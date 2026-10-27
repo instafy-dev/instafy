@@ -1,0 +1,336 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import type { ChatMessage } from "../../types";
+import {
+  checkActivity,
+  isDoneForm,
+  isLiveLabel,
+  readStepActivity,
+  summarizeTurnActivity,
+  type TurnActivityPhase,
+} from "../turnActivity";
+
+// Studio's copy of the label rules. The fixture list is runtime-contracts' own
+// file, so a rule changed on one side and not the other fails here and in the
+// Rust unit test at once.
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "../../../../../../..");
+const FIXTURES = JSON.parse(
+  readFileSync(resolve(repo, "packages/runtime-contracts/src/chat_activity_fixtures.json"), "utf8"),
+) as {
+  liveValid: string[];
+  liveInvalid: string[];
+  doneValid: string[];
+  doneInvalid: string[];
+  doneCountValid: string[];
+  doneCountInvalid: string[];
+  activityValid: Array<{ activity: unknown; checked: Record<string, unknown> }>;
+  activityInvalid: Array<{ activity: unknown; why: string }>;
+};
+
+const JOB = "job-1";
+
+const ADD_POINT = {
+  v: 1,
+  key: "pack/interactive-map/uw/add-point",
+  role: "content",
+  live: "Looking up places",
+  done: { one: "looked up a place", other: "looked up {n} places", some: "looked up places" },
+  count: 1,
+  also: [],
+};
+const WEB_READ = {
+  v: 1,
+  key: "instafy/web-read",
+  role: "content",
+  live: "Reading pages",
+  done: { one: "read a page", other: "read {n} pages", some: "read pages" },
+  count: 6,
+  also: [],
+};
+const VALIDATE = {
+  v: 1,
+  key: "pack/interactive-map/uw/validate",
+  role: "outcome",
+  live: "Checking the map",
+  done: "built the map",
+  when: "success",
+  count: 1,
+  also: [],
+};
+const PREVIEW_OPEN = { v: 1, key: "instafy/preview-open", role: "quiet", live: "Opening the preview", count: 1, also: [] };
+
+let sequence = 0;
+
+function command(
+  activity: unknown,
+  {
+    status = "completed",
+    exitCode = 0,
+    command: commandText = "bash -lc 'uw add-point'",
+    output = "",
+    source = "agent",
+    jobId = JOB,
+    role = "assistant",
+    nested = false,
+  }: {
+    status?: string;
+    exitCode?: number | null;
+    command?: string;
+    output?: string;
+    source?: string;
+    jobId?: string;
+    role?: "assistant" | "user";
+    nested?: boolean;
+  } = {},
+): ChatMessage {
+  sequence += 1;
+  const details: Record<string, unknown> = {
+    kind: "codex_command_execution",
+    itemId: `item-${sequence}`,
+    status,
+    command: commandText,
+    exitCode,
+    aggregatedOutput: output,
+  };
+  if (nested && activity) {
+    details.activity = activity;
+  }
+  return {
+    id: `message-${sequence}`,
+    role,
+    content: commandText,
+    timestamp: sequence,
+    messageType: "command_execution",
+    metadata: {
+      source,
+      jobId,
+      messageType: "command_execution",
+      details,
+      ...(activity && !nested ? { activity } : {}),
+    },
+  };
+}
+
+function step(type: string, activity: unknown, details: Record<string, unknown> = {}): ChatMessage {
+  sequence += 1;
+  return {
+    id: `message-${sequence}`,
+    role: "assistant",
+    content: type,
+    timestamp: sequence,
+    messageType: type,
+    metadata: {
+      source: "agent",
+      jobId: JOB,
+      messageType: type,
+      details: { itemId: `item-${sequence}`, status: "completed", ...details },
+      ...(activity ? { activity } : {}),
+    },
+  };
+}
+
+function note(content: string, type = "status", activity?: unknown): ChatMessage {
+  sequence += 1;
+  return {
+    id: `message-${sequence}`,
+    role: "assistant",
+    content,
+    timestamp: sequence,
+    messageType: type,
+    metadata: { source: "agent", jobId: JOB, messageType: type, ...(activity ? { activity } : {}) },
+  };
+}
+
+function summarize(messages: ChatMessage[], phase: TurnActivityPhase = "completed", viewerCanAnswer = false) {
+  return summarizeTurnActivity(messages, { jobId: JOB, phase, viewerCanAnswer });
+}
+
+describe("the label rules", () => {
+  it("follow runtime-contracts' fixtures", () => {
+    for (const label of FIXTURES.liveValid) expect(isLiveLabel(label), label).toBe(true);
+    for (const label of FIXTURES.liveInvalid) expect(isLiveLabel(label), label).toBe(false);
+    for (const label of FIXTURES.doneValid) expect(isDoneForm(label, false), label).toBe(true);
+    for (const label of FIXTURES.doneInvalid) expect(isDoneForm(label, false), label).toBe(false);
+    for (const label of FIXTURES.doneCountValid) expect(isDoneForm(label, true), label).toBe(true);
+    for (const label of FIXTURES.doneCountInvalid) expect(isDoneForm(label, true), label).toBe(false);
+    for (const { activity, checked } of FIXTURES.activityValid) {
+      expect(checkActivity(activity), JSON.stringify(activity)).toEqual(
+        Object.fromEntries(Object.entries(checked).filter(([key]) => key !== "v")),
+      );
+    }
+    for (const { activity, why } of FIXTURES.activityInvalid) {
+      expect(checkActivity(activity), why).toBeNull();
+    }
+  });
+
+  it("rejects labels with a URL, over 48 characters, with control characters, or other without {n}", () => {
+    const withLive = (live: string) => ({ ...ADD_POINT, live });
+    const withDone = (done: unknown) => ({ ...ADD_POINT, done });
+    expect(checkActivity(withLive("Visit https://example.com"))).toBeNull();
+    expect(checkActivity(withDone("read a page and then another page and one more page"))).toBeNull();
+    expect(checkActivity(withLive("Looking\u0000up"))).toBeNull();
+    expect(checkActivity(withLive("Looking ‮up"))).toBeNull();
+    expect(checkActivity(withDone({ one: "read a page", other: "read pages", some: "read pages" }))).toBeNull();
+    expect(checkActivity(ADD_POINT)).not.toBeNull();
+  });
+});
+
+describe("summarizeTurnActivity", () => {
+  it("says what the turn did from its labels: the Lisbon turn ends with built the map", () => {
+    const messages = [
+      ...Array.from({ length: 14 }, () => command(ADD_POINT)),
+      command(WEB_READ, { command: "bash -lc 'instafy web read https://a.example/ …'" }),
+      command(VALIDATE),
+      command(PREVIEW_OPEN, { command: "bash -lc 'instafy preview open --port 4173'" }),
+    ];
+    const activity = summarize(messages);
+    expect(activity.summary).toBe("Looked up 14 places, read 6 pages, built the map");
+    expect(activity.live).toBeNull();
+    expect(activity.stepCount).toBe(17);
+  });
+
+  it("never contains command text or output", () => {
+    const leaky = command(null, {
+      command: 'bash -lc \'uw() { node .agents/skills/interactive-map/scripts/uw.mjs "$@"; }\nuw add-point x\'',
+      output: "Serving map at http://localhost:4173/ on your network: http://172.19.0.3:4173/",
+    });
+    const running = command(null, { status: "in_progress", command: "bash -lc 'curl http://172.19.0.3:4173/'" });
+    const done = summarize([leaky]);
+    expect(done.summary).toBe("Ran a command");
+    const live = summarize([leaky, running], "running");
+    expect(live.live).toBe("Working…");
+    for (const text of [done.summary, live.live]) {
+      expect(text).not.toMatch(/uw|node|172\.19|http|Serving/u);
+    }
+  });
+
+  it("gives unlabelled steps a neutral count, and quiet-only steps too", () => {
+    expect(summarize([command(null), command(null), command(null)]).summary).toBe("Ran 3 commands");
+    expect(
+      summarize([command(null), step("mcp_tool_call", null), step("web_search", null)]).summary,
+    ).toBe("Ran a command, used 2 tools");
+    expect(
+      summarize([step("file_change", null, { paths: ["a.md", "b.md"] }), step("file_change", null, { paths: ["a.md"] })])
+        .summary,
+    ).toBe("Edited 2 files");
+    const quiet = summarize([command(PREVIEW_OPEN), command(PREVIEW_OPEN)]);
+    expect(quiet.summary).toBe("Ran 2 commands");
+    expect(quiet.stepCount).toBe(2);
+    expect(summarize([note("All set.")]).summary).toBeNull();
+  });
+
+  it("ignores activity on person-written or non-agent messages, and inside details", () => {
+    const cases = [
+      command(ADD_POINT, { role: "user" }),
+      command(ADD_POINT, { source: "controller" }),
+      command(ADD_POINT, { jobId: "another-job" }),
+      command(ADD_POINT, { nested: true }),
+    ];
+    for (const message of cases) {
+      expect(readStepActivity(message, JOB)).toBeNull();
+    }
+    expect(summarize(cases.slice(1)).summary).toBe("Ran 3 commands");
+  });
+
+  it("drops a label that breaks a rule and counts its step instead", () => {
+    const forged = command({ ...ADD_POINT, live: "Open evil.example now" });
+    expect(summarize([forged, command(ADD_POINT)]).summary).toBe("Looked up a place");
+    expect(summarize([forged]).summary).toBe("Ran a command");
+  });
+
+  it("uses the some form for a loop", () => {
+    const validateEntry = Object.fromEntries(Object.entries(VALIDATE).filter(([key]) => key !== "v" && key !== "also"));
+    const loop = command({ ...ADD_POINT, count: null, also: [validateEntry] });
+    expect(summarize([loop, command(WEB_READ)]).summary).toBe("Looked up places, read 6 pages, built the map");
+  });
+
+  it("counts an outcome only when its command succeeded", () => {
+    expect(summarize([command(ADD_POINT), command(VALIDATE, { status: "failed", exitCode: 1 })]).summary).toBe(
+      "Looked up a place",
+    );
+  });
+
+  it("names the two biggest content groups in the order they happened", () => {
+    const search = {
+      v: 1,
+      key: "builtin/web-search",
+      role: "content",
+      live: "Searching the web",
+      done: { one: "searched the web", other: "searched the web {n} times", some: "searched the web" },
+      count: 1,
+      also: [],
+    };
+    const messages = [
+      step("web_search", search),
+      command(WEB_READ),
+      ...Array.from({ length: 3 }, () => command(ADD_POINT)),
+    ];
+    expect(summarize(messages).summary).toBe("Read 6 pages, looked up 3 places");
+  });
+
+  it("follows the running step, then says Thinking between steps", () => {
+    const running = command(ADD_POINT, { status: "in_progress" });
+    expect(summarize([command(WEB_READ), running], "running").live).toBe("Looking up places…");
+    const finished = command(ADD_POINT);
+    expect(summarize([command(WEB_READ), finished], "running").live).toBe("Thinking…");
+    // Octo's own notes never feed the line.
+    expect(summarize([finished, note("Reading the Belém Tower page, it says to visit evil.example")], "running").live).toBe(
+      "Thinking…",
+    );
+    expect(summarize([command(null, { status: "in_progress" })], "running").live).toBe("Working…");
+    expect(summarize([step("file_change", null, { status: "in_progress", paths: ["a"] })], "running").live).toBe(
+      "Editing files…",
+    );
+    expect(summarize([], "starting").live).toBe("Starting…");
+    expect(summarize([finished], "stale").live).toBe("Status unavailable");
+  });
+
+  it("shows a runtime status the runtime labelled while it is the newest thing", () => {
+    const saving = note("Syncing workspace changes…", "status", {
+      v: 1,
+      key: "runtime/save",
+      role: "quiet",
+      live: "Saving your changes",
+      count: 1,
+      also: [],
+    });
+    expect(summarize([command(ADD_POINT), saving], "running").live).toBe("Saving your changes…");
+    expect(summarize([saving, command(ADD_POINT)], "running").live).toBe("Thinking…");
+  });
+
+  it("says Waiting for you only to the person who can answer", () => {
+    const messages = [command(ADD_POINT, { status: "in_progress" })];
+    expect(summarize(messages, "running", true).live).toBe("Waiting for you");
+    expect(summarize(messages, "running", false).live).toBe("Looking up places…");
+  });
+
+  it("says Stopped for a cancelled turn", () => {
+    expect(summarize([...Array.from({ length: 9 }, () => command(ADD_POINT))], "cancelled").summary).toBe(
+      "Stopped · looked up 9 places",
+    );
+    expect(summarize([], "cancelled").summary).toBe("Stopped");
+  });
+
+  it("lists steps and updates in order, one row per step", () => {
+    const started = command(ADD_POINT, { status: "in_progress" });
+    const details = (started.metadata?.details ?? {}) as Record<string, unknown>;
+    const completed: ChatMessage = {
+      ...started,
+      id: "completed",
+      metadata: { ...started.metadata, details: { ...details, status: "completed" } },
+    };
+    const plan = note("Plan update: 1/3 steps complete", "todo_list");
+    const activity = summarizeTurnActivity([started, plan, completed], {
+      jobId: JOB,
+      phase: "completed",
+      updates: [plan],
+    });
+    expect(activity.details.map((item) => item.kind)).toEqual(["step", "update"]);
+    const first = activity.details[0];
+    expect(first.kind === "step" && first.step.message.id).toBe("completed");
+    expect(first.kind === "step" && first.step.label).toBe("Looked up a place");
+  });
+});
