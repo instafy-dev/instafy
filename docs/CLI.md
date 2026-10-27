@@ -649,9 +649,11 @@ framed (`X-Frame-Options` or CSP `frame-ancestors`).
 
 What the page may load is Instafy's rule, not the page's: the site's own origin directly, every other public
 address through the runtime image's egress proxy (public addresses on ports 80 and 443 only), and nothing else.
-Another local port, `localhost` names, private and reserved addresses and link-only sites are blocked, and listed
-under `blocked` with the reason rather than as errors; people opening the preview cannot reach them either. Without
-the egress proxy (a machine outside the runtime image) nothing off the site's origin loads (`offSite: "blocked"`).
+Another local port, `localhost` names, private and reserved addresses and every site on the link-only list (a
+`no-reuse` one too, since the check's picture can become the card's) are blocked, and listed under `blocked` with
+the reason rather than as errors. People opening the preview cannot reach another local port or a private address
+either, so a page that needs one should serve it from the site itself. Without the egress proxy (a machine outside
+the runtime image) nothing off the site's origin loads (`offSite: "blocked"`).
 
 | Exit | Meaning |
 |---|---|

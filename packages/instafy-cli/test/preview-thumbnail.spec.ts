@@ -16,6 +16,7 @@ import {
   staticThumbnail,
   thumbnailBudgetMs,
 } from "../src/preview-thumbnail.js";
+import { LINK_ONLY_FILE, LINK_ONLY_SCHEMA, linkOnlySite } from "../src/web-read.js";
 import {
   classifyRequest,
   cleanDescription,
@@ -154,6 +155,26 @@ describe("what a capture or check may load", () => {
     expect(classifyRequest("wss://booking.com/socket", rules).kind).toBe("blocked");
     expect(classifyRequest("https://tile.openstreetmap.org/1/1/1.png", rules)).toEqual({ kind: "proxy" });
     expect(classifyRequest("https://example.org:443/a", rules)).toEqual({ kind: "proxy" });
+  });
+
+  it("blocks a site whose terms bar reusing its content too, which readers may read: the picture is kept and shown", () => {
+    const skills = path.join(tmp, "reuse-space", ".agents", "skills");
+    const file = path.join(skills, "instafy-web-research", "references", LINK_ONLY_FILE);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      schema: LINK_ONLY_SCHEMA,
+      sites: [{ name: "Example Reviews", match: ["reviews.example"], kind: "no-reuse", why: "terms bar copying its reviews" }],
+    }));
+    const withCopy = loadCaptureLinkOnly(path.join(tmp, "reuse-space"), {});
+    expect(withCopy).not.toBeNull();
+    // `instafy web read` reads it; the capture and the check do not load it into a picture.
+    expect(linkOnlySite("https://www.reviews.example/item/1", withCopy!)).toBeNull();
+    expect(classifyRequest("https://www.reviews.example/photo.jpg", { ...rules, linkOnly: withCopy })).toEqual({
+      kind: "blocked",
+      reason: expect.stringMatching(/^Example Reviews bars reusing its content/),
+    });
+    expect(classifyRequest("https://www.booking.com/x.png", { ...rules, linkOnly: withCopy })).toEqual({ kind: "blocked", reason: expect.stringMatching(/link-only/) });
+    expect(classifyRequest("https://tile.openstreetmap.org/1/1/1.png", { ...rules, linkOnly: withCopy })).toEqual({ kind: "proxy" });
   });
 
   it("blocks everything off the site without a proxy, or without the link-only list", () => {

@@ -82,8 +82,9 @@ A member can **Present** a site whose page says it can share its view, and the o
 - **What the capture may load.** Only the site's own loopback origin directly. Every other request goes through the
   image's `browser-egress-proxy`, an instance of its own on a free loopback port: public addresses on ports 80 and
   443 only, connected to the address it checked. Another loopback port, `localhost` names, private, link-local,
-  CGNAT, metadata and reserved addresses, and the link-only sites `instafy web read` refuses (their translator,
-  cache and archive copies too) are blocked, WebSockets included. Without the proxy binary nothing off the site's
+  CGNAT, metadata and reserved addresses, and every site on the link-only list (their translator, cache and archive
+  copies too) are blocked, WebSockets included: a `no-agents` site is never fetched, and a `no-reuse` site, which
+  `instafy web read` may read, is not loaded into a picture Instafy keeps and shows. Without the proxy binary nothing off the site's
   origin loads. The page loads as an anonymous first visit: a fresh context with no person's session, cookies,
   location or browser profile, service workers blocked, downloads refused, new windows closed, no permissions.
   `instafy preview check` follows the same rules and lists blocked requests as `blocked`, not as page errors.

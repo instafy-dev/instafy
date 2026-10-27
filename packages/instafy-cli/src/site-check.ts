@@ -28,7 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Command } from "commander";
 import { isLocalHostName, isPrivateAddress } from "@instafy/bind/net";
-import { defaultSkillRoots, linkOnlySite, loadLinkOnlyGuard, type LinkOnlyGuard } from "./web-read.js";
+import { defaultSkillRoots, listedSite, loadLinkOnlyGuard, type LinkOnlyGuard } from "./web-read.js";
 import {
   PREVIEW_EXIT_NOT_LISTENING,
   PreviewCommandError,
@@ -305,8 +305,16 @@ export function classifyRequest(raw: string, rules: RequestRules): RequestVerdic
   if (!rules.linkOnly) return blocked("the link-only site list could not be loaded");
   const web = new URL(url.href);
   web.protocol = scheme;
-  const listed = linkOnlySite(web, rules.linkOnly);
-  if (listed) return blocked(`${listed.name} is link-only (${listed.reason})`);
+  // Either kind: a "no-agents" site is never fetched, and a "no-reuse" one's content must not end up in a picture that
+  // Instafy keeps and shows (a check's desktop picture becomes the card's).
+  const listed = listedSite(web, rules.linkOnly);
+  if (listed) {
+    return blocked(
+      listed.kind === "no-reuse"
+        ? `${listed.name} bars reusing its content (${listed.reason})`
+        : `${listed.name} is link-only (${listed.reason})`,
+    );
+  }
   return { kind: "proxy" };
 }
 
