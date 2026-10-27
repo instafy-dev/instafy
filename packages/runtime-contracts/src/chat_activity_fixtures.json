@@ -132,7 +132,7 @@
         "done": { "one": "searched {host}", "other": "searched {host} {n} times", "some": "searched {host}" },
         "count": 1,
         "step": "search",
-        "pageKey": "0123456789abcdef",
+        "pageKey": "00000000ffffffff",
         "approval": "free"
       },
       "checked": {
@@ -144,7 +144,7 @@
         "done": { "one": "searched {host}", "other": "searched {host} {n} times", "some": "searched {host}" },
         "count": 1,
         "step": "search",
-        "pageKey": "0123456789abcdef",
+        "pageKey": "00000000ffffffff",
         "approval": "free",
         "also": []
       }
