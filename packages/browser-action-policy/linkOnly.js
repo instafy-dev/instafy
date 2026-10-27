@@ -884,6 +884,9 @@
       const anchor = named.map((entry) => entry.home || (entry.search && entry.search.origin)).find(Boolean);
       const anchorHost = anchor ? hostOfUrl(new URL(anchor)) : null;
       entries = anchorHost ? list.sites.filter((entry) => named.includes(entry) || hostOnSite(anchorHost, entry.patterns)) : named;
+      // The link stays on the hosts of the first entry by that name (the bundled one, where there is one): another
+      // entry that reuses the name for other hosts may make the site stricter but never lends it a link of its own.
+      host = anchorHost;
     }
     if (!entries.length) return { ok: false, error: `${cleanText(reference, 80)} is not on the link-only list` };
     const strictest = entries.find((entry) => entry.kind !== NO_REUSE) || entries[0];

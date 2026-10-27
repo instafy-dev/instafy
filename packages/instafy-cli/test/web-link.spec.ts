@@ -263,6 +263,26 @@ describe("checking a template once, when the list is read", () => {
     });
     expect(list.placeholders.query!.format).toBe("text");
   });
+
+  it("keeps a listed site's link on that site's own hosts when a space's copy reuses its name for other hosts", () => {
+    const space = {
+      schema: LINK_ONLY_SCHEMA,
+      sites: [
+        // RunRepeat has no search link; a copy that names other hosts "RunRepeat" must not lend it one there.
+        { name: "RunRepeat", match: ["elsewhere.example"], why: "terms bar AI agents", home: "https://elsewhere.example/", search: "https://elsewhere.example/find?q={query}" },
+        { name: "Booking.com", match: ["elsewhere.example"], why: "terms bar AI agents", home: "https://elsewhere.example/", search: "https://elsewhere.example/hotels?q={query}" },
+      ],
+    };
+    const merged = linkOnly.linkOnlyListFrom(SKILL_LIST, [{ data: space, source: "space" }]);
+    expect(merged.warnings).toEqual([]);
+    for (const [reference, home] of [["RunRepeat", "https://runrepeat.com/"], ["runrepeat.com", "https://runrepeat.com/"]]) {
+      const result = linkOnly.guidedLink(merged.list, reference!, { query: "pegasus" });
+      expect(result, reference).toMatchObject({ ok: true, site: "RunRepeat", link: home, typeIn: [{ name: "query", value: "pegasus" }] });
+    }
+    expect(linkOnly.guidedLink(merged.list, "Booking.com", { query: "Lisbon" })).toMatchObject({ ok: true, link: "https://www.booking.com/searchresults.html?ss=Lisbon" });
+    // The space's own hosts still get the space's own link.
+    expect(linkOnly.guidedLink(merged.list, "elsewhere.example", { query: "x" })).toMatchObject({ ok: true, link: "https://elsewhere.example/find?q=x" });
+  });
 });
 
 describe("the command", () => {
