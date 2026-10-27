@@ -29,6 +29,29 @@ export function resolveAgentTabIds({ pages, agentControlActive, agentPageIds = [
   return new Set(pages.filter((page) => page.openedBy === "agent" || bound.has(page.id)).map((page) => page.id));
 }
 
+/**
+ * The Shared Browser tabs that carry the agent's badge in the chat's page
+ * strip: every tab the browser's page list says the agent opened, whichever
+ * conversation's run opened it (the browser lists them only while a run holds
+ * it, or until it closes the tabs an earlier run left open), and the tab this
+ * conversation's running turn is bound to.
+ */
+export function resolveSharedPageStripAgentTabIds({ pages, agentPageIds = [] }: {
+  pages: readonly BrowserSessionPage[];
+  agentPageIds?: readonly string[];
+}): ReadonlySet<string> {
+  return resolveAgentTabIds({ pages, agentControlActive: true, agentPageIds });
+}
+
+/**
+ * The label of a tab the agent opened in the Shared Browser, the one its
+ * approval prompts and Octo's list_tabs use: "Octo's tab 2". It keeps its
+ * number while it is open.
+ */
+export function sharedBrowserAgentTabLabel(page: Pick<BrowserSessionPage, "agentTabNumber">): string {
+  return page.agentTabNumber ? `${BROWSER_AGENT_DEFAULT_NAME}'s tab ${page.agentTabNumber}` : `${BROWSER_AGENT_DEFAULT_NAME}'s tab`;
+}
+
 /** The agent's tabs that show a web page, in tab order: what the Reading row lists. */
 export function resolveAgentReadingPages(input: BrowserAgentTabsInput): BrowserSessionPage[] {
   const agentTabIds = resolveAgentTabIds(input);

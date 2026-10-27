@@ -353,12 +353,27 @@ const openedTabs = () => {
 const saveOpenedTabs = (tabs) => {
   if (openedTabsPath) fs.writeFileSync(openedTabsPath, JSON.stringify(tabs));
 };
-// A closed tab leaves the context's pages, as it does in Chromium.
+// Windows pages opened by themselves, as Target.getTargets reports them:
+// [{ targetId, type, openerId }]. Kept in a file like the tabs.
+const windowsPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_WINDOWS;
+const openWindows = () => {
+  try {
+    return JSON.parse(fs.readFileSync(windowsPath, "utf8"));
+  } catch (_) {
+    return [];
+  }
+};
+const frontPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_FRONT;
+// A closed tab leaves the context's pages, as it does in Chromium, and
+// Chromium shows a neighbouring tab instead: here, a person's tab.
 const closePage = (targetId) => {
   closedPages.add(targetId);
   const index = pages.findIndex((page) => page.targetId === targetId);
   if (index >= 0) pages.splice(index, 1);
   saveOpenedTabs(openedTabs().filter((tab) => tab.targetId !== targetId));
+  if (frontPath && fs.existsSync(frontPath) && fs.readFileSync(frontPath, "utf8") === targetId) {
+    fs.writeFileSync(frontPath, "persons-tab");
+  }
 };
 const makePage = (targetId, opened = null) => {
   let currentUrl = opened ? opened.url : mode === "blank-page"
@@ -373,6 +388,8 @@ const makePage = (targetId, opened = null) => {
             ? "chrome://newtab/"
             : mode === "browser-internal"
               ? "chrome://settings/"
+              : mode === "link-only-page"
+                ? "https://www.booking.com/hotel/fixture.html"
               : targetId === "decoy-target" && !decoyLooksIdentical
                 ? "https://decoy.example.test/"
                 : "https://example.test/";
@@ -504,6 +521,20 @@ const browser = {
   newBrowserCDPSession: async () => ({
     send: async (method, params) => {
       if (cdpLogPath) fs.appendFileSync(cdpLogPath, `${JSON.stringify({ method, params })}\n`);
+      if (method === "Target.getTargets") {
+        return {
+          targetInfos: [
+            ...pages.map((page) => ({ targetId: page.targetId, type: "page" })),
+            ...openWindows(),
+          ],
+        };
+      }
+      if (method === "Target.closeTarget") {
+        if (windowsPath) {
+          fs.writeFileSync(windowsPath, JSON.stringify(openWindows().filter((info) => info.targetId !== params.targetId)));
+        }
+        closePage(params.targetId);
+      }
       return {};
     },
     detach: async () => {},
@@ -527,9 +558,19 @@ module.exports = {
 
 /// Runs the embedded controller the way the runtime does: `node -` with the
 /// script on stdin.
-struct EmbeddedControllerCommand(StdCommand);
+struct EmbeddedControllerCommand(StdCommand, Option<String>);
 
 impl EmbeddedControllerCommand {
+    /// The same controller composed without the link-only list, as if the
+    /// skill's data were missing.
+    fn without_link_only_list(mut self) -> Self {
+        let script = embedded_shared_browser_script();
+        let embedded = embedded_link_only_sites();
+        assert!(script.contains(&embedded));
+        self.1 = Some(script.replace(&embedded, "globalThis.__instafyLinkOnlySites = undefined;"));
+        self
+    }
+
     fn spawn(mut self) -> std::io::Result<std::process::Child> {
         use std::process::Stdio;
         self.0
@@ -538,7 +579,8 @@ impl EmbeddedControllerCommand {
             .stderr(Stdio::piped());
         let mut child = self.0.spawn()?;
         let mut stdin = child.stdin.take().expect("controller stdin");
-        stdin.write_all(embedded_shared_browser_script().as_bytes())?;
+        let script = self.1.take().unwrap_or_else(embedded_shared_browser_script);
+        stdin.write_all(script.as_bytes())?;
         drop(stdin);
         Ok(child)
     }
@@ -563,6 +605,7 @@ struct EmbeddedControllerFixture {
     click_log: PathBuf,
     opened_tabs: PathBuf,
     front_tab: PathBuf,
+    open_windows: PathBuf,
     owner_id: Uuid,
     run_id: Uuid,
     initiator_user_id: Uuid,
@@ -595,6 +638,7 @@ impl EmbeddedControllerFixture {
         let click_log = tempdir.path().join("clicked-controls.log");
         let opened_tabs = tempdir.path().join("opened-tabs.json");
         let front_tab = tempdir.path().join("front-tab");
+        let open_windows = tempdir.path().join("open-windows.json");
         std::fs::create_dir_all(&approval_dir).expect("approval fixture directory");
 
         Self {
@@ -612,6 +656,7 @@ impl EmbeddedControllerFixture {
             click_log,
             opened_tabs,
             front_tab,
+            open_windows,
             owner_id: Uuid::new_v4(),
             run_id: Uuid::new_v4(),
             initiator_user_id: Uuid::new_v4(),
@@ -710,11 +755,12 @@ impl EmbeddedControllerFixture {
             .env("INSTAFY_SHARED_BROWSER_FAKE_CLICK_LOG", &self.click_log)
             .env("INSTAFY_SHARED_BROWSER_FAKE_TABS", &self.opened_tabs)
             .env("INSTAFY_SHARED_BROWSER_FAKE_FRONT", &self.front_tab)
+            .env("INSTAFY_SHARED_BROWSER_FAKE_WINDOWS", &self.open_windows)
             .env("HOSTILE_MARKER", &self.hostile_marker);
         if let Some(body) = body {
             command.arg(body);
         }
-        EmbeddedControllerCommand(command)
+        EmbeddedControllerCommand(command, None)
     }
 
     fn run(&self, mode: &str, method: &str, path: &str, body: Option<&str>) -> Output {
@@ -1465,11 +1511,18 @@ fn runtime_approval_directory_is_fixed_protected_and_cleaned() {
     .expect("write stale approval temp");
 
     prepare_clean_approval_directory(&approval_dir).expect("clean approval directory");
+    // Every run-scoped file is revoked; only the record of Octo's tabs that
+    // may still be open outlives the run.
     assert_eq!(
         std::fs::read_dir(&approval_dir)
             .expect("read cleaned approval directory")
-            .count(),
-        0
+            .map(|entry| entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned())
+            .collect::<Vec<_>>(),
+        vec![LEFTOVER_AGENT_TABS_FILE.to_string()]
     );
     #[cfg(unix)]
     assert_eq!(
@@ -5490,4 +5543,760 @@ async fn the_end_of_a_run_closes_octos_tabs_apart_from_those_the_person_kept() {
     );
     drop(guard);
     assert!(requests.lock().expect("requests").is_empty());
+}
+
+// Hardening of Octo's tabs: the link-only guard in every tab Octo drives,
+// Octo's tab or the run's page in front whenever Octo closes something, one
+// number per tab for its lifetime, no window Octo's tabs open by themselves,
+// and no tab of Octo's left unbadged or open after a run that did not end
+// cleanly.
+
+impl EmbeddedControllerFixture {
+    fn front(&self) -> String {
+        std::fs::read_to_string(&self.front_tab).expect("front tab")
+    }
+
+    fn tab_id_of(&self, opened: &JsonValue) -> String {
+        opened["tabId"].as_str().expect("tab id").to_string()
+    }
+
+    fn cdp_calls(&self, method: &str) -> Vec<JsonValue> {
+        std::fs::read_to_string(&self.cdp_log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("cdp call"))
+            .filter(|call| call["method"] == method)
+            .collect()
+    }
+}
+
+#[test]
+fn closing_octos_tabs_never_leaves_a_persons_tab_in_front() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let first = fixture.tab_id_of(&fixture.open_tab("https://example.test/one"));
+    let second = fixture.tab_id_of(&fixture.open_tab("https://example.test/two"));
+    assert_eq!(fixture.front(), second);
+
+    // Octo closes the tab it works in. Chromium shows a neighbouring tab,
+    // which may be the person's; the run's page comes to the front instead.
+    payload_of(&fixture.call(
+        "safe",
+        "POST",
+        "/v1/tabs/close",
+        Some(&json!({ "tabId": second }).to_string()),
+    ));
+    assert_eq!(fixture.front(), "page-target");
+
+    // Octo closes its last tab.
+    payload_of(&fixture.call(
+        "safe",
+        "POST",
+        "/v1/tabs/select",
+        Some(&json!({ "tabId": first }).to_string()),
+    ));
+    assert_eq!(fixture.front(), first);
+    let closed = payload_of(&fixture.call(
+        "safe",
+        "POST",
+        "/v1/tabs/close",
+        Some(&json!({ "tabId": first }).to_string()),
+    ));
+    assert_eq!(fixture.front(), "page-target");
+    assert_eq!(closed["agentTabsOpen"], 0);
+    assert_eq!(closed["tabs"][0]["tabId"], "page-target");
+    assert_eq!(closed["tabs"][0]["current"], true);
+    assert!(fixture.browser_tabs().is_empty());
+
+    // A new tab the person denies goes again, and the tab Octo was in comes
+    // back to the front.
+    fixture.prepare_authority("page-target", &[]);
+    let (output, _requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/tabs/open",
+        Some(r#"{"url":"https://example.test/three"}"#),
+        &["deny"],
+    );
+    assert!(failure_of(&output).contains("approval_denied"));
+    assert!(fixture.browser_tabs().is_empty());
+    assert_eq!(fixture.front(), "page-target");
+}
+
+#[test]
+fn each_of_octos_tabs_keeps_one_label_in_prompts_and_list_tabs_while_it_is_open() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_authority("page-target", &[]);
+    let mut tab_ids = Vec::new();
+    for number in 1..=3 {
+        let (output, requests) = fixture.call_deciding(
+            "safe",
+            "POST",
+            "/v1/tabs/open",
+            Some(&json!({ "url": format!("https://example.test/report-{number}") }).to_string()),
+            &["allow_origin", "allow_once"],
+        );
+        let opened = payload_of(&output);
+        assert_eq!(opened["tabLabel"], format!("Octo's tab {number}"));
+        assert_eq!(
+            requests[0]["display"]["label"],
+            format!(
+                "Octo's tab {number}: Allow the assistant to open this site in a new tab for this run"
+            )
+        );
+        tab_ids.push(fixture.tab_id_of(&opened));
+    }
+
+    // Closing tab 1 renumbers nothing: tab 3 is still "Octo's tab 3" in its
+    // prompts, as it is in list_tabs and in Studio.
+    payload_of(&fixture.call(
+        "safe",
+        "POST",
+        "/v1/tabs/close",
+        Some(&json!({ "tabId": tab_ids[0] }).to_string()),
+    ));
+    payload_of(&fixture.call(
+        "safe",
+        "POST",
+        "/v1/tabs/select",
+        Some(&json!({ "tabId": tab_ids[2] }).to_string()),
+    ));
+    let (output, requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://other.example/pricing"}"#),
+        &["allow_origin", "allow_once"],
+    );
+    assert_eq!(payload_of(&output)["tabLabel"], "Octo's tab 3");
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["display"]["label"]
+                .as_str()
+                .expect("label")
+                .to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "Octo's tab 3: Allow the assistant to access this destination for this run".to_string(),
+            "Octo's tab 3: Navigate the Shared Browser".to_string(),
+        ]
+    );
+    let listed = payload_of(&fixture.call("safe", "GET", "/v1/tabs", None));
+    let labels = listed["tabs"]
+        .as_array()
+        .expect("tabs")
+        .iter()
+        .map(|tab| {
+            (
+                tab["tabId"].as_str().map(str::to_string),
+                tab.get("label").cloned(),
+                tab.get("number").cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels,
+        vec![
+            (Some("page-target".to_string()), None, None),
+            (
+                Some(tab_ids[1].clone()),
+                Some(json!("Octo's tab 2")),
+                Some(json!(2))
+            ),
+            (
+                Some(tab_ids[2].clone()),
+                Some(json!("Octo's tab 3")),
+                Some(json!(3))
+            ),
+        ]
+    );
+
+    // A new tab takes the next number; a number is never given twice in a run.
+    let (output, _) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/tabs/open",
+        Some(r#"{"url":"https://example.test/report-4"}"#),
+        &["allow_origin", "allow_once"],
+    );
+    assert_eq!(payload_of(&output)["tabLabel"], "Octo's tab 4");
+    let record = fixture.tab_record();
+    assert_eq!(record["version"], 2);
+    assert_eq!(record["lastTabNumber"], 4);
+    assert_eq!(
+        record["tabs"]
+            .as_array()
+            .expect("tabs")
+            .iter()
+            .map(|tab| tab["number"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2), json!(3), json!(4)]
+    );
+}
+
+#[test]
+fn octo_never_opens_or_reads_a_link_only_site_on_the_page_the_person_chose() {
+    let fixture = EmbeddedControllerFixture::new();
+    let decisions = ["allow_origin", "allow_once", "allow_once"];
+    for url in [
+        "https://www.booking.com/hotel/fixture.html",
+        "https://www.airbnb.co.uk/rooms/1",
+        "https://amazon.de/dp/1",
+    ] {
+        let (output, requests) = fixture.run_with_decisions(
+            "safe",
+            "page-target",
+            "POST",
+            "/v1/navigate",
+            Some(&json!({ "url": url }).to_string()),
+            &["https://example.test"],
+            &decisions,
+        );
+        let error = failure_of(&output);
+        assert!(
+            error.contains("is link-only: Octo never opens it, in any tab"),
+            "{url}: {error}"
+        );
+        assert!(error.contains("Send page to Octo"), "{url}: {error}");
+        assert!(requests.is_empty(), "{url} asked: {requests:?}");
+    }
+
+    // A link to a link-only site is refused before any prompt: on a site
+    // the person approved, and on one not approved yet, before its prompt.
+    let snapshot_id = fixture.snapshot_id("link-only-link");
+    for approved in [&["https://example.test"][..], &[]] {
+        let (output, requests) = fixture.run_with_decisions(
+            "link-only-link",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&json!({ "index": 0, "snapshotId": snapshot_id }).to_string()),
+            approved,
+            &decisions,
+        );
+        let error = failure_of(&output);
+        assert!(
+            error.contains("Booking.com is link-only"),
+            "{approved:?}: {error}"
+        );
+        assert!(requests.is_empty(), "{approved:?} asked: {requests:?}");
+    }
+    assert!(!fixture.click_log.exists(), "the link was never clicked");
+
+    // The page the person chose is on a link-only site: Octo reads and does
+    // nothing there, before any prompt, and says how the person can share it.
+    for (method, path, body) in [
+        ("GET", "/v1/snapshot", None),
+        ("GET", "/v1/status", None),
+        ("POST", "/v1/scroll", Some(r#"{"x":0,"y":720}"#)),
+        (
+            "POST",
+            "/v1/click",
+            Some(
+                r#"{"index":0,"snapshotId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+            ),
+        ),
+    ] {
+        for approved in [&[][..], &["https://www.booking.com"][..]] {
+            let (output, requests) = fixture.run_with_decisions(
+                "link-only-page",
+                "page-target",
+                method,
+                path,
+                body,
+                approved,
+                &decisions,
+            );
+            let error = failure_of(&output);
+            assert!(
+                error.contains("The page the person chose is now on Booking.com, which is link-only, so nothing there was read or done"),
+                "{path}: {error}"
+            );
+            assert!(error.contains("Send page to Octo"), "{path}: {error}");
+            assert!(requests.is_empty(), "{path} asked: {requests:?}");
+        }
+    }
+    let listed = payload_of(&fixture.run("link-only-page", "GET", "/v1/tabs", None));
+    assert_eq!(listed["tabs"][0]["linkOnlySite"], "Booking.com");
+    assert_eq!(listed["tabs"][0]["url"], JsonValue::Null);
+    assert_eq!(listed["tabs"][0]["title"], JsonValue::Null);
+    assert_no_canary("link-only list_tabs", &listed.to_string());
+    assert!(
+        !fixture.action_log().contains("booking"),
+        "{}",
+        fixture.action_log()
+    );
+}
+
+#[test]
+fn without_the_link_only_list_octo_opens_and_reads_nothing_in_any_tab() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    for (method, path, body) in [
+        ("GET", "/v1/snapshot", None),
+        ("GET", "/v1/status", None),
+        ("POST", "/v1/scroll", Some(r#"{"x":0,"y":720}"#)),
+        (
+            "POST",
+            "/v1/navigate",
+            Some(r#"{"url":"https://example.test/report"}"#),
+        ),
+        (
+            "POST",
+            "/v1/tabs/open",
+            Some(r#"{"url":"https://example.test/report"}"#),
+        ),
+    ] {
+        let output = fixture
+            .command_for("safe", "page-target", method, path, body)
+            .without_link_only_list()
+            .output()
+            .expect("run without the list");
+        let error = failure_of(&output);
+        assert!(
+            error.contains("The link-only site list is unavailable"),
+            "{path}: {error}"
+        );
+    }
+    assert!(fixture.browser_tabs().is_empty());
+    // The same calls run with the list.
+    payload_of(&fixture.call("safe", "GET", "/v1/snapshot", None));
+}
+
+#[test]
+fn a_window_a_page_in_octos_tab_opened_by_itself_is_closed_before_the_next_step() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let tab_id = fixture.tab_id_of(&fixture.open_tab("https://example.test/report"));
+    // Between steps the page in Octo's tab opened a window, which opened
+    // another; the person's page and another tab opened one each.
+    std::fs::write(
+        &fixture.open_windows,
+        json!([
+            { "targetId": "WINDOW-1", "type": "page", "openerId": tab_id },
+            { "targetId": "WINDOW-2", "type": "page", "openerId": "WINDOW-1" },
+            { "targetId": "PERSONS-WINDOW", "type": "page", "openerId": "page-target" },
+            { "targetId": "OTHER-TAB", "type": "page" },
+            { "targetId": "WORKER", "type": "service_worker", "openerId": tab_id },
+        ])
+        .to_string(),
+    )
+    .expect("open windows");
+
+    let listed = payload_of(&fixture.call("safe", "GET", "/v1/tabs", None));
+    let closed = fixture
+        .cdp_calls("Target.closeTarget")
+        .iter()
+        .map(|call| {
+            call["params"]["targetId"]
+                .as_str()
+                .expect("target")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(closed, vec!["WINDOW-1".to_string(), "WINDOW-2".to_string()]);
+    let left = serde_json::from_slice::<Vec<JsonValue>>(
+        &std::fs::read(&fixture.open_windows).expect("windows"),
+    )
+    .expect("windows JSON")
+    .iter()
+    .map(|info| info["targetId"].as_str().expect("target").to_string())
+    .collect::<Vec<_>>();
+    assert_eq!(left, vec!["PERSONS-WINDOW", "OTHER-TAB", "WORKER"]);
+    assert_eq!(
+        listed["tabs"]
+            .as_array()
+            .expect("tabs")
+            .iter()
+            .map(|tab| tab["tabId"].as_str().expect("tab id").to_string())
+            .collect::<Vec<_>>(),
+        vec!["page-target".to_string(), tab_id.clone()]
+    );
+    // The windows came to the front when they opened; Octo's tab is back.
+    std::fs::write(&fixture.front_tab, "WINDOW-3").expect("a window in front");
+    std::fs::write(
+        &fixture.open_windows,
+        json!([{ "targetId": "WINDOW-3", "type": "page", "openerId": tab_id }]).to_string(),
+    )
+    .expect("another window");
+    payload_of(&fixture.call("safe", "GET", "/v1/tabs", None));
+    assert_eq!(fixture.front(), tab_id);
+}
+
+/// A loopback stand-in for Chromium's DevTools endpoint that speaks the
+/// target-discovery protocol: it answers `/json/version`, sends `events` once
+/// discovery is on, and records the targets it is asked to close.
+async fn fake_target_discovery(
+    events: Vec<JsonValue>,
+) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::AsyncWriteExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("fake devtools");
+    let address = listener.local_addr().expect("fake devtools address");
+    let closed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&closed);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let mut head = [0u8; 32];
+            let read = stream.peek(&mut head).await.unwrap_or(0);
+            if head[..read].starts_with(b"GET /json/version") {
+                let body = json!({
+                    "Browser": "Chrome/fixture",
+                    "webSocketDebuggerUrl": format!("ws://{address}/devtools/browser/fixture-browser-1"),
+                })
+                .to_string();
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                continue;
+            }
+            let events = events.clone();
+            let recorded = Arc::clone(&recorded);
+            tokio::spawn(async move {
+                let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                while let Some(Ok(message)) = socket.next().await {
+                    let Message::Text(text) = message else {
+                        continue;
+                    };
+                    let command: JsonValue = serde_json::from_str(&text).expect("command");
+                    match command["method"].as_str() {
+                        Some("Target.setDiscoverTargets") => {
+                            let _ = socket
+                                .send(Message::Text(
+                                    json!({ "id": command["id"], "result": {} }).to_string(),
+                                ))
+                                .await;
+                            for event in &events {
+                                let _ = socket.send(Message::Text(event.to_string())).await;
+                            }
+                        }
+                        Some(method @ ("Target.closeTarget" | "Target.activateTarget")) => {
+                            let target = command["params"]["targetId"].as_str().expect("target");
+                            recorded.lock().expect("closed").push(
+                                if method == "Target.closeTarget" {
+                                    target.to_string()
+                                } else {
+                                    format!("front:{target}")
+                                },
+                            );
+                            let _ = socket
+                                .send(Message::Text(
+                                    json!({ "id": command["id"], "result": { "success": true } })
+                                        .to_string(),
+                                ))
+                                .await;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+    });
+    (address, closed)
+}
+
+fn target_created(target_id: &str, kind: &str, opener_id: Option<&str>) -> JsonValue {
+    let mut info = json!({ "targetId": target_id, "type": kind, "url": "https://example.test/" });
+    if let Some(opener_id) = opener_id {
+        info["openerId"] = json!(opener_id);
+    }
+    json!({ "method": "Target.targetCreated", "params": { "targetInfo": info } })
+}
+
+#[tokio::test]
+async fn while_a_run_holds_the_browser_windows_its_tabs_open_by_themselves_close_as_they_appear() {
+    let (address, closed) = fake_target_discovery(vec![
+        target_created("page-target", "page", None),
+        target_created("TAB-A", "page", None),
+        target_created("PERSONS-TAB", "page", None),
+        target_created("WINDOW-1", "page", Some("TAB-A")),
+        target_created("WINDOW-2", "page", Some("WINDOW-1")),
+        target_created("PERSONS-WINDOW", "page", Some("page-target")),
+        target_created("OTHER-WINDOW", "page", Some("PERSONS-TAB")),
+        target_created("WORKER", "service_worker", Some("TAB-A")),
+        target_created("TAB-A", "page", Some("WINDOW-1")),
+    ])
+    .await;
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    let cancel_signal = JobCancelSignal::new();
+    let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        directory.path().join("agent-control.json"),
+        approval_dir.clone(),
+        ApprovalStart::Routine,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire run");
+    write_run_record(
+        &approval_dir,
+        "tabs.json",
+        &guard,
+        json!({
+            "version": 2,
+            "currentTabId": "TAB-A",
+            "lastTabNumber": 1,
+            "tabs": [{ "tabId": "TAB-A", "number": 1, "approvedOrigins": [] }]
+        }),
+    );
+    guard.cdp_base = Some(("127.0.0.1".to_string(), address.port()));
+    guard.start_window_watch();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while closed.lock().expect("closed").len() < 4 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Give a wrong close a moment to arrive before checking there is none.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Each window closes, and the tab Octo acts on comes back to the front.
+    assert_eq!(
+        *closed.lock().expect("closed"),
+        vec![
+            "WINDOW-1".to_string(),
+            "front:TAB-A".to_string(),
+            "WINDOW-2".to_string(),
+            "front:TAB-A".to_string(),
+        ]
+    );
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+}
+
+/// A loopback port nothing listens on: a browser that is down.
+fn unreachable_devtools() -> (String, u16) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("address").port();
+    drop(listener);
+    ("127.0.0.1".to_string(), port)
+}
+
+fn leftover_record(approval_dir: &Path) -> Option<JsonValue> {
+    std::fs::read(approval_dir.join(LEFTOVER_AGENT_TABS_FILE))
+        .ok()
+        .map(|bytes| serde_json::from_slice(&bytes).expect("leftover JSON"))
+}
+
+#[test]
+fn octos_tabs_left_open_by_a_run_that_did_not_end_cleanly_stay_badged_and_close_at_the_next_start()
+{
+    let (address, requests) = fake_devtools();
+    let directory = tempfile::tempdir().expect("startup tempdir");
+    let marker_path = directory.path().join("agent-control.json");
+    let approval_dir = directory.path().join("approvals");
+    std::fs::create_dir_all(&approval_dir).expect("approvals");
+    let (owner_id, run_id, initiator_user_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let bound = |extra: JsonValue| {
+        let mut record = json!({
+            "ownerId": owner_id.to_string(),
+            "runId": run_id,
+            "initiatorUserId": initiator_user_id,
+            "browserPageId": "page-target",
+        });
+        for (key, value) in extra.as_object().expect("extra") {
+            record[key] = value.clone();
+        }
+        record
+    };
+    let write = |path: &Path, record: JsonValue| {
+        std::fs::write(path, record.to_string()).expect("write record");
+        #[cfg(unix)]
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("protect");
+    };
+    let leave_unconfirmed_run = || {
+        write(
+            &marker_path,
+            bound(json!({ "version": 2, "displayName": "Octo", "expiresAtMs": 1 })),
+        );
+        write(
+            &approval_dir.join("tabs.json"),
+            bound(json!({
+                "version": 2,
+                "currentTabId": "TAB-C",
+                "lastTabNumber": 3,
+                "tabs": [
+                    { "tabId": "TAB-A", "number": 1, "approvedOrigins": [] },
+                    { "tabId": "TAB-B", "number": 2, "approvedOrigins": [] },
+                    { "tabId": "TAB-C", "number": 3, "approvedOrigins": [] }
+                ]
+            })),
+        );
+        write(
+            &approval_dir.join("kept-tabs.json"),
+            bound(json!({ "version": 1, "tabIds": ["TAB-B"] })),
+        );
+    };
+
+    // The process ended while a run held the browser. At the next start the
+    // browser does not answer yet: the run's records are revoked, but its
+    // unkept tabs stay recorded, with their numbers, so they stay badged.
+    leave_unconfirmed_run();
+    clear_stale_agent_control_marker_at_startup(
+        true,
+        &marker_path,
+        &approval_dir,
+        Some(&unreachable_devtools()),
+    )
+    .expect("startup");
+    assert!(!marker_path.exists());
+    assert!(!approval_dir.join("tabs.json").exists());
+    assert!(!approval_dir.join("kept-tabs.json").exists());
+    assert_eq!(
+        leftover_record(&approval_dir),
+        Some(json!({
+            "version": 1,
+            "tabs": [{ "tabId": "TAB-A", "number": 1 }, { "tabId": "TAB-C", "number": 3 }]
+        }))
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(approval_dir.join(LEFTOVER_AGENT_TABS_FILE))
+            .expect("leftover")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    // At the start after that the browser answers: they close, and nothing
+    // is left to badge.
+    clear_stale_agent_control_marker_at_startup(
+        true,
+        &marker_path,
+        &approval_dir,
+        Some(&("127.0.0.1".to_string(), address.port())),
+    )
+    .expect("startup");
+    assert_eq!(
+        *requests.lock().expect("requests"),
+        vec![
+            "GET /json/close/TAB-A HTTP/1.1".to_string(),
+            "GET /json/close/TAB-C HTTP/1.1".to_string(),
+        ]
+    );
+    assert_eq!(leftover_record(&approval_dir), None);
+
+    // A start that finds the browser up closes them at once.
+    requests.lock().expect("requests").clear();
+    leave_unconfirmed_run();
+    clear_stale_agent_control_marker_at_startup(
+        true,
+        &marker_path,
+        &approval_dir,
+        Some(&("127.0.0.1".to_string(), address.port())),
+    )
+    .expect("startup");
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+    assert_eq!(leftover_record(&approval_dir), None);
+
+    // A record bound to another run than the marker names no tab.
+    requests.lock().expect("requests").clear();
+    leave_unconfirmed_run();
+    let mut other = serde_json::from_slice::<JsonValue>(
+        &std::fs::read(approval_dir.join("tabs.json")).expect("tabs"),
+    )
+    .expect("tabs JSON");
+    other["runId"] = json!(Uuid::new_v4());
+    write(&approval_dir.join("tabs.json"), other);
+    clear_stale_agent_control_marker_at_startup(
+        true,
+        &marker_path,
+        &approval_dir,
+        Some(&("127.0.0.1".to_string(), address.port())),
+    )
+    .expect("startup");
+    assert!(requests.lock().expect("requests").is_empty());
+    assert_eq!(leftover_record(&approval_dir), None);
+}
+
+#[tokio::test]
+async fn the_next_confirmed_end_closes_leftover_tabs_and_keeps_those_it_cannot_close() {
+    let (address, requests) = fake_devtools();
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    std::fs::create_dir_all(&approval_dir).expect("approvals");
+    write_leftover_agent_tabs(
+        &approval_dir,
+        &[AgentTab {
+            tab_id: "EARLIER-TAB".to_string(),
+            number: Some(2),
+        }],
+    )
+    .expect("leftover");
+    let acquire = || {
+        let cancel_signal = JobCancelSignal::new();
+        let guard = SharedBrowserAgentControlGuard::acquire_with_path(
+            directory.path().join("agent-control.json"),
+            approval_dir.clone(),
+            ApprovalStart::Routine,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "page-target",
+            "Octo",
+            cancel_signal.clone(),
+            Duration::from_secs(60),
+        )
+        .expect("acquire run");
+        (guard, cancel_signal)
+    };
+
+    // A new run starts: its records start empty, the leftover record stays.
+    let (mut guard, cancel_signal) = acquire();
+    assert!(leftover_record(&approval_dir).is_some());
+    write_run_record(
+        &approval_dir,
+        "tabs.json",
+        &guard,
+        json!({
+            "version": 2,
+            "currentTabId": null,
+            "lastTabNumber": 1,
+            "tabs": [{ "tabId": "TAB-A", "number": 1, "approvedOrigins": [] }]
+        }),
+    );
+    // Its end is confirmed but the browser does not answer: its tab joins
+    // the leftovers instead of becoming an unbadged ordinary tab.
+    guard.cdp_base = Some(unreachable_devtools());
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+    assert_eq!(
+        leftover_record(&approval_dir),
+        Some(json!({
+            "version": 1,
+            "tabs": [{ "tabId": "EARLIER-TAB", "number": 2 }, { "tabId": "TAB-A", "number": 1 }]
+        }))
+    );
+    assert!(!approval_dir.join("tabs.json").exists());
+
+    // The next run's confirmed end closes them all.
+    let (mut guard, cancel_signal) = acquire();
+    guard.cdp_base = Some(("127.0.0.1".to_string(), address.port()));
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+    assert_eq!(
+        *requests.lock().expect("requests"),
+        vec![
+            "GET /json/close/EARLIER-TAB HTTP/1.1".to_string(),
+            "GET /json/close/TAB-A HTTP/1.1".to_string(),
+        ]
+    );
+    assert_eq!(leftover_record(&approval_dir), None);
 }

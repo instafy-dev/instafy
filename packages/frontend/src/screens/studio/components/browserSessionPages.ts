@@ -15,6 +15,8 @@ export type BrowserSessionPage = {
   openedBy?: BrowserTabOpener;
   /** One of Octo's tabs a person kept open past the end of the turn. */
   kept?: boolean;
+  /** The number one of Octo's tabs keeps while it is open ("Octo's tab 2"). */
+  agentTabNumber?: number;
 };
 
 export type BrowserSessionPageTarget = Pick<BrowserSessionPage, "id" | "url" | "host" | "label">;

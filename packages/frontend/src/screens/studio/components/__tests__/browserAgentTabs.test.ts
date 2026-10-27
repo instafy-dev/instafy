@@ -6,6 +6,8 @@ import {
   personalBrowserTabPages,
   resolveAgentReadingPages,
   resolveAgentTabIds,
+  resolveSharedPageStripAgentTabIds,
+  sharedBrowserAgentTabLabel,
 } from "../browserAgentTabs";
 import type { BrowserSessionPage } from "../browserSessionPages";
 
@@ -41,6 +43,24 @@ describe("resolveAgentTabIds", () => {
   it("ignores bound ids for tabs that are not open", () => {
     expect([...resolveAgentTabIds({ pages, agentControlActive: true, agentPageIds: ["closed", " "] })])
       .toEqual(["opened"]);
+  });
+});
+
+describe("resolveSharedPageStripAgentTabIds", () => {
+  it("badges every tab the browser says the agent opened, whichever conversation's run it is", () => {
+    const pages = [page("mine"), page("opened", { openedBy: "agent" }), page("bound")];
+    // Another conversation's run on this machine: this conversation has no
+    // running browser turn, and the agent's tab still carries its badge.
+    expect([...resolveSharedPageStripAgentTabIds({ pages })]).toEqual(["opened"]);
+    expect([...resolveSharedPageStripAgentTabIds({ pages, agentPageIds: ["bound"] })]).toEqual(["opened", "bound"]);
+    expect(resolveSharedPageStripAgentTabIds({ pages: [page("mine"), page("person", { openedBy: "person" })] }).size).toBe(0);
+  });
+});
+
+describe("sharedBrowserAgentTabLabel", () => {
+  it("names a tab the agent opened as its prompts do", () => {
+    expect(sharedBrowserAgentTabLabel({ agentTabNumber: 4 })).toBe("Octo's tab 4");
+    expect(sharedBrowserAgentTabLabel({})).toBe("Octo's tab");
   });
 });
 

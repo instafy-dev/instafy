@@ -38,16 +38,24 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   // page the person chose for the run. runtime-agent and the origin read the
   // same files and hold the same bound.
   const MAX_AGENT_TABS = 3;
+  // Each of Octo's tabs keeps the number it was opened with ("Octo's tab 2")
+  // for as long as it is open; a run numbers its tabs 1, 2, 3, ... and never
+  // reuses a number. The origin shows the same number to every viewer.
+  const MAX_AGENT_TAB_NUMBER = 999;
   const FIXED_FILES = new Set([
     "request.json",
     "decision.json",
     "state.json",
     "withhold-next.json",
-    // The tabs Octo opened in this run, each with its own site approvals.
+    // The tabs Octo opened in this run, each with its number and its own site
+    // approvals.
     "tabs.json",
     // The tabs the person kept, which stay open when the run ends. The origin
     // writes it; this script only reads it.
     "kept-tabs.json",
+    // Octo's tabs from an earlier run that could not be closed yet. runtime-
+    // agent writes it; it gives this run nothing, and this script never reads it.
+    "leftover-tabs.json",
   ]);
 
   function fail(code, message) {
@@ -447,10 +455,22 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     }
 
     // The tabs Octo opened in this run. `currentTabId` is the tab its tools
-    // act on (null: the page the person chose), and each tab holds the sites
-    // the person approved in that tab. Bound to the run like the state.
+    // act on (null: the page the person chose), each tab holds its number and
+    // the sites the person approved in that tab, and `lastTabNumber` is the
+    // number the run last gave a tab. Bound to the run like the state.
     function emptyTabs(authority) {
-      return { version: 1, ...authority, currentTabId: null, tabs: [] };
+      return { version: 2, ...authority, currentTabId: null, lastTabNumber: 0, tabs: [] };
+    }
+
+    function validTabNumbers(record) {
+      const numbers = record.tabs.map((tab) => tab.number);
+      return (
+        Number.isSafeInteger(record.lastTabNumber) &&
+        record.lastTabNumber >= 0 &&
+        record.lastTabNumber <= MAX_AGENT_TAB_NUMBER &&
+        numbers.every((number) => Number.isSafeInteger(number) && number >= 1 && number <= record.lastTabNumber) &&
+        new Set(numbers).size === numbers.length
+      );
     }
 
     function validTabOrigins(origins) {
@@ -474,14 +494,14 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       }
       const record = exactObject(
         raw,
-        ["version", "ownerId", "runId", "initiatorUserId", "browserPageId", "currentTabId", "tabs"],
+        ["version", "ownerId", "runId", "initiatorUserId", "browserPageId", "currentTabId", "lastTabNumber", "tabs"],
         "Shared Browser tab record",
       );
       const tabIds = Array.isArray(record.tabs)
-        ? record.tabs.map((tab) => exactObject(tab, ["tabId", "approvedOrigins"], "Shared Browser tab").tabId)
+        ? record.tabs.map((tab) => exactObject(tab, ["tabId", "number", "approvedOrigins"], "Shared Browser tab").tabId)
         : [];
       if (
-        record.version !== 1 ||
+        record.version !== 2 ||
         Object.keys(authority).some((key) => record[key] !== authority[key]) ||
         !Array.isArray(record.tabs) ||
         record.tabs.length > MAX_AGENT_TABS ||
@@ -494,6 +514,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         }) ||
         new Set(tabIds).size !== tabIds.length ||
         record.tabs.some((tab) => !validTabOrigins(tab.approvedOrigins)) ||
+        !validTabNumbers(record) ||
         (record.currentTabId !== null && !tabIds.includes(record.currentTabId))
       ) {
         fail("approval_state_invalid", "Shared Browser tab record is invalid or belongs to another run");
@@ -508,10 +529,16 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     function writeTabs(record) {
       const authority = readAuthority(initialAuthority);
       const next = {
-        version: 1,
+        version: 2,
         ...authority,
         currentTabId: record.currentTabId ?? null,
-        tabs: record.tabs.map((tab) => ({ tabId: tab.tabId, approvedOrigins: [...tab.approvedOrigins] })),
+        // A number once given is never given again in this run.
+        lastTabNumber: Math.max(readTabsFor(authority).lastTabNumber, record.lastTabNumber ?? 0),
+        tabs: record.tabs.map((tab) => ({
+          tabId: tab.tabId,
+          number: tab.number,
+          approvedOrigins: [...tab.approvedOrigins],
+        })),
       };
       // Checked the way it is read back, so a bad record is never published.
       const tabIds = next.tabs.map((tab) => tab.tabId);
@@ -520,6 +547,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         tabIds.some((tabId) => assertPageId(tabId) === authority.browserPageId) ||
         new Set(tabIds).size !== tabIds.length ||
         next.tabs.some((tab) => !validTabOrigins(tab.approvedOrigins)) ||
+        !validTabNumbers(next) ||
         (next.currentTabId !== null && !tabIds.includes(next.currentTabId))
       ) {
         fail("approval_protocol_invalid", "Shared Browser tab record is out of bounds");
@@ -864,6 +892,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       writeTabs,
       keptTabIds,
       maxAgentTabs: MAX_AGENT_TABS,
+      maxAgentTabNumber: MAX_AGENT_TAB_NUMBER,
     };
   }
 

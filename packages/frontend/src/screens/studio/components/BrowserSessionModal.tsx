@@ -506,7 +506,12 @@ export function BrowserSessionModal({
   humanInputRunIds?: ReadonlySet<string> | null;
   currentUserId?: string | null;
   activeBrowserRunId?: string | null;
-  onTakeOverAgent?: (() => Promise<boolean>) | null;
+  /**
+   * Take over. `agentHoldsBrowser`: the browser reports the agent's control,
+   * which spans every tab, so the run is stopped from whichever tab is on
+   * screen.
+   */
+  onTakeOverAgent?: ((options?: { agentHoldsBrowser?: boolean }) => Promise<boolean>) | null;
   onContinueAfterHumanInput?: ((message: string) => Promise<boolean>) | null;
   sharedBrowserRfbCapabilities?: RuntimeBrowserSessionCapabilities["rfb"] | null;
   sharedBrowserWebRtcCapabilities?: RuntimeBrowserSessionCapabilities["webrtc"] | null;
@@ -1014,7 +1019,9 @@ export function BrowserSessionModal({
     canTakeOver: transportActive && canControlBrowser && Boolean(effectiveAgentControlOwner && onTakeOverAgent),
     humanControlConfirmed: humanInputEnabled,
     canContinue: transportActive && Boolean(onContinueAfterHumanInput),
-    onTakeOver: async () => onTakeOverAgent ? onTakeOverAgent() : false,
+    onTakeOver: async () => onTakeOverAgent
+      ? onTakeOverAgent({ agentHoldsBrowser: effectiveAgentControlOwner !== null })
+      : false,
     onContinue: async (message: string) => onContinueAfterHumanInput ? onContinueAfterHumanInput(message) : false,
   };
   const browserHumanInputState = useBrowserHumanInput(browserHumanInputOptions);

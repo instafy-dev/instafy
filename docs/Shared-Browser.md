@@ -413,16 +413,20 @@ Browser has tabs of its own (see Personal-Browser.md).
 - **Visible, badged and shared.** A tab opens blank in the run's own browser
   context, is recorded in the run's `tabs.json` before anything loads, and is
   brought to the front whenever Octo works in it. `GET /browser/pages` marks
-  it `openedBy: "agent"` (and `kept: true` once a person keeps it). Every
-  viewer sees it in the tab list as "Octo · <title>" while Octo holds the
-  browser and as "Octo's tab: <title>" after Pause or take-over, and the
-  action feed attributes each step to the tab it ran in.
+  it `openedBy: "agent"` with its `agentTabNumber` (and `kept: true` once a
+  person keeps it), for every viewer and every conversation on the machine.
+  The action feed attributes each step to the tab it ran in.
+- **One label per tab.** A run numbers its tabs 1, 2, 3, … as it opens them,
+  never gives a number twice, and a tab keeps its number while it is open.
+  Prompts ("Octo's tab 2: …"), `list_tabs` (`label`, `number`), tool results
+  (`tabLabel`) and Studio's tab list ("Octo's tab 2: <title>") and page strip
+  all use that label.
 - **Only its own tabs.** Octo can use the page the person chose and the tabs it
   opened in this run, never another tab a person or a page opened, and it can
   close only its own tabs.
 - **Approvals bind to the tab.** A site approved in one of Octo's tabs is
   approved in that tab only (the run's page and the other tabs ask again), and
-  prompts name the tab ("Octo's tab 2: …"). Step approvals carry the tab in
+  prompts name the tab by its label. Step approvals carry the tab in
   their payload fingerprint, and snapshot ids and targets are bound to the
   tab, so a snapshot of one tab is never a target in another. Routine browsing,
   where the run has it, covers the run's tabs alike.
@@ -432,18 +436,35 @@ Browser has tabs of its own (see Personal-Browser.md).
   a named risky step (purchase, message, download, sign-out and the others), an
   activation key, a risky address, a step that may show a secret and a manual
   field handoff are refused there in every mode, before any prompt.
-- **Never a link-only site.** A site on the web-research skill's link-only list
-  (runtime-agent embeds the skill's `link-only-sites.json` into the controller)
-  is never opened in Octo's tabs: not by `open_tab`, `navigate` or a link, and
-  not through a redirect, which the tab's request guard stops before the request
-  leaves the browser. Without the list, Octo's tabs open nothing. A page that
-  moves itself on to a link-only site between Octo's steps is neither read nor
-  used there; Octo can only take the tab elsewhere or close it.
-- **No other windows.** A step in one of Octo's tabs that opens another window
+- **Never a link-only site, in any tab.** A site on the web-research skill's
+  link-only list (runtime-agent embeds the skill's `link-only-sites.json` into
+  the controller) is never opened or read by Octo, in its own tabs and on the
+  page the person chose alike: `open_tab`, `navigate` and a link, form or
+  activation key that leads there are refused before any prompt, and a
+  redirect one of Octo's steps causes is stopped by the step's request guard
+  before the request leaves the browser. A page that is on a link-only site,
+  because the person went there or the page moved there by itself, is neither
+  read nor used: every step there is refused before any prompt, and the
+  refusal tells Octo to ask the person to use **Send page to Octo** or to do
+  it themselves. Octo can only take the tab elsewhere, or close one of its
+  own. Without the list, Octo opens, reads and does nothing in any tab. The
+  person's own browsing is unchanged.
+- **No other windows.** A step of Octo's, in any tab, that opens another window
   (a `target="_blank"` link, a script) has that window's requests stopped
   before they leave the browser, the window closed, and the step reported as
-  refused. Octo opens tabs only with `open_tab`, so every tab it uses is
-  counted, badged and closed at the end.
+  refused. A window a page in one of Octo's tabs opens by itself between steps
+  (a timer, or a script still holding the activation of Octo's last click) is
+  closed too: runtime-agent closes it, and any window it opens in turn, as
+  soon as the browser reports it while the run holds the browser, and each
+  controller command closes any that is left before it runs. Windows the
+  person's own pages open are left alone. Octo opens tabs only with
+  `open_tab`, so every tab it uses is counted, badged and closed at the end.
+- **Octo's tab or the run's page in front.** When Octo closes one of its tabs,
+  a window, or a new tab the person denied, the tab it now acts on (else the
+  run's page, else another of its tabs) comes to the front instead of whatever
+  neighbour Chromium shows, which may be a person's tab. While Octo holds the
+  browser, Studio offers **Take over** in the Reading row and the toolbar
+  whichever tab is on screen.
 - **Control.** Agent control stays runtime-wide: while a run holds the marker
   the origin refuses human input on every tab, and Pause, Escape or taking over
   ends the run and with it every tab's agent control. A tab the person closes
@@ -452,9 +473,17 @@ Browser has tabs of its own (see Personal-Browser.md).
   confirmed gone, runtime-agent closes Octo's tabs through the loopback
   DevTools endpoint (`GET /json/close/<id>`), apart from the ones a person kept
   with **Keep tab** in the browser toolbar (`POST /browser/pages/:id/keep`,
-  `browser.control`, recorded in the run's `kept-tabs.json`). A kept tab, or one
-  that fails to close, stays an ordinary tab no later run can use, and both
-  records are cleared with the run's approval directory.
+  `browser.control`, recorded in the run's `kept-tabs.json`). A kept tab stays
+  an ordinary tab no later run can use, and both records are cleared with the
+  run's approval directory.
+- **No orphan tabs.** A tab of Octo's that is still open when its run's
+  records are revoked (the run ended without a confirmed shutdown, so the
+  runtime restarted, or the browser did not answer the close) is carried into
+  `leftover-tabs.json`, the one file in the approval directory that outlives a
+  run. It grants nothing: the origin keeps badging those tabs `openedBy:
+  "agent"` with their numbers, Octo cannot use them, and runtime-agent closes
+  them at the next confirmed shutdown, runtime start or browser start. **Keep
+  tab** on one makes it an ordinary tab at once.
 
 ### Redaction, step categories and downloads
 

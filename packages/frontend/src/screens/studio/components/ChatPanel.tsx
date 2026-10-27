@@ -428,7 +428,7 @@ import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./use
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserAgentPageIds, sharedBrowserConversationRunIds } from "./browserHandoffRouting";
-import { BROWSER_AGENT_DEFAULT_NAME, resolveAgentTabIds } from "./browserAgentTabs";
+import { BROWSER_AGENT_DEFAULT_NAME, resolveSharedPageStripAgentTabIds } from "./browserAgentTabs";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
 const {
@@ -3229,12 +3229,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       : null,
     [sharedBrowserAgentPages, sharedBrowserChromeWithSend],
   );
+  // The browser's page list says which tabs the agent opened, also when
+  // another conversation's run on this machine opened them.
   const browserPageStripAgentTabIds = useMemo(
-    () => resolveAgentTabIds({
-      pages: browserSessionPages,
-      agentControlActive: browserTransport === "shared" && sharedBrowserAgentPages.length > 0,
-      agentPageIds: sharedBrowserAgentPages,
-    }),
+    () => browserTransport === "shared"
+      ? resolveSharedPageStripAgentTabIds({ pages: browserSessionPages, agentPageIds: sharedBrowserAgentPages })
+      : new Set<string>(),
     [browserSessionPages, browserTransport, sharedBrowserAgentPages],
   );
   const browserPageStripAgentName =
@@ -4951,9 +4951,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const declineBrowserAutoStart = useCallback(() => {
     markBrowserAutoStartDeclined(browserRequestIdentity);
   }, [browserRequestIdentity]);
-  const takeOverSharedBrowser = useCallback(() => {
+  const takeOverSharedBrowser = useCallback((options?: { agentHoldsBrowser?: boolean }) => {
     declineBrowserAutoStart();
-    return browserHandoff.takeOverShared();
+    return browserHandoff.takeOverShared(options);
   }, [browserHandoff, declineBrowserAutoStart]);
 
   const handleStashDraft = useCallback(async (): Promise<boolean> => {
@@ -6562,7 +6562,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     humanInputIdentityKey={browserHandoff.identityKey}
                     humanInputRunIds={browserHumanInputRunIds}
                     activeBrowserRunId={browserHandoff.sharedJob?.runId ?? null}
-                    onTakeOverAgent={browserHandoff.sharedJob ? takeOverSharedBrowser : null}
+                    onTakeOverAgent={browserHandoff.sharedJobWhileAgentHolds ? takeOverSharedBrowser : null}
                     onContinueAfterHumanInput={browserHandoff.continueShared}
                     onPresenceChange={setSharedBrowserPresence}
                     sharedBrowserChrome={sharedBrowserChromeForView}

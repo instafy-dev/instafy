@@ -66,6 +66,10 @@ struct BrowserPageResponse {
     /// A tab of Octo's that a person kept open past the end of the turn.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     kept: bool,
+    /// The number one of Octo's tabs was opened with, which it keeps while it
+    /// is open: Studio, prompts and Octo all call it "Octo's tab <number>".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_tab_number: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1061,6 +1065,7 @@ async fn handle_browser_pages(
                 can_go_forward: has_history_state && history_state.can_go_forward,
                 opened_by: agent_tabs.tab_ids.contains(&target.id).then_some("agent"),
                 kept: agent_tabs.kept.contains(&target.id),
+                agent_tab_number: agent_tabs.number_of(&target.id),
             }
         })
         .collect();
@@ -1925,6 +1930,7 @@ mod tests {
             can_go_forward: false,
             opened_by: None,
             kept: false,
+            agent_tab_number: None,
         };
         let value = serde_json::to_value(page).expect("serialize browser page");
         assert_eq!(
@@ -1939,6 +1945,7 @@ mod tests {
         // A page that is not one of Octo's tabs carries no badge fields.
         assert!(value.get("openedBy").is_none());
         assert!(value.get("kept").is_none());
+        assert!(value.get("agentTabNumber").is_none());
     }
 
     #[test]
@@ -1954,10 +1961,12 @@ mod tests {
             can_go_forward: false,
             opened_by: Some("agent"),
             kept: true,
+            agent_tab_number: Some(2),
         };
         let value = serde_json::to_value(page).expect("serialize browser page");
         assert_eq!(value["openedBy"], "agent");
         assert_eq!(value["kept"], true);
+        assert_eq!(value["agentTabNumber"], 2);
     }
 
     #[test]

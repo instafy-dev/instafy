@@ -109,4 +109,29 @@ describe("BrowserReadingRow", () => {
     await act(async () => root.render(strip()));
     expect(container.querySelector('[data-testid="browser-agent-tab-badge"]')).toBeNull();
   });
+
+  it("labels a tab the agent opened in the page strip and the row as its prompts do", async () => {
+    const opened = page("gamma", { openedBy: "agent", agentTabNumber: 3 });
+    await act(async () => root.render(
+      <BrowserSessionPageStrip
+        pages={[page("alpha", { isActive: true }), opened]}
+        agentTabIds={new Set(["alpha", "gamma"])}
+        agentName="Octo"
+        onSelectPage={vi.fn()}
+        onToggleBrowser={vi.fn()}
+        onClearPendingNewBrowser={vi.fn()}
+        browserHidden
+        browserOpen={false}
+        pendingNewBrowser={false}
+      />,
+    ));
+    const badges = [...container.querySelectorAll('[data-testid="browser-agent-tab-badge"]')].map((badge) => badge.textContent);
+    // The tab its run is bound to carries the agent's name; the tab it opened, its label.
+    expect(badges).toEqual(["Octo", "Octo's tab 3"]);
+
+    await act(async () => root.render(<BrowserReadingRow pages={[opened]} canTakeOver onTakeOver={vi.fn()} />));
+    const item = container.querySelector<HTMLElement>('[data-testid="browser-reading-page"]')!;
+    expect(item.title.startsWith("Octo's tab 3: ")).toBe(true);
+    expect(item.textContent).toContain("Octo's tab 3:");
+  });
 });

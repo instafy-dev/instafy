@@ -1046,21 +1046,32 @@ fn a_page_a_credential_step_opens_stays_withheld_for_a_sent_page() {
     assert!(!CarriedWithholding::Nothing.withholds("LOADER_step-1"));
 }
 
+/// The run's tab record as the controller writes it: tab N of `tab_ids` is
+/// "Octo's tab N + 1".
 fn write_agent_tabs(fixture: &ApprovalFixture, tab_ids: &[&str]) {
     write_private_json(
         &fixture.approval_dir.join(AGENT_TABS_FILE),
         &json!({
-            "version": 1,
+            "version": 2,
             "ownerId": fixture.marker.owner_id,
             "runId": fixture.marker.run_id,
             "initiatorUserId": fixture.marker.initiator_user_id,
             "browserPageId": fixture.marker.browser_page_id,
             "currentTabId": tab_ids.first(),
+            "lastTabNumber": tab_ids.len(),
             "tabs": tab_ids
                 .iter()
-                .map(|tab_id| json!({ "tabId": tab_id, "approvedOrigins": ["https://example.test"] }))
+                .enumerate()
+                .map(|(index, tab_id)| json!({ "tabId": tab_id, "number": index + 1, "approvedOrigins": ["https://example.test"] }))
                 .collect::<Vec<_>>(),
         }),
+    );
+}
+
+fn write_leftover_tabs(fixture: &ApprovalFixture, tabs: JsonValue) {
+    write_private_json(
+        &fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE),
+        &json!({ "version": 1, "tabs": tabs }),
     );
 }
 
@@ -1081,6 +1092,7 @@ async fn octos_tabs_are_read_only_from_the_running_turns_own_record() {
         AgentTabs {
             tab_ids: vec!["TAB-A".to_string(), "TAB-B".to_string()],
             kept: Vec::new(),
+            numbers: vec![("TAB-A".to_string(), 1), ("TAB-B".to_string(), 2)],
         }
     );
 
@@ -1088,23 +1100,34 @@ async fn octos_tabs_are_read_only_from_the_running_turns_own_record() {
     // tab or an unprotected file badges nothing.
     let mut other = fixture.marker.clone();
     other.run_id = Uuid::new_v4().to_string();
+    let own = |tabs: JsonValue, last_tab_number: u64| {
+        json!({
+            "version": 2, "ownerId": fixture.marker.owner_id, "runId": fixture.marker.run_id,
+            "initiatorUserId": fixture.marker.initiator_user_id,
+            "browserPageId": fixture.marker.browser_page_id, "currentTabId": null,
+            "lastTabNumber": last_tab_number, "tabs": tabs,
+        })
+    };
     for record in [
         json!({
-            "version": 1, "ownerId": other.owner_id, "runId": other.run_id,
+            "version": 2, "ownerId": other.owner_id, "runId": other.run_id,
             "initiatorUserId": other.initiator_user_id, "browserPageId": other.browser_page_id,
-            "currentTabId": null, "tabs": [{ "tabId": "TAB-A", "approvedOrigins": [] }],
+            "currentTabId": null, "lastTabNumber": 1,
+            "tabs": [{ "tabId": "TAB-A", "number": 1, "approvedOrigins": [] }],
         }),
+        own(json!([{ "tabId": fixture.marker.browser_page_id, "number": 1, "approvedOrigins": [] }]), 1),
+        own(json!(["A", "B", "C", "D"].iter().enumerate().map(|(index, tab_id)| json!({ "tabId": tab_id, "number": index + 1, "approvedOrigins": [] })).collect::<Vec<_>>()), 4),
+        // Numbers out of bounds, repeated, or past the run's last number.
+        own(json!([{ "tabId": "TAB-A", "number": 0, "approvedOrigins": [] }]), 1),
+        own(json!([{ "tabId": "TAB-A", "number": 2, "approvedOrigins": [] }]), 1),
+        own(json!([{ "tabId": "TAB-A", "number": 1, "approvedOrigins": [] }, { "tabId": "TAB-B", "number": 1, "approvedOrigins": [] }]), 2),
+        own(json!([{ "tabId": "TAB-A", "number": 1, "approvedOrigins": [] }]), 1000),
+        // An earlier record without numbers.
         json!({
             "version": 1, "ownerId": fixture.marker.owner_id, "runId": fixture.marker.run_id,
             "initiatorUserId": fixture.marker.initiator_user_id,
             "browserPageId": fixture.marker.browser_page_id, "currentTabId": null,
-            "tabs": [{ "tabId": fixture.marker.browser_page_id, "approvedOrigins": [] }],
-        }),
-        json!({
-            "version": 1, "ownerId": fixture.marker.owner_id, "runId": fixture.marker.run_id,
-            "initiatorUserId": fixture.marker.initiator_user_id,
-            "browserPageId": fixture.marker.browser_page_id, "currentTabId": null,
-            "tabs": (["A", "B", "C", "D"].map(|tab_id| json!({ "tabId": tab_id, "approvedOrigins": [] }))),
+            "tabs": [{ "tabId": "TAB-A", "approvedOrigins": [] }],
         }),
     ] {
         write_private_json(&fixture.approval_dir.join(AGENT_TABS_FILE), &record);
@@ -1194,4 +1217,109 @@ async fn a_person_keeps_only_octos_tabs_of_the_running_turn() {
     // Once the turn has ended nothing is kept.
     fs::remove_file(&fixture.marker_path).expect("run ends");
     assert_not_found(fixture.bridge.keep_agent_tab("TAB-A").await);
+}
+
+#[tokio::test]
+async fn tabs_an_earlier_run_left_open_stay_badged_with_their_numbers() {
+    let fixture = ApprovalFixture::origin();
+    // A run that ended without a confirmed shutdown left two of Octo's tabs
+    // open; runtime-agent recorded them before revoking the run.
+    fs::remove_file(&fixture.marker_path).expect("the run is gone");
+    write_leftover_tabs(
+        &fixture,
+        json!([{ "tabId": "EARLIER-A", "number": 2 }, { "tabId": "EARLIER-B" }]),
+    );
+    assert_eq!(
+        fixture.bridge.agent_tabs().await,
+        AgentTabs {
+            tab_ids: vec!["EARLIER-A".to_string(), "EARLIER-B".to_string()],
+            kept: Vec::new(),
+            numbers: vec![("EARLIER-A".to_string(), 2)],
+        }
+    );
+
+    // While a new run holds the browser, its own tabs come first.
+    write_private_json(&fixture.marker_path, &fixture.marker);
+    write_agent_tabs(&fixture, &["TAB-A"]);
+    let tabs = fixture.bridge.agent_tabs().await;
+    assert_eq!(tabs.tab_ids, vec!["TAB-A", "EARLIER-A", "EARLIER-B"]);
+    assert_eq!(tabs.number_of("TAB-A"), Some(1));
+    assert_eq!(tabs.number_of("EARLIER-A"), Some(2));
+    assert_eq!(tabs.number_of("EARLIER-B"), None);
+
+    // A record that cannot be read safely badges nothing of its own.
+    for record in [
+        json!({ "version": 2, "tabs": [{ "tabId": "EARLIER-A" }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "../tabs.json" }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "EARLIER-A" }, { "tabId": "EARLIER-A" }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "EARLIER-A", "number": 0 }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "EARLIER-A", "approvedOrigins": [] }] }),
+        json!({ "version": 1, "tabs": (0..13).map(|index| json!({ "tabId": format!("T{index}") })).collect::<Vec<_>>() }),
+    ] {
+        write_private_json(
+            &fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE),
+            &record,
+        );
+        assert_eq!(
+            fixture.bridge.agent_tabs().await.tab_ids,
+            vec!["TAB-A"],
+            "{record}"
+        );
+    }
+    write_leftover_tabs(&fixture, json!([{ "tabId": "EARLIER-A" }]));
+    set_mode(&fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE), 0o644);
+    assert_eq!(fixture.bridge.agent_tabs().await.tab_ids, vec!["TAB-A"]);
+}
+
+#[tokio::test]
+async fn keeping_a_tab_an_earlier_run_left_open_makes_it_an_ordinary_tab() {
+    let fixture = ApprovalFixture::origin();
+    write_agent_tabs(&fixture, &["TAB-A"]);
+    write_leftover_tabs(
+        &fixture,
+        json!([{ "tabId": "EARLIER-A", "number": 2 }, { "tabId": "EARLIER-B", "number": 3 }]),
+    );
+
+    // During a run, Keep tab on a leftover tab takes it off the record that
+    // runtime-agent closes; it is not added to this run's kept tabs.
+    let kept = fixture
+        .bridge
+        .keep_agent_tab("EARLIER-A")
+        .await
+        .expect("keep a leftover tab");
+    assert!(kept.kept);
+    assert!(!fixture.approval_dir.join(KEPT_AGENT_TABS_FILE).exists());
+    assert_eq!(
+        fixture.bridge.agent_tabs().await.tab_ids,
+        vec!["TAB-A", "EARLIER-B"]
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE))
+            .expect("leftover tabs")
+            .permissions()
+            .mode()
+            & 0o777,
+        APPROVAL_FILE_MODE
+    );
+
+    // With no run holding the browser, the same.
+    fs::remove_file(&fixture.marker_path).expect("the run ends");
+    fixture
+        .bridge
+        .keep_agent_tab("EARLIER-B")
+        .await
+        .expect("keep a leftover tab");
+    assert_eq!(fixture.bridge.agent_tabs().await, AgentTabs::default());
+    let record: JsonValue = serde_json::from_slice(
+        &fs::read(fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE)).expect("leftover"),
+    )
+    .expect("leftover JSON");
+    assert_eq!(record, json!({ "version": 1, "tabs": [] }));
+
+    // Anything else is not Octo's to keep.
+    assert_not_found(fixture.bridge.keep_agent_tab("EARLIER-A").await);
+    assert_not_found(fixture.bridge.keep_agent_tab("SOMEONE-ELSES-TAB").await);
+    fs::remove_dir_all(&fixture.approval_dir).expect("no approval directory");
+    assert_not_found(fixture.bridge.keep_agent_tab("EARLIER-A").await);
 }

@@ -69,6 +69,28 @@ describe("mapRuntimeBrowserSessionPagesPayload", () => {
     ]);
   });
 
+  it("keeps the number each of Octo's tabs keeps while it is open", () => {
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { id: "tab-1", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent", agentTabNumber: 2 },
+        // A number means nothing on a tab that is not Octo's, or out of bounds.
+        { id: "page-1", url: "https://example.com/", host: "example.com", label: "Example", agentTabNumber: 1 },
+        { id: "tab-2", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", agentTabNumber: 0 },
+        { id: "tab-3", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", agentTabNumber: "3" },
+        { id: "tab-4", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", agentTabNumber: 1.5 },
+        { id: "tab-5", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", agentTabNumber: 1000 },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.agentTabNumber ?? null])).toEqual([
+      ["tab-1", 2],
+      ["page-1", null],
+      ["tab-2", null],
+      ["tab-3", null],
+      ["tab-4", null],
+      ["tab-5", null],
+    ]);
+  });
+
   it("maps valid runtime browser pages and drops malformed entries", () => {
     expect(
       mapRuntimeBrowserSessionPagesPayload({

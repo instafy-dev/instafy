@@ -103,6 +103,20 @@ describe("useChatBrowserHandoff", () => {
     expect(cancelAgentJob).not.toHaveBeenCalled();
   });
 
+  it("takes over from a person's own tab while the browser reports the agent holds it", async () => {
+    cancelAgentJob.mockResolvedValue({ ok: true, canceledJobIds: [JOB_ID], canceledRunIds: [] });
+    // Octo closed its tab and the person's other tab is on screen.
+    const onPersonsTab = options({ page: { id: "persons-tab", url: "https://example.test/form", host: "example.test", label: "Mine" } });
+    await render(onPersonsTab);
+    expect(resultRef.current!.sharedJob).toBeNull();
+    expect(resultRef.current!.sharedJobWhileAgentHolds).toEqual({ jobId: JOB_ID, runId: RUN_ID });
+    // Without the browser's word that the agent holds it, nothing is cancelled.
+    await expect(resultRef.current!.takeOverShared()).resolves.toBe(false);
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    await expect(resultRef.current!.takeOverShared({ agentHoldsBrowser: true })).resolves.toBe(true);
+    expect(cancelAgentJob).toHaveBeenCalledExactlyOnceWith(JOB_ID, "User taking over the browser");
+  });
+
   it("propagates cancellation failure without fallback", async () => {
     cancelAgentJob.mockRejectedValue(new Error("offline"));
     await render(options());

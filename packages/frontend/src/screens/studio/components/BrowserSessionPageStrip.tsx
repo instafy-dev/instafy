@@ -3,6 +3,7 @@ import { NavArrowDown, Plus, Safari, Xmark } from "iconoir-react";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
 import type { BrowserSessionPage } from "./browserSessionPages";
 import { BrowserAgentTabBadge } from "./BrowserReadingRow";
+import { sharedBrowserAgentTabLabel } from "./browserAgentTabs";
 
 const COLLAPSED_PAGE_LIMIT = 3;
 
@@ -162,7 +163,12 @@ export function BrowserSessionPageStrip({
                   <Safari className="h-3.5 w-3.5" aria-hidden="true" />
                 </span>
                 <span className="flex min-w-0 items-center gap-1.5">
-                  {agentTabIds?.has(page.id) ? <BrowserAgentTabBadge agentName={agentName} /> : null}
+                  {agentTabIds?.has(page.id) ? (
+                    <BrowserAgentTabBadge
+                      agentName={agentName}
+                      label={page.openedBy === "agent" && page.agentTabNumber ? sharedBrowserAgentTabLabel(page) : undefined}
+                    />
+                  ) : null}
                   <span className="truncate text-sm font-medium">{page.label}</span>
                   {current ? (
                     <span className="inline-flex h-2 w-2 flex-none rounded-full bg-emerald-500 dark:bg-emerald-400" />

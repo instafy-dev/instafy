@@ -59,20 +59,23 @@ export function sharedBrowserAgentPageIds(runs: readonly RunRecord[], runtimeId:
 /**
  * Cancel only one authoritative browser job, never all conversation jobs.
  * The job is the one bound to the page on screen. On a tab the agent opened
- * itself (`openedByAgent`), it is the one browser job on that runtime, since
- * the agent's control spans every tab of that browser; a person's own tab
- * never falls back to a runtime-wide job.
+ * itself (`openedByAgent`), or on any tab while the browser reports that the
+ * agent holds it (`agentHoldsBrowser`), it is the one browser job on that
+ * runtime, since the agent's control spans every tab of that browser: Take
+ * over stays reachable whichever tab is on screen. Otherwise a person's own
+ * tab never falls back to a runtime-wide job.
  */
 export function sharedBrowserTakeoverJob(
   runs: RunRecord[],
   runtimeId: string | null,
   pageId: string | null,
-  options: { openedByAgent?: boolean } = {},
+  options: { openedByAgent?: boolean; agentHoldsBrowser?: boolean } = {},
 ): { jobId: string; runId: string } | null {
   if (!runtimeId || !pageId) return null;
   const onRuntime = activeSharedBrowserRuns(runs, runtimeId);
   const onPage = onRuntime.filter((run) => run.metadata?.browserPageId === pageId);
-  const matches = onPage.length === 0 && options.openedByAgent === true ? onRuntime : onPage;
+  const runtimeWide = options.openedByAgent === true || options.agentHoldsBrowser === true;
+  const matches = onPage.length === 0 && runtimeWide ? onRuntime : onPage;
   if (matches.length !== 1) return null;
   const run = matches[0];
   const jobId = run.metadata?.jobId;
