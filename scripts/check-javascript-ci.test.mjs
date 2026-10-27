@@ -68,12 +68,12 @@ const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget and read-reference selectors, the
   // code-mode host build, per-model proxy_retry_budget runs, inert native compaction
   // and native chat image selectors, and provider unit tests, independently bound by check-rust-ci, and the CLI git
-  // wrapper, preview check, bound-sites binder, web read and preview picture suites bound below, and the local author pseudonym key
+  // wrapper, preview check, bound-sites binder, web read (with its offline fixtures) and preview picture suites bound below, and the local author pseudonym key
   // test in the contracts lane, and the tunnel broker test lane in the Rust tests
   // aggregate, also bound by check-rust-ci; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: '23ffd5845e0c464f4514a7f8dd89c6ca7ac2e054d65520e6d5c661f0f73d11ea' },
+    previousHash: '5de013c3516ae9f510af95b02639445457fbd8aced8edf09d64a8707595a2ed6' },
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];
@@ -372,8 +372,8 @@ test('the complete pre-split command inventory and working directories are uncha
     'Test CLI preview check': '137359ecfe1c8c525bc9346e6610c692e69ca7f97016387da8e114b11e5dacf6',
     // Reviewed addition: the bound-sites binder (packages/instafy-bind) and `instafy bind`.
     'Test bound-sites binder': '820efecc9ec5027b63e7856ec5bf0ab712c90294354b2eb41f91ac101f4f4cbc',
-    // Reviewed addition: `instafy web read`, against a local fixture server only.
-    'Test CLI web read': '34389f1b76c6eed629c38fcb149cc7a05d426ff98a8d5aabd0041cf996102c42',
+    // Reviewed addition: `instafy web read`, against a local fixture server and offline fixture files only.
+    'Test CLI web read': 'e00dff87c3e04539a229cad90787ca9fdaa4fc3353ac10d96ebf8f4a8b59d1d6',
     // Reviewed addition: a preview card's picture (what a capture may load, Instafy's gate), local fixture servers only.
     'Test CLI preview pictures': '902e506aa784d5327eb79f9e1368b8882ed29e60f6c7cdccd51e34f5e8e16882',
     'Build and test desktop runtime': '4404b931ad4c93454f1acb37955f5059b7f3df6ac9cf9ffa81e92d3306481e73',
@@ -399,7 +399,7 @@ test('the complete pre-split command inventory and working directories are uncha
 test('the full frontend, CLI, provider artifact and Desktop commands are preserved without filtering', () => {
   const commands = {
     'javascript-frontend': ['pnpm --filter @instafy/frontend lint', 'pnpm --filter @instafy/frontend build', 'pnpm --filter @instafy/frontend test:unit'],
-    'javascript-cli': ['pnpm --filter @instafy/cli test:package', 'npm pack --dry-run --ignore-scripts', 'pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/git-wrapper.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/local-site.spec.ts test/site-check.spec.ts', 'pnpm --filter @instafy/bind test', 'pnpm --filter @instafy/cli exec vitest run test/bind.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-read.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/preview-thumbnail.spec.ts'],
+    'javascript-cli': ['pnpm --filter @instafy/cli test:package', 'npm pack --dry-run --ignore-scripts', 'pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/git-wrapper.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/local-site.spec.ts test/site-check.spec.ts', 'pnpm --filter @instafy/bind test', 'pnpm --filter @instafy/cli exec vitest run test/bind.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-read.spec.ts test/web-fixtures.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/preview-thumbnail.spec.ts'],
     'javascript-desktop': ['pnpm --filter @instafy/desktop-runtime-agent build', 'pnpm --filter @instafy/desktop-runtime-agent exec vitest run', 'pnpm --filter @instafy/desktop-app test'],
   };
   for (const [key, list] of Object.entries(commands)) for (const command of list) {

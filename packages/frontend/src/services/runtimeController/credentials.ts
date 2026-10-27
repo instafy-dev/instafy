@@ -675,6 +675,25 @@ export async function revokeMyCredential(
   }
 }
 
+/**
+ * Why Instafy AI cannot run a turn for this person right now, as the
+ * controller reports it next to `available: false`. Older controllers omit it.
+ */
+export type ManagedAiUnavailableReason =
+  | "disabled"
+  | "no_proxy"
+  | "proxy_unreachable"
+  | "proxy_needs_credential"
+  | "daily_limit_reached";
+
+const MANAGED_AI_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set<ManagedAiUnavailableReason>([
+  "disabled",
+  "no_proxy",
+  "proxy_unreachable",
+  "proxy_needs_credential",
+  "daily_limit_reached",
+]);
+
 export interface CredentialRequirementsResult {
   success: boolean;
   requiresUserCredentials: boolean;
@@ -696,6 +715,8 @@ export interface CredentialRequirementsResult {
      * is used up. Older controllers leave it out.
      */
     nextAvailableAt?: string | null;
+    /** Why `available` is false. Null when available or from an older controller. */
+    unavailableReason?: ManagedAiUnavailableReason | null;
   } | null;
   error?: string;
 }
@@ -741,6 +762,11 @@ export function parseManagedAiAccess(value: unknown): CredentialRequirementsResu
       typeof managedAiPayload.nextAvailableAt === "string" &&
       Number.isFinite(Date.parse(managedAiPayload.nextAvailableAt))
         ? managedAiPayload.nextAvailableAt
+        : null,
+    unavailableReason:
+      typeof managedAiPayload.unavailableReason === "string" &&
+      MANAGED_AI_UNAVAILABLE_REASONS.has(managedAiPayload.unavailableReason)
+        ? (managedAiPayload.unavailableReason as ManagedAiUnavailableReason)
         : null,
   };
 }

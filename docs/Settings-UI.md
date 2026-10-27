@@ -551,7 +551,13 @@ list of disabled providers when no personal connections exist.
 After the controller confirms its capabilities, show Instafy AI as the first connection row with
 the canonical Octo mark, its allowance and the same Default badge or Make default action
 as saved providers. Selecting it clears the default credential without deleting any saved
-connection. Keep quota exhaustion or service unavailability distinct from the chosen default.
+connection. Keep quota exhaustion or service unavailability distinct from the chosen default:
+Instafy AI is available or not whichever connection is the default, and when it cannot run turns
+the row says why in plain words (today's prompts are used and when more come, the server is not
+set up to run it, or it cannot be reached). Make default is offered while it can run turns or only
+today's prompts are used. Adding a connection from this page never takes the default from an
+available Instafy AI; connecting from chat ("Connect your own AI", the AI gate) is the person's
+choice of AI and does.
 Controllers without managed AI show "Unavailable on this server" without a Default badge,
 quota or switch action. An unresolved or failed capability check must not be presented as
 confirmed unavailability. Reserve the separate status summary for loading, errors or a saved

@@ -20,20 +20,17 @@
 //
 // It never sends cookies or credentials, never submits a form and never runs a page's scripts. A page whose text needs
 // JavaScript comes back as `needs_browser`. Which sources to read, and how to cite them, is a skill's judgement.
-import { createHash } from "node:crypto";
+//
+// The link-only guard, the turn budget and cache (in the space's folder on a runtime), the untrusted wrapper, the
+// address check and the offline fixtures of test builds are web-shared.ts, which other web commands use too.
 import dns from "node:dns";
-import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import type { Command } from "commander";
-import * as linkOnly from "@instafy/browser-action-policy/linkOnly";
 import * as redaction from "@instafy/browser-action-policy/redaction";
-import bundledLinkOnlySites from "virtual:instafy/link-only-sites";
-import { checkPublicUrl } from "@instafy/bind/net";
 import { AI_AGENTS, USER_AGENT, challengeReason, parseRobots, robotsAllows, type RobotsGroup } from "@instafy/bind/web";
 import {
   findPassages,
@@ -47,18 +44,74 @@ import {
   type PageSignals,
   type StructuredItem,
 } from "./web-page.js";
+import {
+  BUNDLED_LINK_ONLY_SITES,
+  Cache,
+  FIXTURE_VIEWER,
+  LinkOnlyListUnavailableError,
+  LOCAL_TURN_IDLE_MS,
+  NETWORK_VIEWER,
+  TurnStore,
+  WebFixturesError,
+  barsAgents,
+  checkAddress,
+  defaultSkillRoots,
+  linkOnlyMessage,
+  linkOnlySite,
+  listedSite,
+  loadLinkOnlyGuard,
+  loadWebFixtures,
+  mementoOriginals,
+  noReuseSite,
+  realSleep,
+  sha256,
+  siteKey,
+  stopKeys,
+  turnScope,
+  webDirs,
+  webFixturesFolder,
+  wrapUntrusted,
+  type LinkOnlyGuard,
+  type Resolver,
+  type StopRecord as SharedStopRecord,
+  type WebFixtures,
+  type WebViewer,
+} from "./web-shared.js";
 
-export const VIEWER = "server fetch";
+// The link-only guard, turn budget, cache, untrusted wrapper and address check are shared with the other web commands
+// (web-shared.ts); these names stay importable from here.
+export {
+  BUNDLED_LINK_ONLY_SITES,
+  LINK_ONLY_FILE,
+  LINK_ONLY_PLACES,
+  LINK_ONLY_SCHEMA,
+  LinkOnlyListUnavailableError,
+  UNTRUSTED_TAG,
+  WEB_FIXTURES_ALLOWED,
+  WEB_FIXTURES_ENV,
+  WebFixturesError,
+  checkAddress,
+  defaultSkillRoots,
+  linkOnlySite,
+  listedSite,
+  loadLinkOnlyGuard,
+  mementoOriginals,
+  siteKey,
+  stopKeys,
+  turnScope,
+  wrapUntrusted,
+  type LinkOnlyGuard,
+  type LinkOnlySite,
+  type ResolvedAddress,
+  type Resolver,
+  type WebViewer,
+} from "./web-shared.js";
+
+/** What reads a page over the network: this command, over plain HTTP. A test build's fixture page says "fixture". */
+export const VIEWER = NETWORK_VIEWER;
 export const WEB_USER_AGENT = USER_AGENT;
 /** robots.txt groups checked for every URL: every crawler, this agent, and the AI agents. */
 export const ROBOTS_AGENTS: readonly string[] = ["*", "instafy-agent", ...AI_AGENTS];
-export const UNTRUSTED_TAG = "untrusted_page_content";
-export const LINK_ONLY_FILE = "link-only-sites.json";
-export const LINK_ONLY_SCHEMA = linkOnly.LINK_ONLY_SITES_SCHEMA;
-/** Where a skill folder keeps its copy of the list: the web-research skill's `references/`, or the folder itself. */
-export const LINK_ONLY_PLACES: readonly string[] = [path.join("references", LINK_ONLY_FILE), LINK_ONLY_FILE];
-/** The web-research skill's list as the build bundled it (from the skill's own file, so there is one source). */
-export const BUNDLED_LINK_ONLY_SITES: unknown = bundledLinkOnlySites;
 
 export const LIMITS = Object.freeze({
   urlsPerCall: 6,
@@ -82,7 +135,7 @@ export const LIMITS = Object.freeze({
   pageTtlMs: 6 * 3600_000,
   stopTtlMs: 24 * 3600_000,
   robotsTtlMs: 6 * 3600_000,
-  localTurnIdleMs: 15 * 60_000,
+  localTurnIdleMs: LOCAL_TURN_IDLE_MS,
 });
 
 export const WEB_READ_EXIT_OK = 0;
@@ -118,7 +171,7 @@ export type SkipCode = "turn_limit" | "host_limit" | "time_limit";
 export type FailCode = "not_found" | "http_error" | "unreachable" | "timeout";
 export type PageStatus = "read" | "needs_browser" | "stopped" | "skipped" | "failed";
 
-export type Provenance = { requestedUrl: string; finalUrl: string; title: string; readAt: string; viewer: typeof VIEWER };
+export type Provenance = { requestedUrl: string; finalUrl: string; title: string; readAt: string; viewer: WebViewer };
 
 export type PageResult = {
   requestedUrl: string;
@@ -149,7 +202,8 @@ export type PageResult = {
 
 export type WebReadReport = {
   ok: true;
-  viewer: typeof VIEWER;
+  /** "server fetch", or "fixture" when a test build answered from INSTAFY_WEB_FIXTURES */
+  viewer: WebViewer;
   userAgent: string;
   notice: string;
   pages: PageResult[];
@@ -171,9 +225,6 @@ export type WebReadReport = {
   warnings: string[];
 };
 
-export type ResolvedAddress = { address: string; family: number };
-export type Resolver = (host: string) => Promise<ResolvedAddress[]>;
-
 /** Everything the engine reads from the machine, so tests can supply their own. */
 export type WebReadDeps = {
   /** DNS lookup of every address of a host (default: the system resolver) */
@@ -182,9 +233,11 @@ export type WebReadDeps = {
   dial?: (address: string, port: number) => { host: string; port: number };
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
-  /** turn budget and stop memory (default: $XDG_STATE_HOME or ~/.local/state, under instafy/web-read) */
+  /** turn budget and stop memory (default: the space's $INSTAFY_CACHE_DIR on a runtime, else $XDG_STATE_HOME or
+   * ~/.local/state; under instafy/web-read) */
   stateDir?: string;
-  /** page, stop and robots.txt cache for this workspace; null turns the cache off (stops are still remembered per turn) */
+  /** page, stop and robots.txt cache for this workspace (default: the space's $INSTAFY_CACHE_DIR on a runtime, else
+   * $XDG_CACHE_HOME or ~/.cache); null turns the cache off (stops are still remembered per turn) */
   cacheDir?: string | null;
   /** folders whose skill subfolders may hold link-only-sites.json (default: .agents/skills from cwd upwards, ~/.agents/skills and the skill packs) */
   skillRoots?: string[];
@@ -205,286 +258,15 @@ export type WebReadOptions = {
 
 export class WebReadUsageError extends Error {}
 
-// ---------------------------------------------------------------------------------------------------------------
-// Link-only guard: skill-owned data, enforced here
-
-/**
- * A listed site an address is on: `kind` is what its terms bar ("no-agents": AI agents and automated access, so it is
- * never fetched; "no-reuse": copying, so it is read but not reused), `via` names the wrappers (translator, cache,
- * archive) it was found through.
- */
-export type LinkOnlySite = { name: string; reason: string; kind: linkOnly.LinkOnlyKind; via: string[] };
-export type LinkOnlyGuard = { list: linkOnly.LinkOnlyList; sources: string[]; warnings: string[] };
-
-/** The bundled list is missing or malformed: nothing is read rather than reading without it. */
-export class LinkOnlyListUnavailableError extends Error {}
-
-const MAX_LINK_ONLY_BYTES = 256 * 1024;
-
-/** Folders that may hold skills: `.agents/skills` in cwd and every parent, `~/.agents/skills`, and the skill packs. */
-export function defaultSkillRoots(cwd: string, env: NodeJS.ProcessEnv): string[] {
-  const roots: string[] = [];
-  let dir = path.resolve(cwd);
-  for (;;) {
-    roots.push(path.join(dir, ".agents", "skills"));
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  roots.push(path.join(os.homedir(), ".agents", "skills"));
-  const packs = env.INSTAFY_SKILL_PACKS_DIR?.trim();
-  if (packs) {
-    roots.push(packs);
-    try {
-      for (const entry of fs.readdirSync(packs, { withFileTypes: true })) {
-        if (entry.isDirectory()) roots.push(path.join(packs, entry.name, "skills"));
-      }
-    } catch {
-      // no packs here
-    }
-  }
-  return roots;
-}
-
-/** One skill's copy of the list, or why it is left out. Never echoes the file's content. */
-function readLinkOnlyCopy(file: string): { data: unknown } | { warning: string } | null {
-  let real: string;
-  try {
-    real = fs.realpathSync(file);
-  } catch {
-    return null;
-  }
-  try {
-    const stat = fs.statSync(real);
-    if (!stat.isFile()) return { warning: `${file} is not a file and was ignored; the bundled list still applies` };
-    if (stat.size > MAX_LINK_ONLY_BYTES) {
-      return { warning: `${file} is larger than ${MAX_LINK_ONLY_BYTES} bytes and was ignored; the bundled list still applies` };
-    }
-    return { data: JSON.parse(fs.readFileSync(real, "utf8")) as unknown };
-  } catch (error) {
-    const why = error instanceof SyntaxError ? "is not valid JSON" : "could not be read";
-    return { warning: `${file} ${why} and was ignored; the bundled list still applies` };
-  }
-}
-
-/**
- * The list this command enforces: the bundled copy of the web-research skill's list, plus every
- * `<root>/<skill>/references/link-only-sites.json` (and `<root>/<skill>/link-only-sites.json`) a skill folder holds,
- * such as the space's own copy. A copy only adds sites and wrappers; one that is not a list is left out with a warning.
- * Throws LinkOnlyListUnavailableError when the bundled copy does not load.
- */
-export function loadLinkOnlyGuard(roots: string[], bundled: unknown = BUNDLED_LINK_ONLY_SITES): LinkOnlyGuard {
-  const additions: Array<{ data: unknown; source: string }> = [];
-  const warnings: string[] = [];
-  const seen = new Set<string>();
-  for (const root of roots) {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(root, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      for (const place of LINK_ONLY_PLACES) {
-        const file = path.join(root, entry.name, place);
-        let real: string;
-        try {
-          real = fs.realpathSync(file);
-        } catch {
-          continue;
-        }
-        if (seen.has(real)) continue;
-        seen.add(real);
-        const copy = readLinkOnlyCopy(file);
-        if (!copy) continue;
-        if ("warning" in copy) warnings.push(copy.warning);
-        else additions.push({ data: copy.data, source: file });
-      }
-    }
-  }
-  const merged = linkOnly.linkOnlyListFrom(bundled, additions);
-  if (!merged.list) {
-    throw new LinkOnlyListUnavailableError(
-      "The link-only site list built into `instafy web read` could not be loaded, so nothing was read. Reinstall or update the Instafy CLI.",
-    );
-  }
-  return { list: merged.list, sources: merged.sources, warnings: [...warnings, ...merged.warnings] };
-}
-
-/** The listed site an address is on, directly or as a wrapper's copy of it, of any kind (the strictest), or null. */
-export function listedSite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
-  const hit = linkOnly.linkOnlyMatch(guard.list, url);
-  return hit ? { name: hit.site, reason: hit.why, kind: hit.kind, via: hit.via } : null;
-}
-
-/** The "no-agents" site an address is on, directly or as a wrapper's copy of it, or null: never fetched. */
-export function linkOnlySite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
-  const hit = listedSite(url, guard);
-  return hit && linkOnly.barsAgents(hit) ? hit : null;
-}
-
-/** The "no-reuse" site a read page is on, or null, when no address of it is on a "no-agents" site. */
-function noReuseSite(urls: string[], guard: LinkOnlyGuard): LinkOnlySite | null {
-  const hits = urls.map((url) => listedSite(url, guard)).filter((hit): hit is LinkOnlySite => hit !== null);
-  return hits.some((hit) => linkOnly.barsAgents(hit)) ? null : (hits[0] ?? null);
-}
-
-/** "Booking.com is link-only (terms bar AI agents); this address is its copy on the Wayback Machine" */
-function linkOnlyMessage(site: LinkOnlySite): string {
-  const copy = site.via.length ? `; this address is its copy on ${site.via.join(", then ")}` : "";
-  return `${site.name} is link-only (${site.reason})${copy}`;
-}
-
-/** Addresses a response says it is a copy of: the Memento `Link: <…>; rel="original"` header (RFC 7089), read by the
- * matcher the Shared and Personal Browser use too. */
-export function mementoOriginals(header: string | string[] | undefined, base: URL): string[] {
-  return linkOnly.mementoOriginals(header, base);
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// Turn budget and stop memory
-
-type StopRecord = { code: StopCode; message: string; at: number };
-type TurnState = {
-  v: 1;
-  turn: string;
-  touchedAt: number;
-  loads: number;
-  hosts: Record<string, { loads: number; lastAt: number }>;
-  stops: Record<string, StopRecord>;
-  hostStops: Record<string, StopRecord>;
-};
-
-function sha256(value: string | Buffer): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-/** The site a host belongs to for caps and site-wide stops: lower case, no trailing dot, no leading "www.". */
-export function siteKey(host: string): string {
-  return host.toLowerCase().replace(/\.+$/, "").replace(/^www\./, "");
-}
+type StopRecord = SharedStopRecord<StopCode>;
 
 /** Stops the site itself answered with; they also cover the same path with any other query. */
 const SITE_ANSWER_STOPS = new Set<StopCode>(["login", "forbidden", "rate_limited", "captcha", "paywall", "download", "secret_screen"]);
 
-/**
- * The keys a stop is remembered under, hashed so no address is written to disk: the address without scheme, "www.",
- * trailing slash or fragment, and the same without its query. So http/https, "?x" or a trailing slash is not a new
- * URL for a stopped one.
- */
-export function stopKeys(url: URL): { exact: string; path: string } {
-  const where = `${siteKey(url.hostname)}${url.pathname.replace(/\/+$/, "") || "/"}`;
-  return { exact: sha256(`url:${where}${url.search}`), path: sha256(`path:${where}`) };
-}
-
-/** The turn this call belongs to: the runtime's turn (INSTAFY_TURN_STARTED_AT), else a local session that lapses when idle. */
-export function turnScope(env: NodeJS.ProcessEnv): { key: string; label: string; idleReset: boolean } {
-  const started = env.INSTAFY_TURN_STARTED_AT?.trim();
-  if (started) return { key: sha256(`${env.INSTAFY_PROJECT_ID ?? ""}|${started}`).slice(0, 24), label: "this turn", idleReset: false };
-  return { key: "local", label: "this session (no Instafy turn here; it lapses after 15 minutes without reads)", idleReset: true };
-}
-
-function defaultStateDir(env: NodeJS.ProcessEnv): string {
-  const base = env.XDG_STATE_HOME?.trim() || path.join(os.homedir(), ".local", "state");
-  return path.join(base, "instafy", "web-read");
-}
-
-function workspaceRoot(cwd: string): string {
-  let dir = path.resolve(cwd);
-  for (;;) {
-    if ([".git", ".agents", ".instafy"].some((name) => fs.existsSync(path.join(dir, name)))) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) return path.resolve(cwd);
-    dir = parent;
-  }
-}
-
-function defaultCacheDir(env: NodeJS.ProcessEnv, cwd: string): string {
-  const base = env.XDG_CACHE_HOME?.trim() || path.join(os.homedir(), ".cache");
-  return path.join(base, "instafy", "web-read", sha256(workspaceRoot(cwd)).slice(0, 16));
-}
-
-function writeFileAtomic(file: string, value: unknown) {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(value), { mode: 0o600 });
-  fs.renameSync(temp, file);
-}
-
-function readJson<T>(file: string): T | null {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8")) as T;
-  } catch {
-    return null;
-  }
-}
-
-const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-class TurnStore {
-  private readonly file: string;
-  private readonly lock: string;
-
-  constructor(
-    private readonly dir: string,
-    private readonly scope: { key: string; idleReset: boolean },
-    private readonly now: () => number,
-  ) {
-    this.file = path.join(dir, `turn-${scope.key}.json`);
-    this.lock = `${this.file}.lock`;
-  }
-
-  /** Runs `fn` on the turn state under a lock file, so parallel calls cannot both spend the same budget. */
-  async update<T>(fn: (state: TurnState) => T): Promise<T> {
-    fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-    const started = Date.now();
-    for (;;) {
-      try {
-        fs.closeSync(fs.openSync(this.lock, "wx", 0o600));
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        try {
-          if (Date.now() - fs.statSync(this.lock).mtimeMs > 10_000) fs.rmSync(this.lock, { force: true });
-        } catch {
-          // released meanwhile
-        }
-        if (Date.now() - started > 15_000) throw new Error(`the read budget in ${this.dir} stayed locked`);
-        await realSleep(20);
-      }
-    }
-    try {
-      const now = this.now();
-      let state = readJson<TurnState>(this.file);
-      if (!state || state.v !== 1 || (this.scope.idleReset && now - state.touchedAt > LIMITS.localTurnIdleMs)) {
-        state = { v: 1, turn: this.scope.key, touchedAt: now, loads: 0, hosts: {}, stops: {}, hostStops: {} };
-      }
-      const result = fn(state);
-      state.touchedAt = now;
-      writeFileAtomic(this.file, state);
-      return result;
-    } finally {
-      fs.rmSync(this.lock, { force: true });
-    }
-  }
-
-  /** Removes other turns' files older than two days. */
-  prune() {
-    try {
-      for (const name of fs.readdirSync(this.dir)) {
-        if (!/^turn-[\w-]+\.json$/.test(name) || name === path.basename(this.file)) continue;
-        const file = path.join(this.dir, name);
-        if (Date.now() - fs.statSync(file).mtimeMs > 2 * 86_400_000) fs.rmSync(file, { force: true });
-      }
-    } catch {
-      // best effort
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------------------------------------------
 // Cache: pages, stops and robots.txt, per workspace, keyed by URL; written only from what this command fetched
+
+type CacheKind = "pages" | "stops" | "robots";
 
 type CachedPage = {
   status: "read" | "needs_browser";
@@ -501,35 +283,6 @@ type CachedPage = {
   links: PageLink[];
   structured: StructuredItem[];
 };
-
-class Cache {
-  constructor(private readonly dir: string | null) {}
-
-  // Entries are stored under the key's hash, so no requested or redirect address is written in the clear.
-  private file(kind: "pages" | "stops" | "robots", id: string) {
-    return this.dir ? path.join(this.dir, kind, `${id.slice(0, 40)}.json`) : null;
-  }
-
-  get<T>(kind: "pages" | "stops" | "robots", key: string, ttlMs: number, now: number): T | null {
-    const id = sha256(key);
-    const file = this.file(kind, id);
-    if (!file) return null;
-    const entry = readJson<{ key: string; savedAt: number; value: T }>(file);
-    if (!entry || entry.key !== id || typeof entry.savedAt !== "number" || now - entry.savedAt > ttlMs || now < entry.savedAt - 60_000) return null;
-    return entry.value;
-  }
-
-  put(kind: "pages" | "stops" | "robots", key: string, value: unknown, now: number) {
-    const id = sha256(key);
-    const file = this.file(kind, id);
-    if (!file) return;
-    try {
-      writeFileAtomic(file, { key: id, savedAt: now, value });
-    } catch {
-      // a cache that cannot be written is only slower
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------------------------------------------
 // One HTTP GET to a checked address
@@ -548,35 +301,40 @@ type Fetched =
 type NetContext = {
   resolve: Resolver;
   dial: (address: string, port: number) => { host: string; port: number };
+  /** test builds only: answers from hand-written files instead of the network */
+  fixtures: WebFixtures | null;
 };
 
-/** Checks the URL's host (every resolved address must be public) and returns the addresses to dial, or a refusal. */
-export async function checkAddress(
-  url: URL,
-  resolve: Resolver,
-): Promise<{ addresses: string[] } | { refused: string; unresolved?: true }> {
-  if (url.protocol !== "http:" && url.protocol !== "https:") return { refused: `not a web address (${url.protocol})` };
-  if (url.username || url.password) return { refused: "addresses with a user name or password are not read" };
-  if (url.port && url.port !== "80" && url.port !== "443") return { refused: `port ${url.port}: only the web ports 80 and 443 are read` };
-  const result = await checkPublicUrl(url.href, { lookup: (host: string) => resolve(host) });
-  if (!("addresses" in result) || !result.ok) {
-    const reason = "reason" in result ? result.reason : `${url.hostname} was refused`;
-    // A name that does not resolve is a site that is not there, not a refused address.
-    return / does not resolve /.test(reason) ? { refused: reason, unresolved: true } : { refused: reason };
+type GetOptions = { timeoutMs: number; maxBytes: number; accept: string; anyType?: boolean };
+type Head = { status: number; headers: Record<string, string | string[] | undefined> };
+
+/** What the status and headers alone decide (a redirect, a 401/403/429, a download), or null to read the body. */
+function headOutcome(url: URL, head: Head, options: GetOptions): Fetched | null {
+  const header = (name: string) => {
+    const value = head.headers[name];
+    return Array.isArray(value) ? value.join(", ") : String(value ?? "");
+  };
+  const location = head.headers.location;
+  if (head.status >= 300 && head.status < 400 && location) {
+    return { kind: "redirect", url, status: head.status, location: String(location) };
   }
-  if (!result.addresses.length) return { refused: `${url.hostname} has no address` };
-  return { addresses: result.addresses };
+  const fullType = header("content-type");
+  const contentType = fullType.split(";")[0]!.trim().toLowerCase();
+  if (head.status === 401 || head.status === 403 || head.status === 429) {
+    return { kind: "response", url, status: head.status, contentType: fullType, noStore: true, body: Buffer.alloc(0), truncated: false, originals: [] };
+  }
+  if (!options.anyType && (/^\s*attachment\b/i.test(header("content-disposition")) || (contentType && !TEXTUAL_TYPE.test(contentType)))) {
+    return { kind: "download", url, status: head.status, contentType };
+  }
+  return null;
 }
 
-async function httpGet(
-  url: URL,
-  netContext: NetContext,
-  options: { timeoutMs: number; maxBytes: number; accept: string; anyType?: boolean },
-): Promise<Fetched> {
+async function httpGet(url: URL, netContext: NetContext, options: GetOptions): Promise<Fetched> {
   const checked = await checkAddress(url, netContext.resolve);
   if ("refused" in checked) {
     return checked.unresolved ? { kind: "error", url, code: "unreachable", message: checked.refused } : { kind: "blocked", url, reason: checked.refused };
   }
+  if (netContext.fixtures) return fixtureGet(url, netContext.fixtures, options);
   const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
   let last: Fetched | null = null;
   // Only the addresses just checked are dialled, so a second DNS answer can never move the connection.
@@ -591,10 +349,28 @@ async function httpGet(
   return last ?? { kind: "error", url, code: "unreachable", message: `${url.hostname} did not answer` };
 }
 
+/** A fixture's answer, read by the same rules as a network answer (redirects, stops, downloads, the size bound). */
+function fixtureGet(url: URL, fixtures: WebFixtures, options: GetOptions): Fetched {
+  const answer = fixtures.answer(url);
+  const decided = headOutcome(url, answer, options);
+  if (decided) return decided;
+  const truncated = answer.body.length > options.maxBytes;
+  return {
+    kind: "response",
+    url,
+    status: answer.status,
+    contentType: answer.headers["content-type"] ?? "",
+    noStore: /\b(?:no-store|private)\b/i.test(answer.headers["cache-control"] ?? ""),
+    body: truncated ? answer.body.subarray(0, options.maxBytes) : answer.body,
+    truncated,
+    originals: mementoOriginals(answer.headers.link, url),
+  };
+}
+
 function attempt(
   url: URL,
   target: { host: string; port: number },
-  options: { timeoutMs: number; maxBytes: number; accept: string; anyType?: boolean },
+  options: GetOptions,
 ): Promise<Fetched & { connectFailed?: boolean }> {
   return new Promise((resolve) => {
     let settled = false;
@@ -627,27 +403,15 @@ function attempt(
       (response) => {
         connected = true;
         const status = response.statusCode ?? 0;
-        const location = response.headers.location;
-        if (status >= 300 && status < 400 && location) {
+        const decided = headOutcome(url, { status, headers: response.headers }, options);
+        if (decided) {
           response.resume();
           request.destroy();
-          finish({ kind: "redirect", url, status, location: String(location) });
+          finish(decided);
           return;
         }
-        const contentType = String(response.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
         const fullType = String(response.headers["content-type"] ?? "");
         const noStore = /\b(?:no-store|private)\b/i.test(String(response.headers["cache-control"] ?? ""));
-        if (status === 401 || status === 403 || status === 429) {
-          request.destroy();
-          finish({ kind: "response", url, status, contentType: fullType, noStore: true, body: Buffer.alloc(0), truncated: false, originals: [] });
-          return;
-        }
-        const disposition = String(response.headers["content-disposition"] ?? "");
-        if (!options.anyType && (/^\s*attachment\b/i.test(disposition) || (contentType && !TEXTUAL_TYPE.test(contentType)))) {
-          request.destroy();
-          finish({ kind: "download", url, status, contentType });
-          return;
-        }
         const encoding = String(response.headers["content-encoding"] ?? "").trim().toLowerCase();
         let stream: NodeJS.ReadableStream = response;
         if (encoding === "gzip" || encoding === "x-gzip") stream = response.pipe(zlib.createGunzip());
@@ -786,16 +550,6 @@ function visibleChars(lines: string[]): number {
   return lines.reduce((sum, line) => sum + line.length, 0);
 }
 
-function escapeAttribute(value: string): string {
-  return value.replace(/[&"<>]/g, (c) => ({ "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" })[c]!);
-}
-
-/** Page text inside <untrusted_page_content>, with any tag of that name in the text defused so it cannot close it. */
-export function wrapUntrusted(text: string, url: string, readAt: string): string {
-  const safe = text.replace(/<(\s*\/?\s*untrusted_page_content)/gi, "‹$1");
-  return `<${UNTRUSTED_TAG} url="${escapeAttribute(url)}" read_at="${readAt}" viewer="${VIEWER}">\n${safe}\n</${UNTRUSTED_TAG}>`;
-}
-
 const TELL: Record<StopCode | SkipCode | FailCode | "needs_browser" | "no_reuse", string> = {
   link_only: `${STOP_TELL} A skill lists this site as link-only.`,
   robots: STOP_TELL,
@@ -829,9 +583,10 @@ type ReadContext = {
   net: NetContext;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
-  turn: TurnStore;
-  cache: Cache;
+  turn: TurnStore<StopCode>;
+  cache: Cache<CacheKind>;
   guard: LinkOnlyGuard;
+  viewer: WebViewer;
   deadline: number;
   robotsMemo: Map<string, Promise<{ refused: string | null } | { failed: FailCode; message: string }>>;
 };
@@ -904,7 +659,7 @@ async function loadRobots(
   return { refused: `robots.txt for ${origin} redirects more than ${LIMITS.maxRedirects} times (treated as disallow)` };
 }
 
-function basePage(requested: string, readAt: string): PageResult {
+function basePage(requested: string, readAt: string, viewer: WebViewer): PageResult {
   const shown = redaction.redactUrl(requested).text;
   // code, message and tell are filled in later; listing them here keeps them next to status in the JSON.
   return {
@@ -913,7 +668,7 @@ function basePage(requested: string, readAt: string): PageResult {
     code: undefined,
     message: undefined,
     tell: undefined,
-    provenance: { requestedUrl: shown, finalUrl: shown, title: "", readAt, viewer: VIEWER },
+    provenance: { requestedUrl: shown, finalUrl: shown, title: "", readAt, viewer },
     redirects: [],
     fromCache: false,
   };
@@ -922,7 +677,7 @@ function basePage(requested: string, readAt: string): PageResult {
 async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "urls" | "find">> & { terms: string[] }, ctx: ReadContext): Promise<PageResult> {
   const requestedUrl = new URL(rawUrl);
   const requested = stripHash(requestedUrl);
-  const page = basePage(requested, new Date(ctx.now()).toISOString());
+  const page = basePage(requested, new Date(ctx.now()).toISOString(), ctx.viewer);
 
   // Every address the chain reached, so a stop is remembered for each of them (under hashed keys).
   const hopUrls: URL[] = [];
@@ -1157,7 +912,7 @@ function present(
   }
   const links = record.links.slice(0, options.links).map((link, index) => {
     const listed = listedSite(link.href, guard);
-    const mark = !listed ? {} : linkOnly.barsAgents(listed) ? { linkOnly: true as const } : { noReuse: true as const };
+    const mark = !listed ? {} : barsAgents(listed) ? { linkOnly: true as const } : { noReuse: true as const };
     return { index, text: link.text, href: link.href, ...mark };
   });
   // A page from a "no-reuse" site (or a copy of one) is read, and says how its content may be used.
@@ -1184,7 +939,7 @@ function present(
     redirects: record.redirects,
     contentHash: record.contentHash,
     fromCache,
-    text: wrapUntrusted(body, record.finalUrl, record.readAt),
+    text: wrapUntrusted(body, record.finalUrl, record.readAt, page.provenance.viewer),
     textChars: body.length,
     truncated,
     ...(find ? { find } : {}),
@@ -1234,25 +989,38 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
   const maxChars = clamp(options.maxChars ?? LIMITS.defaultChars, LIMITS.minChars, LIMITS.maxChars);
   const links = clamp(options.links ?? LIMITS.defaultLinks, 0, LIMITS.maxLinks);
 
+  // Test builds only: a fixture folder stands in for the network. Checked first, so a build that does not honour it
+  // refuses before anything is read rather than reading the live web in its place.
+  const fixtureFolder = webFixturesFolder(env, cwd);
+  const fixtures = fixtureFolder ? loadWebFixtures(fixtureFolder) : null;
+  const viewer: WebViewer = fixtures ? FIXTURE_VIEWER : NETWORK_VIEWER;
+  const dirs = webDirs("web-read", env, cwd);
+  // Fixture runs keep their budget, stops and cache apart from real reads, per fixture folder.
+  const apart = (dir: string) => (fixtures ? path.join(dir, "fixtures", sha256(fixtures.folder).slice(0, 16)) : dir);
+  const cacheDir = deps.cacheDir === undefined ? dirs.cacheDir : deps.cacheDir;
+
   const scope = turnScope(env);
-  const turn = new TurnStore(deps.stateDir ?? defaultStateDir(env), scope, now);
+  const turn = new TurnStore<StopCode>(apart(deps.stateDir ?? dirs.stateDir), scope, now);
   turn.prune();
   // Loaded before any request, so nothing is fetched without the list.
   const guard = loadLinkOnlyGuard(deps.skillRoots ?? defaultSkillRoots(cwd, env), "bundledLinkOnly" in deps ? deps.bundledLinkOnly : BUNDLED_LINK_ONLY_SITES);
   const warnings = [...guard.warnings];
+  if (fixtures) warnings.unshift(`test build: pages come from the fixtures in ${fixtures.folder}, not the web`);
   const started = now();
   const hostDeadline = turnDeadline(env);
   const deadline = Math.min(started + LIMITS.callMs, hostDeadline === null ? Infinity : hostDeadline - 5_000);
   const ctx: ReadContext = {
     net: {
-      resolve: deps.resolve ?? (async (host) => dns.promises.lookup(host, { all: true, verbatim: true })),
+      resolve: fixtures?.resolve ?? deps.resolve ?? (async (host) => dns.promises.lookup(host, { all: true, verbatim: true })),
       dial: deps.dial ?? ((address, port) => ({ host: address, port })),
+      fixtures,
     },
     now,
     sleep: deps.sleep ?? realSleep,
     turn,
-    cache: new Cache(deps.cacheDir === undefined ? defaultCacheDir(env, cwd) : deps.cacheDir),
+    cache: new Cache<CacheKind>(cacheDir === null ? null : apart(cacheDir)),
     guard,
+    viewer,
     deadline,
     robotsMemo: new Map(),
   };
@@ -1262,7 +1030,7 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
   const state = await turn.update((s) => ({ loads: s.loads, hosts: Object.fromEntries(Object.entries(s.hosts).map(([h, r]) => [h, r.loads])) }));
   return {
     ok: true,
-    viewer: VIEWER,
+    viewer,
     userAgent: USER_AGENT,
     notice: NOTICE,
     pages,
@@ -1278,7 +1046,7 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
     guards: {
       linkOnly: {
         sites: guard.list.sites.length,
-        noReuse: guard.list.sites.filter((site) => !linkOnly.barsAgents(site)).length,
+        noReuse: guard.list.sites.filter((site) => !barsAgents(site)).length,
         wrappers: guard.list.wrappers.length,
         sources: guard.sources,
       },
@@ -1312,7 +1080,7 @@ export function formatWebRead(report: WebReadReport): string {
           pageWritten.push(` ${link.index}. ${link.text || "(no text)"} <${link.href}>${link.linkOnly ? " [link-only]" : link.noReuse ? " [no-reuse]" : ""}`);
         }
       }
-      out.push(wrapUntrusted(pageWritten.join("\n"), page.provenance.finalUrl, page.provenance.readAt));
+      out.push(wrapUntrusted(pageWritten.join("\n"), page.provenance.finalUrl, page.provenance.readAt, page.provenance.viewer));
       out.push(page.text);
       if (page.structured?.length) out.push(`  structured data: ${page.structured.map((item) => item.kind).join(", ")} (see --json)`);
     }
@@ -1354,7 +1122,7 @@ export async function runWebReadCli(
   } catch (error) {
     const usage = error instanceof WebReadUsageError;
     const code = usage ? WEB_READ_EXIT_USAGE : WEB_READ_EXIT_INTERNAL;
-    const message = usage || error instanceof LinkOnlyListUnavailableError
+    const message = usage || error instanceof LinkOnlyListUnavailableError || error instanceof WebFixturesError
       ? (error as Error).message
       : `web read failed, nothing was read: ${error instanceof Error ? error.message : String(error)}`;
     if (opts.json) io.out(JSON.stringify({ ok: false, exitCode: code, error: message }));

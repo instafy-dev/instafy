@@ -1618,8 +1618,12 @@ reads that page once for the person who pressed it:
 - The origin creates a fresh isolated world in the page's main frame and runs
   `redaction.js` and `pageCapture.js` there, so page scripts cannot reach the
   reader or the masking. Only the masked address, title and text (at most 50,000
-  characters, cut after masking) leave the machine, with `readAt` and
-  `Cache-Control: no-store`.
+  characters, cut after masking) and up to 200 masked web links leave the
+  machine, with `readAt` and `Cache-Control: no-store`. runtime-agent's reader
+  carries `linkOnly.js` and the skill's link-only list, so a link to a
+  link-only site carries the site's name; without the list no links are sent,
+  and `javascript:`, `data:` and other non-web links never are. The origin
+  refuses an answer whose links the reader could not have produced.
 - A secret screen, a page the agent's controller marked withheld (read in the
   page's own world, failing closed), the page a credential step of the agent's
   run opened before the controller marked it (`withhold-next.json` in the
@@ -1856,9 +1860,10 @@ An opt-in local agent-turn proof may connect the machine's existing `~/.codex/au
 visible Desktop credential flow. Electron main keeps only the supported ChatGPT subscription fields,
 removes API-key and unknown fields, and sends the sanitized credential directly to the configured
 controller. Renderer and preload code receive only availability and created-credential metadata,
-never the path or contents. Disable traces, video, and automatic screenshots before exercising this
-flow, use disposable local accounts and projects, and verify that the turn is recorded as BYOC with
-no managed-credit debit. Hosted canary accounts and orchestration are deployment-private.
+never the path or contents. Connecting from the Your AI panel keeps an available Instafy AI the
+default, so the proof then presses Make default on the new connection before its turn. Disable
+traces, video, and automatic screenshots before exercising this flow, use disposable local accounts
+and projects, and verify that the turn is recorded as BYOC with no managed-credit debit. Hosted canary accounts and orchestration are deployment-private.
 
 The runtime entrypoint gives a newly launched headed Chromium up to 30 seconds to answer on its CDP
 port, and stops waiting as soon as that process exits. The first launch on a cold machine is the

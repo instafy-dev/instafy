@@ -1102,3 +1102,53 @@ describe("the command", () => {
     expect(report.guards.linkOnly.sources[1]).toMatch(/instafy-web-research[\\/]references[\\/]link-only-sites\.json$/);
   });
 });
+
+describe("the cache in the space's folder (INSTAFY_CACHE_DIR)", () => {
+  it("keeps robots.txt and stop records across two turns with a fresh home folder and the same space folder", async () => {
+    const space = path.join(tmp, `space-cache-${caseNo}`);
+    const homes = [path.join(tmp, `home-a-${caseNo}`), path.join(tmp, `home-b-${caseNo}`)];
+    routes["news.example.org/robots.txt"] = { type: "text/plain", body: "User-agent: *\nDisallow: /private\n" };
+    routes["news.example.org/a"] = { body: ARTICLE };
+    routes["news.example.org/b"] = { body: ARTICLE };
+    routes["news.example.org/x"] = { status: 401 };
+    // The runtime's defaults, not the test's folders: only HOME and INSTAFY_CACHE_DIR say where things go.
+    const turnIn = (home: string, started: string): Partial<WebReadDeps> => ({
+      stateDir: undefined,
+      cacheDir: undefined,
+      env: { HOME: home, INSTAFY_CACHE_DIR: space, INSTAFY_TURN_STARTED_AT: started, INSTAFY_PROJECT_ID: "project-1" },
+    });
+
+    const first = await read(["http://news.example.org/a", "http://news.example.org/x"], {}, turnIn(homes[0]!, "2026-10-26T10:00:00Z"));
+    expect(first.pages.map((p) => [p.status, p.code])).toEqual([["read", undefined], ["stopped", "login"]]);
+    expect(hits.filter((hit) => hit === "news.example.org/robots.txt")).toHaveLength(1);
+
+    const second = await read(
+      ["http://news.example.org/b", "http://news.example.org/x", "http://news.example.org/private/p"],
+      { fresh: true },
+      turnIn(homes[1]!, "2026-10-26T11:00:00Z"),
+    );
+    expect(second.pages.map((p) => [p.status, p.code, p.previouslyStopped ?? false])).toEqual([
+      ["read", undefined, false],
+      ["stopped", "login", true],
+      ["stopped", "robots", false],
+    ]);
+    // robots.txt came from the space's folder, and the stopped page was not asked for again.
+    expect(hits.filter((hit) => hit === "news.example.org/robots.txt")).toHaveLength(1);
+    expect(hits.filter((hit) => hit === "news.example.org/x")).toHaveLength(1);
+    expect(hits).not.toContain("news.example.org/private/p");
+    expect(fs.readdirSync(path.join(space, "instafy", "web-read", "cache")).sort()).toEqual(["pages", "robots", "stops"]);
+    expect(fs.readdirSync(path.join(space, "instafy", "web-read", "state")).some((name) => /^turn-/.test(name))).toBe(true);
+    for (const home of homes) expect(fs.existsSync(home)).toBe(false);
+  });
+
+  it("uses the home folder it is given when no space folder is set, or the one set is relative", async () => {
+    routes["news.example.org/a"] = { body: ARTICLE };
+    for (const [name, cacheDirEnv] of [["unset", undefined], ["relative", "relative/cache"]] as const) {
+      const home = path.join(tmp, `home-${name}-${caseNo}`);
+      const env = { HOME: home, INSTAFY_TURN_STARTED_AT: turn, ...(cacheDirEnv ? { INSTAFY_CACHE_DIR: cacheDirEnv } : {}) };
+      expect((await one("http://news.example.org/a", {}, { stateDir: undefined, cacheDir: undefined, env })).status).toBe("read");
+      expect(fs.existsSync(path.join(home, ".cache", "instafy", "web-read")), name).toBe(true);
+      expect(fs.existsSync(path.join(home, ".local", "state", "instafy", "web-read")), name).toBe(true);
+    }
+  });
+});

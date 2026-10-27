@@ -1,0 +1,18 @@
+{
+  "schema": "instafy.web-fixtures@1",
+  "about": "Hand-written pages for `instafy web read` tests. Nothing here was captured from a live site.",
+  "hosts": {
+    "intranet.example.org": ["10.0.0.5"]
+  },
+  "pages": {
+    "https://museum.example.org/robots.txt": { "type": "text/plain", "body": "User-agent: *\nDisallow: /staff\n" },
+    "https://museum.example.org/hours": { "file": "museum-hours.html" },
+    "https://museum.example.org/staff/rota": { "file": "museum-hours.html" },
+    "https://museum.example.org/visit": { "status": 301, "headers": { "location": "https://museum.example.org/hours" } },
+    "https://museum.example.org/notes": { "file": "ignore-instructions.html" },
+    "https://www.booking.com/hotel/se/city-museum-inn.html": { "file": "booking-hotel.html" },
+    "https://busy.example.net/a": { "status": 429 },
+    "https://busy.example.net/b": { "file": "museum-hours.html" },
+    "https://intranet.example.org/": { "body": "<p>internal</p>" }
+  }
+}

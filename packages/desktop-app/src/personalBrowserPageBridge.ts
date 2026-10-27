@@ -11,8 +11,14 @@ import {
   KNOWN_SECRET_PATTERN_SOURCES,
   MASKED_TEXT_SOURCE,
   PLACEHOLDER_SOURCE,
+  pageLinksInPage,
+  type RawPageLink,
 } from "./personalBrowserRedaction";
 import { formSubmissionRulesInPage } from "./personalBrowserActionPolicy";
+
+// The shared reader's link listing (pageCapture.js), run inside the page as it
+// stands: the same function the Shared Browser's origin runs.
+const PAGE_LINKS_IN_PAGE_SOURCE = pageLinksInPage.toString();
 
 const PERSONAL_BROWSER_ISOLATED_WORLD_ID = 987;
 
@@ -46,6 +52,8 @@ export type PersonalBrowserPageSnapshot = {
   interactive: PersonalBrowserInteractiveElement[];
   documentToken: string;
   signals?: PersonalBrowserPageSecretSignals;
+  /** The page's web links, raw, when the snapshot asked for them (Send page to Octo). */
+  links?: RawPageLink[];
   capturedAt: string;
 };
 
@@ -635,10 +643,12 @@ async function executeIsolated<T>(webContents: WebContents, code: string): Promi
 
 export async function snapshotPersonalBrowserPage(
   webContents: WebContents,
+  options: { links?: number } = {},
 ): Promise<PersonalBrowserPageSnapshot> {
+  const links = Math.max(0, Math.min(Math.trunc(options.links ?? 0), 1_000));
   const result = await executeIsolated<Omit<PersonalBrowserPageSnapshot, "capturedAt">>(
     webContents,
-    buildPageScript({}, `
+    buildPageScript({ links }, `
       const interactive = candidates().slice(0, 500).map((element, index) => {
         const item = descriptor(element);
         if (!item.found || !item.identity) return null;
@@ -661,6 +671,7 @@ export async function snapshotPersonalBrowserPage(
         interactive,
         documentToken: registry.documentToken,
         signals: pageSecretSignals(),
+        ...(args.links > 0 ? { links: (${PAGE_LINKS_IN_PAGE_SOURCE})(args.links) } : {}),
       };
     `),
   );

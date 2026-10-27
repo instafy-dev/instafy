@@ -402,6 +402,8 @@ async fn responses(
         }
         // A bounded browser turn only needs its tool inventory recorded; the parent checks it.
         "personal_browser_tools" | "personal_browser_behind_proxy" => return answer(FINAL_TEXT),
+        // So does an ordinary turn whose config asks for web search.
+        "web_search_requested" => return answer(FINAL_TEXT),
         "tool_once" => {
             let supplied_history = body["input"].to_string();
             if !supplied_history.contains("TOOL_APPLIED") {
@@ -534,6 +536,25 @@ fn offered_tool_names(request: &Value) -> Vec<String> {
     names
 }
 
+/// Whether a request offers OpenAI's hosted web search (`web_search`, `web_search_preview` and
+/// their dated forms), in `tools` or in code mode's `additional_tools` input item.
+fn offers_hosted_web_search(request: &Value) -> bool {
+    fn carries(tools: &Value) -> bool {
+        tools.as_array().into_iter().flatten().any(|tool| {
+            tool["type"]
+                .as_str()
+                .is_some_and(|kind| kind == "web_search" || kind.starts_with("web_search_"))
+                || carries(&tool["tools"])
+        })
+    }
+    carries(&request["tools"])
+        || request["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| item["type"] == "additional_tools" && carries(&item["tools"]))
+}
+
 /// Collects every line of every string in a request. The prompt travels as `instructions`, or
 /// for a Responses Lite model (gpt-6-luna, gpt-6-sol) as a developer input item.
 fn request_text_lines(value: &Value, output: &mut Vec<String>) {
@@ -657,9 +678,16 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         codex_home.join("auth.json"),
         json!({"OPENAI_API_KEY":API_KEY}).to_string(),
     )?;
+    // `web_search_requested` asks for OpenAI's hosted web search every way a config can; the
+    // runtime keeps it off anyway.
+    let web_search_requested = scenario == "web_search_requested";
     fs::write(
         codex_home.join("config.toml"),
-        "cli_auth_credentials_store = \"file\"\nproject_doc_max_bytes = 0\n[features]\napps = false\nweb_search_request = false\nmulti_agent = false\n",
+        if web_search_requested {
+            "cli_auth_credentials_store = \"file\"\nproject_doc_max_bytes = 0\nweb_search = \"live\"\n[features]\napps = false\nweb_search_request = true\nstandalone_web_search = true\nmulti_agent = false\n"
+        } else {
+            "cli_auth_credentials_store = \"file\"\nproject_doc_max_bytes = 0\n[features]\napps = false\nweb_search_request = false\nmulti_agent = false\n"
+        },
     )?;
     let state = Arc::new(MockState {
         scenario: scenario.to_string(),
@@ -713,7 +741,14 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .env("CODEX_API_KEY", API_KEY)
         .env("CODEX_MODEL", test_model())
         .env("CODEX_MODEL_PROVIDER", "openai")
-        .env("CODEX_ENABLE_WEB_SEARCH", "false")
+        .env(
+            "CODEX_ENABLE_WEB_SEARCH",
+            if web_search_requested {
+                "true"
+            } else {
+                "false"
+            },
+        )
         .env("CODEX_RUNTIME_REASONING_EFFORT", "low")
         // The bounded proxy policy must win over these deliberately large values.
         .env("CODEX_MAX_RUN_RETRIES", "4")
@@ -831,6 +866,16 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         expected_requests,
         "{scenario}: {diagnostics}"
     );
+    // No lane ever offers OpenAI's hosted web search, on any model: Octo searches only through
+    // Instafy's own command, which keeps link-only sites link-only.
+    for (index, request) in requests.iter().enumerate() {
+        assert!(
+            !offers_hosted_web_search(request),
+            "{scenario} on {}: request {index} offered OpenAI's hosted web search: {}",
+            test_model(),
+            request["tools"]
+        );
+    }
     // Every lane's prompt reaches the model with Instafy's Destructive Actions section exactly
     // once (a model's own copy counts) and without Codex's app, plugin and skill sections.
     for request in requests.iter() {
@@ -1018,6 +1063,13 @@ scenario_test!(
 scenario_test!(
     bounded_browser_turn_offers_only_its_browser_tools,
     "personal_browser_tools",
+    1
+);
+// OpenAI's hosted web search stays off on an ordinary turn whose config and environment ask for
+// it; every scenario checks that no request offers it.
+scenario_test!(
+    hosted_web_search_stays_off_when_the_config_asks_for_it,
+    "web_search_requested",
     1
 );
 // The Personal Browser bearer must never reach an ambient proxy (HTTP_PROXY, ALL_PROXY, ...).
@@ -1312,6 +1364,7 @@ async fn isolated_retry_child() -> Result<()> {
             | "incomplete_after_tool_call"
             | "personal_browser_tools"
             | "personal_browser_behind_proxy"
+            | "web_search_requested"
     ) {
         assert_eq!(result?.final_json["summary"], FINAL_TEXT);
     } else {

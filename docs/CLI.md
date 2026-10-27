@@ -783,10 +783,36 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   (`INSTAFY_TURN_STARTED_AT`); outside a turn the budget lapses after 15 minutes without reads. A page from the cache
   costs nothing.
 
-Pages are cached per workspace for 6 hours (`$XDG_CACHE_HOME/instafy/web-read`, or `~/.cache`), keyed by the URL's
-hash (no address is stored in the clear), with the content hash; a page the site marks `no-store` or `private` is
-not cached. `--fresh` reads it again. The turn budget lives under `$XDG_STATE_HOME/instafy/web-read` (or
-`~/.local/state`).
+Pages are cached per workspace for 6 hours, keyed by the URL's hash (no address is stored in the clear), with the
+content hash; a page the site marks `no-store` or `private` is not cached. `--fresh` reads it again. On a runtime the
+cache, robots.txt answers, stop records and the turn budget live in the space's own folder
+(`$INSTAFY_CACHE_DIR/instafy/web-read/{cache,state}`), which outlasts the turn, so a worker whose home folder is new
+every turn still knows what an earlier turn stopped at, and every worker of a turn shares one budget. On a person's own
+computer, where nothing sets `INSTAFY_CACHE_DIR` (or where it names a folder this process may not write), the cache
+lives under `$XDG_CACHE_HOME/instafy/web-read` (or `~/.cache`) and the turn budget under
+`$XDG_STATE_HOME/instafy/web-read` (or `~/.local/state`).
+
+**Offline fixtures (test builds only).** A CLI built with `INSTAFY_TEST_BUILD=1`
+(`INSTAFY_TEST_BUILD=1 pnpm --filter @instafy/cli build`) answers from hand-written files when
+`INSTAFY_WEB_FIXTURES=<folder>` is set, so tests and evals never touch a live site. Every rule above still applies to
+the fixture answers (link-only sites, robots.txt, redirects, address checks, stops, budget, redaction and the untrusted
+wrapper); each page's `viewer` is `fixture` instead of `server fetch`, and the budget and cache of fixture runs are kept
+apart from real reads. `<folder>/fixtures.json` lists the answers:
+
+```json
+{ "schema": "instafy.web-fixtures@1",
+  "hosts": { "intranet.example": ["10.0.0.5"] },
+  "pages": {
+    "https://museum.example/hours": { "file": "hours.html" },
+    "https://museum.example/robots.txt": { "type": "text/plain", "body": "User-agent: *\nDisallow: /staff" },
+    "https://busy.example/": { "status": 429 },
+    "https://old.example/": { "status": 301, "headers": { "location": "https://museum.example/hours" } } } }
+```
+
+A page's body is `body`, or the file `file` names inside the folder (its type follows the extension unless `type` says
+otherwise). An address that is not listed answers 404, so a missing robots.txt means no rules; a host with no page and
+no address under `hosts` does not resolve. Every other build, the published package included, refuses
+`INSTAFY_WEB_FIXTURES` (exit 70) rather than reading the live web in its place.
 
 | Exit | Meaning |
 |---|---|

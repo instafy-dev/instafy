@@ -86,6 +86,12 @@ import {
 } from "./personalBrowserHost";
 import { createFileTeammateActivityStore } from "./personalBrowserTeammateActivity";
 import {
+  PERSONAL_BROWSER_SEARCH_ENGINES,
+  searchAddress,
+  searchChoice,
+  selectedSearchEngine,
+} from "./personalBrowserSearch";
+import {
   isPersonalBrowserFeatureEnabled,
 } from "./personalBrowserSecurity";
 import {
@@ -230,6 +236,8 @@ type DesktopAppConfig = {
   desktopHardwareHostId?: string;
   /** The one-time answer to "Allow Instafy to use your location?". */
   studioLocationConsent?: StoredStudioLocationConsent;
+  /** The engine the Personal Browser's address bar searches with (an id from the skill's list). */
+  personalBrowserSearchEngine?: string;
 };
 
 type DesktopLocalHardwareHostStatus = {
@@ -2228,6 +2236,49 @@ app.whenReady().then(() => {
         return personalBrowserHost!.getStatus();
       }
       return personalBrowserHost!.navigate(payload?.url);
+    });
+  });
+
+  // Address-bar search: words that are not an address open a search on the
+  // engine the person picked, like navigating to the search's address. The
+  // engines and their links are the skill's bundled list; Studio sends only the
+  // words and an engine id from that list.
+  ipcMain.handle("instafy:personalBrowserSearchEngines", (event) => {
+    assertAllowedCaller(event);
+    return searchChoice(PERSONAL_BROWSER_SEARCH_ENGINES, readConfig().personalBrowserSearchEngine);
+  });
+
+  ipcMain.handle("instafy:personalBrowserSetSearchEngine", (event, payload) => {
+    assertAllowedCaller(event);
+    const engineId = payload?.engineId;
+    if (!PERSONAL_BROWSER_SEARCH_ENGINES?.engines.some((engine) => engine.id === engineId)) {
+      throw new Error("That search engine is not available.");
+    }
+    writeConfig({ ...readConfig(), personalBrowserSearchEngine: engineId });
+    return searchChoice(PERSONAL_BROWSER_SEARCH_ENGINES, engineId);
+  });
+
+  ipcMain.handle("instafy:personalBrowserSearch", async (event, payload) => {
+    assertAllowedCaller(event);
+    const rendererLease = captureStudioRendererGeneration(event);
+    if (!personalBrowserHost) {
+      throw new Error("Personal Browser host is unavailable.");
+    }
+    const engine = selectedSearchEngine(PERSONAL_BROWSER_SEARCH_ENGINES, readConfig().personalBrowserSearchEngine);
+    if (!engine) {
+      throw new Error("Search is not available in this Desktop build. Enter an address.");
+    }
+    const address = searchAddress(engine, payload?.query);
+    if (!address) {
+      throw new Error("Enter words to search for.");
+    }
+    return serializePersonalBrowserMutation(async () => {
+      assertStudioRendererGenerationCurrent(rendererLease);
+      const ownerId = requirePersonalBrowserOwnerId(payload?.ownerId);
+      if (!personalBrowserHost!.isOwnedBy(ownerId)) {
+        return personalBrowserHost!.getStatus();
+      }
+      return personalBrowserHost!.navigate(address);
     });
   });
 

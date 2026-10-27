@@ -33,6 +33,7 @@ import {
 } from "./personalBrowserTeammateActivity";
 import {
   hasCredentialWord,
+  MAX_SENT_PAGE_LINKS,
   maskSentPage,
   redactLogValue,
   redactPageObservation,
@@ -1211,8 +1212,9 @@ export class PersonalBrowserHost {
   /**
    * Send page to Octo: reads the page on screen once for its owner, masked in
    * this process with the agent snapshot's rules, before anything leaves
-   * Desktop. A secret screen, a page withheld from the agent or a page whose
-   * checks failed comes back without text.
+   * Desktop, with up to 200 of its web links (those to link-only sites marked).
+   * A secret screen, a page withheld from the agent or a page whose checks
+   * failed comes back without text or links.
    *
    * It grants nothing. Agent control, approvals, the broker and the agent's
    * snapshot targets stay as they were, nothing is kept for a later read and
@@ -1227,7 +1229,7 @@ export class PersonalBrowserHost {
     if (!/^https?:\/\//i.test(address)) {
       throw new Error("Open a web page first.");
     }
-    const snapshot = await snapshotPersonalBrowserPage(contents);
+    const snapshot = await snapshotPersonalBrowserPage(contents, { links: MAX_SENT_PAGE_LINKS });
     if (
       !this.isOwnedBy(ownerId) ||
       this.getWebContents() !== contents ||
@@ -1239,10 +1241,19 @@ export class PersonalBrowserHost {
     const withhold =
       this.withheldDocumentTokens.has(snapshot.documentToken) ||
       (this.withholdNextDocumentAfter !== null && this.withholdNextDocumentAfter !== snapshot.documentToken);
+    // Its links go too, each to a link-only site marked as one; without the
+    // link-only list the page goes without its links.
+    const linkOnly = PERSONAL_BROWSER_LINK_ONLY_GUARD;
+    const linkOnlySite = linkOnly.available
+      ? (address: string) => {
+          const refusal = linkOnly.refusal(address);
+          return refusal?.code === "link_only_site" ? refusal.site : null;
+        }
+      : null;
     const view = maskSentPage(
       { redactUrl, redactPageObservation },
-      { url: snapshot.url, title: snapshot.title, text: snapshot.text, signals: snapshot.signals ?? null },
-      { withhold },
+      { url: snapshot.url, title: snapshot.title, text: snapshot.text, signals: snapshot.signals ?? null, links: snapshot.links ?? [] },
+      { withhold, linkOnlySite },
     );
     return { ...view, readAt: snapshot.capturedAt };
   }
