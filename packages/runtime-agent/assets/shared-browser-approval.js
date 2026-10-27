@@ -634,6 +634,13 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         : tabApprovedOrigins(authority, tabId).includes(origin);
     }
 
+    // Whether the run has routine browsing now: the person's own choice at a
+    // site prompt, or runtime-agent's at the start of a run on an attested
+    // browser host. Never a tool argument.
+    function routineBrowsingAllowed() {
+      return readState(readAuthority(initialAuthority)).routineBrowsingAllowed === true;
+    }
+
     function buildRequest(kind, details) {
       const authority = readAuthority(initialAuthority);
       const now = Date.now();
@@ -932,6 +939,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       sha256,
       isOriginApproved,
       ensureOriginApproved,
+      routineBrowsingAllowed,
       allowOnce,
       withholdNextDocumentAfter,
       withholdNextDocument,

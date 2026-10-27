@@ -361,7 +361,46 @@ proceed without another site/action prompt, including an address typed for a
 site the run has not used yet. Steps in a named risk category (below), risky
 addresses, form submissions, buttons whose label commits a change (such as
 Save, Speichern or Buchen, even when page script runs them without a form), and
-Enter/Space activation still require one-shot confirmation. Menu items, tabs,
+Enter/Space activation still require one-shot confirmation. The one form
+submission that does not is a **site search**: Enter in the page's own search
+box, or typing into it with submit, when all of these hold
+(`isFreeSiteSearch` in `@instafy/browser-action-policy`):
+
+- the classifier allows the submit as a same-site GET search (a search field by
+  structure, no risk word in the form's labels, not a sign-in form);
+- the browser's own submission (formSubmission.js) is known: Enter submits the
+  form implicitly and is not blocked, it is a GET in the same tab, not a dialog,
+  not a field inside a submit button, and not a search box without a form
+  (which page script handles, so it still asks);
+- its address has the page's own origin (scheme, host and port: another
+  subdomain asks), is public (no loopback, private or local address), and it
+  is not on the link-only list (refused before any prompt, as always);
+- the address it sends is not a risky address (sign-out, export or file
+  format, a one-time link, an action address). That is the action with the
+  form's entries as its query, as the browser builds it, so a hidden
+  `format=csv` makes the search an export that asks, as a navigation to the
+  same address would;
+- nothing it sends looks like a key: the field is not a password, code or
+  payment field (refused anyway), and the redaction rules mask none of the
+  entries it sends, alone or as `name=value` (so a hidden `code=482910`
+  asks): the field with the typed text and the form's other controls, hidden
+  fields and the default button included. They are read from the controls
+  and through the form's own list of them, which a control named `elements`
+  cannot hide, never with `new FormData()`, which would run the page's
+  handlers; they are tested and kept nowhere. A form with a file chooser, a
+  form-associated custom element or more than 64 entries asks, and so does a
+  field with no name, which sends nothing typed and is the page script's box;
+- the run is under routine browsing, which covers the run's page and Octo's
+  own tabs alike. In Ask mode it asks like every other step.
+
+While a site search runs, the step's guard lets no form post leave the tab, to
+the page's own site included: a page script that turns the search into a post
+is stopped before it leaves the browser, and the step fails saying so. The
+step's result carries `activity: {"step": "search", "approval": "free"}`. A GET
+search sends nothing a plain navigation to the same address could not, apart
+from the form's hidden values, which go back to the origin that wrote them; a
+site whose GET search has a side effect is the same accepted trade-off as a
+plain link under routine browsing (below). Menu items, tabs,
 tree items, disclosure and menu openers and navigation items are navigation: a
 commit word in their label (such as Neue Rechnung, Start or Neu) does not make
 them ask. A control of any kind whose label records, rebooks, files, issues,
@@ -453,7 +492,8 @@ Browser has tabs of its own (see Personal-Browser.md).
   where the run has it, covers the run's tabs alike.
 - **Reading only.** Octo's tabs take only the steps routine browsing takes
   without asking: reading, plain links, menus, ordinary clicks, typing that
-  does not submit and non-activation keys. A form submission, a commit button,
+  does not submit, non-activation keys and, under routine browsing, a site
+  search of the page's own origin. Any other form submission, a commit button,
   a named risky step (purchase, message, download, sign-out and the others), an
   activation key, a risky address, a step that may show a secret and a manual
   field handoff are refused there in every mode, before any prompt.
@@ -621,9 +661,11 @@ makes, not just the form's `action` and `method`:
   sends nothing, so it has no destination.
 - The step's destination, its link-only check, the prompt for another site
   ("Allow this form destination for this run") and the approval's destination
-  binding all use that submission. A same-site GET search is free only when
-  its submission is a known GET of the page's own site in the same tab, to an
-  address that is not risky.
+  binding all use that submission. The classifier allows a same-site GET
+  search only when its submission is a known GET of the page's own site in the
+  same tab, to an address that is not risky; the Shared Browser takes one
+  without a prompt only under the stricter site-search rule above (the page's
+  own origin, nothing key-like sent, routine browsing).
 - A form step whose submission opens another window (`_blank`, a `<base
   target>`, or a name that is no frame of the page) is refused before any
   prompt.
@@ -631,7 +673,7 @@ makes, not just the form's `action` and `method`:
   While a step runs on a page, a form the tab posts to another site goes out
   only when the step is a form step approved for that site; an ordinary step
   (one routine browsing takes without asking) posts to the page's own site
-  only. A form the page moved after the check (a keydown or click handler
+  only, and a site search posts nowhere. A form the page moved after the check (a keydown or click handler
   changing the default button or its `formaction`), or one sent through a
   submit button the describer cannot see (in a closed shadow tree, or laid
   over the control), is stopped before it leaves the browser and the step
