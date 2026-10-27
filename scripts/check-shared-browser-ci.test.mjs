@@ -1,6 +1,7 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import { assertMainOnlySave, assertNoPullRequestCacheSave, cacheStepRuns, CACHE_REFS, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
 import { HOSTED_CHROMIUM_STEP, PATH_RESOLVED_CMAKE, withoutSharedPrerequisiteTimeout } from "./lib/sharedBrowserPrerequisitesTestBaseline.mjs";
+import { withoutBrowserUiJobBudget } from "./lib/browserUiBudgetTestBaseline.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -18,7 +19,7 @@ const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev
 // trimmed cargo paths; the current policy is asserted directly below. Each proof
 // rebuilds it, so a cache-policy regression fails that proof, not the module.
 // The separately checked prerequisite budgets are also reversed exactly.
-const previousAggregateWorkflow = () => withoutSharedPrerequisiteTimeout("browser-e2e.yml", withoutMainOnlyCaches("browser-e2e.yml", workflow)).replace(aggregateIf, "    if: ${{ always() }}");
+const previousAggregateWorkflow = () => withoutSharedPrerequisiteTimeout("browser-e2e.yml", withoutMainOnlyCaches("browser-e2e.yml", withoutBrowserUiJobBudget("browser-e2e.yml", workflow))).replace(aggregateIf, "    if: ${{ always() }}");
 const jobs = [
   { key: "shared-profile", label: "public-shared-browser-aggregate", name: "Shared Browser profile E2E", minutes: 5 },
   { key: "shared-profile-lifecycle", label: "public-shared-browser-profile", name: "Shared Browser profile lifecycle", minutes: 30, script: "browser-profile-e2e.mjs" },

@@ -184,12 +184,12 @@ describe("ChatSendQueueSurface", () => {
     expect(container.textContent).not.toContain("Reconnect");
     expect(container.querySelector('[data-testid="chat-send-queue-runtime-action-expanded"]')).toBeNull();
     expect(container.textContent).not.toContain("@octo");
-    expect(container.querySelector('h3[data-testid="chat-send-queue-panel-header"]')?.textContent?.trim()).toBe(
+    expect(container.querySelector('[data-testid="chat-send-queue-panel-header"] h3')?.textContent?.trim()).toBe(
       "Queued messages",
     );
     const panel = container.querySelector('[aria-label="Queued messages"][role="region"]');
     expect(panel?.className).toContain("basis-full");
-    expect(panel?.firstElementChild?.className).toContain("sm:w-[min(24rem,100%)]");
+    expect(panel?.firstElementChild?.className).toContain("max-w-sm");
   });
 
   it("shows queue editing without a misleading queue toggle", async () => {

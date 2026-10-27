@@ -226,6 +226,31 @@ describe("ComposerActionMenu", () => {
     expect(onStartVoiceInput).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps button semantics and skips disabled rows during keyboard navigation", async () => {
+    const onStartVoiceInput = vi.fn();
+    await renderMenu(true, true, {
+      onUploadImage: vi.fn(),
+      onStartVoiceInput,
+      voiceInputDisabled: true,
+    });
+    const upload = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-upload-image"]')!;
+    const dictate = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-voice-input"]')!;
+    const importRepo = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-import-github"]')!;
+    expect(upload.getAttribute("role")).not.toBe("menuitem");
+    expect(dictate.disabled).toBe(true);
+    await act(async () => {
+      upload.focus();
+      upload.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    });
+    expect(document.activeElement).toBe(importRepo);
+    await act(async () => {
+      importRepo.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }));
+      dictate.click();
+    });
+    expect(document.activeElement).toBe(upload);
+    expect(onStartVoiceInput).not.toHaveBeenCalled();
+  });
+
   it.each([
     { voiceRepliesEnabled: false, label: "Turn on spoken replies" },
     { voiceRepliesEnabled: true, label: "Turn off spoken replies" },

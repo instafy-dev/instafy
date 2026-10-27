@@ -1,7 +1,6 @@
 import type { Ref } from "react";
 import { NumberedListLeft } from "iconoir-react";
 import { Button } from "../../../components/Button";
-import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import { ToolbarCountButton } from "../../../components/ToolbarCountButton";
 import {
@@ -9,6 +8,7 @@ import {
   ChatSendQueue,
   type QueuedChatPrompt,
 } from "./ChatSendQueue";
+import { ComposerMessagePanel } from "./ComposerMessagePanel";
 import type { CollapsedQueuedMessageSummary } from "./chatSendQueueSummary";
 
 export const CHAT_SEND_QUEUE_ITEMS_ID = "chat-send-queue-items";
@@ -106,40 +106,18 @@ export function ChatSendQueuePanel({
     !mutationDisabled && !sendingAttachment && inputValue.trim().length > 0;
 
   return (
-    <div
+    <ComposerMessagePanel
       id={CHAT_SEND_QUEUE_ITEMS_ID}
-      role="region"
-      aria-label="Queued messages"
-      className="basis-full"
-    >
-      <div className={editingQueuedItem ? "w-full" : "ml-auto w-full sm:w-[min(24rem,100%)]"}>
-        {totalQueuedCount > 0 && chatSendQueueExpanded ? (
-          <Surface tone="subtle" radius="xl" shadow="none" className="mx-1 mb-2 px-3 py-2">
-            <Text as="h3" variant="bodyStrong" tone="primary" data-testid="chat-send-queue-panel-header">
-              Queued messages
-            </Text>
-          </Surface>
-        ) : null}
-        {chatSendQueueDisplay.length > 0 && chatSendQueueExpanded ? (
-          <div className="max-h-[min(32rem,60dvh)] overflow-y-auto overscroll-contain">
-            <ChatSendQueue
-              items={chatSendQueueDisplay}
-              onRemove={onRemoveQueuedItem}
-              onReorder={onReorderQueuedItem}
-              onEdit={onEditQueuedMessage}
-              onSendNow={queueCanSendNow ? onSendQueuedMessageNow : undefined}
-              editDisabled={sendingAttachment || mutationDisabled}
-              sendNowDisabled={!queueCanSendNow || mutationDisabled}
-              removeDisabled={mutationDisabled}
-              reorderDisabled={mutationDisabled || reorderDisabled}
-              onDraggingChange={onDraggingChange}
-            />
-          </div>
-        ) : null}
-        {editingQueuedItem ? (
-          <div
-            className="flex flex-wrap items-center justify-between gap-2 p-1"
-          >
+      title="Queued messages"
+      icon={<NumberedListLeft />}
+      presentation="bubbles"
+      headerTestId="chat-send-queue-panel-header"
+      showHeader={totalQueuedCount > 0 && chatSendQueueExpanded}
+      fullWidth={Boolean(editingQueuedItem)}
+      footer={editingQueuedItem ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 p-1"
+        >
             <div className="min-w-0">
               <Text as="div" variant="captionStrong" tone="muted">
                 {editingQueuedItem.restoreOnly ? "Restore queued message" : "Editing queued message"}
@@ -184,8 +162,22 @@ export function ChatSendQueuePanel({
             </div>
           </div>
         ) : null}
-      </div>
-    </div>
+    >
+      {chatSendQueueDisplay.length > 0 && chatSendQueueExpanded ? (
+        <ChatSendQueue
+          items={chatSendQueueDisplay}
+          onRemove={onRemoveQueuedItem}
+          onReorder={onReorderQueuedItem}
+          onEdit={onEditQueuedMessage}
+          onSendNow={queueCanSendNow ? onSendQueuedMessageNow : undefined}
+          editDisabled={sendingAttachment || mutationDisabled}
+          sendNowDisabled={!queueCanSendNow || mutationDisabled}
+          removeDisabled={mutationDisabled}
+          reorderDisabled={mutationDisabled || reorderDisabled}
+          onDraggingChange={onDraggingChange}
+        />
+      ) : null}
+    </ComposerMessagePanel>
   );
 }
 
