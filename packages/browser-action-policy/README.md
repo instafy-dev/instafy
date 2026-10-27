@@ -33,6 +33,13 @@ load `redaction.js` first.
   `unnamedControlName(hints)` names a control the page left unnamed from its
   tooltip attribute, image text, icon and position, so a prompt never shows an
   index such as "button 5".
+  `isFreeSiteSearch(target, pageUrl, submittedValues)` is the stricter test the
+  Shared Browser applies before it lets Enter in a site's own search box go
+  without a prompt under routine browsing: Enter submits the form implicitly
+  as a GET of the page's own origin in the same tab, to a public address that
+  is not risky, through a search field the classifier allows, sending at most
+  64 values (the typed text and the form's other values, hidden ones included)
+  none of which the redaction rules would mask.
 - `formSubmission.js`: `formSubmissionRulesInPage()` runs inside a page (or an
   isolated world) and computes the submission a form step makes, as the
   browser does: a submit button's `formaction`, `formmethod`, `formenctype` and

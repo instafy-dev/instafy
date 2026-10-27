@@ -57,6 +57,23 @@ const control = (text, extra = {}) => ({
   tag: "button", role: null, ariaLabel: "", labels: "", placeholder: "", inputType: "button",
   text, ...extra,
 });
+const siteSearch = {
+  description: control("", {
+    tag: "input", inputType: "search", ariaLabel: "Search places", labels: "Search places", formMethod: "get",
+    formAction: "https://example.test/search", formActionText: "form get https://example.test/search Search",
+  }),
+  policy: {
+    formActionUrl: "https://example.test/search", formSubmission: "implicit", formSubmits: true,
+    formName: "Search", formSubmitLabels: "Search", formFieldCount: 1,
+  },
+};
+// The values the form sends besides the field's new text, as the page's
+// form-values helper reports them.
+const formValuesFor = () => ({
+  kind: "form-values",
+  complete: true,
+  values: mode === "site-search-key" ? ["en", ["sk", "live", "SEARCHKEY0123456789abcdef"].join("_")] : ["en"],
+});
 const special = {
   "invite-button": { description: control("Invite member") },
   "generate-key": { description: control("Generate API key") },
@@ -170,6 +187,12 @@ const special = {
     }),
     policy: { formActionUrl: "https://other.example/collect", formSubmission: "nested", formSubmits: true },
   },
+  // The site's own search box: Enter sends a GET of the page's own origin.
+  // "-posts-own" pages turn it into a post to their own site when Enter is
+  // pressed; "-key" forms send a hidden key-like value.
+  "site-search": siteSearch,
+  "site-search-posts-own": siteSearch,
+  "site-search-key": siteSearch,
   "canary-label": { description: control(`Copy ${CANARY}`) },
   "click-error-canary": { description: control("Show details") },
   "no-policy": { description: control("Show details"), policy: null },
@@ -536,11 +559,15 @@ const makePage = (targetId, opened = null) => {
     },
     focus: async () => {},
     fill: async () => {},
-    press: async () => {},
+    press: async (key) => {
+      if (mode === "site-search-posts-own" && key === "Enter") {
+        pauseDocument("main", "https://example.test/collect", { method: "POST" });
+      }
+    },
   };
   const handleAt = (ordinal) => ({
     ...handle,
-    evaluate: async () => controlsFor(targetId)[ordinal],
+    evaluate: async (_fn, arg) => arg && arg.kind === "form-values" ? formValuesFor() : controlsFor(targetId)[ordinal],
     click: async () => {
       if (clickLogPath) fs.appendFileSync(clickLogPath, `${ordinal}\n`);
       return handle.click();
@@ -2381,6 +2408,125 @@ fn routine_policy_never_types_secrets_or_accepts_model_authored_grants() {
     let output = fixture.run("safe", "POST", "/v1/navigate", Some(&body.to_string()));
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported field routine"));
+}
+
+// Enter in the page's own search box, or typing into it with submit, goes
+// without a prompt only under routine browsing, in the run's page and in
+// Octo's own tabs, and says so in its result.
+#[test]
+fn a_site_search_of_the_pages_own_origin_goes_without_a_prompt_under_routine_browsing() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    for (path, extra) in [
+        ("/v1/type", json!({"text": "Belém Tower", "submit": true})),
+        ("/v1/press", json!({"key": "Enter"})),
+    ] {
+        let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id_in("site-search")});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) =
+            fixture.call_deciding("site-search", "POST", path, Some(&body.to_string()), &[]);
+        assert!(requests.is_empty(), "{path} asked: {requests:?}");
+        let payload = payload_of(&output);
+        assert_eq!(
+            payload["activity"],
+            json!({"step": "search", "approval": "free"}),
+            "{path}"
+        );
+    }
+
+    // One of Octo's own tabs, which refuse every other submission.
+    let opened = fixture.open_tab("https://example.test/places");
+    let snapshot_id = fixture.snapshot_id_in("site-search");
+    let body =
+        json!({"index": 0, "snapshotId": snapshot_id, "text": "Belém Tower", "submit": true});
+    let (output, requests) = fixture.call_deciding(
+        "site-search",
+        "POST",
+        "/v1/type",
+        Some(&body.to_string()),
+        &[],
+    );
+    assert!(requests.is_empty(), "{requests:?}");
+    let payload = payload_of(&output);
+    assert_eq!(payload["tabId"], opened["tabId"]);
+    assert_eq!(payload["activity"]["approval"], "free");
+}
+
+#[test]
+fn a_site_search_asks_in_ask_mode_and_when_its_form_sends_a_key_like_value() {
+    // Ask mode: the person reviews every step, a site's own search too.
+    for (path, extra, operation) in [
+        (
+            "/v1/type",
+            json!({"text": "Belém Tower", "submit": true}),
+            "form-submit",
+        ),
+        ("/v1/press", json!({"key": "Enter"}), "press-enter"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id("site-search")});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.run_with_decisions(
+            "site-search",
+            "page-target",
+            "POST",
+            path,
+            Some(&body.to_string()),
+            &["https://example.test"],
+            &["deny"],
+        );
+        assert!(failure_of(&output).contains("approval_denied"));
+        assert_eq!(requests.len(), 1, "{path}");
+        assert_eq!(requests[0]["operation"], operation);
+    }
+
+    // Routine browsing, but the form sends a hidden key-like value, or the
+    // typed text looks like one.
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    for (mode, text) in [
+        ("site-search-key", "Belém Tower".to_string()),
+        (
+            "site-search",
+            ["ghp", "SEARCHKEY0123456789abcdefghijklmnopqrstu"].join("_"),
+        ),
+    ] {
+        let body = json!({"index": 0, "snapshotId": fixture.snapshot_id_in(mode), "text": text, "submit": true});
+        let (output, requests) =
+            fixture.call_deciding(mode, "POST", "/v1/type", Some(&body.to_string()), &["deny"]);
+        assert!(failure_of(&output).contains("approval_denied"), "{mode}");
+        assert_eq!(requests.len(), 1, "{mode}");
+        assert_eq!(requests[0]["operation"], "form-submit", "{mode}");
+    }
+}
+
+#[test]
+fn a_free_site_search_lets_no_form_post_leave_the_tab_even_to_its_own_site() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    std::fs::remove_file(&fixture.fetch_log).ok();
+    let body = json!({"index": 0, "snapshotId": fixture.snapshot_id_in("site-search-posts-own"), "key": "Enter"});
+    let (output, requests) = fixture.call_deciding(
+        "site-search-posts-own",
+        "POST",
+        "/v1/press",
+        Some(&body.to_string()),
+        &[],
+    );
+    assert!(requests.is_empty(), "{requests:?}");
+    let refused = failure_of(&output);
+    assert!(
+        refused.contains("the page sent a form to https://example.test/, which the step was not approved to send to"),
+        "{refused}"
+    );
+    assert_eq!(
+        fixture.fetch_answers(),
+        vec![("Fetch.failRequest".to_string(), "request-main".to_string())]
+    );
 }
 
 #[test]

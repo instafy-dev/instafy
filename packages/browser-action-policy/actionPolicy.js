@@ -24,6 +24,11 @@
  * own hints (tooltip attribute, image text, icon name, position), so a
  * prompt never reads "button 5". Hosts mask it like any other control name.
  *
+ * isFreeSiteSearch(target, pageUrl, submittedValues) is the stricter test a
+ * host applies before it lets Enter in a site's own search box go without a
+ * prompt under routine browsing: a GET of the page's own origin, in the same
+ * tab, to a public address that is not risky, sending nothing key-like.
+ *
  * Plain script: it uses the redaction module's credential words and nothing
  * else. Evaluated where `module` is undefined, it reads
  * `globalThis.__instafyBrowserRedaction` and sets
@@ -547,6 +552,92 @@
     return null;
   }
 
+  // At most this many values, of at most this many characters each, may go
+  // with a free search; a form that sends more asks.
+  const FREE_SEARCH_MAX_VALUES = 64;
+  const FREE_SEARCH_MAX_VALUE_CHARS = 4096;
+  const LOCAL_HOST_NAME = /(?:^|\.)(?:localhost|local|internal|lan|home|intranet|localdomain|home\.arpa)$/i;
+  const PRIVATE_IPV4_BLOCKS = [
+    [0x00000000, 8], [0x0a000000, 8], [0x64400000, 10], [0x7f000000, 8], [0xa9fe0000, 16],
+    [0xac100000, 12], [0xc0000000, 24], [0xc0000200, 24], [0xc0a80000, 16], [0xc6120000, 15],
+    [0xc6336400, 24], [0xcb007100, 24], [0xe0000000, 4], [0xf0000000, 4],
+  ];
+
+  function httpUrl(value) {
+    try {
+      const parsed = new URL(cleanText(value));
+      return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname &&
+        !parsed.username && !parsed.password ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // A host name or address literal a step may reach without a prompt: never
+  // loopback, private, link-local, CGNAT, multicast, reserved or documentation
+  // addresses, never a local name (localhost, *.local, a single label), and,
+  // to keep the test simple, never an IPv6 literal. Judged on the literal
+  // only; the hosted browser's egress proxy checks the address it connects to.
+  function isPublicHost(hostname) {
+    const host = String(hostname || "").toLowerCase().replace(/\.+$/, "");
+    if (!host || host.startsWith("[") || host.includes(":")) return false;
+    const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (octets) {
+      const parts = octets.slice(1).map(Number);
+      if (parts.some((part) => part > 255)) return false;
+      const value = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+      return !PRIVATE_IPV4_BLOCKS.some(([base, bits]) => {
+        const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+        return ((value & mask) >>> 0) === ((base & mask) >>> 0);
+      });
+    }
+    return host.includes(".") && !LOCAL_HOST_NAME.test(host);
+  }
+
+  // A value that the redaction rules would mask: a known key format, a
+  // random-looking run, a UUID or long hex value, or a code next to a code
+  // word.
+  function looksKeyLike(value) {
+    return redaction.redactText(value, { strict: true }).masked > 0;
+  }
+
+  /**
+   * Enter in a site's own search box, or typing into it with submit, that a
+   * host may let go without a prompt under routine browsing. All of these
+   * hold, judged on the submission the browser makes (formSubmission.js):
+   * - the classifier allows the submit as a same-site GET search (a search
+   *   field by structure, no risk word in the form's labels, not a sign-in
+   *   form);
+   * - the field submits its form by Enter (implicit submission), and the
+   *   browser does submit it: not a field inside a submit button, not a
+   *   blocked submission, not a search box that has no form;
+   * - the submission is a GET in the same tab, not a dialog;
+   * - its address has the page's own origin (scheme, host and port), is
+   *   public and is not a risky address (sign-out, export, an action
+   *   address);
+   * - every value it sends, the typed text and the form's other values,
+   *   hidden ones included, is a string the redaction rules leave alone,
+   *   and there are at most 64 of them.
+   * The host keeps its own checks: the link-only list, routine browsing
+   * itself and a guard that lets no form post leave the tab during the step.
+   */
+  function isFreeSiteSearch(target, pageUrl, submittedValues) {
+    const facts = target && typeof target === "object" ? target : {};
+    if (!cleanText(facts.formOwnerIdentity) || facts.formSubmission !== "implicit" || facts.formSubmits !== true) {
+      return false;
+    }
+    if (facts.formNewWindow === true || lower(facts.formMethod) !== "get") return false;
+    const verdict = classifySubmit(facts, { pageUrl });
+    if (verdict.verdict !== "allow" || verdict.category !== "search") return false;
+    const action = httpUrl(facts.formActionUrl);
+    const page = httpUrl(pageUrl);
+    if (!action || !page || action.origin !== page.origin) return false;
+    if (!isPublicHost(action.hostname) || classifyAddress(action.href)) return false;
+    if (!Array.isArray(submittedValues) || submittedValues.length > FREE_SEARCH_MAX_VALUES) return false;
+    return submittedValues.every((value) =>
+      typeof value === "string" && value.length <= FREE_SEARCH_MAX_VALUE_CHARS && !looksKeyLike(value));
+  }
+
   function isSamePageAnchor(href, pageUrl) {
     if (!pageUrl) return false;
     try {
@@ -785,5 +876,6 @@
     unnamedControlName,
     isEditable,
     isSearchField,
+    isFreeSiteSearch,
   });
 });
