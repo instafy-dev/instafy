@@ -411,8 +411,12 @@ A plain link whose address has side effects but is not on the risky-address list
 a control with neither a risky nor a commit word in its label, or a menu item,
 tab or navigation item whose only risky word is a commit word outside the
 consequential list (such as "Neu", "Weiter", "Erfassen" or "Abgleichen" in a
-menu), can still act without a prompt. **Ask** reviews every state-changing interaction; a run on the
-space's own machine cannot be switched to it yet (see "Remaining work").
+menu), can still act without a prompt. **Ask** reviews every click, typing,
+form submission and key press. Its one relaxation is the plain address: on a
+site already approved in that tab, an address that is not on the risky-address
+list opens without a prompt, so such an address with side effects can act
+without one, as under routine browsing. A run on the space's own machine cannot
+be switched to Ask yet (see "Remaining work").
 
 ### Octo's own tabs
 
