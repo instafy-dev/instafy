@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { SubmitConversationOptions } from "../../../conversations/useConversation";
 import { cancelAgentJob } from "../../../services/runtimeController/jobs";
 import type { RunRecord } from "../../../types";
-import { sharedBrowserTakeoverJob } from "./browserHandoffRouting";
+import { continuedSharedBrowserRunId, sharedBrowserTakeoverJob } from "./browserHandoffRouting";
 import type { BrowserSessionPage, BrowserSessionPageTarget } from "./browserSessionPages";
 import { buildSharedBrowserSubmitMetadata, withPersonalBrowserRuntimeExpectations } from "./sharedBrowserSubmitRouting";
 import { BROWSER_AUTO_STARTED_METADATA_KEY } from "./browserRequest";
@@ -25,6 +25,9 @@ export type BrowserContinuationExtras = {
   metadata?: Record<string, unknown> | null;
   knownHosts?: readonly string[] | null;
 };
+
+/** The metadata key naming the browser run a continuation continues. */
+export const BROWSER_CONTINUES_RUN_METADATA_KEY = "browserContinuesRunId";
 
 function displayOptions(message: string, extras: BrowserContinuationExtras | null | undefined) {
   const display = extras?.display?.trim();
@@ -134,6 +137,25 @@ export function useChatBrowserHandoff(options: Options) {
     });
     return true;
   }, [assertCurrent]);
+
+  /**
+   * Let AI continue in Instafy's browser, after the person took over or did
+   * a manual step: the new run names the run it continues, so the runtime
+   * can keep that run's approvals (it checks that the run is the last one
+   * that held this browser, for this person on this page).
+   */
+  const continueSharedRun = useCallback(async (message: string) => {
+    const captured = latest.current;
+    const continuesRunId = continuedSharedBrowserRunId(captured.runs, {
+      conversationId: captured.conversationId,
+      runtimeId: captured.runtimeId,
+      pageId: captured.page?.id ?? null,
+      userId: captured.userId,
+    });
+    return continueShared(message, continuesRunId
+      ? { metadata: { [BROWSER_CONTINUES_RUN_METADATA_KEY]: continuesRunId } }
+      : null);
+  }, [continueShared]);
 
   const continuePersonal = useCallback(async (
     message: string,
@@ -256,5 +278,8 @@ export function useChatBrowserHandoff(options: Options) {
     return true;
   }, [assertCurrent, continuePersonal]);
 
-  return { identityKey, sharedJob, sharedJobWhileAgentHolds, takeOverShared, continueShared, continuePersonal, startPersonal };
+  return {
+    identityKey, sharedJob, sharedJobWhileAgentHolds, takeOverShared, continueShared, continueSharedRun,
+    continuePersonal, startPersonal,
+  };
 }

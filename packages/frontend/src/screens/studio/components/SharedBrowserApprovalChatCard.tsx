@@ -10,6 +10,7 @@ import { ChatBubbleRow } from "./ChatBubbleRow";
 import {
   sharedBrowserApprovalActionDescription,
   sharedBrowserApprovalAllowDecision,
+  sharedBrowserApprovalTargetAddress,
 } from "./SharedBrowserApprovalPrompt";
 import type { SharedBrowserApprovalState } from "./useSharedBrowserApproval";
 
@@ -57,11 +58,15 @@ function clock(remainingMs: number): string {
 
 function describe(agent: string, request: RuntimeSharedBrowserApprovalRequest): string {
   const destination = hostOf(request.display.destinationOrigin) ?? hostOf(request.destinationOrigin);
+  // The exact page the step will load, when the runtime names it.
+  const page = sharedBrowserApprovalTargetAddress(request);
   if (request.kind === "origin") {
-    return `${agent} paused before reading or acting on ${destination ?? "a new site"}.`;
+    return page
+      ? `${agent} paused before opening ${page}.`
+      : `${agent} paused before reading or acting on ${destination ?? "a new site"}.`;
   }
-  if (request.operation === "navigate" && destination) {
-    return `${agent} is waiting to open ${destination}.`;
+  if (request.operation === "navigate" && (page ?? destination)) {
+    return `${agent} is waiting to open ${page ?? destination}.`;
   }
   const site = hostOf(request.sourceOrigin) ?? destination;
   return `${agent} is waiting to ${sharedBrowserApprovalActionDescription(request)}${site ? ` on ${site}` : ""}.`;

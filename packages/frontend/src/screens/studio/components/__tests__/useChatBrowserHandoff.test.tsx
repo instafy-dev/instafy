@@ -124,6 +124,31 @@ describe("useChatBrowserHandoff", () => {
     expect(cancelAgentJob).toHaveBeenCalledTimes(1);
   });
 
+  it("names the browser run that Let AI continue continues, so the runtime can keep its approvals", async () => {
+    const value = options();
+    const base = value.runs[0];
+    const stopped: RunRecord = {
+      ...base, status: "canceled", updatedAt: "2026-10-27T10:58:45Z",
+      metadata: { ...base.metadata, initiatingUserId: "user-1" },
+    };
+    const teammates: RunRecord = {
+      ...stopped, id: "00000000-0000-4000-8000-000000000004", updatedAt: "2026-10-27T11:00:00Z",
+      metadata: { ...stopped.metadata, initiatingUserId: "user-2" },
+    };
+    await render({ ...value, runs: [stopped, teammates] });
+    await expect(resultRef.current!.continueSharedRun("Continue the previous browser task.")).resolves.toBe(true);
+    expect(vi.mocked(value.onSubmit).mock.calls[0]![2]!.metadata).toMatchObject({
+      browserContinuesRunId: RUN_ID, browserPageId: "page-1", browserRuntimeId: "shared-runtime-1",
+    });
+    // A card's task continues nothing: it starts with its own approvals.
+    await resultRef.current!.continueShared("Open https://example.test/hours");
+    expect(vi.mocked(value.onSubmit).mock.calls[1]![2]!.metadata).not.toHaveProperty("browserContinuesRunId");
+    // With no run of the person's on this page to continue, none is named.
+    await render({ ...value, runs: [teammates] });
+    await resultRef.current!.continueSharedRun("Continue the previous browser task.");
+    expect(vi.mocked(value.onSubmit).mock.calls[2]![2]!.metadata).not.toHaveProperty("browserContinuesRunId");
+  });
+
   it("dispatches Shared continuation directly with exact page/runtime and no draft attachments", async () => {
     const value = options();
     await render(value);
