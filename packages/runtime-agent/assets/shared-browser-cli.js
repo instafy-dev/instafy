@@ -1649,11 +1649,6 @@ async function withholdDocument(page) {
   return marked === true;
 }
 
-// The model-facing view of the page: what a person can see of it. Text,
-// title, address, control names and link targets are masked on every site and
-// in every approval mode; a secret screen withholds the text and stays
-// withheld until a new page loads. Whether a page is a secret screen is still
-// judged on all of its rendered text and every control's name, seen or not.
 // A page is read in several steps, and it can change documents in between: a
 // timed redirect that commits while the text is read, or a load the step's
 // document guard does not see (a page restored from the back/forward cache,
@@ -1670,6 +1665,11 @@ function assertReadStayedOnOneSite(page, startUrl) {
   }
 }
 
+// The model-facing view of the page: what a person can see of it. Text,
+// title, address, control names and link targets are masked on every site and
+// in every approval mode; a secret screen withholds the text and stays
+// withheld until a new page loads. Whether a page is a secret screen is still
+// judged on all of its rendered text and every control's name, seen or not.
 async function snapshot(page, { withhold = false } = {}) {
   const startUrl = page.url();
   refuseLinkOnlyPage(page);
