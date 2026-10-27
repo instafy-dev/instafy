@@ -1,21 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Lock, WebWindow } from "iconoir-react";
+import { WebWindow } from "iconoir-react";
 import { Text } from "../../../components/Text";
 import { useOptionalRuntimeState } from "../../../runtime/RuntimeStateProvider";
 import { ControllerApiError } from "../../../services/runtimeController/core";
 import {
+  SITE_PREVIEW_THUMBNAIL_EVENT,
   getSitePreview,
+  getSitePreviewThumbnail,
+  sitePreviewFacts,
   sitePreviewProblem,
   sitePreviewShownState,
   wakeSitePreview,
   type ControllerSitePreview,
+  type SitePreviewThumbnailEventDetail,
 } from "../../../services/runtimeController/previews";
 import { useConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
-import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
 import { sitePreviewCardTitle, type SitePreviewRequest } from "./sitePreviewRequest";
 import { requestFollow, setFollowPresence, useFollowAccount, useFollowEntry } from "./previewHost/followStore";
 import { getFollowState } from "../../../services/runtimeController/previewFollow";
 import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
+import { SitePreviewCardView, type SitePreviewCardAction, type SitePreviewCardStatus, type SitePreviewCardViewProps } from "./SitePreviewCardView";
+import { useAuthorizedImage, useNearViewport } from "./useAuthorizedImage";
 
 export type SitePreviewState = "checking" | "live" | "not_responding" | "unavailable" | "stopped";
 
@@ -38,6 +43,8 @@ const MAX_UNSEEN_FOLLOWS = 8;
  * last one the card stops asking until a press or a tunnel or runtime event.
  */
 const RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
+/** A card says "Checking the site…" only once a check has taken this long; most answer before. */
+export const SITE_PREVIEW_CHECKING_QUIET_MS = 3_000;
 const ENDED_GRANT_STATUSES: ReadonlySet<string> = new Set(["revoked", "expired", "closed", "failed"]);
 const ENDED_RUNTIME_STATUSES: ReadonlySet<string> = new Set(["stopped", "stopping", "terminated", "released", "failed"]);
 
@@ -169,35 +176,23 @@ function whenVisible(run: () => void): () => void {
   return () => document.removeEventListener("visibilitychange", onChange);
 }
 
-/**
- * A stopped site Open cannot start: nobody recorded how, a newer preview
- * replaced it, or another site took its port. The card says how to get it back
- * instead of offering a button that does nothing.
- */
-export const STOPPED_ASK_OCTO_TEXT = "Stopped · ask Octo to start it again";
+/** What the card says under its title in each state that is not the normal live one. */
+export const SITE_PREVIEW_STATUS_TEXT = {
+  checking: "Checking the site…",
+  starting: "Starting…",
+  notResponding: "Not responding",
+  unavailable: "Status unavailable",
+  stopped: "Stopped",
+  stoppedRestarts: "Stopped · opening restarts it",
+  stoppedNeedsBuilder: "Stopped · only people who can edit this space can start it",
+  couldNotStart: "Couldn't start",
+} as const;
 
-export function sitePreviewStateLabel(state: SitePreviewState, port: number | null): string {
-  switch (state) {
-    case "live":
-      return "Live";
-    case "not_responding":
-      return port ? `Not responding on port ${port}` : "Not responding";
-    case "stopped":
-      return "Stopped";
-    case "unavailable":
-      return "Status unavailable";
-    default:
-      return "Checking…";
-  }
+/** A failed wake as one short line: "Couldn't start · {why}". */
+export function couldNotStartText(error: string): string {
+  const why = error.replace(/^Couldn't start(?: it)?[:.]?\s*/i, "").replace(/\.$/, "").trim();
+  return why ? `${SITE_PREVIEW_STATUS_TEXT.couldNotStart} · ${why}` : SITE_PREVIEW_STATUS_TEXT.couldNotStart;
 }
-
-const STATE_DOT: Record<SitePreviewState, string> = {
-  checking: "bg-slate-300 motion-safe:animate-pulse dark:bg-slate-600",
-  live: "bg-emerald-500 dark:bg-emerald-400",
-  not_responding: "bg-secondary-500 dark:bg-secondary-400",
-  unavailable: "bg-slate-300 dark:bg-slate-600",
-  stopped: "bg-slate-400 dark:bg-slate-500",
-};
 
 /** What the runtime store already knows: `tunnel.*` and runtime events land there at once. */
 function useStoreSignals(previewId: string, runtimeId: string | null) {
@@ -216,10 +211,11 @@ function useStoreSignals(previewId: string, runtimeId: string | null) {
 }
 
 /**
- * Octo's "Ready to preview" card for a site running in the space. It names
- * the site, says whether it is live, and opens it in the conversation's side
- * pane on a press, through ConversationPreviewContext as a chat link opens a
- * file. It never opens by itself, not even when it is new, and holds no URL.
+ * Octo's preview card for a site running in the space, drawn as a link
+ * preview (SitePreviewCardView). It names the site, says when it is not
+ * simply live, and opens it in the conversation's side pane on a press,
+ * through ConversationPreviewContext as a chat link opens a file. It never
+ * opens by itself, not even when it is new, and holds no URL.
  */
 export function SitePreviewCard({
   preview,
@@ -387,9 +383,6 @@ export function SitePreviewCard({
   const showing = state !== "stopped" && opener?.visiblePreviewId === preview.previewId;
   // Only a record that says how to start the site can be woken; a preview that is gone cannot.
   const wakeable = server?.restartable === true && !gone && !replaced;
-  // Stopped for good from here: the controller answered (or the preview is
-  // gone) and nothing can start it, so Open would do nothing.
-  const cannotRestart = state === "stopped" && !wakeable && (gone || replaced || server !== null);
   // Starting its stopped machine takes someone who may change the space: others see why before they press Open.
   const startBlocked = wakeable && state === "stopped" && server?.canStart === false;
   // Someone else (another member, another tab) is waking it: follow along.
@@ -465,35 +458,89 @@ export function SitePreviewCard({
     openNow();
   };
 
-  const label = starting
-    ? "Starting…"
-    : wakeError ?? (startBlocked ? START_NEEDS_BUILDER_TEXT
-      : cannotRestart ? STOPPED_ASK_OCTO_TEXT
-        : sitePreviewStateLabel(state, server?.port ?? preview.port));
-  const actions: ChatActionCardAction[] = [];
+  // A check that has not answered for a while says so; most answer before anyone notices.
+  const [checkingLong, setCheckingLong] = useState(false);
+  useEffect(() => {
+    if (state !== "checking") {
+      setCheckingLong(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setCheckingLong(true), SITE_PREVIEW_CHECKING_QUIET_MS);
+    return () => window.clearTimeout(timer);
+  }, [state]);
+
+  // A new picture of the site (`instafy preview open` or `check` took one): the latest card asks again, and every
+  // card for the preview reads the answer.
+  const thumbnailVersion = server?.thumbnail?.version ?? null;
+  useEffect(() => {
+    if (!latest || typeof window === "undefined") return;
+    const onPicture = (event: Event) => {
+      const detail = (event as CustomEvent<SitePreviewThumbnailEventDetail | null>).detail;
+      if (detail?.previewId === preview.previewId && detail.version !== thumbnailVersion) renew();
+    };
+    window.addEventListener(SITE_PREVIEW_THUMBNAIL_EVENT, onPicture);
+    return () => window.removeEventListener(SITE_PREVIEW_THUMBNAIL_EVENT, onPicture);
+  }, [latest, preview.previewId, renew, thumbnailVersion]);
+
+  // What the record says about the site (picture, facts) belongs to this card only while the record is still this
+  // site's: a preview that is gone has none, and a later site on the same port must not lend this card its picture.
+  const record = gone || replaced ? null : server;
+  // The picture, with this person's own session, once the card is near the screen. Never a signed URL or a frame.
+  const thumbnail = record?.thumbnail ?? null;
+  const [pictureRef, near] = useNearViewport();
+  const pictureKey = `preview-picture:${preview.previewId}:${thumbnail?.version ?? "none"}`;
+  const { state: picture } = useAuthorizedImage(
+    pictureKey,
+    () => projectId && thumbnail
+      ? getSitePreviewThumbnail(projectId, preview.previewId, thumbnail.version)
+      : Promise.resolve({ ok: false, reason: "refused" } as const),
+    Boolean(projectId && thumbnail && near && latest),
+  );
+  const pictureGone = picture.status === "unavailable" || picture.status === "failed";
+
+  const stoppedText = !wakeable
+    ? SITE_PREVIEW_STATUS_TEXT.stopped
+    : startBlocked
+      ? SITE_PREVIEW_STATUS_TEXT.stoppedNeedsBuilder
+      : SITE_PREVIEW_STATUS_TEXT.stoppedRestarts;
+  const port = server?.port ?? preview.port;
+  let status: SitePreviewCardStatus | null = null;
+  let pictureTone: SitePreviewCardViewProps["pictureTone"] = "normal";
+  if (starting) {
+    status = { text: SITE_PREVIEW_STATUS_TEXT.starting, busy: true };
+    pictureTone = "dim";
+  } else if (wakeError === START_NEEDS_BUILDER_TEXT) {
+    status = { text: SITE_PREVIEW_STATUS_TEXT.stoppedNeedsBuilder };
+    pictureTone = "gray";
+  } else if (wakeError) {
+    status = { text: couldNotStartText(wakeError) };
+    pictureTone = "gray";
+  } else if (state === "stopped") {
+    status = { text: stoppedText };
+    pictureTone = "gray";
+  } else if (state === "not_responding") {
+    status = { text: SITE_PREVIEW_STATUS_TEXT.notResponding, ...(port ? { title: `Nothing answers on port ${port}` } : {}) };
+    pictureTone = "dim";
+  } else if (state === "unavailable") {
+    status = { text: SITE_PREVIEW_STATUS_TEXT.unavailable };
+  } else if (state === "checking" && checkingLong) {
+    status = { text: SITE_PREVIEW_STATUS_TEXT.checking };
+  }
+  // A card that can do nothing on a press does not look pressable.
+  const pressable = Boolean(opener) && !starting && !(state === "stopped" && (!wakeable || startBlocked)) &&
+    !(wakeError === START_NEEDS_BUILDER_TEXT);
+
+  const actions: SitePreviewCardAction[] = [];
   if (opener && followable && followPresence) {
     // The pane follows as soon as it is open and knows the presentation.
     actions.push({
-      id: "follow-preview", label: `Follow ${followPresence.presenter.name}`, variant: "primary", testId: "preview-ready-follow",
+      id: "follow-preview", label: `Follow ${followPresence.presenter.name}`, testId: "preview-ready-follow",
       onPress: () => { requestFollow(preview.previewId); open(); },
     });
   }
-  // No dead button: a site nothing here can start offers no Open, and its status says to ask Octo.
-  if (opener && !cannotRestart) {
-    actions.push({
-      id: "open-preview",
-      label: showing ? "Showing" : "Open",
-      variant: showing || followable || (state === "not_responding" && !wakeable) || state === "unavailable" ? "outline" : "primary",
-      onPress: open,
-      isDisabled: showing || starting || (state === "stopped" && (!wakeable || startBlocked)),
-      isLoading: starting,
-      loadingLabel: "Starting…",
-      testId: "preview-ready-open",
-    });
-  }
-  // A site that stopped answering starts again from here (a stopped one starts with Open).
-  if (wakeable && !starting && state === "not_responding") {
-    actions.push({ id: "restart-preview", label: "Start again", variant: "outline", onPress: () => void wake(null), testId: "preview-ready-restart" });
+  // A site that stopped answering starts again from here (a stopped one starts with a press on the card).
+  if (opener && wakeable && !starting && state === "not_responding") {
+    actions.push({ id: "restart-preview", label: "Start again", onPress: () => void wake(null), testId: "preview-ready-restart" });
   }
 
   // An earlier card for a site Octo opened again: the latest one, further down, is the one to use.
@@ -513,37 +560,21 @@ export function SitePreviewCard({
   }
 
   return (
-    <ChatActionCard
-      testId="preview-ready-card"
-      icon={<WebWindow className="h-4 w-4 text-slate-500 dark:text-slate-400" aria-hidden="true" />}
-      overline="Ready to preview"
+    <SitePreviewCardView
       title={preview.title}
+      facts={sitePreviewFacts(record)}
+      picture={thumbnail && !pictureGone ? { url: picture.status === "ready" ? picture.url : null } : null}
+      pictureTone={pictureTone}
+      visibility={server?.visibility === "private" ? "private" : null}
+      status={status}
+      state={state}
+      wake={starting ? "waking" : wakeError ? "failed" : undefined}
+      pressable={pressable}
+      busy={starting}
+      onOpen={open}
+      followLine={followLine}
       actions={actions}
-    >
-      {/* Gaps, not a "·" separator, so a wrapped line never ends in a stray dot. */}
-      <Text as="div" variant="caption" tone="muted" className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-        <span
-          role="status"
-          aria-live="polite"
-          className="inline-flex items-center gap-1.5"
-          data-testid="preview-ready-status"
-          data-state={state}
-          data-wake={starting ? "waking" : wakeError ? "failed" : undefined}
-        >
-          <span className={`h-2 w-2 shrink-0 rounded-full ${starting ? STATE_DOT.checking : STATE_DOT[state]}`} aria-hidden="true" />
-          {label}
-        </span>
-        {followLine ? (
-          <span className="font-medium text-violet-700 dark:text-violet-300" data-testid="preview-ready-follow-line">{followLine}</span>
-        ) : null}
-        {/* Said only when the controller's record says so. */}
-        {server?.visibility === "private" ? (
-          <span className="inline-flex items-center gap-1" data-testid="preview-ready-visibility">
-            <Lock className="h-3 w-3" aria-hidden="true" />
-            Only space members
-          </span>
-        ) : null}
-      </Text>
-    </ChatActionCard>
+      pictureRef={pictureRef}
+    />
   );
 }

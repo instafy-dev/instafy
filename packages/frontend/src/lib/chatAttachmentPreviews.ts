@@ -7,7 +7,8 @@ import { hasSupabaseConfig, supabase } from "./supabaseClient";
 // into view, a chat opened again or the sender's own new message shows its
 // image without fetching it again. Only bytes are kept, never object URLs, and
 // everything is dropped when the signed-in person changes, so nobody is shown
-// an image their own session was not allowed to read.
+// an image their own session was not allowed to read. Chat attachments and a
+// preview card's picture share the one budget (`loadKeptImage`).
 
 /** At most this many downloads run at once; the rest wait their turn. */
 export const CHAT_ATTACHMENT_PREVIEW_CONCURRENCY = 4;
@@ -110,34 +111,48 @@ export function seedChatAttachmentPreview(storagePath: string, blob: Blob) {
  * next request tries again.
  */
 export function loadChatAttachmentPreview(storagePath: string): Promise<ChatAttachmentDownloadResult> {
+  return loadKeptImage(storagePath, () => downloadChatAttachment(storagePath));
+}
+
+/**
+ * Any image the chat downloads with this person's session, under `key` (a
+ * Storage path, or a name of the caller's that cannot be one): a kept copy, the
+ * download already running for it, or `download` now. A failure is never kept.
+ */
+export function loadKeptImage(
+  key: string,
+  download: () => Promise<ChatAttachmentDownloadResult>,
+): Promise<ChatAttachmentDownloadResult> {
   watchSignedInPerson();
-  const blob = kept.get(storagePath);
+  const blob = kept.get(key);
   if (blob) {
-    kept.delete(storagePath);
-    kept.set(storagePath, blob);
+    kept.delete(key);
+    kept.set(key, blob);
     return Promise.resolve({ ok: true, blob });
   }
-  const running = inFlight.get(storagePath);
+  const running = inFlight.get(key);
   if (running) {
     return running;
   }
   const startedIn = generation;
-  const download = (async () => {
+  const pending = (async () => {
     await acquireDownloadSlot();
     try {
-      return await downloadChatAttachment(storagePath);
+      return await download();
+    } catch {
+      return { ok: false, reason: "transient" } as const;
     } finally {
       releaseDownloadSlot();
     }
   })().then((result) => {
-    if (inFlight.get(storagePath) === download) {
-      inFlight.delete(storagePath);
+    if (inFlight.get(key) === pending) {
+      inFlight.delete(key);
     }
     if (result.ok && startedIn === generation) {
-      keep(storagePath, result.blob);
+      keep(key, result.blob);
     }
     return result;
   });
-  inFlight.set(storagePath, download);
-  return download;
+  inFlight.set(key, pending);
+  return pending;
 }

@@ -20,18 +20,20 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
 2. The CLI checks that something is listening, asks the controller for a preview, starts a rathole client for it and
    tells the controller it is ready. It never prints a URL. Its JSON output has ids, the port, the path, a status and
    `viewerHostSuffix` (for a dev server's allowed-hosts list).
-3. The controller records a **Ready to preview** card in the conversation: an `action_request` message whose
-   `details.preview` holds the preview's id and port, and no URL. Each run that opens a site posts its own card, so a
-   conversation can hold several for one site. Studio draws only the latest one in full; an earlier one shrinks to a
-   line ("Hello · opened again further down"), so a conversation shows one card per site, at its latest place.
-4. A member presses **Open** on the card. Studio asks the controller for a viewer session and shows the site as a tab in
-   the conversation's side pane, next to Chat, Browser and files, under the same browser bar (title, Reload, Open in
-   new tab). The card never opens by itself, and cards in history never open anything.
-5. The tab's × closes the pane and revokes its session. If the server stops answering, the card and the pane say
-   "Not responding on port N". If the preview is closed or the machine stops, they say "Stopped". While the pane
-   is on screen it checks the site every 15 s and the cards of that preview read its answers, so they ask nothing
-   themselves. A pane whose session the controller refuses because the site stopped asks for a new one only once a
-   later check says the site answers again.
+3. The controller records a preview card in the conversation: an `action_request` message whose `details.preview`
+   holds the preview's id and port, and no URL. Each run that opens a site posts its own card, so a conversation can
+   hold several for one site. Studio draws only the latest one in full; an earlier one shrinks to a line ("Hello ·
+   opened again further down"), so a conversation shows one card per site, at its latest place. The card looks like a
+   link preview: a picture of the site, its title with a lock (private) and a chevron, and one line of facts (see
+   [The card's picture and facts](#the-cards-picture-and-facts)).
+4. A member presses the card. Studio asks the controller for a viewer session and shows the site as a tab in the
+   conversation's side pane, next to Chat, Browser and files, under the same browser bar (title, Reload, Open in new
+   tab). The card never opens by itself, and cards in history never open anything.
+5. The tab's × closes the pane and revokes its session. The card says nothing while the site is live; if the server
+   stops answering it says "Not responding" (the port on hover), and if the preview is closed or the machine stops,
+   "Stopped". While the pane is on screen it checks the site every 15 s and the cards of that preview read its answers,
+   so they ask nothing themselves. A pane whose session the controller refuses because the site stopped asks for a new
+   one only once a later check says the site answers again.
 6. While the pane shows the site, its heartbeat (about once a minute) counts as activity in the space, so the idle
    sweep does not stop a machine someone is looking at. This counts only for members who may change the space, the
    same rule as Studio's own activity ping and as starting a stopped machine: the space pays for the machine, so a
@@ -64,6 +66,58 @@ Traefik   HostRegexp router → forwardAuth → broker GET /preview-auth
 A member can **Present** a site whose page says it can share its view, and the others **Follow** it live; see
 [Follow-Mode.md](Follow-Mode.md).
 
+## The card's picture and facts
+
+- **Facts line.** `instafy preview open --summary "<text>"` (1 to 80 characters, one line, no control or direction
+  characters; the controller checks it like the title) is kept with the preview. Without one, the card shows the
+  page's own `<meta name="description">`, read when its picture is taken. Studio shows either as one line of plain
+  text, cut at 80 characters, never Markdown or a link.
+- **Taking the picture.** Once `/ready` reports the site live, `instafy preview open` loads `http://127.0.0.1:<port><path>`
+  in the runtime image's own Playwright and Chromium (the engine `instafy preview check` uses) at 1280×800 and keeps a
+  640×400 JPEG (quality 70, or 50 when that is over 256 KiB, else none), within 15 s in all. The JSON gains `thumbnail`
+  (`uploaded`, `skipped` or `failed`) and `thumbnailReason`; the exit code never changes. `--no-thumbnail` takes none;
+  `--thumbnail <file>` sends a picture a skill made itself (JPEG, PNG or WebP, at most 512 KiB and 2000×2000).
+  `instafy preview check` takes a new one from the desktop page it already loaded, when this machine has a preview open
+  on that port and path, so a check after a change also refreshes the card.
+- **What the capture may load.** Only the site's own loopback origin directly. Every other request goes through the
+  image's `browser-egress-proxy`, an instance of its own on a free loopback port: public addresses on ports 80 and
+  443 only, connected to the address it checked. Another loopback port, `localhost` names, private, link-local,
+  CGNAT, metadata and reserved addresses, and every site on the link-only list (their translator, cache and archive
+  copies too) are blocked, WebSockets included: a `no-agents` site is never fetched, and a `no-reuse` site, which
+  `instafy web read` may read, is not loaded into a picture Instafy keeps and shows. Without the proxy binary nothing off the site's
+  origin loads. A redirect is checked too: Playwright follows one without asking the request rules, so every
+  connection off the site first passes Instafy's own gate in front of the egress proxy (local and link-local
+  addresses included, which Chromium would otherwise send around a proxy), which refuses by the whole address of a
+  plain-HTTP request and by the host of a TLS one or a WebSocket. A redirect to an https copy that a wrapper writes into
+  its path or query, which the gate cannot read, means no picture is kept. The page loads as an anonymous first visit: a fresh context with no person's session, cookies,
+  location or browser profile, service workers blocked, downloads refused, new windows closed, no permissions.
+  `instafy preview check` follows the same rules and lists blocked requests as `blocked`, not as page errors.
+- **Without a browser** (self-hosted without Chromium), the CLI reads the page's HTML from 127.0.0.1 (at most 512 KiB)
+  and uses its `og:image` only when it is on the same `127.0.0.1:<port>` origin, at most 512 KiB, and a JPEG, PNG or
+  WebP by its bytes. An `og:image` on another host is never fetched.
+- **Upload.** `PUT /projects/:id/previews/:pid/thumbnail` with `{image: <base64>, contentType, source:
+  "capture" | "og_image" | "file", description?}` (at most 768 KiB). Only a job or machine token bound to the
+  preview's runtime may upload, as for `/ready`; people cannot. The controller decides the type from the bytes (JPEG,
+  PNG or WebP; never SVG or GIF), reads the size from the header (64 to 2000 pixels each way), caps it at 512 KiB, and
+  removes metadata (EXIF, XMP, ICC, comments, text chunks, anything after the image) without decoding pixels. At most
+  6 uploads per preview a minute and 60 per runtime an hour.
+- **Storage.** One picture per preview in `runtime_preview_thumbnails` (RLS on, no client policy). It goes with every
+  new open of the preview (a preview is keyed by machine and port, so a later site on the port has the same id; the
+  CLI takes a new picture once that site is live), when the preview is closed or replaced (`supersededBy`), and with
+  its space. A preview stopped by a sleeping machine keeps its picture. One closed on purpose and started again from
+  its card has none until the next `instafy preview check` or open. A card whose record now names another site
+  shows neither that site's picture nor its facts.
+- **Reading it.** `GET /projects/:id/previews/:pid/thumbnail?v=<version>` applies the rule `GET` of the preview uses:
+  members who may open the preview (a private runtime's preview is a 404 to others). The answer is
+  `cache-control: private, no-store`, `x-content-type-options: nosniff`, `content-security-policy: default-src 'none';
+  sandbox`. `GET` of a preview gains `summary`, `pageDescription` and `thumbnail: {version, width, height, capturedAt}`
+  or null. Studio fetches the picture with the person's own session into an object URL once the card is near the
+  screen, within the chat's in-memory image budget (40 images, 64 MiB). Never a Storage object, a signed URL, an
+  iframe, a notification or part of the card message, which stays ids-only.
+- **Refresh.** Each upload publishes `preview.thumbnail_updated {previewId, version, runtimeId}` with the preview's
+  conversation, built as `preview.wake` is, so the same `/events` filters apply. It carries no picture and no
+  description; the latest card for the preview asks `GET` again and every card reads the answer.
+
 ## Waking a stopped site
 
 `instafy preview open` records how the site was started: the argv and working directory of the process listening on
@@ -72,10 +126,10 @@ secret is never recorded: the CLI leaves it out (from `/proc`) or refuses it (`-
 it too (`400`), whichever client sends it. The controller keeps it in the preview's
 controller-owned metadata, where no tunnel route can change it and no listing shows it. The preview record says
 `restartable: true` when such a command is recorded and no newer tunnel replaced the preview's (below). Closing a
-preview on purpose (`instafy preview close`, the close route) keeps the command: the card reads Stopped, and Open
-starts the site again for someone who may change the space.
+preview on purpose (`instafy preview close`, the close route) keeps the command: the card reads "Stopped · opening
+restarts it", and pressing it starts the site again for someone who may change the space.
 
-When a member presses **Open** on a stopped, restartable site (or **Start again** on the card or the pane when it
+When a member presses the card of a stopped, restartable site (or **Start again** on the card or the pane when it
 stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
 
 - If the machine is up and the site answers, the answer is `200 {state: "live"}` and nothing else happens.
@@ -85,9 +139,10 @@ stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
   its site while the machine is up, or join a wake under way. Starting a preview someone closed on purpose also takes
   someone who may change the space, machine up or not. A person's `GET` of the preview says `canStart: false` when
   their wake could not go ahead (they may not change the space, and the machine is not up or the preview was closed),
-  so Studio disables **Open** with that reason before anyone presses it. A stopped preview that cannot be woken (no
-  recorded command, or replaced by a newer one) offers no Open: its card says to ask Octo to start it again. A self-hosted machine that is offline fails with
-  `409 runtime_offline` ("The computer this space runs on is offline.").
+  so the card reads "Stopped · only people who can edit this space can start it" and cannot be pressed. A stopped
+  preview that cannot be woken (no recorded command, or replaced by a newer one) reads "Stopped" and cannot be pressed
+  either; Octo can start it again in a turn. A self-hosted machine that is offline fails with `409 runtime_offline`
+  ("The computer this space runs on is offline.").
 - The runtime agent polls `POST /agent/preview-restarts/claim` with its agent token. A claim reconnects the same
   preview tunnel on the machine's current lease and hands the agent the recorded command and the tunnel client
   credentials. The agent starts the command as argv in its directory under the workspace (symlinks resolved, never

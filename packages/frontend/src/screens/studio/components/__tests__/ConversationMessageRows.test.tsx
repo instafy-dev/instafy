@@ -415,7 +415,7 @@ describe("ConversationMessageRows", () => {
     const cards = container.querySelectorAll('[data-testid="preview-ready-card"]');
     expect(cards).toHaveLength(1);
     expect(rowOf(cards[0])).toBe("preview-card");
-    expect(cards[0].textContent).toContain("Checking…");
+    expect(cards[0].querySelector<HTMLElement>('[data-testid="preview-ready-status"]')?.dataset.state).toBe("checking");
     expect(rowOf(container.querySelector('[data-testid="generic-action-card"]'))).toBe("generic-card");
     expect(container.querySelector('[data-testid="generic-action-card"] button')).toBeNull();
     expect(rowOf(container.querySelector('[data-testid="other-action-go"]'))).toBe("other-card");
