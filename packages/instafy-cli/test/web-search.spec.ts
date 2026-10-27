@@ -4,6 +4,7 @@
 // and no real key exists.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -344,6 +345,62 @@ describe("searching with the space's own key (fixtures)", () => {
     const later = { ...env, INSTAFY_TURN_DEADLINE: new Date(START + 12_000).toISOString() };
     expect((await webSearch({ query: "ramen" }, transportDeps(later, timed))).status).toBe("ok");
     expect(seen).toEqual([7_000]);
+  });
+
+  it("ends a search by its deadline even when the provider's name takes longer to look up", async () => {
+    const { requests, transport } = recorder(() => ({ status: 200, body: braveAnswer(["a"]) }));
+    // Real time: the turn ends in 6.5 s, so the search has 1.5 s; the lookup answers only after 4 s.
+    const now = Date.now();
+    const env = { BRAVE_SEARCH_API_KEY: BRAVE_KEY, INSTAFY_TURN_STARTED_AT: new Date(now - 60_000).toISOString(), INSTAFY_TURN_DEADLINE: new Date(now + 6_500).toISOString() };
+    const slowLookup = () => new Promise<Array<{ address: string; family: number }>>((resolve) => setTimeout(() => resolve([{ address: "93.184.216.34", family: 4 }]), 4_000));
+    const report = await webSearch({ query: "ramen" }, transportDeps(env, transport, { now: Date.now, resolve: slowLookup }));
+    expect(Date.now() - now).toBeLessThan(2_500);
+    expect(report).toMatchObject({ status: "unavailable", code: "timeout" });
+    expect(requests).toHaveLength(0);
+  });
+
+  it("gives a provider only the time left in all, however many of its addresses it tries", async () => {
+    // Local stand-ins for the provider's two addresses (nothing leaves this machine): the first takes the
+    // connection and drops it after 1 s, the second never answers.
+    const sockets = new Set<net.Socket>();
+    const keep = (socket: net.Socket) => {
+      sockets.add(socket);
+      socket.on("error", () => {});
+    };
+    const dropping = net.createServer((socket) => {
+      keep(socket);
+      setTimeout(() => socket.destroy(), 1_000);
+    });
+    const silent = net.createServer(keep);
+    const listen = (server: net.Server) =>
+      new Promise<number>((resolve) => server.listen(0, "127.0.0.1", () => resolve((server.address() as net.AddressInfo).port)));
+    const ports: Record<string, number> = { "93.184.216.34": await listen(dropping), "93.184.216.35": await listen(silent) };
+    try {
+      const now = Date.now();
+      const env = { BRAVE_SEARCH_API_KEY: BRAVE_KEY, INSTAFY_TURN_STARTED_AT: new Date(now - 60_000).toISOString(), INSTAFY_TURN_DEADLINE: new Date(now + 6_500).toISOString() };
+      const report = await webSearch(
+        { query: "ramen" },
+        {
+          resolve: async () => [
+            { address: "93.184.216.34", family: 4 },
+            { address: "93.184.216.35", family: 4 },
+          ],
+          dial: (address) => ({ host: "127.0.0.1", port: ports[address]! }),
+          now: Date.now,
+          stateDir: path.join(base, "state"),
+          skillRoots: [],
+          env,
+          cwd: tmp,
+        },
+      );
+      // 1.5 s were left before the margin: the second address gets what the first left over, not 1.5 s again.
+      expect(Date.now() - now).toBeLessThan(2_100);
+      expect(report).toMatchObject({ status: "unavailable", code: "timeout" });
+      expect(sockets.size).toBe(2);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await Promise.all([dropping, silent].map((server) => new Promise((resolve) => server.close(resolve))));
+    }
   });
 
   it("runs only in Octo's live turn", async () => {

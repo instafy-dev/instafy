@@ -521,20 +521,37 @@ class TransportError extends Error {
   }
 }
 
-/** The network transport: https to the checked address only (no second lookup), no redirects followed. */
+/**
+ * The network transport: https to the checked address only (no second lookup), no redirects followed. `timeoutMs` is
+ * the time for the whole request: a second address gets only what the first one left.
+ */
 function networkTransport(dial: (address: string, port: number) => { host: string; port: number }): SearchTransport {
   return async (request, addresses, timeoutMs) => {
+    const end = Date.now() + timeoutMs;
+    const timedOut = () => new TransportError("timeout", `${request.url.hostname} did not answer within ${Math.round(timeoutMs / 1000)} s`);
     let last: Error | null = null;
     for (const address of addresses.slice(0, 2)) {
+      const left = end - Date.now();
+      if (left < 250) throw timedOut();
       try {
-        return await sendOnce(request, dial(address, Number(request.url.port || 443)), timeoutMs);
+        return await sendOnce(request, dial(address, Number(request.url.port || 443)), left);
       } catch (error) {
         last = error as Error;
-        if (error instanceof TransportError && error.code === "timeout") break;
+        if (error instanceof TransportError && error.code === "timeout") throw timedOut();
       }
     }
     throw last instanceof TransportError ? last : new TransportError("unreachable", `${request.url.hostname} did not answer`);
   };
+}
+
+/** `work`'s answer, or null when it has not come within `ms` (it is then left to finish on its own). */
+async function within<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([work, new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), Math.max(0, ms))))]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function sendOnce(request: SearchRequest, target: { host: string; port: number }, timeoutMs: number): Promise<SearchAnswer> {
@@ -1176,7 +1193,10 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
       ...((country ?? provider.defaults.country) ? { country: country ?? provider.defaults.country } : {}),
     };
     const request = buildSearchRequest(provider, vars, key);
-    const checked = await checkAddress(request.url, resolve);
+    // The name lookup counts against the same deadline as the request: a slow resolver never carries a search past it.
+    const lookupMs = deadline - now();
+    const checked = await within(checkAddress(request.url, resolve), lookupMs);
+    if (!checked) return fail("timeout", `${request.url.hostname} could not be looked up within ${Math.round(lookupMs / 1000)} s`);
     if ("refused" in checked) return fail(checked.unresolved ? "unreachable" : "provider_error", checked.refused);
     if (key !== null && !(await state.takeDaily(provider.id, provider.dailyLimit))) {
       return fail("day_limit", `this space's key made its ${provider.dailyLimit} searches today`);
