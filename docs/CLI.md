@@ -746,6 +746,26 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   query are the same URL. After a 429 or a bot check, nothing more is read from that site (its `www.` form included)
   in the turn. Do not read a stopped URL another
   way (another tool, address, user agent or browser): give the person the plain link and use a different source.
+- **Redaction.** The browsers' `redaction.js` (`packages/browser-action-policy`) masks keys and tokens in the text,
+  title, links, addresses and structured data before anything is printed or cached. A page that shows a credential is
+  withheld as `secret_screen`.
+- **Budget.** Per turn, at most 12 page loads and 4 per site (`www.example.org` and `example.org` are one site), at
+  least 2 s apart; a call reads at most 6 URLs and
+  returns within 60 s (or before the turn's `INSTAFY_TURN_DEADLINE`) with what it has. The turn is the runtime's
+  (`INSTAFY_TURN_STARTED_AT`); outside a turn the budget lapses after 15 minutes without reads. A page from the cache
+  costs nothing.
+
+Pages are cached per workspace for 6 hours (`$XDG_CACHE_HOME/instafy/web-read`, or `~/.cache`), keyed by the URL's
+hash (no address is stored in the clear), with the content hash; a page the site marks `no-store` or `private` is
+not cached. `--fresh` reads it again. The turn budget lives under `$XDG_STATE_HOME/instafy/web-read` (or
+`~/.local/state`).
+
+| Exit | Meaning |
+|---|---|
+| 0 | At least one page was read |
+| 2 | No page was read (every URL stopped, was skipped or failed) |
+| 64 | Bad options or URLs |
+| 70 | The command itself failed, so nothing was read |
 
 ### Guiding the person to a link-only site: `instafy web link`
 
@@ -767,26 +787,6 @@ is a site that is not on the list (exit 64); without a list that loads, exit 70.
 names; a template is https on the site's own hosts, with each placeholder a whole path segment or a whole query value,
 or it is left out with a warning. The same list files apply as for `instafy web read`, so a space's copy may add a
 site's template or bar its deep links, but never allow deep links the bundled list bars.
-- **Redaction.** The browsers' `redaction.js` (`packages/browser-action-policy`) masks keys and tokens in the text,
-  title, links, addresses and structured data before anything is printed or cached. A page that shows a credential is
-  withheld as `secret_screen`.
-- **Budget.** Per turn, at most 12 page loads and 4 per site (`www.example.org` and `example.org` are one site), at
-  least 2 s apart; a call reads at most 6 URLs and
-  returns within 60 s (or before the turn's `INSTAFY_TURN_DEADLINE`) with what it has. The turn is the runtime's
-  (`INSTAFY_TURN_STARTED_AT`); outside a turn the budget lapses after 15 minutes without reads. A page from the cache
-  costs nothing.
-
-Pages are cached per workspace for 6 hours (`$XDG_CACHE_HOME/instafy/web-read`, or `~/.cache`), keyed by the URL's
-hash (no address is stored in the clear), with the content hash; a page the site marks `no-store` or `private` is
-not cached. `--fresh` reads it again. The turn budget lives under `$XDG_STATE_HOME/instafy/web-read` (or
-`~/.local/state`).
-
-| Exit | Meaning |
-|---|---|
-| 0 | At least one page was read |
-| 2 | No page was read (every URL stopped, was skipped or failed) |
-| 64 | Bad options or URLs |
-| 70 | The command itself failed, so nothing was read |
 
 ## AI-readable diagnostics
 
