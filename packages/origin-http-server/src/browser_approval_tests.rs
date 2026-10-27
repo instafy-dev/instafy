@@ -468,7 +468,11 @@ async fn routine_state_is_additive_and_keeps_consequential_decisions_bound() {
 async fn a_run_that_declined_a_site_still_shows_and_takes_its_next_prompt() {
     // After the person declines one site, the run goes on and asks about the
     // next one; the state then lists the declined site.
-    for declined in [None, Some(json!([])), Some(json!(["https://declined.example"]))] {
+    for declined in [
+        None,
+        Some(json!([])),
+        Some(json!(["https://declined.example"])),
+    ] {
         let fixture = ApprovalFixture::action();
         let mut state = json!({
             "version": 1,

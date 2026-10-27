@@ -2772,7 +2772,10 @@ fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
     let navigated = payload_of(&navigated);
     assert_eq!(navigate_requests.len(), 1);
     assert_eq!(navigate_requests[0]["kind"], "origin");
-    assert_eq!(navigate_requests[0]["display"]["label"], "Open https://example.test/");
+    assert_eq!(
+        navigate_requests[0]["display"]["label"],
+        "Open https://example.test/"
+    );
     assert_eq!(navigated["url"], "https://example.test/");
     assert_eq!(navigated["visibleText"], "Fixture page");
 }
