@@ -366,3 +366,176 @@ describe("summarizeTurnActivity", () => {
     expect(first.kind === "step" && first.step.label).toBe("Looked up a place");
   });
 });
+
+// Browser steps, from the runtime's browser table (activity_labels.rs).
+// Opening, reading and searching count only for a step that succeeded.
+const BROWSER_OPEN = {
+  key: "browser/open",
+  role: "content",
+  live: "Opening {host}",
+  done: { one: "opened {host}", other: "opened {n} pages on {host}", some: "opened pages on {host}" },
+  when: "success",
+};
+const BROWSER_READ = {
+  key: "browser/read",
+  role: "content",
+  live: "Reading {host}",
+  done: { one: "read a page on {host}", other: "read {n} pages on {host}", some: "read pages on {host}" },
+  when: "success",
+};
+const BROWSER_SEARCH = {
+  key: "browser/search",
+  role: "content",
+  live: "Searching {host}",
+  done: { one: "searched {host}", other: "searched {host} {n} times", some: "searched {host}" },
+  when: "success",
+};
+const BROWSER_BROWSE = { key: "browser/browse", role: "quiet", live: "Browsing {host}" };
+
+function browserStep(
+  label: Record<string, unknown>,
+  facts: { host?: string; pageKey?: string; step: string; approval?: string },
+  status = "completed",
+): ChatMessage {
+  return step(
+    "mcp_tool_call",
+    { v: 1, count: 1, also: [], ...label, ...facts },
+    { status, server: "instafy_shared_browser", tool: facts.step },
+  );
+}
+
+const PAGE_A = "aaaaaaaaaaaaaaaa";
+const PAGE_B = "bbbbbbbbbbbbbbbb";
+
+describe("browser steps", () => {
+  it("count the distinct pages read, not the reads", () => {
+    const messages = [
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(summarize(messages).summary).toBe("Read 2 pages on visitlisboa.com");
+    expect(summarize(messages.slice(0, 2)).summary).toBe("Read a page on visitlisboa.com");
+  });
+
+  it("drop a group's trailing site when the group before it named the same one", () => {
+    const messages = [
+      browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", pageKey: PAGE_A, step: "search" }),
+      browserStep(BROWSER_BROWSE, { host: "visitlisboa.com", step: "click" }),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(summarize(messages).summary).toBe("Searched visitlisboa.com, read 2 pages");
+    // Another site keeps its name.
+    const twoSites = [
+      browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" }),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(summarize(twoSites).summary).toBe("Opened carris.pt, read a page on visitlisboa.com");
+  });
+
+  it("name the site while a step runs, and the browser before any site is known", () => {
+    expect(summarize([browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", step: "search" }, "in_progress")], "running").live)
+      .toBe("Searching visitlisboa.com…");
+    expect(summarize([browserStep(BROWSER_BROWSE, { host: "visitlisboa.com", step: "click" }, "in_progress")], "running").live)
+      .toBe("Browsing visitlisboa.com…");
+    const unnamed = browserStep({ key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" }, { step: "navigate" }, "in_progress");
+    expect(summarize([unnamed], "running").live).toBe("Using the browser…");
+  });
+
+  it("show an international site in its own script, and a mixed one as the runtime named it", () => {
+    const munich = [browserStep(BROWSER_OPEN, { host: "xn--mnchen-3ya.de", pageKey: PAGE_A, step: "navigate" })];
+    expect(summarize(munich).summary).toBe("Opened münchen.de");
+    const lookalike = [browserStep(BROWSER_OPEN, { host: "xn--pple-43d.com", pageKey: PAGE_A, step: "navigate" })];
+    expect(summarize(lookalike).summary).toBe("Opened xn--pple-43d.com");
+  });
+});
+
+describe("answered browser prompts", () => {
+  const searched = (approval: string, status = "completed") =>
+    browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", pageKey: PAGE_B, step: "search", approval }, status);
+
+  it("add one clause to the done line, without the site the line already names", () => {
+    const messages = [
+      searched("once"),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(summarize(messages).summary).toBe("Searched visitlisboa.com, read 2 pages · you allowed a search");
+  });
+
+  it("name the site when the line names another one first", () => {
+    const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
+    expect(summarize([opened, searched("once")]).summary).toBe(
+      "Opened carris.pt, searched visitlisboa.com · you allowed a search on visitlisboa.com",
+    );
+    const denied = browserStep(BROWSER_BROWSE, { host: "visitlisboa.com", step: "submit", approval: "denied" }, "failed");
+    expect(summarize([opened, denied]).summary).toBe("Opened carris.pt · you said no to a form on visitlisboa.com");
+    const expired = browserStep(BROWSER_BROWSE, { host: "visitlisboa.com", step: "click", approval: "expired" }, "failed");
+    expect(summarize([opened, expired]).summary).toBe(
+      "Opened carris.pt · skipped a click on visitlisboa.com: no answer in time",
+    );
+    const site = browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot", approval: "once" });
+    expect(summarize([opened, site]).summary).toBe("Opened carris.pt, read a page · you allowed the site");
+    const google = browserStep({ key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" }, { step: "navigate", approval: "denied" }, "failed");
+    expect(summarize([google]).summary).toBe("Used the browser · you said no to opening a page");
+  });
+
+  it("never say a step the person said no to, or left, was done", () => {
+    // Octo asked to open google.com and the person said no: nothing was opened.
+    const google = browserStep(BROWSER_OPEN, { host: "google.com", step: "navigate", approval: "denied" }, "failed");
+    expect(summarize([google]).summary).toBe("Used a tool · you said no to opening google.com");
+    const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
+    expect(summarize([opened, google]).summary).toBe("Opened carris.pt · you said no to opening google.com");
+    const unanswered = browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", step: "search", approval: "expired" }, "failed");
+    expect(summarize([opened, unanswered]).summary).toBe(
+      "Opened carris.pt · skipped a search on visitlisboa.com: no answer in time",
+    );
+    // A page that failed to load was not read either.
+    const failedRead = browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot" }, "failed");
+    expect(summarize([opened, failedRead]).summary).toBe("Opened carris.pt");
+  });
+
+  it("count the answers when there are several, and never count a step's routine or free approval", () => {
+    const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate", approval: "once" });
+    const clicked = browserStep(BROWSER_BROWSE, { host: "carris.pt", step: "click", approval: "once" });
+    expect(summarize([opened, clicked]).summary).toBe("Opened carris.pt · you allowed 2 steps");
+    const routine = browserStep(BROWSER_BROWSE, { host: "carris.pt", step: "click", approval: "routine" });
+    const free = searched("free");
+    expect(summarize([routine, free]).summary).toBe("Searched visitlisboa.com");
+  });
+
+  it("list each answer in Details after its step, with its site", () => {
+    const messages = [searched("once")];
+    const activity = summarizeTurnActivity(messages, { jobId: JOB, phase: "completed" });
+    expect(activity.details.map((item) => item.kind)).toEqual(["step", "approval"]);
+    const approval = activity.details[1];
+    expect(approval.kind === "approval" && approval.text).toBe("You allowed a search on visitlisboa.com");
+  });
+
+  it("use what was decided in this tab when no step says it (an older runtime)", () => {
+    const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
+    const activity = summarizeTurnActivity([opened], {
+      jobId: JOB,
+      phase: "completed",
+      approvals: [{
+        approvalId: "approval-1", outcome: "allowed", operation: "form-submit",
+        host: "visitlisboa.com", destinationHost: "visitlisboa.com",
+      }],
+    });
+    expect(activity.summary).toBe("Opened carris.pt · you allowed a form on visitlisboa.com");
+    expect(activity.details.at(-1)).toEqual({
+      kind: "approval", id: "approval:approval-1", text: "You allowed a form on visitlisboa.com",
+    });
+    // The steps' own word wins once they carry it: no answer is counted twice.
+    const withStep = summarizeTurnActivity([opened, searched("once")], {
+      jobId: JOB,
+      phase: "completed",
+      approvals: [{
+        approvalId: "approval-1", outcome: "allowed", operation: "form-submit",
+        host: "visitlisboa.com", destinationHost: "visitlisboa.com",
+      }],
+    });
+    expect(withStep.summary).toBe("Opened carris.pt, searched visitlisboa.com · you allowed a search on visitlisboa.com");
+  });
+});

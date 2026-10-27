@@ -30,6 +30,7 @@ import {
 import { resolveThreadPreviewSafeInsetPx } from "./threadPreviewGeometry";
 import { resolveSpineToneFromStatus } from "./ThreadSpine";
 import { summarizeTurnActivity, type TurnActivityPhase } from "./turnActivity";
+import { useTurnBrowserApproval } from "./turnBrowserApproval";
 
 const CHAT_SPINE_GUTTER_PX = 26;
 // Steps are the activity line's and Details'; they are never update rows.
@@ -88,6 +89,8 @@ export function useAgentJobThreadPreviewState({
     [fallbackThreadMessages, jobId, runs, threadConversationControllerId],
   );
   const owningConversation = threadConversation ?? activeConversation;
+  // A browser prompt of this turn's run shows inside the turn, under its line.
+  const browserApproval = useTurnBrowserApproval({ jobId, runs: runs ?? {} });
   const threadPreviewRootRef = useRef<HTMLDivElement | null>(null);
   const threadPreviewRef = useRef<HTMLDivElement | null>(null);
   const [threadPreviewRootLeftPx, setThreadPreviewRootLeftPx] = useState(Number.POSITIVE_INFINITY);
@@ -460,8 +463,10 @@ export function useAgentJobThreadPreviewState({
         jobId: jobId || null,
         phase: activityPhase,
         updates: detailUpdates,
+        viewerCanAnswer: browserApproval.viewerCanAnswer,
+        approvals: browserApproval.settled,
       }),
-    [activityPhase, detailUpdates, jobId, threadMessages],
+    [activityPhase, browserApproval.settled, browserApproval.viewerCanAnswer, detailUpdates, jobId, threadMessages],
   );
 
   useEffect(() => {
@@ -598,6 +603,7 @@ export function useAgentJobThreadPreviewState({
     showHeaderAvatar,
     assistantAvatarMotion,
     activity,
+    browserApproval: browserApproval.row,
     detailsOpen,
     cards,
     isThreadUnresolved,

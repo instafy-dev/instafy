@@ -23,8 +23,8 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | Running an unlabelled command or tool | `Working…`; a file edit says `Editing files…` |
 | A runtime status is the newest thing | `Saving your changes…`, `Retrying…`, until anything newer arrives |
 | The model is working, before or between steps | `Thinking…` (never its reasoning titles or notes) |
-| A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer (`turnActivity.ts` takes it as `viewerCanAnswer`; nothing feeds it yet, the inline browser approvals will) |
-| Done | up to two "what it did" groups, biggest first and in the order they happened, then the latest "what it made": `Looked up 14 places, read 6 pages, built the map` |
+| A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
+| Done | up to two "what it did" groups, biggest first and in the order they happened, then the latest "what it made": `Looked up 14 places, read 6 pages, built the map`; then, after ` · `, what the person answered to the turn's browser prompts |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files` |
 | Stopped by the person | `Stopped · looked up 9 places`, or `Stopped` |
 | No news for 45 seconds while not in flight | `Status unavailable` |
@@ -73,7 +73,8 @@ from trusted data only, in this order:
    (`pnpm test`, `npm run test`, `cargo test`, `pytest`, `vitest`), builds (`pnpm build`,
    `npm run build`, `cargo build`) and `git clone`. Web searches, file edits, browser tool calls
    ("used the browser") and other tool calls ("used a tool") have fixed labels too, as do the
-   runtime's own statuses: saving the turn's changes and retrying a request.
+   runtime's own statuses: saving the turn's changes and retrying a request. A Shared Browser
+   step names its site (see [Browser steps](#browser-steps)).
 4. **Anything else gets no label.** Studio counts those steps instead ("Ran 3 commands").
 
 A label is never built from command output, page text, a page title or text the model wrote. The
@@ -121,6 +122,97 @@ Exit status reaches Studio through the step's own `status` and `exitCode`; a lab
 - `when: "success"` counts the step only when it exits 0.
 - Browser steps may also carry `host`, `pageKey` (16 hex characters, never the URL), `step` and
   `approval`.
+
+## Browser steps
+
+A Shared Browser step says what it did and on which site: "Searching visitlisboa.com…" while it
+runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
+
+- **The browser reports it.** The Shared Browser controller (`assets/shared-browser-cli.js`)
+  adds `activity: {step, url, approval}` to each step's result: the step's kind, the masked
+  address of the page the step left the tab on (only on a site the run may read) and how it was
+  allowed. It comes from the browser's own state, never from page text. `approval` is `once` when
+  the step waited on a prompt (its site's or its own) and the person allowed it, `routine` when
+  routine browsing took an acting step without one, `free` for a site's own search
+  ([Shared Browser](Shared-Browser.md#human-approval-policy)), and absent when the step needed no
+  answer.
+- **runtime-agent keeps four facts** (`shared_browser_activity.rs`), when the tool call ends:
+  `step` (one of `navigate`, `open_tab`, `snapshot`, `search`, `submit`, `click`, `type`,
+  `press`, `scroll`, `tabs`, `status`); `host`, the address's domain in lower case without a
+  leading `www.` (an address literal, a name without a dot or one the contract rejects gives
+  none); `pageKey`, the first 16 hex characters of the SHA-256 of the address without its
+  fragment, never the address; and `approval`, `once`, `routine` or `free` from the controller, or
+  `denied` / `expired` from the step's terminal consent code. When the step starts, `navigate`
+  and `open_tab` take the host from the address Octo asked for; any other step, and a step
+  whose result names no page, uses the last host the turn's browser steps named. A step the
+  person said no to, or left unanswered, never reaches the page, so its kind comes from the tool
+  call: typing with submit is `submit` (a form), whatever field it was for.
+- **The labels** (`jobs/activity_labels.rs`):
+
+  | Step | Running | Done (one / other / some) | Role |
+  |---|---|---|---|
+  | `navigate`, `open_tab` | Opening {host} | opened {host} / opened {n} pages on {host} / opened pages on {host} | content |
+  | `snapshot` | Reading {host} | read a page on {host} / read {n} pages on {host} / read pages on {host} | content |
+  | `search` (typing with submit, or Enter, in a search field) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
+  | `submit`, `click`, `type`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | – | quiet |
+  | no host known yet | Using the browser | used the browser | content |
+
+  Opening, reading and searching carry `when: "success"`: a step the person said no to, left
+  unanswered, or that failed (a link-only site, an error) opened, read and searched nothing, so
+  the done line never counts it. "Opened google.com · you said no to opening google.com" cannot
+  happen; a turn whose only step was refused reads "Used a tool · you said no to opening
+  google.com".
+
+- **Studio** groups browser steps by key and host. Pages opened and read count by distinct
+  `pageKey`, so reading a page twice is "read a page"; searches count each time. After a group on
+  the same site, a group's trailing " on {host}" goes: "Searched visitlisboa.com, read 2 pages".
+  A host in punycode shows in Unicode when all its letters are of one script (or one of the CJK
+  sets written with Latin, Unicode's "highly restrictive" profile), so "münchen.de" reads as
+  itself and a name that mixes scripts stays in punycode (`activityHost.ts`).
+- The Personal Browser's steps say "used the browser" until its results carry the same
+  `activity`.
+
+## Browser prompts
+
+When a Shared Browser step needs the person's answer, the turn shows it as one row under its
+activity line, to the person who started the run only, and the line says `Waiting for you`:
+
+```
+🔒 Octo wants to send the form “Search” on visitlisboa.com.   [Deny] [Allow]
+```
+
+- **The row** (`BrowserApprovalRow.tsx`) names the step in one sentence: `Octo wants to use
+  {host}.` (or `to open {page}.` when the site prompt names the page it loads), `to open {page}.`,
+  `to click “{label}” on {host}.`, `to type into “{label}” on {host}.`, `to send the form
+  “{label}” on {host}.` (plus `It goes to {site}.` when the form posts to another site), `to press
+  Enter on “{label}” on {host}.` and `to press {key} on {host}.` `{label}` is the runtime's
+  already-masked name of the control, cut at 40 characters: the page's own words appear only
+  here, where the person needs them to decide, never in the line. `Allow site` answers a site
+  prompt and `Allow` one step; neither button takes focus. In the prompt's last minute the row
+  says `Expires in under a minute`; an error shows after the buttons. The row is a labelled
+  group, says `Octo needs your answer: …` once to screen readers, and its buttons are 44 px tall
+  on coarse pointers.
+- **Where it shows.** ChatPanel provides the prompt of the viewer's running browser job
+  (`turnBrowserApproval.tsx`); the turn whose job that run serves claims it and shows it under
+  its line, with no avatar of its own. When no turn on screen claims it within 300 ms (the turn
+  is not in this view), the chat shows the same row at the end of the transcript, with Octo's
+  avatar. The browser view's sheet shares the same approval state, so answering one settles both.
+- **Once answered**, or left to expire, the row goes and the turn's done line gains one clause
+  after ` · `, and Details an entry with a lock:
+
+  | Outcome | Clause |
+  |---|---|
+  | allowed | `you allowed a search on visitlisboa.com` |
+  | said no | `you said no to a search on visitlisboa.com` |
+  | no answer | `skipped a search on visitlisboa.com: no answer in time` |
+
+  The noun comes from the step's own `activity` (`step` and `approval`), so it reads the same
+  after a reload: `a search`, `a form`, `a click`, `typing`, `a key press`, `opening {host}`, or
+  the site itself (`the site` when the line already names it). The host is left out when the line
+  already names it first: `Searched visitlisboa.com, read 2 pages · you allowed a search`.
+  Several answers read as the latest one counted: `you allowed 2 steps`. When no step carries an
+  answer (an older runtime), the prompts answered in this tab stand in, named by their
+  operation.
 
 ## The label rules
 

@@ -330,13 +330,23 @@ function siteApproved(rawUrl) {
 // `destinationUrl`: the exact address the step loads, when it loads one. The
 // site's prompt is bound to it and its label names it. `label` may be a
 // function, so a label that masks an address is made only when a prompt shows.
+// This process runs one step. Set once the step waited on a prompt and the
+// person allowed it, so its activity says it was allowed at its prompt.
+let stepAllowedAtPrompt = false;
+
 async function ensureSiteApproved(rawUrl, label, { destinationUrl = null } = {}) {
-  return await approvalProtocol.ensureOriginApproved(
+  // A site the run already uses, or routine browsing, opens without a prompt.
+  const prompts = !siteApproved(rawUrl);
+  const origin = await approvalProtocol.ensureOriginApproved(
     rawUrl,
     () => tabLabel(typeof label === "function" ? label() : label),
     inAgentTab() ? activePageId : null,
     { destinationUrl },
   );
+  if (prompts) {
+    stepAllowedAtPrompt = true;
+  }
+  return origin;
 }
 
 // The address a prompt names, so the person approves the page the step will
@@ -364,16 +374,22 @@ function refuseUnlessReadingStep(readingStep) {
 }
 
 async function allowStepOnce(details, options) {
-  if (!inAgentTab()) {
-    return await approvalProtocol.allowOnce(details, options);
+  // Routine browsing takes a routine step without a prompt; every other step
+  // waits for the person's answer.
+  const prompts = !(options?.routine === true && approvalProtocol.routineBrowsingAllowed());
+  const request = inAgentTab()
+    ? await approvalProtocol.allowOnce({
+      ...details,
+      label: tabLabel(details.label),
+      payloadFingerprint: approvalProtocol.sha256(
+        JSON.stringify({ tabId: activePageId, payload: details.payloadFingerprint }),
+      ),
+    }, options)
+    : await approvalProtocol.allowOnce(details, options);
+  if (prompts) {
+    stepAllowedAtPrompt = true;
   }
-  return await approvalProtocol.allowOnce({
-    ...details,
-    label: tabLabel(details.label),
-    payloadFingerprint: approvalProtocol.sha256(
-      JSON.stringify({ tabId: activePageId, payload: details.payloadFingerprint }),
-    ),
-  }, options);
+  return request;
 }
 
 function strictlyMasked(value) {
@@ -2197,8 +2213,44 @@ async function freeSiteSearch(page, target, typed) {
 // a post is stopped before it leaves the browser.
 const FREE_SEARCH_POST_ORIGINS = Object.freeze([]);
 
-// What a free site search's result says it was, for the runtime and Studio.
-const FREE_SEARCH_ACTIVITY = Object.freeze({ step: "search", approval: "free" });
+// What a step was, for the turn's plain-language activity line
+// (docs/Chat-Activity.md): its kind, the page it left the tab on (masked like
+// the result's own address, and only on a site the run may read) and how it
+// was allowed. Made from the browser's own state, never from page text.
+// runtime-agent keeps only the kind, the address's host, a key of the address
+// and the approval.
+function stepActivity(page, step, approval = null) {
+  let url = null;
+  try {
+    if (page && !page.isClosed() && !isBlankPage(page) && siteApproved(page.url())) {
+      url = maskedUrl(page.url());
+    }
+  } catch (_) {
+    url = null;
+  }
+  return { step, url, ...(approval ? { approval } : {}) };
+}
+
+// How a step was allowed: "once" when it waited on a prompt (its site's or
+// its own) and the person allowed it, "routine" when routine browsing took it
+// without one, and nothing when it needed no answer (reading a site the run
+// already uses).
+function stepApproval() {
+  if (stepAllowedAtPrompt) {
+    return "once";
+  }
+  return approvalProtocol.routineBrowsingAllowed() ? "routine" : null;
+}
+
+// A reading step asks only for its site, and only the first time: "once"
+// when that prompt was answered in this step.
+function readingApproval() {
+  return stepAllowedAtPrompt ? "once" : null;
+}
+
+function withActivity(result, activity) {
+  return { ...result, activity };
+}
 
 // Runs inside the page through Playwright, so it must not use anything from
 // this file's scope. Waits, at most `timeoutMs`, for the running animations
@@ -2642,12 +2694,12 @@ async function describeTabs(tabs) {
 
 async function executeTabCommand(browser, method, requestPath, body, tabs) {
   if (method === "GET" && requestPath === "/v1/tabs") {
-    return await describeTabs(tabs);
+    return withActivity(await describeTabs(tabs), stepActivity(null, "tabs"));
   }
 
   if (method === "POST" && requestPath === "/v1/tabs/select") {
     await selectTab(browser, tabs, body.tabId);
-    return await describeTabs(tabs);
+    return withActivity(await describeTabs(tabs), stepActivity(null, "tabs"));
   }
 
   if (method === "POST" && requestPath === "/v1/tabs/close") {
@@ -2676,7 +2728,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
     // Chromium shows a neighbouring tab, which may be the person's; the tab
     // Octo now acts on comes to the front instead.
     await frontOctoTab(tabs);
-    return { closedTabId: tabId, ...(await describeTabs(tabs)) };
+    return withActivity({ closedTabId: tabId, ...(await describeTabs(tabs)) }, stepActivity(null, "tabs"));
   }
 
   if (method === "POST" && requestPath === "/v1/tabs/open") {
@@ -2741,7 +2793,10 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
       }
       const settled = await resolveExpectedPage(browser);
       await emitNavigationResult(settled);
-      return { openedTab: true, ...(await snapshotForResult(settled)) };
+      return withActivity(
+        { openedTab: true, ...(await snapshotForResult(settled)) },
+        stepActivity(settled, "open_tab", stepApproval()),
+      );
     } catch (error) {
       if (!loading) {
         // Nothing was approved or loaded: the blank tab goes again. When the
@@ -3000,6 +3055,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       redacted: false,
       url: redaction.redactUrl(page.url()).text,
       title: redaction.redactText(title, { credentialContext: redaction.hasCredentialWord(title) }).text,
+      activity: stepActivity(page, "status"),
     };
   }
 
@@ -3022,7 +3078,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       label: result.title || result.url,
       url: result.url,
     });
-    return result;
+    return withActivity(result, stepActivity(page, "snapshot", readingApproval()));
   }
 
   if (method === "POST" && requestPath === "/v1/request-human-input") {
@@ -3120,7 +3176,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
     await emitNavigationResult(page);
-    return await snapshotForResult(page);
+    return withActivity(await snapshotForResult(page), stepActivity(page, "navigate", stepApproval()));
   }
 
   if (method === "POST" && requestPath === "/v1/click") {
@@ -3194,7 +3250,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (page.url() !== beforeUrl) {
       await emitNavigationResult(page);
     }
-    return await snapshotAfterStep(page, withholding);
+    return withActivity(await snapshotAfterStep(page, withholding), stepActivity(page, "click", stepApproval()));
   }
 
   if (method === "POST" && requestPath === "/v1/type") {
@@ -3304,8 +3360,13 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       await emitNavigationResult(page);
     }
     page = await resolveExpectedPage(browser);
-    const typed = await snapshotAfterStep(page, withholding);
-    return freeSearch ? { ...typed, activity: FREE_SEARCH_ACTIVITY } : typed;
+    // Typing with submit into a search field is a search, whoever allowed it;
+    // into any other field it sends a form.
+    const typeKind = submitting ? (step.category === "search" ? "search" : "submit") : "type";
+    return withActivity(
+      await snapshotAfterStep(page, withholding),
+      stepActivity(page, typeKind, freeSearch ? "free" : stepApproval()),
+    );
   }
 
   if (method === "POST" && requestPath === "/v1/press") {
@@ -3400,8 +3461,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     await target.locator.press(pressKey);
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
-    const pressed = await snapshotAfterStep(page, withholding);
-    return freeSearch ? { ...pressed, activity: FREE_SEARCH_ACTIVITY } : pressed;
+    // Enter in a search field is a search, whoever allowed it.
+    const pressKind = pressKey === "Enter" && step.category === "search" ? "search" : "press";
+    return withActivity(
+      await snapshotAfterStep(page, withholding),
+      stepActivity(page, pressKind, freeSearch ? "free" : stepApproval()),
+    );
   }
 
   if (method === "POST" && requestPath === "/v1/scroll") {
@@ -3417,7 +3482,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     await page.mouse.wheel(x, y);
     await page.waitForTimeout(200);
     page = await resolveExpectedPage(browser);
-    return await snapshotForResult(page);
+    return withActivity(await snapshotForResult(page), stepActivity(page, "scroll", readingApproval()));
   }
 
   throw new Error("Unsupported Shared Browser method/path combination");

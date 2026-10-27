@@ -56,6 +56,7 @@ import { isTransientThreadUpdate } from "./threadPreviewProxyError";
 import { TurnActivityDetails } from "./TurnActivityDetails";
 import { TurnActivityLine } from "./TurnActivityLine";
 import type { TurnActivity } from "./turnActivity";
+import { TurnBrowserApprovalRow, type TurnBrowserApproval } from "./turnBrowserApproval";
 
 const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
 
@@ -235,6 +236,8 @@ export type AgentJobThreadPreviewLayoutProps = {
   runStatusShownInEntryHeader?: boolean;
   /** The turn's plain-language line and the steps behind its Details (turnActivity). */
   activity: TurnActivity;
+  /** The run's browser prompt, when this turn waits on the viewer's answer; shown under the line. */
+  browserApproval?: TurnBrowserApproval["row"];
   detailsOpen: boolean;
   /** Cards stay in the turn's default view: they ask the person for something or show what it made. */
   cards: ChatMessage[];
@@ -280,6 +283,7 @@ export function AgentJobThreadPreviewLayout({
   showHeaderIdentity = true,
   runStatusShownInEntryHeader = false,
   activity,
+  browserApproval = null,
   detailsOpen,
   cards,
   isThreadUnresolved,
@@ -404,7 +408,7 @@ export function AgentJobThreadPreviewLayout({
     return ids;
   }, [finalSummaryCoversProxyError, finalSummaryDisplayContent, finalSummaryMessage, terminalStatusMarker, updateMessages]);
   const detailItems = useMemo(
-    () => activity.details.filter((item) => item.kind === "step" || visibleUpdateIds.has(item.id)),
+    () => activity.details.filter((item) => item.kind !== "update" || visibleUpdateIds.has(item.id)),
     [activity.details, visibleUpdateIds],
   );
   const activityText = activity.live ?? activity.summary ?? "";
@@ -413,7 +417,7 @@ export function AgentJobThreadPreviewLayout({
   // they leave the line plain ("Thinking…" before the first step).
   const hasDetails =
     detailItems.some(
-      (item) => item.kind === "step" || (getMessageType(item.message) ?? "").trim().toLowerCase() !== "reasoning",
+      (item) => item.kind !== "update" || (getMessageType(item.message) ?? "").trim().toLowerCase() !== "reasoning",
     ) || branchThreads.length > 0;
   // A failed turn has one Details: the failure block's, which lists the steps.
   const activityLineOpensDetails = hasDetails && runFailurePresentation === null;
@@ -755,6 +759,14 @@ export function AgentJobThreadPreviewLayout({
               detailsId={detailsId}
               onToggleDetails={onToggleDetails}
             />
+          </div>
+        ) : null}
+
+        {browserApproval ? (
+          // The run's prompt for the person who started it, under the line,
+          // with no avatar of its own: it is part of this turn.
+          <div className="relative min-w-0">
+            <TurnBrowserApprovalRow agentName={browserApproval.agentName} onSettled={browserApproval.onSettled} />
           </div>
         ) : null}
 

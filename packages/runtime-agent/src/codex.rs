@@ -4518,6 +4518,8 @@ pub(crate) struct CodexEventStreamAdapter {
     pending_code_mode_cell_calls: HashSet<String>,
     /// The job this run serves, for log lines only.
     job_id: Option<uuid::Uuid>,
+    /// The last host a Shared Browser step named, for a later step that names none yet.
+    last_browser_host: Option<String>,
 }
 
 /// For tests that do not look at usage. Nothing feeds this baseline store, so no turn reports
@@ -4543,6 +4545,7 @@ impl CodexEventStreamAdapter {
             usage_attempt: None,
             pending_code_mode_cell_calls: HashSet::new(),
             job_id: None,
+            last_browser_host: None,
         }
     }
 
@@ -4676,16 +4679,35 @@ impl CodexEventStreamAdapter {
                     }
                 })]
             }
-            EventMsg::McpToolCallBegin(tool_call) => vec![json!({
-                "type": "item.started",
-                "item": {
+            EventMsg::McpToolCallBegin(tool_call) => {
+                let mut item = json!({
                     "id": tool_call.call_id,
                     "type": "mcp_tool_call",
                     "server": tool_call.invocation.server,
                     "tool": tool_call.invocation.tool,
                     "status": "in_progress",
+                });
+                // What the browser step is, for the turn's activity line: only the step's kind
+                // and a host (docs/Chat-Activity.md).
+                if tool_call
+                    .invocation
+                    .server
+                    .eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME)
+                    && let Some(step) = crate::shared_browser_activity::browser_step_facts(
+                        &tool_call.invocation.tool,
+                        tool_call.invocation.arguments.as_ref(),
+                        None,
+                        None,
+                        &mut self.last_browser_host,
+                    )
+                {
+                    item["browserStep"] = step;
                 }
-            })],
+                vec![json!({
+                    "type": "item.started",
+                    "item": item,
+                })]
+            }
             EventMsg::McpToolCallEnd(tool_call) => {
                 let terminal_consent = if tool_call
                     .invocation
@@ -4719,6 +4741,33 @@ impl CodexEventStreamAdapter {
                     "tool": tool_call.invocation.tool,
                     "status": if tool_call.is_success() { "completed" } else { "failed" },
                 });
+                // The step's kind, host, page key and approval from the browser's own result,
+                // and nothing else of it (shared_browser_activity).
+                if tool_call
+                    .invocation
+                    .server
+                    .eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME)
+                {
+                    let terminal_code = terminal_consent
+                        .as_ref()
+                        .and_then(|signal| signal.get("code"))
+                        .and_then(JsonValue::as_str);
+                    let payload = tool_call
+                        .result
+                        .as_ref()
+                        .ok()
+                        .and_then(|result| result.structured_content.as_ref())
+                        .filter(|_| terminal_code.is_none());
+                    if let Some(step) = crate::shared_browser_activity::browser_step_facts(
+                        &tool_call.invocation.tool,
+                        tool_call.invocation.arguments.as_ref(),
+                        payload,
+                        terminal_code,
+                        &mut self.last_browser_host,
+                    ) {
+                        item["browserStep"] = step;
+                    }
+                }
                 if let Some(terminal_consent) = terminal_consent {
                     item["terminalConsent"] = terminal_consent;
                 }
@@ -5816,8 +5865,9 @@ mod tests {
     use codex_protocol::protocol::{
         AgentMessageContentDeltaEvent, AgentMessageEvent, ExecCommandBeginEvent,
         ExecCommandEndEvent, ExecCommandOutputDeltaEvent, ExecCommandSource, ExecCommandStatus,
-        ExecOutputStream, ItemCompletedEvent, McpInvocation, McpToolCallEndEvent,
-        RawResponseItemEvent, TokenCountEvent, TokenUsage, TokenUsageInfo, TurnCompleteEvent,
+        ExecOutputStream, ItemCompletedEvent, McpInvocation, McpToolCallBeginEvent,
+        McpToolCallEndEvent, RawResponseItemEvent, TokenCountEvent, TokenUsage, TokenUsageInfo,
+        TurnCompleteEvent,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -8912,6 +8962,100 @@ required = true
 
         let unrelated = adapter.collect(&event("untrusted_server"));
         assert!(unrelated[0]["item"].get("terminalConsent").is_none());
+    }
+
+    #[test]
+    fn mcp_end_copies_only_allowlisted_activity_fields() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let invocation = |tool: &str, arguments: Option<JsonValue>| McpInvocation {
+            server: "instafy_shared_browser".to_string(),
+            tool: tool.to_string(),
+            arguments,
+        };
+        let begin = Event {
+            id: "evt_mcp_begin".to_string(),
+            msg: EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
+                call_id: "call_navigate".to_string(),
+                invocation: invocation(
+                    "navigate",
+                    Some(json!({"url": "https://www.visitlisboa.com/en"})),
+                ),
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                mcp_app_ui: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        let started = adapter.collect(&begin);
+        assert_eq!(
+            started[0]["item"]["browserStep"],
+            json!({"step": "navigate", "host": "visitlisboa.com"})
+        );
+
+        let end = |tool: &str, structured: JsonValue| Event {
+            id: "evt_mcp_end".to_string(),
+            msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                call_id: "call_search".to_string(),
+                invocation: invocation(tool, None),
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                duration: Duration::from_millis(1),
+                result: Ok(CallToolResult {
+                    content: vec![json!({"type": "text", "text": "Call 555 now"})],
+                    structured_content: Some(structured),
+                    is_error: Some(false),
+                    meta: None,
+                }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        let completed = adapter.collect(&end(
+            "type",
+            json!({
+                "title": "Call 555 now at www.evil.example",
+                "visibleText": "Results for Belém Tower",
+                "activity": {
+                    "step": "search",
+                    "url": "https://www.visitlisboa.com/en/search?q=Bel%C3%A9m",
+                    "approval": "free",
+                    "label": "Visit evil.example",
+                },
+            }),
+        ));
+        let step = &completed[0]["item"]["browserStep"];
+        let mut keys: Vec<&str> = step
+            .as_object()
+            .expect("facts")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["approval", "host", "pageKey", "step"]);
+        assert_eq!(step["step"], "search");
+        assert_eq!(step["host"], "visitlisboa.com");
+        assert_eq!(step["approval"], "free");
+        let item = completed[0]["item"].to_string();
+        for leaked in ["555", "evil", "Belém", "search?q="] {
+            assert!(!item.contains(leaked), "{leaked} leaked into {item}");
+        }
+
+        // A later step with no address of its own names the last host.
+        let click = adapter.collect(&end("click", json!({"ok": true})));
+        assert_eq!(
+            click[0]["item"]["browserStep"],
+            json!({"step": "click", "host": "visitlisboa.com"})
+        );
     }
 
     #[test]
