@@ -45,7 +45,6 @@ test("the bundled link-only list is the web-research skill's own file, in every 
 
 test("every no-agents site in the skill's list is refused, and no no-reuse site, by the list's own matching rule", () => {
   const guard = linkOnly.PERSONAL_BROWSER_LINK_ONLY_GUARD;
-  assert.ok(source.sites.some((site) => site.kind === "no-reuse"), "the list has a site read but not reused");
   for (const site of source.sites) {
     for (const pattern of site.match) {
       const host = pattern.endsWith(".*") ? `${pattern.slice(0, -2)}.com` : pattern;
@@ -100,16 +99,29 @@ test("example.* covers one or two short suffix labels; example.com covers its su
 });
 
 test("every case in the readers' shared table is refused or let through by kind, wrappers' copies and host spellings included", () => {
-  const guard = linkOnly.PERSONAL_BROWSER_LINK_ONLY_GUARD;
-  // Both kinds are in the table: sites refused, and sites read but not reused.
-  assert.ok(CASES.bundled.some((kase) => kase.site !== null && kase.kind === "no-reuse"));
-  assert.ok(CASES.bundled.some((kase) => kase.site !== null && kase.kind !== "no-reuse"));
-  for (const kase of CASES.bundled) {
-    const refusal = guard.refusal(caseUrl(kase));
-    const expected = kase.site === null || kase.kind === "no-reuse"
+  const refusalFor = (kase) =>
+    kase.site === null || kase.kind === "no-reuse"
       ? null
       : kase.via ? { code: "link_only_site", site: kase.site, via: kase.via } : { code: "link_only_site", site: kase.site };
-    assert.deepEqual(refusal === null ? null : { ...refusal }, expected, kase.url);
+  const guard = linkOnly.PERSONAL_BROWSER_LINK_ONLY_GUARD;
+  for (const kase of CASES.bundled) {
+    const refusal = guard.refusal(caseUrl(kase));
+    assert.deepEqual(refusal === null ? null : { ...refusal }, refusalFor(kase), kase.url);
+  }
+  // Desktop enforces the bundled list only (no channel carries a space's copy), but the matcher it runs takes a list
+  // with the space's additions the same way: the table's space cases, both kinds among them, hold here too.
+  const space = CASES.spaceCopy.list;
+  const withSpace = linkOnly.createPersonalBrowserLinkOnlyGuard({
+    ...source,
+    sites: [...source.sites, ...space.sites],
+    wrappers: [...source.wrappers, ...space.wrappers],
+  });
+  const cases = [...CASES.spaceCopy.cases, ...CASES.bundled.map((kase) => ({ url: caseUrl(kase), ...(kase.withSpaceCopy ?? kase) }))];
+  assert.ok(cases.some((kase) => kase.site !== null && kase.kind === "no-reuse"), "a site read but not reused");
+  assert.ok(cases.some((kase) => kase.site !== null && kase.kind !== "no-reuse"), "a site refused");
+  for (const kase of cases) {
+    const refusal = withSpace.refusal(caseUrl(kase));
+    assert.deepEqual(refusal === null ? null : { ...refusal }, refusalFor(kase), kase.url);
   }
 });
 

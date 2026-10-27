@@ -114,9 +114,10 @@ test("the link-only list matches hosts by its own rule", () => {
   for (const host of ["notbooking.com", "booking.com.example.test", "amazon.example.io", "example.com", "127.0.0.1:8080"]) {
     assert.equal(name(host), null, host);
   }
-  // Each site has a kind: most bar agents; a "no-reuse" one is read but never reused.
+  // Each site has a kind. Every listed site bars agents today: RunRepeat's terms have no clause that bars only
+  // copying, so it is not read either.
   assert.equal(linkOnlySite("www.booking.com").kind, "no-agents");
-  assert.equal(linkOnlySite("runrepeat.com").kind, "no-reuse");
+  assert.equal(linkOnlySite("runrepeat.com").kind, "no-agents");
   assert.equal(LINK_ONLY.schema, "instafy.link-only-sites@1");
 });
 

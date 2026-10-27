@@ -268,13 +268,34 @@ fn the_link_only_list_is_well_formed_data() {
                 "{site}: {key}"
             );
         }
-        // A site is "no-reuse" only with a note on why reading is not barred.
+        // A site is "no-reuse" only on a clause that bars copying or
+        // republishing (its quote), with a note on why reading is not barred.
+        // Without such a clause its terms are unclear, so it stays "no-agents".
         if kind == "no-reuse" {
             assert!(
                 terms["note"]
                     .as_str()
                     .is_some_and(|note| !note.trim().is_empty()),
                 "{site}"
+            );
+            let quote = terms["quote"].as_str().unwrap_or("").to_lowercase();
+            assert!(
+                [
+                    "copy",
+                    "copies",
+                    "copying",
+                    "reproduc",
+                    "republish",
+                    "redistribut",
+                    "reuse",
+                    "re-use",
+                    "resale",
+                    "resell",
+                    "re-sell"
+                ]
+                .iter()
+                .any(|word| quote.contains(word)),
+                "{site}: the quote is the clause that bars reuse"
             );
         }
         assert!(

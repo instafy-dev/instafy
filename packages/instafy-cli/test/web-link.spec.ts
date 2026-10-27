@@ -30,6 +30,8 @@ const SKILL_LIST = JSON.parse(fs.readFileSync(SKILL_LIST_PATH, "utf8")) as {
   sites: ListedSite[];
 };
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-web-link-"));
+/** Words of a clause that bars copying or republishing a site's content. */
+const REUSE_CLAUSE = /\b(?:cop(?:y|ying|ies)|reproduc\w*|republish\w*|redistribut\w*|re-?use|re-?sell\w*|resale)\b/i;
 afterAll(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 const bundled = () => {
@@ -53,12 +55,26 @@ describe("the skill's list: kinds, evidence and guided-mode data", () => {
       expect(Number.isNaN(Date.parse(entry.terms.checked)), entry.name).toBe(false);
       expect(entry.terms.quote.trim().length, entry.name).toBeGreaterThan(10);
       expect(entry.terms.quote.length, entry.name).toBeLessThanOrEqual(200);
-      // A site is read but not reused only with a note on why reading is not barred.
-      if (entry.kind === "no-reuse") expect(entry.terms.note?.trim(), entry.name).toBeTruthy();
+      // A site is read but not reused only on a clause of its terms that bars copying or republishing (the clause
+      // that makes it "no-reuse"), with a note on why reading is not barred. Anything less is unclear: "no-agents".
+      if (entry.kind === "no-reuse") {
+        expect(entry.terms.note?.trim(), entry.name).toBeTruthy();
+        expect(entry.terms.quote, `${entry.name}: the quote is the clause that bars reuse`).toMatch(REUSE_CLAUSE);
+      }
     }
     // Most sites bar agents outright; the strict kind is the default.
     expect(SKILL_LIST.sites.filter((entry) => entry.kind === "no-agents").length).toBeGreaterThan(SKILL_LIST.sites.length / 2);
-    for (const name of ["Booking.com", "Agoda", "Airbnb", "Amazon", "Tripadvisor", "Expedia group"]) expect(site(name).kind, name).toBe("no-agents");
+    for (const name of ["Booking.com", "Agoda", "Airbnb", "Amazon", "Tripadvisor", "Expedia group", "RunRepeat"]) expect(site(name).kind, name).toBe("no-agents");
+  });
+
+  it("knows a clause that bars reuse from one that does not", () => {
+    for (const quote of ["You may not copy, reproduce or republish any content", "no reuse of our reviews without a licence", "must not redistribute the data"]) {
+      expect(quote).toMatch(REUSE_CLAUSE);
+    }
+    // A price for a data licence, or a page with no terms, bars nothing: such a site stays "no-agents".
+    for (const quote of ["Our most basic license agreement start at €1,000 per year", "Terms of use", "Contact us for API access"]) {
+      expect(quote).not.toMatch(REUSE_CLAUSE);
+    }
   });
 
   it("compiles every home page and search template without a warning, each on the site's own hosts", () => {
@@ -272,10 +288,22 @@ describe("the command", () => {
     const text = io();
     expect(await runWebLinkCli("Agoda", ["query=Lisbon"], {}, text.io, deps)).toBe(WEB_LINK_EXIT_OK);
     expect(text.out[0]).toMatch(/^Agoda \(no-agents, no deep links\)\nlink: https:\/\/www\.agoda\.com\/\ntype: .*: Lisbon\n/);
-    // A "no-reuse" site is readable; the tell says how its content may be used.
+    // RunRepeat bars agents too (nothing in its terms says an agent may read it): the person gets its home page.
+    const runRepeat = io();
+    expect(await runWebLinkCli("runrepeat.com", ["query=pegasus"], { json: true }, runRepeat.io, deps)).toBe(WEB_LINK_EXIT_OK);
+    expect(JSON.parse(runRepeat.out[0]!)).toMatchObject({ kind: "no-agents", link: "https://runrepeat.com/", typeIn: [{ name: "query", value: "pegasus" }] });
+    expect(JSON.parse(runRepeat.out[0]!).tell).toMatch(/Octo never opens or reads this link/);
+    // A "no-reuse" site (one a skill's copy adds) is readable; the tell says how its content may be used.
+    const skills = path.join(tmp, "reuse-skills");
+    const file = path.join(skills, "instafy-web-research", "references", LINK_ONLY_FILE);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ schema: LINK_ONLY_SCHEMA, sites: [{ name: "Example Reviews", match: ["reviews.example"], kind: "no-reuse", why: "terms bar copying", home: "https://reviews.example/" }] }),
+    );
     const reuse = io();
-    expect(await runWebLinkCli("runrepeat.com", [], { json: true }, reuse.io, deps)).toBe(WEB_LINK_EXIT_OK);
-    expect(JSON.parse(reuse.out[0]!)).toMatchObject({ kind: "no-reuse", link: "https://runrepeat.com/" });
+    expect(await runWebLinkCli("reviews.example", [], { json: true }, reuse.io, { skillRoots: [skills] })).toBe(WEB_LINK_EXIT_OK);
+    expect(JSON.parse(reuse.out[0]!)).toMatchObject({ kind: "no-reuse", link: "https://reviews.example/" });
     expect(JSON.parse(reuse.out[0]!).tell).toMatch(/never copy its reviews, photos or price lists/);
   });
 

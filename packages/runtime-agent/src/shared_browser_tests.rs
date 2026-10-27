@@ -7044,11 +7044,17 @@ fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redir
     fixture.prepare_routine_start("page-target");
     let mut authority_since = std::time::Instant::now();
     let bundled = cases["bundled"].as_array().expect("bundled cases");
-    // Both kinds are in the table: sites refused and sites that load.
+    let space_cases = cases["spaceCopy"]["cases"].as_array().expect("space cases");
+    // Both kinds are in the table: sites refused and sites that load (the
+    // bundled list bars agents on every site, so a "no-reuse" one comes from
+    // the space's copy).
     for kind in ["no-agents", "no-reuse"] {
         assert!(
-            bundled.iter().any(|case| case["site"].is_string()
-                && case["kind"].as_str().unwrap_or("no-agents") == kind),
+            space_cases
+                .iter()
+                .chain(bundled.iter().filter_map(|case| case.get("withSpaceCopy")))
+                .any(|case| case["site"].is_string()
+                    && case["kind"].as_str().unwrap_or("no-agents") == kind),
             "{kind}"
         );
     }
@@ -7058,7 +7064,7 @@ fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redir
     // With the space's copy, its additions hold too, and the bundled list
     // still does: a copy can make a site stricter, never looser.
     fixture.write_space_link_only(&cases["spaceCopy"]["list"].to_string());
-    for case in cases["spaceCopy"]["cases"].as_array().expect("space cases") {
+    for case in space_cases {
         check_link_only_case(&fixture, case, false, &mut authority_since);
     }
     for case in bundled {
