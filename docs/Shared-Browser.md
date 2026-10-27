@@ -453,7 +453,12 @@ Browser has tabs of its own (see Personal-Browser.md).
   the bundled list still applies. `open_tab`, `navigate` and a link, form or
   activation key that leads there are refused before any prompt, and a
   redirect one of Octo's steps causes is stopped by the step's request guard
-  before the request leaves the browser. The guard watches the tab's own
+  before the request leaves the browser. A copy nested in another wrapper (a
+  translator's copy of an archive's copy) counts, and so does an answer that
+  says it is a copy of a link-only site (an archive's Memento
+  `Link: <…>; rel="original"`, which names the page even at a short address
+  such as `archive.ph/AbCdE`): the guard stops it when the answer arrives,
+  before the page renders. The guard watches the tab's own
   document: a frame an ordinary page embeds from a link-only site (a map, a
   sign-in button, a captcha) loads as the page asks, since Octo neither reads
   nor drives frames, and does not fail the step. A page that is on a

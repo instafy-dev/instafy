@@ -52,8 +52,17 @@ load `redaction.js` first.
   (case, trailing dots, port, user info, IDN), and an address on one of the
   list's `wrappers` (a translator, cache, archive or reader proxy) is checked
   as the site it embeds, wherever the wrapper's `embeds` says that site is
-  written. The readers run one table of cases,
-  `test/link-only-cases.json`, through their own guards.
+  written. Wrappers nest: one that rewrites the host keeps the address's path
+  and query for the wrapper inside. Every host written in a wrapper's path or
+  query counts, an address of any length is checked, and one the URL parser
+  refuses has its host read leniently; a copy the check cannot see through
+  (nested too deeply, naming too many hosts, or a check that throws) is
+  refused as "a site this check cannot rule out" rather than read.
+  `mementoOriginals(header, base)` and `linkOnlyCopyOf(list, header, base)`
+  read a response's Memento `Link: <…>; rel="original"` header, so a page an
+  archive serves at a short address is checked as the page it copies. The
+  readers run one table of cases, `test/link-only-cases.json`, through their
+  own guards (a case's `pad` writes a long address out).
 
 The tests live with the Desktop Personal Browser
 (`packages/desktop-app/test/personal-browser-redaction.test.mjs`,

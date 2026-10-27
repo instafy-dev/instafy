@@ -317,27 +317,10 @@ function linkOnlyMessage(site: LinkOnlySite): string {
   return `${site.name} is link-only (${site.reason})${copy}`;
 }
 
-/** Addresses a response says it is a copy of: the Memento `Link: <…>; rel="original"` header (RFC 7089). */
+/** Addresses a response says it is a copy of: the Memento `Link: <…>; rel="original"` header (RFC 7089), read by the
+ * matcher the Shared and Personal Browser use too. */
 export function mementoOriginals(header: string | string[] | undefined, base: URL): string[] {
-  const text = (Array.isArray(header) ? header.join(",") : header ?? "").slice(0, 16_384);
-  const originals: string[] = [];
-  for (const match of text.matchAll(/<([^>]*)>([^<]*)/g)) {
-    // The parameters up to the comma that starts the next link value.
-    const rel = match[2]!
-      .replace(/,\s*$/, "")
-      .split(";")
-      .map((param) => param.trim())
-      .find((param) => /^rel\s*=/i.test(param));
-    const values = rel?.replace(/^rel\s*=\s*/i, "").replace(/^"|"$/g, "").toLowerCase().split(/\s+/) ?? [];
-    if (!values.includes("original")) continue;
-    try {
-      originals.push(new URL(match[1]!.trim(), base).href);
-    } catch {
-      // not an address
-    }
-    if (originals.length >= 4) break;
-  }
-  return originals;
+  return linkOnly.mementoOriginals(header, base);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -493,6 +476,8 @@ type CachedPage = {
   contentType: string;
   contentHash: string;
   redirects: string[];
+  /** the addresses the page said it is a copy of (Memento rel=original), redacted */
+  originals?: string[];
   lines: string[];
   links: PageLink[];
   structured: StructuredItem[];
@@ -968,9 +953,12 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
 
   if (!options.fresh) {
     const cached = ctx.cache.get<CachedPage>("pages", requested, LIMITS.pageTtlMs, ctx.now());
-    // A site listed as link-only since the page was cached is not served from the cache either.
+    // A site listed as link-only since the page was cached is not served from the cache either, nor a page that said
+    // it is a copy of one.
     const listed = (url: string) => Boolean(linkOnlySite(url, ctx.guard));
-    if (cached && ![requested, cached.finalUrl, ...cached.redirects].some(listed)) return present(page, cached, true, options, ctx.guard);
+    if (cached && ![requested, cached.finalUrl, ...cached.redirects, ...(cached.originals ?? [])].some(listed)) {
+      return present(page, cached, true, options, ctx.guard);
+    }
   }
 
   // Over budget or out of time: nothing is fetched, not even robots.txt (the reservation below re-checks under the lock).
@@ -1114,6 +1102,7 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     contentType: extra.contentType ?? "",
     contentHash: `sha256:${sha256(response.body)}`,
     redirects,
+    ...(response.originals.length ? { originals: response.originals.map((original) => redaction.redactUrl(original).text) } : {}),
     lines: redacted.digest.lines.slice(0, 20_000),
     links: redacted.digest.links,
     structured: redacted.digest.structured,

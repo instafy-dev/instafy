@@ -352,6 +352,16 @@ const pauseDocument = (frameId, url) => {
     }
   }
 };
+// A document's answer, paused only for a session that asked to see answers
+// (a Response-stage Document pattern), the way Chromium does.
+const pauseDocumentAnswer = (frameId, url, responseHeaders) => {
+  for (const session of fetchSessions) {
+    if (!session.answers) continue;
+    for (const handler of session.handlers) {
+      handler({ requestId: `response-${frameId}`, frameId, resourceType: "Document", request: { url }, responseStatusCode: 200, responseHeaders });
+    }
+  }
+};
 // Tabs opened through context.newPage(), kept in a file so they last across
 // controller processes the way Chromium's tabs do: [{ targetId, url }].
 const openedTabsPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_TABS;
@@ -431,6 +441,16 @@ const makePage = (targetId, opened = null) => {
           "main",
           process.env.INSTAFY_SHARED_BROWSER_FAKE_REDIRECT_URL || "https://www.booking.com/hotel/fixture.html",
         );
+      }
+      // The tab's own document loads an address that names no listed site
+      // (a short archive address), and its answer says which page it copies.
+      if (mode === "answers-with-link-header") {
+        const url = process.env.INSTAFY_SHARED_BROWSER_FAKE_REDIRECT_URL || "https://archive.ph/AbCdE";
+        pauseDocument("main", url);
+        pauseDocumentAnswer("main", url, [
+          { name: "Content-Type", value: "text/html" },
+          { name: "Link", value: process.env.INSTAFY_SHARED_BROWSER_FAKE_ANSWER_LINK || "" },
+        ]);
       }
       if (mode === "click-error-canary") {
         throw new Error(`element <button data-key="${CANARY}"> is not attached to the DOM`);
@@ -547,7 +567,12 @@ context = {
     const session = { handlers: [] };
     return {
       send: async (method, params) => {
-        if (method === "Fetch.enable") fetchSessions.add(session);
+        if (method === "Fetch.enable") {
+          fetchSessions.add(session);
+          session.answers = (params?.patterns || []).some(
+            (pattern) => pattern.requestStage === "Response" && pattern.resourceType === "Document",
+          );
+        }
         if (method === "Fetch.disable") fetchSessions.delete(session);
         if (fetchLogPath && (method === "Fetch.failRequest" || method === "Fetch.continueRequest")) {
           fs.appendFileSync(fetchLogPath, `${JSON.stringify({ method, requestId: params.requestId })}\n`);
@@ -6658,6 +6683,24 @@ impl EmbeddedControllerFixture {
         command.output().expect("run the redirected click")
     }
 
+    /// A step of Octo's whose document loads `url` and is answered with the
+    /// Memento `Link` header `link`.
+    fn click_answered_with(&self, url: &str, link: &str) -> Output {
+        let snapshot_id = self.snapshot_id_in("answers-with-link-header");
+        let mut command = self.command_for(
+            "answers-with-link-header",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&json!({ "index": 0, "snapshotId": snapshot_id }).to_string()),
+        );
+        command
+            .0
+            .env("INSTAFY_SHARED_BROWSER_FAKE_REDIRECT_URL", url)
+            .env("INSTAFY_SHARED_BROWSER_FAKE_ANSWER_LINK", link);
+        command.output().expect("run the answered click")
+    }
+
     fn write_space_link_only(&self, content: &str) {
         std::fs::create_dir_all(self.space_link_only.parent().expect("space copy folder"))
             .expect("space copy folder");
@@ -6665,10 +6708,26 @@ impl EmbeddedControllerFixture {
     }
 }
 
+/// A case's address, with a long case's `{pad}` written out.
+fn link_only_case_url(case: &JsonValue) -> String {
+    let url = case["url"].as_str().expect("case url");
+    match case.get("pad") {
+        Some(pad) => url.replace(
+            "{pad}",
+            &pad["text"]
+                .as_str()
+                .expect("pad text")
+                .repeat(pad["times"].as_u64().expect("pad times") as usize),
+        ),
+        None => url.to_string(),
+    }
+}
+
 fn check_link_only_case(fixture: &EmbeddedControllerFixture, case: &JsonValue) {
+    let full_url = link_only_case_url(case);
     let url = case["url"].as_str().expect("case url");
     std::fs::remove_file(&fixture.fetch_log).ok();
-    let output = fixture.click_redirected_to(url);
+    let output = fixture.click_redirected_to(&full_url);
     match case["site"].as_str() {
         Some(site) => {
             let refused = failure_of(&output);
@@ -6860,6 +6919,53 @@ fn the_spaces_copy_of_the_list_adds_sites_and_never_removes_a_bundled_one() {
         assert!(
             !warnings.contains("not json"),
             "the copy's text is not repeated: {status}"
+        );
+    }
+}
+
+#[test]
+fn octos_step_never_loads_a_page_that_says_it_is_a_copy_of_a_link_only_site() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let answer = |name: &str| (format!("Fetch.continueRequest"), name.to_string());
+    // A short archive address names no site; the answer's Memento header
+    // says which page it copies, and the copy is stopped before it renders.
+    for in_tab in [false, true] {
+        if in_tab {
+            fixture.open_tab("https://example.test/hotel");
+        }
+        std::fs::remove_file(&fixture.fetch_log).ok();
+        let refused = failure_of(&fixture.click_answered_with(
+            "https://archive.ph/AbCdE",
+            r#"<https://www.booking.com/hotel/x.html>; rel="original", <https://archive.ph/timegate/https://www.booking.com/hotel/x.html>; rel="timegate""#,
+        ));
+        assert!(
+            refused.contains(
+                "led to Booking.com (a page that says it is a copy of it), which is link-only, so it was not opened"
+            ),
+            "in a tab: {in_tab}: {refused}"
+        );
+        assert_eq!(
+            fixture.fetch_answers(),
+            vec![
+                answer("request-main"),
+                ("Fetch.failRequest".to_string(), "response-main".to_string())
+            ],
+            "in a tab: {in_tab}"
+        );
+    }
+    // A copy of another site, and an answer that names no original, load.
+    for link in [
+        r#"<https://example.test/report>; rel="original""#,
+        r#"<https://www.booking.com/>; rel="timegate""#,
+        "",
+    ] {
+        std::fs::remove_file(&fixture.fetch_log).ok();
+        payload_of(&fixture.click_answered_with("https://archive.ph/FgHiJ", link));
+        assert_eq!(
+            fixture.fetch_answers(),
+            vec![answer("request-main"), answer("response-main")],
+            "{link}"
         );
     }
 }

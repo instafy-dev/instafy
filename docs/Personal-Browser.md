@@ -521,7 +521,12 @@ only in the visible browser, so the rules are the ones a person sees:
   `open_tab` and `navigate` to such a site, a link to one, and
   every page load or redirect hop of a driven tab, and every frame of a page the
   agent opened, that would land on one are refused with `link_only_site`,
-  before any prompt or lookup. On a page that is
+  before any prompt or lookup. A copy nested in another wrapper (a
+  translator's copy of an archive's copy) counts, and a page or frame of a
+  driven tab whose answer says it is a copy of a link-only site (an archive's
+  Memento `Link: <…>; rel="original"`, which names the page even at a short
+  address such as `archive.ph/AbCdE`) is stopped when the answer arrives,
+  before the page renders. On a page that is
   already on one, because the person left a tab there, `snapshot`, `click`,
   `type`, `press`, `scroll` and `request_human_input` are refused the same way;
   in a tab the agent holds, `status` and `list_tabs` give only the site's name

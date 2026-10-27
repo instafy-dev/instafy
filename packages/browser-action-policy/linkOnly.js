@@ -16,11 +16,20 @@
  *   "subdomain-dashes" (www-example-com.translate.goog: "." written "-" and
  *   "-" written "--"), "path" (web.archive.org/web/2024/https://example.com/)
  *   or "query" (…/search?q=cache:example.com). A wrapper is never refused for
- *   itself, only for its copies of a listed site. Wrappers may nest.
+ *   itself, only for its copies of a listed site. Wrappers may nest: a
+ *   wrapper that rewrites the host keeps the page's path and query, so a
+ *   translator's copy of an archive's copy is the archive's copy too.
+ *   Every host name written in a wrapper's path or query counts, however
+ *   long the address and however many names it holds; a copy this cannot
+ *   see through (nested more than MAX_DEPTH wrappers deep, naming more than
+ *   MAX_EMBEDDED_NAMES hosts, or failing the check) is refused rather than
+ *   read unchecked.
  *
  * Hosts are compared the way a browser connects to them: lower case, no
  * trailing dots, IDN in punycode, without port or user info. An IP literal
- * never matches a name. Merging lists only adds: a space's copy cannot
+ * never matches a name. An address of any length is checked, and one the URL
+ * parser refuses (a label that is not valid punycode) has its host read
+ * leniently rather than not at all. Merging lists only adds: a space's copy cannot
  * remove a bundled site.
  *
  * Plain script with no imports. In CommonJS it exports its API; evaluated
@@ -38,21 +47,31 @@
   const EMBEDS = Object.freeze(["subdomain", "subdomain-dashes", "path", "query"]);
   const MAX_ENTRIES = 500;
   const MAX_PATTERNS_PER_ENTRY = 50;
-  // A wrapper inside a wrapper inside a wrapper is looked into; deeper is not.
-  const MAX_DEPTH = 3;
-  // Host names taken from one wrapper address, and the characters of one
-  // address part they are looked for in.
-  const MAX_EMBEDDED_NAMES = 32;
-  const MAX_SCANNED_CHARS = 8_192;
+  // view-source:, blob: and filesystem: addresses inside one another.
+  const MAX_INNER_ADDRESSES = 3;
+  // Wrappers inside wrappers are followed this deep. Real copies nest a few
+  // levels at most (each level takes part of a host name's 253 characters);
+  // a copy nested deeper is refused rather than read unchecked.
+  const MAX_DEPTH = 32;
+  // Different host names one wrapper address may write; one that writes more
+  // is refused rather than read unchecked.
+  const MAX_EMBEDDED_NAMES = 4_096;
   const LABEL = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
   const NAME = new RegExp(`^${LABEL}(?:\\.${LABEL})*$`);
   const SHORT_SUFFIX_LABEL = /^[a-z]{2,3}$/;
   const WEB_PROTOCOLS = new Set(["http:", "https:"]);
   // Browser addresses that show another address's page or data.
   const INNER_ADDRESS_PROTOCOLS = new Set(["view-source:", "blob:", "filesystem:"]);
-  // Characters that never belong to a host name, where host names in a
-  // wrapper's path or query are split apart. Linear: no backtracking.
-  const NOT_HOST_CHARACTER = /[^\p{L}\p{N}\p{M}.\-。．｡]+/u;
+  // Where host names in a wrapper's path or query are split apart: ASCII
+  // other than letters, digits, "." and "-", and white space and controls.
+  // Every other character stays with its name, since the URL parser maps some
+  // to ASCII ("ｂ", "。") and drops others (a soft hyphen, a zero-width
+  // space), and the name is then spelled the way the parser spells it.
+  // Linear: no backtracking.
+  const HOST_BREAK = /[\u0000-\u002c\u002f\u003a-\u0040\u005b-\u0060\u007b-\u007f\p{Z}\p{Cc}]+/u;
+  // Within a run the parser does not take as a host, the parts made of
+  // letters, digits, marks, format characters and dots are tried one by one.
+  const NOT_NAME_CHARACTER = /[^\p{L}\p{N}\p{M}\p{Cf}.\-。．｡]+/u;
   const OTHER_DOTS = /[。．｡]/g;
 
   // Every trailing dot goes ("example.com.." names the same site to a lenient
@@ -65,14 +84,86 @@
     return value.slice(start, end);
   }
 
+  // Dots and dashes at either end of a name written in a wrapper's address,
+  // with loops rather than a regular expression that backtracks on a long run.
+  function trimDotsAndDashes(value) {
+    const edge = (code) => code === 0x2e || code === 0x2d;
+    let start = 0;
+    let end = value.length;
+    while (start < end && edge(value.charCodeAt(start))) start += 1;
+    while (end > start && edge(value.charCodeAt(end - 1))) end -= 1;
+    return value.slice(start, end);
+  }
+
+  // An address of any length: a browser loads addresses far longer than any
+  // limit set here, so none is set.
   function parseAddress(address) {
     if (address && typeof address === "object" && typeof address.href === "string") address = address.href;
-    if (typeof address !== "string" || address.length > 65_536) return null;
+    if (typeof address !== "string") return null;
     try {
       return new URL(address);
     } catch (_) {
-      return null;
+      return lenientWebAddress(address);
     }
+  }
+
+  // An http(s) address the URL parser refuses, such as one with a label that
+  // is not valid punycode, may still reach a site through another parser or
+  // resolver. Its host, path and query are read leniently, so it is checked
+  // like any other address rather than not at all.
+  function lenientWebAddress(address) {
+    const text = address.replace(/[\t\n\r]/g, "");
+    let at = 0;
+    while (at < text.length && text.charCodeAt(at) <= 0x20) at += 1;
+    const colon = text.indexOf(":", at);
+    if (colon < 0) return null;
+    const protocol = `${text.slice(at, colon).toLowerCase()}:`;
+    if (!WEB_PROTOCOLS.has(protocol)) return null;
+    let start = colon + 1;
+    while (start < text.length && (text[start] === "/" || text[start] === "\\")) start += 1;
+    let end = start;
+    while (end < text.length && !"/\\?#".includes(text[end])) end += 1;
+    const authority = text.slice(start, end);
+    let host = authority.slice(authority.lastIndexOf("@") + 1);
+    if (host.startsWith("[")) {
+      host = host.slice(0, host.indexOf("]") + 1) || host;
+    } else if (host.includes(":")) {
+      host = host.slice(0, host.lastIndexOf(":"));
+    }
+    const rest = text.slice(end);
+    const hash = rest.indexOf("#");
+    const beforeHash = hash < 0 ? rest : rest.slice(0, hash);
+    const query = beforeHash.indexOf("?");
+    return {
+      protocol,
+      hostname: lenientHost(host),
+      pathname: query < 0 ? beforeHash : beforeHash.slice(0, query),
+      search: query < 0 ? "" : beforeHash.slice(query),
+      href: text,
+    };
+  }
+
+  // Each label as the URL parser spells it where it can, as written where not.
+  function lenientHost(raw) {
+    let host = raw;
+    try {
+      host = decodeURIComponent(raw);
+    } catch (_) {
+      // kept as written
+    }
+    host = host.toLowerCase().replace(OTHER_DOTS, ".");
+    if (host.startsWith("[")) return host;
+    return host
+      .split(".")
+      .map((label) => {
+        if (!label || /^[\x21-\x7e]*$/.test(label)) return label;
+        try {
+          return new URL(`http://${label}/`).hostname;
+        } catch (_) {
+          return label;
+        }
+      })
+      .join(".");
   }
 
   // The web address inside view-source:, blob: and filesystem: addresses.
@@ -84,7 +175,7 @@
   /** Is this an http(s) page, directly or inside view-source:, blob: or filesystem:? */
   function isWebAddress(address) {
     let url = parseAddress(address);
-    for (let depth = 0; url && depth <= MAX_DEPTH; depth += 1) {
+    for (let depth = 0; url && depth <= MAX_INNER_ADDRESSES; depth += 1) {
       if (WEB_PROTOCOLS.has(url.protocol)) return true;
       url = innerAddress(url);
     }
@@ -252,7 +343,7 @@
   // Percent-decoding, repeated for an address encoded twice. Bytes that are
   // not UTF-8 are decoded one by one rather than given up on.
   function decoded(text) {
-    let value = String(text).slice(0, MAX_SCANNED_CHARS);
+    let value = String(text);
     for (let round = 0; round < 3 && value.includes("%"); round += 1) {
       let next;
       try {
@@ -266,18 +357,33 @@
     return value;
   }
 
-  // Host names written in a wrapper's path or query: runs of host characters
-  // with a dot whose last label has a letter (not a time, version or address).
+  // One run of a wrapper's path or query as a host name, spelled the way a
+  // browser connects to it, or null: a name has a dot, and its last label a
+  // letter (not a time, a version or an address).
+  function embeddedName(run) {
+    const name = trimDotsAndDashes(run.replace(OTHER_DOTS, "."));
+    if (!name.includes(".") || !/\p{L}/u.test(name.slice(name.lastIndexOf(".") + 1))) return null;
+    return asciiName(name);
+  }
+
+  // The different host names written in a wrapper's path or query, all of
+  // them: up to MAX_EMBEDDED_NAMES + 1, which is one too many to check.
   function hostNamesIn(text) {
-    const names = [];
-    for (const token of decoded(text).split(NOT_HOST_CHARACTER)) {
-      if (names.length >= MAX_EMBEDDED_NAMES) break;
-      let name = trimDots(token.replace(OTHER_DOTS, "."));
-      while (name.startsWith("-") || name.endsWith("-")) name = trimDots(name.replace(/^-+|-+$/g, ""));
-      if (!name.includes(".") || !/\p{L}/u.test(name.slice(name.lastIndexOf(".") + 1))) continue;
-      names.push(name);
+    const names = new Set();
+    for (const run of decoded(text).split(HOST_BREAK)) {
+      if (names.size > MAX_EMBEDDED_NAMES) break;
+      if (!run) continue;
+      const whole = embeddedName(run);
+      if (whole) {
+        names.add(whole);
+        continue;
+      }
+      for (const piece of run.split(NOT_NAME_CHARACTER)) {
+        const name = piece && piece !== run ? embeddedName(piece) : null;
+        if (name) names.add(name);
+      }
     }
-    return names;
+    return [...names];
   }
 
   // "www-example-com" -> "www.example.com", "my--shop-de" -> "my-shop.de".
@@ -298,7 +404,7 @@
 
   // RFC 3492 decoding of one "xn--" label, or null.
   function punycodeLabel(label) {
-    if (!label.startsWith("xn--")) return null;
+    if (!label.startsWith("xn--") || label.length > 253) return null;
     const input = label.slice(4);
     const base = 36;
     const tMin = 1;
@@ -353,39 +459,57 @@
     }
   }
 
-  // The addresses a wrapper's address embeds, as `http://<name>/` URLs.
-  function embeddedAddresses(wrapper, prefix, url) {
-    const names = [];
-    if (prefix && wrapper.embeds.includes("subdomain")) names.push(prefix);
-    if (prefix && wrapper.embeds.includes("subdomain-dashes")) {
-      const label = prefix.slice(prefix.lastIndexOf(".") + 1);
-      names.push(undashed(label));
-      const unicode = punycodeLabel(label);
-      if (unicode) names.push(undashed(unicode));
-    }
-    if (wrapper.embeds.includes("path")) names.push(...hostNamesIn(url.pathname));
-    if (wrapper.embeds.includes("query")) names.push(...hostNamesIn(url.search.slice(1)));
-    const addresses = [];
-    for (const name of names.slice(0, MAX_EMBEDDED_NAMES)) {
-      const ascii = asciiName(name);
-      if (ascii) addresses.push(new URL(`http://${ascii}/`));
-    }
-    return addresses;
+  // A copy this check cannot see through, which is refused rather than read.
+  function unchecked(why, via) {
+    return { site: "a site this check cannot rule out", why, via };
   }
 
-  function matchUrl(list, url, depth) {
-    if (!WEB_PROTOCOLS.has(url.protocol)) {
-      const inner = depth < MAX_DEPTH ? innerAddress(url) : null;
-      return inner ? matchUrl(list, inner, depth + 1) : null;
+  // The sites a wrapper's address embeds, each as a host name. A site written
+  // into the host keeps the address's path and query (the wrapper serves the
+  // page's own path), which another wrapper inside may embed a site in; one
+  // written in the path or query has none of its own to look into, and any
+  // site inside it is written in that same path or query, so it is found
+  // there. `overflow` when the address writes too many names to check.
+  function embeddedOf(wrapper, prefix, part, scans) {
+    const found = [];
+    const rewritten = (raw) => {
+      const host = asciiName(raw);
+      if (host) found.push({ host, part });
+    };
+    if (prefix && wrapper.embeds.includes("subdomain")) rewritten(prefix);
+    if (prefix && wrapper.embeds.includes("subdomain-dashes")) {
+      const label = prefix.slice(prefix.lastIndexOf(".") + 1);
+      rewritten(undashed(label));
+      const unicode = punycodeLabel(label);
+      if (unicode) rewritten(undashed(unicode));
     }
-    const host = hostOfUrl(url);
-    if (!host) return null;
+    if (part) {
+      for (const [embed, text] of [["path", part.pathname], ["query", part.search.slice(1)]]) {
+        if (!wrapper.embeds.includes(embed)) continue;
+        let names = scans.get(text);
+        if (!names) {
+          names = hostNamesIn(text);
+          scans.set(text, names);
+        }
+        if (names.length > MAX_EMBEDDED_NAMES) return { found, overflow: true };
+        for (const host of names) found.push({ host, part: null });
+      }
+    }
+    return { found, overflow: false };
+  }
+
+  // The link-only site a host is on, directly or as the copy a wrapper on it
+  // serves. `part` is the address's path and query, or null for a host
+  // written in a wrapper's path or query. Each host is looked into once.
+  function matchHost(list, host, part, depth, state) {
     for (const site of list.sites) {
       if (site.patterns.some((pattern) => prefixBefore(host, pattern) !== null)) {
         return { site: site.name, why: site.why, via: [] };
       }
     }
-    if (depth >= MAX_DEPTH) return null;
+    const key = part ? `${host} with the path` : host;
+    if (state.seen.has(key)) return null;
+    state.seen.add(key);
     for (const wrapper of list.wrappers) {
       let prefix = null;
       for (const pattern of wrapper.patterns) {
@@ -393,9 +517,13 @@
         if (prefix !== null) break;
       }
       if (prefix === null) continue;
-      for (const embedded of embeddedAddresses(wrapper, prefix, url)) {
-        const found = matchUrl(list, embedded, depth + 1);
-        if (found) return { ...found, via: [wrapper.name, ...found.via] };
+      const { found, overflow } = embeddedOf(wrapper, prefix, part, state.scans);
+      if (overflow) return unchecked(`its address writes more than ${MAX_EMBEDDED_NAMES} host names`, [wrapper.name]);
+      if (!found.length) continue;
+      if (depth >= MAX_DEPTH) return unchecked(`it is nested in more than ${MAX_DEPTH} wrappers`, [wrapper.name]);
+      for (const inner of found) {
+        const hit = matchHost(list, inner.host, inner.part, depth + 1, state);
+        if (hit) return { ...hit, via: [wrapper.name, ...hit.via] };
       }
     }
     return null;
@@ -409,8 +537,63 @@
    */
   function linkOnlyMatch(list, address) {
     if (!list || !Array.isArray(list.sites)) return null;
-    const url = parseAddress(address);
-    return url ? matchUrl(list, url, 0) : null;
+    let url = parseAddress(address);
+    for (let inner = 0; url && !WEB_PROTOCOLS.has(url.protocol); inner += 1) {
+      url = inner < MAX_INNER_ADDRESSES ? innerAddress(url) : null;
+    }
+    const host = url ? hostOfUrl(url) : null;
+    if (!host) return null;
+    try {
+      return matchHost(list, host, { pathname: String(url.pathname || ""), search: String(url.search || "") }, 0, {
+        seen: new Set(),
+        scans: new Map(),
+      });
+    } catch (_) {
+      // A guard that throws would leave a browser's request hanging or end a
+      // read; a web address the check could not finish is refused instead.
+      return unchecked("the check could not finish", []);
+    }
+  }
+
+  /**
+   * The addresses a response says it is a copy of: each address of a Memento
+   * `Link` header (RFC 7089) whose `rel` names "original", resolved against
+   * the response's own address. Archives send it, so a short archive address
+   * (archive.ph/AbCdE) still names the page it copies. `header` is the
+   * header's value, or its values.
+   */
+  function mementoOriginals(header, base) {
+    const values = Array.isArray(header) ? header : [header];
+    const text = values.filter((value) => typeof value === "string").join(",");
+    const originals = new Set();
+    for (const match of text.matchAll(/<([^>]*)>([^<]*)/g)) {
+      // The parameters up to the comma that starts the next link value.
+      const rel = match[2]
+        .split(";")
+        .map((param) => param.trim())
+        .find((param) => /^rel\s*=/i.test(param));
+      const names = rel ? rel.replace(/^rel\s*=\s*/i, "").replace(/,.*$/s, "").replace(/"/g, "").toLowerCase().split(/\s+/) : [];
+      if (!names.includes("original")) continue;
+      const target = match[1].trim();
+      try {
+        originals.add(new URL(target, base).href);
+      } catch (_) {
+        originals.add(target);
+      }
+    }
+    return [...originals];
+  }
+
+  /**
+   * The link-only site a response says it is a copy of (its Memento
+   * `rel="original"`): `{ site, why, via, original }`, or null.
+   */
+  function linkOnlyCopyOf(list, linkHeader, base) {
+    for (const original of mementoOriginals(linkHeader, base)) {
+      const hit = linkOnlyMatch(list, original);
+      if (hit) return { ...hit, original };
+    }
+    return null;
   }
 
   return Object.freeze({
@@ -419,6 +602,8 @@
     compileLinkOnlyList,
     linkOnlyListFrom,
     linkOnlyMatch,
+    linkOnlyCopyOf,
+    mementoOriginals,
     isWebAddress,
   });
 });

@@ -13,7 +13,7 @@
 // the list, which the readers running in the space (`instafy web read`, the
 // Shared Browser) enforce as well; Desktop has no channel that carries a
 // space's files with a Personal Browser turn, so it does not read that copy.
-import { isWebAddress, linkOnlyListFrom, linkOnlyMatch } from "@instafy/browser-action-policy/linkOnly";
+import { isWebAddress, linkOnlyCopyOf, linkOnlyListFrom, linkOnlyMatch } from "@instafy/browser-action-policy/linkOnly";
 import bundledLinkOnlySites from "virtual:instafy/link-only-sites";
 
 export const LINK_ONLY_SITES_SCHEMA = "instafy.link-only-sites@1";
@@ -22,7 +22,7 @@ export const LINK_ONLY_SITES_SCHEMA = "instafy.link-only-sites@1";
 export const BUNDLED_LINK_ONLY_SITES: unknown = bundledLinkOnlySites;
 
 export type PersonalBrowserLinkOnlyRefusal =
-  | { code: "link_only_site"; site: string; via?: string[] }
+  | { code: "link_only_site"; site: string; via?: string[]; copy?: true }
   | { code: "link_only_list_unavailable" };
 
 export type PersonalBrowserLinkOnlyGuard = {
@@ -30,6 +30,12 @@ export type PersonalBrowserLinkOnlyGuard = {
   readonly available: boolean;
   /** Why the agent may not read, open or act on this address, or null. Never refuses a non-web address. */
   refusal(url: string): PersonalBrowserLinkOnlyRefusal | null;
+  /**
+   * Why the agent may not read a page whose answer says it is a copy of a
+   * link-only site (an archive's Memento `Link: <…>; rel="original"`), or null.
+   * `headers` are the answer's headers, any case.
+   */
+  copyRefusal(headers: Record<string, string | string[]> | undefined, url: string): PersonalBrowserLinkOnlyRefusal | null;
 };
 
 /**
@@ -47,6 +53,16 @@ export function createPersonalBrowserLinkOnlyGuard(data: unknown): PersonalBrows
       if (!hit) return null;
       return hit.via.length ? { code: "link_only_site", site: hit.site, via: hit.via } : { code: "link_only_site", site: hit.site };
     },
+    copyRefusal(headers, url) {
+      if (!isWebAddress(url)) return null;
+      if (list === null) return { code: "link_only_list_unavailable" };
+      const link = Object.entries(headers ?? {})
+        .filter(([name]) => name.toLowerCase() === "link")
+        .flatMap(([, value]) => (Array.isArray(value) ? value : [value]));
+      const hit = link.length ? linkOnlyCopyOf(list, link, url) : null;
+      if (!hit) return null;
+      return { code: "link_only_site", site: hit.site, ...(hit.via.length ? { via: hit.via } : {}), copy: true };
+    },
   };
 }
 
@@ -58,7 +74,9 @@ export function personalBrowserLinkOnlyMessage(refusal: PersonalBrowserLinkOnlyR
   if (refusal.code === "link_only_list_unavailable") {
     return `The link-only site list is unavailable in this Desktop build, so the agent reads and opens no web page. ${action}`;
   }
-  const copy = refusal.via?.length ? ` This address is its copy on ${refusal.via.join(", then ")}.` : "";
+  const copy = refusal.copy
+    ? " This page says it is a copy of it."
+    : refusal.via?.length ? ` This address is its copy on ${refusal.via.join(", then ")}.` : "";
   return `${refusal.site} is link-only: its terms bar AI agents or automated copying, so the agent never reads, opens or uses it.${copy} ${action} ` +
     "Give the person the plain link; they may open it themselves and use Send page to Octo.";
 }

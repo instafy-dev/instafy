@@ -29,4 +29,12 @@ export declare function linkOnlyListFrom(
   additions?: ReadonlyArray<{ data: unknown; source: string }>,
 ): { list: LinkOnlyList | null; warnings: string[]; sources: string[] };
 export declare function linkOnlyMatch(list: LinkOnlyList | null, address: string | URL): LinkOnlyMatch | null;
+/** The addresses a response's Memento `Link` header names as the original it copies (`rel="original"`). */
+export declare function mementoOriginals(header: string | readonly string[] | undefined | null, base?: string | URL): string[];
+/** The link-only site a response says it is a copy of, with the address it names. */
+export declare function linkOnlyCopyOf(
+  list: LinkOnlyList | null,
+  linkHeader: string | readonly string[] | undefined | null,
+  base?: string | URL,
+): (LinkOnlyMatch & { original: string }) | null;
 export declare function isWebAddress(address: string | URL): boolean;

@@ -1,5 +1,5 @@
 {
-  "about": "One table of link-only matching cases that every reader runs through its own guard: `instafy web read` (packages/instafy-cli/test/web-read.spec.ts), the Shared Browser controller (packages/runtime-agent/src/shared_browser_tests.rs) and the Personal Browser (packages/desktop-app/test/personal-browser-link-only.test.mjs). `bundled` runs against the web-research skill's own list; `spaceCopy` runs against that list plus `spaceCopy.list` as a space's additions, where the reader can see the space. `site` is the link-only site the address is on, or null; `via` names the wrappers it was found through.",
+  "about": "One table of link-only matching cases that every reader runs through its own guard: `instafy web read` (packages/instafy-cli/test/web-read.spec.ts), the Shared Browser controller (packages/runtime-agent/src/shared_browser_tests.rs) and the Personal Browser (packages/desktop-app/test/personal-browser-link-only.test.mjs). `bundled` runs against the web-research skill's own list; `spaceCopy` runs against that list plus `spaceCopy.list` as a space's additions, where the reader can see the space. `site` is the link-only site the address is on, or null; `via` names the wrappers it was found through. A case with `pad` stands for a long address: its `{pad}` is `pad.text` written `pad.times` times.",
   "bundled": [
     { "url": "https://www.booking.com/hotel/x.html", "site": "Booking.com" },
     { "url": "HTTPS://WWW.BOOKING.COM/hotel/x.html", "site": "Booking.com" },
@@ -46,6 +46,22 @@
     { "url": "https://r.jina.ai/https://www.agoda.com/x", "site": "Agoda", "via": ["the Jina reader proxy"] },
     { "url": "https://web.archive.org/web/2024/https://www-booking-com.translate.goog/", "site": "Booking.com", "via": ["the Wayback Machine", "Google Translate's page proxy"] },
     { "url": "https://archive.ph/newest/https://web.archive.org/web/2024/https%253A%252F%252Fwww.booking.com%252F", "site": "Booking.com", "via": ["archive.today"] }
+,
+
+    { "url": "https://web-archive-org.translate.goog/web/2024/https://www.booking.com/hotel/x.html?_x_tr_sl=auto&_x_tr_tl=en", "site": "Booking.com", "via": ["Google Translate's page proxy", "the Wayback Machine"] },
+    { "url": "https://r-jina-ai.translate.goog/https://www.agoda.com/x", "site": "Agoda", "via": ["Google Translate's page proxy", "the Jina reader proxy"] },
+    { "url": "https://webcache-googleusercontent-com.translate.goog/search?q=cache:www.vrbo.com/1", "site": "Expedia group", "via": ["Google Translate's page proxy", "Google's page cache"] },
+    { "url": "https://web-archive-org.translate.goog/web/2024/https://www--booking--com-translate-goog.cdn.ampproject.org/c/s/x", "site": "Booking.com", "via": ["Google Translate's page proxy", "the Wayback Machine", "the AMP cache", "Google Translate's page proxy"] },
+    { "url": "https://web-archive-org.translate.goog/web/2024/https://example.org/", "site": null },
+    { "url": "https://r.jina.ai/https://a0.example:a1.example:a2.example:a3.example:a4.example:a5.example:a6.example:a7.example:a8.example:a9.example:a10.example:a11.example:a12.example:a13.example:a14.example:a15.example:a16.example:a17.example:a18.example:a19.example:a20.example:a21.example:a22.example:a23.example:a24.example:a25.example:a26.example:a27.example:a28.example:a29.example:a30.example:a31.example:a32.example:a33.example:a34.example:a35.example:a36.example:a37.example:a38.example:a39.example@www.booking.com/", "site": "Booking.com", "via": ["the Jina reader proxy"] },
+    { "url": "https://r.jina.ai/https://{pad}@www.booking.com/", "pad": {"text": "a", "times": 9000}, "site": "Booking.com", "via": ["the Jina reader proxy"] },
+    { "url": "https://archive.org/wayback/available?{pad}url=https://www.booking.com/", "pad": {"text": "x=1&", "times": 3000}, "site": "Booking.com", "via": ["the Wayback Machine"] },
+    { "url": "https://www.booking.com/hotel?q={pad}", "pad": {"text": "a", "times": 70000}, "site": "Booking.com" },
+    { "url": "https://r.jina.ai/https://book%C2%ADing.com/", "site": "Booking.com", "via": ["the Jina reader proxy"] },
+    { "url": "https://web.archive.org/web/2024/https://www.boo%E2%80%8Bking.com/", "site": "Booking.com", "via": ["the Wayback Machine"] },
+    { "url": "https://xn--a.booking.com/", "site": "Booking.com" },
+    { "url": "https://web.archive.org/web/2024/https://xn--a.booking.com/", "site": "Booking.com", "via": ["the Wayback Machine"] },
+    { "url": "https://web.archive.org/web/2024/https://xn--a.example/", "site": null }
   ],
   "spaceCopy": {
     "list": {
@@ -66,6 +82,7 @@
       { "url": "https://www.booking.com.proxy.example/", "site": "Booking.com", "via": ["Example proxy"] },
       { "url": "https://web.archive.org/web/2024/https://shop.example/", "site": "Example Shop", "via": ["the Wayback Machine"] },
       { "url": "https://xn--www-bcher-example-62b.cdn.ampproject.org/", "site": "Example Shop", "via": ["the AMP cache"] },
+      { "url": "https://web.archive.org.proxy.example/web/2024/https://www.shop.example/", "site": "Example Shop", "via": ["Example proxy", "the Wayback Machine"] },
       { "url": "https://other.example.proxy.example/", "site": null },
       { "url": "https://proxy.example/", "site": null },
       { "url": "https://www.booking.com/hotel/x.html", "site": "Booking.com" }

@@ -716,8 +716,11 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   `name.co.uk`). Hosts match however the address spells them (case, trailing dots, port, user info, international
   names). A wrapper is a service that serves other sites' pages at its own address; `embeds` says where its address
   writes the site (`subdomain`, `subdomain-dashes` as in `www-example-com.translate.goog`, `path` as in
-  `web.archive.org/web/2024/https://example.com/`, or `query`). A page that says it is a copy of another address
-  (the Memento `Link: <…>; rel="original"` header archives send) is checked as that address too. A copy that does not
+  `web.archive.org/web/2024/https://example.com/`, or `query`). Wrappers nest (a translator's copy of an archive's copy is
+  the archived site), every host written in a wrapper's path or query counts, and an address of any length is checked; a
+  copy the check cannot see through (nested more than 32 wrappers deep, or naming more than 4,096 hosts) is refused. A
+  page that says it is a copy of another address (the Memento `Link: <…>; rel="original"` header archives send) is
+  checked as that address too, also when it is served from the cache. A copy that does not
   parse, has another schema or is not a list is ignored with a warning, and the bundled list still applies.
   `guards.linkOnly` reports the sites, wrappers and sources (`bundled` and each copy) in force. The matching is
   `@instafy/browser-action-policy`'s `linkOnly.js`, which the Shared and Personal Browser run too.

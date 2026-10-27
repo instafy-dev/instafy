@@ -21,6 +21,8 @@ const SKILL_LIST = path.join(
 const source = JSON.parse(fs.readFileSync(SKILL_LIST, "utf8"));
 // The matching cases every reader runs through its own guard (`instafy web read`, the Shared Browser and this one).
 const CASES = JSON.parse(fs.readFileSync(path.join(packageRoot, "../browser-action-policy/test/link-only-cases.json"), "utf8"));
+// A case's address, with a long case's `{pad}` written out.
+const caseUrl = (kase) => (kase.pad ? kase.url.replace("{pad}", kase.pad.text.repeat(kase.pad.times)) : kase.url);
 
 test("the bundled link-only list is the web-research skill's own file, in every Desktop bundle that enforces it", () => {
   assert.deepEqual(linkOnly.BUNDLED_LINK_ONLY_SITES, source, "dist/personalBrowserLinkOnly.js was built from another copy");
@@ -72,7 +74,7 @@ test("example.* covers one or two short suffix labels; example.com covers its su
 test("every case in the readers' shared table is refused or let through, wrappers' copies and host spellings included", () => {
   const guard = linkOnly.PERSONAL_BROWSER_LINK_ONLY_GUARD;
   for (const kase of CASES.bundled) {
-    const refusal = guard.refusal(kase.url);
+    const refusal = guard.refusal(caseUrl(kase));
     const expected = kase.site === null
       ? null
       : kase.via ? { code: "link_only_site", site: kase.site, via: kase.via } : { code: "link_only_site", site: kase.site };

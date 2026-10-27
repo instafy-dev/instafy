@@ -190,6 +190,19 @@ function linkOnlySiteOf(rawUrl) {
   return hit.via.length ? `${hit.site} (its copy on ${hit.via.join(", then ")})` : hit.site;
 }
 
+// The link-only site a document's answer says it is a copy of, or null: an
+// archive's Memento `Link: <…>; rel="original"` header names the page it
+// copies even at a short address (archive.ph/AbCdE) that names no site.
+// `headers` are CDP's [{ name, value }].
+function linkOnlyCopyOf(headers, rawUrl) {
+  if (LINK_ONLY_SITES === null) return null;
+  const link = (Array.isArray(headers) ? headers : [])
+    .filter((header) => String(header?.name || "").toLowerCase() === "link")
+    .map((header) => String(header?.value || ""));
+  const hit = link.length ? LINK_ONLY.api.linkOnlyCopyOf(LINK_ONLY_SITES, link, String(rawUrl || "")) : null;
+  return hit ? `${hit.site} (a page that says it is a copy of it)` : null;
+}
+
 const LIST_UNAVAILABLE_MESSAGE =
   "The link-only site list is unavailable, so Octo opens, reads and does nothing in any tab. Nothing was opened, read or done.";
 const SEND_PAGE_HINT =
@@ -2636,10 +2649,18 @@ async function guardStepDocuments(page) {
     if (typeof mainFrameId !== "string" || !mainFrameId) {
       throw new Error("The tab's main frame is unknown");
     }
+    // Each document request pauses before it leaves, and again when its answer
+    // arrives (CDP marks that stage with a status or an error), before the
+    // page renders: an answer may say it is a copy of a link-only site.
     session.on("Fetch.requestPaused", (event) => {
       const url = event?.request?.url || "";
       const ownDocument = typeof event?.frameId !== "string" || event.frameId === mainFrameId;
-      const site = !ownDocument ? null : LINK_ONLY_SITES === null ? "an unknown site" : linkOnlySiteOf(url);
+      const answered = event?.responseStatusCode !== undefined || event?.responseErrorReason !== undefined;
+      const site = !ownDocument
+        ? null
+        : LINK_ONLY_SITES === null
+          ? "an unknown site"
+          : linkOnlySiteOf(url) || (answered ? linkOnlyCopyOf(event.responseHeaders, url) : null);
       const answer = site
         ? session.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" })
         : session.send("Fetch.continueRequest", { requestId: event.requestId });
@@ -2647,7 +2668,10 @@ async function guardStepDocuments(page) {
       answer.catch(() => {});
     });
     await session.send("Fetch.enable", {
-      patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }],
+      patterns: [
+        { urlPattern: "*", resourceType: "Document", requestStage: "Request" },
+        { urlPattern: "*", resourceType: "Document", requestStage: "Response" },
+      ],
     });
   } catch (_) {
     if (session) await session.detach().catch(() => {});

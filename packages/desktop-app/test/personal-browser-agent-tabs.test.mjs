@@ -675,6 +675,37 @@ test("a translator's, cache's or archive's copy of a link-only site is refused l
   assert.deepEqual(views[1].webContents.loads, ["https://web.archive.org/web/2024/https://docs.example.test/"]);
 });
 
+test("a page that says it is a copy of a link-only site (Memento rel=original) is stopped when its answer arrives, in every tab the agent drives", async () => {
+  const { host, views, personView } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  const copyOf = (original, name = "Link") => ({ [name]: [`<${original}>; rel="original", <https://archive.ph/timegate/${original}>; rel="timegate"`] });
+  // A short archive address names no site; its answer says which page it copies.
+  for (const contents of [views[1].webContents, personView.webContents]) {
+    for (const resourceType of ["mainFrame", "subFrame"]) {
+      const answer = await headersReceived(contents, {
+        resourceType,
+        url: "https://archive.ph/AbCdE",
+        ip: "93.184.216.36",
+        responseHeaders: copyOf("https://www.booking.com/hotel/x.html", resourceType === "mainFrame" ? "Link" : "link"),
+      });
+      assert.deepEqual(plain(answer), { cancel: true }, resourceType);
+    }
+    // A copy of another site, or an answer without the header, is an ordinary page.
+    assert.deepEqual(plain(await headersReceived(contents, { resourceType: "mainFrame", url: "https://archive.ph/FgHiJ", ip: "93.184.216.36", responseHeaders: copyOf("https://docs.example.test/") })), {});
+    assert.deepEqual(plain(await headersReceived(contents, { resourceType: "mainFrame", url: "https://archive.ph/FgHiJ", ip: "93.184.216.36", responseHeaders: { "Content-Type": ["text/html"] } })), {});
+  }
+  await assert.rejects(host.handleControlOperation("snapshot", {}), (error) => {
+    assert.equal(error.code, "link_only_site");
+    assert.match(error.message, /Booking\.com is link-only/);
+    assert.match(error.message, /This page says it is a copy of it\. Desktop stopped the page before it loaded/);
+    return true;
+  });
+  // The person's own browsing, once paused, is untouched.
+  host.pauseAgentControl();
+  assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType: "mainFrame", url: "https://archive.ph/AbCdE", ip: "93.184.216.36", responseHeaders: copyOf("https://www.booking.com/") })), {});
+});
+
 test("the person's own browsing is unchanged: once paused, link-only sites and private addresses load as before", async () => {
   const { host, views, personView } = fixture();
   await resume(host, "routine");
