@@ -65,10 +65,10 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 30_000,
-  // The 100+ required cases run serially; hosted timings project seven to
-  // eight minutes in total. Leave room for startup and teardown while
+  // The 157 required cases run serially; hosted timings project about
+  // fifteen minutes in total. Leave room for startup and teardown while
   // bounding the complete lane without extending any individual test.
-  globalTimeout: 600_000,
+  globalTimeout: 1_200_000,
   outputDir: "test-results/browser-ci/browser-ui",
   reporter: [
     ["list"],
