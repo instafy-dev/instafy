@@ -1,13 +1,11 @@
-import { useEffect, useState, type Ref } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
 import { Bookmark, Trash } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
+import { Text } from "../../../components/Text";
+import { ToolbarCountButton } from "../../../components/ToolbarCountButton";
 import type { ControllerMessageStash } from "../../../services/runtimeController/messageStashes";
-import {
-  DARK_DIVIDER_BORDER_CLASS,
-  DARK_PANEL_BORDER_CLASS,
-  DARK_PANEL_STRONG_BG_CLASS,
-} from "../../../theme/darkSurfaces";
+import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 
 export const CHAT_MESSAGE_STASH_PANEL_ID = "chat-message-stashes-panel";
 
@@ -42,29 +40,19 @@ export function ChatMessageStashTrigger({
     return null;
   }
 
-  const countLabel = count > 99 ? "99+" : String(count);
   return (
-    <Button
-      type="button"
+    <ToolbarCountButton
+      count={count}
       aria-label={`Stashed drafts (${count})`}
       title={`Stashed drafts (${count})`}
       aria-controls={CHAT_MESSAGE_STASH_PANEL_ID}
-      aria-expanded={expanded}
+      expanded={expanded}
       ref={triggerRef}
-      variant={expanded ? "secondary" : "ghost"}
-      preset="toolbar"
       onPress={() => onExpandedChange(!expanded)}
-      className="relative flex-none"
       data-testid="chat-message-stashes-summary"
     >
       <Bookmark aria-hidden="true" className="h-4 w-4" data-testid="chat-message-stashes-icon" />
-      <span
-        aria-hidden="true"
-        className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-slate-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white dark:bg-slate-300 dark:text-slate-950 dark:ring-[color:var(--color-studio-dark-panel)]"
-      >
-        {countLabel}
-      </span>
-    </Button>
+    </ToolbarCountButton>
   );
 }
 
@@ -78,6 +66,7 @@ export function ChatMessageStashPanel({
   ChatMessageStashTrayProps,
   "stashes" | "restoredStashId" | "busy" | "onRestore" | "onDelete"
 >) {
+  const restoreButtons = useRef(new Map<string, HTMLButtonElement>());
   if (stashes.length === 0) {
     return null;
   }
@@ -90,19 +79,19 @@ export function ChatMessageStashPanel({
       className="basis-full"
     >
       <Surface
-        tone="default"
+        tone="subtle"
         radius="xl"
         shadow="none"
-        className={`ml-auto w-full overflow-hidden border border-slate-200/70 bg-white/95 sm:w-[min(24rem,100%)] ${DARK_PANEL_STRONG_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`}
+        className="ml-auto w-full overflow-hidden sm:w-[min(24rem,100%)]"
       >
         <div
-          className="flex min-h-10 items-center gap-2 px-3 py-1.5"
+          className="flex min-h-10 items-center gap-2 px-4 py-1.5"
           data-testid="chat-message-stashes-panel-header"
         >
           <Bookmark aria-hidden="true" className="h-4 w-4 flex-none text-slate-500 dark:text-slate-400" />
-          <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800 dark:text-slate-100">
+          <Text as="span" variant="bodyStrong" tone="primary" className="min-w-0 flex-1 truncate">
             Stashed drafts
-          </span>
+          </Text>
         </div>
         <div
           className={`max-h-[min(16rem,35dvh)] divide-y divide-slate-200/70 overflow-y-auto overscroll-contain border-t border-slate-200/70 dark:divide-slate-800/80 ${DARK_DIVIDER_BORDER_CLASS}`}
@@ -112,26 +101,29 @@ export function ChatMessageStashPanel({
             const preview = stash.text || "Untitled draft";
             const accessiblePreview = buildAccessibleDraftPreview(preview);
             return (
-              <div key={stash.id} className="flex items-center gap-2.5 px-3 py-2.5">
+              <div key={stash.id} className="flex items-center gap-2 p-1.5">
                 <Button
+                  ref={button => {
+                    if (button) restoreButtons.current.set(stash.id, button);
+                    else restoreButtons.current.delete(stash.id);
+                  }}
                   type="button"
                   variant="ghost"
-                  size="sm"
-                  radius="md"
-                  className="min-w-0 flex-1 justify-start bg-transparent px-0 py-0 text-left shadow-none hover:bg-transparent data-[hovered]:bg-transparent"
+                  preset="inline"
+                  className="min-w-0 flex-1 justify-start text-left"
                   aria-label={`Restore stashed draft ${index + 1}: ${accessiblePreview}`}
                   isDisabled={busy}
                   onPress={() => onRestore(stash)}
                   data-testid="chat-message-stash-restore"
                 >
                   <span className="min-w-0">
-                    <span className="block truncate text-sm text-slate-800 dark:text-slate-100">
+                    <Text as="span" variant="bodyStrong" tone="inherit" className="block truncate">
                       {preview}
-                    </span>
+                    </Text>
                     {restoredStashId === stash.id ? (
-                      <span className="block text-xxs font-semibold uppercase tracking-[0.14em] text-primary-600 dark:text-primary-300">
+                      <Text as="span" variant="caption" tone="accent" className="block">
                         Restored in composer
-                      </span>
+                      </Text>
                     ) : null}
                   </span>
                 </Button>
@@ -139,10 +131,15 @@ export function ChatMessageStashPanel({
                   type="button"
                   aria-label={`Delete stashed draft ${index + 1}: ${accessiblePreview}`}
                   variant="ghost"
-                  size="xs"
-                  radius="full"
+                  tone="danger"
                   isDisabled={busy}
-                  onPress={() => onDelete(stash.id)}
+                  onPress={() => {
+                    // Keep focus in the panel when the focused delete control
+                    // disappears. The owner handles the final draft's removal.
+                    const next = stashes[index + 1] ?? stashes[index - 1];
+                    if (next) restoreButtons.current.get(next.id)?.focus();
+                    onDelete(stash.id);
+                  }}
                   data-testid="chat-message-stash-delete"
                 >
                   <Trash aria-hidden="true" className="h-4 w-4" />

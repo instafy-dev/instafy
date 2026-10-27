@@ -48,6 +48,12 @@ determines the winner. Arbitrary layout classes remain supported.
   chips and compound tab controls retain their purpose-specific shapes.
   Browser address fields use the shared input's 12px radius, including the mobile
   address trigger. Their embedded Go/Clear utilities use the shared 8px corners.
+- Image attachment previews use `AttachmentThumbnail`: 48px in the composer and
+  96px in messages, with shared quiet-button interaction, 8px corners and no
+  decorative border or shadow. The image supplies the thumbnail's content; it is
+  not a file-type icon. Loading/unavailable states use the muted `Surface` and
+  shared caption text. The composer tray uses `Surface tone="muted" radius="xl"
+  shadow="none"`; its local classes only arrange and scroll the previews.
 - Content-sized toolbar controls, such as participant stacks and a browser-location
   icon plus chevron, use `Button preset="toolbar"`. It owns flat elevation, 8px
   corners, 4px padding and a 32px minimum mouse target;
@@ -61,9 +67,20 @@ determines the winner. Arbitrary layout classes remain supported.
   and Requested beside the corresponding person. The compact Give control action
   sits in the first requester's row; its accessible label retains the complete
   recipient name. Keep other controls in the footer and preserve request order.
-  The composer's stash and queue triggers use this same toolbar preset: quiet
-  when closed, with the secondary surface when expanded. The stash count badge
-  stays circular; the trigger does not supply its own border, palette or size.
+  The composer's stash and queue triggers share `ToolbarCountButton`, built on
+  this same toolbar preset: quiet when closed, with the secondary surface when
+  expanded. Bookmark means stashed drafts; the numbered list means queued
+  messages. Both have circular count badges, capped at 99+, with the exact count
+  in their accessible label and tooltip. The opened queue visibly names
+  "Queued messages" above the bubbles. Chat / Browser retain visible text labels.
+  Triggers do not supply their own border, palette or size.
+  Stash restore rows use the inline preset; their panel uses the subtle surface
+  and shared text variants. Delete, goal utilities, Collapse draft and Remove
+  attachment use quiet utility icons with 8px corners. Goal actions move onto
+  their own row in a narrow pane, preserving readable summary text and touch
+  targets. Browser page chips use the inline preset with a neutral selected
+  surface and quiet inactive actions. They retain their pressed/page-selection
+  semantics and horizontal scrolling; they are not conversation navigation tabs.
 - `Input` and both native/styled `Select` share medium defaults and control size tokens.
   `Field label` plus matching `htmlFor`/control `id` also labels app-rendered selects;
   explicit ARIA labels remain authoritative. `Checkbox` owns its interaction target

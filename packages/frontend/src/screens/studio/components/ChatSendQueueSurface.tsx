@@ -1,6 +1,9 @@
 import type { Ref } from "react";
+import { NumberedListLeft } from "iconoir-react";
 import { Button } from "../../../components/Button";
+import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
+import { ToolbarCountButton } from "../../../components/ToolbarCountButton";
 import {
   buildQueuedMessageAccessiblePreview,
   ChatSendQueue,
@@ -55,28 +58,24 @@ export function ChatSendQueueTrigger({
     return null;
   }
 
-  const countLabel = totalQueuedCount > 99 ? "99+" : String(totalQueuedCount);
   const preview = buildQueuedMessageAccessiblePreview(collapsedQueuedMessageSummary?.message);
   const title = preview
     ? `Queued messages (${totalQueuedCount}): ${preview}`
     : `Queued messages (${totalQueuedCount})`;
 
   return (
-    <Button
-      type="button"
+    <ToolbarCountButton
+      count={totalQueuedCount}
       aria-label={title}
       title={title}
       aria-controls={CHAT_SEND_QUEUE_ITEMS_ID}
-      aria-expanded={expanded}
+      expanded={expanded}
       ref={triggerRef}
-      variant={expanded ? "secondary" : "ghost"}
-      preset="toolbar"
       onPress={onToggleExpanded}
-      className="shrink-0 whitespace-nowrap"
       data-testid="chat-send-queue-agent-summary"
     >
-      <span>Queued {countLabel}</span>
-    </Button>
+      <NumberedListLeft aria-hidden="true" className="h-4 w-4" data-testid="chat-send-queue-icon" />
+    </ToolbarCountButton>
   );
 }
 
@@ -115,7 +114,11 @@ export function ChatSendQueuePanel({
     >
       <div className={editingQueuedItem ? "w-full" : "ml-auto w-full sm:w-[min(24rem,100%)]"}>
         {totalQueuedCount > 0 && chatSendQueueExpanded ? (
-          <span className="sr-only" data-testid="chat-send-queue-panel-header">Queue</span>
+          <Surface tone="subtle" radius="xl" shadow="none" className="mx-1 mb-2 px-3 py-2">
+            <Text as="h3" variant="bodyStrong" tone="primary" data-testid="chat-send-queue-panel-header">
+              Queued messages
+            </Text>
+          </Surface>
         ) : null}
         {chatSendQueueDisplay.length > 0 && chatSendQueueExpanded ? (
           <div className="max-h-[min(32rem,60dvh)] overflow-y-auto overscroll-contain">

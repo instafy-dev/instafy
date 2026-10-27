@@ -13,6 +13,7 @@ import {
   useState,
 } from "react";
 import { Globe, MoreHoriz, WarningTriangle } from "iconoir-react";
+import { AttachmentThumbnail } from "../../../components/AttachmentThumbnail";
 import { Button } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
@@ -254,9 +255,6 @@ export function extractImageAttachments(message: ChatMessage): ChatImageAttachme
   );
 }
 
-const ATTACHMENT_TILE_CLASS =
-  "h-24 w-24 rounded-xl border border-slate-200 bg-slate-50 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]";
-
 type StorageImageState =
   | { storagePath: string; status: "loading" }
   | { storagePath: string; status: "ready"; url: string }
@@ -361,26 +359,28 @@ function ChatAttachmentImageTile({
 }) {
   if (!imageUrl) {
     return (
-      <div
+      <Surface
+        tone="muted"
+        radius="lg"
+        shadow="none"
         role="img"
         aria-label={`Loading ${alt}`}
         aria-busy="true"
-        className={ATTACHMENT_TILE_CLASS}
+        className="h-24 w-24"
         data-testid="chat-image-attachment-placeholder"
       />
     );
   }
 
   return (
-    <button
-      type="button"
-      className="h-24 w-24 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 shadow-sm transition hover:bg-slate-100/60 hover:opacity-95 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:hover:bg-[var(--color-studio-dark-control-hover)]"
-      onClick={() => onOpenImage?.(imageUrl, alt)}
+    <AttachmentThumbnail
+      src={imageUrl}
+      alt={alt}
+      size="message"
+      onPress={() => onOpenImage?.(imageUrl, alt)}
       aria-label={`Open ${alt}`}
       data-testid="chat-image-attachment-thumbnail"
-    >
-      <img src={imageUrl} alt={alt} className="h-full w-full object-cover" />
-    </button>
+    />
   );
 }
 
@@ -398,29 +398,38 @@ function ChatMessageStorageImage({
   let tile: ReactNode;
   if (state.status === "unavailable") {
     tile = (
-      <div
+      <Surface
+        tone="muted"
+        radius="lg"
+        shadow="none"
         role="img"
         aria-label={`${alt} is unavailable`}
         title={alt}
-        className={`${ATTACHMENT_TILE_CLASS} flex items-center justify-center p-2 text-center text-xs text-slate-500 dark:text-slate-400`}
+        className="flex h-24 w-24 items-center justify-center p-2 text-center"
         data-testid="chat-image-attachment-unavailable"
       >
-        Image unavailable
-      </div>
+        <Text as="span" variant="caption" tone="muted">Image unavailable</Text>
+      </Surface>
     );
   } else if (state.status === "failed") {
     tile = (
-      <button
+      <Button
         type="button"
-        onClick={retry}
+        variant="secondary"
+        size="icon"
+        radius="lg"
+        elevation="none"
+        onPress={retry}
         aria-label={`Couldn't load ${alt}. Try again`}
         title={alt}
-        className={`${ATTACHMENT_TILE_CLASS} flex flex-col items-center justify-center gap-1 p-2 text-center text-xs text-slate-500 transition hover:bg-slate-100/60 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)]`}
+        className="h-24 w-24"
         data-testid="chat-image-attachment-retry"
       >
-        <span>Couldn't load image</span>
-        <span className="font-medium text-slate-700 dark:text-slate-200">Try again</span>
-      </button>
+        <span className="flex flex-col items-center gap-1 p-2 text-center">
+          <Text as="span" variant="caption" tone="muted">Couldn't load image</Text>
+          <Text as="span" variant="captionStrong">Try again</Text>
+        </span>
+      </Button>
     );
   } else {
     tile = (

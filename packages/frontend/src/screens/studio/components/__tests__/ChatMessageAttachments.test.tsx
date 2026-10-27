@@ -157,6 +157,27 @@ describe("chat message attachments", () => {
     root = createRoot(container);
   });
 
+  it("opens the image from its accessible thumbnail", async () => {
+    const onOpenImage = vi.fn();
+    const imageUrl = "data:image/png;base64,cG5n";
+    await act(async () => {
+      root.render(
+        <UserMessageBubble
+          message={messageWith([{ kind: "image", previewUrl: imageUrl, fileName: "shot.png" }])}
+          projectId={PROJECT}
+          onOpenImage={onOpenImage}
+        />,
+      );
+    });
+
+    const thumbnail = container.querySelector<HTMLButtonElement>('[data-testid="chat-image-attachment-thumbnail"]');
+    expect(thumbnail?.tagName).toBe("BUTTON");
+    expect(thumbnail?.getAttribute("aria-label")).toBe("Open shot.png");
+
+    await act(async () => thumbnail?.click());
+    expect(onOpenImage).toHaveBeenCalledExactlyOnceWith(imageUrl, "shot.png");
+  });
+
   it("shows a plain placeholder when Storage refuses the read", async () => {
     mocks.downloadChatAttachment.mockResolvedValue({ ok: false, reason: "refused" });
     await renderBubble(messageWith([{ kind: "image", storagePath: STORAGE_PATH, fileName: "shot.png" }]));
@@ -244,8 +265,8 @@ describe("chat message attachments", () => {
     await renderBubble(messageWith([{ kind: "image", storagePath: STORAGE_PATH, fileName: "shot.png" }]));
 
     expect(mocks.downloadChatAttachment).not.toHaveBeenCalled();
-    expect(container.querySelector('[data-testid="chat-image-attachment-placeholder"]')?.getAttribute("aria-label"))
-      .toBe("Loading shot.png");
+    const placeholder = container.querySelector('[data-testid="chat-image-attachment-placeholder"]');
+    expect(placeholder?.getAttribute("aria-label")).toBe("Loading shot.png");
     const observer = observers.find((entry) => entry.targets.length > 0)!;
     await act(async () => {
       observer.callback(

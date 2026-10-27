@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatMessageStashTray } from "../ChatMessageStashTray";
@@ -54,7 +54,7 @@ describe("ChatMessageStashTray", () => {
     expect(summary?.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector(`#${summary?.getAttribute("aria-controls")}`)).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-message-stashes-icon"]')).not.toBeNull();
-    expect(summary?.querySelector('span[aria-hidden="true"]')?.className).toContain("bg-slate-600");
+    expect(summary?.querySelector('span[aria-hidden="true"]')?.textContent).toBe("2");
     expect(container.textContent).toBe("2");
     await act(async () => {
       (summary as HTMLButtonElement).click();
@@ -129,5 +129,19 @@ describe("ChatMessageStashTray", () => {
     expect(deleteName).toBe(`Delete stashed draft 1: ${"a".repeat(119)}…`);
     expect(restoreName).not.toContain(text);
     expect(deleteName).not.toContain(text);
+  });
+
+  it("moves focus to the next draft, then the previous draft when deleting the last row", async () => {
+    function StatefulTray() {
+      const [items, setItems] = useState([stash, { ...stash, id: "middle", text: "Middle" }, { ...stash, id: "last", text: "Last" }]);
+      return <ChatMessageStashTray stashes={items} restoredStashId={null} expanded onRestore={vi.fn()}
+        onDelete={id => setItems(current => current.filter(item => item.id !== id))} />;
+    }
+    await act(async () => root.render(<StatefulTray />));
+    const deletes = () => container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-message-stash-delete"]');
+    await act(async () => { deletes()[1].focus(); deletes()[1].click(); });
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Restore stashed draft 2: Last");
+    await act(async () => { deletes()[1].focus(); deletes()[1].click(); });
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Restore stashed draft 1: Try the smaller type scale");
   });
 });
