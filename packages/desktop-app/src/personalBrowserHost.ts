@@ -238,9 +238,12 @@ type PersonalBrowserTab = {
   withholdNextDocumentAfter: string | null;
   // The agent drives this tab: it opened it, or the tab was on screen while
   // the agent held control since the last Resume. While the agent holds
-  // control, every page and frame load here stays public and off link-only
-  // sites.
+  // control, every page load here stays public and off link-only sites.
   agentDriven: boolean;
+  // The page in this tab is one the agent opened (a page load while it drove
+  // the tab), not one the person opened: its frames and its own requests are
+  // held to the agent's rules too.
+  agentDocument: boolean;
   // A page load Desktop stopped in this tab while the agent drove it; the
   // agent's next page step in that control epoch reports it once.
   blockedPageLoad: { epoch: number; code: string; message: string } | null;
@@ -261,6 +264,7 @@ function createPersonalBrowserTab(id: string, openedBy: PersonalBrowserTab["open
     withheldDocumentTokens: new Set(),
     withholdNextDocumentAfter: null,
     agentDriven: openedBy === "agent",
+    agentDocument: openedBy === "agent",
     blockedPageLoad: null,
   };
 }
@@ -1343,6 +1347,8 @@ export class PersonalBrowserHost {
       if (isActive() && this.tabCapture.controlActive) {
         this.markTeammateActivity(this.currentPartition, url);
       }
+      // A page that loaded while the agent did not drive the tab is the person's.
+      if (!this.drivesTab(tab)) tab.agentDocument = false;
       // An approval for a navigation that never happened ends with the page.
       tab.approvedNavigations.clear();
       if (isActive()) this.humanInputRequest = null;
@@ -1413,13 +1419,14 @@ export class PersonalBrowserHost {
     session.setPermissionRequestHandler((contents, permission, callback, details) =>
       callback(this.tabCapture.allowsVideoCapture(contents, permission, details)));
     session.on("will-download", (event) => event.preventDefault());
-    // While the agent holds control, every page and frame request of a tab it
-    // drives, each redirect hop included, stays off link-only sites and on
-    // public addresses before it connects, and every response there, the
-    // page's own requests included, must come from a public address. The
-    // person's own browsing is not filtered.
+    // While the agent holds control, every page load in a tab it drives, each
+    // redirect hop included, and every frame of a page it opened there stays
+    // off link-only sites and on public addresses before it connects; their
+    // responses, and those of that page's own requests, must come from a
+    // public address. A page the person opened, and the person's own
+    // browsing, are not filtered.
     installPersonalBrowserRequestGuard(session, {
-      drivenTab: (webContentsId) => this.drivenTabForContents(webContentsId),
+      drivenTab: (webContentsId, resourceType) => this.drivenTabForRequest(webContentsId, resourceType),
       onStopped: (tab, resourceType, stopped) => {
         // A stopped page (not a frame) is reported by the agent's next step.
         if (resourceType === "mainFrame") tab.blockedPageLoad = { epoch: this.controlEpoch, ...stopped };
@@ -1438,11 +1445,22 @@ export class PersonalBrowserHost {
     return this.agentActing() && tab.agentDriven && this.tabs.includes(tab);
   }
 
-  private drivenTabForContents(webContentsId: number | undefined): PersonalBrowserTab | null {
+  /**
+   * The tab a request holds to the agent's rules: every page load in a tab
+   * the agent drives, which from then on holds a page the agent opened, and
+   * the frames and own requests of such a page. A page the person opened
+   * keeps working as it is while the agent reads it.
+   */
+  private drivenTabForRequest(webContentsId: number | undefined, resourceType: string): PersonalBrowserTab | null {
     if (webContentsId === undefined) return null;
     const tab = this.tabs.find((entry) =>
       entry.view !== null && !entry.view.webContents.isDestroyed() && entry.view.webContents.id === webContentsId) ?? null;
-    return tab && this.drivesTab(tab) ? tab : null;
+    if (!tab || !this.drivesTab(tab)) return null;
+    if (resourceType === "mainFrame") {
+      tab.agentDocument = true;
+      return tab;
+    }
+    return tab.agentDocument ? tab : null;
   }
 
   private linkOnlyError(refusal: PersonalBrowserLinkOnlyRefusal, action: string): PersonalBrowserControlError {

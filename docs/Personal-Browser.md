@@ -459,28 +459,33 @@ only in the visible browser, so the rules are the ones a person sees:
   it opened, the tab on screen when the person resumed and every tab it shows
   with `select_tab`, the person's own tab included, until the person takes
   control back. A tab of the person's that stays in the background is not
-  driven. Once the person has control again (Pause, Escape, **Take over**),
-  none of the rules below apply to their browsing.
+  driven. Every page load in a driven tab is the agent's, and so is the page
+  it loads: that page's frames and its own requests are held to the rules
+  below too. A page the person opened keeps working as it is while the agent
+  reads it (a local app's scripts, requests and frames go on), but navigating
+  away from it is the agent's. Once the person has control again (Pause,
+  Escape, **Take over**), none of the rules below apply to their browsing.
 - **Public pages only, in every tab.** `open_tab`, `navigate` and a link the
   agent clicks open only public addresses: a loopback, private-network,
   link-local or local host name is refused with `private_address_blocked`
   before anything asks, and so is a name that resolves to one. Every page and
   frame request of a driven tab, each redirect hop included, resolves its host
   the same way in the session's request filter and is cancelled before it
-  connects when it is not public; a local name written with a final dot
-  (`localhost.`) is still local. A redirect or page-started navigation to such
-  an address is stopped without a prompt.
+  connects when it is not public (frames only in a page the agent opened); a
+  local name written with a final dot (`localhost.`) is still local. A
+  redirect or page-started navigation to such an address is stopped without a
+  prompt.
 - **The address actually connected to.** Chromium resolves the name again when
   it connects, so a name can answer with a public address for that check and a
   private one for the connection (DNS rebinding). Every response reports the
   address Chromium connected to (`ip` in the `webRequest.onHeadersReceived`
   details; Electron's typings list it only for `onBeforeRedirect`, so the
-  Personal Browser Electron smoke checks that it is there). Any response in a
-  driven tab from an address that is not public is cancelled before the page
-  renders or receives it: a page or frame load (the agent gets
-  `private_address_blocked`), and the page's own requests too (scripts,
-  images, `fetch`), so a page that is already open cannot read a private
-  address through a name that changes its answer later. Nothing from such a
+  Personal Browser Electron smoke checks that it is there). A response from an
+  address that is not public is cancelled before the page renders or receives
+  it: a page load in a driven tab (the agent gets `private_address_blocked`),
+  and a frame or the page's own request (scripts, images, `fetch`) of a page
+  the agent opened, so such a page cannot read a private address through a
+  name that changes its answer later either. Nothing from such a
   response is shown, read or followed, but the request itself has reached that
   address by then. A response from the HTTP cache made no connection and
   reports no address, so the check before the request stands. Through a proxy
@@ -493,8 +498,9 @@ only in the visible browser, so the rules are the ones a person sees:
   or driven by the agent. Desktop bundles that same file, the one runtime-agent
   embeds, at build time, and a test fails when the bundled copy differs from the
   skill's file. `open_tab` and `navigate` to such a site, a link to one, and
-  every page, frame and redirect hop of a driven tab that would land on one are
-  refused with `link_only_site`, before any prompt or lookup. On a page that is
+  every page load or redirect hop of a driven tab, and every frame of a page the
+  agent opened, that would land on one are refused with `link_only_site`,
+  before any prompt or lookup. On a page that is
   already on one, because the person left a tab there, `snapshot`, `click`,
   `type`, `press`, `scroll` and `request_human_input` are refused the same way;
   `status` and `list_tabs` give only the site's name (`linkOnlySite`), and the

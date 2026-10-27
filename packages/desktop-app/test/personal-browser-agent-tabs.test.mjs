@@ -794,3 +794,28 @@ test("a navigation the page starts to a name that resolves to a private address 
   assert.equal(dialogs.length, asked + 1);
   assert.match(dialogs.at(-1).message, /shop\.example\.test/);
 });
+
+test("a page the person opened keeps working while the agent reads it; a page the agent opens there is held to its rules", async () => {
+  const { host, personView } = fixture();
+  // The person's own page, a local app, on screen when they resume.
+  personView.webContents.url = "http://localhost:5173/";
+  await resume(host, "routine");
+  await host.handleControlOperation("snapshot", {});
+  // Its frames and its own requests (scripts, fetch, the dev server's socket) go on as before.
+  for (const resourceType of ["subFrame", "xhr", "script", "webSocket"]) {
+    assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType, url: "http://localhost:5173/api" })), {}, resourceType);
+    assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType, url: "http://localhost:5173/api", ip: "127.0.0.1" })), {}, resourceType);
+  }
+  // A page load in that tab is the agent's, and holds to its rules.
+  assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "mainFrame", url: "http://localhost:5173/next" })), { cancel: true });
+  await rejectsWith(host.handleControlOperation("snapshot", {}), "private_address_blocked");
+  // So does the page the agent opens there, frames and own requests included.
+  await host.handleControlOperation("navigate", { url: "https://news.example.test/" });
+  assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "subFrame", url: "https://www.google.com/maps/embed" })), { cancel: true });
+  assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType: "xhr", url: "https://news.example.test/api", ip: "10.0.0.5" })), { cancel: true });
+  // Once the person has paused and opened a page of their own, it is theirs again.
+  host.pauseAgentControl();
+  await host.navigate("http://localhost:5173/");
+  await resume(host, "routine");
+  assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType: "xhr", url: "http://localhost:5173/api", ip: "127.0.0.1" })), {});
+});
