@@ -282,7 +282,8 @@ describe("the command", () => {
   it("refuses a value that is not name=value, a name given twice, an unknown placeholder or an unlisted site with exit 64", async () => {
     expect(() => parseLinkValues(["Lisbon"])).toThrow(/is not name=value/);
     expect(() => parseLinkValues(["query=a", "query=b"])).toThrow(/query is given twice/);
-    expect(parseLinkValues(["query=a=b", "adults=2"])).toEqual({ query: "a=b", adults: "2" });
+    expect({ ...parseLinkValues(["query=a=b", "adults=2"]) }).toEqual({ query: "a=b", adults: "2" });
+    expect(webLink("booking.com", parseLinkValues(["__proto__=x"]), deps)).toMatchObject({ ok: false, error: expect.stringMatching(/\{__proto__\} is not a placeholder/) });
     for (const [site, pairs] of [
       ["booking.com", ["Lisbon"]],
       ["booking.com", ["color=red"]],

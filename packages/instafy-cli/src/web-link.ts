@@ -41,7 +41,8 @@ export class WebLinkUsageError extends Error {}
 
 /** `name=value` pairs, each name once. */
 export function parseLinkValues(raw: string[]): Record<string, string> {
-  const values: Record<string, string> = {};
+  // No prototype, so a name such as __proto__ is a name like any other (and refused as an unknown placeholder).
+  const values: Record<string, string> = Object.create(null);
   for (const pair of raw) {
     const at = pair.indexOf("=");
     const name = at > 0 ? pair.slice(0, at).trim() : "";
