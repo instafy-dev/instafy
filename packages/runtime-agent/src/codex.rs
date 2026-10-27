@@ -8770,7 +8770,11 @@ required = true
             "python3 -c \"import subprocess; print(subprocess.run(['instafy','web','search','ramen shinjuku','--json'], capture_output=True, text=True).stdout)\"",
             "cat /tmp/search.json",
         ] {
-            assert_eq!(run_command(script, WEB_SEARCH_JSON_OUTPUT), kept_json, "{script}");
+            assert_eq!(
+                run_command(script, WEB_SEARCH_JSON_OUTPUT),
+                kept_json,
+                "{script}"
+            );
         }
         // The same report, compacted by jq: one line, so no activity line of its own; still nothing of it is kept.
         let compact = "{\"ok\":true,\"status\":\"ok\",\"activity\":\"web search \\\"ramen\\\" · 1 result\",\"results\":[{\"rank\":1,\"url\":\"https://blog.example.org/ramen\",\"text\":\"<untrusted_page_content url=\\\"https://blog.example.org/ramen\\\" read_at=\\\"x\\\" viewer=\\\"search result\\\">\\ntitle: Ramen diary\\n</untrusted_page_content>\"}]}\n";
