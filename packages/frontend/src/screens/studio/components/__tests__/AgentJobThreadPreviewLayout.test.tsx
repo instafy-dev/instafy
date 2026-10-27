@@ -342,6 +342,52 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.textContent).toContain("Serving map");
   });
 
+  // Live test, 2026-10-27: pressing the old step-count chip hid the step list
+  // for good. The line that replaced it must open, close and reopen Details,
+  // and opening Details must not move it: a short settled reply drops the
+  // turn's chrome, and bringing that chrome back on open pushed the line down
+  // from under the pointer.
+  it("opens, closes and reopens Details from the line, which stays where it was", async () => {
+    const now = Date.now();
+    const message = threadMessage([
+      commandStep("one", ADD_POINT_ACTIVITY, { timestamp: now - 3_000 }),
+      commandStep("two", WEB_READ_ACTIVITY, { timestamp: now - 2_000 }),
+      {
+        id: "reply",
+        role: "assistant",
+        authorId: null,
+        content: "Here's your Lisbon weekend.",
+        timestamp: now - 1_000,
+        files: null,
+        metadata: { jobId: JOB_ID, source: "agent", kind: "result", outcome: "success" },
+      },
+    ]);
+
+    for (const showHeaderAvatar of [true, false]) {
+      await act(async () => {
+        root.render(<LiveAgentJobThreadPreview key={String(showHeaderAvatar)} message={message} showHeaderAvatar={showHeaderAvatar} />);
+      });
+      const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
+      expect(line?.tagName).toBe("BUTTON");
+      const header = () => container.querySelector('[data-testid="agent-thread-preview-header"]') !== null;
+      const spine = () => container.querySelector('[data-testid="agent-thread-spine-end"]') !== null;
+      const closedChrome = { header: header(), spine: spine() };
+      const details = () => container.querySelector('[data-testid="turn-activity-details"]');
+
+      for (const expectedOpen of [true, false, true, false, true]) {
+        await act(async () => {
+          line?.click();
+        });
+        expect(container.querySelector('[data-testid="turn-activity-line"]'), String(showHeaderAvatar)).toBe(line);
+        expect(line?.getAttribute("aria-expanded")).toBe(String(expectedOpen));
+        expect(line?.textContent).toBe(`Looked up a place, read 6 pages${expectedOpen ? "Hide details" : "Details"}`);
+        expect(details() !== null).toBe(expectedOpen);
+        expect({ header: header(), spine: spine() }, `header avatar ${showHeaderAvatar}`).toEqual(closedChrome);
+      }
+      expect(details()?.querySelectorAll('[data-testid="turn-activity-command"]')).toHaveLength(2);
+    }
+  });
+
   it("says Thinking once the model has started, before its first step", async () => {
     const message = threadMessage([
       {

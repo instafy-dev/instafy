@@ -426,10 +426,11 @@ export function AgentJobThreadPreviewLayout({
   const hasUsefulPreview =
     isCompleted && hasPreview && !["", "completed", "thinking", "reasoning"].includes(normalizeThreadPlaceholderText(previewText));
   const showSummaryBody = isCompleted && (hasUsefulFinalSummary || hasUsefulPreview || terminalStatusMarker !== null);
+  // Opening Details never changes this: the line must stay under the pointer
+  // that opened it, so the turn keeps its chrome either way.
   const canUseTightCompletedLayoutBase =
     isCompleted &&
     showSummaryBody &&
-    !showDetailsPanel &&
     finalSummaryDisplayContent.length > 0 &&
     (hideThreadSpine || finalSummaryDisplayContent.length <= 420);
   // A short settled reply drops the run-activity spine, even with a file-change

@@ -186,6 +186,26 @@ for (const dark of [false, true]) {
       await page.keyboard.press("Space");
       await expect(line).toHaveAttribute("aria-expanded", "false");
       await expect(page.getByRole("list", { name: "Steps" })).toHaveCount(0);
+
+      // Live test, 2026-10-27: the old step-count chip hid the steps for good.
+      // The line reopens them, by pointer and keyboard, and never moves.
+      // Its start stays put; only "Details" becomes "Hide details".
+      const place = async () => {
+        const box = await line.boundingBox();
+        return box && { x: box.x, y: box.y, height: box.height };
+      };
+      const closedPlace = await place();
+      for (const open of [true, false, true]) {
+        await line.click();
+        await expect(line).toHaveAttribute("aria-expanded", String(open));
+        await expect(page.getByRole("list", { name: "Steps" })).toHaveCount(open ? 1 : 0);
+        expect(await place()).toEqual(closedPlace);
+      }
+      await page.keyboard.press("Enter");
+      await expect(line).toHaveAttribute("aria-expanded", "false");
+      await page.keyboard.press("Enter");
+      await expect(line).toHaveAttribute("aria-expanded", "true");
+      await expect(page.getByRole("list", { name: "Steps" }).getByRole("listitem")).toHaveCount(2);
       expect(errors, errors.join("; ")).toEqual([]);
     });
   }
