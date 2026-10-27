@@ -21,8 +21,10 @@ import {
 } from "iconoir-react";
 import { DialogTrigger } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
-import { Button, IconButton } from "../../../components/Button";
+import { IconButton } from "../../../components/Button";
+import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Text } from "../../../components/Text";
+import { StudioMenuAction, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { CHAT_SLASH_COMMANDS } from "../../../conversations/slashCommands";
@@ -84,46 +86,22 @@ function ActionRow({
   testId?: string;
   disabled?: boolean;
   /**
-   * Native tooltip for a disabled row. It sits on a wrapper because the
-   * disabled Button has pointer-events none, so the pointer reaches the
-   * wrapper instead.
+   * Keep the native tooltip on a wrapper so the reason remains reachable
+   * even when the action itself is disabled.
    */
   hoverTitle?: string;
 }) {
   const row = (
-    <Button
+    <StudioMenuAction
       type="button"
-      variant="ghost"
-      size="sm"
-      radius="xl"
       onPress={onPress}
       isDisabled={disabled}
-      className={`${description ? "h-auto min-h-11 py-2" : "h-11"} w-full justify-start px-2.5 text-left`}
       data-testid={testId}
     >
-      <span className="flex w-full items-center gap-3">
-        <span className="inline-flex h-8 w-8 flex-none items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 text-slate-700 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-200">
-          {icon}
-        </span>
-        <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
-          {description ? (
-            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <Text as="span" variant="bodyStrong" tone="primary" className="text-sm">
-                {title}
-              </Text>
-              <span className="whitespace-normal text-xs font-normal text-slate-500 dark:text-slate-400">
-                {description}
-              </span>
-            </span>
-          ) : (
-            <Text as="span" variant="bodyStrong" tone="primary" className="truncate text-sm">
-              {title}
-            </Text>
-          )}
-          {end ? <span className="flex-none text-slate-400 dark:text-slate-500">{end}</span> : null}
-        </span>
-      </span>
-    </Button>
+      <MenuItemContent start={icon} end={end} description={description}>
+        {title}
+      </MenuItemContent>
+    </StudioMenuAction>
   );
   return hoverTitle ? <div title={hoverTitle}>{row}</div> : row;
 }
@@ -250,23 +228,17 @@ export function ComposerActionMenu({
       </IconButton>
       <StudioDialogPopover
         placement="top start"
-        offset={10}
-        className="w-[min(15rem,calc(100vw-1.25rem))] p-2"
+        layout="menu"
+        className="w-64"
         data-testid="composer-action-menu"
       >
         {view === "commands" ? (
           <div className="space-y-1" onKeyDown={moveRowFocus}>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              radius="xl"
+            <ActionRow
+              icon={<NavArrowLeft className="h-4 w-4" aria-hidden="true" />}
+              title="Commands"
               onPress={() => setView("main")}
-              className="mb-1 justify-start px-2.5 text-left"
-            >
-              <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
-              Commands
-            </Button>
+            />
             {visibleCommands.map((command) => (
               <ActionRow
                 key={command.command}
@@ -282,18 +254,12 @@ export function ComposerActionMenu({
           </div>
         ) : view === "connect" && onSelectConnector ? (
           <div className="space-y-1" onKeyDown={moveRowFocus}>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              radius="xl"
+            <ActionRow
+              icon={<NavArrowLeft className="h-4 w-4" aria-hidden="true" />}
+              title="Connect a tool"
               onPress={() => setView("main")}
-              className="mb-1 justify-start px-2.5 text-left"
-              data-testid="composer-action-menu-connect-back"
-            >
-              <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
-              Connect a tool
-            </Button>
+              testId="composer-action-menu-connect-back"
+            />
             {AVAILABLE_FEATURED_CONNECTORS.map((connector) => {
               const Mark = connector.mark;
               const installed =
@@ -395,10 +361,7 @@ export function ComposerActionMenu({
             ) : null}
             {(onInsertSuggestion || (!mutationDisabled && (onUploadImage || onStartVoiceInput || onToggleVoiceReplies))) &&
             (!mutationDisabled || showInviteAction) ? (
-              <div
-                role="separator"
-                className="mx-2 my-1 border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-panel-border)]"
-              />
+              <StudioMenuSeparator />
             ) : null}
             {!mutationDisabled && onQueueMessage ? (
               <ActionRow
@@ -409,9 +372,9 @@ export function ComposerActionMenu({
                   onQueueMessage();
                 }}
                 end={
-                  <kbd aria-label={`${commandKeyLabel} plus Enter`} className="font-sans text-xxs">
+                  <Text as="kbd" variant="captionSmall" tone="inherit" aria-label={`${commandKeyLabel} plus Enter`} className="font-sans">
                     {commandKeyLabel} ↵
-                  </kbd>
+                  </Text>
                 }
                 disabled={queueDisabled}
                 testId="composer-action-menu-queue"
@@ -426,9 +389,9 @@ export function ComposerActionMenu({
                   onStashDraft();
                 }}
                 end={
-                  <kbd aria-label={`${commandKeyLabel} plus Shift plus Enter`} className="font-sans text-xxs">
+                  <Text as="kbd" variant="captionSmall" tone="inherit" aria-label={`${commandKeyLabel} plus Shift plus Enter`} className="font-sans">
                     {commandKeyLabel} ⇧ ↵
-                  </kbd>
+                  </Text>
                 }
                 disabled={stashDisabled}
                 testId="composer-action-menu-stash"
@@ -436,16 +399,15 @@ export function ComposerActionMenu({
             ) : null}
             {!mutationDisabled && (onQueueMessage || onStashDraft) ? (
               <>
-                <p
-                  className="px-3 pb-1 pt-0.5 text-xxs text-slate-400 dark:text-slate-500"
+                <Text
+                  variant="captionSmall"
+                  tone="muted"
+                  className="px-2.5 py-1"
                   data-testid="composer-action-menu-enter-hint"
                 >
                   Enter sends or steers · ⇧Enter adds a line
-                </p>
-                <div
-                  role="separator"
-                  className="mx-2 my-1 border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-panel-border)]"
-                />
+                </Text>
+                <StudioMenuSeparator />
               </>
             ) : null}
             {!mutationDisabled ? (
@@ -490,9 +452,9 @@ export function ComposerActionMenu({
                 }}
                 end={
                   pendingNewBrowser ? (
-                    <span className="rounded-full border border-primary-500/25 bg-primary-500/10 px-1.5 py-0.5 text-3xs font-semibold uppercase tracking-[0.14em] text-primary-600 dark:text-primary-300">
+                    <Badge tone="info" size="xs">
                       Next
-                    </span>
+                    </Badge>
                   ) : null
                 }
                 testId="composer-action-menu-open-new-browser"

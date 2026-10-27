@@ -6567,7 +6567,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     humanInputRunIds={browserHumanInputRunIds}
                     activeBrowserRunId={browserHandoff.sharedJob?.runId ?? null}
                     onTakeOverAgent={browserHandoff.sharedJobWhileAgentHolds ? takeOverSharedBrowser : null}
-                    onContinueAfterHumanInput={browserHandoff.continueShared}
+                    onContinueAfterHumanInput={browserHandoff.continueSharedRun}
                     onPresenceChange={setSharedBrowserPresence}
                     sharedBrowserChrome={sharedBrowserChromeForView}
                     sharedBrowserViewerKind={sharedBrowserViewerKind}

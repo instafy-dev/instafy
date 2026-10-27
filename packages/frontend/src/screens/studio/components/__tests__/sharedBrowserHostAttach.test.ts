@@ -5,10 +5,13 @@ import { runtimeEntryIsBooting } from "../../../../runtime/utils/runtimeEntry";
 import { resolveBrowserRuntimeSelection } from "../browserSessionRuntimeEnsure";
 import {
   SHARED_BROWSER_HOST_COPY,
+  SHARED_BROWSER_HOST_MAX_POLL_MS,
+  SHARED_BROWSER_HOST_POLL_MS,
   SHARED_BROWSER_HOST_REQUEST_TIMEOUT_MS,
   SPACE_MACHINE_COLD_START_TIMEOUT_MS,
   shouldStartSpaceMachineForBrowser,
   spaceMachineLaunchOnItsWay,
+  sharedBrowserHostPollDelay,
   startSpaceMachineForBrowser,
   waitForSharedBrowserHostReady,
   type SharedBrowserHostClient,
@@ -92,7 +95,8 @@ describe("waitForSharedBrowserHostReady", () => {
       .resolves.toMatchObject({ kind: "ready" });
     expect(startHost).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ projectId: "project-1", runtimeId: "space", browserSessionId: "surface-1" }));
     expect(fetchHost).toHaveBeenCalledTimes(4);
-    expect(clock.sleeps.every((ms) => ms === 500)).toBe(true);
+    // Quick at first after the start, then less often while it keeps starting.
+    expect(clock.sleeps).toEqual([500, 500, 1_000]);
   });
 
   it.each(["idle", "failed"] as const)("asks a viewer to get a builder when the browser is %s", async (state) => {
@@ -184,6 +188,20 @@ describe("waitForSharedBrowserHostReady", () => {
     await expect(waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...clock }))
       .resolves.toEqual({ kind: "error", errorKind: "failed", reason: "browser host wait timed out" });
     expect(clock.now()).toBe(120_000);
+  });
+
+  // Live test, Oct 27: each press of "Try again" on a browser that never
+  // opened read its state every 500 ms for two minutes (240 requests).
+  it("reads a browser that keeps starting less and less often, at most every 2 s", async () => {
+    const { value, fetchHost } = client([snapshot("starting")]);
+    const clock = fakeClock();
+    await waitForSharedBrowserHostReady({ ...base, canControl: true, client: value, ...clock });
+    expect(clock.sleeps.slice(0, 6)).toEqual([500, 500, 1_000, 1_000, 2_000, 2_000]);
+    expect(Math.max(...clock.sleeps)).toBe(SHARED_BROWSER_HOST_MAX_POLL_MS);
+    // 63 reads in the two minutes, where a read every 500 ms made 240.
+    expect(fetchHost).toHaveBeenCalledTimes(63);
+    expect(sharedBrowserHostPollDelay(1)).toBe(SHARED_BROWSER_HOST_POLL_MS);
+    expect(sharedBrowserHostPollDelay(40)).toBe(SHARED_BROWSER_HOST_MAX_POLL_MS);
   });
 
   it("reports no host (404) as off", async () => {

@@ -313,7 +313,7 @@ function ApprovalSheet({ origin, routine, pressed }: { origin: string; routine: 
             <Text as="p" variant="caption" tone="muted" className="mt-3 leading-snug">
               {routine
                 ? "Routine browsing applies across sites for this AI turn. You can revoke it by taking over or stopping the turn."
-                : "Allow applies to this site for the current AI turn. You will still approve actions separately."}
+                : "Allow applies to this site for the current AI turn, so its pages open without asking again. Other actions still ask."}
             </Text>
             <div ref={boxRef} className={chrome.APPROVAL_ROUTINE} data-testid="landing-browser-routine-box">
               <span

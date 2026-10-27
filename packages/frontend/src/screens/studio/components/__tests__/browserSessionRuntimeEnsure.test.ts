@@ -374,6 +374,8 @@ describe("waitForBrowserRuntimeOrigin", () => {
       .mockResolvedValueOnce({
         runtimes: [
           createRuntimeEntry({
+            lastSeenAt: new Date().toISOString(),
+            health: "online",
             origin: {
               originId: " origin-1 ",
               endpoint: " https://runtime.example.test ",
@@ -462,5 +464,111 @@ describe("waitForBrowserRuntimeOrigin", () => {
     await expect(result).resolves.toEqual({ originId: null, endpoint: null });
     expect(fetchStatus).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  /**
+   * Live test, Oct 27: the browser session machine stopped answering after a
+   * browser turn. Try again then spun for over 90 s and gave up, while the
+   * controller still listed the machine as up.
+   */
+  describe("after a press on a browser session machine that stopped answering", () => {
+    const origin = { originId: "origin-1", endpoint: "https://runtime.example.test", protocols: ["http"] };
+    const silentSince = (nowMs: number, secondsAgo: number) =>
+      createRuntimeEntry({ status: "running", health: "offline", lastSeenAt: new Date(nowMs - secondsAgo * 1_000).toISOString(), origin });
+    const answering = (nowMs: number) =>
+      createRuntimeEntry({ status: "ready", health: "online", lastSeenAt: new Date(nowMs).toISOString(), origin });
+    const reading = (entry: ControllerRuntimeStatusEntry) => ({ runtimes: [entry], preferredRuntimeId: null });
+
+    it("never takes the origin of a machine that does not answer, and opens it once it answers again", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      // Its runtime started again (the machine stays up): back after 40 s.
+      const fetchStatus = vi.fn(async () =>
+        reading(Date.now() >= 40_000 ? answering(Date.now()) : silentSince(Date.now(), 30)));
+      const result = waitForBrowserRuntimeOrigin({ projectId: "project-1", runtimeId: "runtime-1", fetchStatus });
+      let settled = false;
+      void result.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(39_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(result).resolves.toEqual({ originId: "origin-1", endpoint: "https://runtime.example.test" });
+    });
+
+    it("keeps waiting past two minutes while the machine starts again, and says so once after a minute", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      // A new launch of the machine: requested, never seen, no origin yet.
+      const launching = createRuntimeEntry({ status: "requested", health: "offline", lastSeenAt: null, origin: null });
+      const fetchStatus = vi.fn(async () => reading(Date.now() >= 200_000 ? answering(Date.now()) : launching));
+      const onSlow = vi.fn();
+      const result = waitForBrowserRuntimeOrigin({ projectId: "project-1", runtimeId: "runtime-1", fetchStatus, onSlow });
+      let settled = false;
+      void result.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(onSlow).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(onSlow).toHaveBeenCalledTimes(1);
+      // Where it used to give up.
+      await vi.advanceTimersByTimeAsync(80_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(65_000);
+      await expect(result).resolves.toEqual({ originId: "origin-1", endpoint: "https://runtime.example.test" });
+      expect(onSlow).toHaveBeenCalledTimes(1);
+      // Status reads slow down after the first minute.
+      expect(fetchStatus.mock.calls.length).toBeLessThan(40);
+    });
+
+    it("asks the controller again, once, when the machine has been silent past its idle time, and opens the new launch", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      let relaunchedAtMs: number | null = null;
+      const fetchStatus = vi.fn(async () => {
+        const nowMs = Date.now();
+        if (relaunchedAtMs === null) return reading(silentSince(nowMs, 200 + nowMs / 1_000));
+        return reading(nowMs - relaunchedAtMs >= 90_000
+          ? answering(nowMs)
+          : createRuntimeEntry({ status: "requested", health: "offline", lastSeenAt: null, origin: null }));
+      });
+      // The controller replaces a silent generation only once its idle time
+      // (300 s) has passed.
+      const ensureAgain = vi.fn(async () => {
+        relaunchedAtMs = Date.now();
+        return { runtimeId: "runtime-1" };
+      });
+      const result = waitForBrowserRuntimeOrigin({ projectId: "project-1", runtimeId: "runtime-1", fetchStatus, ensureAgain });
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(ensureAgain).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(ensureAgain).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(110_000);
+      await expect(result).resolves.toEqual({ originId: "origin-1", endpoint: "https://runtime.example.test" });
+      expect(ensureAgain).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops waiting at once when the machine has stopped and nothing starts it", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const fetchStatus = vi.fn(async () =>
+        reading(createRuntimeEntry({ status: "stopped", health: "offline", lastSeenAt: null, origin })));
+      const result = waitForBrowserRuntimeOrigin({ projectId: "project-1", runtimeId: "runtime-1", fetchStatus });
+      let settled = false;
+      void result.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(settled).toBe(true);
+      await expect(result).resolves.toEqual({ originId: null, endpoint: null });
+    });
+
+    it("gives up at ten minutes when the machine never answers", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const fetchStatus = vi.fn(async () => reading(silentSince(Date.now(), 30)));
+      const result = waitForBrowserRuntimeOrigin({ projectId: "project-1", runtimeId: "runtime-1", fetchStatus });
+      let settled = false;
+      void result.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(70_000);
+      await expect(result).resolves.toEqual({ originId: null, endpoint: null });
+    });
   });
 });

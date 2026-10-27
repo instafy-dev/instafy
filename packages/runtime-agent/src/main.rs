@@ -108,9 +108,16 @@ fn main() -> anyhow::Result<()> {
     // SAFETY: no other thread exists yet.
     unsafe { runtime_agent::browser_host::capture_process_mode() }
         .context("failed to capture the browser host mode")?;
+    // Skill pack commands (`bin` in a pack's manifest) on PATH for every shell and worker the
+    // runtime starts: a runtime image's shims, or a folder of this run's own at the end of PATH,
+    // removed when the runtime exits. This follows the credential scrub above, because it runs
+    // `node --version` and a probe.
+    // SAFETY: no other thread exists yet; the Tokio runtime is built on the next line.
+    let pack_bins = unsafe { runtime_agent::skill_packs::prepare_pack_bins() };
     let runtime = build_tokio_runtime()?;
     let exit = runtime.block_on(async move { run_runtime_agent().await })?;
     if exit == AgentExit::SpaceDeleted {
+        drop(pack_bins);
         std::process::exit(SPACE_DELETED_EXIT_CODE);
     }
     Ok(())

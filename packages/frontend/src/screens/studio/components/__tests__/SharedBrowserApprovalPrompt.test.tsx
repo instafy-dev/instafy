@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SharedBrowserApprovalPrompt,
   sharedBrowserApprovalAllowDecision,
+  sharedBrowserApprovalTargetAddress,
   type SharedBrowserApprovalPromptRequest,
 } from "../SharedBrowserApprovalPrompt";
 
@@ -71,6 +72,40 @@ describe("SharedBrowserApprovalPrompt", () => {
         ?.click();
     });
     expect(onDecision).toHaveBeenCalledWith("allow_origin");
+  });
+
+  it("shows the exact page a site prompt opens, and says that pages on an allowed site open without asking", async () => {
+    await act(async () => {
+      root.render(
+        <SharedBrowserApprovalPrompt
+          onDecision={vi.fn()}
+          request={{
+            ...originRequest,
+            display: { label: "Open https://example.test/en/places/belem-tower?lang=en", destinationOrigin: "https://example.test" },
+          }}
+          submitting={false}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-testid="shared-browser-approval-destination"]')?.textContent)
+      .toBe("example.test/en/places/belem-tower?lang=en");
+    expect(container.textContent).toContain("Page");
+    expect(container.textContent).toContain("its pages open without asking again. Other actions still ask.");
+    expect(container.textContent).not.toContain("You will still approve actions separately.");
+  });
+
+  it("reads the page from the label only when it is on the prompt's own site", () => {
+    const base = { kind: "origin" as const, operation: "approve-origin", destinationOrigin: "https://example.test" };
+    const target = (label: string, extra: Partial<SharedBrowserApprovalPromptRequest> = {}) =>
+      sharedBrowserApprovalTargetAddress({ ...base, ...extra, display: { label, destinationOrigin: "https://example.test" } });
+    expect(target("Octo's tab 2: Open https://example.test/ in a new tab")).toBe("example.test");
+    expect(target("Open https://example.test/long/path…")).toBe("example.test/long/path\u2026");
+    expect(target("Open https://other.example/path")).toBeNull();
+    expect(target("Allow the assistant to read and interact with this site for this run")).toBeNull();
+    // A click's label is the control's name, which a page chooses.
+    expect(target("https://example.test/fake", { kind: "action", operation: "click" })).toBeNull();
+    expect(target("Go to https://example.test/files/a.pdf", { kind: "action", operation: "navigate" }))
+      .toBe("example.test/files/a.pdf");
   });
 
   it("denies on Escape and explains one-shot action approval", async () => {

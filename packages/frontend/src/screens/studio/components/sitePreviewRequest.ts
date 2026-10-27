@@ -14,6 +14,11 @@ export function isSitePreviewId(value: unknown): value is string {
   return typeof value === "string" && SITE_PREVIEW_ID_PATTERN.test(value);
 }
 
+/** A card's title as Studio shows it: trimmed, at most 120 UTF-16 units, "Preview" when empty. */
+export function sitePreviewCardTitle(value: unknown): string {
+  return (typeof value === "string" ? value.trim().slice(0, 120) : "") || "Preview";
+}
+
 /**
  * Whether a stored card declares a site preview at all (its details carry a
  * `preview`), whether or not `sitePreviewFromMessage` accepts what it names.
@@ -40,6 +45,5 @@ export function sitePreviewFromMessage(message: ChatMessage): SitePreviewRequest
   if (!isSitePreviewId(record.previewId)) return null;
   const port = record.port;
   if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) return null;
-  const title = typeof details?.title === "string" ? details.title.trim().slice(0, 120) : "";
-  return { previewId: record.previewId, title: title || "Preview", port };
+  return { previewId: record.previewId, title: sitePreviewCardTitle(details?.title), port };
 }

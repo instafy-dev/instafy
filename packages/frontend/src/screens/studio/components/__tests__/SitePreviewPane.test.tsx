@@ -241,6 +241,32 @@ describe("SitePreviewPane", () => {
     expect(frame()?.getAttribute("src")).toBe(withHostQuery(FIRST));
   });
 
+  // Live test, Oct 27: the open tab of a site Octo then stopped (and closed)
+  // said "Too many previews opened" after a single open. The frame's 401 asked
+  // for one new session, the controller said the site had stopped, and the
+  // pane took its last Live health as the site being back, so it asked again
+  // and again until the controller's 20-a-minute limit answered 429.
+  it("asks for one new session when a stopped site's frame loses its session, not one per answer", async () => {
+    await render();
+    expect(pane().dataset.state).toBe("live");
+    // Octo stops the site and closes its preview: sessions end, mints are refused.
+    let refusals = 0;
+    mocks.createSitePreviewViewer.mockImplementation(async () => {
+      refusals += 1;
+      throw apiError(refusals > 20 ? 429 : 409);
+    });
+    mocks.getSitePreview.mockResolvedValue(record({ status: "revoked", health: null }));
+    await post({ type: "instafy-preview", status: 401 }, new URL(FIRST).origin, frame()!.contentWindow);
+    await advance(1_000);
+    expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
+    expect(pane().dataset.state).toBe("stopped");
+    expect(problemText()).not.toContain("Too many previews opened");
+    // It keeps checking the record, slowly, and asks for nothing more while the site is down.
+    await advance(SITE_PREVIEW_HEALTH_POLL_MS * 4);
+    expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
+    expect(pane().dataset.state).toBe("stopped");
+  });
+
   it("revokes a session that arrives after the pane unmounted", async () => {
     let resolve!: (value: unknown) => void;
     mocks.createSitePreviewViewer.mockImplementationOnce(() => new Promise(next => { resolve = next; }));

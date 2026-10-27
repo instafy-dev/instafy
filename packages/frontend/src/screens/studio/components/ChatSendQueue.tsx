@@ -197,14 +197,17 @@ export function ChatSendQueue({
         ? createPortal(
             <DragOverlay dropAnimation={null} zIndex={QUEUE_DRAG_OVERLAY_Z_INDEX}>
               {activeItem ? (
-                <div
+                <Surface
                   aria-hidden="true"
-                  className="pointer-events-none flex w-[min(23rem,calc(100vw-2rem))] items-center gap-2 rounded-xl border border-slate-200/80 bg-white px-3 py-2.5 text-sm text-slate-800 shadow-xl dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  tone="floating"
+                  radius="xl"
+                  shadow="lg"
+                  className="pointer-events-none flex w-[min(23rem,calc(100vw-2rem))] items-center gap-2 px-3 py-2.5"
                   data-testid="chat-send-queue-drag-overlay"
                 >
-                  <Drag className="h-4 w-4 flex-none text-slate-400" />
-                  <span className="truncate">{activeItem.message}</span>
-                </div>
+                  <Text as="span" tone="muted" className="shrink-0"><Drag className="h-4 w-4" /></Text>
+                  <Text as="span" variant="bodyCompact" tone="primary" className="truncate">{activeItem.message}</Text>
+                </Surface>
               ) : null}
             </DragOverlay>,
             document.body,

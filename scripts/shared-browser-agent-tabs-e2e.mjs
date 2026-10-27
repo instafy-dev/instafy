@@ -127,6 +127,11 @@ export async function runSharedBrowserAgentTabsFixture() {
       },
     });
     servers.push(sources.server);
+    const transport = await listenSite("transport", {
+      "/": { title: "Transport", body: "<p>Lines and fares.</p>" },
+      "/tram-15": { title: "Tram 15", body: "<p>Tram 15 runs to the tower every 10 minutes.</p>" },
+    });
+    servers.push(transport.server);
 
     context = await chromium.launchPersistentContext(profileDirectory, {
       executablePath,
@@ -165,7 +170,10 @@ export async function runSharedBrowserAgentTabsFixture() {
     writeProtectedJson(markerPath, authority);
 
     const prompts = [];
-    async function runTool(method, requestPath, body = null, decisions = []) {
+    // `stopAtPrompt`: the person takes over while the step's prompt is on
+    // screen, so the run's tool processes are killed, as runtime-agent kills
+    // their process group when a run is stopped.
+    async function runTool(method, requestPath, body = null, decisions = [], { stopAtPrompt = false } = {}) {
       const child = spawn(process.execPath, ["-", method, requestPath, ...(body ? [JSON.stringify(body)] : [])], {
         cwd: temporary,
         env: {
@@ -195,6 +203,10 @@ export async function runSharedBrowserAgentTabsFixture() {
           if (seen.has(request.approvalId)) return;
           seen.add(request.approvalId);
           prompts.push(request);
+          if (stopAtPrompt) {
+            child.kill("SIGKILL");
+            return;
+          }
           const decision = decisions[seen.size - 1];
           assert.ok(decision, `Unexpected prompt during ${requestPath}: ${request.display.label}`);
           writeProtectedJson(path.join(approvalDirectory, "decision.json"), {
@@ -248,15 +260,16 @@ export async function runSharedBrowserAgentTabsFixture() {
     const pageWithUrl = (url) => browserPages().find((entry) => entry.url() === url);
 
     // 1. Octo opens a visible tab. In Ask, the site is approved in that tab
-    // and the step is bound to it; the prompts name the tab.
-    const opened = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/timetable` }, ["allow_origin", "allow_once"]);
+    // with one prompt that names the tab and the page it opens; plain
+    // navigations on that site in the tab then ask nothing.
+    const opened = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/timetable` }, ["allow_origin"]);
     const firstTab = opened.tabId;
     assert.equal(opened.openedTab, true);
     assert.equal(opened.browserPageId, runPageId);
     assert.match(opened.visibleText, /Trains leave every 20 minutes/);
+    // One prompt: the site in the new tab, naming the exact page it opens.
     assert.deepEqual(prompts.map((prompt) => [prompt.kind, prompt.display.label]), [
-      ["origin", "Octo's tab 1: Allow the assistant to open this site in a new tab for this run"],
-      ["action", "Octo's tab 1: Open a new tab"],
+      ["origin", `Octo's tab 1: Open ${sources.origin}/timetable in a new tab`],
     ]);
     assert.ok(prompts.every((prompt) => prompt.browserPageId === runPageId));
     const timetable = pageWithUrl(`${sources.origin}/timetable`);
@@ -290,15 +303,15 @@ export async function runSharedBrowserAgentTabsFixture() {
     // through a redirect, which the tab's guard stops before it leaves.
     await refused(/Booking\.com is link-only/, "POST", "/v1/tabs/open", { url: "https://www.booking.com/" });
     assert.equal(browserPages().length, 2, "No tab was opened for a link-only site");
-    await refused(/led to Booking\.com, which is link-only/, "POST", "/v1/navigate", { url: `${sources.origin}/to-link-only` }, ["allow_once"]);
+    await refused(/led to Booking\.com, which is link-only/, "POST", "/v1/navigate", { url: `${sources.origin}/to-link-only` }, []);
     assert.ok(!browserPages().some((entry) => entry.url().includes("booking")), "No tab shows the link-only site");
     // The blocked load left an error page; Octo goes back to its source.
-    await ok("POST", "/v1/navigate", { url: `${sources.origin}/timetable` }, ["allow_once"]);
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/timetable` }, []);
 
     // A link that opens another window does not escape the tab's guard: the
     // window is stopped before it loads anything and closed, so no tab Octo
     // cannot see, count or close is left behind.
-    await ok("POST", "/v1/navigate", { url: `${sources.origin}/new-window` }, ["allow_once"]);
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/new-window` }, []);
     const reviews = await ok("GET", "/v1/snapshot");
     const reviewLink = reviews.interactiveElements.find((element) => element.label === "Read the review");
     assert.ok(reviewLink, "The new-window link is observed");
@@ -310,7 +323,7 @@ export async function runSharedBrowserAgentTabsFixture() {
 
     // A page that moves itself on to a link-only site between Octo's steps is
     // not read: Octo stops there before any prompt.
-    await ok("POST", "/v1/navigate", { url: `${sources.origin}/later` }, ["allow_once"]);
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/later` }, []);
     for (let attempt = 0; attempt < 100 && !pageWithUrl(linkOnlyReview); attempt += 1) await delay(50);
     assert.ok(pageWithUrl(linkOnlyReview), "The fixture page moved on by itself");
     const promptsBeforeLinkOnlyRead = prompts.length;
@@ -319,12 +332,12 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.equal(prompts.length, promptsBeforeLinkOnlyRead, "Reading a link-only site is refused before any prompt");
     const linkOnlyTabs = await ok("GET", "/v1/tabs");
     assert.deepEqual(linkOnlyTabs.tabs.at(-1).title, null, "list_tabs shows nothing from the link-only page");
-    await ok("POST", "/v1/navigate", { url: `${sources.origin}/timetable` }, ["allow_once"]);
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/timetable` }, []);
 
     // 4. At most three tabs of Octo's own.
-    const second = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/hours` }, ["allow_origin", "allow_once"]);
-    const third = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/prices` }, ["allow_origin", "allow_once"]);
-    assert.equal(prompts.at(-2).display.label, "Octo's tab 3: Allow the assistant to open this site in a new tab for this run");
+    const second = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/hours` }, ["allow_origin"]);
+    const third = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/prices` }, ["allow_origin"]);
+    assert.equal(prompts.at(-1).display.label, `Octo's tab 3: Open ${sources.origin}/prices in a new tab`);
     await refused(/already has 3 tabs open/, "POST", "/v1/tabs/open", { url: `${sources.origin}/hours` });
     assert.equal(browserPages().length, 4);
 
@@ -353,8 +366,8 @@ export async function runSharedBrowserAgentTabsFixture() {
     // over. Neither becomes a tab Octo cannot see, count or close: the next
     // step closes both before it runs (runtime-agent closes them as they
     // appear while it holds the browser; that path is unit-tested).
-    const offers = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/opens-windows` }, ["allow_origin", "allow_once"]);
-    assert.equal(prompts.at(-2).display.label, "Octo's tab 4: Allow the assistant to open this site in a new tab for this run", "A number is never given twice in a run");
+    const offers = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/opens-windows` }, ["allow_origin"]);
+    assert.equal(prompts.at(-1).display.label, `Octo's tab 4: Open ${sources.origin}/opens-windows in a new tab`, "A number is never given twice in a run");
     assert.equal(offers.tabLabel, "Octo's tab 4");
     for (let attempt = 0; attempt < 200 && browserPages().length < 5; attempt += 1) await delay(25);
     assert.equal(browserPages().length, 5, "The page opened two windows by itself");
@@ -386,7 +399,7 @@ export async function runSharedBrowserAgentTabsFixture() {
 
     // 11. Octo closes its last tab: the run's page comes to the front, not
     // the person's other tab.
-    const last = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/hours` }, ["allow_origin", "allow_once"]);
+    const last = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/hours` }, ["allow_origin"]);
     await personsTab.bringToFront();
     await ok("POST", "/v1/tabs/select", { tabId: last.tabId });
     const closedLast = await ok("POST", "/v1/tabs/close", { tabId: last.tabId });
@@ -400,9 +413,9 @@ export async function runSharedBrowserAgentTabsFixture() {
     const promptsBeforeRunPage = prompts.length;
     await refused(/Booking\.com is link-only: Octo never opens it, in any tab/, "POST", "/v1/navigate", { url: "https://www.booking.com/hotel/fixture.html" });
     assert.equal(prompts.length, promptsBeforeRunPage, "Refused before any prompt");
-    await refused(/led to Booking\.com, which is link-only/, "POST", "/v1/navigate", { url: `${sources.origin}/to-link-only` }, ["allow_origin", "allow_once"]);
+    await refused(/led to Booking\.com, which is link-only/, "POST", "/v1/navigate", { url: `${sources.origin}/to-link-only` }, ["allow_origin"]);
     assert.ok(!browserPages().some((entry) => entry.url().includes("booking")), "The run's page never showed the link-only site");
-    await ok("POST", "/v1/navigate", { url: `${sources.origin}/later` }, ["allow_once"]);
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/later` }, []);
     for (let attempt = 0; attempt < 100 && runPage.url() !== linkOnlyReview; attempt += 1) await delay(50);
     assert.equal(runPage.url(), linkOnlyReview, "The run's page moved on by itself");
     const promptsOnLinkOnly = prompts.length;
@@ -412,27 +425,92 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.equal(prompts.length, promptsOnLinkOnly, "Nothing on the link-only page asked or ran");
     const runPageListed = await ok("GET", "/v1/tabs");
     assert.deepEqual([runPageListed.tabs[0].linkOnlySite, runPageListed.tabs[0].title], ["RunRepeat", null]);
-    await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, ["allow_origin", "allow_once"]);
+    await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, ["allow_origin"]);
     assert.equal(runPage.url(), `${research.origin}/`, "Octo took the person's page back to where it was");
 
     // A page that frames a link-only site (a map) is an ordinary page: Octo's
     // step loads it and succeeds, the frame loads as the page asks, and
     // nothing of the frame is read.
-    const framed = await ok("POST", "/v1/navigate", { url: `${sources.origin}/hotel` }, ["allow_once"]);
+    const framed = await ok("POST", "/v1/navigate", { url: `${sources.origin}/hotel` }, []);
     assert.match(framed.visibleText, /Rooms from 80 EUR/);
     assert.doesNotMatch(JSON.stringify(framed), /Map tiles/);
     assert.equal(runPage.url(), `${sources.origin}/hotel`);
     assert.ok(linkOnly.requests.includes("GET /map"), "The page's own frame loaded");
 
+    // 13. Take over, then Let AI continue, then approve a navigation. Run A
+    // approves a site on the person's page and one in a tab of its own; the
+    // person takes over while a prompt is on screen. runtime-agent ends the
+    // run as it does after a confirmed shutdown: Octo's tabs close through
+    // the DevTools endpoint, the run's records are revoked and the marker is
+    // removed. Let AI continue names run A, and runtime-agent starts the new
+    // run with what A approved on the person's page (the record it keeps for
+    // that; its rules are unit-tested), written here the same way.
+    const startRun = (approvedOrigins) => {
+      for (const name of fs.readdirSync(approvalDirectory)) fs.rmSync(path.join(approvalDirectory, name));
+      Object.assign(authority, { ownerId: randomUUID(), runId: randomUUID(), expiresAtMs: Date.now() + 300_000 });
+      if (approvedOrigins.length) {
+        writeProtectedJson(path.join(approvalDirectory, "state.json"), {
+          version: 1, ownerId: authority.ownerId, runId: authority.runId,
+          initiatorUserId: authority.initiatorUserId, browserPageId: runPageId,
+          approvedOrigins, consumedApprovalIds: [], routineBrowsingAllowed: false,
+        });
+      }
+      writeProtectedJson(markerPath, authority);
+    };
+    startRun([]);
+    const promptsBeforeRunA = prompts.length;
+    await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, ["allow_origin"]);
+    const runATab = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/hours` }, ["allow_origin"]);
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/prices`, tabId: runATab.tabId }, []);
+    assert.equal(prompts.length - promptsBeforeRunA, 2, "Run A asked once per site");
+    await ok("POST", "/v1/tabs/select", { tabId: runPageId });
+    const stopped = await runTool("POST", "/v1/navigate", { url: `${transport.origin}/` }, [], { stopAtPrompt: true });
+    assert.equal(stopped.code, null, "the person took over while the prompt was on screen");
+    const runAOrigins = state().approvedOrigins;
+    for (const tab of tabsRecord().tabs) {
+      assert.equal((await fetch(`http://127.0.0.1:${port}/json/close/${tab.tabId}`)).status, 200);
+    }
+    fs.rmSync(markerPath);
+    for (let attempt = 0; attempt < 50 && pageWithUrl(`${sources.origin}/prices`); attempt += 1) await delay(20);
+    assert.ok(!pageWithUrl(`${sources.origin}/prices`), "Octo's tab closed when the person took over");
+    assert.deepEqual(runAOrigins, [research.origin]);
+
+    startRun(runAOrigins);
+    const promptsBeforeRunB = prompts.length;
+    // The site the person approved on their page opens without asking again.
+    await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, []);
+    assert.equal(prompts.length, promptsBeforeRunB, "Let AI continue kept the run's approval");
+    // A new site asks once, naming the exact page; the person's one answer
+    // completes the step, so no approval is lost to a second prompt.
+    const tram = await ok("POST", "/v1/navigate", { url: `${transport.origin}/tram-15` }, ["allow_origin"]);
+    assert.equal(prompts.length, promptsBeforeRunB + 1);
+    const tramPrompt = prompts.at(-1);
+    assert.equal(tramPrompt.kind, "origin");
+    assert.equal(tramPrompt.display.label, `Open ${transport.origin}/tram-15`);
+    assert.equal(tramPrompt.display.destinationOrigin, transport.origin);
+    assert.equal(tram.url, `${transport.origin}/tram-15`);
+    assert.match(tram.visibleText, /Tram 15 runs to the tower/);
+    assert.equal(runPage.url(), `${transport.origin}/tram-15`);
+    assert.ok(transport.requests.includes("GET /tram-15"), "the approved page loaded");
+    // Within the approved site, the next page opens without a prompt.
+    await ok("POST", "/v1/navigate", { url: `${transport.origin}/` }, []);
+    // The site Octo had in its own tab, which closed with run A, asks again
+    // there: approvals stay bound to the tab they were given in.
+    const runBTab = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/hours` }, ["allow_origin"]);
+    assert.equal(prompts.at(-1).display.label, `Octo's tab 1: Open ${sources.origin}/hours in a new tab`);
+    assert.match(runBTab.visibleText, /Open daily 9 to 17/);
+    const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    assert.ok(version.Browser, "the browser still answers after the take-over and the continuation");
+
     const actionLog = fs.readFileSync(actionsPath, "utf8");
     assert.ok(!actionLog.includes("booking.com/hotel"), "The link-only address never reached the action feed as a step");
     const result = {
       status: "passed",
-      fixtureVersion: 2,
+      fixtureVersion: 3,
       prompts: prompts.length,
       checks: [
         "visible agent tab in the run's browser context, brought to front",
-        "per-tab site approval and tab-bound step approval",
+        "per-tab site approval, asked once for a new tab",
         "form submission refused in an agent tab before any prompt",
         "link-only site refused as a new tab and through a redirect",
         "a window opened from Octo's tab is stopped and closed",
@@ -445,6 +523,8 @@ export async function runSharedBrowserAgentTabsFixture() {
         "turn-end close through the DevTools HTTP endpoint",
         "the person's page: link-only refused before any prompt, through a redirect, and once the page is on one",
         "a page that frames a link-only site loads and Octo's step succeeds, reading nothing of the frame",
+        "a plain navigation asks at most once, and its prompt names the exact page",
+        "take over mid-prompt, Let AI continue keeps the page's approvals, and one answer completes an approved navigation",
       ],
       limitations: [
         "No model, Studio UI, origin keep endpoint or runtime shutdown guard; those are unit-tested.",
@@ -466,7 +546,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 2 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 3 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });

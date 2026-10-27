@@ -12,7 +12,7 @@ import {
 } from "../../../services/runtimeController/previews";
 import { useConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
 import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
-import type { SitePreviewRequest } from "./sitePreviewRequest";
+import { sitePreviewCardTitle, type SitePreviewRequest } from "./sitePreviewRequest";
 import { requestFollow, setFollowPresence, useFollowAccount, useFollowEntry } from "./previewHost/followStore";
 import { getFollowState } from "../../../services/runtimeController/previewFollow";
 import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
@@ -132,6 +132,15 @@ function shareAnswer(previewId: string, from: CardMember, answer: SharedAnswer) 
 }
 
 /**
+ * A record the preview's pane just read, for every card of that preview: the
+ * pane checks its site every 15 s while it is on screen, so a card beside it
+ * reads those answers instead of asking the controller the same thing.
+ */
+export function shareSitePreviewRecord(previewId: string, preview: ControllerSitePreview) {
+  for (const member of cardsByPreview.get(previewId)?.members ?? []) member.read({ preview });
+}
+
+/**
  * What a failed check means for the card: `gone` (the preview does not exist,
  * this viewer may not see it, or it stopped) reads Stopped; `final` (this
  * server offers no previews, or the session is gone) reads Status unavailable
@@ -159,6 +168,13 @@ function whenVisible(run: () => void): () => void {
   document.addEventListener("visibilitychange", onChange);
   return () => document.removeEventListener("visibilitychange", onChange);
 }
+
+/**
+ * A stopped site Open cannot start: nobody recorded how, a newer preview
+ * replaced it, or another site took its port. The card says how to get it back
+ * instead of offering a button that does nothing.
+ */
+export const STOPPED_ASK_OCTO_TEXT = "Stopped · ask Octo to start it again";
 
 export function sitePreviewStateLabel(state: SitePreviewState, port: number | null): string {
   switch (state) {
@@ -357,33 +373,41 @@ export function SitePreviewCard({
   }, [renew, serverStatus, signals.grantStatus, signals.runtimeStatus]);
 
   const unavailable = cannotCheck || failures > 0;
+  // A preview is keyed by its machine and port, so a later site on the same
+  // port takes over its record: a card whose title the record no longer has
+  // is about a site that is not there any more, whatever the record says.
+  const replaced = server !== null && sitePreviewCardTitle(server.title) !== preview.title;
   const state = sitePreviewState({
     preview: server,
-    gone,
+    gone: gone || replaced,
     unavailable,
     grantStatus: signals.grantStatus,
     runtimeStatus: signals.runtimeStatus,
   });
   const showing = state !== "stopped" && opener?.visiblePreviewId === preview.previewId;
   // Only a record that says how to start the site can be woken; a preview that is gone cannot.
-  const wakeable = server?.restartable === true && !gone;
+  const wakeable = server?.restartable === true && !gone && !replaced;
+  // Stopped for good from here: the controller answered (or the preview is
+  // gone) and nothing can start it, so Open would do nothing.
+  const cannotRestart = state === "stopped" && !wakeable && (gone || replaced || server !== null);
   // Starting its stopped machine takes someone who may change the space: others see why before they press Open.
   const startBlocked = wakeable && state === "stopped" && server?.canStart === false;
   // Someone else (another member, another tab) is waking it: follow along.
-  const wakingElsewhere = !waking && server?.wake?.state === "waking";
+  const wakingElsewhere = !waking && !replaced && server?.wake?.state === "waking";
   const starting = waking || wakingElsewhere;
   // The site came back some other way (Octo restarted it, someone else woke it): the failure is old news.
   useEffect(() => { if (state === "live" && wakeError && !waking) setWakeError(null); }, [state, wakeError, waking]);
 
-  // While its pane is on screen, the card keeps up with the site, so it never
-  // reads Live beside a site that stopped answering. A card whose site has no
-  // settled state keeps asking for a while too, so it sees the site come up.
-  // Only the newest card for the preview asks; the others read its answers.
-  // Nothing follows while a failed check is being retried or after the
-  // controller said it will not answer.
+  // While its pane is on screen, the card reads the pane's own checks of the
+  // site (shareSitePreviewRecord), so it never reads Live beside a site that
+  // stopped answering and asks nothing itself. A card whose site has no
+  // settled state keeps asking for a while, so it sees the site come up, and
+  // one follows a wake someone else started. Only the newest card for the
+  // preview asks; the others read its answers. Nothing follows while a failed
+  // check is being retried or after the controller said it will not answer.
   const settled = state === "live" || state === "stopped";
   const wantsToFollow = !failures && !cannotCheck && !gone &&
-    (showing || wakingElsewhere || (!settled && !followsSpent));
+    (wakingElsewhere || (!showing && !settled && !followsSpent));
   useEffect(() => setWantsToFollow(preview.previewId, member, wantsToFollow), [member, preview.previewId, wantsToFollow]);
   const following = leads && wantsToFollow;
   useEffect(() => {
@@ -443,7 +467,9 @@ export function SitePreviewCard({
 
   const label = starting
     ? "Starting…"
-    : wakeError ?? (startBlocked ? START_NEEDS_BUILDER_TEXT : sitePreviewStateLabel(state, server?.port ?? preview.port));
+    : wakeError ?? (startBlocked ? START_NEEDS_BUILDER_TEXT
+      : cannotRestart ? STOPPED_ASK_OCTO_TEXT
+        : sitePreviewStateLabel(state, server?.port ?? preview.port));
   const actions: ChatActionCardAction[] = [];
   if (opener && followable && followPresence) {
     // The pane follows as soon as it is open and knows the presentation.
@@ -452,7 +478,8 @@ export function SitePreviewCard({
       onPress: () => { requestFollow(preview.previewId); open(); },
     });
   }
-  if (opener) {
+  // No dead button: a site nothing here can start offers no Open, and its status says to ask Octo.
+  if (opener && !cannotRestart) {
     actions.push({
       id: "open-preview",
       label: showing ? "Showing" : "Open",

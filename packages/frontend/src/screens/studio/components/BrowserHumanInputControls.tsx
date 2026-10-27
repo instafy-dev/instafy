@@ -1,6 +1,8 @@
 import { useContext, useLayoutEffect, type ReactNode } from "react";
 import { CursorPointer, Play } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
+import { Text } from "../../../components/Text";
+import { StudioDialogBody } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { BrowserToolsOverlayContext } from "./BrowserToolsPopover";
 import { useBrowserHumanInput, type BrowserHumanInputOptions } from "./useBrowserHumanInput";
@@ -54,14 +56,16 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
       {props.renderControls ? props.renderControls(controls) : controls}
       <StudioDialogModal isOpen={dialogOpen} onOpenChange={(open) => { if (!open) state.dismissTakeOver(); }}
         isDismissable={state.busy === null} isKeyboardDismissDisabled={state.busy !== null}
-        dialogAriaLabel="Take over browser" modalClassName="!max-w-sm" dialogClassName="p-5" data-browser-session-safe-zone="true">
-        <h2 className="text-base font-semibold text-slate-900 dark:text-white">Take over the browser?</h2>
-        <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">The AI will pause so you can use the page. When you’re ready, choose <strong>Let AI continue</strong> in the browser controls.</p>
-        {state.error ? <p role="alert" className="mt-3 text-sm text-rose-600 dark:text-rose-300">{state.error}</p> : null}
-        <div className="mt-5 flex justify-end gap-2">
-          <Button type="button" size="sm" variant="ghost" radius="full" className="min-h-10" isDisabled={state.busy !== null} onPress={state.dismissTakeOver} data-testid="browser-human-input-cancel">Keep AI working</Button>
-          <Button type="button" size="sm" variant="primary" radius="full" className="min-h-10" isDisabled={state.busy !== null} onPress={() => void state.takeOver()} data-testid="browser-human-input-takeover">{state.busy === "takeover" ? "Stopping AI…" : "Take over"}</Button>
-        </div>
+        dialogAriaLabel="Take over browser" size="sm" gutter="responsive" layout="editor" data-browser-session-safe-zone="true">
+        <StudioDialogBody scrollable>
+          <Text as="h2" variant="subtitle" tone="primary">Take over the browser?</Text>
+          <Text as="p" variant="body" tone="muted" className="mt-2">The AI will pause so you can use the page. When you’re ready, choose <strong>Let AI continue</strong> in the browser controls.</Text>
+          {state.error ? <Text as="p" variant="body" tone="danger" role="alert" className="mt-3 break-words">{state.error}</Text> : null}
+          <div className="mt-5 flex flex-wrap justify-end gap-2">
+            <Button type="button" preset="form" variant="ghost" isDisabled={state.busy !== null} onPress={state.dismissTakeOver} data-testid="browser-human-input-cancel">Keep AI working</Button>
+            <Button type="button" preset="form" variant="primary" isDisabled={state.busy !== null} onPress={() => void state.takeOver()} data-testid="browser-human-input-takeover">{state.busy === "takeover" ? "Stopping AI…" : "Take over"}</Button>
+          </div>
+        </StudioDialogBody>
       </StudioDialogModal>
     </>
   );

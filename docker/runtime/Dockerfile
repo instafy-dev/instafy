@@ -51,13 +51,15 @@ FROM ${NODE_IMAGE} AS node-runtime
 # Skill packs every space gets: the release archives pinned in
 # packages/runtime-agent/skill-packs.json. The installer checks each archive's
 # sha256 before reading it, then its commit, entries and content hash, and fails
-# the build on any mismatch (scripts/install-skill-packs.mjs).
+# the build on any mismatch (scripts/install-skill-packs.mjs). It also writes a
+# shim per pack command (`bin`) to /out/skill-packs/.bin, which runs the pack
+# from the folder the runtime images copy it to (--install-root).
 ########################
 FROM ${NODE_IMAGE} AS skill-packs
 WORKDIR /build
 COPY packages/runtime-agent/skill-packs.json packages/runtime-agent/skill-packs.json
 COPY scripts/install-skill-packs.mjs scripts/install-skill-packs.mjs
-RUN node scripts/install-skill-packs.mjs --require-pinned --pin packages/runtime-agent/skill-packs.json --out /out/skill-packs
+RUN node scripts/install-skill-packs.mjs --require-pinned --pin packages/runtime-agent/skill-packs.json --out /out/skill-packs --install-root /opt/instafy/skill-packs
 
 ########################
 # Shared Browser egress proxy
@@ -518,6 +520,20 @@ RUN chmod +x /opt/instafy-cli/bin/instafy.js \
 # Skill packs ship once per image; each space gets only a small managed
 # SKILL.md and launcher that find them here (packages/runtime-agent/src/skill_packs.rs).
 COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs
+# Pack commands (`uw`) on PATH for every shell. Model shells are login shells,
+# which reset PATH here, so the shims go in /usr/local/bin like `instafy`. A
+# name a login shell already finds fails the build.
+RUN set -eu; \
+    for shim in /opt/instafy/skill-packs/.bin/*; do \
+      [ -f "$shim" ] || continue; \
+      name="$(basename "$shim")"; \
+      if found="$(bash -lc 'command -v -- "$1"' bash "$name")"; then \
+        echo "skill pack command $name is already a command: $found" >&2; exit 1; \
+      fi; \
+      install -m 0755 "$shim" "/usr/local/bin/$name"; \
+      [ "$(bash -lc 'command -v -- "$1"' bash "$name")" = "/usr/local/bin/$name" ] \
+        || { echo "a login shell does not find skill pack command $name" >&2; exit 1; }; \
+    done
 
 # The compiled binaries change with almost every commit, so they come last: a
 # runtime-agent change re-exports only the binary layers and the small layers
@@ -695,6 +711,20 @@ RUN chmod +x /opt/instafy-cli/bin/instafy.js \
 # Skill packs ship once per image; each space gets only a small managed
 # SKILL.md and launcher that find them here (packages/runtime-agent/src/skill_packs.rs).
 COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs
+# Pack commands (`uw`) on PATH for every shell. Model shells are login shells,
+# which reset PATH here, so the shims go in /usr/local/bin like `instafy`. A
+# name a login shell already finds fails the build.
+RUN set -eu; \
+    for shim in /opt/instafy/skill-packs/.bin/*; do \
+      [ -f "$shim" ] || continue; \
+      name="$(basename "$shim")"; \
+      if found="$(bash -lc 'command -v -- "$1"' bash "$name")"; then \
+        echo "skill pack command $name is already a command: $found" >&2; exit 1; \
+      fi; \
+      install -m 0755 "$shim" "/usr/local/bin/$name"; \
+      [ "$(bash -lc 'command -v -- "$1"' bash "$name")" = "/usr/local/bin/$name" ] \
+        || { echo "a login shell does not find skill pack command $name" >&2; exit 1; }; \
+    done
 
 # The compiled binaries change with almost every commit, so they come last: a
 # runtime-agent change re-exports only the binary layers and the small layers

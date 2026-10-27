@@ -232,6 +232,19 @@ export interface AdaptivePollOptions {
   fastMs: number;
   slowMs: number;
   slowIdleMs?: number;
+  /**
+   * Back off while nothing changes: each read whose callback resolves to
+   * `false` (nothing new, or it failed) doubles the next delay, up to this
+   * cap; a read that found something resets it. A delay already at or above
+   * the cap is left alone. Unset, every read keeps the plain cadence.
+   */
+  quietMaxMs?: number;
+}
+
+/** The delay after `quietReads` reads in a row found nothing new: doubling from `delayMs`, at most `quietMaxMs`. */
+export function quietPollDelay(delayMs: number, quietReads: number, quietMaxMs: number | undefined): number {
+  if (!quietMaxMs || quietReads <= 0 || delayMs >= quietMaxMs) return delayMs;
+  return Math.min(quietMaxMs, delayMs * 2 ** Math.min(quietReads, 16));
 }
 
 /**
@@ -242,9 +255,11 @@ export interface AdaptivePollOptions {
  * of `fast` reads at once: speeding up reads now, and slowing down still
  * takes one trailing read before the slow cadence. While the document is
  * hidden that read waits for the return, which then reads at once. `fast` is
- * not part of any scope, so a change never resets the caller's state.
+ * not part of any scope, so a change never resets the caller's state. With
+ * `quietMaxMs`, reads that find nothing new stretch the delay (see
+ * {@link quietPollDelay}); a change of `fast` starts from the plain cadence.
  */
-export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs, slowMs, slowIdleMs = slowMs }: AdaptivePollOptions): void {
+export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs, slowMs, slowIdleMs = slowMs, quietMaxMs }: AdaptivePollOptions): void {
   const fastRef = useRef(fast);
   const kickRef = useRef<(() => void) | null>(null);
   useEffect(() => {
@@ -252,24 +267,42 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
     let timer: number | null = null;
     let cancelled = false;
     let lastRunAt = 0;
+    let quietReads = 0;
+    let run = 0;
     const clear = () => { if (timer !== null) window.clearTimeout(timer); timer = null; };
     const schedule = () => {
       clear();
       if (cancelled) return;
       const delay = adaptivePollDelay(fastRef.current, fastMs, slowMs, slowIdleMs);
       if (delay === null) return;
-      const wait = lastRunAt + delay - Date.now();
+      const wait = lastRunAt + quietPollDelay(delay, quietReads, quietMaxMs) - Date.now();
       if (wait <= 0) tick();
       else timer = window.setTimeout(tick, wait);
+    };
+    // Only the latest read moves the backoff; a stale answer changes nothing.
+    const settle = (thisRun: number, foundSomething: boolean) => {
+      if (cancelled || thisRun !== run) return;
+      const next = foundSomething ? 0 : quietReads + 1;
+      if (next === quietReads) return;
+      quietReads = next;
+      schedule();
     };
     const tick = () => {
       clear();
       lastRunAt = Date.now();
-      try { void Promise.resolve(callback()).catch(() => {}); } catch { /* the next tick retries */ }
+      run += 1;
+      const thisRun = run;
+      let result: Promise<unknown>;
+      try { result = Promise.resolve(callback()); } catch (error) { result = Promise.reject(error); }
+      void result.then(
+        (value) => { if (quietMaxMs) settle(thisRun, value !== false); },
+        () => { if (quietMaxMs) settle(thisRun, false); },
+      );
       schedule();
     };
     kickRef.current = () => {
       if (cancelled) return;
+      quietReads = 0;
       // Hidden: owe the read to the return instead of reading now.
       if (pollingGateState() === "hidden") { lastRunAt = 0; return; }
       tick();
@@ -277,7 +310,7 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
     const unsubscribe = subscribePollingGate(schedule);
     tick();
     return () => { cancelled = true; clear(); unsubscribe(); kickRef.current = null; };
-  }, [callback, enabled, fastMs, slowIdleMs, slowMs]);
+  }, [callback, enabled, fastMs, quietMaxMs, slowIdleMs, slowMs]);
   useEffect(() => {
     if (fastRef.current === fast) return;
     fastRef.current = fast;
