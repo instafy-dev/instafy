@@ -330,8 +330,8 @@
    * Only http and https pages are read; anything else answers
    * `{ unsupported: true }`. `options.linkOnly`, `{ api, sites }`, is
    * linkOnly.js's API and the web-research skill's list, which mark the links
-   * to link-only sites; without a list that compiles the page goes without
-   * its links.
+   * to link-only ("no-agents") sites; without a list that compiles the page
+   * goes without its links.
    */
   function captureSentPage(redaction, options) {
     const location = globalThis.location;
@@ -360,9 +360,12 @@
       const linkOnly = options && options.linkOnly;
       const list = linkOnly && linkOnly.api && linkOnly.sites ? linkOnly.api.linkOnlyListFrom(linkOnly.sites).list : null;
       if (list) {
+        // Only a site whose terms bar agents is link-only. A "no-reuse" site
+        // may be opened and read (its content is not reused), so its links go
+        // unmarked, as on the Personal Browser.
         linkOnlySite = (address) => {
           const hit = linkOnly.api.linkOnlyMatch(list, address);
-          return hit ? hit.site : null;
+          return hit && linkOnly.api.barsAgents(hit) ? hit.site : null;
         };
       }
     } catch (_) {

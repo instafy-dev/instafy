@@ -123,13 +123,13 @@ const RESULTS_PAGE = fs.readFileSync(
   "utf8",
 );
 
-function captureWithLinks(html, { url = "https://search.example/?q=city+museum+opening+hours", linkOnly = true } = {}) {
+function captureWithLinks(html, { url = "https://search.example/?q=city+museum+opening+hours", linkOnly = true, sites = linkOnlySites } = {}) {
   const dom = new JSDOM(html, { url, runScripts: "outside-only" });
   const { window } = dom;
   window.eval(`(function (module, require) {\n${redactionSource}\n})(undefined, undefined);`);
   window.eval(`(function (module, require) {\n${pageCaptureSource}\n})(undefined, undefined);`);
   window.eval(`(function (module, require) {\n${linkOnlySource}\n})(undefined, undefined);`);
-  window.eval(`globalThis.__instafyLinkOnlySites = ${linkOnlySites};`);
+  window.eval(`globalThis.__instafyLinkOnlySites = ${sites};`);
   const options = linkOnly
     ? "{ withhold: false, linkOnly: { api: globalThis.__instafyLinkOnly, sites: globalThis.__instafyLinkOnlySites } }"
     : "{ withhold: false }";
@@ -172,4 +172,26 @@ test("a sent page's links are masked like its text, bounded, and left out when t
   const secret = captureWithLinks(`<title>API keys</title><h2>API keys</h2><p>${RANDOM_VALUE}</p><a href="https://console.example/">Console</a>`);
   assert.equal(secret.secretScreen, true);
   assert.deepEqual(secret.links, []);
+});
+
+test("only a link to a site that bars agents is marked link-only; a no-reuse site's link is not", () => {
+  // A list whose sites include one that bars only reusing its content: Octo may open and read it (web read marks it
+  // no-reuse), so a sent page must not tell Octo to leave it alone, as the Personal Browser does not either.
+  const list = JSON.parse(linkOnlySites);
+  list.sites.push({
+    name: "Example Reviews",
+    match: ["reviews.example"],
+    kind: "no-reuse",
+    why: "terms bar copying its reviews",
+    terms: { url: "https://reviews.example/terms", checked: "2026-10-27", quote: "You may not copy or republish reviews." },
+  });
+  const page = captureWithLinks(
+    `<title>Results</title><p>Results</p><a href="https://reviews.example/city-museum">City Museum reviews</a>` +
+      `<a href="https://www.booking.com/hotel/se/city-museum-inn.html">City Museum Inn</a>`,
+    { sites: JSON.stringify(list) },
+  );
+  assert.deepEqual(page.links, [
+    { text: "City Museum reviews", href: "https://reviews.example/city-museum" },
+    { text: "City Museum Inn", href: "https://www.booking.com/hotel/se/city-museum-inn.html", linkOnly: "Booking.com" },
+  ]);
 });
