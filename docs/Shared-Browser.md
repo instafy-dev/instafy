@@ -705,8 +705,11 @@ A teammate polls nothing and sees no card.
 Prompts are raised only inside a run, and only the agent writes the action log,
 so the browser view reads both fast only while work can produce them. While a
 run is active in the space or the agent controls the browser, it reads the
-action log every second and the pending prompt 1.5 s after each answer (every
-400 ms while a prompt is shown). With neither, it reads the action log every
+action log every second while it keeps finding new actions; each read that
+finds none doubles the wait up to 4 s (the agent spends most of a turn
+thinking between actions), and the next action found brings back the 1 s tail.
+It reads the pending prompt 1.5 s after each answer (every 400 ms while a
+prompt is shown). With neither, it reads the action log every
 10 s and the prompt every 15 s, 30 s each once nobody has touched the tab for
 three minutes. A run starting, or the agent taking control, reads both at once;
 a run ending takes one more read of the action log, so a human-input request
@@ -1137,8 +1140,10 @@ unless the policy is `"covered"`.
   space's own machine with `sharedBrowserHost`, Studio opens it in place. It
   reads `GET browser/host`. If the browser is idle or failed and the person may
   control the browser, Studio posts `POST browser/host/start` with
-  `{"version": 1}`, then polls every 500 ms until the browser is ready (at most
-  120 s). A viewer is told to ask a space builder, and a poisoned browser says
+  `{"version": 1}`, then polls until the browser is ready, every 500 ms at first
+  and less often while it keeps starting (two reads at each of 500 ms, 1 s,
+  then every 2 s; a start it asks for begins again at 500 ms), for at most
+  120 s. A viewer is told to ask a space builder, and a poisoned browser says
   the space's machine must restart first. A state Studio does not know is
   polled like `starting`, and so is a start refused with `machine_stopping` or
   `browser_host_stopping` (asked again after a second, within the start
@@ -1160,7 +1165,11 @@ unless the policy is `"covered"`.
   cannot open, nothing reads them. Even then the 2.5 s cadence holds only while
   a run is active, someone else is in the browser or controls it, or the view
   is on screen and the person has used the tab in the last three minutes;
-  otherwise the pages are read every 15 s, and never while the tab is hidden. Capabilities stay, so the attach can go on
+  otherwise the pages are read every 15 s, and never while the tab is hidden.
+  A read that finds the tabs exactly as they were doubles the wait up to 5 s;
+  any change brings back 2.5 s, and reads that fail or find the browser still
+  starting keep it. A failed capability read is not asked again while the tab
+  is hidden. Capabilities stay, so the attach can go on
   once the view opens again; a capability read that failed is not asked again
   while the view is off, and is asked at once when it opens. While it opens it
   polls quietly, for at most

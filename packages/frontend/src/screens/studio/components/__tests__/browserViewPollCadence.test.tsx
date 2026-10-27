@@ -113,7 +113,9 @@ describe("browser view poll cadence", () => {
     const g = mocks.fetchPages.mock.calls.length;
     expect(a).toBe(4); // 0, 10, 20, 30 s
     expect(p).toBe(3); // 0, 15.4, 30.8 s
-    expect(g).toBe(14); // unchanged 2.5 s while visible and the person is around
+    // 2.5 s while visible and the person is around, then every 5 s while the
+    // tabs come back unchanged: 0, 2.5, 7.5 … 32.5 s.
+    expect(g).toBe(8);
   });
 
   it("person away three minutes: actions 30 s, approval 30 s, pages 15 s", async () => {
@@ -129,7 +131,10 @@ describe("browser view poll cadence", () => {
     expect(g).toBe(4);
   });
 
-  it("run active: same cadence as today (actions 1 s, approval 1.5 s + RTT, pages 2.5 s), even with no input for minutes", async () => {
+  // Live test, Oct 27: one Studio tab made about 4,900 requests in 30 min,
+  // most of them while a run drove Instafy's browser. Between its actions the
+  // agent is thinking, and the tail read an empty log every second.
+  it("run active with nothing new: approvals keep 1.5 s, the action log backs off to 4 s and the tabs to 5 s, even with no input for minutes", async () => {
     await act(async () => root.render(<><Actions agentActive /><Approval runActive /><Pages pollFast /></>));
     await advance(200_000, 500); // no input: gate goes idle, fast must not care
     for (const m of Object.values(mocks)) m.mockClear();
@@ -137,9 +142,55 @@ describe("browser view poll cadence", () => {
     const a = mocks.fetchActions.mock.calls.length;
     const p = mocks.fetchPendingApproval.mock.calls.length;
     const g = mocks.fetchPages.mock.calls.length;
-    expect(a).toBeGreaterThanOrEqual(33);
+    expect(a).toBeGreaterThanOrEqual(8);
+    expect(a).toBeLessThanOrEqual(9);
     expect(p).toBeGreaterThanOrEqual(17);
-    expect(g).toBeGreaterThanOrEqual(13);
+    expect(g).toBeGreaterThanOrEqual(6);
+    expect(g).toBeLessThanOrEqual(7);
+  });
+
+  it("run active: a new action brings back the 1 s tail at once, and a quiet log backs off 1, 2, 4 s", async () => {
+    let cursor = 0;
+    let pending = 0;
+    mocks.fetchActions.mockImplementation(async () => {
+      if (pending > 0) {
+        pending -= 1;
+        cursor += 10;
+        return { actions: [{ seq: cursor, ts: cursor, pageId: "page-1", type: "click", label: "Click", url: null, x: 1, y: 1, viewportW: 10, viewportH: 10 }], cursor };
+      }
+      return { actions: [], cursor };
+    });
+    await act(async () => root.render(<Actions agentActive />));
+    await advance(30_000);
+    const times = () => mocks.fetchActions.mock.invocationCallOrder.length;
+    mocks.fetchActions.mockClear();
+    await advance(12_000);
+    // Quiet for a while: every 4 s.
+    expect(times()).toBe(3);
+    // The agent acts: the next read (at most 4 s later) finds it, and the
+    // tail is back to 1 s while it keeps acting.
+    pending = 6;
+    await advance(4_000);
+    expect(cursor).toBeGreaterThan(0);
+    mocks.fetchActions.mockClear();
+    await advance(4_000);
+    expect(times()).toBe(4);
+  });
+
+  it("a changed tab list brings back the 2.5 s page reads", async () => {
+    await act(async () => root.render(<Pages pollFast />));
+    await advance(60_000);
+    mocks.fetchPages.mockClear();
+    await advance(10_000);
+    expect(mocks.fetchPages.mock.calls.length).toBe(2); // unchanged: every 5 s
+    let url = 0;
+    mocks.fetchPages.mockImplementation(async () => {
+      url += 1;
+      return [{ id: "page-1", url: `https://example.test/${url}`, host: "example.test", label: "Example", title: "Example", isActive: true, canGoBack: true, canGoForward: false }];
+    });
+    mocks.fetchPages.mockClear();
+    await advance(10_000);
+    expect(mocks.fetchPages.mock.calls.length).toBeGreaterThanOrEqual(4); // changing: every 2.5 s
   });
 
   it("a run starting reads at once and then fast: an approval raised 300 ms later shows within ~2 s", async () => {
