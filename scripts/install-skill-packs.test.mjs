@@ -11,6 +11,8 @@ import zlib from "node:zlib";
 import {
   DEFAULT_PIN,
   MANIFEST,
+  RESERVED_BIN_NAMES,
+  RESERVED_BIN_PREFIXES,
   installFromFolder,
   installPinned,
   treeDigest,
@@ -310,7 +312,12 @@ test("refuses a bin outside the pack", async () => {
 });
 
 test("refuses a reserved name", async () => {
-  for (const name of ["node", "git", "instafy", "sh", "runtime-agent", "Uw", "u", "uw_x", "1uw", `u${"w".repeat(32)}`]) {
+  for (const name of [
+    "node", "git", "instafy", "sh", "runtime-agent", "Uw", "u", "uw_x", "1uw", `u${"w".repeat(32)}`,
+    // The image's helpers and Codex's commands: an image build or a PATH check at startup may not see them yet.
+    "applypatch", "rathole", "runtime-entrypoint", "browser-egress-proxy", "browser-webrtc-sender",
+    "codex-linux-sandbox", "codex-code-mode-host", "codex-execve-wrapper", "instafy-helper",
+  ]) {
     const { files, tree } = packFiles("demo", { manifest: { bin: { [name]: "scripts/run.mjs" } } });
     await expectRefused(packEntries("demo", files), /is not a command a pack may declare/u, { tree });
   }
@@ -327,4 +334,15 @@ test("a command two packs declare gets no shim", () => {
   assert.deepEqual(writeBinShims({ out, installRoot: "/opt/instafy/skill-packs", log: (line) => lines.push(line) }), ["one-only"]);
   assert.deepEqual(fs.readdirSync(path.join(out, ".bin")), ["one-only"]);
   assert.ok(lines.some((line) => /one and two all declare the command shared/u.test(line)), lines.join("\n"));
+});
+
+test("the installer and the runtime reserve the same command names", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "packages/runtime-agent/src/skill_packs.rs"), "utf8");
+  const list = (constant) => {
+    const body = source.match(new RegExp(`pub const ${constant}: &\\[&str\\] = &\\[([^\\]]*)\\];`, "u"))?.[1];
+    assert.ok(body, constant);
+    return [...body.matchAll(/"([^"]+)"/gu)].map(([, name]) => name).sort();
+  };
+  assert.deepEqual(list("RESERVED_BIN_NAMES"), [...RESERVED_BIN_NAMES].sort());
+  assert.deepEqual(list("RESERVED_BIN_PREFIXES"), [...RESERVED_BIN_PREFIXES].sort());
 });

@@ -48,11 +48,20 @@ export const BIN_DIR = ".bin";
 export const BIN_MARKER = "# instafy:managed-pack-bin";
 export const MAX_PACK_BINS = 8;
 const BIN_NAME = /^[a-z][a-z0-9-]{1,31}$/u;
-// The same names packages/runtime-agent/src/skill_packs.rs refuses.
+// The same names and prefixes packages/runtime-agent/src/skill_packs.rs refuses: the runtime's own
+// tools, the commands every shell needs, the image's helpers (some reach /usr/local/bin after the
+// pack commands) and Codex's commands.
 export const RESERVED_BIN_NAMES = new Set([
   "instafy", "node", "npm", "npx", "pnpm", "pnpx", "yarn", "corepack", "git", "sh", "bash", "zsh", "dash",
   "env", "python", "python3", "pip", "codex", "runtime-agent", "curl", "wget", "sudo", "make",
+  "applypatch", "rathole", "runtime-entrypoint", "browser-egress-proxy", "browser-webrtc-sender",
 ]);
+export const RESERVED_BIN_PREFIXES = ["codex-", "instafy-"];
+
+/// Whether a pack may declare the command `name`: plain, not reserved, outside the reserved prefixes.
+export function isPackBinName(name) {
+  return typeof name === "string" && BIN_NAME.test(name) && !RESERVED_BIN_NAMES.has(name) && !RESERVED_BIN_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
 // A path written into a shim: plain characters only, single-quoted there.
 const PLAIN_PATH = /^[A-Za-z0-9._/-]+$/u;
 
@@ -314,7 +323,7 @@ export function packBins(manifest, files, name) {
   const bins = Object.entries(manifest.bin);
   if (bins.length > MAX_PACK_BINS) fail(`${name}: bin lists more than ${MAX_PACK_BINS} commands`);
   return bins.map(([bin, entry]) => {
-    if (!BIN_NAME.test(bin) || RESERVED_BIN_NAMES.has(bin)) fail(`${name}: bin ${JSON.stringify(bin)} is not a command a pack may declare (a-z, 0-9 and -, 2 to 32 characters, not a reserved name)`);
+    if (!isPackBinName(bin)) fail(`${name}: bin ${JSON.stringify(bin)} is not a command a pack may declare (a-z, 0-9 and -, 2 to 32 characters, not a reserved name)`);
     if (typeof entry !== "string" || !PLAIN_PATH.test(entry) || !files.has(safeRelative(entry, `${name} bin ${bin}`))) {
       fail(`${name}: the command ${bin} runs ${JSON.stringify(entry)}, which is not a file inside the pack`);
     }

@@ -976,16 +976,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_worker_path_reaches_pack_commands() {
-        let Some(node) = crate::skill_packs::node_on_path() else {
+        if crate::skill_packs::node_on_path().is_none() {
             return;
-        };
+        }
         let packs_root = tempfile::tempdir().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let pack = crate::skill_packs::tests::pack_with_command(packs_root.path(), "demo", "demo");
         let packs = std::slice::from_ref(&pack);
         let runtime_path = std::env::var_os("PATH").unwrap();
-        let prepared =
-            crate::skill_packs::prepare_pack_bins_in(packs, Some(node), temp.path(), &runtime_path);
+        let prepared = crate::skill_packs::prepare_pack_bins_in(
+            packs,
+            Some(crate::skill_packs::tests::TEST_PACK_NODE),
+            temp.path(),
+            &runtime_path,
+        );
         let dir = prepared.dir.as_ref().unwrap().path().to_path_buf();
         // What the worker process starts with, from the runtime's environment after startup.
         let vars = [

@@ -109,7 +109,10 @@ const PACK_SETTING_NAMESPACES: &[&str] = &["INSTAFY_LOOKUP_"];
 /// At most this many commands (`bin`) per pack.
 pub const MAX_PACK_BINS: usize = 8;
 /// Command names no pack may declare: the runtime's own tools and the commands every shell needs
-/// (`scripts/install-skill-packs.mjs` refuses the same names).
+/// (`scripts/install-skill-packs.mjs` refuses the same names). The runtime image's helpers are
+/// here too, because some reach `/usr/local/bin` after the pack commands do, and Codex's
+/// `applypatch` alias, which the runtime puts on PATH only at startup: an image build cannot see
+/// either, and a pack command must never take their place.
 pub const RESERVED_BIN_NAMES: &[&str] = &[
     "instafy",
     "node",
@@ -134,7 +137,15 @@ pub const RESERVED_BIN_NAMES: &[&str] = &[
     "wget",
     "sudo",
     "make",
+    "applypatch",
+    "rathole",
+    "runtime-entrypoint",
+    "browser-egress-proxy",
+    "browser-webrtc-sender",
 ];
+/// Name prefixes no pack command may start with: Codex's and Instafy's own commands
+/// (`codex-linux-sandbox`, `codex-code-mode-host`, `codex-execve-wrapper`, ...).
+pub const RESERVED_BIN_PREFIXES: &[&str] = &["codex-", "instafy-"];
 /// The second line of every pack command shim, followed by ` <pack> <version>`.
 pub const PACK_BIN_MARKER: &str = "# instafy:managed-pack-bin";
 /// The name of the folder [`prepare_pack_bins`] makes, followed by `<pid>-` and a random suffix.
@@ -272,7 +283,8 @@ fn is_plain_relative_path(path: &str) -> bool {
 }
 
 /// A command name a pack may declare (`bin`): a lowercase letter, then 1 to 31 lowercase letters,
-/// digits or dashes, and not one of [`RESERVED_BIN_NAMES`].
+/// digits or dashes, not one of [`RESERVED_BIN_NAMES`] and not starting with one of
+/// [`RESERVED_BIN_PREFIXES`].
 pub fn is_pack_bin_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     (2..=32).contains(&bytes.len())
@@ -281,6 +293,9 @@ pub fn is_pack_bin_name(name: &str) -> bool {
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
         && !RESERVED_BIN_NAMES.contains(&name)
+        && !RESERVED_BIN_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 /// A setting pattern a pack may declare: `NAME` or `PREFIX_*` (upper-case letters, digits and `_`,
@@ -1310,6 +1325,10 @@ pub(crate) mod tests {
         assert_eq!(NodeRequirement::parse("^22"), None);
     }
 
+    /// A Node.js version the test packs accept (they need `>=22`): tests that run a pack command
+    /// prepare it for this version, whatever `node` the machine has.
+    pub(crate) const TEST_PACK_NODE: NodeVersion = (22, 0, 0);
+
     /// Rewrites `dir`'s manifest with `bin`.
     pub(crate) fn declare_bin(dir: &Path, bin: serde_json::Value) {
         let mut manifest: serde_json::Value =
@@ -1421,9 +1440,22 @@ pub(crate) mod tests {
             "codex",
             "runtime-agent",
             "sudo",
+            // The runtime's helpers and Codex's commands, which an image build or a PATH check at
+            // startup may not see yet.
+            "applypatch",
+            "rathole",
+            "runtime-entrypoint",
+            "browser-egress-proxy",
+            "browser-webrtc-sender",
+            "codex-linux-sandbox",
+            "codex-code-mode-host",
+            "codex-execve-wrapper",
+            "instafy-helper",
         ] {
             assert!(!is_pack_bin_name(bad), "{bad}");
         }
+        // Only the namespace is reserved, not every name that starts with the same letters.
+        assert!(is_pack_bin_name("codexy"));
         let root = tempfile::tempdir().expect("tmp");
         let dir = make_pack(root.path(), "demo", true);
         declare_bin(&dir, serde_json::json!({ "node": "scripts/run.mjs" }));
@@ -1523,15 +1555,22 @@ pub(crate) mod tests {
     #[test]
     fn prepared_bins_are_appended_to_path() {
         use std::os::unix::fs::PermissionsExt;
-        let Some(node) = node_on_path() else {
+        // The shim runs the pack with whatever `node` is on PATH; the pack's own Node.js
+        // requirement is checked in `a_pack_without_its_node_gets_no_command`, so this test does
+        // not depend on the machine's Node.js major.
+        if node_on_path().is_none() {
             return;
-        };
+        }
         let root = tempfile::tempdir().expect("tmp");
         let temp = tempfile::tempdir().expect("tmp");
         let pack = pack_with_command(root.path(), "demo", "demo");
         let path = std::env::var_os("PATH").expect("PATH");
-        let prepared =
-            prepare_pack_bins_in(std::slice::from_ref(&pack), Some(node), temp.path(), &path);
+        let prepared = prepare_pack_bins_in(
+            std::slice::from_ref(&pack),
+            Some(TEST_PACK_NODE),
+            temp.path(),
+            &path,
+        );
         assert_eq!(prepared.linked, [("demo".to_string(), "demo".to_string())]);
         let dir = prepared
             .dir

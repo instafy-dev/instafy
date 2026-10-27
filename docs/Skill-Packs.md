@@ -74,7 +74,9 @@ A pack may name its commands, so a skill says `uw validate my-map` instead of a 
 Each command runs its file with `node`. A pack may declare at most 8. A name is a lowercase letter
 followed by 1 to 31 lowercase letters, digits or dashes, and is never one of `instafy`, `node`, `npm`,
 `npx`, `pnpm`, `pnpx`, `yarn`, `corepack`, `git`, `sh`, `bash`, `zsh`, `dash`, `env`, `python`,
-`python3`, `pip`, `codex`, `runtime-agent`, `curl`, `wget`, `sudo` or `make`. The file must be a
+`python3`, `pip`, `codex`, `runtime-agent`, `curl`, `wget`, `sudo` or `make`, nor one of the
+runtime's own helpers (`applypatch`, `rathole`, `runtime-entrypoint`, `browser-egress-proxy`,
+`browser-webrtc-sender`), nor a name starting with `codex-` or `instafy-`. The file must be a
 regular file inside the pack. The installer and the runtime refuse a manifest that breaks these rules.
 A name two packs declare goes to neither.
 

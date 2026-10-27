@@ -8,6 +8,7 @@ import test from "node:test";
 // image inputs.
 import "./runtime-browser-host.test.mjs";
 import "./runtime-browser-cost.test.mjs";
+import { isPackBinName } from "./install-skill-packs.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const productionDockerfiles = [
@@ -1422,6 +1423,11 @@ test("runtime skill packs come only from pinned release archives, checked before
     const copy = link.indexOf('install -m 0755 "$shim" "/usr/local/bin/$name";');
     assert.ok(check > 0 && copy > check, target);
     assert.ok(link.includes(`[ "$(bash -lc 'command -v -- "$1"' bash "$name")" = "/usr/local/bin/$name" ]`), target);
+    // The image's own commands are names no pack may declare: the build's check runs before some of
+    // them are copied in, and a pack command must never take their place.
+    const own = new Set([...section.matchAll(/\/usr\/local\/bin\/([A-Za-z0-9._-]+)/gu)].map(([, name]) => name));
+    assert.ok(own.has("runtime-agent") && own.has("codex-code-mode-host"), target);
+    assert.deepEqual([...own].filter((name) => isPackBinName(name)), [], target);
   }
   // A pack installed for local development never enters the build context.
   const ignore = read(".dockerignore").split("\n");
