@@ -14,21 +14,8 @@ const PRIVATE_PACKAGE_MARKERS = Object.freeze([
   [["kno", "sh"].join(""), "contract"].join("-"),
 ]);
 const PRODUCT_MARKER = ["kno", "sh"].join("");
-const PRODUCT_MARKER_EXCEPTIONS = Object.freeze([
-  ["packages", "provider-contract"].join("/"),
-  // The vendored hosted-web robot integration slice keeps the product's wire
-  // identifiers verbatim. Only this exact directory prefix is exempt; the
-  // private package marker and every other rule still apply inside it.
-  ["packages", "frontend", "hosted", "robot"].join("/"),
-]);
 const AUTH_FILE_SUFFIX = [".codex", "auth.json"].join("/");
 const INTERNAL_DIRECTORY = ["inter", "nal"].join("");
-
-function isProductMarkerException(normalizedPath) {
-  return PRODUCT_MARKER_EXCEPTIONS.some((prefix) =>
-    normalizedPath.startsWith(`${prefix}/`),
-  );
-}
 
 const CONTENT_MARKERS = Object.freeze([
   {
@@ -208,10 +195,7 @@ function pathFindings(filePath, approvedEnvironmentTemplates = new Set()) {
   if (PRIVATE_PACKAGE_MARKERS.some((marker) => lowerPath.includes(marker))) {
     findings.push("private-package");
   }
-  if (
-    lowerPath.includes(PRODUCT_MARKER) &&
-    !isProductMarkerException(normalizedPath)
-  ) {
+  if (lowerPath.includes(PRODUCT_MARKER)) {
     findings.push("private-product");
   }
   for (const rule of contentFindings(
@@ -451,14 +435,12 @@ function contentFindings(filePath, content) {
       findings.push(marker.id);
     }
   }
-  if (!isProductMarkerException(normalizedPath)) {
-    if (bufferContainsProductMarker(content)) {
-      findings.push("private-product");
-    } else {
-      const encodedFinding = encodedProductFinding(content);
-      if (encodedFinding) {
-        findings.push(encodedFinding);
-      }
+  if (bufferContainsProductMarker(content)) {
+    findings.push("private-product");
+  } else {
+    const encodedFinding = encodedProductFinding(content);
+    if (encodedFinding) {
+      findings.push(encodedFinding);
     }
   }
   return findings;
