@@ -142,13 +142,17 @@ function AutoRetryCountdown({ dueAt }: { dueAt: number }) {
  * Friendly body for a failed-run assistant message: one plain sentence, a
  * quiet actions row ("Try again" + "Details"), and the raw technical text
  * collapsed behind the Details toggle. The stored message keeps the raw text.
+ * A failed turn has this one Details: it also lists the turn's steps.
  */
 export function RunFailureMessageBody({
   message,
   presentation,
+  steps = null,
 }: {
   message: ChatMessage;
   presentation: RunFailurePresentation;
+  /** The turn's steps (TurnActivityDetails), listed under the error text. */
+  steps?: ReactNode;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const retryContext = useRunFailureRetry();
@@ -349,6 +353,7 @@ export function RunFailureMessageBody({
           {presentation.rawText}
         </div>
       ) : null}
+      {detailsOpen && steps ? <div className="min-w-0">{steps}</div> : null}
     </div>
   );
 }
