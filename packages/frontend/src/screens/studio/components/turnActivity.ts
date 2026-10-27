@@ -453,7 +453,9 @@ function stepLabel(activity: StepActivity | null, state: StepState): string | nu
   if (!activity) {
     return null;
   }
-  if (state !== "running" && activity.done) {
+  // A failed step names what it was doing ("Checking the map"), never what it
+  // would have done ("Built the map").
+  if (state === "done" && activity.done) {
     return capitalize(doneWords(activity.done, activity.count, activity.host));
   }
   return activity.live ? fillHost(activity.live, activity.host) : null;
@@ -497,14 +499,17 @@ export function summarizeTurnActivity(
   const steps: TurnStep[] = [];
   const order: Array<{ kind: "step"; key: string } | { kind: "update"; message: ChatMessage }> = [];
   const updateIds = new Set((options.updates ?? []).map((update) => update.id));
-  let newestStepIndex = -1;
+  // A runtime status ("Saving your changes", "Retrying") names the line only
+  // while it is the newest thing in the turn: any later message (a step, the
+  // model reasoning or writing again, the save's own "done" status) ends it.
+  let newestOtherIndex = -1;
   let newestStatus: { index: number; activity: StepActivity } | null = null;
 
   threadMessages.forEach((message, index) => {
     const type = (getMessageType(message) ?? "").trim().toLowerCase();
     const kind = STEP_TYPES[type];
     if (kind) {
-      newestStepIndex = index;
+      newestOtherIndex = index;
       const key = stepKey(message, kind);
       const step = turnStepFromMessage(message, jobId) as TurnStep;
       const existing = stepIndexByKey.get(key);
@@ -522,7 +527,11 @@ export function summarizeTurnActivity(
       const activity = readStepActivity(message, jobId);
       if (activity) {
         newestStatus = { index, activity };
+      } else {
+        newestOtherIndex = index;
       }
+    } else {
+      newestOtherIndex = index;
     }
     if (updateIds.has(message.id)) {
       order.push({ kind: "update", message });
@@ -549,7 +558,7 @@ export function summarizeTurnActivity(
     const runningStep = [...steps].reverse().find((step) => step.state === "running") ?? null;
     if (options.viewerCanAnswer) {
       live = "Waiting for you";
-    } else if (status && status.index > newestStepIndex && status.activity.live) {
+    } else if (status && status.index > newestOtherIndex && status.activity.live) {
       live = `${fillHost(status.activity.live, status.activity.host)}…`;
     } else if (runningStep) {
       const label = runningStep.activity?.live

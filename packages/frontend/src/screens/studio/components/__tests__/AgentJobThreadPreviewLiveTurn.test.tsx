@@ -373,14 +373,18 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
       expect(settled[1]).toBe(whileRunning[1]);
       expect(container.textContent).not.toContain("earlier update");
 
-      // Octo's notes are one press away, in order.
+      // Octo's reasoning titles and notes are one press away, in order.
       await act(async () => {
         activityLine()?.click();
       });
       const rows = Array.from(container.querySelectorAll('[data-testid="agent-thread-inline-update-row"]')).map(
         (row) => row.textContent,
       );
-      expect(rows).toEqual(statuses.map((status) => status.content));
+      expect(rows).toEqual([
+        expect.stringContaining("Reading the request"),
+        expect.stringContaining("Analyzing output schema"),
+        ...statuses.map((status) => status.content),
+      ]);
     },
   );
 

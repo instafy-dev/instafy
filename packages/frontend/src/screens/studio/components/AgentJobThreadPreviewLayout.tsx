@@ -403,7 +403,13 @@ export function AgentJobThreadPreviewLayout({
     [activity.details, visibleUpdateIds],
   );
   const activityText = activity.live ?? activity.summary ?? "";
-  const hasDetails = detailItems.length > 0 || branchThreads.length > 0;
+  // Details opens once the turn has done something: a step, a note, a plan or
+  // a child thread. Reasoning titles are listed there too, but on their own
+  // they leave the line plain ("Thinking…" before the first step).
+  const hasDetails =
+    detailItems.some(
+      (item) => item.kind === "step" || (getMessageType(item.message) ?? "").trim().toLowerCase() !== "reasoning",
+    ) || branchThreads.length > 0;
   // A failed turn has one Details: the failure block's, which lists the steps.
   const activityLineOpensDetails = hasDetails && runFailurePresentation === null;
   const showActivityLine = activityText.length > 0;
@@ -511,7 +517,7 @@ export function AgentJobThreadPreviewLayout({
     );
   };
 
-  // Octo's notes, statuses and plan updates, as Details lists them.
+  // Octo's notes, reasoning titles, statuses and plan updates, as Details lists them.
   const renderUpdate = (update: ChatMessage) => {
     const updateType = (getMessageType(update) ?? "").trim().toLowerCase();
     const isActivityUpdate = updateType === "reasoning" || updateType === "status";

@@ -8,7 +8,7 @@ Looked up 14 places, read 6 pages, built the map   Details ›
 
 While the turn runs, the line names the current step ("Looking up places…", "Reading pages…") and
 says "Thinking…" between steps. Details holds everything else: each command and its output, tool
-calls, Octo's notes and plan updates. This page describes where the words come from and why they
+calls, Octo's notes, reasoning titles and plan updates. This page describes where the words come from and why they
 can be trusted.
 
 ## In Studio
@@ -21,7 +21,7 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | Queued or starting, before the model has begun | `Starting…` |
 | Running a labelled step | its running label, for example `Looking up places…` (the newest running step wins) |
 | Running an unlabelled command or tool | `Working…`; a file edit says `Editing files…` |
-| A runtime status is the newest thing | `Saving your changes…`, `Retrying…` |
+| A runtime status is the newest thing | `Saving your changes…`, `Retrying…`, until anything newer arrives |
 | The model is working, before or between steps | `Thinking…` (never its reasoning titles or notes) |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer (`turnActivity.ts` takes it as `viewerCanAnswer`; nothing feeds it yet, the inline browser approvals will) |
 | Done | up to two "what it did" groups, biggest first and in the order they happened, then the latest "what it made": `Looked up 14 places, read 6 pages, built the map` |
@@ -36,8 +36,10 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   plain text.
 - Details (`TurnActivityDetails.tsx`) lists the turn in order: each command with its label, the
   command without its shell wrapper (the full line is its title), its state and its output behind
-  a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes, plan
-  updates and statuses. It shows the newest 60 rows, with "Show earlier steps" above them.
+  a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes,
+  reasoning titles, plan updates and statuses. A failed step reads as what it was doing ("Checking
+  the map"), never as what it would have done. It shows the newest 60 rows, with "Show earlier
+  steps" above them; pressing that moves focus to the first row it reveals.
 - Cards (secrets, connections, action and preview cards, team plans) stay in the turn's default
   view, and the file changes stay under the reply. Run traces keep their full view.
 - A command on its own in the conversation is one row: its label (or "Ran a command"), its state

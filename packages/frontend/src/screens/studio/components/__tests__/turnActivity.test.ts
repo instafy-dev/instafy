@@ -253,6 +253,19 @@ describe("summarizeTurnActivity", () => {
     );
   });
 
+  // Details put "Built the map" beside the failed validate's cross: a failed
+  // step names what it was doing, never what it would have done.
+  it("never labels a failed step in Details with what it would have done", () => {
+    const activity = summarize([command(VALIDATE, { status: "failed", exitCode: 1 }), command(ADD_POINT, { exitCode: 2 })]);
+    const labels = activity.details.map((item) => (item.kind === "step" ? [item.step.state, item.step.label] : null));
+    expect(labels).toEqual([
+      ["failed", "Checking the map"],
+      ["failed", "Looking up places"],
+    ]);
+    const done = summarize([command(VALIDATE)]).details[0];
+    expect(done.kind === "step" && done.step.label).toBe("Built the map");
+  });
+
   it("names the two biggest content groups in the order they happened", () => {
     const search = {
       v: 1,
@@ -299,6 +312,25 @@ describe("summarizeTurnActivity", () => {
     });
     expect(summarize([command(ADD_POINT), saving], "running").live).toBe("Saving your changes…");
     expect(summarize([saving, command(ADD_POINT)], "running").live).toBe("Thinking…");
+  });
+
+  // A retry or a save is over once anything else arrives: the model reasoning
+  // again, a note, the save's own "done" status. Held until the next step, the
+  // line read "Retrying…" through a whole reply written after the retry.
+  it("gives up a runtime status once anything newer arrives, not only a step", () => {
+    const retrying = note("Retrying: stream disconnected", "status", {
+      v: 1,
+      key: "runtime/retry",
+      role: "quiet",
+      live: "Retrying",
+      count: 1,
+      also: [],
+    });
+    expect(summarize([command(ADD_POINT), retrying], "running").live).toBe("Retrying…");
+    expect(summarize([command(ADD_POINT), retrying, note("**Picking the hotels**", "reasoning")], "running").live).toBe(
+      "Thinking…",
+    );
+    expect(summarize([retrying, note("Workspace changes saved.")], "running").live).toBe("Thinking…");
   });
 
   it("says Waiting for you only to the person who can answer", () => {

@@ -438,6 +438,48 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.textContent).not.toContain("evil.example");
   });
 
+  // Builders find everything in Details: the reasoning titles the old rail's
+  // "Thinking" chips showed on hover are listed there in order, while the
+  // line itself never uses them.
+  it("lists Octo's reasoning titles in Details, in order, and never in the line", async () => {
+    const now = Date.now();
+    const message = threadMessage([
+      commandStep("one", ADD_POINT_ACTIVITY, { timestamp: now - 3_000 }),
+      {
+        id: "octo-reasoning",
+        role: "assistant",
+        authorId: null,
+        content: "**Choosing where to stay**\n\nBaixa is central and flat.",
+        timestamp: now - 2_000,
+        files: null,
+        messageType: "reasoning",
+        metadata: { messageType: "reasoning", status: "completed", jobId: JOB_ID, source: "agent" },
+      },
+      commandStep("two", WEB_READ_ACTIVITY, { timestamp: now - 1_000 }),
+    ]);
+
+    await act(async () => {
+      root.render(<LiveAgentJobThreadPreview message={message} />);
+    });
+
+    const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
+    expect(line?.textContent).toBe("Thinking…" + "Details");
+    expect(container.textContent).not.toContain("Choosing where to stay");
+
+    await act(async () => {
+      line?.click();
+    });
+
+    const rows = [...(container.querySelector('[data-testid="turn-activity-details"] [role="list"]')?.children ?? [])];
+    expect(rows.map((row) => row.textContent ?? "")).toEqual([
+      expect.stringContaining("Looked up a place"),
+      expect.stringContaining("Choosing where to stay"),
+      expect.stringContaining("Read 6 pages"),
+    ]);
+    expect(rows[1]?.querySelector('[data-testid="agent-thread-inline-update-row"]')).not.toBeNull();
+    expect(line?.textContent).toBe("Thinking…" + "Hide details");
+  });
+
   it("gives a failed turn one Details, the failure block's, and lists the steps there", async () => {
     const step = commandStep("one", ADD_POINT_ACTIVITY);
     await act(async () => {

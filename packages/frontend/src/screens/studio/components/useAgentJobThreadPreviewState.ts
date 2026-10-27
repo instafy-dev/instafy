@@ -123,16 +123,13 @@ export function useAgentJobThreadPreviewState({
       if (THREAD_ACTION_CARD_TYPES.has(type)) {
         return false;
       }
-      return ![
-        "command_execution",
-        "mcp_tool_call",
-        "todo_list",
-        "web_search",
-        "token_usage",
-        "runtime_switch",
-        "reasoning",
-        "status",
-      ].includes(type);
+      // A step is plumbing (a file change reads "Applied file changes:
+      // <paths>"): it is the activity line's and Details', never the body of a
+      // turn that has no reply, such as one someone stopped.
+      if (STEP_MESSAGE_TYPES.has(type)) {
+        return false;
+      }
+      return !["todo_list", "token_usage", "runtime_switch", "reasoning", "status"].includes(type);
     };
 
     for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
@@ -400,8 +397,8 @@ export function useAgentJobThreadPreviewState({
   }, [jobId]);
 
   // Everything between the person's message and the reply that is not a step:
-  // cards (shown in the turn) and Octo's notes, statuses and plan updates
-  // (listed in Details).
+  // cards (shown in the turn) and Octo's notes, reasoning titles, statuses and
+  // plan updates (listed in Details).
   const intermediateUpdates = useMemo(() => {
     const excludedIds = new Set<string>();
     if (finalSummaryMessage?.id) {
@@ -418,10 +415,9 @@ export function useAgentJobThreadPreviewState({
         return false;
       }
       const type = messageType(candidate);
-      if (type === "reasoning") {
-        return false;
-      }
-      if (type === "status") {
+      // Octo's reasoning titles and notes are listed in Details (never on the
+      // line), as long as they say something.
+      if (type === "status" || type === "reasoning") {
         const normalized = normalizeAssistantStatusText(candidate.content);
         if (!normalized) {
           return false;
