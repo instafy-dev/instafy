@@ -316,6 +316,8 @@ const WEB_RESEARCH_TEMPLATE: &str = include_str!(concat!(
 const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // From before `instafy web read` was one of its readers.
     include_str!("legacy/web-research-v1.md"),
+    // From before link-only sites had kinds (no-agents, no-reuse) and a guided mode.
+    include_str!("legacy/web-research-v2.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -326,6 +328,8 @@ const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
 const LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES: &[&str] = &[
     // From before it listed the translators, caches and archives that serve copies of other sites.
     include_str!("legacy/web-research-link-only-v1.json"),
+    // From before each site had a kind, the terms it rests on, and guided-mode links.
+    include_str!("legacy/web-research-link-only-v2.json"),
 ];
 const SKILL_READING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

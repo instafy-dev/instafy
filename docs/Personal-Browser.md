@@ -507,8 +507,9 @@ only in the visible browser, so the rules are the ones a person sees:
   address, so a name that changes its answer between Desktop's lookup and
   Chromium's connection is not caught for a WebSocket.
 - **Never a link-only site.** Sites whose terms or robots.txt bar AI agents
-  (the `instafy-web-research` skill's `references/link-only-sites.json`:
-  Booking.com, Airbnb, Amazon, Google search and Maps and others), and a
+  (the `no-agents` sites in the `instafy-web-research` skill's
+  `references/link-only-sites.json`: Booking.com, Airbnb, Amazon, Google search
+  and Maps and others; a site with no kind, or an unknown one, counts), and a
   translator's, cache's or archive's copy of one (the list's `wrappers`), are
   never read or driven by the agent. Desktop bundles that same file, the one
   runtime-agent embeds, at build time, and a test fails when the bundled copy
@@ -517,7 +518,9 @@ only in the visible browser, so the rules are the ones a person sees:
   Browser and `instafy web read`. Desktop enforces the bundled list: sites a
   space adds to its own copy of the list are enforced by the readers that run in
   the space (`instafy web read`, the Shared Browser), but no Personal Browser
-  channel carries a space's files, so Desktop does not read that copy.
+  channel carries a space's files, so Desktop does not read that copy. A
+  `no-reuse` site (its terms bar copying its content, not reading it) is not
+  refused; the web-research skill says how its content may be used.
   `open_tab` and `navigate` to such a site, a link to one, and
   every page load or redirect hop of a driven tab, and every frame of a page the
   agent opened, that would land on one are refused with `link_only_site`,

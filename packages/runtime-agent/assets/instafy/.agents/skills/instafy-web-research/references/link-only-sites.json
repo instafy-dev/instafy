@@ -1,18 +1,75 @@
 {
   "schema": "instafy.link-only-sites@1",
-  "about": "Sites Octo links to and never reads, in any reader or browser, because their terms or robots.txt bar AI agents or automated copying (instafy-web-research, Link-only sites). A reader that enforces this list treats it as a safety guard: it refuses the URL and every redirect hop that lands on one. The bundled copy is the floor: a space's copy may add sites and wrappers, never remove one; readers that can see the space enforce both. Matching: \"example.com\" matches that host and any subdomain; \"example.*\" matches the label followed by one or two public-suffix labels of 2 or 3 letters (example.de, example.co.uk, www.example.com.au). Hosts are compared as a browser connects to them: any case, trailing dots, ports and user info ignored, international names in punycode. Wrappers are services that serve another site's pages at an address of their own (translators, caches, archives, reader and fetch proxies). A wrapper is never refused itself, but its copy of a listed site is that site. \"embeds\" says where its address writes the site: \"subdomain\" (example.com.proxy.test), \"subdomain-dashes\" (www-example-com.translate.goog, with \".\" written \"-\" and \"-\" written \"--\"), \"path\" (web.archive.org/web/2024/https://www.example.com/) or \"query\" (.../search?q=cache:www.example.com). Add a site when its terms bar AI agents or automated copying, with the reason; robots.txt is checked on every read anyway, so a robots-only block needs no entry. Add a wrapper when a service serves other sites' pages under its own address.",
-  "reviewed": "2026-10",
+  "about": "Sites whose terms or robots.txt limit what Octo may do with them (instafy-web-research, Link-only sites). Each site's \"kind\" says which rules apply. \"no-agents\": the terms bar AI agents, bots, scrapers or any automated access or collection. Every reader and browser refuses the site, every redirect hop that lands on it, and every wrapper's copy of it; Octo guides the person to it instead. \"no-reuse\": the terms bar copying or republishing its content but not reading it. Readers read it; Octo summarizes it in its own words, cites \"seen <date> on <host>\", links back, never copies reviews, photos or price lists, and keeps its content out of anything published or shared by public link. A site without a kind, or with an unknown one, is \"no-agents\"; when terms are unclear, choose \"no-agents\". \"terms\" records the evidence: the terms page's \"url\", the day it was \"checked\", a short \"quote\" of the deciding clause and an optional \"note\". Guided mode: \"home\" is the site's front page; \"search\" is an optional https link template on the site's own hosts whose \"{name}\" placeholders, each a whole path segment or a whole query value, are defined in \"placeholders\" (format \"text\", \"date\" as YYYY-MM-DD, or \"count\"); \"deepLinks\": false means the terms bar deep links, so the person gets the home page and what to type there, and the site has no \"search\". The bundled copy is the floor: a space's copy may add sites, wrappers and placeholders and may make a site stricter, never remove one or loosen it (where several entries match, the strictest kind wins); a copy that is not a list is ignored with a warning. Matching: \"example.com\" matches that host and any subdomain; \"example.*\" matches the label followed by one or two public-suffix labels of 2 or 3 letters (example.de, example.co.uk, www.example.com.au). Hosts are compared as a browser connects to them: any case, trailing dots, ports and user info ignored, international names in punycode. Wrappers are services that serve another site's pages at an address of their own (translators, caches, archives, reader and fetch proxies). A wrapper is never refused itself, but its copy of a listed site is that site. \"embeds\" says where its address writes the site: \"subdomain\" (example.com.proxy.test), \"subdomain-dashes\" (www-example-com.translate.goog, with \".\" written \"-\" and \"-\" written \"--\"), \"path\" (web.archive.org/web/2024/https://www.example.com/) or \"query\" (.../search?q=cache:www.example.com). Add a site when its terms bar AI agents or automated copying, with the reason, its kind and the terms it rests on; robots.txt is checked on every plain read anyway. Add a wrapper when a service serves other sites' pages under its own address.",
+  "reviewed": "2026-10-27",
+  "placeholders": {
+    "query": {"format": "text", "about": "what to search for: a place, area, hotel or product"},
+    "checkin": {"format": "date", "about": "arrival date"},
+    "checkout": {"format": "date", "about": "departure date"},
+    "adults": {"format": "count", "about": "adults"},
+    "children": {"format": "count", "about": "children"},
+    "rooms": {"format": "count", "about": "rooms"}
+  },
   "sites": [
-    { "name": "Booking.com", "match": ["booking.com"], "why": "terms bar AI agents" },
-    { "name": "Agoda", "match": ["agoda.com", "agoda.net"], "why": "terms bar AI agents and deep links" },
-    { "name": "Airbnb", "match": ["airbnb.*"], "why": "terms bar AI agents" },
-    { "name": "Amazon", "match": ["amazon.*", "amzn.*", "amzn.asia", "a.co"], "why": "terms and robots.txt bar AI agents" },
-    { "name": "Nike", "match": ["nike.com"], "why": "terms bar AI agents" },
-    { "name": "Expedia group", "match": ["expedia.*", "hotels.*", "vrbo.*"], "why": "terms bar automated copying" },
-    { "name": "Trip.com", "match": ["trip.com", "ctrip.com"], "why": "terms allow private use only" },
-    { "name": "Tripadvisor", "match": ["tripadvisor.*"], "why": "terms bar content reuse" },
-    { "name": "Google search, Maps, Travel and Hotels", "match": ["google.*", "goo.gl"], "why": "terms bar automated access; Maps links are fine as links" },
-    { "name": "RunRepeat", "match": ["runrepeat.com"], "why": "content not licensed for reuse" }
+    {
+      "name": "Booking.com", "match": ["booking.com"], "kind": "no-agents", "why": "terms bar AI agents",
+      "terms": {"url": "https://www.booking.com/content/terms.html", "checked": "2026-10-27", "quote": "using automated assistants (including AI-powered assistants) to access the Platform without express permission"},
+      "home": "https://www.booking.com/",
+      "search": "https://www.booking.com/searchresults.html?ss={query}&checkin={checkin}&checkout={checkout}&group_adults={adults}&group_children={children}&no_rooms={rooms}"
+    },
+    {
+      "name": "Agoda", "match": ["agoda.com", "agoda.net"], "kind": "no-agents", "why": "terms bar AI agents and deep links",
+      "terms": {"url": "https://www.agoda.com/info/termsofuse.html", "checked": "2026-10-27", "quote": "datamining, scraping, spidering, indexing, storing or rehosting the Content outside our Platform", "note": "The page builds its text with JavaScript, so the clause was read from its search listing. The same terms bar deep links into the platform without prior written permission."},
+      "home": "https://www.agoda.com/",
+      "deepLinks": false
+    },
+    {
+      "name": "Airbnb", "match": ["airbnb.*"], "kind": "no-agents", "why": "terms bar AI agents",
+      "terms": {"url": "https://www.airbnb.com/help/article/2908", "checked": "2026-10-27", "quote": "Do not use bots, crawlers, scrapers, or other automated means to access or collect data"},
+      "home": "https://www.airbnb.com/",
+      "search": "https://www.airbnb.com/s/{query}/homes?checkin={checkin}&checkout={checkout}&adults={adults}&children={children}"
+    },
+    {
+      "name": "Amazon", "match": ["amazon.*", "amzn.*", "amzn.asia", "a.co"], "kind": "no-agents", "why": "terms and robots.txt bar AI agents",
+      "terms": {"url": "https://www.amazon.com/gp/help/customer/display.html?nodeId=508088", "checked": "2026-10-27", "quote": "any use of data mining, robots, or similar data gathering and extraction tools", "note": "amazon.com answered 503 to a direct read, so the clause was read from a dated copy of the same page (14 Aug 2026). Its robots.txt disallows every page for named AI agents (ChatGPT-User, Claude-User and others)."},
+      "home": "https://www.amazon.com/",
+      "search": "https://www.amazon.com/s?k={query}"
+    },
+    {
+      "name": "Nike", "match": ["nike.com"], "kind": "no-agents", "why": "terms bar AI agents",
+      "terms": {"url": "https://agreementservice.svs.nike.com/us/en_us/rest/agreement?agreementType=termsOfUse&uxId=com.nike.commerce.nikedotcom.web&country=US&language=en&requestType=redirect", "checked": "2026-10-27", "quote": "Develop or use any application or automated technology, other than as approved by NIKE, to interact with the Services"},
+      "home": "https://www.nike.com/",
+      "search": "https://www.nike.com/w?q={query}"
+    },
+    {
+      "name": "Expedia group", "match": ["expedia.*", "hotels.*", "vrbo.*"], "kind": "no-agents", "why": "terms bar automated access and deep links",
+      "terms": {"url": "https://www.expedia.com/lp/b/terms-of-service", "checked": "2026-10-27", "quote": "access, monitor or copy any content on our Service using any robot, spider, scraper or other automated means", "note": "expedia.com answered 429 to direct reads, so the clause (last revised 26 Mar 2026) was read from the page's search listing. Hotels.com's terms carry the same list and bar \"deep link to any part of our Service\"."},
+      "home": "https://www.expedia.com/",
+      "deepLinks": false
+    },
+    {
+      "name": "Trip.com", "match": ["trip.com", "ctrip.com"], "kind": "no-agents", "why": "terms allow private, non-commercial use only and bar deep links",
+      "terms": {"url": "https://uk.trip.com/contents/service-guideline/terms.html", "checked": "2026-10-27", "quote": "WE ONLY PROVIDE OUR WEBSITE FOR DOMESTIC AND PRIVATE USE", "note": "No clause names automated access either way, but use is private and non-commercial only, so an agent's reading is unclear and the site stays no-agents. Deep links are barred: \"nor may you create a link to any part of our Website other than the home page\". ctrip.com's own agreement was not found."},
+      "home": "https://www.trip.com/",
+      "deepLinks": false
+    },
+    {
+      "name": "Tripadvisor", "match": ["tripadvisor.*"], "kind": "no-agents", "why": "terms bar AI systems and deep links",
+      "terms": {"url": "https://tripadvisor.mediaroom.com/us-terms-of-use", "checked": "2026-10-27", "quote": "any robot, spider, artificial intelligence (AI) system, or other automated device, process or means to access", "note": "www.tripadvisor.com answered 403 to a direct read; this is Tripadvisor's own copy of its terms (effective 15 Jul 2025). They also bar: \"deep-link to any portion of the Services for any purpose without our express written permission\"."},
+      "home": "https://www.tripadvisor.com/",
+      "deepLinks": false
+    },
+    {
+      "name": "Google search, Maps, Travel and Hotels", "match": ["google.*", "goo.gl"], "kind": "no-agents", "why": "terms bar automated access where robots.txt disallows it; Maps links are fine as links",
+      "terms": {"url": "https://policies.google.com/terms", "checked": "2026-10-27", "quote": "using automated means to access content from any of our services in violation of the machine-readable instructions", "note": "google.com's robots.txt disallows search, travel search and most Maps pages for every agent; the Maps terms also bar copying and bulk downloads."},
+      "home": "https://www.google.com/",
+      "search": "https://www.google.com/maps/search/?api=1&query={query}"
+    },
+    {
+      "name": "RunRepeat", "match": ["runrepeat.com"], "kind": "no-reuse", "why": "its lab data and reviews are sold under licence, not for reuse; reading is not barred",
+      "terms": {"url": "https://data.runrepeat.com/", "checked": "2026-10-27", "quote": "Our most basic license agreement start at €1,000 per year", "note": "runrepeat.com's legal disclaimer and robots.txt set no rule against automated reading; its content is licensed, so it is summarized and linked, never copied."},
+      "home": "https://runrepeat.com/"
+    }
   ],
   "wrappers": [
     { "name": "Google Translate's page proxy", "match": ["translate.goog"], "embeds": ["subdomain-dashes"], "why": "serves a site's pages at www-example-com.translate.goog" },

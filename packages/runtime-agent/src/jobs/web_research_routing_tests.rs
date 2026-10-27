@@ -97,6 +97,9 @@ fn asks_for_a_fact_from_the_web_route_to_the_research_skill() {
         "what are the opening hours of the city museum this weekend",
         "compare prices for these two running shoes, with sources",
         "fact check this claim about the bridge's opening date",
+        // A site that bars agents: the skill's guided mode.
+        "compare hotel prices in Lisbon for 12-14 November for two adults on Booking.com",
+        "find an apartment on Airbnb in Porto for next weekend",
     ] {
         let ids = routed(&contexts, prompt);
         assert!(ids.iter().any(|id| id == RESEARCH), "{prompt}: {ids:?}");
@@ -113,6 +116,7 @@ fn asks_for_a_fact_from_the_web_route_to_the_research_skill() {
         // Building or debugging an app about cafes, hotels or prices is not a fact to read on the web.
         "build a landing page for my restaurant",
         "make a website for my hotel with a booking form",
+        "build a hotel booking app with a search form and a price filter",
         "add a price column to the products table",
         "update the prices in my cafe app's menu",
         "find out why the build fails",
@@ -156,7 +160,7 @@ fn the_research_skill_says_how_to_choose_read_cross_check_and_cite() {
         "| Prices | the shop's or operator's own product page |",
         "An aggregator (a site listing many businesses' offers, prices or reviews) is never the final source.",
         "Read one only in a browser tab the person watches",
-        "Never read them, in any reader or browser: give the plain link.",
+        "the site is link-only. Never read, open or drive it, in any reader or browser",
         "1. URLs the person gave. 2. Sources an installed skill names for this need. 3. Open data and open APIs",
         "6. At most 2 guessed official domains, each confirmed by reading it",
         "Never put a guessed address in a `request_browser` task.",
@@ -196,24 +200,105 @@ fn the_link_only_list_is_well_formed_data() {
             .as_str()
             .is_some_and(|about| !about.is_empty())
     );
+    // Placeholders for guided-mode links: a lowercase name, a format the matcher knows, and what it is.
+    let placeholders = parsed["placeholders"].as_object().expect("placeholders");
+    assert!(placeholders.contains_key("query"));
+    for (name, placeholder) in placeholders {
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "{name}"
+        );
+        assert!(
+            ["text", "date", "count"].contains(&placeholder["format"].as_str().unwrap_or("")),
+            "{name}: {placeholder}"
+        );
+        assert!(
+            placeholder["about"]
+                .as_str()
+                .is_some_and(|about| !about.trim().is_empty())
+        );
+    }
     let sites = parsed["sites"].as_array().expect("sites");
     assert!(!sites.is_empty());
     let mut seen = HashSet::new();
     for site in sites {
         let object = site.as_object().expect("site object");
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.retain(|key| !["deepLinks", "search"].contains(key));
         keys.sort();
-        assert_eq!(keys, ["match", "name", "why"], "{site}");
+        assert_eq!(
+            keys,
+            ["home", "kind", "match", "name", "terms", "why"],
+            "{site}"
+        );
+        // Every site has a kind and the terms it rests on: the page, the day it was read, the deciding clause.
+        let kind = site["kind"].as_str().expect("kind");
+        assert!(["no-agents", "no-reuse"].contains(&kind), "{site}");
+        let terms = site["terms"].as_object().expect("terms");
         assert!(
-            site["name"]
+            terms["url"]
                 .as_str()
-                .is_some_and(|name| !name.trim().is_empty())
+                .is_some_and(|url| url.starts_with("https://")),
+            "{site}"
+        );
+        let checked = terms["checked"].as_str().expect("checked");
+        assert!(
+            checked.len() == 10
+                && checked
+                    .chars()
+                    .enumerate()
+                    .all(|(at, c)| if at == 4 || at == 7 {
+                        c == '-'
+                    } else {
+                        c.is_ascii_digit()
+                    }),
+            "{site}: checked is YYYY-MM-DD"
         );
         assert!(
-            site["why"]
-                .as_str()
-                .is_some_and(|why| !why.trim().is_empty())
+            terms["quote"].as_str().is_some_and(|quote| {
+                let quote = quote.trim();
+                !quote.is_empty() && quote.chars().count() <= 200
+            }),
+            "{site}: a short quote of the deciding clause"
         );
+        for key in terms.keys() {
+            assert!(
+                ["url", "checked", "quote", "note"].contains(&key.as_str()),
+                "{site}: {key}"
+            );
+        }
+        // A site is "no-reuse" only with a note on why reading is not barred.
+        if kind == "no-reuse" {
+            assert!(
+                terms["note"]
+                    .as_str()
+                    .is_some_and(|note| !note.trim().is_empty()),
+                "{site}"
+            );
+        }
+        assert!(
+            site["home"]
+                .as_str()
+                .is_some_and(|home| home.starts_with("https://")),
+            "{site}"
+        );
+        // Only an explicit false is written; a site that bars deep links has no search link.
+        if let Some(deep_links) = site.get("deepLinks") {
+            assert_eq!(deep_links, &JsonValue::Bool(false), "{site}");
+            assert!(site.get("search").is_none(), "{site}");
+        }
+        if let Some(search) = site.get("search") {
+            let search = search.as_str().expect("search");
+            assert!(search.starts_with("https://"), "{site}");
+            let mut rest = search;
+            while let Some(open) = rest.find('{') {
+                let close = rest[open..].find('}').expect("a closed placeholder") + open;
+                let name = &rest[open + 1..close];
+                assert!(placeholders.contains_key(name), "{site}: {{{name}}}");
+                rest = &rest[close + 1..];
+            }
+        }
         let patterns = site["match"].as_array().expect("match list");
         assert!(!patterns.is_empty(), "{site}");
         for pattern in patterns {
@@ -314,9 +399,14 @@ fn an_unedited_earlier_link_only_list_is_upgraded_and_an_edited_one_kept() {
     assert!(!previous.contains("\"wrappers\""));
     let tmp = scaffolded_space();
     let sites = tmp.path().join(learn::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH);
-    fs::write(&sites, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&sites).unwrap(), LINK_ONLY);
+    // The list from before kinds and guided mode is upgraded too.
+    let before_kinds = include_str!("legacy/web-research-link-only-v2.json");
+    assert!(before_kinds.contains("\"wrappers\"") && !before_kinds.contains("\"kind\""));
+    for earlier in [previous, before_kinds] {
+        fs::write(&sites, earlier).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&sites).unwrap(), LINK_ONLY);
+    }
 
     let edited = previous.replace(
         "\"sites\": [",
@@ -430,4 +520,39 @@ fn the_browser_skill_reads_a_cards_pages_in_octos_own_shared_browser_tabs() {
         learn::ensure_project_memory_scaffold(tmp.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
     }
+}
+
+/// The kinds of link-only site and guided mode: a `no-agents` site is never read or opened and the person is
+/// guided to it with a filled link (`instafy web link`) and Send page to Octo; a `no-reuse` site is read but its
+/// content is summarized, cited and linked, never copied or published. An unedited earlier copy is upgraded.
+#[test]
+fn the_research_skill_has_kinds_of_link_only_site_and_a_guided_mode() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let research = flat(RESEARCH_SKILL);
+    for needle in [
+        "Each site's `kind` says which rules apply; `terms` quotes the clause it rests on.",
+        "`no-agents` (terms bar AI agents, bots or automated access): the site is link-only.",
+        "nor a translator's, cache's or archive's copy of it. Guide the person instead (below).",
+        "`no-reuse` (terms bar copying, not reading): read it like any page; `instafy web read` marks it `noReuse`.",
+        "Summarize it in your own words, cite \"seen <date> on <host>\" and link back (to its `home` when `deepLinks` is false).",
+        "Never copy its reviews, photos or price lists, and keep its content out of anything published or shared by public link: links only there.",
+        "### Guided mode",
+        "Run `instafy web link <site> query=<…> checkin=<YYYY-MM-DD> …`",
+        "the site's home page plus `typeIn` (what to type there) when the site bars deep links or has no search link",
+        "Reply with short numbered steps for the person: open the link in their own tab",
+        "press **Send page to Octo** on each",
+        "Never open or read these links yourself, in any tab or reader. Work only from the pages the person sends",
+        "From a listed site of either kind, a page the person sent from one, or an aggregator listing, a page or dataset keeps at most the name and the link.",
+    ] {
+        assert!(research.contains(needle), "{needle}");
+    }
+    assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+
+    let previous = include_str!("legacy/web-research-v2.md");
+    assert!(!previous.contains("Guided mode"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::WEB_RESEARCH_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
 }
