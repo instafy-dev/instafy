@@ -655,6 +655,13 @@ fn on_status_line(shared: &Arc<Shared>, config: &HostConfig, host: &mut Running,
                 }
                 current
             };
+            if became_ready {
+                // A browser that started has none of an earlier run's tabs of
+                // Octo's; the record of them is settled off the executor.
+                tokio::task::spawn_blocking(
+                    crate::shared_browser::close_leftover_agent_tabs_after_browser_start,
+                );
+            }
             if became_ready && let Some(persistence) = &config.persistence {
                 let shared = shared.clone();
                 let generation = host.generation;

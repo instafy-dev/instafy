@@ -229,11 +229,23 @@ struct FingerprintedApprovalRequest<'a> {
 /// directory, so they are cleared with it.
 const AGENT_TABS_FILE: &str = "tabs.json";
 const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
+/// Octo's tabs from an earlier run that could not be closed yet, written by
+/// runtime-agent (`leftover-tabs.json`). The one record that outlives a run:
+/// it grants nothing, and its tabs keep Octo's badge until runtime-agent
+/// closes them or a person keeps one. runtime-agent and the origin both
+/// rewrite it, each under the approval directory's lock.
+const LEFTOVER_AGENT_TABS_FILE: &str = "leftover-tabs.json";
 const AGENT_TABS_MAX_BYTES: u64 = 8 * 1024;
 const KEPT_AGENT_TABS_MAX_BYTES: usize = 4 * 1024;
 /// The most tabs of its own Octo may have open in one run (runtime-agent's
 /// `MAX_AGENT_TABS`, the script's `MAX_AGENT_TABS`).
 const MAX_AGENT_TABS: usize = 3;
+/// The most tabs the leftover record holds (runtime-agent's
+/// `MAX_LEFTOVER_AGENT_TABS`).
+const MAX_LEFTOVER_AGENT_TABS: usize = 4 * MAX_AGENT_TABS;
+/// The highest number a run gives one of Octo's tabs (the script's
+/// `MAX_AGENT_TAB_NUMBER`).
+const MAX_AGENT_TAB_NUMBER: u64 = 999;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -244,6 +256,7 @@ struct AgentTabsRecord {
     initiator_user_id: String,
     browser_page_id: String,
     current_tab_id: Option<String>,
+    last_tab_number: u64,
     tabs: Vec<AgentTabRecord>,
 }
 
@@ -251,8 +264,25 @@ struct AgentTabsRecord {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentTabRecord {
     tab_id: String,
+    /// The number the tab was opened with ("Octo's tab 2"), for its lifetime.
+    number: u64,
     #[serde(rename = "approvedOrigins")]
     _approved_origins: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LeftoverAgentTabsRecord {
+    version: u8,
+    tabs: Vec<LeftoverAgentTab>,
+}
+
+/// A tab in the leftover record, by its id only: the number it had belonged
+/// to its run, which has ended.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LeftoverAgentTab {
+    tab_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -266,12 +296,45 @@ struct KeptAgentTabsRecord {
     tab_ids: Vec<String>,
 }
 
-/// Octo's tabs in the run that holds the browser now: every viewer sees them
-/// with Octo's badge, and a person may keep one open past the run.
+/// Octo's tabs in the run that holds the browser now, and those earlier runs
+/// left open: every viewer sees them with Octo's badge, and a person may keep
+/// one open as an ordinary tab.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AgentTabs {
     pub(crate) tab_ids: Vec<String>,
     pub(crate) kept: Vec<String>,
+    /// The number each tab of the running turn was opened with ("Octo's tab
+    /// 2").
+    pub(crate) numbers: Vec<(String, u64)>,
+    /// The tabs an earlier run left open. They have no number, since the run
+    /// that numbered them has ended and the next one numbers its own tabs
+    /// from 1 again, and Octo is not reading them.
+    pub(crate) leftover: Vec<String>,
+}
+
+impl AgentTabs {
+    pub(crate) fn number_of(&self, tab_id: &str) -> Option<u64> {
+        self.numbers
+            .iter()
+            .find(|(id, _)| id == tab_id)
+            .map(|(_, number)| *number)
+    }
+
+    pub(crate) fn is_leftover(&self, tab_id: &str) -> bool {
+        self.leftover.iter().any(|id| id == tab_id)
+    }
+
+    /// These tabs, then `leftovers` they do not name yet.
+    fn with_leftovers(mut self, leftovers: Vec<LeftoverAgentTab>) -> Self {
+        for tab in leftovers {
+            if self.tab_ids.contains(&tab.tab_id) {
+                continue;
+            }
+            self.leftover.push(tab.tab_id.clone());
+            self.tab_ids.push(tab.tab_id);
+        }
+        self
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -577,47 +640,58 @@ impl BrowserApprovalBridge {
         Ok(Some(marker))
     }
 
-    /// Octo's tabs in the run that holds the browser, for the page list.
-    /// None while no run holds it, or when its records cannot be read safely:
-    /// a badge is never shown from a record this run cannot prove is its own.
+    /// Octo's tabs for the page list: those of the run that holds the
+    /// browser, and those earlier runs left open. A run's tabs are left out
+    /// while no run holds the browser, or when its records cannot be read
+    /// safely: a badge is never shown from a record this run cannot prove is
+    /// its own.
     pub(crate) async fn agent_tabs(&self) -> AgentTabs {
-        let AgentControlMarkerObservation::Active(marker) = self.read_agent_control().await else {
-            return AgentTabs::default();
-        };
         let Ok(Some(dir)) = open_protected_directory(&self.approval_dir, true) else {
             return AgentTabs::default();
         };
-        read_agent_tabs(&dir, &marker).unwrap_or_default()
+        let run_tabs = match self.read_agent_control().await {
+            AgentControlMarkerObservation::Active(marker) => {
+                read_agent_tabs(&dir, &marker).unwrap_or_default()
+            }
+            _ => AgentTabs::default(),
+        };
+        run_tabs.with_leftovers(read_leftover_agent_tabs(&dir).unwrap_or_default())
     }
 
     /// Keeps one of Octo's tabs open past the end of the run. It gives no
     /// one any authority: the tab stays an ordinary visible tab, which no
-    /// later run can use.
+    /// later run can use. A tab an earlier run left open becomes an ordinary
+    /// tab at once.
     async fn keep_agent_tab(&self, page_id: &str) -> Result<KeepAgentTabResponse, OriginError> {
         validate_page_id(page_id)?;
         let _keeping = self.kept_tabs.lock().await;
         let marker = match self.read_agent_control().await {
-            AgentControlMarkerObservation::Active(marker) => marker,
-            AgentControlMarkerObservation::Inactive => {
-                return Err(OriginError::not_found(
-                    "Octo has no tabs open in a running turn",
-                ))
-            }
+            AgentControlMarkerObservation::Active(marker) => Some(marker),
+            AgentControlMarkerObservation::Inactive => None,
             AgentControlMarkerObservation::Unavailable(error) => {
                 return Err(OriginError::unavailable(format!(
                     "Shared Browser agent control is unavailable: {error}"
                 )))
             }
         };
-        let dir = self.open_required_approval_dir()?;
-        let tabs = read_agent_tabs(&dir, &marker).map_err(|error| {
-            OriginError::unavailable(format!("Octo's tabs could not be read: {error}"))
-        })?;
-        if !tabs.tab_ids.iter().any(|tab_id| tab_id == page_id) {
-            return Err(OriginError::not_found(
-                "this tab is not one Octo opened in the running turn",
-            ));
-        }
+        let dir = match (&marker, open_protected_directory(&self.approval_dir, true)) {
+            (None, Ok(None)) => {
+                return Err(OriginError::not_found(
+                    "Octo has no tabs open in a running turn",
+                ))
+            }
+            _ => self.open_required_approval_dir()?,
+        };
+        let tabs = match marker.as_ref() {
+            Some(marker) => read_agent_tabs(&dir, marker).map_err(|error| {
+                OriginError::unavailable(format!("Octo's tabs could not be read: {error}"))
+            })?,
+            None => AgentTabs::default(),
+        };
+        let Some(marker) = marker.filter(|_| tabs.tab_ids.iter().any(|tab_id| tab_id == page_id))
+        else {
+            return keep_leftover_agent_tab(&dir, page_id);
+        };
         let mut kept = tabs.kept;
         if !kept.iter().any(|tab_id| tab_id == page_id) {
             kept.push(page_id.to_string());
@@ -752,24 +826,33 @@ fn read_agent_tabs(dir: &Dir, marker: &AgentControlMarker) -> Result<AgentTabs, 
     };
     let record: AgentTabsRecord =
         serde_json::from_slice(&bytes).map_err(|_| "tabs.json is malformed".to_string())?;
-    if record.version != 1
-        || !record_matches_marker(
-            &record.owner_id,
-            &record.run_id,
-            &record.initiator_user_id,
-            &record.browser_page_id,
-            marker,
-        )
-        || record.tabs.len() > MAX_AGENT_TABS
+    if !record_matches_marker(
+        &record.owner_id,
+        &record.run_id,
+        &record.initiator_user_id,
+        &record.browser_page_id,
+        marker,
+    ) || record.tabs.len() > MAX_AGENT_TABS
     {
         return Err("tabs.json belongs to another run or is out of bounds".to_string());
     }
+    if record.version != 2 || record.last_tab_number > MAX_AGENT_TAB_NUMBER {
+        return Err("tabs.json is out of bounds".to_string());
+    }
     let mut tab_ids = Vec::with_capacity(record.tabs.len());
+    let mut numbers = Vec::with_capacity(record.tabs.len());
     for tab in record.tabs {
         validate_page_id_string(&tab.tab_id)?;
         if tab.tab_id == marker.browser_page_id || tab_ids.contains(&tab.tab_id) {
             return Err("tabs.json repeats a tab".to_string());
         }
+        if tab.number == 0
+            || tab.number > record.last_tab_number
+            || numbers.iter().any(|(_, number)| *number == tab.number)
+        {
+            return Err("tabs.json numbers its tabs out of bounds".to_string());
+        }
+        numbers.push((tab.tab_id.clone(), tab.number));
         tab_ids.push(tab.tab_id);
     }
     if record
@@ -808,18 +891,156 @@ fn read_agent_tabs(dir: &Dir, marker: &AgentControlMarker) -> Result<AgentTabs, 
                 .collect()
         }
     };
-    Ok(AgentTabs { tab_ids, kept })
+    Ok(AgentTabs {
+        tab_ids,
+        kept,
+        numbers,
+        leftover: Vec::new(),
+    })
+}
+
+/// The tabs earlier runs left open (`leftover-tabs.json`). A record that
+/// cannot be read safely names no tab.
+fn read_leftover_agent_tabs(dir: &Dir) -> Result<Vec<LeftoverAgentTab>, String> {
+    let Some(bytes) = read_protected_child(
+        dir,
+        OsStr::new(LEFTOVER_AGENT_TABS_FILE),
+        AGENT_TABS_MAX_BYTES,
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let record: LeftoverAgentTabsRecord = serde_json::from_slice(&bytes)
+        .map_err(|_| "leftover-tabs.json is malformed".to_string())?;
+    if record.version != 1 || record.tabs.len() > MAX_LEFTOVER_AGENT_TABS {
+        return Err("leftover-tabs.json is out of bounds".to_string());
+    }
+    for (index, tab) in record.tabs.iter().enumerate() {
+        validate_page_id_string(&tab.tab_id)?;
+        if record.tabs[..index]
+            .iter()
+            .any(|earlier| earlier.tab_id == tab.tab_id)
+        {
+            return Err("leftover-tabs.json is out of bounds".to_string());
+        }
+    }
+    Ok(record.tabs)
+}
+
+/// Keep tab on a tab an earlier run left open: it leaves the leftover
+/// record, so it is an ordinary tab now and runtime-agent never closes it.
+fn keep_leftover_agent_tab(dir: &Dir, page_id: &str) -> Result<KeepAgentTabResponse, OriginError> {
+    // runtime-agent rewrites the record too, when a run ends or the browser
+    // starts, under the same lock: neither undoes the other's change.
+    let _lock = ApprovalDirectoryLock::acquire(dir)?;
+    let leftovers = read_leftover_agent_tabs(dir).map_err(|error| {
+        OriginError::unavailable(format!("Octo's earlier tabs could not be read: {error}"))
+    })?;
+    if !leftovers.iter().any(|tab| tab.tab_id == page_id) {
+        return Err(OriginError::not_found(
+            "this tab is not one Octo opened in the running turn or left open",
+        ));
+    }
+    let record = LeftoverAgentTabsRecord {
+        version: 1,
+        tabs: leftovers
+            .into_iter()
+            .filter(|tab| tab.tab_id != page_id)
+            .collect(),
+    };
+    let bytes = serde_json::to_vec(&record).map_err(|error| {
+        OriginError::internal(format!("failed to serialize leftover tabs: {error}"))
+    })?;
+    write_private_record(
+        dir,
+        LEFTOVER_AGENT_TABS_FILE,
+        bytes,
+        AGENT_TABS_MAX_BYTES as usize,
+        "leftover tabs",
+    )?;
+    Ok(KeepAgentTabResponse {
+        kept: true,
+        page_id: page_id.to_string(),
+    })
+}
+
+/// The approval directory's lock (`flock` on the directory itself), held
+/// while it lives. runtime-agent takes the same lock around reading and
+/// publishing the leftover record.
+struct ApprovalDirectoryLock {
+    // A descriptor of its own, so closing it releases the lock.
+    #[cfg(unix)]
+    _directory: rustix::fd::OwnedFd,
+}
+
+impl ApprovalDirectoryLock {
+    #[cfg(unix)]
+    fn acquire(dir: &Dir) -> Result<Self, OriginError> {
+        use rustix::fs::{flock, openat, FlockOperation, Mode, OFlags};
+
+        // The directory opened again for reading: `flock` needs a readable
+        // descriptor, and `dir` may hold an `O_PATH` one.
+        let directory = openat(
+            dir,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            OriginError::unavailable(format!(
+                "failed to open the approval directory to lock it: {error}"
+            ))
+        })?;
+        loop {
+            match flock(&directory, FlockOperation::LockExclusive) {
+                Ok(()) => {
+                    return Ok(Self {
+                        _directory: directory,
+                    })
+                }
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => {
+                    return Err(OriginError::unavailable(format!(
+                        "failed to lock the approval directory: {error}"
+                    )))
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn acquire(_dir: &Dir) -> Result<Self, OriginError> {
+        Ok(Self {})
+    }
 }
 
 fn write_kept_agent_tabs(dir: &Dir, record: &KeptAgentTabsRecord) -> Result<(), OriginError> {
-    let mut bytes = serde_json::to_vec(record).map_err(|error| {
+    let bytes = serde_json::to_vec(record).map_err(|error| {
         OriginError::internal(format!("failed to serialize kept tabs: {error}"))
     })?;
+    write_private_record(
+        dir,
+        KEPT_AGENT_TABS_FILE,
+        bytes,
+        KEPT_AGENT_TABS_MAX_BYTES,
+        "kept tabs",
+    )
+}
+
+/// Publishes one owner-only record in the approval directory: written to a
+/// new temporary file, synced, then renamed over `leaf`.
+fn write_private_record(
+    dir: &Dir,
+    leaf: &str,
+    mut bytes: Vec<u8>,
+    max_bytes: usize,
+    what: &str,
+) -> Result<(), OriginError> {
     bytes.push(b'\n');
-    if bytes.len() > KEPT_AGENT_TABS_MAX_BYTES {
-        return Err(OriginError::internal(
-            "kept tabs exceeded their fixed bound",
-        ));
+    if bytes.len() > max_bytes {
+        return Err(OriginError::internal(format!(
+            "{what} exceeded their fixed bound"
+        )));
     }
     // The approval directory's cleanup accepts this prefix, so a write cut
     // short is cleared with the rest of the run.
@@ -828,24 +1049,24 @@ fn write_kept_agent_tabs(dir: &Dir, record: &KeptAgentTabsRecord) -> Result<(), 
         let mut temporary = dir
             .open_with(&temporary_name, &create_new_private_options())
             .map_err(|error| {
-                OriginError::unavailable(format!("failed to create kept tabs: {error}"))
+                OriginError::unavailable(format!("failed to create {what}: {error}"))
             })?;
         #[cfg(unix)]
         temporary
             .set_permissions(cap_std::fs::Permissions::from_mode(APPROVAL_FILE_MODE))
             .map_err(|error| {
-                OriginError::unavailable(format!("failed to protect kept tabs: {error}"))
+                OriginError::unavailable(format!("failed to protect {what}: {error}"))
             })?;
         temporary.write_all(&bytes).map_err(|error| {
-            OriginError::unavailable(format!("failed to write kept tabs: {error}"))
+            OriginError::unavailable(format!("failed to write {what}: {error}"))
         })?;
-        temporary.sync_all().map_err(|error| {
-            OriginError::unavailable(format!("failed to sync kept tabs: {error}"))
-        })?;
+        temporary
+            .sync_all()
+            .map_err(|error| OriginError::unavailable(format!("failed to sync {what}: {error}")))?;
         drop(temporary);
-        dir.rename(&temporary_name, dir, OsStr::new(KEPT_AGENT_TABS_FILE))
+        dir.rename(&temporary_name, dir, OsStr::new(leaf))
             .map_err(|error| {
-                OriginError::unavailable(format!("failed to publish kept tabs: {error}"))
+                OriginError::unavailable(format!("failed to publish {what}: {error}"))
             })?;
         sync_dir(dir).map_err(|error| {
             OriginError::unavailable(format!("failed to sync the approval directory: {error}"))

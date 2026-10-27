@@ -6,6 +6,8 @@ import {
   personalBrowserTabPages,
   resolveAgentReadingPages,
   resolveAgentTabIds,
+  resolveSharedPageStripAgentTabIds,
+  sharedBrowserAgentTabLabel,
 } from "../browserAgentTabs";
 import type { BrowserSessionPage } from "../browserSessionPages";
 
@@ -42,6 +44,40 @@ describe("resolveAgentTabIds", () => {
     expect([...resolveAgentTabIds({ pages, agentControlActive: true, agentPageIds: ["closed", " "] })])
       .toEqual(["opened"]);
   });
+
+  it("leaves out the tabs an earlier run left open: the agent holds them no more", () => {
+    const withEarlier = [...pages, page("earlier", { openedBy: "agent", leftover: true })];
+    expect([...resolveAgentTabIds({ pages: withEarlier, agentControlActive: true, agentPageIds: ["bound"] })])
+      .toEqual(["opened", "bound"]);
+  });
+});
+
+describe("resolveSharedPageStripAgentTabIds", () => {
+  it("badges every tab the browser says the agent opened, whichever conversation's run it is", () => {
+    const pages = [page("mine"), page("opened", { openedBy: "agent" }), page("bound")];
+    // Another conversation's run on this machine: this conversation has no
+    // running browser turn, and the agent's tab still carries its badge.
+    expect([...resolveSharedPageStripAgentTabIds({ pages })]).toEqual(["opened"]);
+    expect([...resolveSharedPageStripAgentTabIds({ pages, agentPageIds: ["bound"] })]).toEqual(["opened", "bound"]);
+    expect(resolveSharedPageStripAgentTabIds({ pages: [page("mine"), page("person", { openedBy: "person" })] }).size).toBe(0);
+  });
+
+  it("badges a tab an earlier run left open as the agent's too", () => {
+    const pages = [page("mine"), page("earlier", { openedBy: "agent", leftover: true })];
+    expect([...resolveSharedPageStripAgentTabIds({ pages })]).toEqual(["earlier"]);
+  });
+});
+
+describe("sharedBrowserAgentTabLabel", () => {
+  it("names a tab the agent opened as its prompts do", () => {
+    expect(sharedBrowserAgentTabLabel({ agentTabNumber: 4 })).toBe("Octo's tab 4");
+    expect(sharedBrowserAgentTabLabel({})).toBe("Octo's tab");
+  });
+
+  it("names a tab an earlier run left open apart from the running turn's numbered tabs", () => {
+    expect(sharedBrowserAgentTabLabel({ leftover: true })).toBe("Octo's earlier tab");
+    expect(sharedBrowserAgentTabLabel({ leftover: true, agentTabNumber: 1 })).toBe("Octo's earlier tab");
+  });
 });
 
 describe("resolveAgentReadingPages", () => {
@@ -55,6 +91,11 @@ describe("resolveAgentReadingPages", () => {
     expect(resolveAgentReadingPages({ pages, agentControlActive: true, agentPageIds: ["a"] }).map((p) => p.id))
       .toEqual(["b", "a", "c"]);
     expect(resolveAgentReadingPages({ pages, agentControlActive: false })).toEqual([]);
+  });
+
+  it("never lists a tab an earlier run left open as being read", () => {
+    const pages = [page("b", { openedBy: "agent", agentTabNumber: 1 }), page("earlier", { openedBy: "agent", leftover: true })];
+    expect(resolveAgentReadingPages({ pages, agentControlActive: true }).map((p) => p.id)).toEqual(["b"]);
   });
 });
 

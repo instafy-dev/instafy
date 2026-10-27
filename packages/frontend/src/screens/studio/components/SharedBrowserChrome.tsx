@@ -14,7 +14,7 @@ import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
 import { BrowserChromeShell } from "./BrowserChromeShell";
 import { SendPageToOctoButton } from "./SendPageToOctoButton";
-import { resolveAgentTabIds } from "./browserAgentTabs";
+import { resolveAgentTabIds, sharedBrowserAgentTabLabel } from "./browserAgentTabs";
 import {
   HUMAN_SHARED_BROWSER_CONTROL_OWNER,
   type SharedBrowserControlOwner,
@@ -72,14 +72,15 @@ export const KEEP_TAB_LABEL = "Keep tab";
 
 function pageOptionLabel(page: BrowserSessionPage, agentName: string | null = null): string {
   const label = page.title?.trim() || page.label.trim() || page.host.trim() || page.url;
-  // A native option shows text only, so the agent's tab carries its name
-  // while the agent holds it.
-  if (agentName) return `${agentName} · ${label}`;
-  // A tab Octo opened says so for everyone watching, even after control
-  // ends (Pause, take-over) and when a person kept it.
+  // A tab Octo opened says so for everyone watching, with the number its
+  // prompts use ("Octo's tab 2"), while Octo holds it, after control ends
+  // (Pause, take-over) and when a person kept it.
   if (page.openedBy === "agent") {
-    return `${page.kept ? "Octo's tab, kept" : "Octo's tab"}: ${label}`;
+    return `${sharedBrowserAgentTabLabel(page)}${page.kept ? ", kept" : ""}: ${label}`;
   }
+  // A native option shows text only, so the tab the agent holds carries its
+  // name while the agent holds it.
+  if (agentName) return `${agentName} · ${label}`;
   return label;
 }
 

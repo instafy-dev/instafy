@@ -82,14 +82,26 @@ export function useChatBrowserHandoff(options: Options) {
   const sharedJob = sharedBrowserTakeoverJob(options.runs, options.runtimeId, options.page?.id ?? null, {
     openedByAgent: options.page?.openedBy === "agent",
   });
+  // The job Take over stops while the browser reports that the agent holds
+  // it: its control spans every tab, so this one is found from any tab on
+  // screen, a person's own included.
+  const sharedJobWhileAgentHolds = sharedBrowserTakeoverJob(options.runs, options.runtimeId, options.page?.id ?? null, {
+    openedByAgent: options.page?.openedBy === "agent",
+    agentHoldsBrowser: true,
+  });
 
-  const takeOverShared = useCallback(async () => {
+  /**
+   * `agentHoldsBrowser`: the browser reports the agent's control right now,
+   * so the runtime's one browser job is stopped whichever tab is on screen.
+   */
+  const takeOverShared = useCallback(async ({ agentHoldsBrowser = false }: { agentHoldsBrowser?: boolean } = {}) => {
     const captured = latest.current;
     const epoch = generation.current;
     assertCurrent(captured, epoch);
     if (captured.transport !== "shared") return false;
     const job = sharedBrowserTakeoverJob(captured.runs, captured.runtimeId, captured.page?.id ?? null, {
       openedByAgent: captured.page?.openedBy === "agent",
+      agentHoldsBrowser,
     });
     if (!job) return false;
     const result = await cancelAgentJob(job.jobId, "User taking over the browser");
@@ -244,5 +256,5 @@ export function useChatBrowserHandoff(options: Options) {
     return true;
   }, [assertCurrent, continuePersonal]);
 
-  return { identityKey, sharedJob, takeOverShared, continueShared, continuePersonal, startPersonal };
+  return { identityKey, sharedJob, sharedJobWhileAgentHolds, takeOverShared, continueShared, continuePersonal, startPersonal };
 }

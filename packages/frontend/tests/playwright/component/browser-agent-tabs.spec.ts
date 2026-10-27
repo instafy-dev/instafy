@@ -7,7 +7,7 @@ test.use({ hasTouch: true });
 // picker and Reading row) and Personal (the desktop surface over a stubbed
 // native host). Take over is one press and ends the agent's control of every
 // tab; afterwards no tab carries the agent's control mark ("Octo · "), and a
-// tab the agent opened only says whose it is ("Octo's tab: ").
+// tab the agent opened keeps the label its prompts use ("Octo's tab 2: ").
 for (const { width, dark } of [{ width: 390, dark: false }, { width: 390, dark: true }, { width: 1100, dark: false }]) {
   test(`agent tabs are badged, listed and taken over in one press at ${width}px in ${dark ? "dark" : "light"} mode`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
@@ -31,7 +31,7 @@ for (const { width, dark } of [{ width: 390, dark: false }, { width: 390, dark: 
       const pages = [
         {id:"mine",url:"https://mine.example/",host:"mine.example",label:"Mine",title:"My own page",lastReferencedAt:3,isActive:false},
         {id:"bound",url:"https://www.city.example/parks",host:"city.example",label:"Parks",title:"Parks and gardens | City of Example",lastReferencedAt:2,isActive:true},
-        {id:"opened",url:"https://transit.example/timetable",host:"transit.example",label:"Timetable",title:"Timetable with a very long title that keeps going past the edge of a phone screen",lastReferencedAt:1,isActive:false,openedBy:"agent"},
+        {id:"opened",url:"https://transit.example/timetable",host:"transit.example",label:"Timetable",title:"Timetable with a very long title that keeps going past the edge of a phone screen",lastReferencedAt:1,isActive:false,openedBy:"agent",agentTabNumber:2},
       ];
       const noop = () => {};
       function Shared() {
@@ -84,7 +84,7 @@ for (const { width, dark } of [{ width: 390, dark: false }, { width: 390, dark: 
     // Shared: the tab picker names the agent on its tabs, the Reading row lists them.
     const shared = page.getByTestId("shared-fixture");
     const options = shared.locator('[data-testid="shared-browser-page-select"] option');
-    await expect(options).toHaveText(["My own page", "Octo · Parks and gardens | City of Example", "Octo · Timetable with a very long title that keeps going past the edge of a phone screen"]);
+    await expect(options).toHaveText(["My own page", "Octo · Parks and gardens | City of Example", "Octo's tab 2: Timetable with a very long title that keeps going past the edge of a phone screen"]);
     const sharedRow = shared.getByTestId("browser-reading-row");
     await expect(sharedRow).toContainText("Octo is reading");
     await expect(sharedRow.getByTestId("browser-reading-page")).toHaveCount(2);
@@ -99,7 +99,7 @@ for (const { width, dark } of [{ width: 390, dark: false }, { width: 390, dark: 
     // One press, no confirmation: control is revoked and every badge is gone.
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(shared.getByTestId("browser-reading-row")).toHaveCount(0);
-    await expect(options).toHaveText(["My own page", "Parks and gardens | City of Example", "Octo's tab: Timetable with a very long title that keeps going past the edge of a phone screen"]);
+    await expect(options).toHaveText(["My own page", "Parks and gardens | City of Example", "Octo's tab 2: Timetable with a very long title that keeps going past the edge of a phone screen"]);
     await expect(shared.getByRole("button", { name: "Let AI continue" })).toBeVisible();
 
     // Personal: the page the resumed turn reads, and the same one-press take-over (Pause).

@@ -16,7 +16,26 @@ export type RuntimeBrowserSessionPage = {
   openedBy?: BrowserTabOpener;
   /** One of Octo's tabs a person kept open past the end of the turn. */
   kept?: boolean;
+  /**
+   * The number one of Octo's tabs was opened with, which it keeps while it is
+   * open: prompts, Octo and Studio all call it "Octo's tab <number>".
+   */
+  agentTabNumber?: number;
+  /**
+   * One of Octo's tabs that an earlier run left open: badged as Octo's, with
+   * no number, and not one Octo is reading.
+   */
+  leftover?: boolean;
 };
+
+/** The highest number a Shared Browser run gives one of Octo's tabs. */
+const MAX_AGENT_TAB_NUMBER = 999;
+
+export function parseAgentTabNumber(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= MAX_AGENT_TAB_NUMBER
+    ? (value as number)
+    : undefined;
+}
 
 /** Who opened a browser tab: the agent (Octo) or the person. */
 export type BrowserTabOpener = "agent" | "person";
@@ -277,6 +296,7 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
         return null;
       }
       const openedBy = parseBrowserTabOpener(record.openedBy);
+      const agentTabNumber = openedBy === "agent" ? parseAgentTabNumber(record.agentTabNumber) : undefined;
       return {
         id,
         url,
@@ -288,6 +308,8 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
         canGoForward: record.canGoForward === true,
         ...(openedBy ? { openedBy } : {}),
         ...(openedBy === "agent" && record.kept === true ? { kept: true } : {}),
+        ...(agentTabNumber ? { agentTabNumber } : {}),
+        ...(openedBy === "agent" && record.leftover === true ? { leftover: true } : {}),
       } satisfies RuntimeBrowserSessionPage;
     })
     .filter((page): page is RuntimeBrowserSessionPage => Boolean(page));

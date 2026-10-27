@@ -47,9 +47,12 @@ function writeProtectedJson(destination, value) {
   fs.renameSync(temporary, destination);
 }
 
-const page = (title, body) => `<!doctype html><html lang="en"><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-<title>${title}</title><body><h1>${title}</h1>${body}</body></html>`;
+// A route's `script` runs in the page (and only then is inline script
+// allowed), and its `frame` is the one address it may frame; no fixture page
+// loads anything else.
+const page = (title, body, script = "", frame = "") => `<!doctype html><html lang="en"><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'${script ? "; script-src 'unsafe-inline'" : ""}${frame ? `; frame-src ${new URL(frame).origin}` : ""}">
+<title>${title}</title><body><h1>${title}</h1>${body}${frame ? `<iframe src="${frame}"></iframe>` : ""}${script ? `<script>${script}</script>` : ""}</body></html>`;
 
 // One fixture site. It records every request, so a refused step can be shown
 // to have sent nothing.
@@ -67,7 +70,7 @@ async function listenSite(name, routes) {
       return;
     }
     response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    response.end(page(route.title, route.body));
+    response.end(page(route.title, route.body, route.script, route.frame));
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -100,6 +103,7 @@ export async function runSharedBrowserAgentTabsFixture() {
     // loopback below), so a load that slips through is seen by its server.
     const linkOnly = await listenSite("link-only", {
       "/review": { title: "Link-only review", body: "<p>Text Octo must never read.</p>" },
+      "/map": { title: "Link-only map", body: "<p>Map tiles Octo must never read.</p>" },
     });
     servers.push(linkOnly.server);
     const linkOnlyReview = `http://www.runrepeat.com:${linkOnly.server.address().port}/review`;
@@ -110,7 +114,17 @@ export async function runSharedBrowserAgentTabsFixture() {
       "/to-link-only": { redirect: "https://www.booking.com/hotel/fixture.html" },
       "/to-review": { redirect: linkOnlyReview },
       "/new-window": { title: "Reviews", body: "<p><a href=\"/to-review\" target=\"_blank\">Read the review</a></p>" },
+      // An ordinary page that frames the link-only site, as a hotel page
+      // frames a map.
+      "/hotel": { title: "Hotel", body: "<p>Rooms from 80 EUR.</p>", frame: linkOnlyReview.replace("/review", "/map") },
       "/later": { title: "Moving", body: `<meta http-equiv="refresh" content="2;url=${linkOnlyReview}"><p>This page moves on by itself.</p>` },
+      // Opens two windows by itself once Octo's step is over: one that can
+      // reach its opener and one that cannot (noopener).
+      "/opens-windows": {
+        title: "Offers",
+        body: "<p>Offers open in windows of their own.</p>",
+        script: "setTimeout(() => { window.open('/hours', 'offer'); window.open('/prices', '_blank', 'noopener'); }, 1500);",
+      },
     });
     servers.push(sources.server);
 
@@ -225,6 +239,12 @@ export async function runSharedBrowserAgentTabsFixture() {
     const tabsRecord = () => JSON.parse(fs.readFileSync(path.join(approvalDirectory, "tabs.json"), "utf8"));
     const state = () => JSON.parse(fs.readFileSync(path.join(approvalDirectory, "state.json"), "utf8"));
     const browserPages = () => context.pages().filter((entry) => !entry.isClosed());
+    // Whether a page has the browser's focus, as the origin judges the page
+    // in front. A page that does not answer in time counts as not in front.
+    const hasFocus = (entry) => Promise.race([
+      entry.evaluate(() => document.hasFocus()).catch(() => false),
+      delay(5_000).then(() => false),
+    ]);
     const pageWithUrl = (url) => browserPages().find((entry) => entry.url() === url);
 
     // 1. Octo opens a visible tab. In Ask, the site is approved in that tab
@@ -245,12 +265,12 @@ export async function runSharedBrowserAgentTabsFixture() {
     // The origin shows viewers the focused page as the active one.
     assert.equal(await timetable.evaluate(() => document.hasFocus()), true, "Octo's tab is in front");
     assert.equal(await runPage.evaluate(() => document.hasFocus()), false);
-    assert.deepEqual(tabsRecord().tabs, [{ tabId: firstTab, approvedOrigins: [sources.origin] }]);
+    assert.deepEqual(tabsRecord().tabs, [{ tabId: firstTab, number: 1, approvedOrigins: [sources.origin] }]);
     assert.deepEqual(state().approvedOrigins, [], "The tab's site approval is the tab's only");
     const listed = await ok("GET", "/v1/tabs");
-    assert.deepEqual(listed.tabs.map((tab) => [tab.openedBy, tab.current, tab.originApproved]), [
-      ["person", false, false],
-      ["octo", true, true],
+    assert.deepEqual(listed.tabs.map((tab) => [tab.openedBy, tab.label ?? null, tab.current, tab.originApproved]), [
+      ["person", null, false, false],
+      ["octo", "Octo's tab 1", true, true],
     ]);
     const navigation = fs.readFileSync(actionsPath, "utf8").trim().split("\n").map(JSON.parse)
       .filter((action) => action.type === "navigate");
@@ -318,6 +338,9 @@ export async function runSharedBrowserAgentTabsFixture() {
     await refused(/close only the tabs it opened/, "POST", "/v1/tabs/close", { tabId: runPageId });
     await ok("POST", "/v1/tabs/close", { tabId: second.tabId });
     assert.ok(!pageWithUrl(`${sources.origin}/hours`), "The closed tab is gone from the browser");
+    // The tabs left keep their numbers: Octo's tab 3 is not renumbered.
+    const renumbered = await ok("GET", "/v1/tabs");
+    assert.deepEqual(renumbered.tabs.map((tab) => tab.label ?? null), [null, "Octo's tab 1", "Octo's tab 3"]);
 
     // 7. The person closes the tab Octo works in: nothing more happens in it.
     await ok("POST", "/v1/tabs/select", { tabId: third.tabId });
@@ -326,20 +349,86 @@ export async function runSharedBrowserAgentTabsFixture() {
     const afterClose = await ok("GET", "/v1/tabs");
     assert.deepEqual(afterClose.tabs.map((tab) => tab.tabId), [runPageId, firstTab]);
 
-    // 8. The end of the run closes Octo's remaining tabs with the request
+    // 8. A page in Octo's tab opens windows by itself after Octo's step is
+    // over. Neither becomes a tab Octo cannot see, count or close: the next
+    // step closes both before it runs (runtime-agent closes them as they
+    // appear while it holds the browser; that path is unit-tested).
+    const offers = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/opens-windows` }, ["allow_origin", "allow_once"]);
+    assert.equal(prompts.at(-2).display.label, "Octo's tab 4: Allow the assistant to open this site in a new tab for this run", "A number is never given twice in a run");
+    assert.equal(offers.tabLabel, "Octo's tab 4");
+    for (let attempt = 0; attempt < 200 && browserPages().length < 5; attempt += 1) await delay(25);
+    assert.equal(browserPages().length, 5, "The page opened two windows by itself");
+    const afterWindows = await ok("GET", "/v1/tabs");
+    for (let attempt = 0; attempt < 100 && browserPages().length > 3; attempt += 1) await delay(20);
+    assert.equal(browserPages().length, 3, "Both windows were closed before the next step ran");
+    const offersPage = pageWithUrl(`${sources.origin}/opens-windows`);
+    assert.equal(await hasFocus(offersPage), true, "Octo's tab is back in front");
+    assert.deepEqual(afterWindows.tabs.map((tab) => tab.label ?? null), [null, "Octo's tab 1", "Octo's tab 4"]);
+
+    // 9. Closing Octo's tabs never leaves a person's tab in front, so the
+    // person sees a tab of the run, and its Take over, while Octo holds the
+    // browser. The person had another tab of their own open beside it.
+    const personsTab = await context.newPage();
+    await personsTab.goto(`${research.origin}/`);
+    await ok("POST", "/v1/tabs/select", { tabId: offers.tabId });
+    await ok("POST", "/v1/tabs/close", { tabId: offers.tabId });
+    // Only one page has the browser's focus, so the run's page having it
+    // means the person's tab does not.
+    assert.equal(await hasFocus(runPage), true, "After Octo closes the tab it works in, the run's page is in front");
+
+    // 10. The end of the run closes Octo's remaining tabs with the request
     // runtime-agent sends (GET /json/close/<id> on the loopback DevTools port).
     const closing = await fetch(`http://127.0.0.1:${port}/json/close/${firstTab}`);
     assert.equal(closing.status, 200);
     for (let attempt = 0; attempt < 50 && pageWithUrl(`${sources.origin}/timetable`); attempt += 1) await delay(20);
     assert.ok(!pageWithUrl(`${sources.origin}/timetable`), "Octo's tab closed at the end of the run");
-    assert.equal(browserPages().length, 1, "Only the person's page is left");
-    assert.equal(runPage.url(), `${research.origin}/`, "The person's page was never touched");
+    assert.deepEqual(browserPages(), [runPage, personsTab], "Only the person's pages are left");
+
+    // 11. Octo closes its last tab: the run's page comes to the front, not
+    // the person's other tab.
+    const last = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/hours` }, ["allow_origin", "allow_once"]);
+    await personsTab.bringToFront();
+    await ok("POST", "/v1/tabs/select", { tabId: last.tabId });
+    const closedLast = await ok("POST", "/v1/tabs/close", { tabId: last.tabId });
+    assert.equal(closedLast.agentTabsOpen, 0);
+    assert.equal(await hasFocus(runPage), true, "After Octo closes its last tab, the run's page is in front");
+    assert.equal(runPage.url(), `${research.origin}/`, "The person's page was not touched by Octo's tabs");
+
+    // 12. The page the person chose is guarded like Octo's own tabs: Octo
+    // never opens a link-only site there, not even through a redirect, and
+    // reads nothing once the page is on one, all before any prompt.
+    const promptsBeforeRunPage = prompts.length;
+    await refused(/Booking\.com is link-only: Octo never opens it, in any tab/, "POST", "/v1/navigate", { url: "https://www.booking.com/hotel/fixture.html" });
+    assert.equal(prompts.length, promptsBeforeRunPage, "Refused before any prompt");
+    await refused(/led to Booking\.com, which is link-only/, "POST", "/v1/navigate", { url: `${sources.origin}/to-link-only` }, ["allow_origin", "allow_once"]);
+    assert.ok(!browserPages().some((entry) => entry.url().includes("booking")), "The run's page never showed the link-only site");
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/later` }, ["allow_once"]);
+    for (let attempt = 0; attempt < 100 && runPage.url() !== linkOnlyReview; attempt += 1) await delay(50);
+    assert.equal(runPage.url(), linkOnlyReview, "The run's page moved on by itself");
+    const promptsOnLinkOnly = prompts.length;
+    await refused(/The page the person chose is now on RunRepeat, which is link-only[^]*Send page to Octo/, "GET", "/v1/snapshot", null, ["allow_origin"]);
+    await refused(/link-only/, "GET", "/v1/status", null, ["allow_origin"]);
+    await refused(/link-only/, "POST", "/v1/scroll", { y: 400 }, ["allow_origin"]);
+    assert.equal(prompts.length, promptsOnLinkOnly, "Nothing on the link-only page asked or ran");
+    const runPageListed = await ok("GET", "/v1/tabs");
+    assert.deepEqual([runPageListed.tabs[0].linkOnlySite, runPageListed.tabs[0].title], ["RunRepeat", null]);
+    await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, ["allow_origin", "allow_once"]);
+    assert.equal(runPage.url(), `${research.origin}/`, "Octo took the person's page back to where it was");
+
+    // A page that frames a link-only site (a map) is an ordinary page: Octo's
+    // step loads it and succeeds, the frame loads as the page asks, and
+    // nothing of the frame is read.
+    const framed = await ok("POST", "/v1/navigate", { url: `${sources.origin}/hotel` }, ["allow_once"]);
+    assert.match(framed.visibleText, /Rooms from 80 EUR/);
+    assert.doesNotMatch(JSON.stringify(framed), /Map tiles/);
+    assert.equal(runPage.url(), `${sources.origin}/hotel`);
+    assert.ok(linkOnly.requests.includes("GET /map"), "The page's own frame loaded");
 
     const actionLog = fs.readFileSync(actionsPath, "utf8");
     assert.ok(!actionLog.includes("booking.com/hotel"), "The link-only address never reached the action feed as a step");
     const result = {
       status: "passed",
-      fixtureVersion: 1,
+      fixtureVersion: 2,
       prompts: prompts.length,
       checks: [
         "visible agent tab in the run's browser context, brought to front",
@@ -350,7 +439,12 @@ export async function runSharedBrowserAgentTabsFixture() {
         "a link-only page reached by the page itself is not read",
         "three agent tabs at most",
         "close_tab, and a tab the person closed",
+        "each tab keeps its number and label; numbers are never reused",
+        "windows a page in Octo's tab opens by itself are closed before the next step",
+        "closing Octo's tab, and its last tab, brings the run's page to the front",
         "turn-end close through the DevTools HTTP endpoint",
+        "the person's page: link-only refused before any prompt, through a redirect, and once the page is on one",
+        "a page that frames a link-only site loads and Octo's step succeeds, reading nothing of the frame",
       ],
       limitations: [
         "No model, Studio UI, origin keep endpoint or runtime shutdown guard; those are unit-tested.",
@@ -372,7 +466,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 1 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 2 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });

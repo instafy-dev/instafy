@@ -26,8 +26,16 @@ const policyScript = (name) => `(function (module, require) {\n${
   fs.readFileSync(path.join(repositoryRoot, "packages/browser-action-policy", name), "utf8")
 }\n})(undefined, undefined);`;
 export const policyScriptNames = ["redaction.js", "actionPolicy.js", "pageCapture.js"];
+// The web-research skill's link-only list, embedded the way runtime-agent's
+// embedded_link_only_sites() embeds it: without it the controller refuses
+// every step, on the page the person chose too.
+const linkOnlySites = fs.readFileSync(
+  path.join(repositoryRoot, "packages/runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"),
+  "utf8",
+);
 const scriptSource = [
   ...policyScriptNames.map(policyScript),
+  `globalThis.__instafyLinkOnlySites = ${linkOnlySites};`,
   ...["shared-browser-approval.js", "shared-browser-cli.js"]
     .map((name) => fs.readFileSync(path.join(repositoryRoot, "packages/runtime-agent/assets", name), "utf8")),
 ].join("\n");

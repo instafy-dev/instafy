@@ -75,17 +75,20 @@ test("agent-tabs fixture rejects filters and skips rather than producing a parti
   }
 });
 
-test("agent-tabs fixture embeds the link-only list the runtime agent embeds, ahead of the controller", () => {
+test("both fixtures embed the link-only list the runtime agent embeds, ahead of the controller", () => {
   const rust = fs.readFileSync(
     path.join(import.meta.dirname, "../packages/runtime-agent/src/shared_browser.rs"),
     "utf8",
   );
   const file = rust.match(/const LINK_ONLY_SITES_DATA: &str = include_str!\(\s*"\.\.\/assets\/([^"]+)"\s*\);/u);
   assert.ok(file, "runtime-agent embeds the link-only list");
-  const fixture = fs.readFileSync(path.join(import.meta.dirname, "shared-browser-agent-tabs-e2e.mjs"), "utf8");
-  assert.ok(fixture.includes(`"packages/runtime-agent/assets/${file[1]}"`), file[1]);
   assert.match(rust, /globalThis\.__instafyLinkOnlySites = \{LINK_ONLY_SITES_DATA\};/u);
-  assert.match(fixture, /`globalThis\.__instafyLinkOnlySites = \$\{linkOnlySites\};`/u);
+  // The controller refuses every step, in any tab, without the list.
+  for (const name of ["shared-browser-agent-tabs-e2e.mjs", "shared-browser-cobrowsing-e2e.mjs"]) {
+    const fixture = fs.readFileSync(path.join(import.meta.dirname, name), "utf8");
+    assert.ok(fixture.includes(`"packages/runtime-agent/assets/${file[1]}"`), `${name}: ${file[1]}`);
+    assert.match(fixture, /`globalThis\.__instafyLinkOnlySites = \$\{linkOnlySites\};`/u, name);
+  }
   const order = rust.match(/fn embedded_shared_browser_script\(\) -> String \{([\s\S]*?)\n\}/u)[1];
   assert.ok(order.indexOf("embedded_link_only_sites()") > order.indexOf("BROWSER_PAGE_CAPTURE_SCRIPT"));
 });

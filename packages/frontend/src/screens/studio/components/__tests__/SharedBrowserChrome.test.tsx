@@ -100,7 +100,9 @@ describe("SharedBrowserChrome", () => {
     const pages = [
       page({ id: "mine", title: "My page", isActive: false }),
       page({ id: "bound", title: "Bound page", isActive: true }),
-      page({ id: "opened", title: "Opened page", isActive: false, openedBy: "agent" }),
+      page({ id: "opened", title: "Opened page", isActive: false, openedBy: "agent", agentTabNumber: 2 }),
+      // A tab of Octo's an earlier run left open: Octo does not hold it.
+      page({ id: "earlier", title: "Earlier page", isActive: false, openedBy: "agent", leftover: true }),
     ];
     const optionLabels = () => [...container.querySelectorAll<HTMLOptionElement>('[data-testid="shared-browser-page-select"] option')]
       .map((option) => [option.textContent, option.dataset.agentTab ?? null]);
@@ -111,13 +113,15 @@ describe("SharedBrowserChrome", () => {
         controlOwner: { kind: "agent", displayName: "Octo" },
       })} />);
     });
+    // The tab Octo opened carries the label its prompts and list_tabs use.
     expect(optionLabels()).toEqual([
       ["My page", null],
       ["Octo · Bound page", "true"],
-      ["Octo · Opened page", "true"],
+      ["Octo's tab 2: Opened page", "true"],
+      ["Octo's earlier tab: Earlier page", null],
     ]);
     expect(container.querySelector('[data-testid="shared-browser-page-select"]')!.getAttribute("aria-description"))
-      .toBe("3 tabs, 2 used by Octo. Current tab: Octo · Bound page");
+      .toBe("4 tabs, 2 used by Octo. Current tab: Octo · Bound page");
 
     await act(async () => {
       root.render(<SharedBrowserChrome {...props({ pages, agentPageIds: ["bound"] })} />);
@@ -125,8 +129,10 @@ describe("SharedBrowserChrome", () => {
     expect(optionLabels()).toEqual([
       ["My page", null],
       ["Bound page", null],
-      // The tab Octo opened still says whose it is, without the agent's control mark.
-      ["Octo's tab: Opened page", null],
+      // The tab Octo opened still says whose it is, with the same number,
+      // without the agent's control mark.
+      ["Octo's tab 2: Opened page", null],
+      ["Octo's earlier tab: Earlier page", null],
     ]);
   });
 
