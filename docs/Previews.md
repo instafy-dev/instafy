@@ -85,7 +85,11 @@ A member can **Present** a site whose page says it can share its view, and the o
   CGNAT, metadata and reserved addresses, and every site on the link-only list (their translator, cache and archive
   copies too) are blocked, WebSockets included: a `no-agents` site is never fetched, and a `no-reuse` site, which
   `instafy web read` may read, is not loaded into a picture Instafy keeps and shows. Without the proxy binary nothing off the site's
-  origin loads. The page loads as an anonymous first visit: a fresh context with no person's session, cookies,
+  origin loads. A redirect is checked too: Playwright follows one without asking the request rules, so every
+  connection off the site first passes Instafy's own gate in front of the egress proxy (local and link-local
+  addresses included, which Chromium would otherwise send around a proxy), which refuses by the whole address of a
+  plain-HTTP request and by the host of a TLS one or a WebSocket. A redirect to an https copy that a wrapper writes into
+  its path or query, which the gate cannot read, means no picture is kept. The page loads as an anonymous first visit: a fresh context with no person's session, cookies,
   location or browser profile, service workers blocked, downloads refused, new windows closed, no permissions.
   `instafy preview check` follows the same rules and lists blocked requests as `blocked`, not as page errors.
 - **Without a browser** (self-hosted without Chromium), the CLI reads the page's HTML from 127.0.0.1 (at most 512 KiB)

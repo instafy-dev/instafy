@@ -417,9 +417,133 @@ export async function startOffSiteRoute(options: { proxyServer?: string; locatio
   return startRefusingProxy();
 }
 
-/** The proxy settings for a context: everything goes through `route`, except the direct origins. */
+/**
+ * What Instafy's gate sees of a request: the whole address of a plain-HTTP one, only the host of a TLS one or a
+ * WebSocket (the browser tunnels those with CONNECT). Null for anything else.
+ */
+export function gateView(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.username || url.password) return null;
+  if (url.protocol === "http:") return url.href;
+  if (url.protocol === "https:" || url.protocol === "wss:") return `https://${url.host}/`;
+  if (url.protocol === "ws:") return `http://${url.host}/`;
+  return null;
+}
+
+/** A CONNECT's `host:port` as the address the gate checks: http on port 80, https otherwise. */
+function connectView(authority: string): string | null {
+  const match = /^(\[[0-9a-fA-F:.]+\]|[^:/@\s\[\]]+):(\d{1,5})$/.exec(authority.trim());
+  if (!match) return null;
+  const port = Number(match[2]);
+  if (!port || port > 65535) return null;
+  return gateView(`${port === 80 ? "http" : "https"}://${match[1]}:${port}/`);
+}
+
+/**
+ * Instafy's own gate between the browser and the egress proxy. The request rules (applyRequestRules) see only a
+ * request's first address: Playwright follows a redirect without asking them. So every connection the browser makes
+ * off the site comes here as well, each redirect hop and every frame's and worker's included, and is checked again by
+ * what the gate can see of it (gateView). What passes goes on to `upstream`; what does not is refused (403), and its
+ * reason is kept for the report (`refusal`).
+ */
+export type RequestGate = OffSiteRoute & { refusal: (url: string) => string | null };
+
+const MAX_GATE_NOTES = 500;
+
+export async function startRequestGate(upstream: OffSiteRoute, rules: RequestRules): Promise<RequestGate> {
+  // Nothing reaches the gate directly: the site's own origin bypasses the proxy, so here it is just another local port.
+  const offSite: RequestRules = { ...rules, direct: [] };
+  const refused = new Map<string, string>();
+  const verdictFor = (seen: string | null): RequestVerdict => {
+    const verdict = seen ? classifyRequest(seen, offSite) : blocked("not a web address");
+    if (verdict.kind === "blocked" && seen && !refused.has(seen) && refused.size < MAX_GATE_NOTES) refused.set(seen, verdict.reason);
+    return verdict;
+  };
+  const target = new URL(upstream.server);
+  const upstreamAt = { host: target.hostname.replace(/^\[|\]$/g, ""), port: Number(target.port) || 80 };
+  const sockets = new Set<net.Socket>();
+  const server = http.createServer((req, res) => {
+    // A plain-HTTP request names its whole address (absolute form), so all of it is checked.
+    const address = req.url ?? "";
+    if (verdictFor(/^http:\/\//i.test(address) ? gateView(address) : null).kind === "blocked") {
+      res.writeHead(403, { "content-type": "text/plain", "cache-control": "no-store" });
+      res.end("blocked by Instafy: not loaded for a check or a preview's picture");
+      return;
+    }
+    const forward = http.request({ ...upstreamAt, method: req.method, path: address, headers: req.headers }, (answer) => {
+      res.writeHead(answer.statusCode ?? 502, answer.headers);
+      answer.pipe(res);
+    });
+    forward.on("error", () => {
+      if (!res.headersSent) res.writeHead(502);
+      res.end();
+    });
+    req.pipe(forward);
+  });
+  server.on("connect", (req: http.IncomingMessage, client: net.Socket, head: Buffer) => {
+    client.on("error", () => {});
+    const authority = req.url ?? "";
+    if (verdictFor(connectView(authority)).kind === "blocked") {
+      client.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
+      return;
+    }
+    const tunnel = net.connect(upstreamAt, () => {
+      tunnel.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
+      if (head.length) tunnel.write(head);
+      tunnel.pipe(client);
+      client.pipe(tunnel);
+    });
+    tunnel.on("error", () => client.destroy());
+    tunnel.on("close", () => client.destroy());
+    client.on("close", () => tunnel.destroy());
+  });
+  server.on("connection", (socket: net.Socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address() as AddressInfo;
+  return {
+    server: `http://127.0.0.1:${port}`,
+    kind: upstream.kind,
+    refusal: (url) => {
+      const seen = gateView(url);
+      return seen ? (refused.get(seen) ?? null) : null;
+    },
+    stop: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await upstream.stop();
+    },
+  };
+}
+
+/**
+ * A redirect hop whose address the rules block but the gate cannot refuse, because it sees only the host: an https
+ * copy of a link-only site that a wrapper (an archive, a cache) writes into its path or query. The page may have
+ * loaded it, so a picture taken now is never kept. Null for every other hop.
+ */
+export function unstoppedRedirect(url: string, rules: RequestRules): { reason: string } | null {
+  const verdict = classifyRequest(url, rules);
+  if (verdict.kind !== "blocked") return null;
+  const seen = gateView(url);
+  if (seen && classifyRequest(seen, { ...rules, direct: [] }).kind === "blocked") return null;
+  return { reason: verdict.reason };
+}
+
+/**
+ * The proxy settings for a context: everything goes through the gate, the direct origins excepted. Chromium would
+ * otherwise send local and link-local addresses around any proxy, a redirect hop to one included; `<-loopback>` sends
+ * them to the gate too, whatever the Playwright in use does by default.
+ */
 export function contextProxy(route: OffSiteRoute, direct: string[]): { server: string; bypass: string } {
-  return { server: route.server, bypass: direct.map((origin) => new URL(origin).host).join(",") };
+  return { server: route.server, bypass: ["<-loopback>", ...direct.map((origin) => new URL(origin).host)].join(",") };
 }
 
 /**
@@ -722,7 +846,7 @@ const DOMINANT_COLOUR = async (b64: string) => {
   return max / (w * h);
 };
 
-type ViewportNetwork = { rules: RequestRules; route: OffSiteRoute };
+type ViewportNetwork = { rules: RequestRules; gate: RequestGate };
 
 async function checkViewport(
   browser: any,
@@ -753,12 +877,20 @@ async function checkViewport(
     reducedMotion: "reduce",
     serviceWorkers: "block",
     acceptDownloads: false,
-    proxy: contextProxy(network.route, network.rules.direct),
+    proxy: contextProxy(network.gate, network.rules.direct),
   });
   const t0 = Date.now();
   let status: number | null = null;
+  // Redirect hops the gate could not refuse (see unstoppedRedirect): said out loud, and no picture is kept.
+  const unstopped = new Map<string, string>();
   try {
     await applyRequestRules(context, network.rules, noteBlocked);
+    context.on("request", (request: any) => {
+      if (!request.redirectedFrom()) return;
+      const url = String(request.url());
+      const hop = unstoppedRedirect(url, network.rules);
+      if (hop && !unstopped.has(url)) unstopped.set(url, hop.reason);
+    });
     const page = await context.newPage();
     closePopups(page);
     const ours = (u: string) => isSiteUrl(u, siteOrigin);
@@ -779,7 +911,7 @@ async function checkViewport(
       if (blockedRequests.has(u)) return;
       const why = r.failure()?.errorText ?? "failed";
       if (!ours(u) && PROXY_REFUSED.test(why)) {
-        noteBlocked(u, "the egress proxy refused it: not a public address, or not a web port");
+        noteBlocked(u, network.gate.refusal(u) ?? "the egress proxy refused it: not a public address, or not a web port");
         return;
       }
       // X-Frame-Options or CSP frame-ancestors: reported once, as the reason the frame stays empty
@@ -795,6 +927,12 @@ async function checkViewport(
       const s = Number(r.status());
       if (r.request().isNavigationRequest() && ours(u) && status === null) status = s;
       if (s < 400 || /\/favicon\.ico(\?|$)/.test(u)) return;
+      // The gate's own answer to a plain-HTTP request it refused (a redirect hop): blocked, not the site's error.
+      const refusal = s === 403 && !ours(u) ? network.gate.refusal(u) : null;
+      if (refusal) {
+        noteBlocked(u, refusal);
+        return;
+      }
       (ours(u) ? errors : warnings).push(`HTTP ${s}: ${shortUrl(u)}`);
     });
 
@@ -831,9 +969,15 @@ async function checkViewport(
       const incomplete = incompleteBlankCheck(dominant, snap.text);
       if (incomplete) (incomplete.error ? errors : warnings).push(incomplete.message);
     }
+    for (const [url, reason] of unstopped) {
+      warnings.push(`a redirect led to ${url.slice(0, 200)} (${reason}), which this check could not stop`);
+    }
     let thumbnail: CheckThumbnail | undefined;
     if (takeThumbnail) {
-      thumbnail = blank.blank
+      const [firstUnstopped] = unstopped;
+      thumbnail = firstUnstopped
+        ? { skipped: `a redirect led to ${firstUnstopped[0].slice(0, 200)} (${firstUnstopped[1]}), which a picture never shows` }
+        : blank.blank
         ? { skipped: "the page looked blank" }
         : await pageThumbnail(page, context)
             .then(async (shot) => ("image" in shot ? { image: shot.image, description: await readPageDescription(page.mainFrame()) } : shot))
@@ -923,18 +1067,22 @@ export async function runSiteCheck(
   try {
     const shots = outDir ?? makeDefaultOutDir(port);
     host = opts.framed ? await startFrameHost(url) : null;
-    route = await startOffSiteRoute({ proxyServer: opts.proxyServer });
+    const upstream = await startOffSiteRoute({ proxyServer: opts.proxyServer });
+    route = upstream;
     const rules: RequestRules = {
       direct: host ? [siteOrigin, new URL(host.url).origin] : [siteOrigin],
-      offSite: route.kind,
+      offSite: upstream.kind,
       linkOnly: loadCaptureLinkOnly(opts.cwd ?? process.cwd(), env),
     };
+    // Stopping the gate stops the egress proxy behind it.
+    const gate = await startRequestGate(upstream, rules);
+    route = gate;
     const target = { pageUrl: host?.url ?? url, framed: Boolean(opts.framed) };
     for (const vp of viewports) {
       // The card shows the site as a page of its own, so only the plain desktop load is pictured.
       const takeThumbnail = Boolean(opts.thumbnail) && vp.name === "desktop" && !opts.framed;
       const { thumbnail: shot, ...report } = await checkViewport(
-        launched.browser, target, vp, siteOrigin, shots, timeoutMs, opts.waitMs ?? 600, { rules, route }, takeThumbnail,
+        launched.browser, target, vp, siteOrigin, shots, timeoutMs, opts.waitMs ?? 600, { rules, gate }, takeThumbnail,
       );
       if (shot) thumbnail = shot;
       reports.push(report);

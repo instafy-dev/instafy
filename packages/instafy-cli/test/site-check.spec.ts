@@ -437,6 +437,42 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
     expect(otherSeen).toEqual([]);
   });
 
+  it("a redirect hop to a link-only site is blocked and listed, never sent on to the egress proxy", { timeout: 180_000 }, async () => {
+    // A stand-in for the egress proxy that records what it is sent; public.example/to-booking redirects to Booking.
+    const proxied: string[] = [];
+    const proxy = http.createServer((req, res) => {
+      proxied.push(`${req.method} ${req.url}`);
+      if (req.url === "http://public.example/to-booking") {
+        res.writeHead(302, { location: "https://www.booking.com/hotel/pt/x.html" });
+        res.end();
+        return;
+      }
+      res.writeHead(403);
+      res.end();
+    });
+    proxy.on("connect", (req, socket: net.Socket) => {
+      proxied.push(`CONNECT ${req.url}`);
+      socket.on("error", () => {});
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+    });
+    proxy.listen(0, "127.0.0.1");
+    await once(proxy, "listening");
+    servers.push(proxy);
+    const port = await serve({
+      "/": { body: GOOD.replace("</body>", `<img src="/to-booking.png" alt=""><iframe src="http://public.example/to-booking"></iframe></body>`) },
+      "/to-booking.png": { status: 302, body: "", headers: { location: "http://www.booking.com/logo.png" } },
+    });
+    const proxyServer = `http://127.0.0.1:${(proxy.address() as { port: number }).port}`;
+    const result = await check({ port, outDir: path.join(tmp, "redirect-hops"), phone: true, proxyServer });
+    expect(result.code, JSON.stringify(result.report?.viewports.map((v) => v.errors))).toBe(CHECK_EXIT_OK);
+    const v = result.report!.viewports[0]!;
+    expect(v.blocked.join("\n")).toMatch(/https?:\/\/www\.booking\.com\/logo\.png \(Booking\.com is link-only/);
+    expect(v.blocked.join("\n")).toMatch(/https:\/\/www\.booking\.com\/hotel\/pt\/x\.html \(Booking\.com is link-only/);
+    expect([...v.errors, ...v.warnings].join("\n")).not.toMatch(/booking/);
+    expect(proxied).toContain("GET http://public.example/to-booking");
+    expect(proxied.join("\n")).not.toMatch(/booking\.com/);
+  });
+
   it("a minimal page (one heading on a plain background) passes", { timeout: 90_000 }, async () => {
     const port = await serve({ "/": { body: `<!doctype html><title>Hello</title><h1>Hello</h1>` } });
     const result = await check({ port, outDir: path.join(tmp, "minimal") });

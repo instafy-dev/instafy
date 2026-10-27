@@ -20,11 +20,15 @@ import { LINK_ONLY_FILE, LINK_ONLY_SCHEMA, linkOnlySite } from "../src/web-read.
 import {
   classifyRequest,
   cleanDescription,
+  contextProxy,
+  gateView,
   launchChromium,
   loadCaptureLinkOnly,
   loadPlaywright,
   locateBrowserEngine,
   startOffSiteRoute,
+  startRequestGate,
+  unstoppedRedirect,
   type RequestRules,
 } from "../src/site-check.js";
 
@@ -64,12 +68,12 @@ function webpOf(width: number, height: number): Buffer {
   return Buffer.concat([Buffer.from("RIFF", "latin1"), size, Buffer.from("WEBP", "latin1"), chunk]);
 }
 
-type Route = { status?: number; type?: string; body: string | Buffer };
+type Route = { status?: number; type?: string; body: string | Buffer; headers?: Record<string, string> };
 async function serve(routes: Record<string, Route>, seen: string[] = []): Promise<number> {
   const server = http.createServer((req, res) => {
     seen.push(req.url ?? "");
     const route = routes[(req.url ?? "/").split("?")[0]!];
-    res.writeHead(route?.status ?? (route ? 200 : 404), { "content-type": route?.type ?? "text/html; charset=utf-8" });
+    res.writeHead(route?.status ?? (route ? 200 : 404), { "content-type": route?.type ?? "text/html; charset=utf-8", ...(route?.headers ?? {}) });
     res.end(route?.body ?? "not found");
   });
   server.listen(0, "127.0.0.1");
@@ -201,6 +205,93 @@ describe("what a capture or check may load", () => {
   });
 });
 
+describe("Instafy's gate in front of the egress proxy: every connection off the site, each redirect hop included", () => {
+  const site = "http://127.0.0.1:4173";
+  const rules: RequestRules = { direct: [site], offSite: "proxy", linkOnly: loadCaptureLinkOnly(tmp, {}) };
+
+  /** One request through a proxy: the status it answers, and for CONNECT the status line only. */
+  function viaProxy(proxy: string, method: "GET" | "CONNECT", target: string): Promise<number> {
+    const at = new URL(proxy);
+    return new Promise((resolve) => {
+      const request = http.request({ host: at.hostname, port: Number(at.port), method, path: target, headers: { host: target } });
+      request.on("connect", (res, socket: net.Socket) => {
+        socket.destroy();
+        resolve(res.statusCode ?? 0);
+      });
+      request.on("response", (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      request.on("error", () => resolve(-1));
+      request.end();
+    });
+  }
+
+  it("refuses by what it can see of a request and passes the rest on to the egress proxy", async () => {
+    const proxied: string[] = [];
+    const upstream = await testProxy(proxied);
+    const gate = await startRequestGate({ server: upstream, kind: "proxy", stop: async () => {} }, rules);
+    try {
+      // TLS and WebSockets: the host. Plain HTTP: the whole address, so an archive's copy of a link-only site too.
+      expect(await viaProxy(gate.server, "CONNECT", "www.booking.com:443")).toBe(403);
+      expect(await viaProxy(gate.server, "CONNECT", "www-booking-com.translate.goog:443")).toBe(403);
+      expect(await viaProxy(gate.server, "CONNECT", "10.1.2.3:443")).toBe(403);
+      expect(await viaProxy(gate.server, "CONNECT", "127.0.0.1:4173")).toBe(403);
+      expect(await viaProxy(gate.server, "CONNECT", "example.org:8443")).toBe(403);
+      expect(await viaProxy(gate.server, "GET", "http://web.archive.org/web/2024/https://www.booking.com/")).toBe(403);
+      expect(await viaProxy(gate.server, "GET", "http://169.254.169.254/latest/meta-data/")).toBe(403);
+      expect(await viaProxy(gate.server, "GET", "/not-absolute")).toBe(403);
+      expect(proxied).toEqual([]);
+      // What passes goes on unchanged: the egress proxy still checks the address it connects to.
+      expect(await viaProxy(gate.server, "GET", "http://public.example/pic.png")).toBe(200);
+      expect(await viaProxy(gate.server, "CONNECT", "tile.openstreetmap.org:443")).toBe(403);
+      expect(proxied).toEqual(["GET http://public.example/pic.png", "CONNECT tile.openstreetmap.org:443"]);
+      // The report reads the reason back by the address the page saw fail.
+      expect(gate.refusal("https://www.booking.com/hotel/pt/x.html")).toMatch(/^Booking\.com is link-only/);
+      expect(gate.refusal("wss://www.booking.com/socket")).toMatch(/^Booking\.com is link-only/);
+      expect(gate.refusal("http://169.254.169.254/latest/meta-data/")).toMatch(/private or reserved/);
+      expect(gate.refusal("https://tile.openstreetmap.org/1/1/1.png")).toBeNull();
+    } finally {
+      await gate.stop();
+    }
+  });
+
+  it("refuses everything when this machine has no egress proxy or the link-only list did not load", async () => {
+    const proxied: string[] = [];
+    const upstream = await testProxy(proxied);
+    for (const changed of [{ offSite: "blocked" as const }, { linkOnly: null }]) {
+      const gate = await startRequestGate({ server: upstream, kind: "proxy", stop: async () => {} }, { ...rules, ...changed });
+      try {
+        expect(await viaProxy(gate.server, "GET", "http://public.example/pic.png")).toBe(403);
+        expect(await viaProxy(gate.server, "CONNECT", "tile.openstreetmap.org:443")).toBe(403);
+      } finally {
+        await gate.stop();
+      }
+    }
+    expect(proxied).toEqual([]);
+  });
+
+  it("knows which redirect hops it cannot refuse: an https copy that a wrapper writes into its path or query", () => {
+    expect(gateView("https://web.archive.org/web/2024/https://www.booking.com/")).toBe("https://web.archive.org/");
+    expect(gateView("ws://chat.example:80/socket")).toBe("http://chat.example/");
+    expect(gateView("http://web.archive.org/web/2024/https://www.booking.com/")).toBe("http://web.archive.org/web/2024/https://www.booking.com/");
+    expect(unstoppedRedirect("https://web.archive.org/web/2024/https://www.booking.com/", rules)).toEqual({ reason: expect.stringMatching(/Booking\.com/) });
+    expect(unstoppedRedirect("https://webcache.googleusercontent.com/search?q=cache:www.booking.com/", rules)).not.toBeNull();
+    // The gate refuses these itself, and lets these through rightly.
+    for (const url of ["https://www.booking.com/x", "http://web.archive.org/web/2024/https://www.booking.com/", "http://10.1.2.3/", "http://127.0.0.1:5432/"]) {
+      expect(unstoppedRedirect(url, rules), url).toBeNull();
+    }
+    for (const url of [`${site}/next`, "https://web.archive.org/web/2024/https://example.org/", "https://tile.openstreetmap.org/1/1/1.png"]) {
+      expect(unstoppedRedirect(url, rules), url).toBeNull();
+    }
+  });
+
+  it("sends local and link-local addresses to the gate too, whatever the Playwright in use does by default", () => {
+    const proxy = contextProxy({ server: "http://127.0.0.1:9", kind: "proxy", stop: async () => {} }, [site]);
+    expect(proxy).toEqual({ server: "http://127.0.0.1:9", bypass: "<-loopback>,127.0.0.1:4173" });
+  });
+});
+
 describe("without a browser: the page's own og:image, on its own origin only", () => {
   it("uploads a same-origin og:image with the page's description", async () => {
     const port = await serve({
@@ -251,11 +342,20 @@ if (checkoutEngine) {
   }
 }
 
-/** A stand-in for the egress proxy: it serves `public.example` itself and records every request it is sent. */
-async function testProxy(seen: string[]): Promise<string> {
+/**
+ * A stand-in for the egress proxy: it serves `public.example` itself and records every request it is sent. `redirects`
+ * maps a public.example address to where it redirects.
+ */
+async function testProxy(seen: string[], redirects: Record<string, string> = {}): Promise<string> {
   const pixel = pngOf(64, 64);
   const server = http.createServer((req, res) => {
     seen.push(`${req.method} ${req.url}`);
+    const location = redirects[req.url ?? ""];
+    if (location) {
+      res.writeHead(302, { location });
+      res.end();
+      return;
+    }
     if (req.url?.startsWith("http://public.example/")) {
       res.writeHead(200, { "content-type": "image/png" });
       res.end(pixel);
@@ -308,6 +408,77 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
       expect(proxied.join("\n")).not.toMatch(/booking|10\.1\.2\.3|127\.0\.0\.1/);
     },
   );
+
+  it(
+    "a redirect never takes the capture to a link-only site, an archive's copy of one or a private address, from the site or from a public address",
+    { timeout: 180_000 },
+    async () => {
+      const proxied: string[] = [];
+      const proxyServer = await testProxy(proxied, {
+        "http://public.example/to-booking": "https://www.booking.com/hotel/pt/x.html",
+        "http://public.example/to-private": "http://10.1.2.3/admin",
+        "http://public.example/to-copy.png": "http://web.archive.org/web/2024/https://www.booking.com/logo.png",
+      });
+      const port = await serve({
+        "/": {
+          body: `<!doctype html><title>Lisbon weekend</title>
+<body style="margin:0;background:#e8f0e6;font:16px system-ui"><h1 style="padding:24px;background:#2a6;color:#fff">Lisbon weekend</h1>
+<img src="/to-booking.png"><iframe src="http://public.example/to-booking"></iframe><iframe src="http://public.example/to-private"></iframe>
+<img src="http://public.example/to-copy.png"><img src="http://public.example/pic.png"></body>`,
+        },
+        "/to-booking.png": { status: 302, body: "", headers: { location: "http://www.booking.com/logo.png" } },
+      });
+      const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!("thumbnail" in result)) return;
+      // Each redirect was followed up to Instafy's own gate, which refused it: nothing reached the egress proxy.
+      expect(proxied).toContain("GET http://public.example/to-booking");
+      expect(proxied).toContain("GET http://public.example/to-private");
+      expect(proxied).toContain("GET http://public.example/pic.png");
+      expect(proxied.join("\n")).not.toMatch(/booking\.com|10\.1\.2\.3|archive\.org/);
+      const blocked = result.blocked.join("\n");
+      expect(blocked).toMatch(/booking\.com.*\(Booking\.com is link-only/);
+      expect(blocked).toMatch(/10\.1\.2\.3.*\(a private or reserved address\)/);
+    },
+  );
+
+  it("a redirect to an https copy of a link-only site, whose address the gate cannot read, keeps the picture off the card", { timeout: 180_000 }, async () => {
+    const proxied: string[] = [];
+    const proxyServer = await testProxy(proxied);
+    const port = await serve({
+      "/": { body: `<!doctype html><title>Copy</title><body style="background:#e8f0e6"><h1>Copy</h1><img src="/logo.png"></body>` },
+      "/logo.png": { status: 302, body: "", headers: { location: "https://web.archive.org/web/2024/https://www.booking.com/logo.png" } },
+    });
+    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
+    expect(result).toMatchObject({ ok: false, status: "skipped", reason: expect.stringMatching(/Booking\.com/) });
+  });
+
+  it("a redirect to another local port never goes around the gate, even where Playwright would not force it through", { timeout: 180_000 }, async () => {
+    const otherSeen: string[] = [];
+    const other = await serve({ "/secret.html": { body: "<h1>secret</h1>" } }, otherSeen);
+    const proxied: string[] = [];
+    const proxyServer = await testProxy(proxied, {
+      "http://public.example/to-local": `http://127.0.0.1:${other}/secret.html`,
+      "http://public.example/to-metadata": "http://169.254.169.254/latest/meta-data/",
+    });
+    const port = await serve({
+      "/": { body: `<!doctype html><title>Local</title><body style="background:#e8f0e6"><h1>Local</h1><iframe src="http://public.example/to-local"></iframe><iframe src="http://public.example/to-metadata"></iframe></body>` },
+    });
+    const forced = "PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK";
+    const before = process.env[forced];
+    process.env[forced] = "1";
+    try {
+      const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(otherSeen).toEqual([]);
+      expect(proxied).toContain("GET http://public.example/to-local");
+      expect(proxied.join("\n")).not.toMatch(/169\.254|127\.0\.0\.1/);
+      if ("blocked" in result) expect(result.blocked.join("\n")).toMatch(/127\.0\.0\.1:\d+\/secret\.html \(another local server/);
+    } finally {
+      if (before === undefined) delete process.env[forced];
+      else process.env[forced] = before;
+    }
+  });
 
   it("a capture that runs past its budget fails without hanging", { timeout: 120_000 }, async () => {
     // A server that takes the connection and never answers.

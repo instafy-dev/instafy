@@ -571,6 +571,9 @@ jobs:
       - name: Test CLI web read
         run: pnpm --filter @instafy/cli exec vitest run test/web-read.spec.ts
 
+      - name: Test CLI preview pictures
+        run: pnpm --filter @instafy/cli exec vitest run test/preview-thumbnail.spec.ts
+
   javascript-desktop:
     name: JavaScript Desktop and runtime
     runs-on: >-

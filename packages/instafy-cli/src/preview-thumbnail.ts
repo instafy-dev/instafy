@@ -3,8 +3,9 @@
 // The picture on a preview's card. `instafy preview open` takes one once the site is live: the site's own page at
 // 1280×800 in the runtime's headless Chromium, as a 640×400 JPEG, with the page's own `<meta name="description">`. The
 // page loads as an anonymous first visit (no person's session, cookies, location or browser profile) under the same
-// request rules as `instafy preview check`: the site's own loopback origin directly, other public addresses through the
-// image's egress proxy, never another local port, a private address or a link-only site.
+// request rules as `instafy preview check`: the site's own loopback origin directly, other public addresses through
+// Instafy's gate and the image's egress proxy, never another local port, a private address or a link-only site, not
+// even through a redirect.
 //
 // Without a browser (a self-hosted machine without Chromium) the page's HTML is read from 127.0.0.1 and its `og:image`
 // is used when it is on the site's own origin and is a real JPEG, PNG or WebP; an image anywhere else is never fetched.
@@ -27,6 +28,8 @@ import {
   pageThumbnail,
   readPageDescription,
   startOffSiteRoute,
+  startRequestGate,
+  unstoppedRedirect,
   type OffSiteRoute,
   type RequestRules,
 } from "./site-check.js";
@@ -285,13 +288,19 @@ export async function captureSiteThumbnail(options: CaptureOptions): Promise<Thu
   const blocked = new Map<string, string>();
   let route: OffSiteRoute | null = null;
   let timer: NodeJS.Timeout | null = null;
+  // A redirect hop the gate could not refuse (an https archive's copy of a link-only site): the picture is not kept.
+  let unstopped: { url: string; reason: string } | null = null;
   const work = (async (): Promise<ThumbnailAttempt> => {
-    route = await startOffSiteRoute({ proxyServer: options.proxyServer });
+    const upstream = await startOffSiteRoute({ proxyServer: options.proxyServer });
+    route = upstream;
     const rules: RequestRules = {
       direct: [siteOrigin],
-      offSite: route.kind,
+      offSite: upstream.kind,
       linkOnly: loadCaptureLinkOnly(options.cwd ?? process.cwd(), env),
     };
+    // Every connection off the site passes Instafy's gate, each redirect hop included; stopping it stops the proxy.
+    const gate = await startRequestGate(upstream, rules);
+    route = gate;
     // An anonymous first visit: a fresh context with no session, cookies, location or profile; no service workers,
     // no downloads, no permissions.
     const context = await launched.browser.newContext({
@@ -302,8 +311,26 @@ export async function captureSiteThumbnail(options: CaptureOptions): Promise<Thu
       acceptDownloads: false,
       proxy: contextProxy(route, rules.direct),
     });
-    await applyRequestRules(context, rules, (url, reason) => {
+    const noteBlocked = (url: string, reason: string) => {
       if (!blocked.has(url)) blocked.set(url, reason);
+    };
+    await applyRequestRules(context, rules, noteBlocked);
+    // What the gate refused shows as a failed request (a TLS hop) or as its own 403 (a plain-HTTP hop).
+    context.on("requestfailed", (request: any) => {
+      const url = String(request.url());
+      const refusal = gate.refusal(url);
+      if (refusal) noteBlocked(url, refusal);
+    });
+    context.on("response", (response: any) => {
+      const url = String(response.url());
+      const refusal = Number(response.status()) === 403 ? gate.refusal(url) : null;
+      if (refusal) noteBlocked(url, refusal);
+    });
+    context.on("request", (request: any) => {
+      if (unstopped || !request.redirectedFrom()) return;
+      const url = String(request.url());
+      const hop = unstoppedRedirect(url, rules);
+      if (hop) unstopped = { url, reason: hop.reason };
     });
     const page = await context.newPage();
     closePopups(page);
@@ -317,6 +344,10 @@ export async function captureSiteThumbnail(options: CaptureOptions): Promise<Thu
     const description = await readPageDescription(page.mainFrame());
     const shot = await pageThumbnail(page, context);
     if ("skipped" in shot) return { ok: false, status: "skipped", reason: shot.skipped };
+    const hop = unstopped as { url: string; reason: string } | null;
+    if (hop) {
+      return { ok: false, status: "skipped", reason: `a redirect led to ${hop.url.slice(0, 200)} (${hop.reason}), which a picture never shows` };
+    }
     return {
       ok: true,
       thumbnail: { image: shot.image, contentType: "image/jpeg", width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT, source: "capture", description },
