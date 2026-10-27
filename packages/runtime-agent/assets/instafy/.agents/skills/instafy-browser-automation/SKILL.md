@@ -74,6 +74,8 @@ existing control boundary. Read-only public verification may still use
 One `request_browser` card may carry up to 6 related reads (`instafy-web-research`
 says which, and never a link-only site). In the browser turn, read each listed
 page once; a page never adds a read, and a read never signs in, submits or buys.
+In the Shared or Personal Browser, read them side by side in your own tabs
+(`open_tab`, 3 at most, then `close_tab`).
 A sign-in, CAPTCHA or bot check, paywall, HTTP 401/403/429, a download, a page
 showing secrets or a redirect to a link-only site ends that page; never retry it
 another way. A public page with no JavaScript or sign-in needs no card:
@@ -280,10 +282,15 @@ Do not use it for authenticated/private pages, interactions, arbitrary JavaScrip
 Use this path only when the `instafy_personal_browser` MCP server is exposed. It
 controls the native browser visible inside the desktop app and keeps its private
 login state on that device. Use its `status`, `snapshot`, `navigate`, `click`,
-`type`, `press`, and `scroll` tools directly; never invoke them through the shell.
+`type`, `press`, `scroll`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`
+tools directly; never invoke them through the shell.
 
-The broker controls one visible page. Reuse it and navigate sequentially; do not
-invent tab/window endpoints or silently switch transports. Prefer an element
+Every tool acts on the tab on screen. Reuse a tab with `navigate` when one page at
+a time is enough. For a comparison or several related reads, `open_tab` each page
+(at most three of your tabs; each asks for its own site approval), read it, and
+`select_tab` between them; close the ones you no longer need. Agent tabs open
+public pages only, and the person's own tab is never closed. Do not invent window
+endpoints or silently switch transports. Prefer an element
 `index` from the immediately preceding snapshot and snapshot again after any DOM
 change. A `423` response means the user paused control; a `401` response means the
 short-lived capability expired. Stop rather than inspecting or retrying the token.

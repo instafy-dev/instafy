@@ -5,18 +5,20 @@ import path from "node:path";
 // test must not turn the required lane green while omitting its main proof.
 export const REQUIRED_BROWSER_LANES = Object.freeze({
   personal: {
-    minimumTests: 4,
+    minimumTests: 5,
     files: ["electron-personal-browser.spec.ts"],
     titles: [
       "is enabled by default and rejects opening behind the explicit kill switch",
       "persists one local profile across restarts and isolates another profile",
       "keeps real login cookies per user across projects and restarts, then clears only that user",
       "revokes ownership and control when the Studio renderer reloads",
+      "stops agent-driven page loads on a link-only site or a private address, also by the address actually connected to",
     ],
   },
   "browser-ui": {
     minimumTests: 53,
     files: [
+      "browser-agent-tabs.spec.ts",
       "browser-chrome-mobile-layout.spec.ts",
       "browser-cobrowsing-ui.spec.ts",
       "browser-cursor-overlay.spec.ts",
@@ -43,6 +45,9 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "typing-agent-stack.spec.ts",
     ],
     titles: [
+      "agent tabs are badged, listed and taken over in one press at 390px in light mode",
+      "agent tabs are badged, listed and taken over in one press at 390px in dark mode",
+      "agent tabs are badged, listed and taken over in one press at 1100px in light mode",
       "typing avatar stacks keep status text clear in light on desktop and phones",
       "typing avatar stacks keep status text clear in dark on desktop and phones",
       "Skills import keeps its title and actions reachable across keyboard resize and rotation",

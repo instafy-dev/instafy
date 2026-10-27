@@ -4,6 +4,7 @@
 //! only a job's scoped proxy/controller credentials and reports events/results over bounded IPC.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -70,6 +71,11 @@ pub struct IsolatedToolWorkerRequest {
     pub job_environment: HashMap<String, String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// The project's skill-pack folder (`INSTAFY_CACHE_DIR`): the one place outside the snapshot
+    /// and the fresh private state the worker may write, so a pack's caches and service health
+    /// outlast the turn.
+    #[serde(default)]
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -177,6 +183,20 @@ impl IsolatedToolWorkerRequest {
             !workspace.starts_with(&state) && !state.starts_with(&workspace),
             "worker workspace and private state must be separate"
         );
+        if let Some(cache) = &self.cache_dir {
+            ensure!(
+                cache.is_absolute(),
+                "isolated worker cache folder must be absolute"
+            );
+            let cache = std::fs::canonicalize(cache).context("worker cache folder is missing")?;
+            ensure!(cache.is_dir(), "worker cache folder must be a directory");
+            ensure!(
+                [&workspace, &state]
+                    .iter()
+                    .all(|root| !cache.starts_with(root) && !root.starts_with(&cache)),
+                "worker cache folder must be separate from the workspace and private state"
+            );
+        }
         validate_job_environment(&self.job_environment)
     }
 }
@@ -325,16 +345,10 @@ pub async fn run_with_program(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     // No machine credentials or model settings cross from the runtime's process environment.
-    for key in PERSISTENT_HELPER_BASE_ENV_KEYS {
-        if ![
-            "HOME", "USER", "LOGNAME", "SHELL", "TZ", "TMPDIR", "TMP", "TEMP",
-        ]
-        .contains(key)
-            && let Some(value) = std::env::var_os(key)
-        {
-            command.env(key, value);
-        }
-    }
+    command.envs(worker_process_environment(
+        crate::skill_packs::installed_packs(),
+        std::env::vars_os(),
+    ));
     command.env("INSTAFY_RUNTIME_PARENT_DISPOSITION", "1");
     #[cfg(unix)]
     command.process_group(0);
@@ -502,6 +516,99 @@ pub async fn run_with_program(
     })
 }
 
+/// What the worker process inherits from the runtime (`vars`): the helper baseline without the
+/// locations the worker sets itself, plus the settings installed skill packs declare
+/// ([`crate::skill_packs::pack_settings_environment`]). Never a credential.
+fn worker_process_environment(
+    packs: &[crate::skill_packs::InstalledPack],
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
+    let mut environment: Vec<(OsString, OsString)> = vars
+        .iter()
+        .filter(|(key, _)| {
+            key.to_str().is_some_and(|name| {
+                PERSISTENT_HELPER_BASE_ENV_KEYS.contains(&name)
+                    && ![
+                        "HOME", "USER", "LOGNAME", "SHELL", "TZ", "TMPDIR", "TMP", "TEMP",
+                    ]
+                    .contains(&name)
+            })
+        })
+        .cloned()
+        .collect();
+    environment.extend(crate::skill_packs::pack_settings_environment(packs, vars));
+    environment
+}
+
+/// The variables the worker sets for itself and its tools after it starts: private locations,
+/// the job's scoped credentials and identity, and the project's skill-pack folder.
+fn worker_environment(
+    request: &IsolatedToolWorkerRequest,
+    state: &Path,
+    workspace: &Path,
+) -> HashMap<String, String> {
+    let base = request.proxy_base_url.trim_end_matches('/');
+    let mut environment = request.job_environment.clone();
+    environment.extend(HashMap::from([
+        (
+            "HOME".into(),
+            state.join("home").to_string_lossy().into_owned(),
+        ),
+        (
+            "CODEX_HOME".into(),
+            state.join("codex").to_string_lossy().into_owned(),
+        ),
+        (
+            "TMPDIR".into(),
+            state.join("tmp").to_string_lossy().into_owned(),
+        ),
+        (
+            "TMP".into(),
+            state.join("tmp").to_string_lossy().into_owned(),
+        ),
+        (
+            "TEMP".into(),
+            state.join("tmp").to_string_lossy().into_owned(),
+        ),
+        ("CODEX_API_KEY".into(), request.proxy_token.clone()),
+        ("OPENAI_API_KEY".into(), request.proxy_token.clone()),
+        ("OPENAI_BASE_URL".into(), format!("{base}/v1")),
+        ("PROXY_BASE_URL".into(), base.into()),
+        (
+            "CONTROLLER_BASE_URL".into(),
+            request.controller_base_url.clone(),
+        ),
+        ("PROJECT_ID".into(), request.project_id.to_string()),
+        ("INSTAFY_PROJECT_ID".into(), request.project_id.to_string()),
+        ("SPACE_ID".into(), request.project_id.to_string()),
+        ("INSTAFY_SPACE_ID".into(), request.project_id.to_string()),
+        ("CODEX_MAX_RUN_RETRIES".into(), "0".into()),
+        (
+            "GIT_CEILING_DIRECTORIES".into(),
+            workspace.to_string_lossy().into_owned(),
+        ),
+        (
+            "CODEX_RUN_TIMEOUT_SECONDS".into(),
+            RUN_TIMEOUT.as_secs().to_string(),
+        ),
+    ]));
+    if let Some(model) = &request.model {
+        environment.insert("CODEX_MODEL".into(), model.clone());
+    }
+    if let Some(id) = request.conversation_id {
+        environment.insert("CONVERSATION_ID".into(), id.to_string());
+        environment.insert("INSTAFY_CONVERSATION_ID".into(), id.to_string());
+    }
+    if let Some(cache) = &request.cache_dir {
+        environment.insert(
+            crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV.into(),
+            cache.to_string_lossy().into_owned(),
+        );
+    }
+    environment
+}
+
 fn encode_frame(value: &impl Serialize) -> Result<Vec<u8>> {
     let body = serde_json::to_vec(value)?;
     ensure!(
@@ -590,59 +697,13 @@ pub fn prepare_cli() -> Result<IsolatedToolWorkerRequest> {
         }
     }
     process_tree::prepare_child()?;
-    let base = request.proxy_base_url.trim_end_matches('/');
-    let mut environment = request.job_environment.clone();
-    environment.extend(HashMap::from([
-        (
-            "HOME".into(),
-            state.join("home").to_string_lossy().into_owned(),
-        ),
-        (
-            "CODEX_HOME".into(),
-            state.join("codex").to_string_lossy().into_owned(),
-        ),
-        (
-            "TMPDIR".into(),
-            state.join("tmp").to_string_lossy().into_owned(),
-        ),
-        (
-            "TMP".into(),
-            state.join("tmp").to_string_lossy().into_owned(),
-        ),
-        (
-            "TEMP".into(),
-            state.join("tmp").to_string_lossy().into_owned(),
-        ),
-        ("CODEX_API_KEY".into(), request.proxy_token.clone()),
-        ("OPENAI_API_KEY".into(), request.proxy_token.clone()),
-        ("OPENAI_BASE_URL".into(), format!("{base}/v1")),
-        ("PROXY_BASE_URL".into(), base.into()),
-        (
-            "CONTROLLER_BASE_URL".into(),
-            request.controller_base_url.clone(),
-        ),
-        ("PROJECT_ID".into(), request.project_id.to_string()),
-        ("INSTAFY_PROJECT_ID".into(), request.project_id.to_string()),
-        ("SPACE_ID".into(), request.project_id.to_string()),
-        ("INSTAFY_SPACE_ID".into(), request.project_id.to_string()),
-        ("CODEX_MAX_RUN_RETRIES".into(), "0".into()),
-        (
-            "GIT_CEILING_DIRECTORIES".into(),
-            std::fs::canonicalize(&request.workspace_dir)?
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        (
-            "CODEX_RUN_TIMEOUT_SECONDS".into(),
-            RUN_TIMEOUT.as_secs().to_string(),
-        ),
-    ]));
-    if let Some(model) = &request.model {
-        environment.insert("CODEX_MODEL".into(), model.clone());
-    }
-    if let Some(id) = request.conversation_id {
-        environment.insert("CONVERSATION_ID".into(), id.to_string());
-        environment.insert("INSTAFY_CONVERSATION_ID".into(), id.to_string());
+    let workspace = std::fs::canonicalize(&request.workspace_dir)?;
+    let environment = worker_environment(&request, &state, &workspace);
+    // Only the request names the skill-pack folder: a value inherited from the runtime never widens
+    // the sandbox's writable folders (`codex::isolated_tool_worker_permissions`).
+    if !environment.contains_key(crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV) {
+        // SAFETY: the one-shot CLI entry calls this before any thread is created.
+        unsafe { std::env::remove_var(crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV) };
     }
     for (key, value) in environment {
         // SAFETY: the one-shot CLI entry calls this before any thread is created.
@@ -808,6 +869,7 @@ mod tests {
             job_environment: HashMap::new(),
             model: None,
             reasoning_effort: None,
+            cache_dir: None,
         };
         assert!(request.validate().is_ok());
         for with_authority in [
@@ -870,6 +932,124 @@ mod tests {
         assert!(safe_job_environment_key("GITHUB_TOKEN"));
         assert!(safe_job_environment_key("INSTAFY_PROJECT_SECRET_INVENTORY"));
         assert!(safe_job_environment_key("PROJECT_TEST_SENTINEL"));
+    }
+
+    #[test]
+    fn the_worker_inherits_declared_pack_settings_and_never_a_credential() {
+        let root = tempfile::tempdir().unwrap();
+        let mut pack = crate::skill_packs::load_pack(&crate::skill_packs::tests::make_pack(
+            root.path(),
+            "demo",
+            true,
+        ))
+        .unwrap();
+        pack.env = vec!["UW_*".into(), "INSTAFY_LOOKUP_*".into()];
+        let vars = [
+            ("PATH", "/bin"),
+            ("HOME", "/runtime-home"),
+            ("TMPDIR", "/runtime-tmp"),
+            ("UW_OSRM", "https://osrm.example"),
+            ("INSTAFY_LOOKUP_PROVIDERS", "{}"),
+            ("UW_PRIVATE_KEY", "x"),
+            ("INSTAFY_CACHE_DIR", "/another-project"),
+            ("CONTROLLER_ACCESS_TOKEN", "x"),
+            ("OPENAI_API_KEY", "x"),
+            ("RUNTIME_ACCESS_TOKEN", "x"),
+        ]
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)));
+        let names = |packs: &[crate::skill_packs::InstalledPack]| -> Vec<String> {
+            let mut names: Vec<String> = worker_process_environment(packs, vars.clone())
+                .into_iter()
+                .map(|(key, _)| key.into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&[]), ["PATH"], "no pack: the helper baseline only");
+        assert_eq!(
+            names(std::slice::from_ref(&pack)),
+            ["INSTAFY_LOOKUP_PROVIDERS", "PATH", "UW_OSRM"],
+            "the pack's settings, never its credential-looking names or another folder"
+        );
+    }
+
+    #[test]
+    fn only_the_request_names_the_skill_pack_folder_and_it_stays_apart() {
+        let scratch = tempfile::tempdir().unwrap();
+        let workspace_dir = scratch.path().join("workspace");
+        let state_dir = scratch.path().join("state");
+        let cache = scratch.path().join("cache");
+        for dir in [&workspace_dir, &state_dir, &cache] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let request = IsolatedToolWorkerRequest {
+            workspace_dir: workspace_dir.clone(),
+            state_dir: state_dir.clone(),
+            prompt: "inert".into(),
+            project_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            conversation_id: None,
+            proxy_base_url: "http://127.0.0.1:9".into(),
+            proxy_token: "inert-proxy".into(),
+            controller_base_url: "http://127.0.0.1:9".into(),
+            controller_token: None,
+            controller_token_scopes: Vec::new(),
+            controller_token_expires_at: None,
+            job_environment: HashMap::new(),
+            model: None,
+            reasoning_effort: None,
+            cache_dir: Some(cache.clone()),
+        };
+        assert!(request.validate().is_ok());
+        let environment = worker_environment(&request, &state_dir, &workspace_dir);
+        assert_eq!(
+            environment
+                .get(crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV)
+                .map(String::as_str),
+            Some(cache.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            environment["HOME"],
+            state_dir.join("home").to_string_lossy()
+        );
+        let without = IsolatedToolWorkerRequest {
+            cache_dir: None,
+            ..request.clone()
+        };
+        assert!(
+            !worker_environment(&without, &state_dir, &workspace_dir)
+                .contains_key(crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV)
+        );
+        for bad in [
+            workspace_dir.join("cache"),
+            state_dir.clone(),
+            PathBuf::from("relative/cache"),
+            scratch.path().to_path_buf(),
+        ] {
+            let _ = std::fs::create_dir_all(workspace_dir.join("cache"));
+            let error = IsolatedToolWorkerRequest {
+                cache_dir: Some(bad.clone()),
+                ..request.clone()
+            }
+            .validate()
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("cache folder"), "{bad:?}: {error}");
+        }
+        // a job's own environment can never name it
+        let mut job_environment = HashMap::new();
+        job_environment.insert(
+            crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV.to_string(),
+            "/elsewhere".to_string(),
+        );
+        assert!(
+            IsolatedToolWorkerRequest {
+                job_environment,
+                ..request
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -939,6 +1119,7 @@ mod tests {
             job_environment: HashMap::new(),
             model: None,
             reasoning_effort: None,
+            cache_dir: None,
         };
         let request_bytes = encode_frame(&request).unwrap().len();
         let program = scratch.path().join("worker");

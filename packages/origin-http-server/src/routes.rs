@@ -5353,6 +5353,17 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+        // Keep tab changes what stays open in the browser, so it needs control.
+        assert_eq!(
+            client
+                .post(format!("{base}/browser/pages/TAB-A/keep"))
+                .bearer_auth(&view)
+                .send()
+                .await
+                .expect("view-only keep tab request")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
 
         let control = token(&["browser.control"]);
         assert_eq!(
@@ -5405,6 +5416,18 @@ mod tests {
                 .expect("control approval route request")
                 .status(),
             StatusCode::UNPROCESSABLE_ENTITY
+        );
+        // With control, keeping a tab when no turn holds the browser finds
+        // no tab of Octo's to keep.
+        assert_eq!(
+            client
+                .post(format!("{base}/browser/pages/TAB-A/keep"))
+                .bearer_auth(&control)
+                .send()
+                .await
+                .expect("control keep tab request")
+                .status(),
+            StatusCode::NOT_FOUND
         );
         assert_eq!(
             client

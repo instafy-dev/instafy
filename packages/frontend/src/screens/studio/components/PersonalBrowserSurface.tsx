@@ -18,6 +18,7 @@ import {
   Refresh,
   Trash,
   MoreHoriz,
+  Xmark,
 } from "iconoir-react";
 import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
@@ -29,6 +30,8 @@ import { BrowserExpandButton } from "./BrowserExpandButton";
 import { SendPageToOctoButton } from "./SendPageToOctoButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
+import { BrowserReadingRow } from "./BrowserReadingRow";
+import { personalBrowserTabPages, resolveAgentReadingPages } from "./browserAgentTabs";
 import { browserPageOrigin } from "./browserHandoffRouting";
 import {
   BrowserChromeShell,
@@ -86,6 +89,87 @@ export function BrowserTransportSelector({
       </div>
     </BrowserToolsPopover>
   </div>;
+}
+
+type PersonalBrowserTab = NonNullable<InstafyDesktopPersonalBrowserStatus["tabs"]>[number];
+
+function tabLabel(tab: PersonalBrowserTab): string {
+  if (tab.title) return tab.title;
+  try {
+    return new URL(tab.url).host || "New tab";
+  } catch {
+    return "New tab";
+  }
+}
+
+/**
+ * The open tabs, shown once Octo has opened one of its own. Octo's tabs are
+ * marked, so every tab it uses is visible and named as its; the person shows
+ * or closes them once Octo is paused.
+ */
+export function PersonalBrowserTabRow({
+  tabs,
+  locked,
+  onSelect,
+  onClose,
+}: {
+  tabs: readonly PersonalBrowserTab[];
+  locked: boolean;
+  onSelect: (tabId: string) => void;
+  onClose: (tabId: string) => void;
+}) {
+  if (tabs.length < 2) return null;
+  return (
+    <div
+      className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-slate-200 px-2 py-1 dark:border-slate-800"
+      role="group"
+      aria-label="Browser tabs"
+      data-testid="personal-browser-tabs"
+    >
+      {tabs.map((tab) => {
+        const label = tabLabel(tab);
+        const byOcto = tab.openedBy === "agent";
+        return (
+          <div
+            key={tab.id}
+            className={`flex min-w-0 max-w-[14rem] items-center rounded-md ${tab.active ? "bg-slate-200 dark:bg-slate-800" : ""}`}
+            data-testid="personal-browser-tab"
+            data-active={tab.active ? "true" : "false"}
+            data-opened-by={tab.openedBy}
+          >
+            <Button
+              variant="ghost"
+              size="xs"
+              className="min-w-0 flex-1 justify-start"
+              aria-pressed={tab.active}
+              aria-label={byOcto ? `${label} (opened by Octo)` : label}
+              title={locked && !tab.active ? "Pause Octo to switch tabs" : tab.url}
+              isDisabled={locked && !tab.active}
+              onPress={() => onSelect(tab.id)}
+            >
+              {byOcto ? (
+                <span className="shrink-0 rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-700 dark:bg-violet-900/50 dark:text-violet-200">
+                  Octo
+                </span>
+              ) : null}
+              <span className="min-w-0 truncate">{label}</span>
+            </Button>
+            {byOcto ? (
+              <IconButton
+                aria-label={`Close ${label}`}
+                size="sm"
+                variant="ghost"
+                isDisabled={locked}
+                onPress={() => onClose(tab.id)}
+              >
+                <Xmark className="h-3 w-3" aria-hidden="true" />
+              </IconButton>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function personalBrowserStatus(model: PersonalBrowserModel): {
@@ -156,7 +240,7 @@ export function PersonalBrowserSurface({
   humanInputIdentityKey?: string;
   historyUserId?: string | null;
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
-  /** The person paused agent control with the toolbar button. */
+  /** The person paused agent control: the toolbar button or any Take over. */
   onPauseAgentControl?: () => void;
   /** Send page to Octo; absent when this person cannot add attachments here. */
   onSendPage?: () => void;
@@ -326,6 +410,9 @@ export function PersonalBrowserSurface({
     canContinue: active && ownsNativeStatus && Boolean(onContinueAfterHumanInput),
     takeoverRequestId: ownsNativeStatus ? model.status?.takeoverRequestId : undefined,
     onTakeOver: async () => {
+      // Every take-over is a Pause: Octo does not reopen the browser by
+      // itself afterwards, as after the toolbar's Pause.
+      onPauseAgentControl?.();
       const status = await model.setAgentControlEnabled(false);
       return status?.agentControlEnabled === false;
     },
@@ -335,6 +422,19 @@ export function PersonalBrowserSurface({
   };
   const humanInputState = useBrowserHumanInput(humanInputOptions);
   const humanInputAvailable = ready && Boolean(humanInputIdentityKey && onContinueAfterHumanInput);
+  // Whenever the agent holds control of this browser, the pages it is
+  // reading: the tabs it opened and the tab on screen, which is the one it
+  // controls. That is the case with or without a turn of this conversation
+  // working, since another conversation's turn, or a resumed browser between
+  // turns, holds it too. Take over is the same action as the toolbar's: Pause
+  // revokes the broker, so it ends the agent's control of every tab at once.
+  const personalPages = personalBrowserTabPages(ownsNativeStatus ? model.status : null);
+  const agentReadingPages = resolveAgentReadingPages({
+    pages: personalPages,
+    agentControlActive: ready && ownsNativeStatus &&
+      model.status?.agentControlEnabled === true && !model.status?.tabControlActive,
+    agentPageIds: personalPages.filter((page) => page.isActive).map((page) => page.id),
+  });
   const resumeFromStatus = ready && browserStatus.state === "paused" &&
     !model.status?.agentControlEnabled && model.agentPhase !== "unavailable" && !humanInputState.active;
   const clearDataMessage =
@@ -576,6 +676,20 @@ export function PersonalBrowserSurface({
               : null
         }
         testId="personal-browser-chrome"
+      />
+      <PersonalBrowserTabRow
+        tabs={ready && ownsNativeStatus ? model.status?.tabs ?? [] : []}
+        locked={humanInputLocked}
+        onSelect={(tabId) => void model.selectTab(tabId)}
+        onClose={(tabId) => void model.closeTab(tabId)}
+      />
+      <BrowserReadingRow
+        pages={agentReadingPages}
+        canTakeOver={humanInputOptions.canTakeOver && (!humanInputState.active || humanInputState.busy === "takeover")}
+        takingOver={humanInputState.busy === "takeover"}
+        // The toolbar's take-over controls already say why a take-over failed.
+        error={humanInputAvailable ? null : humanInputState.error}
+        onTakeOver={() => void humanInputState.takeOver()}
       />
       <div
         ref={viewportRef}

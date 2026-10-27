@@ -96,6 +96,46 @@ describe("SharedBrowserChrome", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  it("names the agent on the tabs it holds while it has control, and on no tab after", async () => {
+    const pages = [
+      page({ id: "mine", title: "My page", isActive: false }),
+      page({ id: "bound", title: "Bound page", isActive: true }),
+      page({ id: "opened", title: "Opened page", isActive: false, openedBy: "agent", agentTabNumber: 2 }),
+      // A tab of Octo's an earlier run left open: Octo does not hold it.
+      page({ id: "earlier", title: "Earlier page", isActive: false, openedBy: "agent", leftover: true }),
+    ];
+    const optionLabels = () => [...container.querySelectorAll<HTMLOptionElement>('[data-testid="shared-browser-page-select"] option')]
+      .map((option) => [option.textContent, option.dataset.agentTab ?? null]);
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({
+        pages,
+        agentPageIds: ["bound"],
+        controlOwner: { kind: "agent", displayName: "Octo" },
+      })} />);
+    });
+    // The tab Octo opened carries the label its prompts and list_tabs use.
+    expect(optionLabels()).toEqual([
+      ["My page", null],
+      ["Octo · Bound page", "true"],
+      ["Octo's tab 2: Opened page", "true"],
+      ["Octo's earlier tab: Earlier page", null],
+    ]);
+    expect(container.querySelector('[data-testid="shared-browser-page-select"]')!.getAttribute("aria-description"))
+      .toBe("4 tabs, 2 used by Octo. Current tab: Octo · Bound page");
+
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ pages, agentPageIds: ["bound"] })} />);
+    });
+    expect(optionLabels()).toEqual([
+      ["My page", null],
+      ["Bound page", null],
+      // The tab Octo opened still says whose it is, with the same number,
+      // without the agent's control mark.
+      ["Octo's tab 2: Opened page", null],
+      ["Octo's earlier tab: Earlier page", null],
+    ]);
+  });
+
   it("sends the page on screen only on a press, even while someone else controls the browser", async () => {
     const onSendPage = vi.fn();
     await act(async () => {
@@ -123,6 +163,37 @@ describe("SharedBrowserChrome", () => {
       root.render(<SharedBrowserChrome {...props()} />);
     });
     expect(container.querySelector('[data-testid="browser-send-page"]')).toBeNull();
+  });
+
+  it("badges Octo's tabs for everyone and offers Keep tab on one that is not kept", async () => {
+    const onKeepPage = vi.fn();
+    const personTab = page({ id: "page-1", isActive: false });
+    const octoTab = page({ id: "tab-1", url: "https://docs.example/", title: "Docs", isActive: true, openedBy: "agent" });
+    // Octo has control: the person can still keep its tab.
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ onKeepPage, interactionEnabled: false, pages: [personTab, octoTab] })} />);
+    });
+    const options = Array.from(container.querySelectorAll("option")).map((option) => option.textContent);
+    expect(options).toEqual(["Example site", "Octo's tab: Docs"]);
+    const keep = container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-keep-tab"]')!;
+    expect(keep.textContent).toBe("Keep tab");
+    expect(onKeepPage).not.toHaveBeenCalled();
+    await act(async () => keep.click());
+    expect(onKeepPage).toHaveBeenCalledExactlyOnceWith("tab-1");
+
+    // A kept tab says so, and offers nothing more.
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ onKeepPage, pages: [personTab, { ...octoTab, kept: true }] })} />);
+    });
+    expect(Array.from(container.querySelectorAll("option")).map((option) => option.textContent))
+      .toEqual(["Example site", "Octo's tab, kept: Docs"]);
+    expect(container.querySelector('[data-testid="shared-browser-keep-tab"]')).toBeNull();
+
+    // The person's own tab has no badge and nothing to keep.
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ onKeepPage, pages: [{ ...personTab, isActive: true }, { ...octoTab, isActive: false }] })} />);
+    });
+    expect(container.querySelector('[data-testid="shared-browser-keep-tab"]')).toBeNull();
   });
 
   it("shows a blank tab's address as empty, so a typed address is not appended to about:blank", async () => {

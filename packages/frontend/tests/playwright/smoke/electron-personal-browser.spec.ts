@@ -1,5 +1,6 @@
 import { _electron as electron, expect, test } from "@playwright/test";
-import { createServer, type Server } from "node:http";
+import { createHash } from "node:crypto";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
@@ -34,6 +35,9 @@ type PersonalBrowserStatus = {
   ownerId?: string;
   projectId?: string;
   url: string;
+  tabs?: Array<{ id: string; openedBy: "person" | "agent"; active: boolean; url: string }>;
+  activeTabId?: string;
+  maxAgentTabs?: number;
 };
 
 type PersonalBrowserBridge = {
@@ -66,6 +70,8 @@ type PersonalBrowserBridge = {
     ownerId: string;
   }) => Promise<PersonalBrowserStatus>;
   personalBrowserClose: (options: { ownerId: string }) => Promise<PersonalBrowserStatus>;
+  personalBrowserSelectTab: (options: { ownerId: string; tabId: string }) => Promise<PersonalBrowserStatus>;
+  personalBrowserCloseTab: (options: { ownerId: string; tabId: string }) => Promise<PersonalBrowserStatus>;
   personalBrowserClearData: (options: { ownerId: string }) => Promise<PersonalBrowserStatus>;
 };
 
@@ -74,8 +80,48 @@ type PersonalBrowserFixtureWindow = typeof window & {
   __INSTAFY_TEST_SESSION__: () => { access_token: string };
 };
 
+// Host names and paths the fixture server saw for the request guard's pages.
+const guardRequestHosts: string[] = [];
+const guardRequests: string[] = [];
+
+// A WebSocket on the fixture server: it answers one text message.
+function fixtureUpgrade(request: import("node:http").IncomingMessage, socket: import("node:stream").Duplex) {
+  if (request.url !== "/guard/socket") {
+    socket.destroy();
+    return;
+  }
+  const [hostName = ""] = String(request.headers.host ?? "").split(":");
+  guardRequests.push(`${hostName}${request.url}`);
+  const accept = createHash("sha1")
+    .update(`${request.headers["sec-websocket-key"] ?? ""}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest("base64");
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  const payload = Buffer.from("private socket data");
+  socket.end(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));
+}
+
 function fixtureHandler(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) {
   response.setHeader("Cache-Control", "no-store");
+  if (request.url?.startsWith("/guard/")) {
+    const [hostName = "", port = ""] = String(request.headers.host ?? "").split(":");
+    guardRequestHosts.push(hostName);
+    guardRequests.push(`${hostName}${request.url}`);
+    if (request.url === "/guard/data") {
+      response.setHeader("Access-Control-Allow-Origin", "*");
+      response.setHeader("Content-Type", "text/plain; charset=utf-8");
+      response.end("private data");
+      return;
+    }
+    if (request.url === "/guard/to-link-only") {
+      response.statusCode = 302;
+      response.setHeader("Location", `http://www.booking.com:${port}/guard/page`);
+      response.end();
+      return;
+    }
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.end("<!doctype html><title>Guarded fixture</title><p>guarded fixture page</p>");
+    return;
+  }
   if (request.url === "/me/session") {
     const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "") ?? "";
     let userId = "";
@@ -204,6 +250,7 @@ test.describe("Electron Personal Browser", () => {
 
   test.beforeAll(async () => {
     fixtureServer = createServer(fixtureHandler);
+    fixtureServer.on("upgrade", fixtureUpgrade);
     fixtureOrigin = `http://127.0.0.1:${await listen(fixtureServer)}`;
   });
 
@@ -719,6 +766,150 @@ test.describe("Electron Personal Browser", () => {
     await expectNoLogin();
     await openProfile(OTHER_PROFILE_USER_ID);
     await expectLogin("b");
+  });
+
+  test("reports the person's tab and keeps tab changes the person's own while the agent has control", async () => {
+    const targetUrl = `${fixtureOrigin}/target`;
+    const ownerId = "tabs-owner";
+    const page = await launchDesktop(true);
+    const result = await page.evaluate(async ({ projectId, profileUserId, ownerId, targetUrl }) => {
+      const desktop = (window as Window & { instafyDesktop?: PersonalBrowserBridge }).instafyDesktop!;
+      const outcome = async (run: () => Promise<PersonalBrowserStatus>) => {
+        try {
+          return { status: await run() };
+        } catch (caught) {
+          return { error: caught instanceof Error ? caught.message : String(caught) };
+        }
+      };
+      const opened = await desktop.personalBrowserOpen({
+        projectId,
+        controllerUrl: window.location.origin,
+        controllerAccessToken: (window as PersonalBrowserFixtureWindow).__INSTAFY_TEST_SESSION__().access_token,
+        profileUserId,
+        ownerId,
+        url: targetUrl,
+      });
+      await desktop.personalBrowserSetBounds({ x: 20, y: 80, width: 640, height: 420, visible: true, ownerId });
+      const shownWhilePaused = await outcome(() => desktop.personalBrowserSelectTab({ ownerId, tabId: opened.activeTabId! }));
+      const closeOwnTab = await outcome(() => desktop.personalBrowserCloseTab({ ownerId, tabId: opened.activeTabId! }));
+      await desktop.personalBrowserSetAgentControlEnabled({ enabled: true, ownerId });
+      const shownWhileResumed = await outcome(() => desktop.personalBrowserSelectTab({ ownerId, tabId: opened.activeTabId! }));
+      await desktop.personalBrowserSetAgentControlEnabled({ enabled: false, ownerId });
+      return { opened, shownWhilePaused, closeOwnTab, shownWhileResumed };
+    }, { projectId: PROJECT_ID, profileUserId: PROFILE_USER_ID, ownerId, targetUrl });
+
+    expect(result.opened.maxAgentTabs).toBe(3);
+    expect(result.opened.tabs).toEqual([{ id: result.opened.activeTabId, openedBy: "person", active: true, url: targetUrl, title: "Personal Browser fixture" }]);
+    expect(result.shownWhilePaused.status?.activeTabId).toBe(result.opened.activeTabId);
+    expect(result.closeOwnTab.error).toContain("agent opened");
+    expect(result.shownWhileResumed.error).toContain("Pause");
+  });
+
+  test("stops agent-driven page loads on a link-only site or a private address, also by the address actually connected to", async () => {
+    // Desktop's own built request guard on the sessions of a minimal Electron
+    // main process: real Chromium, loopback fixture servers only.
+    const fixturePort = new URL(fixtureOrigin).port;
+    const proxiedHosts: string[] = [];
+    const proxyServer = createServer((request, response) => {
+      const target = new URL(request.url ?? "/", "http://absolute-form.invalid");
+      proxiedHosts.push(target.hostname);
+      const upstream = httpRequest({
+        host: "127.0.0.1",
+        port: Number(fixturePort),
+        method: request.method,
+        path: `${target.pathname}${target.search}`,
+        headers: request.headers,
+      }, (reply) => {
+        response.writeHead(reply.statusCode ?? 502, reply.headers);
+        reply.pipe(response);
+      });
+      upstream.on("error", () => {
+        response.statusCode = 502;
+        response.end();
+      });
+      request.pipe(upstream);
+    });
+    const proxyOrigin = `http://127.0.0.1:${await listen(proxyServer)}`;
+    guardRequestHosts.length = 0;
+    guardRequests.length = 0;
+    // A disposable profile, never the default Electron one.
+    const guardUserData = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-request-guard-"));
+    const guardApp = await electron.launch({
+      executablePath: DESKTOP_APP_REQUIRE("electron"),
+      args: [path.join(DESKTOP_APP_DIR, "test", "fixtures", "personal-browser-request-guard-app.cjs"), `--user-data-dir=${guardUserData}`],
+      cwd: REPO_ROOT,
+      env: { ...personalBrowserFixtureEnvironment(process.env), TMPDIR: os.tmpdir() },
+    }).catch((error: unknown) => {
+      fs.rmSync(guardUserData, { recursive: true, force: true });
+      throw error;
+    });
+    try {
+      type Outcome = { result: string; text: string };
+      const results = await guardApp.evaluate(
+        async (_electron, options) => (globalThis as unknown as {
+          __instafyRequestGuardScenario: (value: typeof options) => Promise<Record<string, unknown>>;
+        }).__instafyRequestGuardScenario(options),
+        { origin: fixtureOrigin, proxy: proxyOrigin },
+      ) as Record<"rebound" | "linkOnly" | "viaProxy" | "viaProxyToLinkOnly" | "person", Outcome> & {
+        fetched: string;
+        personFetched: string;
+        fetchedLiteral: string;
+        socket: string;
+        personFetchedLiteral: string;
+        personSocket: string;
+        stopped: Array<{ resourceType: string; code: string }>;
+      };
+      // DNS rebinding: the name passed the check made before the request and
+      // Chromium connected to 127.0.0.1. The response was discarded before
+      // the page rendered; only the request reached the server.
+      expect(results.rebound).toEqual({ result: "ERR_BLOCKED_BY_CLIENT", text: "" });
+      // A link-only site is stopped before the request leaves the browser.
+      expect(results.linkOnly).toEqual({ result: "ERR_BLOCKED_BY_CLIENT", text: "" });
+      // Through a proxy the connection is the proxy's own, so the page loads,
+      expect(results.viaProxy).toEqual({ result: "loaded", text: "guarded fixture page" });
+      // and a redirect hop to a link-only site is still stopped before it is requested.
+      expect(results.viaProxyToLinkOnly.result).toBe("ERR_BLOCKED_BY_CLIENT");
+      // The person's own tab, in the same session, loads the same page.
+      expect(results.person).toEqual({ result: "loaded", text: "guarded fixture page" });
+      // A page already open in the agent's tab gets nothing back from a
+      // private address when its script fetches the rebinding name again;
+      // the person's tab gets the answer as before.
+      expect(results.fetched).toBe("blocked");
+      expect(results.personFetched).toBe("private data");
+      // A request of that page to a private address literal, a WebSocket
+      // included, never leaves the browser; the person's tab connects as before.
+      expect(results.fetchedLiteral).toBe("blocked");
+      expect(results.socket).toBe("error");
+      expect(results.personFetchedLiteral).toBe("private data");
+      expect(results.personSocket).toBe("got: private socket data");
+      expect(results.stopped).toEqual([
+        { resourceType: "mainFrame", code: "private_address_blocked" },
+        { resourceType: "mainFrame", code: "link_only_site" },
+        { resourceType: "mainFrame", code: "link_only_site" },
+        { resourceType: "xhr", code: "private_address_blocked" },
+        { resourceType: "xhr", code: "private_address_blocked" },
+        { resourceType: "webSocket", code: "private_address_blocked" },
+      ]);
+      expect(guardRequestHosts).not.toContain("www.booking.com");
+      expect(proxiedHosts).not.toContain("www.booking.com");
+      expect(proxiedHosts).toEqual(["page.guard.test", "hop.guard.test"]);
+      // Only the requests reached the server; the agent's tab got no response.
+      expect(guardRequests.filter((entry) => entry.startsWith("rebound.guard.test"))).toEqual([
+        "rebound.guard.test/guard/page",
+        "rebound.guard.test/guard/page",
+        "rebound.guard.test/guard/data",
+        "rebound.guard.test/guard/data",
+      ]);
+      // Only the person's tab reached the literal address.
+      expect(guardRequests.filter((entry) => entry.startsWith("127.0.0.1/guard/"))).toEqual([
+        "127.0.0.1/guard/data",
+        "127.0.0.1/guard/socket",
+      ]);
+    } finally {
+      await guardApp.close();
+      await new Promise<void>((resolve) => proxyServer.close(() => resolve()));
+      fs.rmSync(guardUserData, { recursive: true, force: true });
+    }
   });
 
   test("revokes ownership and control when the Studio renderer reloads", async () => {

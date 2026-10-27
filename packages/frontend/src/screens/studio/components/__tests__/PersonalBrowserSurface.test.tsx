@@ -31,6 +31,7 @@ function createModel(): PersonalBrowserModel {
     clearNavigationError: vi.fn(),
     clearData: vi.fn(async () => null),
     close: vi.fn(async () => null),
+    closeTab: vi.fn(async () => null),
     goBack: vi.fn(async () => null),
     goForward: vi.fn(async () => null),
     navigate: vi.fn(async () => null),
@@ -39,6 +40,7 @@ function createModel(): PersonalBrowserModel {
     pendingHandoff: null,
     readPage: vi.fn(async () => null),
     reload: vi.fn(async () => null),
+    selectTab: vi.fn(async () => null),
     recovering: false,
     retryAgentControl: vi.fn(async () => null),
     retryOpen: vi.fn(),
@@ -142,6 +144,99 @@ describe("PersonalBrowserSurface", () => {
     expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
   });
 
+  it("lists the pages the agent reads whenever it holds the browser and takes over every tab in one press", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, title: "Example Domain", humanControlReady: false };
+    model.setAgentControlEnabled = vi.fn(async (enabled: boolean) => ({ ...model.status!, agentControlEnabled: enabled, humanControlReady: !enabled }));
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+
+    // No turn of this conversation is working, yet the agent holds the
+    // browser (another conversation's turn, or resumed between turns): the
+    // row and its Take over are there all the same.
+    const onPauseAgentControl = vi.fn();
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} onPauseAgentControl={onPauseAgentControl} transportSelector={null} />));
+    const row = document.querySelector('[data-testid="browser-reading-row"]')!;
+    expect([...row.querySelectorAll('[data-testid="browser-reading-page"]')].map((item) => item.textContent))
+      .toEqual(["example.com· Example Domain"]);
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-reading-takeover"]')!.click());
+    // The same revocation as the toolbar's Take over and Pause: one broker for every tab.
+    expect(model.setAgentControlEnabled).toHaveBeenCalledTimes(1);
+    expect(model.setAgentControlEnabled).toHaveBeenCalledWith(false);
+    // Like the toolbar's Pause, Octo does not reopen the browser by itself afterwards.
+    expect(onPauseAgentControl).toHaveBeenCalledTimes(1);
+
+    // The same row while a turn of this conversation works.
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={{ ...model }} transportSelector={null} />));
+    expect(document.querySelectorAll('[data-testid="browser-reading-row"]')).toHaveLength(1);
+
+    // Once control is off, the row is gone, also while a turn works.
+    model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={{ ...model }} transportSelector={null} />));
+    expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
+  });
+
+  it("reads a multi-tab host's agent tabs, and never another owner's status", async () => {
+    const model = createModel();
+    model.status = {
+      ...model.status!,
+      humanControlReady: false,
+      tabs: [
+        { id: "t1", url: "https://mine.example/", title: "Mine", active: false },
+        { id: "t2", url: "https://www.opened.example/a", title: "Opened", active: false, openedBy: "agent" },
+        { id: "t3", url: "https://current.example/", title: "Current", active: true },
+      ],
+    };
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} transportSelector={null} />));
+    expect([...document.querySelectorAll('[data-testid="browser-reading-page"]')].map((item) => item.textContent))
+      .toEqual(["opened.example· Opened", "current.example· Current"]);
+
+    const foreign = { ...model, status: { ...model.status!, ownerId: "another-owner" } };
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={foreign} transportSelector={null} />));
+    expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
+  });
+
+  it("shows Octo's tabs, marked as Octo's, and switches or closes them only once Octo is paused", async () => {
+    const model = createModel();
+    model.status = {
+      ...model.status!,
+      tabs: [
+        { id: "tab-1", openedBy: "person", active: false, url: "https://example.com/", title: "My page" },
+        { id: "tab-2", openedBy: "agent", active: true, url: "https://docs.example.com/guide", title: "Guide" },
+      ],
+      activeTabId: "tab-2",
+      maxAgentTabs: 3,
+    };
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    const tabs = [...document.querySelectorAll<HTMLElement>('[data-testid="personal-browser-tab"]')];
+    expect(tabs.map((tab) => [tab.dataset.openedBy, tab.dataset.active])).toEqual([["person", "false"], ["agent", "true"]]);
+    expect(tabs[1]!.textContent).toContain("Octo");
+    expect(tabs[0]!.textContent).not.toContain("Octo");
+    expect(document.querySelector('[aria-label="Close My page"]')).toBeNull();
+
+    // While Octo has control, the person's tab cannot be shown and nothing closes.
+    const personTab = document.querySelector<HTMLButtonElement>('[aria-label="My page"]')!;
+    expect(personTab.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[aria-label="Close Guide"]')!.disabled).toBe(true);
+
+    model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
+    await act(async () => root.render(<PersonalBrowserSurface active model={{ ...model }} transportSelector={null} />));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="My page"]')!.click());
+    expect(model.selectTab).toHaveBeenCalledWith("tab-1");
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close Guide"]')!.click());
+    expect(model.closeTab).toHaveBeenCalledWith("tab-2");
+  });
+
+  it("shows no tab row while only the person's tab is open", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, tabs: [{ id: "tab-1", openedBy: "person", active: true, url: "https://example.com/" }], activeTabId: "tab-1" };
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    expect(document.querySelector('[data-testid="personal-browser-tabs"]')).toBeNull();
+  });
+
   it("sends the page only on a press and leaves agent control alone", async () => {
     const model = createModel();
     window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
@@ -212,7 +307,11 @@ describe("PersonalBrowserSurface", () => {
     const viewport = document.querySelector('[data-testid="personal-browser-viewport"]')!;
     expect(chrome.compareDocumentPosition(sharing) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(chrome.contains(sharing)).toBe(true);
-    expect(chrome.parentElement?.nextElementSibling).toBe(viewport);
+    // The agent holds control here, so its Reading row sits between the toolbar and the page.
+    const readingRow = document.querySelector('[data-testid="browser-reading-row"]');
+    expect(readingRow).not.toBeNull();
+    expect(chrome.parentElement?.nextElementSibling).toBe(readingRow);
+    expect(readingRow?.nextElementSibling).toBe(viewport);
     expect(
       container
         .querySelector('[data-testid="personal-browser-agent-status"]')

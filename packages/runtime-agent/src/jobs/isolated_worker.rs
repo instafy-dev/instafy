@@ -176,6 +176,13 @@ impl JobProcessor {
             job_environment: worker_config.environment,
             model,
             reasoning_effort: Some(reasoning_effort),
+            // the project's skill-pack folder, shared with its other turns on this runtime
+            cache_dir: crate::skill_packs::prepare_skill_pack_cache_dir(
+                &self.config.workspace_root,
+                &project_id,
+            )
+            .map_err(|error| warn!(?error, %project_id, "skill pack cache folder unavailable"))
+            .ok(),
         };
         let mut streamed_events = Vec::new();
         let mut streamed_count = 0;

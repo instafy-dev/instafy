@@ -19,6 +19,7 @@ import {
   fetchSharedBrowserHost,
   focusRuntimeBrowserSessionPage,
   isBrowserSessionUnavailableError,
+  keepRuntimeBrowserSessionPage,
   isSharedBrowserHostRefusedError,
   mapSharedBrowserHostPayload,
   readBrowserErrorCode,
@@ -50,6 +51,64 @@ afterEach(() => {
 });
 
 describe("mapRuntimeBrowserSessionPagesPayload", () => {
+  it("keeps the badge of Octo's tabs and whether a person kept one", () => {
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { id: "page-1", url: "https://example.com/", host: "example.com", label: "Example" },
+        { id: "tab-1", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent" },
+        { id: "tab-2", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", kept: true },
+        // "kept" means nothing on a tab that is not Octo's.
+        { id: "page-2", url: "https://other.example/", host: "other.example", label: "Other", kept: true },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.openedBy === "agent", page.kept ?? false])).toEqual([
+      ["page-1", false, false],
+      ["tab-1", true, false],
+      ["tab-2", true, true],
+      ["page-2", false, false],
+    ]);
+  });
+
+  it("keeps the number each of Octo's tabs keeps while it is open", () => {
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { id: "tab-1", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent", agentTabNumber: 2 },
+        // A number means nothing on a tab that is not Octo's, or out of bounds.
+        { id: "page-1", url: "https://example.com/", host: "example.com", label: "Example", agentTabNumber: 1 },
+        { id: "tab-2", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", agentTabNumber: 0 },
+        { id: "tab-3", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", agentTabNumber: "3" },
+        { id: "tab-4", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", agentTabNumber: 1.5 },
+        { id: "tab-5", url: "https://maps.example/", host: "maps.example", label: "Map", openedBy: "agent", agentTabNumber: 1000 },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.agentTabNumber ?? null])).toEqual([
+      ["tab-1", 2],
+      ["page-1", null],
+      ["tab-2", null],
+      ["tab-3", null],
+      ["tab-4", null],
+      ["tab-5", null],
+    ]);
+  });
+
+  it("keeps which of Octo's tabs an earlier run left open", () => {
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { id: "tab-1", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent", leftover: true },
+        { id: "tab-2", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent", agentTabNumber: 1 },
+        // "leftover" means nothing on a tab that is not Octo's, or unless it is true.
+        { id: "page-1", url: "https://example.com/", host: "example.com", label: "Example", leftover: true },
+        { id: "tab-3", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent", leftover: "yes" },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.leftover ?? false])).toEqual([
+      ["tab-1", true],
+      ["tab-2", false],
+      ["page-1", false],
+      ["tab-3", false],
+    ]);
+  });
+
   it("maps valid runtime browser pages and drops malformed entries", () => {
     expect(
       mapRuntimeBrowserSessionPagesPayload({
@@ -83,6 +142,25 @@ describe("mapRuntimeBrowserSessionPagesPayload", () => {
         canGoForward: false,
       },
     ]);
+  });
+
+  it("keeps who opened a tab only when the browser says agent or person", () => {
+    const base = { url: "https://example.com/", host: "example.com", label: "Example", title: null, isActive: false };
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { ...base, id: "agent-tab", openedBy: "agent" },
+        { ...base, id: "person-tab", openedBy: "person" },
+        { ...base, id: "unknown-tab", openedBy: "Octo" },
+        { ...base, id: "legacy-tab" },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.openedBy])).toEqual([
+      ["agent-tab", "agent"],
+      ["person-tab", "person"],
+      ["unknown-tab", undefined],
+      ["legacy-tab", undefined],
+    ]);
+    expect("openedBy" in pages[3]!).toBe(false);
   });
 
   it("returns an empty list for invalid payloads", () => {
@@ -334,6 +412,43 @@ describe("runtime browser session page controls", () => {
         browserSessionId: "browser-surface-1",
       }),
     );
+  });
+
+  it("keeps one of Octo's tabs with browser control, and says when it is no longer Octo's", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ kept: true, pageId: "tab/1" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      keepRuntimeBrowserSessionPage({
+        projectId: "project-1",
+        browserSessionId: "browser-surface-1",
+        pageId: " tab/1 ",
+      }),
+    ).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://origin.example.test/browser/pages/tab%2F1/keep",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(requestOriginAccessTokenMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scopes: ["browser.control"],
+        browserSessionId: "browser-surface-1",
+      }),
+    );
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not found", { status: 404 })));
+    await expect(
+      keepRuntimeBrowserSessionPage({
+        projectId: "project-1",
+        browserSessionId: "browser-surface-1",
+        pageId: "tab-1",
+      }),
+    ).rejects.toThrow("no longer one of Octo's tabs");
+    await expect(
+      keepRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1", pageId: " " }),
+    ).resolves.toBe(false);
   });
 
   it("uses browser view to read the browser action stream", async () => {

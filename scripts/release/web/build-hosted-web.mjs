@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds the hosted web frontend for exactly SOURCE_SHA: the public frontend
-// package with the hosted feature manifest (public core, vendored robot slice,
-// performance bridge), then writes the served release metadata. The Studio
+// package with the hosted feature manifest (public core, then the performance
+// bridge), then writes the served release metadata. The Studio
 // performance transport stays disabled in this lane: enabling it is a reviewed
 // code change, not a variable.
 //

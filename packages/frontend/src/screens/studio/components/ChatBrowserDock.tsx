@@ -13,6 +13,8 @@ export function ChatBrowserDock({
   onBrowserRuntimeIdResolved,
   browserPageStripBottomInset,
   browserSessionPages,
+  browserSessionAgentTabIds,
+  browserSessionAgentName,
   onSelectBrowserSessionPage,
   onToggleBrowserSession,
   onClearPendingNewBrowserSession,
@@ -30,6 +32,9 @@ export function ChatBrowserDock({
   onBrowserRuntimeIdResolved: (runtimeId: string) => void;
   browserPageStripBottomInset?: string;
   browserSessionPages: BrowserSessionPage[];
+  /** The tabs the agent holds now; they carry its name. */
+  browserSessionAgentTabIds?: ReadonlySet<string>;
+  browserSessionAgentName?: string;
   onSelectBrowserSessionPage: (pageId: string) => void;
   onToggleBrowserSession: () => void;
   onClearPendingNewBrowserSession: () => void;
@@ -64,6 +69,8 @@ export function ChatBrowserDock({
         >
           <BrowserSessionPageStrip
             pages={browserSessionPages}
+            agentTabIds={browserSessionAgentTabIds}
+            agentName={browserSessionAgentName}
             onSelectPage={onSelectBrowserSessionPage}
             onToggleBrowser={onToggleBrowserSession}
             onClearPendingNewBrowser={onClearPendingNewBrowserSession}

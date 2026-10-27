@@ -4,6 +4,8 @@ import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
 import type { BrowserSessionPage } from "./browserSessionPages";
+import { BrowserAgentTabBadge } from "./BrowserReadingRow";
+import { sharedBrowserAgentTabLabel } from "./browserAgentTabs";
 
 const COLLAPSED_PAGE_LIMIT = 3;
 
@@ -59,6 +61,8 @@ function BrowserShelfChip({
 
 export function BrowserSessionPageStrip({
   pages,
+  agentTabIds,
+  agentName,
   onSelectPage,
   onToggleBrowser,
   onClearPendingNewBrowser,
@@ -67,6 +71,9 @@ export function BrowserSessionPageStrip({
   pendingNewBrowser,
 }: {
   pages: BrowserSessionPage[];
+  /** The tabs the agent holds now; each carries the agent's name. */
+  agentTabIds?: ReadonlySet<string>;
+  agentName?: string;
   onSelectPage: (pageId: string) => void;
   onToggleBrowser: () => void;
   onClearPendingNewBrowser: () => void;
@@ -127,6 +134,12 @@ export function BrowserSessionPageStrip({
               >
                 <Safari className="h-4 w-4 flex-none" aria-hidden="true" />
                 <span className="flex min-w-0 items-center gap-1.5">
+                  {agentTabIds?.has(page.id) ? (
+                    <BrowserAgentTabBadge
+                      agentName={agentName}
+                      label={page.openedBy === "agent" && page.agentTabNumber ? sharedBrowserAgentTabLabel(page) : undefined}
+                    />
+                  ) : null}
                   <Text as="span" variant="bodyStrong" tone="inherit" className="truncate">{page.label}</Text>
                   {current ? (
                     <span aria-hidden="true" className="inline-flex h-2 w-2 flex-none rounded-full bg-emerald-500 dark:bg-emerald-400" />

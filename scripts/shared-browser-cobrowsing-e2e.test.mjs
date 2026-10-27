@@ -58,3 +58,43 @@ test("co-browsing fixture embeds the same policy scripts, in the same order, as 
   assert.ok(embedded.length > 0);
   assert.deepEqual(policyScriptNames, embedded);
 });
+
+// Octo's own tabs: scripts/shared-browser-agent-tabs-e2e.mjs, which the
+// co-browsing fixture's CI step runs after its own proof.
+
+test("agent-tabs fixture rejects filters and skips rather than producing a partial pass", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-agent-tabs-args-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const argument of ["--skip", "--grep=tabs", "--pass-with-no-tests"]) {
+    const result = spawnSync(process.execPath, [path.join(import.meta.dirname, "shared-browser-agent-tabs-e2e.mjs"), argument], {
+      env: fixtureEnvironment(process.env, directory), encoding: "utf8", timeout: 10_000,
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /no filters or skips/);
+    assert.equal(result.stdout, "");
+  }
+});
+
+test("both fixtures embed the link-only list the runtime agent embeds, ahead of the controller", () => {
+  const rust = fs.readFileSync(
+    path.join(import.meta.dirname, "../packages/runtime-agent/src/shared_browser.rs"),
+    "utf8",
+  );
+  const file = rust.match(/const LINK_ONLY_SITES_DATA: &str = include_str!\(\s*"\.\.\/assets\/([^"]+)"\s*\);/u);
+  assert.ok(file, "runtime-agent embeds the link-only list");
+  assert.match(rust, /globalThis\.__instafyLinkOnlySites = \{LINK_ONLY_SITES_DATA\};/u);
+  // The controller refuses every step, in any tab, without the list.
+  for (const name of ["shared-browser-agent-tabs-e2e.mjs", "shared-browser-cobrowsing-e2e.mjs"]) {
+    const fixture = fs.readFileSync(path.join(import.meta.dirname, name), "utf8");
+    assert.ok(fixture.includes(`"packages/runtime-agent/assets/${file[1]}"`), `${name}: ${file[1]}`);
+    assert.match(fixture, /`globalThis\.__instafyLinkOnlySites = \$\{linkOnlySites\};`/u, name);
+  }
+  const order = rust.match(/fn embedded_shared_browser_script\(\) -> String \{([\s\S]*?)\n\}/u)[1];
+  assert.ok(order.indexOf("embedded_link_only_sites()") > order.indexOf("BROWSER_PAGE_CAPTURE_SCRIPT"));
+});
+
+test("the co-browsing fixture's CI step also runs the agent-tabs fixture", () => {
+  const runner = fs.readFileSync(path.join(import.meta.dirname, "shared-browser-cobrowsing-e2e.mjs"), "utf8");
+  assert.match(runner, /await import\("\.\/shared-browser-agent-tabs-e2e\.mjs"\)/u);
+  assert.match(runner, /await runSharedBrowserAgentTabsFixture\(\)/u);
+});

@@ -267,11 +267,16 @@ test("conversation views preserve mounted resources, drafts and split size acros
   await touch.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
   expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
   const touchClose = page.getByRole("button", { name: "Close notes.md view", exact: true });
+  // Coarse-pointer targets grow before ResizeObserver reveals the active tab.
+  // Wait for that adjustment before measuring the touch target or tapping it.
+  await expect.poll(async () => {
+    const target = (await touchClose.boundingBox())!;
+    const visible = (await viewport.boundingBox())!;
+    return target.x + target.width - (visible.x + visible.width);
+  }).toBeLessThanOrEqual(1);
   const touchBounds = (await touchClose.boundingBox())!;
   expect(touchBounds.width).toBeGreaterThanOrEqual(44);
   expect(touchBounds.height).toBeGreaterThanOrEqual(44);
-  const touchViewport = (await viewport.boundingBox())!;
-  expect(touchBounds.x + touchBounds.width).toBeLessThanOrEqual(touchViewport.x + touchViewport.width + 1);
   await testInfo.attach("conversation-views-dark-touch-320", { path: await screenshot(page, testInfo, "views-dark-touch-320.png"), contentType: "image/png" });
   await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: touchBounds.x + touchBounds.width / 2, y: touchBounds.y + touchBounds.height / 2 }] });
   await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });

@@ -3,7 +3,7 @@ import type { SubmitConversationOptions } from "../../../conversations/useConver
 import { cancelAgentJob } from "../../../services/runtimeController/jobs";
 import type { RunRecord } from "../../../types";
 import { sharedBrowserTakeoverJob } from "./browserHandoffRouting";
-import type { BrowserSessionPageTarget } from "./browserSessionPages";
+import type { BrowserSessionPage, BrowserSessionPageTarget } from "./browserSessionPages";
 import { buildSharedBrowserSubmitMetadata, withPersonalBrowserRuntimeExpectations } from "./sharedBrowserSubmitRouting";
 import { BROWSER_AUTO_STARTED_METADATA_KEY } from "./browserRequest";
 import {
@@ -41,7 +41,8 @@ type Options = {
   open: boolean;
   canWrite: boolean;
   runtimeId: string | null;
-  page: BrowserSessionPageTarget | null;
+  /** The page on screen; `openedBy` lets Take over on the agent's own tab find its run. */
+  page: (BrowserSessionPageTarget & Pick<BrowserSessionPage, "openedBy">) | null;
   runs: RunRecord[];
   personal: ReturnType<typeof usePersonalBrowserBridge>;
   agentHandle: string;
@@ -78,14 +79,30 @@ export function useChatBrowserHandoff(options: Options) {
       throw new Error("The browser or conversation changed. Return to the intended page before continuing.");
     }
   }, []);
-  const sharedJob = sharedBrowserTakeoverJob(options.runs, options.runtimeId, options.page?.id ?? null);
+  const sharedJob = sharedBrowserTakeoverJob(options.runs, options.runtimeId, options.page?.id ?? null, {
+    openedByAgent: options.page?.openedBy === "agent",
+  });
+  // The job Take over stops while the browser reports that the agent holds
+  // it: its control spans every tab, so this one is found from any tab on
+  // screen, a person's own included.
+  const sharedJobWhileAgentHolds = sharedBrowserTakeoverJob(options.runs, options.runtimeId, options.page?.id ?? null, {
+    openedByAgent: options.page?.openedBy === "agent",
+    agentHoldsBrowser: true,
+  });
 
-  const takeOverShared = useCallback(async () => {
+  /**
+   * `agentHoldsBrowser`: the browser reports the agent's control right now,
+   * so the runtime's one browser job is stopped whichever tab is on screen.
+   */
+  const takeOverShared = useCallback(async ({ agentHoldsBrowser = false }: { agentHoldsBrowser?: boolean } = {}) => {
     const captured = latest.current;
     const epoch = generation.current;
     assertCurrent(captured, epoch);
     if (captured.transport !== "shared") return false;
-    const job = sharedBrowserTakeoverJob(captured.runs, captured.runtimeId, captured.page?.id ?? null);
+    const job = sharedBrowserTakeoverJob(captured.runs, captured.runtimeId, captured.page?.id ?? null, {
+      openedByAgent: captured.page?.openedBy === "agent",
+      agentHoldsBrowser,
+    });
     if (!job) return false;
     const result = await cancelAgentJob(job.jobId, "User taking over the browser");
     assertCurrent(captured, epoch);
@@ -239,5 +256,5 @@ export function useChatBrowserHandoff(options: Options) {
     return true;
   }, [assertCurrent, continuePersonal]);
 
-  return { identityKey, sharedJob, takeOverShared, continueShared, continuePersonal, startPersonal };
+  return { identityKey, sharedJob, sharedJobWhileAgentHolds, takeOverShared, continueShared, continuePersonal, startPersonal };
 }

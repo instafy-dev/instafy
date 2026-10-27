@@ -185,6 +185,13 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     });
     assert.equal(initialized.statusCode, 200);
     assert.equal(initialized.body.result.serverInfo.name, "instafy-personal-browser");
+    // The agent learns that Desktop's address refusals are final, in every tab.
+    assert.match(
+      initialized.body.result.instructions,
+      /never a link-only site: link_only_site, link_only_list_unavailable and private_address_blocked are final for that step/,
+    );
+    // A page load stopped after the previous step is reported as that step's, not as a refusal of this one.
+    assert.match(initialized.body.result.instructions, /this step was not run because Desktop stopped a page load after your previous step, it is the previous step's/);
 
     const listed = await requestJson(`${credentials.controlUrl}/mcp`, {
       method: "POST",
@@ -193,8 +200,20 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     });
     assert.deepEqual(
       listed.body.result.tools.map((tool) => tool.name),
-      ["request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll"],
+      ["request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll",
+        "list_tabs", "open_tab", "select_tab", "close_tab"],
     );
+    for (const name of ["navigate", "open_tab"]) {
+      const tool = listed.body.result.tools.find((candidate) => candidate.name === name);
+      assert.match(tool.description, /public/);
+      assert.match(tool.description, /link-only site/);
+    }
+    // Tab tools take a public address or a tab id, never a selector or script.
+    for (const name of ["select_tab", "close_tab"]) {
+      const tool = listed.body.result.tools.find((candidate) => candidate.name === name);
+      assert.deepEqual(tool.inputSchema.required, ["tabId"]);
+      assert.equal(tool.inputSchema.additionalProperties, false);
+    }
     for (const name of ["click", "type", "press"]) {
       const tool = listed.body.result.tools.find((candidate) => candidate.name === name);
       assert.deepEqual(tool.inputSchema.required.includes("index"), true);
@@ -258,6 +277,32 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     });
     assert.equal(selectorArgument.body.error.code, -32602);
     assert.equal(calls.length, 1);
+
+    const tabWithScript = await requestJson(`${credentials.controlUrl}/mcp`, {
+      method: "POST",
+      headers,
+      body: {
+        jsonrpc: "2.0",
+        id: 43,
+        method: "tools/call",
+        params: { name: "open_tab", arguments: { url: "https://example.test", background: true } },
+      },
+    });
+    assert.equal(tabWithScript.body.error.code, -32602, "open_tab has no hidden or background variant");
+    assert.equal(calls.length, 1);
+
+    const opened = await requestJson(`${credentials.controlUrl}/mcp`, {
+      method: "POST",
+      headers,
+      body: {
+        jsonrpc: "2.0",
+        id: 44,
+        method: "tools/call",
+        params: { name: "open_tab", arguments: { url: "https://example.test" } },
+      },
+    });
+    assert.equal(opened.body.result.isError, false);
+    assert.deepEqual(calls.at(-1), { operation: "open_tab", payload: { url: "https://example.test" } });
 
     const missingProject = await requestJson(`${credentials.controlUrl}/mcp`, {
       method: "POST",

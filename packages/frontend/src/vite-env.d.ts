@@ -328,6 +328,19 @@ type InstafyDesktopSpeechTunnelStatus = {
 
 type InstafyDesktopPersonalBrowserState = "closed" | "opening" | "ready" | "error";
 
+/**
+ * One tab of a Personal Browser that has several. A host with one page
+ * leaves `tabs` out, and that page is the status's own url and title.
+ */
+type InstafyDesktopPersonalBrowserTab = {
+  id: string;
+  url: string;
+  title?: string;
+  active: boolean;
+  /** "agent" for a tab the agent opened; anything else is the person's. */
+  openedBy?: string;
+};
+
 type InstafyDesktopPersonalBrowserStatus = {
   supported: boolean;
   enabled: boolean;
@@ -350,6 +363,10 @@ type InstafyDesktopPersonalBrowserStatus = {
   takeoverRequestId?: string;
   sharing?: boolean;
   tabControlActive?: boolean;
+  /** Every open tab. Tabs Octo opened carry openedBy "agent"; absent on older Desktops and one-page hosts. */
+  tabs?: InstafyDesktopPersonalBrowserTab[];
+  activeTabId?: string;
+  maxAgentTabs?: number;
   ownerId?: string;
   projectId?: string;
   runtimeId?: string;
@@ -467,6 +484,8 @@ interface Window {
       url: string;
       ownerId: string;
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    personalBrowserSelectTab?: (options: { ownerId: string; tabId: string }) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    personalBrowserCloseTab?: (options: { ownerId: string; tabId: string }) => Promise<InstafyDesktopPersonalBrowserStatus>;
     /**
      * Send page to Octo: the page on screen, read once and masked by Desktop.
      * Older Desktops do not have it.

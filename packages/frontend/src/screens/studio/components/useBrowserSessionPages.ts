@@ -50,6 +50,10 @@ function toBrowserSessionPage(
     isActive: page.id === activePageId,
     canGoBack: page.canGoBack,
     canGoForward: page.canGoForward,
+    ...(page.openedBy ? { openedBy: page.openedBy } : {}),
+    ...(page.kept ? { kept: true } : {}),
+    ...(page.agentTabNumber ? { agentTabNumber: page.agentTabNumber } : {}),
+    ...(page.leftover ? { leftover: true } : {}),
   };
 }
 
@@ -560,6 +564,41 @@ export function useBrowserSessionPages(params: {
     [browserSessionId, enabled, preferRuntimeId, projectId, refreshAfterMutation, scopeIsCurrent, scopeKey],
   );
 
+  // Keep tab: one of Octo's tabs stays open when its turn ends. Works while
+  // Octo has control, so it is not a page command.
+  const keepPage = useCallback(
+    async (pageId: string): Promise<boolean> => {
+      const trimmedPageId = pageId.trim();
+      if (!enabled || !projectId || !trimmedPageId) {
+        return false;
+      }
+      const requestScope = scopeKey;
+      try {
+        const kept = await controllerClient.browserSessions.keepPage({
+          projectId,
+          browserSessionId,
+          pageId: trimmedPageId,
+          preferRuntimeId,
+        });
+        if (scopeIsCurrent(requestScope)) {
+          await refreshAfterMutation().catch(() => false);
+        }
+        return kept;
+      } catch (error) {
+        if (scopeIsCurrent(requestScope)) {
+          setCommandState({
+            scopeKey: requestScope,
+            pending: null,
+            error: error instanceof Error ? error.message : "Keeping the tab failed.",
+          });
+          await refreshAfterMutation().catch(() => false);
+        }
+        return false;
+      }
+    },
+    [browserSessionId, enabled, preferRuntimeId, projectId, refreshAfterMutation, scopeIsCurrent, scopeKey],
+  );
+
   useEffect(() => {
     preferredActivePageIdRef.current = { scopeKey, pageId: null };
     unavailableSuspendedRef.current = { scopeKey, suspended: false };
@@ -675,6 +714,7 @@ export function useBrowserSessionPages(params: {
     refresh,
     refreshCapabilities,
     focusPage,
+    keepPage,
     clearCommandError,
     navigatePage,
     goBack,

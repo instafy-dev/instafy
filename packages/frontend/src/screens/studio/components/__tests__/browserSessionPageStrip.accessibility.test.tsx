@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { BrowserSessionPageStrip } from "../BrowserSessionPageStrip";
+import type { BrowserSessionPage } from "../browserSessionPages";
 
 it("labels the pending AI request separately from real tabs and lets users cancel it", async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -73,6 +74,59 @@ it("keeps page selection, active-page hiding and the expanded page order separat
     expect(pageButtons().map(button => button.textContent)).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
     await act(async () => overflow.click());
     expect(pageButtons().map(button => button.textContent)).toEqual(["Alpha", "Beta", "Gamma"]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  }
+});
+
+it("keeps agent-labelled chips selectable and hides the active page when its badge is pressed", async () => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const selectPage = vi.fn();
+  const toggleBrowser = vi.fn();
+  const pages: BrowserSessionPage[] = [
+    { id: "person", label: "My page", title: "My page", url: "https://person.example/", host: "person.example", isActive: true, lastReferencedAt: 1 },
+    { id: "agent", label: "Release notes", title: "Release notes", url: "https://docs.example/", host: "docs.example", isActive: false, lastReferencedAt: 1, openedBy: "agent", agentTabNumber: 3 },
+  ];
+  const renderStrip = (activeId: string) => root.render(
+    <BrowserSessionPageStrip
+      pages={pages.map((page) => ({ ...page, isActive: page.id === activeId }))}
+      agentTabIds={new Set(["agent"])}
+      agentName="Octo"
+      browserHidden={false}
+      browserOpen
+      pendingNewBrowser={false}
+      onSelectPage={selectPage}
+      onToggleBrowser={toggleBrowser}
+      onClearPendingNewBrowser={vi.fn()}
+    />,
+  );
+  try {
+    await act(async () => renderStrip("person"));
+    const chips = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="browser-session-page-chip"]')];
+    expect(chips).toHaveLength(2);
+    expect(chips[0].querySelector('[data-testid="browser-agent-tab-badge"]')).toBeNull();
+    const agentChip = chips[1];
+    const badge = agentChip.querySelector<HTMLElement>('[data-testid="browser-agent-tab-badge"]')!;
+    expect(badge.textContent).toBe("Octo's tab 3");
+    expect(badge.title).toBe("Octo opened or is using this tab");
+    expect(agentChip.textContent).toContain("Release notes");
+    expect(agentChip.title).toBe("Release notes");
+    expect(agentChip.getAttribute("aria-pressed")).toBe("false");
+    await act(async () => badge.click());
+    expect(selectPage).toHaveBeenCalledExactlyOnceWith("agent");
+    expect(toggleBrowser).not.toHaveBeenCalled();
+
+    await act(async () => renderStrip("agent"));
+    expect(agentChip.getAttribute("aria-pressed")).toBe("true");
+    expect(chips[0].getAttribute("aria-pressed")).toBe("false");
+    await act(async () => badge.click());
+    expect(toggleBrowser).toHaveBeenCalledOnce();
+    expect(selectPage).toHaveBeenCalledOnce();
   } finally {
     await act(async () => root.unmount());
     container.remove();

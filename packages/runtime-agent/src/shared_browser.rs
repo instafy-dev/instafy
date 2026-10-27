@@ -57,6 +57,11 @@ const BROWSER_ACTION_POLICY_SCRIPT: &str =
     include_str!("../../browser-action-policy/actionPolicy.js");
 const BROWSER_PAGE_CAPTURE_SCRIPT: &str =
     include_str!("../../browser-action-policy/pageCapture.js");
+// The sites the web-research skill keeps link-only. Octo never opens them in
+// its own tabs; the controller enforces the skill's list, it does not own it.
+const LINK_ONLY_SITES_DATA: &str = include_str!(
+    "../assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
+);
 
 const DEFAULT_SHARED_BROWSER_NODE_BINARY: &str = "/usr/bin/node";
 /// The Node binaries the Shared Browser controller may run with: the image's
@@ -80,12 +85,40 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // `withhold-next.json` records the document a key change or "may show a
 // secret" step ran on, so the page it opens stays withheld; it is run-scoped
 // like the rest of this directory.
-const APPROVAL_FIXED_FILES: [&str; 4] = [
+//
+// `tabs.json` lists the tabs Octo opened in the run (written by the
+// controller script) and `kept-tabs.json` the ones the person kept (written by
+// the origin). The guard reads both when the run ends, to close the rest.
+//
+// `leftover-tabs.json` is the one file that outlives a run: Octo's tabs from
+// an earlier run that could not be closed yet (that run ended without a
+// confirmed shutdown, or the browser did not answer). It grants nothing; the
+// origin badges those tabs as Octo's, and the next confirmed shutdown or
+// browser start closes them (see `close_agent_tabs_at`).
+const APPROVAL_FIXED_FILES: [&str; 7] = [
     "request.json",
     "decision.json",
     "state.json",
     "withhold-next.json",
+    AGENT_TABS_FILE,
+    KEPT_AGENT_TABS_FILE,
+    LEFTOVER_AGENT_TABS_FILE,
 ];
+const AGENT_TABS_FILE: &str = "tabs.json";
+const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
+const LEFTOVER_AGENT_TABS_FILE: &str = "leftover-tabs.json";
+/// The most leftover tabs the record holds: a few runs' worth of tabs that
+/// could not be closed. The oldest go first.
+const MAX_LEFTOVER_AGENT_TABS: usize = 4 * MAX_AGENT_TABS;
+/// The most tabs of its own Octo may have open in one run, next to the page
+/// the person chose. `assets/shared-browser-approval.js` (`MAX_AGENT_TABS`)
+/// and the origin hold the same bound.
+pub(crate) const MAX_AGENT_TABS: usize = 3;
+const AGENT_TABS_FILE_MAX_BYTES: u64 = 8 * 1024;
+/// How long closing one of Octo's tabs at the end of a run may take. CDP is
+/// on loopback, so a slower answer is a stuck browser.
+const AGENT_TAB_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_CDP_PORT: u16 = 9223;
 const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 10] = [
     "human_input_required",
     "approval_denied",
@@ -191,6 +224,9 @@ pub(crate) fn approval_wait_budget(raw: Option<&str>) -> Duration {
 pub struct SharedBrowserAgentControlGuard {
     path: PathBuf,
     approval_dir: PathBuf,
+    /// Where the browser's DevTools HTTP endpoint listens, to close Octo's
+    /// tabs when the run ends. None when it is not a loopback HTTP address.
+    cdp_base: Option<(String, u16)>,
     owner_id: String,
     run_id: Uuid,
     initiator_user_id: Uuid,
@@ -199,6 +235,9 @@ pub struct SharedBrowserAgentControlGuard {
     marker_io: Arc<Mutex<()>>,
     shutdown_confirmation: JobCancelSignal,
     heartbeat: JoinHandle<()>,
+    /// Closes the windows pages in Octo's tabs open by themselves while the
+    /// run holds the browser (see [`close_windows_opened_from_agent_tabs`]).
+    window_watch: Option<JoinHandle<()>>,
 }
 
 #[cfg(test)]
@@ -264,11 +303,74 @@ fn clear_stale_agent_control_marker_on_startup_for_mode(
     marker_path: &Path,
     approval_dir: &Path,
 ) -> Result<()> {
+    clear_stale_agent_control_marker_at_startup(
+        browser_session_enabled,
+        marker_path,
+        approval_dir,
+        cdp_endpoint_from_env().as_ref(),
+    )
+}
+
+/// [`clear_stale_agent_control_marker_on_startup_for_mode`] with the DevTools
+/// endpoint given, so a test reaches the same closing.
+fn clear_stale_agent_control_marker_at_startup(
+    browser_session_enabled: bool,
+    marker_path: &Path,
+    approval_dir: &Path,
+    cdp_base: Option<&(String, u16)>,
+) -> Result<()> {
     if !browser_session_enabled {
         return Ok(());
     }
+    // The run that held the browser when the last process ended without a
+    // confirmed shutdown may have left tabs of Octo's open. They are read
+    // before the run's own records are revoked, then closed now if the
+    // browser answers; those that stay open join the leftover record, so they
+    // stay badged as Octo's and close at the next confirmed shutdown or
+    // browser start.
+    let mut run_tabs = Vec::new();
+    if let Some(binding) = stale_marker_binding(marker_path) {
+        match agent_tabs_to_close(approval_dir, &binding) {
+            Ok(tabs) => run_tabs = tabs,
+            Err(error) => tracing::warn!(
+                ?error,
+                "Shared Browser could not read the tabs Octo opened before the restart; they stay open as ordinary tabs"
+            ),
+        }
+    }
     clear_stale_agent_control_marker(marker_path)?;
-    prepare_clean_approval_directory(approval_dir)
+    prepare_clean_approval_directory(approval_dir)?;
+    close_agent_tabs_and_settle_leftovers(approval_dir, cdp_base, run_tabs);
+    Ok(())
+}
+
+/// The run a marker or a record is bound to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RunBinding {
+    owner_id: String,
+    run_id: Uuid,
+    initiator_user_id: Uuid,
+    browser_page_id: String,
+}
+
+/// The run a marker left by an earlier process was bound to, when it can be
+/// read. It proves only which run's tab record is that run's own.
+fn stale_marker_binding(path: &Path) -> Option<RunBinding> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 4 * 1024 {
+        return None;
+    }
+    let marker: JsonValue = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if marker.get("version").and_then(JsonValue::as_u64) != Some(2) {
+        return None;
+    }
+    let text = |key: &str| marker.get(key).and_then(JsonValue::as_str);
+    Some(RunBinding {
+        owner_id: Uuid::parse_str(text("ownerId")?).ok()?.to_string(),
+        run_id: Uuid::parse_str(text("runId")?).ok()?,
+        initiator_user_id: Uuid::parse_str(text("initiatorUserId")?).ok()?,
+        browser_page_id: validate_page_id(text("browserPageId")?).ok()?,
+    })
 }
 
 fn clear_stale_agent_control_marker(path: &Path) -> Result<()> {
@@ -355,6 +457,11 @@ fn prepare_clean_approval_directory(path: &Path) -> Result<()> {
                 "Shared Browser approval entry {} must be a regular file",
                 entry.path().display()
             );
+        }
+        // Every run-scoped file is revoked. The leftover record names tabs
+        // that may still be open and grants nothing, so it stays.
+        if file_name == LEFTOVER_AGENT_TABS_FILE {
+            continue;
         }
         std::fs::remove_file(entry.path()).with_context(|| {
             format!(
@@ -597,7 +704,7 @@ impl SharedBrowserAgentControlGuard {
         display_name: &str,
         cancel_signal: JobCancelSignal,
     ) -> Result<Self> {
-        Self::acquire_at(
+        let mut guard = Self::acquire_at(
             agent_control_file_path(),
             approval_dir_path(),
             run_id,
@@ -605,7 +712,9 @@ impl SharedBrowserAgentControlGuard {
             browser_page_id,
             display_name,
             cancel_signal,
-        )
+        )?;
+        guard.start_window_watch();
+        Ok(guard)
     }
 
     /// [`Self::acquire`] at explicit paths, so a test reaches the same
@@ -739,6 +848,10 @@ impl SharedBrowserAgentControlGuard {
         Ok(Self {
             path,
             approval_dir,
+            cdp_base: cdp_endpoint_from(
+                std::env::var(CDP_URL_ENV).ok().as_deref(),
+                std::env::var(CDP_PORT_ENV).ok().as_deref(),
+            ),
             owner_id,
             run_id,
             initiator_user_id,
@@ -747,14 +860,640 @@ impl SharedBrowserAgentControlGuard {
             marker_io,
             shutdown_confirmation: cancel_signal,
             heartbeat,
+            window_watch: None,
         })
     }
+
+    fn binding(&self) -> RunBinding {
+        RunBinding {
+            owner_id: self.owner_id.clone(),
+            run_id: self.run_id,
+            initiator_user_id: self.initiator_user_id,
+            browser_page_id: self.browser_page_id.clone(),
+        }
+    }
+
+    /// Starts closing the windows Octo's tabs open by themselves, for as
+    /// long as this guard lives. Without a loopback DevTools address there is
+    /// nothing to watch; the controller still closes such windows before
+    /// each step.
+    fn start_window_watch(&mut self) {
+        if self.window_watch.is_some() {
+            return;
+        }
+        let Some(cdp_base) = self.cdp_base.clone() else {
+            return;
+        };
+        self.window_watch = Some(tokio::spawn(close_windows_opened_from_agent_tabs(
+            cdp_base,
+            self.approval_dir.clone(),
+            self.binding(),
+        )));
+    }
+}
+
+/// How long the window watch waits before it connects to the browser again.
+const WINDOW_WATCH_RETRY: Duration = Duration::from_secs(1);
+/// How many windows opened from Octo's tabs the watch remembers, so a window
+/// one of them opens in turn is closed too.
+const WINDOW_WATCH_MAX_REMEMBERED: usize = 64;
+
+/// While a run holds the browser, a page in one of Octo's tabs can open
+/// another window by itself between steps (a timer, or a script still holding
+/// the activation of Octo's last click). Such a window is not one of Octo's
+/// tabs: nothing records, counts, badges or closes it, and Octo cannot use it.
+/// So it is closed as soon as the browser reports it, and so is any window it
+/// opens in turn. Windows opened by the page the person chose, or by any other
+/// tab, are left alone. Runs until the guard aborts it, connecting again when
+/// the browser's DevTools endpoint goes away.
+async fn close_windows_opened_from_agent_tabs(
+    cdp_base: (String, u16),
+    approval_dir: PathBuf,
+    binding: RunBinding,
+) {
+    let mut from_agent_tabs = Vec::new();
+    loop {
+        if let Err(error) =
+            watch_windows_once(&cdp_base, &approval_dir, &binding, &mut from_agent_tabs).await
+        {
+            tracing::debug!(
+                ?error,
+                "Shared Browser window watch lost the browser; connecting again"
+            );
+        }
+        tokio::time::sleep(WINDOW_WATCH_RETRY).await;
+    }
+}
+
+/// One connection of the window watch: target discovery on the browser's
+/// loopback DevTools endpoint, which also reports the windows already open.
+async fn watch_windows_once(
+    cdp_base: &(String, u16),
+    approval_dir: &Path,
+    binding: &RunBinding,
+    from_agent_tabs: &mut Vec<String>,
+) -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (host, port) = cdp_base;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(AGENT_TAB_CLOSE_TIMEOUT)
+        .build()?;
+    let version: JsonValue = client
+        .get(format!("http://{host}:{port}/json/version"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    // Only the path of the browser's own address is used: the socket goes to
+    // the same loopback endpoint.
+    let path = version
+        .get("webSocketDebuggerUrl")
+        .and_then(JsonValue::as_str)
+        .and_then(|raw| reqwest::Url::parse(raw).ok())
+        .map(|url| url.path().to_string())
+        .filter(|path| {
+            path.strip_prefix("/devtools/browser/").is_some_and(|id| {
+                !id.is_empty()
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        })
+        .context("the browser reported no DevTools socket")?;
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{host}:{port}{path}")).await?;
+    socket
+        .send(Message::Text(
+            json!({ "id": 1, "method": "Target.setDiscoverTargets", "params": { "discover": true } })
+                .to_string(),
+        ))
+        .await?;
+    let mut next_id = 2u64;
+    while let Some(message) = socket.next().await {
+        let Message::Text(text) = message? else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<JsonValue>(&text) else {
+            continue;
+        };
+        if event.get("method").and_then(JsonValue::as_str) != Some("Target.targetCreated") {
+            continue;
+        }
+        let info = &event["params"]["targetInfo"];
+        let (Some("page"), Some(target_id), Some(opener_id)) = (
+            info.get("type").and_then(JsonValue::as_str),
+            info.get("targetId").and_then(JsonValue::as_str),
+            info.get("openerId").and_then(JsonValue::as_str),
+        ) else {
+            continue;
+        };
+        if validate_page_id(target_id).is_err() || target_id == binding.browser_page_id {
+            continue;
+        }
+        // The run's record as it is now: Octo's tabs, kept ones included. One
+        // that cannot be read names no tab, and nothing is closed.
+        let agent_tabs = run_agent_tabs(approval_dir, binding).unwrap_or_default();
+        if agent_tabs.iter().any(|tab_id| tab_id == target_id) {
+            continue;
+        }
+        let opened_from_agent_tab = agent_tabs.iter().any(|tab_id| tab_id == opener_id)
+            || from_agent_tabs.iter().any(|id| id == opener_id);
+        if !opened_from_agent_tab {
+            continue;
+        }
+        from_agent_tabs.push(target_id.to_string());
+        let excess = from_agent_tabs
+            .len()
+            .saturating_sub(WINDOW_WATCH_MAX_REMEMBERED);
+        from_agent_tabs.drain(..excess);
+        tracing::info!(
+            target_id,
+            "Shared Browser closed a window that one of Octo's tabs opened by itself"
+        );
+        socket
+            .send(Message::Text(
+                json!({ "id": next_id, "method": "Target.closeTarget", "params": { "targetId": target_id } })
+                    .to_string(),
+            ))
+            .await?;
+        // A window comes to the front when it opens. Once it is closed, the
+        // tab Octo acts on (else the run's page) comes back to the front,
+        // never a neighbouring person's tab.
+        let front = read_run_record(approval_dir, AGENT_TABS_FILE, &[1, 2], binding)
+            .ok()
+            .flatten()
+            .and_then(|record| {
+                record
+                    .get("currentTabId")
+                    .and_then(JsonValue::as_str)
+                    .and_then(|id| validate_page_id(id).ok())
+            })
+            .unwrap_or_else(|| binding.browser_page_id.clone());
+        socket
+            .send(Message::Text(
+                json!({ "id": next_id + 1, "method": "Target.activateTarget", "params": { "targetId": front } })
+                    .to_string(),
+            ))
+            .await?;
+        next_id += 2;
+    }
+    Ok(())
+}
+
+impl SharedBrowserAgentControlGuard {
+    /// This run's tabs that the person did not keep, which the run's end
+    /// closes.
+    fn agent_tabs_to_close(&self) -> Vec<String> {
+        match agent_tabs_to_close(&self.approval_dir, &self.binding()) {
+            Ok(tabs) => tabs,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Shared Browser could not read the tabs Octo opened; they stay open as ordinary tabs"
+                );
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// `earlier` followed by the tabs of `later` it does not name yet, bounded to
+/// the newest [`MAX_LEFTOVER_AGENT_TABS`].
+fn merge_agent_tabs(earlier: Vec<String>, later: Vec<String>) -> Vec<String> {
+    let mut merged = earlier;
+    for tab_id in later {
+        if !merged.contains(&tab_id) {
+            merged.push(tab_id);
+        }
+    }
+    let excess = merged.len().saturating_sub(MAX_LEFTOVER_AGENT_TABS);
+    merged.drain(..excess);
+    merged
+}
+
+/// Closes `run_tabs` and the leftover tabs of earlier runs, then settles the
+/// leftover record: the tabs this pass closed (or found gone) leave it, and
+/// the run's tabs that are still open join it.
+///
+/// The origin also rewrites the record, when a person keeps a leftover tab.
+/// So the record is read again once the pass is over, under the approval
+/// directory's lock that the origin takes too, and only this pass's change
+/// is applied to it: a tab a person kept meanwhile is never put back, and a
+/// tab another pass added meanwhile is never dropped.
+fn close_agent_tabs_and_settle_leftovers(
+    approval_dir: &Path,
+    cdp_base: Option<&(String, u16)>,
+    run_tabs: Vec<String>,
+) {
+    let earlier = read_leftover_agent_tabs(approval_dir);
+    let attempted = merge_agent_tabs(earlier.clone(), run_tabs);
+    if attempted.is_empty() {
+        return;
+    }
+    let still_open = close_agent_tabs_at(cdp_base, attempted.clone());
+    let settled = lock_approval_directory(approval_dir).and_then(|_lock| {
+        let current = read_leftover_agent_tabs(approval_dir);
+        let not_closed_here =
+            |tab_id: &String| !attempted.contains(tab_id) || still_open.contains(tab_id);
+        let joining = still_open
+            .iter()
+            .filter(|tab_id| !earlier.contains(tab_id))
+            .cloned()
+            .collect();
+        let next = merge_agent_tabs(
+            current.into_iter().filter(not_closed_here).collect(),
+            joining,
+        );
+        write_leftover_agent_tabs(approval_dir, &next)
+    });
+    if let Err(error) = settled {
+        tracing::warn!(
+            ?error,
+            "Shared Browser could not record Octo's tabs that are still open"
+        );
+    }
+}
+
+/// The approval directory's lock, held while it lives (`flock` on the
+/// directory itself, so the directory holds no lock file). runtime-agent and
+/// the origin each take it around reading and publishing the leftover
+/// record, the one record both of them rewrite.
+struct ApprovalDirectoryLock {
+    #[cfg(unix)]
+    _directory: std::fs::File,
+}
+
+#[cfg(unix)]
+fn lock_approval_directory(approval_dir: &Path) -> Result<ApprovalDirectoryLock> {
+    use std::os::fd::AsRawFd;
+
+    let directory = std::fs::File::open(approval_dir)
+        .context("failed to open the Shared Browser approval directory to lock it")?;
+    loop {
+        // SAFETY: `flock` on a descriptor this function owns. Closing it,
+        // when the lock is dropped, releases the lock.
+        if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(ApprovalDirectoryLock {
+                _directory: directory,
+            });
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error).context("failed to lock the Shared Browser approval directory");
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_approval_directory(_approval_dir: &Path) -> Result<ApprovalDirectoryLock> {
+    Ok(ApprovalDirectoryLock {})
+}
+
+/// Closes each tab through the browser's loopback DevTools endpoint and
+/// returns the tabs that may still be open. A tab that closed, or that the
+/// browser no longer has, is done with. Once the endpoint cannot be reached,
+/// the rest are kept without another attempt, so a browser that is down
+/// costs one bounded wait.
+fn close_agent_tabs_at(cdp_base: Option<&(String, u16)>, tabs: Vec<String>) -> Vec<String> {
+    if tabs.is_empty() {
+        return tabs;
+    }
+    let Some((host, port)) = cdp_base else {
+        tracing::warn!(
+            tabs = tabs.len(),
+            "Shared Browser has no loopback DevTools address; Octo's tabs stay open, badged as Octo's"
+        );
+        return tabs;
+    };
+    let mut remaining = Vec::new();
+    let mut reachable = true;
+    for tab_id in tabs {
+        if !reachable {
+            remaining.push(tab_id);
+            continue;
+        }
+        match close_browser_tab(host, *port, &tab_id) {
+            Ok(()) => {}
+            Err(failure) => {
+                tracing::warn!(
+                    error = ?failure.error,
+                    tab_id,
+                    "Shared Browser could not close one of Octo's tabs; it stays open, badged as Octo's"
+                );
+                reachable = !failure.unreachable;
+                remaining.push(tab_id);
+            }
+        }
+    }
+    remaining
+}
+
+/// The DevTools endpoint of this process's browser, from the environment the
+/// controller script reads.
+fn cdp_endpoint_from_env() -> Option<(String, u16)> {
+    cdp_endpoint_from(
+        std::env::var(CDP_URL_ENV).ok().as_deref(),
+        std::env::var(CDP_PORT_ENV).ok().as_deref(),
+    )
+}
+
+/// After Instafy's browser starts: the leftover tabs of earlier runs are
+/// closed, or found gone (a browser that started again has none of them).
+/// Blocking, with bounded waits; call it off the async executor.
+pub(crate) fn close_leftover_agent_tabs_after_browser_start() {
+    if !runtime_runs_shared_browser_turns() {
+        return;
+    }
+    close_agent_tabs_and_settle_leftovers(
+        &approval_dir_path(),
+        cdp_endpoint_from_env().as_ref(),
+        Vec::new(),
+    );
+}
+
+/// The leftover record: Octo's tabs from earlier runs that may still be
+/// open. One that cannot be read safely names no tab.
+fn read_leftover_agent_tabs(approval_dir: &Path) -> Vec<String> {
+    let path = approval_dir.join(LEFTOVER_AGENT_TABS_FILE);
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return Vec::new();
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > AGENT_TABS_FILE_MAX_BYTES
+    {
+        return Vec::new();
+    }
+    let Some(record) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<JsonValue>(&bytes).ok())
+    else {
+        return Vec::new();
+    };
+    if record.get("version").and_then(JsonValue::as_u64) != Some(1) {
+        return Vec::new();
+    }
+    let Some(tabs) = record.get("tabs").and_then(JsonValue::as_array) else {
+        return Vec::new();
+    };
+    let mut leftovers = Vec::new();
+    for tab in tabs.iter().take(MAX_LEFTOVER_AGENT_TABS) {
+        let Some(tab_id) = tab
+            .get("tabId")
+            .and_then(JsonValue::as_str)
+            .and_then(|id| validate_page_id(id).ok())
+        else {
+            return Vec::new();
+        };
+        leftovers.push(tab_id);
+    }
+    merge_agent_tabs(Vec::new(), leftovers)
+}
+
+/// Publishes the leftover record, owner-only, or removes it when no tab is
+/// left. It names each tab by its id only: the number a tab had belonged to
+/// its run, which has ended.
+fn write_leftover_agent_tabs(approval_dir: &Path, tabs: &[String]) -> Result<()> {
+    let path = approval_dir.join(LEFTOVER_AGENT_TABS_FILE);
+    if tabs.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("failed to clear the leftover tab record"),
+        };
+    }
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "tabs": tabs
+            .iter()
+            .map(|tab_id| json!({ "tabId": tab_id }))
+            .collect::<Vec<_>>(),
+    }))?;
+    // The temporary name uses the prefix the approval directory cleanup
+    // accepts, so a write cut short is revoked with the rest.
+    publish_private_file(
+        &approval_dir.join(format!(".instafy-approval-leftover-{}", Uuid::new_v4())),
+        &path,
+        &payload,
+        "Shared Browser leftover tab record",
+    )
+}
+
+/// The DevTools HTTP endpoint the controller script connects to
+/// (`INSTAFY_PLAYWRIGHT_CDP_URL`, else port `INSTAFY_PLAYWRIGHT_CDP_PORT` or
+/// 9223 on 127.0.0.1), when it is a credential-free loopback HTTP address.
+fn cdp_endpoint_from(url: Option<&str>, port: Option<&str>) -> Option<(String, u16)> {
+    let raw = match url.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(url) => url.to_string(),
+        None => {
+            let port = match port.map(str::trim).filter(|value| !value.is_empty()) {
+                Some(port) => port.parse::<u16>().ok()?,
+                None => DEFAULT_CDP_PORT,
+            };
+            format!("http://127.0.0.1:{port}")
+        }
+    };
+    let parsed = reqwest::Url::parse(&raw).ok()?;
+    if !matches!(parsed.scheme(), "http" | "ws")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    let raw_host = parsed.host_str()?;
+    let host = if raw_host.eq_ignore_ascii_case("localhost") {
+        "127.0.0.1".to_string()
+    } else {
+        match raw_host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .ok()?
+        {
+            std::net::IpAddr::V4(address) if address.is_loopback() => address.to_string(),
+            std::net::IpAddr::V6(address) if address.is_loopback() => format!("[{address}]"),
+            _ => return None,
+        }
+    };
+    Some((host, parsed.port_or_known_default()?))
+}
+
+/// One of the run's own records in its approval directory, when it is a
+/// bounded regular file of one of `versions` bound to `binding`.
+fn read_run_record(
+    approval_dir: &Path,
+    name: &str,
+    versions: &[u64],
+    binding: &RunBinding,
+) -> Result<Option<JsonValue>> {
+    let path = approval_dir.join(name);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("failed to inspect {name}")),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > AGENT_TABS_FILE_MAX_BYTES
+    {
+        bail!("{name} is not a bounded regular file");
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("failed to read {name}"))?;
+    let record: JsonValue =
+        serde_json::from_slice(&bytes).with_context(|| format!("{name} is not JSON"))?;
+    let bound = record
+        .get("version")
+        .and_then(JsonValue::as_u64)
+        .is_some_and(|version| versions.contains(&version))
+        && record.get("ownerId").and_then(JsonValue::as_str) == Some(binding.owner_id.as_str())
+        && record.get("runId").and_then(JsonValue::as_str) == Some(&binding.run_id.to_string())
+        && record.get("initiatorUserId").and_then(JsonValue::as_str)
+            == Some(&binding.initiator_user_id.to_string())
+        && record.get("browserPageId").and_then(JsonValue::as_str)
+            == Some(binding.browser_page_id.as_str());
+    if !bound {
+        bail!("{name} belongs to another run");
+    }
+    Ok(Some(record))
+}
+
+/// Every tab Octo opened in the run, kept ones included, from the run's own
+/// `tabs.json` (version 2, or version 1 from an earlier runtime-agent).
+fn run_agent_tabs(approval_dir: &Path, binding: &RunBinding) -> Result<Vec<String>> {
+    let Some(tabs) = read_run_record(approval_dir, AGENT_TABS_FILE, &[1, 2], binding)? else {
+        return Ok(Vec::new());
+    };
+    let tab_ids = tabs
+        .get("tabs")
+        .and_then(JsonValue::as_array)
+        .context("tabs.json has no tab list")?
+        .iter()
+        .map(|tab| {
+            tab.get("tabId")
+                .and_then(JsonValue::as_str)
+                .context("a tab in tabs.json has no id")
+                .and_then(validate_page_id)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if tab_ids.len() > MAX_AGENT_TABS || tab_ids.contains(&binding.browser_page_id) {
+        bail!("tabs.json is out of bounds");
+    }
+    Ok(tab_ids)
+}
+
+/// The tabs Octo opened in this run that the person did not keep, from the
+/// run's own records. A record bound to another run, or one that cannot be
+/// read, names no tab: closing is never extended to tabs this run cannot
+/// prove are its own.
+fn agent_tabs_to_close(approval_dir: &Path, binding: &RunBinding) -> Result<Vec<String>> {
+    let agent_tabs = run_agent_tabs(approval_dir, binding)?;
+    if agent_tabs.is_empty() {
+        return Ok(agent_tabs);
+    }
+    // A kept-tab record that cannot be read keeps every tab: leaving a tab
+    // open is the safe side of the person's choice.
+    let kept: Vec<String> = match read_run_record(approval_dir, KEPT_AGENT_TABS_FILE, &[1], binding)
+    {
+        Ok(None) => Vec::new(),
+        Ok(Some(record)) => match record.get("tabIds").and_then(JsonValue::as_array) {
+            Some(ids) => ids
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::to_string)
+                .collect(),
+            None => return Ok(Vec::new()),
+        },
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(agent_tabs
+        .into_iter()
+        .filter(|tab_id| !kept.contains(tab_id))
+        .collect())
+}
+
+/// Why a tab was not closed. `unreachable`: the DevTools endpoint could not
+/// be reached at all, so no other tab can be closed now either.
+#[derive(Debug)]
+struct TabCloseFailure {
+    unreachable: bool,
+    error: anyhow::Error,
+}
+
+/// Closes one tab through the browser's loopback DevTools HTTP endpoint
+/// (`/json/close/<id>`), with a bounded wait. Synchronous, because it runs
+/// while the run's guard is dropped.
+fn close_browser_tab(host: &str, port: u16, tab_id: &str) -> Result<(), TabCloseFailure> {
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+
+    let unreachable = |error: anyhow::Error| TabCloseFailure {
+        unreachable: true,
+        error,
+    };
+    let address: SocketAddr = format!("{host}:{port}")
+        .to_socket_addrs()
+        .context("DevTools address is invalid")
+        .and_then(|mut addresses| addresses.next().context("DevTools address did not resolve"))
+        .map_err(unreachable)?;
+    if !address.ip().is_loopback() {
+        return Err(unreachable(anyhow!("DevTools address is not loopback")));
+    }
+    let stream = TcpStream::connect_timeout(&address, AGENT_TAB_CLOSE_TIMEOUT)
+        .context("failed to reach the browser's DevTools endpoint")
+        .map_err(unreachable)?;
+    close_browser_tab_over(stream, host, port, tab_id).map_err(|error| TabCloseFailure {
+        unreachable: false,
+        error,
+    })
+}
+
+fn close_browser_tab_over(
+    mut stream: std::net::TcpStream,
+    host: &str,
+    port: u16,
+    tab_id: &str,
+) -> Result<()> {
+    use std::io::Read;
+
+    let tab_id = validate_page_id(tab_id)?;
+    stream.set_read_timeout(Some(AGENT_TAB_CLOSE_TIMEOUT))?;
+    stream.set_write_timeout(Some(AGENT_TAB_CLOSE_TIMEOUT))?;
+    stream.write_all(
+        format!(
+            "GET /json/close/{tab_id} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    )?;
+    let mut head = [0u8; 64];
+    let mut read = 0;
+    while read < head.len() {
+        match stream.read(&mut head[read..])? {
+            0 => break,
+            count => read += count,
+        }
+        if head[..read].contains(&b'\n') {
+            break;
+        }
+    }
+    let status_line = String::from_utf8_lossy(&head[..read]);
+    let status = status_line.split_whitespace().nth(1).unwrap_or_default();
+    // 404: the tab is already gone, which is what closing asks for.
+    if status != "200" && status != "404" {
+        bail!("DevTools answered {status} when closing the tab");
+    }
+    Ok(())
 }
 
 impl Drop for SharedBrowserAgentControlGuard {
     fn drop(&mut self) {
         self.active.store(false, Ordering::SeqCst);
         self.heartbeat.abort();
+        if let Some(window_watch) = self.window_watch.take() {
+            window_watch.abort();
+        }
         let Ok(_marker_io) = self.marker_io.lock() else {
             tracing::error!(
                 marker_path = %self.path.display(),
@@ -767,6 +1506,17 @@ impl Drop for SharedBrowserAgentControlGuard {
             .shutdown_confirmation
             .shared_browser_shutdown_is_confirmed()
         {
+            // Every tool process of the run is gone, so nothing opens another
+            // tab. Octo's tabs close now, apart from those the person kept,
+            // and so do earlier runs' leftover tabs. A tab that does not close
+            // stays open, badged as Octo's in the leftover record, and no
+            // later run can use it.
+            let run_tabs = self.agent_tabs_to_close();
+            close_agent_tabs_and_settle_leftovers(
+                &self.approval_dir,
+                self.cdp_base.as_ref(),
+                run_tabs,
+            );
             if let Err(error) = prepare_clean_approval_directory(&self.approval_dir) {
                 tracing::error!(
                     ?error,
@@ -1071,6 +1821,13 @@ fn schema(value: JsonValue) -> Arc<JsonObject> {
 }
 
 fn shared_browser_mcp_tools() -> Vec<Tool> {
+    let tab_id = json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_PAGE_ID_BYTES,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "A tab id from list_tabs."
+    });
     let target_properties = json!({
         "index": { "type": "integer", "minimum": 0, "maximum": MAX_TARGET_INDEX },
         "snapshotId": {
@@ -1104,18 +1861,25 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("snapshot"),
             Cow::Borrowed(
-                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, and links on the page's own site are paths.",
+                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, and links on the page's own site are paths. With `tabId`, that tab becomes the one later tools act on first.",
             ),
-            schema(json!({ "type": "object", "properties": {}, "additionalProperties": false })),
+            schema(json!({
+                "type": "object",
+                "properties": { "tabId": tab_id.clone() },
+                "additionalProperties": false
+            })),
         ),
         Tool::new(
             Cow::Borrowed("navigate"),
             Cow::Borrowed(
-                "Navigate the visible page to a credential-free HTTP(S) URL, or to a path on the current page's site such as a snapshot link's href.",
+                "Navigate the visible page to a credential-free HTTP(S) URL, or to a path on the current page's site such as a snapshot link's href. With `tabId`, that tab becomes the one later tools act on first.",
             ),
             schema(json!({
                 "type": "object",
-                "properties": { "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_CHARS } },
+                "properties": {
+                    "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_CHARS },
+                    "tabId": tab_id.clone()
+                },
                 "required": ["url"],
                 "additionalProperties": false
             })),
@@ -1175,18 +1939,70 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
                 "additionalProperties": false
             })),
         ),
+        Tool::new(
+            Cow::Borrowed("list_tabs"),
+            Cow::Borrowed(
+                "List the tabs this run may use: the page the person chose and the tabs Octo opened, with which one later tools act on. A tab's address and title show once its site is approved in that tab. Each of Octo's tabs has a `label` (\"Octo's tab 2\") that it keeps while it is open; the person's prompts and browser use the same label, so name tabs by it.",
+            ),
+            schema(json!({ "type": "object", "properties": {}, "additionalProperties": false })),
+        ),
+        Tool::new(
+            Cow::Borrowed("open_tab"),
+            Cow::Borrowed(
+                "Open a full credential-free HTTP(S) address in a new visible tab of the shared browser and act on it from now on. Octo may have at most three tabs of its own open; they close when this turn ends unless the person keeps them. The site's approval applies in that tab only.",
+            ),
+            schema(json!({
+                "type": "object",
+                "properties": { "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_CHARS } },
+                "required": ["url"],
+                "additionalProperties": false
+            })),
+        ),
+        Tool::new(
+            Cow::Borrowed("select_tab"),
+            Cow::Borrowed(
+                "Bring one tab from list_tabs to the front and act on it from now on. Take a fresh snapshot there before using element indices.",
+            ),
+            schema(json!({
+                "type": "object",
+                "properties": { "tabId": tab_id.clone() },
+                "required": ["tabId"],
+                "additionalProperties": false
+            })),
+        ),
+        Tool::new(
+            Cow::Borrowed("close_tab"),
+            Cow::Borrowed(
+                "Close one tab Octo opened in this turn. The page the person chose, their other tabs and tabs they kept are never closed.",
+            ),
+            schema(json!({
+                "type": "object",
+                "properties": { "tabId": tab_id },
+                "required": ["tabId"],
+                "additionalProperties": false
+            })),
+        ),
     ]
 }
 
 fn mcp_tool_request(name: &str, arguments: Option<JsonObject>) -> Result<SharedBrowserRequest> {
     let arguments = arguments.unwrap_or_default();
-    if matches!(name, "status" | "snapshot") && !arguments.is_empty() {
+    if matches!(name, "status" | "list_tabs") && !arguments.is_empty() {
         bail!("Shared Browser {name} does not accept arguments");
     }
     let (method, path, body) = match name {
         "status" => ("GET", "/v1/status", None),
-        "snapshot" => ("GET", "/v1/snapshot", None),
+        "snapshot" if arguments.is_empty() => ("GET", "/v1/snapshot", None),
+        "snapshot" => ("POST", "/v1/snapshot", Some(JsonValue::Object(arguments))),
         "navigate" => ("POST", "/v1/navigate", Some(JsonValue::Object(arguments))),
+        "list_tabs" => ("GET", "/v1/tabs", None),
+        "open_tab" => ("POST", "/v1/tabs/open", Some(JsonValue::Object(arguments))),
+        "select_tab" => (
+            "POST",
+            "/v1/tabs/select",
+            Some(JsonValue::Object(arguments)),
+        ),
+        "close_tab" => ("POST", "/v1/tabs/close", Some(JsonValue::Object(arguments))),
         "click" => ("POST", "/v1/click", Some(JsonValue::Object(arguments))),
         "type" => ("POST", "/v1/type", Some(JsonValue::Object(arguments))),
         "press" => ("POST", "/v1/press", Some(JsonValue::Object(arguments))),
@@ -1288,6 +2104,16 @@ fn validate_target(object: &JsonMap<String, JsonValue>) -> Result<()> {
     Ok(())
 }
 
+fn validate_tab_id_field(object: &JsonMap<String, JsonValue>, required: bool) -> Result<()> {
+    match object.get("tabId") {
+        None if !required => Ok(()),
+        Some(JsonValue::String(tab_id)) if tab_id.trim() == tab_id => {
+            validate_page_id(tab_id).map(|_| ())
+        }
+        _ => bail!("Shared Browser tabId must be one tab id from list_tabs"),
+    }
+}
+
 fn valid_snapshot_id(value: &str) -> bool {
     value.len() == SNAPSHOT_ID_CHARS
         && value
@@ -1301,8 +2127,32 @@ fn validate_request_body(path: &str, body: &JsonValue) -> Result<()> {
         .as_object()
         .context("Shared Browser request body must be a JSON object")?;
     match path {
-        "/v1/navigate" => {
+        "/v1/snapshot" | "/v1/tabs/select" | "/v1/tabs/close" => {
+            require_only_keys(object, &["tabId"])?;
+            validate_tab_id_field(object, true)?;
+        }
+        "/v1/tabs/open" => {
             require_only_keys(object, &["url"])?;
+            let raw = object
+                .get("url")
+                .and_then(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.chars().count() <= MAX_URL_CHARS)
+                .context("Shared Browser open_tab requires a bounded URL string")?;
+            // A new tab has no site yet: only a full address opens one.
+            let url = reqwest::Url::parse(raw)
+                .context("Shared Browser open_tab requires a full HTTP(S) address")?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+            {
+                bail!("Shared Browser open_tab requires a credential-free HTTP(S) URL");
+            }
+        }
+        "/v1/navigate" => {
+            require_only_keys(object, &["url", "tabId"])?;
+            validate_tab_id_field(object, false)?;
             let raw = object
                 .get("url")
                 .and_then(JsonValue::as_str)
@@ -1413,10 +2263,14 @@ fn normalize_allowed_path(method: &str, raw: &str) -> Result<String> {
     }
     let allowed = matches!(
         (method, path),
-        ("GET", "/v1/status" | "/v1/snapshot")
+        ("GET", "/v1/status" | "/v1/snapshot" | "/v1/tabs")
             | (
                 "POST",
-                "/v1/navigate"
+                "/v1/snapshot"
+                    | "/v1/tabs/open"
+                    | "/v1/tabs/select"
+                    | "/v1/tabs/close"
+                    | "/v1/navigate"
                     | "/v1/click"
                     | "/v1/type"
                     | "/v1/press"
@@ -1516,11 +2370,18 @@ fn controller_failure(status: std::process::ExitStatus, stderr: &[u8]) -> anyhow
 
 fn embedded_shared_browser_script() -> String {
     format!(
-        "{}\n{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
+        "{}\n{}\n{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
         embedded_plain_script(BROWSER_REDACTION_SCRIPT),
         embedded_plain_script(BROWSER_ACTION_POLICY_SCRIPT),
         embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
+        embedded_link_only_sites(),
     )
+}
+
+/// The skill's link-only list as data for the controller script. The file is
+/// JSON, which is a JavaScript expression as it stands.
+fn embedded_link_only_sites() -> String {
+    format!("globalThis.__instafyLinkOnlySites = {LINK_ONLY_SITES_DATA};")
 }
 
 /// What the origin evaluates, in an isolated world of the page, to read a page

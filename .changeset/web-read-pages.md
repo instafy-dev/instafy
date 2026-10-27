@@ -1,5 +1,0 @@
----
-"@instafy/cli": patch
----
-
-New `instafy web read <url…> --json` reads up to 6 public web pages over plain HTTP and returns their text (or, with `--find`, only the matching passages), links and the page's own structured data, with provenance (`requestedUrl`, `finalUrl`, `title`, `readAt`, `viewer: "server fetch"`) and the text wrapped as untrusted page content. It sends an honest `Instafy-Agent` user agent, honours robots.txt for itself and the AI-agent user agents on every redirect, never fetches sites a skill lists as link-only (`link-only-sites.json`), refuses private, loopback and metadata addresses at every hop and connects only to the address it checked, and stops at logins, CAPTCHAs, paywalls, HTTP 401/403/429, downloads and pages that show credentials, without ever reading a stopped URL again. Text is redacted before output. Per turn it reads at most 12 pages, 4 per site, 2 seconds apart, and caches pages per workspace. A page that needs JavaScript is reported as `needs_browser`.

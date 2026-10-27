@@ -1045,3 +1045,330 @@ fn a_page_a_credential_step_opens_stays_withheld_for_a_sent_page() {
     assert!(CarriedWithholding::Unknown.withholds("LOADER_step-1"));
     assert!(!CarriedWithholding::Nothing.withholds("LOADER_step-1"));
 }
+
+/// The run's tab record as the controller writes it: tab N of `tab_ids` is
+/// "Octo's tab N + 1".
+fn write_agent_tabs(fixture: &ApprovalFixture, tab_ids: &[&str]) {
+    write_private_json(
+        &fixture.approval_dir.join(AGENT_TABS_FILE),
+        &json!({
+            "version": 2,
+            "ownerId": fixture.marker.owner_id,
+            "runId": fixture.marker.run_id,
+            "initiatorUserId": fixture.marker.initiator_user_id,
+            "browserPageId": fixture.marker.browser_page_id,
+            "currentTabId": tab_ids.first(),
+            "lastTabNumber": tab_ids.len(),
+            "tabs": tab_ids
+                .iter()
+                .enumerate()
+                .map(|(index, tab_id)| json!({ "tabId": tab_id, "number": index + 1, "approvedOrigins": ["https://example.test"] }))
+                .collect::<Vec<_>>(),
+        }),
+    );
+}
+
+fn write_leftover_tabs(fixture: &ApprovalFixture, tabs: JsonValue) {
+    write_private_json(
+        &fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE),
+        &json!({ "version": 1, "tabs": tabs }),
+    );
+}
+
+fn kept_record(fixture: &ApprovalFixture) -> JsonValue {
+    serde_json::from_slice(
+        &fs::read(fixture.approval_dir.join(KEPT_AGENT_TABS_FILE)).expect("kept tabs"),
+    )
+    .expect("kept tabs JSON")
+}
+
+#[tokio::test]
+async fn octos_tabs_are_read_only_from_the_running_turns_own_record() {
+    let fixture = ApprovalFixture::origin();
+    assert_eq!(fixture.bridge.agent_tabs().await, AgentTabs::default());
+    write_agent_tabs(&fixture, &["TAB-A", "TAB-B"]);
+    assert_eq!(
+        fixture.bridge.agent_tabs().await,
+        AgentTabs {
+            tab_ids: vec!["TAB-A".to_string(), "TAB-B".to_string()],
+            kept: Vec::new(),
+            numbers: vec![("TAB-A".to_string(), 1), ("TAB-B".to_string(), 2)],
+            leftover: Vec::new(),
+        }
+    );
+
+    // Another run's record, a record naming the run's own page, a fourth
+    // tab or an unprotected file badges nothing.
+    let mut other = fixture.marker.clone();
+    other.run_id = Uuid::new_v4().to_string();
+    let own = |tabs: JsonValue, last_tab_number: u64| {
+        json!({
+            "version": 2, "ownerId": fixture.marker.owner_id, "runId": fixture.marker.run_id,
+            "initiatorUserId": fixture.marker.initiator_user_id,
+            "browserPageId": fixture.marker.browser_page_id, "currentTabId": null,
+            "lastTabNumber": last_tab_number, "tabs": tabs,
+        })
+    };
+    for record in [
+        json!({
+            "version": 2, "ownerId": other.owner_id, "runId": other.run_id,
+            "initiatorUserId": other.initiator_user_id, "browserPageId": other.browser_page_id,
+            "currentTabId": null, "lastTabNumber": 1,
+            "tabs": [{ "tabId": "TAB-A", "number": 1, "approvedOrigins": [] }],
+        }),
+        own(json!([{ "tabId": fixture.marker.browser_page_id, "number": 1, "approvedOrigins": [] }]), 1),
+        own(json!(["A", "B", "C", "D"].iter().enumerate().map(|(index, tab_id)| json!({ "tabId": tab_id, "number": index + 1, "approvedOrigins": [] })).collect::<Vec<_>>()), 4),
+        // Numbers out of bounds, repeated, or past the run's last number.
+        own(json!([{ "tabId": "TAB-A", "number": 0, "approvedOrigins": [] }]), 1),
+        own(json!([{ "tabId": "TAB-A", "number": 2, "approvedOrigins": [] }]), 1),
+        own(json!([{ "tabId": "TAB-A", "number": 1, "approvedOrigins": [] }, { "tabId": "TAB-B", "number": 1, "approvedOrigins": [] }]), 2),
+        own(json!([{ "tabId": "TAB-A", "number": 1, "approvedOrigins": [] }]), 1000),
+        // An earlier record without numbers.
+        json!({
+            "version": 1, "ownerId": fixture.marker.owner_id, "runId": fixture.marker.run_id,
+            "initiatorUserId": fixture.marker.initiator_user_id,
+            "browserPageId": fixture.marker.browser_page_id, "currentTabId": null,
+            "tabs": [{ "tabId": "TAB-A", "approvedOrigins": [] }],
+        }),
+    ] {
+        write_private_json(&fixture.approval_dir.join(AGENT_TABS_FILE), &record);
+        assert_eq!(
+            fixture.bridge.agent_tabs().await,
+            AgentTabs::default(),
+            "{record}"
+        );
+    }
+    write_agent_tabs(&fixture, &["TAB-A"]);
+    set_mode(&fixture.approval_dir.join(AGENT_TABS_FILE), 0o644);
+    assert_eq!(fixture.bridge.agent_tabs().await, AgentTabs::default());
+
+    // When the run ends its marker goes, and so do the badges.
+    write_agent_tabs(&fixture, &["TAB-A"]);
+    fs::remove_file(&fixture.marker_path).expect("run ends");
+    assert_eq!(fixture.bridge.agent_tabs().await, AgentTabs::default());
+}
+
+#[tokio::test]
+async fn a_person_keeps_only_octos_tabs_of_the_running_turn() {
+    let fixture = ApprovalFixture::origin();
+    write_agent_tabs(&fixture, &["TAB-A", "TAB-B"]);
+
+    // The run's own page and any other tab are not Octo's to keep.
+    assert_not_found(
+        fixture
+            .bridge
+            .keep_agent_tab(&fixture.marker.browser_page_id)
+            .await,
+    );
+    assert_not_found(fixture.bridge.keep_agent_tab("SOMEONE-ELSES-TAB").await);
+    assert!(matches!(
+        fixture.bridge.keep_agent_tab("../tabs.json").await,
+        Err(OriginError::BadRequest(_))
+    ));
+    assert!(!fixture.approval_dir.join(KEPT_AGENT_TABS_FILE).exists());
+
+    let kept = fixture
+        .bridge
+        .keep_agent_tab("TAB-B")
+        .await
+        .expect("keep TAB-B");
+    assert!(kept.kept);
+    fixture
+        .bridge
+        .keep_agent_tab("TAB-B")
+        .await
+        .expect("keep again");
+    fixture
+        .bridge
+        .keep_agent_tab("TAB-A")
+        .await
+        .expect("keep TAB-A");
+    let record = kept_record(&fixture);
+    assert_eq!(record["tabIds"], json!(["TAB-B", "TAB-A"]));
+    assert_eq!(record["ownerId"], fixture.marker.owner_id);
+    assert_eq!(record["runId"], fixture.marker.run_id);
+    assert_eq!(record["browserPageId"], fixture.marker.browser_page_id);
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(fixture.approval_dir.join(KEPT_AGENT_TABS_FILE))
+            .expect("kept tabs")
+            .permissions()
+            .mode()
+            & 0o777,
+        APPROVAL_FILE_MODE
+    );
+    assert_eq!(
+        fixture.bridge.agent_tabs().await.kept,
+        vec!["TAB-B".to_string(), "TAB-A".to_string()]
+    );
+    // No leftover temporary file in the run's directory.
+    assert_eq!(
+        fs::read_dir(&fixture.approval_dir)
+            .expect("approval directory")
+            .filter(|entry| entry
+                .as_ref()
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with('.'))
+            .count(),
+        0
+    );
+
+    // Once the turn has ended nothing is kept.
+    fs::remove_file(&fixture.marker_path).expect("run ends");
+    assert_not_found(fixture.bridge.keep_agent_tab("TAB-A").await);
+}
+
+#[tokio::test]
+async fn tabs_an_earlier_run_left_open_stay_badged_as_earlier_tabs() {
+    let fixture = ApprovalFixture::origin();
+    // A run that ended without a confirmed shutdown left two of Octo's tabs
+    // open; runtime-agent recorded them before revoking the run.
+    fs::remove_file(&fixture.marker_path).expect("the run is gone");
+    write_leftover_tabs(
+        &fixture,
+        json!([{ "tabId": "EARLIER-A" }, { "tabId": "EARLIER-B" }]),
+    );
+    assert_eq!(
+        fixture.bridge.agent_tabs().await,
+        AgentTabs {
+            tab_ids: vec!["EARLIER-A".to_string(), "EARLIER-B".to_string()],
+            kept: Vec::new(),
+            numbers: Vec::new(),
+            leftover: vec!["EARLIER-A".to_string(), "EARLIER-B".to_string()],
+        }
+    );
+
+    // While a new run holds the browser, its own tabs come first and carry
+    // its numbers. The earlier tabs carry none, so no label repeats one of
+    // the new run's, and they are not the new run's tabs.
+    write_private_json(&fixture.marker_path, &fixture.marker);
+    write_agent_tabs(&fixture, &["TAB-A"]);
+    let tabs = fixture.bridge.agent_tabs().await;
+    assert_eq!(tabs.tab_ids, vec!["TAB-A", "EARLIER-A", "EARLIER-B"]);
+    assert_eq!(tabs.number_of("TAB-A"), Some(1));
+    assert_eq!(tabs.number_of("EARLIER-A"), None);
+    assert!(!tabs.is_leftover("TAB-A"));
+    assert!(tabs.is_leftover("EARLIER-A"));
+    assert!(tabs.is_leftover("EARLIER-B"));
+
+    // A record that cannot be read safely badges nothing of its own.
+    for record in [
+        json!({ "version": 2, "tabs": [{ "tabId": "EARLIER-A" }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "../tabs.json" }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "EARLIER-A" }, { "tabId": "EARLIER-A" }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "EARLIER-A", "number": 1 }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "EARLIER-A", "approvedOrigins": [] }] }),
+        json!({ "version": 1, "tabs": (0..13).map(|index| json!({ "tabId": format!("T{index}") })).collect::<Vec<_>>() }),
+    ] {
+        write_private_json(
+            &fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE),
+            &record,
+        );
+        let tabs = fixture.bridge.agent_tabs().await;
+        assert_eq!(tabs.tab_ids, vec!["TAB-A"], "{record}");
+        assert!(tabs.leftover.is_empty(), "{record}");
+    }
+    write_leftover_tabs(&fixture, json!([{ "tabId": "EARLIER-A" }]));
+    set_mode(&fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE), 0o644);
+    assert_eq!(fixture.bridge.agent_tabs().await.tab_ids, vec!["TAB-A"]);
+}
+
+#[tokio::test]
+async fn keeping_a_tab_an_earlier_run_left_open_makes_it_an_ordinary_tab() {
+    let fixture = ApprovalFixture::origin();
+    write_agent_tabs(&fixture, &["TAB-A"]);
+    write_leftover_tabs(
+        &fixture,
+        json!([{ "tabId": "EARLIER-A" }, { "tabId": "EARLIER-B" }]),
+    );
+
+    // During a run, Keep tab on a leftover tab takes it off the record that
+    // runtime-agent closes; it is not added to this run's kept tabs.
+    let kept = fixture
+        .bridge
+        .keep_agent_tab("EARLIER-A")
+        .await
+        .expect("keep a leftover tab");
+    assert!(kept.kept);
+    assert!(!fixture.approval_dir.join(KEPT_AGENT_TABS_FILE).exists());
+    assert_eq!(
+        fixture.bridge.agent_tabs().await.tab_ids,
+        vec!["TAB-A", "EARLIER-B"]
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE))
+            .expect("leftover tabs")
+            .permissions()
+            .mode()
+            & 0o777,
+        APPROVAL_FILE_MODE
+    );
+
+    // With no run holding the browser, the same.
+    fs::remove_file(&fixture.marker_path).expect("the run ends");
+    fixture
+        .bridge
+        .keep_agent_tab("EARLIER-B")
+        .await
+        .expect("keep a leftover tab");
+    assert_eq!(fixture.bridge.agent_tabs().await, AgentTabs::default());
+    let record: JsonValue = serde_json::from_slice(
+        &fs::read(fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE)).expect("leftover"),
+    )
+    .expect("leftover JSON");
+    assert_eq!(record, json!({ "version": 1, "tabs": [] }));
+
+    // Anything else is not Octo's to keep.
+    assert_not_found(fixture.bridge.keep_agent_tab("EARLIER-A").await);
+    assert_not_found(fixture.bridge.keep_agent_tab("SOMEONE-ELSES-TAB").await);
+    fs::remove_dir_all(&fixture.approval_dir).expect("no approval directory");
+    assert_not_found(fixture.bridge.keep_agent_tab("EARLIER-A").await);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn keeping_an_earlier_tab_never_undoes_runtime_agents_update_of_the_record() {
+    let fixture = ApprovalFixture::origin();
+    fs::remove_file(&fixture.marker_path).expect("no run holds the browser");
+    write_leftover_tabs(
+        &fixture,
+        json!([{ "tabId": "EARLIER-A" }, { "tabId": "EARLIER-B" }]),
+    );
+    // A run ends meanwhile: under the approval directory's lock,
+    // runtime-agent adds the run's tab it could not close to the record.
+    let (locked, runtime_agent_holds_the_lock) = std::sync::mpsc::channel();
+    let approval_dir = fixture.approval_dir.clone();
+    let runtime_agent = std::thread::spawn(move || {
+        let directory = fs::File::open(&approval_dir).expect("open the approval directory");
+        fs2::FileExt::lock_exclusive(&directory).expect("lock the approval directory");
+        locked.send(()).expect("report the lock");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        write_private_json(
+            &approval_dir.join(LEFTOVER_AGENT_TABS_FILE),
+            &json!({ "version": 1, "tabs": [
+                { "tabId": "EARLIER-A" }, { "tabId": "EARLIER-B" }, { "tabId": "TAB-A" }
+            ] }),
+        );
+        fs2::FileExt::unlock(&directory).expect("unlock the approval directory");
+    });
+    runtime_agent_holds_the_lock
+        .recv()
+        .expect("runtime-agent holds the lock");
+
+    // A person keeps EARLIER-A in that moment: both changes stand.
+    fixture
+        .bridge
+        .keep_agent_tab("EARLIER-A")
+        .await
+        .expect("keep a leftover tab");
+    runtime_agent
+        .join()
+        .expect("runtime-agent settles the record");
+    assert_eq!(
+        fixture.bridge.agent_tabs().await.tab_ids,
+        vec!["EARLIER-B", "TAB-A"]
+    );
+}

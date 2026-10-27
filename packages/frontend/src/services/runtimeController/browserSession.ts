@@ -9,7 +9,40 @@ export type RuntimeBrowserSessionPage = {
   isActive: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
+  /**
+   * Who opened the tab, when the browser says so. Only "agent" and "person"
+   * are kept; anything else is dropped, and an absent value is the person's.
+   */
+  openedBy?: BrowserTabOpener;
+  /** One of Octo's tabs a person kept open past the end of the turn. */
+  kept?: boolean;
+  /**
+   * The number one of Octo's tabs was opened with, which it keeps while it is
+   * open: prompts, Octo and Studio all call it "Octo's tab <number>".
+   */
+  agentTabNumber?: number;
+  /**
+   * One of Octo's tabs that an earlier run left open: badged as Octo's, with
+   * no number, and not one Octo is reading.
+   */
+  leftover?: boolean;
 };
+
+/** The highest number a Shared Browser run gives one of Octo's tabs. */
+const MAX_AGENT_TAB_NUMBER = 999;
+
+export function parseAgentTabNumber(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= MAX_AGENT_TAB_NUMBER
+    ? (value as number)
+    : undefined;
+}
+
+/** Who opened a browser tab: the agent (Octo) or the person. */
+export type BrowserTabOpener = "agent" | "person";
+
+export function parseBrowserTabOpener(value: unknown): BrowserTabOpener | undefined {
+  return value === "agent" || value === "person" ? value : undefined;
+}
 
 export type SharedBrowserViewerKind = "rfb" | "cdp-screencast" | "webrtc";
 
@@ -243,7 +276,7 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
     : [];
 
   return pages
-    .map((entry) => {
+    .map((entry): RuntimeBrowserSessionPage | null => {
       if (!entry || typeof entry !== "object") {
         return null;
       }
@@ -262,6 +295,8 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
       if (!id || !url || !label) {
         return null;
       }
+      const openedBy = parseBrowserTabOpener(record.openedBy);
+      const agentTabNumber = openedBy === "agent" ? parseAgentTabNumber(record.agentTabNumber) : undefined;
       return {
         id,
         url,
@@ -271,6 +306,10 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
         isActive,
         canGoBack: record.canGoBack === true,
         canGoForward: record.canGoForward === true,
+        ...(openedBy ? { openedBy } : {}),
+        ...(openedBy === "agent" && record.kept === true ? { kept: true } : {}),
+        ...(agentTabNumber ? { agentTabNumber } : {}),
+        ...(openedBy === "agent" && record.leftover === true ? { leftover: true } : {}),
       } satisfies RuntimeBrowserSessionPage;
     })
     .filter((page): page is RuntimeBrowserSessionPage => Boolean(page));
@@ -962,6 +1001,62 @@ export async function focusRuntimeBrowserSessionPage(params: {
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     throw new Error(`browser page focus failed (${response.status}): ${text}`);
+  }
+
+  return true;
+}
+
+/**
+ * Keep tab: one of Octo's tabs stays open when its turn ends, as an ordinary
+ * tab. It gives nobody any access.
+ */
+export async function keepRuntimeBrowserSessionPage(params: {
+  projectId: string;
+  browserSessionId: string;
+  pageId: string;
+  preferRuntimeId?: string | null;
+  accessToken?: string | null;
+}): Promise<boolean> {
+  const pageId = params.pageId.trim();
+  if (!pageId) {
+    return false;
+  }
+
+  const token = await requestOriginAccessToken({
+    projectId: params.projectId,
+    protocol: "http",
+    scopes: ["browser.control"],
+    preferRuntime: params.preferRuntimeId ?? null,
+    accessToken: params.accessToken ?? null,
+    browserSessionId: params.browserSessionId,
+  });
+
+  if (!token) {
+    return false;
+  }
+
+  const response = await fetch(
+    buildOriginEndpointUrl(token.endpoint, `/browser/pages/${encodeURIComponent(pageId)}/keep`),
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token.token}`,
+      },
+    },
+  );
+
+  // The origin answers 404 once the turn has ended or the tab is not Octo's.
+  if (response.status === 404) {
+    throw new Error("This tab is no longer one of Octo's tabs, so there is nothing to keep.");
+  }
+
+  if (browserSessionStatusIndicatesUnavailable(response.status)) {
+    return false;
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Keeping the tab failed (${response.status}): ${text}`);
   }
 
   return true;

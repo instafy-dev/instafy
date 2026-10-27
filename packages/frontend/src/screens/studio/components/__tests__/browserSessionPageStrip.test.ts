@@ -29,6 +29,9 @@ function runtimePage(
     isActive: overrides.isActive ?? false,
     canGoBack: overrides.canGoBack ?? false,
     canGoForward: overrides.canGoForward ?? false,
+    ...(overrides.openedBy ? { openedBy: overrides.openedBy } : {}),
+    ...(overrides.agentTabNumber ? { agentTabNumber: overrides.agentTabNumber } : {}),
+    ...(overrides.leftover ? { leftover: true } : {}),
   };
 }
 
@@ -69,6 +72,40 @@ describe("browser session page ordering", () => {
         activePageId: "pear",
       }).map((page) => page.id),
     ).toEqual(["pear", "bbc"]);
+  });
+
+  it("keeps the number of each of Octo's live tabs", () => {
+    const pages = reconcileBrowserSessionPageOrder({
+      currentPages: [],
+      livePages: [
+        runtimePage({ id: "agent", label: "Agent", openedBy: "agent", agentTabNumber: 3 }),
+        runtimePage({ id: "person", label: "Person" }),
+        runtimePage({ id: "earlier", label: "Earlier", openedBy: "agent", leftover: true }),
+      ],
+      activePageId: null,
+    });
+    expect(pages.map((page) => [page.id, page.agentTabNumber ?? null, page.leftover ?? false])).toEqual([
+      ["agent", 3, false],
+      ["person", null, false],
+      ["earlier", null, true],
+    ]);
+  });
+
+  it("keeps who opened each live tab", () => {
+    const pages = reconcileBrowserSessionPageOrder({
+      currentPages: [],
+      livePages: [
+        runtimePage({ id: "agent", label: "Agent", openedBy: "agent" }),
+        runtimePage({ id: "person", label: "Person", openedBy: "person" }),
+        runtimePage({ id: "legacy", label: "Legacy" }),
+      ],
+      activePageId: null,
+    });
+    expect(pages.map((page) => [page.id, page.openedBy])).toEqual([
+      ["agent", "agent"],
+      ["person", "person"],
+      ["legacy", undefined],
+    ]);
   });
 });
 

@@ -8,12 +8,13 @@ import {
   useState,
 } from "react";
 import { NavArrowLeft, NavArrowRight, Refresh } from "iconoir-react";
-import { IconButton } from "../../../components/Button";
+import { Button, IconButton } from "../../../components/Button";
 import { browserSessionPageIsPlaceholder, type BrowserSessionPage } from "./browserSessionPages";
 import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
 import { BrowserChromeShell } from "./BrowserChromeShell";
 import { SendPageToOctoButton } from "./SendPageToOctoButton";
+import { resolveAgentTabIds, sharedBrowserAgentTabLabel } from "./browserAgentTabs";
 import {
   HUMAN_SHARED_BROWSER_CONTROL_OWNER,
   type SharedBrowserControlOwner,
@@ -39,12 +40,16 @@ export type SharedBrowserChromeProps = {
   onClearError: () => void;
   /** Send page to Octo for the page on screen; absent when this person cannot. */
   onSendPage?: (pageId: string) => void;
+  /** Keep tab: one of Octo's tabs stays open when its turn ends. */
+  onKeepPage?: (pageId: string) => void;
   sendPagePending?: boolean;
   toolbarLeading?: ReactNode;
   toolbarStatus?: ReactNode;
   /** Put compact history and reload controls in the existing browser options menu. */
   toolbarActions?: ReactNode | ((compactNavigation: ReactNode) => ReactNode);
   controlOwner?: SharedBrowserControlOwner;
+  /** Tabs an agent run is bound to; with the tabs it opened, they carry its name while it has control. */
+  agentPageIds?: readonly string[];
   interactionEnabled?: boolean;
   controls?: {
     navigate: boolean;
@@ -63,8 +68,20 @@ export function normalizeSharedBrowserAddress(rawAddress: string): string | null
   return normalizeBrowserAddress(rawAddress);
 }
 
-function pageOptionLabel(page: BrowserSessionPage): string {
-  return page.title?.trim() || page.label.trim() || page.host.trim() || page.url;
+export const KEEP_TAB_LABEL = "Keep tab";
+
+function pageOptionLabel(page: BrowserSessionPage, agentName: string | null = null): string {
+  const label = page.title?.trim() || page.label.trim() || page.host.trim() || page.url;
+  // A tab Octo opened says so for everyone watching, with the number its
+  // prompts use ("Octo's tab 2"), while Octo holds it, after control ends
+  // (Pause, take-over) and when a person kept it.
+  if (page.openedBy === "agent") {
+    return `${sharedBrowserAgentTabLabel(page)}${page.kept ? ", kept" : ""}: ${label}`;
+  }
+  // A native option shows text only, so the tab the agent holds carries its
+  // name while the agent holds it.
+  if (agentName) return `${agentName} · ${label}`;
+  return label;
 }
 
 function ChromeButton({
@@ -112,11 +129,13 @@ export function SharedBrowserChrome({
   onFocusPage,
   onClearError,
   onSendPage,
+  onKeepPage,
   sendPagePending = false,
   toolbarLeading,
   toolbarStatus,
   toolbarActions,
   controlOwner = HUMAN_SHARED_BROWSER_CONTROL_OWNER,
+  agentPageIds,
   interactionEnabled,
   controls = { navigate: true, history: true, reload: true, focusPage: true },
 }: SharedBrowserChromeProps) {
@@ -124,6 +143,12 @@ export function SharedBrowserChrome({
     () => pages.find((page) => page.isActive) ?? pages[0] ?? null,
     [pages],
   );
+  const agentName = controlOwner.kind === "agent" ? controlOwner.displayName : null;
+  const agentTabIds = useMemo(
+    () => resolveAgentTabIds({ pages, agentControlActive: agentName !== null, agentPageIds }),
+    [agentName, agentPageIds, pages],
+  );
+  const tabLabel = (page: BrowserSessionPage) => pageOptionLabel(page, agentTabIds.has(page.id) ? agentName : null);
   // A blank tab has no address to edit: the field shows its placeholder, so
   // typing there never lands after "about:blank".
   const activePageAddress = activePage && !browserSessionPageIsPlaceholder(activePage) ? activePage.url : "";
@@ -216,22 +241,37 @@ export function SharedBrowserChrome({
     </ChromeButton>
   );
   const pageSelectionDisabled = !resolved || busy || !controls.focusPage || !humanHasControl;
+  // On one of Octo's tabs that is not kept yet: it closes when Octo's turn
+  // ends unless someone keeps it. Works while Octo has control.
+  const keepTab = onKeepPage && resolved && activePage?.openedBy === "agent" && !activePage.kept ? (
+    <Button
+      className="shrink-0"
+      data-testid="shared-browser-keep-tab"
+      onPress={() => onKeepPage(activePage.id)}
+      size="sm"
+      title="Octo's tab closes when its turn ends. Keep it open as an ordinary tab."
+      type="button"
+      variant="ghost"
+    >
+      {KEEP_TAB_LABEL}
+    </Button>
+  ) : null;
   const pageSelect = (
     <select
       aria-label="Shared browser tab"
-      aria-description={`${pages.length} tabs. Current tab: ${activePage ? pageOptionLabel(activePage) : "none"}`}
+      aria-description={`${pages.length} tabs${agentName && agentTabIds.size ? `, ${agentTabIds.size} used by ${agentName}` : ""}. Current tab: ${activePage ? tabLabel(activePage) : "none"}`}
       className={compact
         ? "absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-default"
         : "h-8 w-36 shrink-0 truncate rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700 outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20 max-[540px]:h-10 pointer-coarse:h-11 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-slate-950 dark:text-slate-200"}
       data-testid="shared-browser-page-select"
       disabled={pageSelectionDisabled}
       onChange={(event) => onFocusPage(event.target.value)}
-      title={activePage ? pageOptionLabel(activePage) : "Shared browser tab"}
+      title={activePage ? tabLabel(activePage) : "Shared browser tab"}
       value={activePage?.id ?? ""}
     >
       {pages.map((page) => (
-        <option key={page.id} value={page.id}>
-          {pageOptionLabel(page)}
+        <option key={page.id} value={page.id} data-agent-tab={agentTabIds.has(page.id) ? "true" : undefined}>
+          {tabLabel(page)}
         </option>
       ))}
     </select>
@@ -247,7 +287,8 @@ export function SharedBrowserChrome({
       >
         <span
           aria-hidden="true"
-          className="inline-flex h-5 min-w-5 items-center justify-center rounded-[5px] border-[1.5px] border-current px-0.5 text-[10px] font-semibold"
+          className={`inline-flex h-5 min-w-5 items-center justify-center rounded-[5px] border-[1.5px] border-current px-0.5 text-[10px] font-semibold ${agentTabIds.size ? "text-violet-700 dark:text-violet-300" : ""}`}
+          data-agent-tabs={agentTabIds.size || undefined}
         >
           {pages.length}
         </span>
@@ -319,13 +360,16 @@ export function SharedBrowserChrome({
           </div>
         }
         status={toolbarStatus}
-        actions={onSendPage ? (
+        actions={onSendPage || keepTab ? (
           <>
-            <SendPageToOctoButton
-              onPress={() => activePage && onSendPage(activePage.id)}
-              pending={sendPagePending}
-              disabled={!resolved || !activePage || browserSessionPageIsPlaceholder(activePage) || !/^https?:\/\//i.test(activePage.url)}
-            />
+            {keepTab}
+            {onSendPage ? (
+              <SendPageToOctoButton
+                onPress={() => activePage && onSendPage(activePage.id)}
+                pending={sendPagePending}
+                disabled={!resolved || !activePage || browserSessionPageIsPlaceholder(activePage) || !/^https?:\/\//i.test(activePage.url)}
+              />
+            ) : null}
             {typeof toolbarActions === "function" ? toolbarActions(compactNavigation) : toolbarActions}
           </>
         ) : typeof toolbarActions === "function" ? toolbarActions(compactNavigation) : toolbarActions}

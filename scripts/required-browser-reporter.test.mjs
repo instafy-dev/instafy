@@ -35,7 +35,7 @@ test("accepts actual first-attempt passes and writes a bounded receipt", async (
   const run = setup(t); run.begin(); run.pass();
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "passed" });
   const receipt = JSON.parse(fs.readFileSync(path.join(run.outputDir, "required-browser-result.json"), "utf8"));
-  assert.equal(receipt.passed, 4); assert.equal(receipt.skipped, 0);
+  assert.equal(receipt.passed, REQUIRED_BROWSER_LANES.personal.titles.length); assert.equal(receipt.skipped, 0);
   assert.ok(receipt.tests.every((item) => !item.file.includes("/")));
 });
 
@@ -50,6 +50,13 @@ test("rejects a zero-test or filtered-out required case even if runner exits suc
 test("minimum count does not hide a replaced cookie proof", async (t) => {
   const run = setup(t); run.tests[2].title = "unrelated passing test";
   run.begin(); run.pass();
+  assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
+});
+
+test("Personal lane fails when its real-Chromium request-guard proof is filtered out", async (t) => {
+  const guardProof = "stops agent-driven page loads on a link-only site or a private address, also by the address actually connected to";
+  const run = setup(t); const others = run.tests.filter((item) => item.title !== guardProof);
+  run.begin(others); run.pass(others);
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
 });
 

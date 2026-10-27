@@ -668,6 +668,7 @@ mod tests {
                 space_path: "scripts/run.mjs".into(),
             }),
             node: NodeRequirement::parse(">=22"),
+            env: Vec::new(),
         }
     }
 

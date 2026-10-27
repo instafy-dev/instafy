@@ -59,6 +59,22 @@ struct BrowserPageResponse {
     is_active: bool,
     can_go_back: bool,
     can_go_forward: bool,
+    /// "agent" on one of the tabs Octo opened in the running turn, or that an
+    /// earlier run left open: shown with Octo's badge to every viewer. Absent
+    /// on a person's tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opened_by: Option<&'static str>,
+    /// A tab of Octo's that a person kept open past the end of the turn.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    kept: bool,
+    /// The number one of Octo's tabs was opened with, which it keeps while it
+    /// is open: Studio, prompts and Octo all call it "Octo's tab <number>".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_tab_number: Option<u64>,
+    /// One of Octo's tabs that an earlier run left open (badged, with no
+    /// number): Octo is not reading it, and Keep tab makes it an ordinary tab.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    leftover: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,6 +297,11 @@ pub fn control_routes() -> Router<AppState> {
             "/browser/pages/:page_id/capture",
             post(crate::browser_page_capture::handle_browser_page_capture)
                 .layer(DefaultBodyLimit::max(BROWSER_PAGE_CAPTURE_BODY_LIMIT_BYTES)),
+        )
+        // Keep tab: one of Octo's tabs stays open when the turn ends.
+        .route(
+            "/browser/pages/:page_id/keep",
+            post(crate::browser_approval::handle_keep_agent_tab),
         )
         .route(
             "/browser/approval/decision",
@@ -1027,6 +1048,11 @@ async fn handle_browser_pages(
     } else {
         BrowserNavigationState::default()
     };
+    let agent_tabs = state
+        .browser_collaboration
+        .approval_bridge()
+        .agent_tabs()
+        .await;
     let pages = targets
         .into_iter()
         .map(|target| {
@@ -1042,6 +1068,10 @@ async fn handle_browser_pages(
                 is_active: active_page_id.as_deref() == Some(target.id.as_str()),
                 can_go_back: has_history_state && history_state.can_go_back,
                 can_go_forward: has_history_state && history_state.can_go_forward,
+                opened_by: agent_tabs.tab_ids.contains(&target.id).then_some("agent"),
+                kept: agent_tabs.kept.contains(&target.id),
+                agent_tab_number: agent_tabs.number_of(&target.id),
+                leftover: agent_tabs.is_leftover(&target.id),
             }
         })
         .collect();
@@ -1904,6 +1934,10 @@ mod tests {
             is_active: true,
             can_go_back: true,
             can_go_forward: false,
+            opened_by: None,
+            kept: false,
+            agent_tab_number: None,
+            leftover: false,
         };
         let value = serde_json::to_value(page).expect("serialize browser page");
         assert_eq!(
@@ -1915,6 +1949,54 @@ mod tests {
             Some(false)
         );
         assert!(value.get("can_go_back").is_none());
+        // A page that is not one of Octo's tabs carries no badge fields.
+        assert!(value.get("openedBy").is_none());
+        assert!(value.get("kept").is_none());
+        assert!(value.get("agentTabNumber").is_none());
+        assert!(value.get("leftover").is_none());
+    }
+
+    #[test]
+    fn octos_tabs_are_badged_in_the_page_list() {
+        let page = BrowserPageResponse {
+            id: "page-2".to_string(),
+            url: "https://example.com/".to_string(),
+            host: "example.com".to_string(),
+            label: "Example".to_string(),
+            title: None,
+            is_active: false,
+            can_go_back: false,
+            can_go_forward: false,
+            opened_by: Some("agent"),
+            kept: true,
+            agent_tab_number: Some(2),
+            leftover: false,
+        };
+        let value = serde_json::to_value(page).expect("serialize browser page");
+        assert_eq!(value["openedBy"], "agent");
+        assert_eq!(value["kept"], true);
+        assert_eq!(value["agentTabNumber"], 2);
+        assert!(value.get("leftover").is_none());
+
+        // A tab an earlier run left open is badged as Octo's, with no number.
+        let earlier = BrowserPageResponse {
+            id: "page-3".to_string(),
+            url: "https://example.com/".to_string(),
+            host: "example.com".to_string(),
+            label: "Example".to_string(),
+            title: None,
+            is_active: false,
+            can_go_back: false,
+            can_go_forward: false,
+            opened_by: Some("agent"),
+            kept: false,
+            agent_tab_number: None,
+            leftover: true,
+        };
+        let value = serde_json::to_value(earlier).expect("serialize browser page");
+        assert_eq!(value["openedBy"], "agent");
+        assert_eq!(value["leftover"], true);
+        assert!(value.get("agentTabNumber").is_none());
     }
 
     #[test]

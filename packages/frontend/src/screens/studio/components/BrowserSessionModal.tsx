@@ -42,6 +42,8 @@ import { BrowserExpandButton } from "./BrowserExpandButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { RemoteControlSurface } from "./RemoteControlSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
+import { BrowserReadingRow } from "./BrowserReadingRow";
+import { resolveAgentReadingPages } from "./browserAgentTabs";
 import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHandoffRouting";
 import { ActionTicker } from "./ActionTicker";
 import { SharedBrowserCollaborationControls } from "./SharedBrowserCollaborationControls";
@@ -504,7 +506,12 @@ export function BrowserSessionModal({
   humanInputRunIds?: ReadonlySet<string> | null;
   currentUserId?: string | null;
   activeBrowserRunId?: string | null;
-  onTakeOverAgent?: (() => Promise<boolean>) | null;
+  /**
+   * Take over. `agentHoldsBrowser`: the browser reports the agent's control,
+   * which spans every tab, so the run is stopped from whichever tab is on
+   * screen.
+   */
+  onTakeOverAgent?: ((options?: { agentHoldsBrowser?: boolean }) => Promise<boolean>) | null;
   onContinueAfterHumanInput?: ((message: string) => Promise<boolean>) | null;
   sharedBrowserRfbCapabilities?: RuntimeBrowserSessionCapabilities["rfb"] | null;
   sharedBrowserWebRtcCapabilities?: RuntimeBrowserSessionCapabilities["webrtc"] | null;
@@ -1012,10 +1019,21 @@ export function BrowserSessionModal({
     canTakeOver: transportActive && canControlBrowser && Boolean(effectiveAgentControlOwner && onTakeOverAgent),
     humanControlConfirmed: humanInputEnabled,
     canContinue: transportActive && Boolean(onContinueAfterHumanInput),
-    onTakeOver: async () => onTakeOverAgent ? onTakeOverAgent() : false,
+    onTakeOver: async () => onTakeOverAgent
+      ? onTakeOverAgent({ agentHoldsBrowser: effectiveAgentControlOwner !== null })
+      : false,
     onContinue: async (message: string) => onContinueAfterHumanInput ? onContinueAfterHumanInput(message) : false,
   };
   const browserHumanInputState = useBrowserHumanInput(browserHumanInputOptions);
+  // The pages the agent is reading while it holds this browser: its own tabs
+  // and the tab its run is bound to. Take over there is the same action as
+  // the toolbar's, and the origin's runtime-wide agent marker it ends covers
+  // every tab.
+  const agentReadingPages = resolveAgentReadingPages({
+    pages: sharedBrowserChrome?.pages ?? [],
+    agentControlActive: effectiveAgentControlOwner !== null,
+    agentPageIds: sharedBrowserChrome?.agentPageIds,
+  });
   const collapsedCardMode = shouldCollapseDocked
     ? error
       ? limitReached
@@ -3273,6 +3291,18 @@ export function BrowserSessionModal({
         />
       ) : null}
 
+      {!shouldCollapseDocked && fillContainer && sharedBrowserChrome && viewLive && effectiveAgentControlOwner ? (
+        <BrowserReadingRow
+          pages={agentReadingPages}
+          agentName={effectiveAgentControlOwner.displayName}
+          canTakeOver={browserHumanInputOptions.canTakeOver &&
+            (!browserHumanInputState.active || browserHumanInputState.busy === "takeover")}
+          takingOver={browserHumanInputState.busy === "takeover"}
+          // The toolbar's take-over controls already say why a take-over failed.
+          error={humanInputIdentityKey ? null : browserHumanInputState.error}
+          onTakeOver={() => void browserHumanInputState.takeOver()}
+        />
+      ) : null}
       {sharedBrowserApproval.routineApprovedRunId && sharedBrowserApproval.routineApprovedRunId === activeBrowserRunId ? (
         <div className="shrink-0 border-b border-slate-200 px-3 py-1 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400" role="status" data-testid="shared-browser-routine-status">
           Routine browsing allowed for this turn · Take over or stop the turn to revoke.

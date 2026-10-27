@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // The hosted web release identity. Served publicly at /instafy-build.json as
 // {"schemaVersion":2,"releaseId":...}. One public commit pins every input of
-// the hosted build: core source, the vendored robot slice, the performance
-// bridge, the hosted manifest, the lockfile and the pinned submodule. The
+// the hosted build: core source, the performance bridge, the hosted
+// manifest, the lockfile and the pinned submodule. The
 // digest is compared by the private release train and the client lanes; it is
 // never parsed.
 

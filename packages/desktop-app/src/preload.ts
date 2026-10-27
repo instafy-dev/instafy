@@ -76,6 +76,10 @@ export type PersonalBrowserStatus = {
   approvalPolicyVersion?: number;
   takeoverRequestId?: string;
   sharing?: boolean;
+  /** Every open tab; tabs the agent opened carry openedBy "agent". */
+  tabs?: Array<{ id: string; openedBy: "person" | "agent"; active: boolean; url: string; title?: string }>;
+  activeTabId?: string;
+  maxAgentTabs?: number;
   ownerId?: string;
   projectId?: string;
   runtimeId?: string;
@@ -466,6 +470,12 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
   /** Send page to Octo: the page on screen, read once and masked by Desktop. */
   personalBrowserReadPage: async (options: { ownerId: string }): Promise<PersonalBrowserSentPage> => {
     return (await ipcRenderer.invoke("instafy:personalBrowserReadPage", options)) as PersonalBrowserSentPage;
+  },
+  personalBrowserSelectTab: async (options: { ownerId: string; tabId: string }): Promise<PersonalBrowserStatus> => {
+    return (await ipcRenderer.invoke("instafy:personalBrowserSelectTab", options)) as PersonalBrowserStatus;
+  },
+  personalBrowserCloseTab: async (options: { ownerId: string; tabId: string }): Promise<PersonalBrowserStatus> => {
+    return (await ipcRenderer.invoke("instafy:personalBrowserCloseTab", options)) as PersonalBrowserStatus;
   },
   personalBrowserGoBack: async (options: { ownerId: string }): Promise<PersonalBrowserStatus> => {
     return (await ipcRenderer.invoke("instafy:personalBrowserGoBack", options)) as PersonalBrowserStatus;

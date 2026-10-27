@@ -353,8 +353,16 @@ pub async fn maybe_restore_and_launch(client: &ControllerClient, registration: &
         }
     }
     if !running {
-        if let Err(error) = launch_chromium().await {
-            warn!(?error, "failed to launch Chromium after profile restore");
+        match launch_chromium().await {
+            // A browser that started again has none of an earlier run's tabs
+            // of Octo's; the record of them is settled now.
+            Ok(()) => {
+                let _ = tokio::task::spawn_blocking(
+                    crate::shared_browser::close_leftover_agent_tabs_after_browser_start,
+                )
+                .await;
+            }
+            Err(error) => warn!(?error, "failed to launch Chromium after profile restore"),
         }
     }
 }
