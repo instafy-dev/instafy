@@ -111,7 +111,7 @@ describe("the provider list (skill-owned data)", () => {
     expect(BUNDLED_SEARCH_PROVIDERS).toEqual(JSON.parse(fs.readFileSync(PROVIDERS_PATH, "utf8")));
     const catalog = loadSearchProviders();
     expect(catalog.warnings).toEqual([]);
-    expect(catalog.chains.get("web-search")).toEqual(["brave-own-key", "kagi-own-key"]);
+    expect(catalog.chains.get("web-search")).toEqual({ mode: "first", providers: ["brave-own-key", "kagi-own-key"] });
     expect(catalog.providers.get("brave-own-key")).toMatchObject({
       method: "GET",
       host: "api.search.brave.com",
@@ -138,7 +138,7 @@ describe("the provider list (skill-owned data)", () => {
     const refused = (data: unknown) => {
       const catalog = loadSearchProviders(data);
       expect(catalog.providers.size).toBe(0);
-      expect(catalog.chains.get("web-search")).toEqual([]);
+      expect(catalog.chains.get("web-search")).toEqual({ mode: "first", providers: [] });
       return catalog.warnings.join("\n");
     };
     expect(refused(variant((e) => (e.request.query.extra_snippets = "true")))).toMatch(/asks for page text \(extra_snippets\)/);
@@ -150,7 +150,8 @@ describe("the provider list (skill-owned data)", () => {
     }))).toMatch(/asks for page text \(extract\)/);
     expect(refused(variant((e) => (e.request.url = "http://api.search.brave.com/res/v1/web/search")))).toMatch(/must be https/);
     expect(refused(variant((e) => (e.request.url = "https://10.0.0.8/search")))).toMatch(/public host/);
-    expect(refused(variant((e) => (e.request.url = "https://{lang}.search.example/search")))).toMatch(/placeholders/);
+    expect(refused(variant((e) => (e.request.url = "https://{lang}.search.example/search")))).toMatch(/only a provider without a key may put \{lang\} in its host/);
+    expect(refused(variant((e) => (e.request.url = "https://api.search.brave.com/{lang}/search")))).toMatch(/placeholders/);
     expect(refused(variant((e) => (e.request.auth.header = "Cookie")))).toMatch(/may not be Cookie/);
     expect(refused(variant((e) => (e.request.query.q = "{query}{password}")))).toMatch(/not a template/);
     expect(refused(variant((e) => (e.cache = { allowed: true })))).toMatch(/never cached/);
@@ -607,7 +608,7 @@ describe("what the room keeps, and the command", () => {
     const web = new Command("web");
     registerWebSearchCommand(web);
     const search = web.commands.find((c) => c.name() === "search")!;
-    expect(search.options.map((o) => o.long)).toEqual(["--count", "--site", "--lang", "--country", "--chain", "--json"]);
+    expect(search.options.map((o) => o.long)).toEqual(["--count", "--site", "--lang", "--country", "--chain", "--provider", "--json"]);
   });
 
   it("carries the skill's provider list in the built CLI and refuses outside a turn there too", () => {

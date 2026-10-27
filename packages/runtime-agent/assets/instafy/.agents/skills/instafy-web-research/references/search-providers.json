@@ -1,6 +1,6 @@
 {
   "schema": "instafy.search-providers@1",
-  "about": "The web search providers `instafy web search` may use, and in which order (`chains`). A provider whose key is not set in the space (`key_env`, added through the secret-request card) is skipped; the first one left answers. `request` says where a search goes: an https `url` (GET with `query` values, or POST with a JSON `body`), and `auth` the header that carries the key (with `prefix`, such as \"Bearer \"). A key is only ever sent to the host of its own entry's `url`. Values may use {query}, {site} (the `site_filter` with {host} filled in, or nothing), {count}, {lang} and {country}; a value whose placeholder is not given is left out. `results` names where the result list is in the answer (`list`, a dotted path) and each result's `title`, `url` and `snippet`; `where` keeps only the items whose fields have these values. `daily_limit` is the most searches a day with one space's key. Results are never cached (`cache.allowed` is false): search only finds links, and Octo cites the pages it reads. Never add a parameter that asks for page text (`extra_snippets`, `summary`, `extract`). Changing provider is an edit here plus a fixture test, not code.",
+  "about": "The web search providers `instafy web search` may use, and in which order (`chains`). A provider whose key is not set in the space (`key_env`, added through the secret-request card) is skipped; the first one left answers. `request` says where a search goes: an https `url` (GET with `query` values, or POST with a JSON `body`), and `auth` the header that carries the key (with `prefix`, such as \"Bearer \"). A key is only ever sent to the host of its own entry's `url`. Values may use {query}, {site} (the `site_filter` with {host} filled in, or nothing), {count}, {lang} and {country}; a value whose placeholder is not given is left out. `results` names where the result list is in the answer (`list`, a dotted path) and each result's `title`, `url` and `snippet`; `where` keeps only the items whose fields have these values. `daily_limit` is the most searches a day with one space's key. Results are never cached (`cache.allowed` is false): search only finds links, and Octo cites the pages it reads. Never add a parameter that asks for page text (`extra_snippets`, `summary`, `extract`). A chain is a list asked in order until one provider answers, or {\"mode\": \"all\", \"providers\": [...]} to ask each one (`reference-search`: Wikipedia, Wikivoyage and the official websites Wikidata records, which need no key). A provider without a key may put {lang} first in its host (with `defaults.lang`), and a result's `url` or `source` may be an https template of the result's fields. A value writes a literal brace as {{ or }}, and {query:sparql} writes the query inside a SPARQL string. A space switches a provider off with its own copy of this file, {\"schema\": \"instafy.search-providers@1\", \"off\": [\"wikidata-official-site\"]}; a copy can do nothing else. Never add Nominatim: its usage policy bars use as a generic geocoder by platforms like this one. Changing provider is an edit here plus a fixture test, not code.",
   "reviewed": "2026-10",
   "providers": {
     "brave-own-key": {
@@ -45,9 +45,64 @@
       "daily_limit": 100,
       "cache": { "allowed": false },
       "terms": "https://kagi.com/privacy/api"
+    },
+    "wikipedia": {
+      "protocol": "http-json-search",
+      "label": "Wikipedia",
+      "request": {
+        "method": "GET",
+        "url": "https://{lang}.wikipedia.org/w/rest.php/v1/search/page",
+        "query": { "q": "{query}", "limit": "{count}" }
+      },
+      "defaults": { "lang": "en" },
+      "results": { "list": "pages", "title": "title", "url": "https://{lang}.wikipedia.org/wiki/{key}", "snippet": ["description", "excerpt"] },
+      "max_count": 10,
+      "max_concurrent": 1,
+      "cache": { "allowed": false },
+      "attribution": "Wikipedia, CC BY-SA 4.0",
+      "license": "CC BY-SA 4.0",
+      "terms": "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use"
+    },
+    "wikivoyage": {
+      "protocol": "http-json-search",
+      "label": "Wikivoyage",
+      "request": {
+        "method": "GET",
+        "url": "https://{lang}.wikivoyage.org/w/rest.php/v1/search/page",
+        "query": { "q": "{query}", "limit": "{count}" }
+      },
+      "defaults": { "lang": "en" },
+      "results": { "list": "pages", "title": "title", "url": "https://{lang}.wikivoyage.org/wiki/{key}", "snippet": ["description", "excerpt"] },
+      "max_count": 10,
+      "max_concurrent": 1,
+      "cache": { "allowed": false },
+      "attribution": "Wikivoyage, CC BY-SA 4.0",
+      "license": "CC BY-SA 4.0",
+      "terms": "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use"
+    },
+    "wikidata-official-site": {
+      "protocol": "http-json-search",
+      "label": "Wikidata (official websites)",
+      "request": {
+        "method": "GET",
+        "url": "https://query.wikidata.org/sparql",
+        "query": {
+          "query": "SELECT ?item ?itemLabel ?itemDescription ?website WHERE {{ SERVICE wikibase:mwapi {{ bd:serviceParam wikibase:endpoint \"www.wikidata.org\"; wikibase:api \"EntitySearch\"; mwapi:search \"{query:sparql}\"; mwapi:language \"{lang}\". ?item wikibase:apiOutputItem mwapi:item. }} ?item wdt:P856 ?website. SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"{lang},en\". }} }} LIMIT {count}",
+          "format": "json"
+        }
+      },
+      "defaults": { "lang": "en" },
+      "results": { "list": "results.bindings", "title": "itemLabel.value", "url": "website.value", "snippet": "itemDescription.value", "source": "item.value" },
+      "max_count": 10,
+      "max_concurrent": 1,
+      "cache": { "allowed": false },
+      "attribution": "Wikidata, CC0",
+      "license": "CC0 1.0",
+      "terms": "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use"
     }
   },
   "chains": {
-    "web-search": ["brave-own-key", "kagi-own-key"]
+    "web-search": ["brave-own-key", "kagi-own-key"],
+    "reference-search": { "mode": "all", "providers": ["wikipedia", "wikivoyage", "wikidata-official-site"] }
   }
 }

@@ -1,0 +1,24 @@
+{
+  "head": { "vars": ["item", "itemLabel", "itemDescription", "website"] },
+  "results": {
+    "bindings": [
+      {
+        "item": { "type": "uri", "value": "http://www.wikidata.org/entity/Q208553" },
+        "website": { "type": "uri", "value": "https://www.torrebelem.example/" },
+        "itemLabel": { "xml:lang": "en", "type": "literal", "value": "Belém Tower" },
+        "itemDescription": { "xml:lang": "en", "type": "literal", "value": "fortified tower in Lisbon, Portugal" }
+      },
+      {
+        "item": { "type": "uri", "value": "http://www.wikidata.org/entity/Q3884" },
+        "website": { "type": "uri", "value": "https://www.amazon.com/" },
+        "itemLabel": { "xml:lang": "en", "type": "literal", "value": "Amazon" },
+        "itemDescription": { "xml:lang": "en", "type": "literal", "value": "American online retailer, prices from $9.99" }
+      },
+      {
+        "item": { "type": "uri", "value": "http://www.wikidata.org/entity/Q1" },
+        "website": { "type": "uri", "value": "javascript:alert(1)" },
+        "itemLabel": { "type": "literal", "value": "Bad link" }
+      }
+    ]
+  }
+}

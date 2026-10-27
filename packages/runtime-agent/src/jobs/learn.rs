@@ -324,6 +324,8 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v2.md"),
     // From before `instafy web search` was its way to search.
     include_str!("legacy/web-research-v3.md"),
+    // From before reference search (Wikipedia, Wikivoyage, Wikidata) was one of its open sources.
+    include_str!("legacy/web-research-v4.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
