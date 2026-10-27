@@ -75,6 +75,14 @@ Other authorized conversation participants receive visible assistant replies as
 `conversation.reply`. Quiet runs and telemetry remain suppressed; automation
 control failures still notify only the owner, without fanout to project members.
 
+A reply nobody sees in the conversation never notifies. Messages marked
+`presentation.hidden: true` (at the top level or under `details`) and a
+multi-agent plan helper's own messages (`multiAgentPlan.role` of `worker`) stay
+out of the transcript, so they raise no `conversation.reply`, no reply row in
+Home's feed and no unread reply in Home. The lead's reply carries the plan, and
+a helper's question to a person (an `action_request` with a
+`userInputRequestId`) still notifies.
+
 `notification_event_types` is the versioned registry. V1 events store an empty
 payload; display text comes from static templates, not source content. To add a
 category of product events, add a registry entry, its authorization rule and

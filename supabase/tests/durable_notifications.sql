@@ -111,6 +111,27 @@ insert into conversation_messages(id,conversation_id,project_id,role,content,cre
   ('00000000-0000-0000-0000-000000000062','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','private reasoning',null,'{"messageType":"reasoning"}');
 select notification_test_assert((select count(*)=2 from notification_events where event_name='conversation.reply'),'assistant and human replies, telemetry excluded');
 select notification_test_assert((select count(*)=1 from notification_recipients r join notification_events e on e.id=r.event_id where producer_key='conversation.reply:00000000-0000-0000-0000-000000000061' and r.user_id='00000000-0000-0000-0000-000000000002'),'human sender excluded');
+
+-- A reply nobody sees in the conversation never notifies: hidden presentation at
+-- either path on any row, and a plan helper's own messages. The lead's reply, a
+-- helper's question to the person, and a hidden flag that is not the JSON
+-- boolean true (the controller's and Studio's test) still notify.
+begin;
+insert into conversation_messages(id,conversation_id,project_id,role,content,created_by,metadata) values
+  ('30000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','goal plumbing',null,'{"messageType":"goal_update","presentation":{"hidden":true}}'),
+  ('30000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','wrapped goal plumbing',null,'{"messageType":"goal_update","details":{"presentation":{"hidden":true}}}'),
+  ('30000000-0000-0000-0000-000000000003','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','helper answer',null,'{"source":"agent","outcome":"succeeded","multiAgentPlan":{"role":"worker"}}'),
+  ('30000000-0000-0000-0000-000000000004','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','older helper answer',null,'{"source":"agent","multi_agent_plan":{"role":" Worker "}}'),
+  ('30000000-0000-0000-0000-000000000005','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','lead answer',null,'{"source":"agent","outcome":"succeeded","multiAgentPlan":{"role":"lead_continuation"}}'),
+  ('30000000-0000-0000-0000-000000000006','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','helper question',null,'{"messageType":"action_request","multiAgentPlan":{"role":"worker"},"details":{"userInputRequestId":"30000000-0000-4000-8000-0000000000aa"}}'),
+  ('30000000-0000-0000-0000-000000000007','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','shown goal update',null,'{"messageType":"goal_update","presentation":{"hidden":false}}'),
+  ('30000000-0000-0000-0000-000000000008','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','string flag',null,'{"presentation":{"hidden":"true"}}'),
+  ('30000000-0000-0000-0000-000000000009','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','user','hidden human row','00000000-0000-0000-0000-000000000001','{"presentation":{"hidden":true}}'),
+  ('30000000-0000-0000-0000-00000000000a','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','assistant','helper question the Studio folds',null,'{"messageType":"action_request","multiAgentPlan":{"role":"worker"},"details":{"userInputRequestId":"30000000-0000-0000-0000-0000000000aa"}}');
+select notification_test_assert((select count(*)=0 from notification_events where producer_key in ('conversation.reply:30000000-0000-0000-0000-000000000001','conversation.reply:30000000-0000-0000-0000-000000000002','conversation.reply:30000000-0000-0000-0000-000000000009')),'hidden presentation at either path never notifies, whoever wrote it');
+select notification_test_assert((select count(*)=0 from notification_events where producer_key in ('conversation.reply:30000000-0000-0000-0000-000000000003','conversation.reply:30000000-0000-0000-0000-000000000004','conversation.reply:30000000-0000-0000-0000-00000000000a')),'a plan helper''s own reply never notifies, nor a question whose id the Studio rejects');
+select notification_test_assert((select count(*)=4 from notification_events where producer_key in ('conversation.reply:30000000-0000-0000-0000-000000000005','conversation.reply:30000000-0000-0000-0000-000000000006','conversation.reply:30000000-0000-0000-0000-000000000007','conversation.reply:30000000-0000-0000-0000-000000000008')),'lead reply, helper question and non-boolean flags still notify');
+rollback;
 delete from project_memberships where user_id='00000000-0000-0000-0000-000000000002';
 select notification_test_assert((select bool_and(not notification_recipient_authorized(e.id,r.user_id)) from notification_events e join notification_recipients r on r.event_id=e.id where r.user_id='00000000-0000-0000-0000-000000000002'),'project revocation invalidates stale participants');
 delete from conversation_participants where user_id='00000000-0000-0000-0000-000000000002';

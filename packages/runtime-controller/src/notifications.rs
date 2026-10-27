@@ -186,13 +186,16 @@ fn extract_message_type_from_metadata(
     normalize_metadata_string(value)
 }
 
-fn should_include_inbox_message(
-    role: &str,
-    metadata: Option<&serde_json::Map<String, JsonValue>>,
-) -> bool {
+fn should_include_inbox_message(role: &str, metadata: &JsonValue) -> bool {
     if !role.eq_ignore_ascii_case("assistant") {
         return false;
     }
+    // A message the Studio never shows, such as a plan helper's own reply, is
+    // no unread reply either: the transcript would not have it to read.
+    if crate::activity::is_kept_out_of_transcript(metadata) {
+        return false;
+    }
+    let metadata = metadata.as_object();
 
     if let Some(kind) = metadata
         .and_then(|map| map.get("kind"))
@@ -341,7 +344,7 @@ async fn list_my_notification_inbox(
             .unwrap_or(JsonValue::Null);
         let message_metadata_object = message_metadata.as_object();
 
-        if !should_include_inbox_message(&message_role, message_metadata_object) {
+        if !should_include_inbox_message(&message_role, &message_metadata) {
             continue;
         }
 
