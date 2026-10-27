@@ -11,3 +11,4 @@ pub mod proxy_auth;
 mod stream_passthrough;
 mod upstream_error;
 mod usage;
+mod usage_diagnostics;
