@@ -13,7 +13,14 @@
 //   6. moves the pack into place in one rename and records it in installed.json.
 // A pack that is already installed with the pinned tree_sha256 is left as it is.
 //
-//   node scripts/install-skill-packs.mjs [--out <dir>] [--pin <skill-packs.json>] [--require-pinned]
+// A pack's commands (`bin` in its manifest: {"uw": "scripts/uw.mjs"}) are checked with the pack: at
+// most 8, plain names (a-z, 0-9, -) that are not reserved, each a file inside the pack. With
+// --install-root <dir> (the absolute folder the packs are copied to, /opt/instafy/skill-packs in the
+// runtime image) the installer also writes one shim per command to <out>/.bin/<name>, which runs
+// `node <dir>/<pack>/<entry>`; the image puts them in /usr/local/bin. A name two packs declare gets
+// no shim.
+//
+//   node scripts/install-skill-packs.mjs [--out <dir>] [--pin <skill-packs.json>] [--require-pinned] [--install-root <dir>]
 //   node scripts/install-skill-packs.mjs --from <pack folder> [--out <dir>]   (pack authors: not pinned)
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -37,6 +44,26 @@ const HEX40 = /^[0-9a-f]{40}$/u;
 const HEX64 = /^[0-9a-f]{64}$/u;
 const VERSION = /^\d+\.\d+\.\d+$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9._@+-]+$/u;
+export const BIN_DIR = ".bin";
+export const BIN_MARKER = "# instafy:managed-pack-bin";
+export const MAX_PACK_BINS = 8;
+const BIN_NAME = /^[a-z][a-z0-9-]{1,31}$/u;
+// The same names and prefixes packages/runtime-agent/src/skill_packs.rs refuses: the runtime's own
+// tools, the commands every shell needs, the image's helpers (some reach /usr/local/bin after the
+// pack commands) and Codex's commands.
+export const RESERVED_BIN_NAMES = new Set([
+  "instafy", "node", "npm", "npx", "pnpm", "pnpx", "yarn", "corepack", "git", "sh", "bash", "zsh", "dash",
+  "env", "python", "python3", "pip", "codex", "runtime-agent", "curl", "wget", "sudo", "make",
+  "applypatch", "rathole", "runtime-entrypoint", "browser-egress-proxy", "browser-webrtc-sender",
+]);
+export const RESERVED_BIN_PREFIXES = ["codex-", "instafy-"];
+
+/// Whether a pack may declare the command `name`: plain, not reserved, outside the reserved prefixes.
+export function isPackBinName(name) {
+  return typeof name === "string" && BIN_NAME.test(name) && !RESERVED_BIN_NAMES.has(name) && !RESERVED_BIN_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+// A path written into a shim: plain characters only, single-quoted there.
+const PLAIN_PATH = /^[A-Za-z0-9._/-]+$/u;
 
 export class InstallError extends Error {}
 
@@ -261,6 +288,76 @@ export function unpackArchive(archive, pack) {
   return { files, executable };
 }
 
+// Activity labels (docs/Chat-Activity.md): the same rules as runtime-contracts' chat_activity.rs,
+// pinned by its chat_activity_fixtures.json.
+const LABEL_PUNCTUATION = "'\u2019,.-\u2013\u00b7:;()&!?";
+const SUBCOMMAND = /^(?:\*|[a-z0-9][a-z0-9-]{0,31})$/u;
+
+export function isPlainLabelText(text) {
+  if (typeof text !== "string" || text === "" || text.trim() !== text || text.includes("  ")) return false;
+  const characters = [...text];
+  if (!characters.every((character) => /\p{Alphabetic}/u.test(character) || /[0-9 ]/u.test(character) || LABEL_PUNCTUATION.includes(character))) return false;
+  const dottedWord = characters.some((character, index) => character === "." && index + 1 < characters.length && (/\p{Alphabetic}/u.test(characters[index + 1]) || /[0-9]/u.test(characters[index + 1])));
+  return !dottedWord && !text.toLowerCase().includes("www");
+}
+
+export function isLiveLabel(text) {
+  return typeof text === "string" && !text.includes("{host}") && [...text].length <= 40 && /^\p{Uppercase}/u.test(text) && isPlainLabelText(text);
+}
+
+export function isDoneForm(text, count) {
+  if (typeof text !== "string" || text.split("{n}").length - 1 !== (count ? 1 : 0)) return false;
+  const filled = text.replace("{n}", "999");
+  return !filled.includes("{host}") && [...filled].length <= 48 && /^\p{Lowercase}/u.test(filled) && isPlainLabelText(filled);
+}
+
+/// Checks a manifest's `bin` and `activity`. Returns null when they follow the rules (or there is
+/// no `activity`), else the first rule broken. A pack that breaks one still installs; the runtime
+/// drops its labels.
+export function checkPackActivity(manifest, files) {
+  if (manifest.activity === undefined) return null;
+  const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!isObject(manifest.activity)) return "activity is not an object";
+  if (!isObject(manifest.bin)) return "activity labels only commands declared in `bin`";
+  const bins = Object.entries(manifest.bin);
+  if (bins.length > MAX_PACK_BINS) return `bin declares more than ${MAX_PACK_BINS} commands`;
+  for (const [name, entry] of bins) {
+    if (!isPackBinName(name)) return `bin ${JSON.stringify(name)} is not a command name a pack may declare`;
+    if (typeof entry !== "string" || !files.has(entry)) return `bin ${JSON.stringify(name)}: ${JSON.stringify(entry)} is not a file inside the pack`;
+  }
+  for (const [name, subcommands] of Object.entries(manifest.activity)) {
+    if (!Object.hasOwn(manifest.bin, name)) return `activity ${JSON.stringify(name)} is not a command in \`bin\``;
+    if (!isObject(subcommands)) return `activity ${JSON.stringify(name)} is not an object`;
+    if (Object.keys(subcommands).length > 64) return `activity ${JSON.stringify(name)} labels more than 64 subcommands`;
+    for (const [subcommand, label] of Object.entries(subcommands)) {
+      const where = `activity ${name}.${subcommand}`;
+      if (!SUBCOMMAND.test(subcommand)) return `${where}: not a subcommand name`;
+      if (!isObject(label)) return `${where}: a label is an object`;
+      const unknown = Object.keys(label).find((key) => !["live", "done", "role", "when"].includes(key));
+      if (unknown) return `${where}: unknown field ${JSON.stringify(unknown)}`;
+      if (!isLiveLabel(label.live)) return `${where}: live breaks the label rules`;
+      const role = label.role ?? "content";
+      if (!["content", "outcome", "quiet"].includes(role)) return `${where}: role is not content, outcome or quiet`;
+      if (label.when !== undefined && label.when !== "success") return `${where}: when is not "success"`;
+      if (label.done === undefined) {
+        if (role !== "quiet") return `${where}: a content or outcome label needs done words`;
+      } else if (typeof label.done === "string") {
+        if (!isDoneForm(label.done, false)) return `${where}: done breaks the label rules`;
+      } else if (isObject(label.done)) {
+        const forms = label.done;
+        if (Object.keys(forms).some((key) => !["one", "other", "some"].includes(key))) return `${where}: done has an unknown form`;
+        if (!isDoneForm(forms.one, false)) return `${where}: done.one breaks the label rules`;
+        if (forms.other !== undefined && !isDoneForm(forms.other, true)) return `${where}: done.other breaks the label rules`;
+        if (forms.some !== undefined && !isDoneForm(forms.some, false)) return `${where}: done.some breaks the label rules`;
+        if (forms.other !== undefined && forms.some === undefined) return `${where}: done needs a \`some\` form with \`other\``;
+      } else {
+        return `${where}: done breaks the label rules`;
+      }
+    }
+  }
+  return null;
+}
+
 /// Checks a pack's files against its manifest and, when pinned, against the pin.
 export function checkPack(files, { name, version = null, tree_sha256 = null }) {
   const raw = files.get(MANIFEST);
@@ -285,7 +382,64 @@ export function checkPack(files, { name, version = null, tree_sha256 = null }) {
   if (typeof skill !== "string" || !files.has(safeRelative(skill, `${name} skill`))) fail(`${name}: the skill file ${JSON.stringify(skill)} is missing`);
   const entry = manifest.cli?.entry ?? manifest.entry;
   if (entry !== undefined && (typeof entry !== "string" || !files.has(safeRelative(entry, `${name} entry`)))) fail(`${name}: the command ${JSON.stringify(entry)} is missing`);
-  return { manifest, tree };
+  return { manifest, tree, bins: packBins(manifest, files, name), activityProblem: checkPackActivity(manifest, files) };
+}
+
+/// The commands a pack declares (`bin`: {name: entry}), checked: at most MAX_PACK_BINS, plain names
+/// that are not reserved, each entry a file inside the pack. Returns [{name, entry}].
+export function packBins(manifest, files, name) {
+  if (manifest.bin === undefined) return [];
+  if (!manifest.bin || typeof manifest.bin !== "object" || Array.isArray(manifest.bin)) fail(`${name}: bin must map command names to files in the pack`);
+  const bins = Object.entries(manifest.bin);
+  if (bins.length > MAX_PACK_BINS) fail(`${name}: bin lists more than ${MAX_PACK_BINS} commands`);
+  return bins.map(([bin, entry]) => {
+    if (!isPackBinName(bin)) fail(`${name}: bin ${JSON.stringify(bin)} is not a command a pack may declare (a-z, 0-9 and -, 2 to 32 characters, not a reserved name)`);
+    if (typeof entry !== "string" || !PLAIN_PATH.test(entry) || !files.has(safeRelative(entry, `${name} bin ${bin}`))) {
+      fail(`${name}: the command ${bin} runs ${JSON.stringify(entry)}, which is not a file inside the pack`);
+    }
+    return { name: bin, entry };
+  });
+}
+
+/// The shim for one command: `#!/bin/sh`, the marker the runtime looks for, then node on the entry.
+export function binShim({ pack, version, entry, installRoot }) {
+  return `#!/bin/sh\n${BIN_MARKER} ${pack} ${version}\nexec node '${installRoot}/${pack}/${entry}' "$@"\n`;
+}
+
+/// Writes <out>/.bin/<name> (mode 0755) for every command of the packs installed in `out`, running
+/// the pack from `installRoot`. Replaces the folder; a name two packs declare gets no shim.
+export function writeBinShims({ out, installRoot, log = () => {} }) {
+  if (typeof installRoot !== "string" || !installRoot.startsWith("/") || !PLAIN_PATH.test(installRoot) || installRoot.split("/").some((segment) => segment === "." || segment === "..")) {
+    fail(`--install-root must be an absolute path of plain characters, not ${JSON.stringify(installRoot)}`);
+  }
+  const root = installRoot.replace(/\/+$/u, "");
+  const owners = new Map();
+  for (const record of readInstalled(out).packs) {
+    if (!NAME.test(record?.name ?? "")) continue;
+    const { manifest, bins } = checkPack(readPackFolder(path.join(out, record.name)), { name: record.name });
+    if (!VERSION.test(manifest.version ?? "")) fail(`${record.name}: ${MANIFEST} version must be x.y.z`);
+    for (const bin of bins) owners.set(bin.name, [...(owners.get(bin.name) ?? []), { pack: record.name, version: manifest.version, entry: bin.entry }]);
+  }
+  const binDir = path.join(out, BIN_DIR);
+  fs.rmSync(binDir, { recursive: true, force: true });
+  fs.mkdirSync(binDir, { recursive: true, mode: 0o755 });
+  const written = [];
+  for (const [name, declared] of [...owners].sort(([a], [b]) => compareBytes(a, b))) {
+    if (declared.length > 1) {
+      log(`warning: ${declared.map(({ pack }) => pack).join(" and ")} all declare the command ${name}; none of them gets it`);
+      continue;
+    }
+    const file = path.join(binDir, name);
+    fs.writeFileSync(file, binShim({ ...declared[0], installRoot: root }), { mode: 0o755, flag: "wx" });
+    fs.chmodSync(file, 0o755);
+    written.push(name);
+    log(`${declared[0].pack}: command ${name}`);
+  }
+  return written;
+}
+
+function warnAboutActivity(name, activityProblem, log) {
+  if (activityProblem) log(`${name}: warning: its activity labels break the label rules and are dropped (${activityProblem}); the pack still installs`);
 }
 
 function readInstalled(out) {
@@ -358,7 +512,7 @@ export async function installPinned({ pin, out, urlPrefix = RELEASE_URL_PREFIX, 
       const digest = sha256(archive);
       if (digest !== pack.sha256) fail(`${pack.name}: archive sha256 ${digest} is not the pinned ${pack.sha256}`);
       const { files, executable } = unpackArchive(archive, pack);
-      checkPack(files, pack);
+      warnAboutActivity(pack.name, checkPack(files, pack).activityProblem, log);
       placePack(out, pack.name, files, executable);
       log(`${pack.name}@${pack.version}: installed (${files.size} files)`);
       results.push({ name: pack.name, version: pack.version, status: "installed" });
@@ -381,7 +535,8 @@ export function installFromFolder({ from, out, log = () => {} }) {
   const raw = files.get(MANIFEST);
   const name = raw ? JSON.parse(raw.toString("utf8")).name : null;
   if (!NAME.test(name ?? "")) fail(`${from}: ${MANIFEST} needs a name matching ${NAME}`);
-  const { manifest, tree } = checkPack(files, { name });
+  const { manifest, tree, activityProblem } = checkPack(files, { name });
+  warnAboutActivity(name, activityProblem, log);
   const executable = new Set([...files.keys()].filter((rel) => fs.statSync(path.join(from, rel)).mode & 0o111));
   placePack(out, name, files, executable);
   const installed = readInstalled(out);
@@ -393,7 +548,7 @@ export function installFromFolder({ from, out, log = () => {} }) {
 }
 
 function parseArguments(argv) {
-  const options = { out: DEFAULT_OUT, pin: DEFAULT_PIN, from: null, requirePinned: false };
+  const options = { out: DEFAULT_OUT, pin: DEFAULT_PIN, from: null, requirePinned: false, installRoot: null };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = () => {
@@ -405,6 +560,7 @@ function parseArguments(argv) {
     else if (argument === "--pin") options.pin = path.resolve(value());
     else if (argument === "--from") options.from = path.resolve(value());
     else if (argument === "--require-pinned") options.requirePinned = true;
+    else if (argument === "--install-root") options.installRoot = value();
     else fail(`unknown argument ${argument}`);
   }
   if (options.requirePinned && options.from) fail("--require-pinned refuses --from: only pinned release archives are installed");
@@ -416,10 +572,11 @@ async function main() {
   const log = (line) => process.stdout.write(`[skill-packs] ${line}\n`);
   if (options.from) {
     installFromFolder({ from: options.from, out: options.out, log });
-    return;
+  } else {
+    const pin = JSON.parse(fs.readFileSync(options.pin, "utf8"));
+    await installPinned({ pin, out: options.out, log });
   }
-  const pin = JSON.parse(fs.readFileSync(options.pin, "utf8"));
-  await installPinned({ pin, out: options.out, log });
+  if (options.installRoot !== null) writeBinShims({ out: options.out, installRoot: options.installRoot, log });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

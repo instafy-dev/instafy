@@ -111,3 +111,87 @@ test("the Shared Browser's agent snapshots and the sent page share one secret ch
   assert.match(cli, /const pageSecretSignalsInPage = pageCapture\.pageSecretSignalsInPage;/);
   assert.doesNotMatch(cli, /function pageSecretSignalsInPage\(/);
 });
+
+// Send page to Octo keeps the page's links: a results page arrives with them.
+const linkOnlySource = fs.readFileSync(path.join(policyRoot, "linkOnly.js"), "utf8");
+const linkOnlySites = fs.readFileSync(
+  path.resolve(policyRoot, "../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"),
+  "utf8",
+);
+const RESULTS_PAGE = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "send-page", "search-results.html"),
+  "utf8",
+);
+
+function captureWithLinks(html, { url = "https://search.example/?q=city+museum+opening+hours", linkOnly = true, sites = linkOnlySites } = {}) {
+  const dom = new JSDOM(html, { url, runScripts: "outside-only" });
+  const { window } = dom;
+  window.eval(`(function (module, require) {\n${redactionSource}\n})(undefined, undefined);`);
+  window.eval(`(function (module, require) {\n${pageCaptureSource}\n})(undefined, undefined);`);
+  window.eval(`(function (module, require) {\n${linkOnlySource}\n})(undefined, undefined);`);
+  window.eval(`globalThis.__instafyLinkOnlySites = ${sites};`);
+  const options = linkOnly
+    ? "{ withhold: false, linkOnly: { api: globalThis.__instafyLinkOnly, sites: globalThis.__instafyLinkOnlySites } }"
+    : "{ withhold: false }";
+  return JSON.parse(window.eval(
+    `JSON.stringify(globalThis.__instafyBrowserPageCapture.captureSentPage(globalThis.__instafyBrowserRedaction, ${options}))`,
+  ));
+}
+
+test("a sent results page arrives with its links, and a Booking link is marked link-only", () => {
+  const page = captureWithLinks(RESULTS_PAGE);
+  assert.equal(page.secretScreen, false);
+  assert.match(page.text, /Open daily from 10:00 to 18:00/);
+  assert.deepEqual(page.links, [
+    { text: "City Museum: opening hours and tickets", href: "https://museum.example/visit/hours" },
+    {
+      text: "City Museum Inn, from 89 EUR a night",
+      href: "https://www.booking.com/hotel/se/city-museum-inn.html",
+      linkOnly: "Booking.com",
+    },
+    { text: "City Museum guidebook", href: "https://www.amazon.de/dp/B000000000", linkOnly: "Amazon" },
+    { text: "City Museum - Wiki", href: "https://wiki.example/City_Museum" },
+    // javascript:, data: and mailto: links are dropped; a relative one is resolved; a repeat is sent once.
+    { text: "Next page", href: "https://search.example/search?q=city+museum+opening+hours&page=2" },
+    { text: "Museum shop", href: "https://museum.example/shop" },
+  ]);
+});
+
+test("a sent page's links are masked like its text, bounded, and left out when they cannot be checked", () => {
+  const many = Array.from({ length: 250 }, (_, index) => `<a href="https://shop.example/item/${index}">Item ${index}</a>`).join("");
+  const page = captureWithLinks(
+    `<title>Shop</title><p>Items</p><a href="https://shop.example/reset?token=${KEY}">Reset with ${KEY}</a>${many}`,
+    { url: "https://shop.example/" },
+  );
+  assert.equal(page.links.length, 200);
+  assert.deepEqual(page.links[0], { text: "Reset with [redacted secret]", href: "https://shop.example/reset?token=REDACTED" });
+  assert.ok(!JSON.stringify(page).includes(KEY));
+  // Without the link-only list no link is sent: none could be marked.
+  assert.deepEqual(captureWithLinks(RESULTS_PAGE, { linkOnly: false }).links, []);
+  // A secret screen sends no links either.
+  const secret = captureWithLinks(`<title>API keys</title><h2>API keys</h2><p>${RANDOM_VALUE}</p><a href="https://console.example/">Console</a>`);
+  assert.equal(secret.secretScreen, true);
+  assert.deepEqual(secret.links, []);
+});
+
+test("only a link to a site that bars agents is marked link-only; a no-reuse site's link is not", () => {
+  // A list whose sites include one that bars only reusing its content: Octo may open and read it (web read marks it
+  // no-reuse), so a sent page must not tell Octo to leave it alone, as the Personal Browser does not either.
+  const list = JSON.parse(linkOnlySites);
+  list.sites.push({
+    name: "Example Reviews",
+    match: ["reviews.example"],
+    kind: "no-reuse",
+    why: "terms bar copying its reviews",
+    terms: { url: "https://reviews.example/terms", checked: "2026-10-27", quote: "You may not copy or republish reviews." },
+  });
+  const page = captureWithLinks(
+    `<title>Results</title><p>Results</p><a href="https://reviews.example/city-museum">City Museum reviews</a>` +
+      `<a href="https://www.booking.com/hotel/se/city-museum-inn.html">City Museum Inn</a>`,
+    { sites: JSON.stringify(list) },
+  );
+  assert.deepEqual(page.links, [
+    { text: "City Museum reviews", href: "https://reviews.example/city-museum" },
+    { text: "City Museum Inn", href: "https://www.booking.com/hotel/se/city-museum-inn.html", linkOnly: "Booking.com" },
+  ]);
+});

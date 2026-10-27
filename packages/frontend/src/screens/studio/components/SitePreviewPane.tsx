@@ -26,6 +26,7 @@ import { FollowRing, FollowRipples, FollowToast, SitePreviewFollowControls } fro
 import { AskConfirmStrip } from "./previewHost/AskConfirmStrip";
 import type { SiteAskHost } from "./previewHost/useSiteAsks";
 import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
+import { shareSitePreviewRecord } from "./SitePreviewCard";
 
 export const SITE_PREVIEW_HEALTH_POLL_MS = 15_000;
 /** While the frame is on screen: keeps a quiet site's session alive. */
@@ -190,7 +191,15 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
     } catch (cause) {
       if (!mounted.current || attempt !== mintAttempt.current) return;
       const problem = sitePreviewProblem(cause);
-      if (problem) { setSession(problem); return; }
+      if (problem) {
+        // The controller just said the site stopped: a Live health read before
+        // it is no sign the site is back, so only a later read may reopen it.
+        // Otherwise each refusal re-mints at once, until the rate limit says
+        // "Too many previews opened".
+        if (problem === "stopped") setHealth("stopped");
+        setSession(problem);
+        return;
+      }
       if (isSitePreviewRateLimited(cause)) { setSession("busy"); return; }
       setSession("ended");
       setFeedback(cause instanceof Error ? cause.message : "Could not open the preview.");
@@ -261,6 +270,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
     try {
       const preview = await getSitePreview(projectId, previewId, signal, fresh ? { fresh } : undefined);
       if (signal?.aborted || !mounted.current) return;
+      // The cards of this preview read it too, instead of asking themselves.
+      shareSitePreviewRecord(previewId, preview);
       setPort(preview.port);
       setRecord(current => current && current.title === preview.title && current.port === preview.port && current.path === preview.path
         ? current : { title: preview.title, port: preview.port, path: preview.path });

@@ -6263,6 +6263,8 @@ fn build_agent_update_metadata(
         }
         map.insert("details".to_string(), details);
     }
+    // The step's plain-language label: checked, then lifted out of the runtime's details.
+    crate::chat_activity::lift_agent_activity(&mut map);
     JsonValue::Object(map)
 }
 
@@ -6961,6 +6963,56 @@ mod tests {
             details_obj.get("kind").and_then(JsonValue::as_str),
             Some("agent_message")
         );
+    }
+
+    #[test]
+    fn agent_message_lifts_a_valid_activity_to_the_top_level() {
+        let job_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
+        let activity = json!({
+            "v": 1, "key": "pack/interactive-map/uw/add-point", "role": "content",
+            "live": "Looking up places",
+            "done": { "one": "looked up a place", "other": "looked up {n} places", "some": "looked up places" },
+            "count": null, "also": [
+                { "key": "pack/interactive-map/uw/validate", "role": "outcome", "live": "Checking the map",
+                  "done": "built the map", "when": "success", "count": 1 }
+            ]
+        });
+        let details = json!({
+            "kind": "codex_command_execution",
+            "command": "bash -lc 'uw add-point …'",
+            "activity": activity,
+        });
+        let metadata =
+            build_agent_update_metadata(&job_id, Some("command_execution"), Some(details));
+        assert_eq!(metadata["source"], json!("agent"));
+        assert_eq!(metadata["activity"], activity);
+        assert!(metadata["details"].get("activity").is_none());
+        assert_eq!(
+            metadata["details"]["kind"],
+            json!("codex_command_execution")
+        );
+    }
+
+    #[test]
+    fn agent_message_drops_an_activity_with_a_url_or_markup() {
+        let job_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
+        for bad in [
+            json!({ "v": 1, "key": "a", "role": "quiet", "live": "Open https://example.com", "count": 1 }),
+            json!({ "v": 1, "key": "a", "role": "quiet", "live": "Visit evil.example", "count": 1 }),
+            json!({ "v": 1, "key": "a", "role": "content", "live": "Reading", "done": "<img src=x>", "count": 1 }),
+            json!({ "v": 1, "key": "a", "role": "content", "live": "Reading", "done": "[read](http://x)", "count": 1 }),
+            json!({ "v": 1, "key": "a", "role": "quiet", "live": "Reading\u{202e}pages", "count": 1 }),
+            json!({ "v": 1, "key": "a", "role": "quiet", "live": "Reading", "count": 1, "html": "<b>" }),
+            json!("Looked up 14 places"),
+        ] {
+            let metadata = build_agent_update_metadata(
+                &job_id,
+                Some("command_execution"),
+                Some(json!({ "kind": "codex_command_execution", "activity": bad })),
+            );
+            assert!(metadata.get("activity").is_none(), "{metadata}");
+            assert!(metadata["details"].get("activity").is_none(), "{metadata}");
+        }
     }
 
     #[test]

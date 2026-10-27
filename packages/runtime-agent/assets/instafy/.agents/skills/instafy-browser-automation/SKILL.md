@@ -97,14 +97,17 @@ finish from the controller's observed title, URL, visible text, and elements. Ke
 the same visible page focused. The controller accepts only these high-level
 operations and never exposes arbitrary JavaScript execution.
 
+Open a site the person named directly, never through a search engine, and only
+addresses they gave or you saw on a page, not guessed paths. A site asks once
+per run; its pages then open without asking. A declined site stays closed: take
+another route that fits the request, or end the turn and ask.
+
 ## Core rules
 
 - Prefer concrete action over narration. If the target and first cue are already known, keep pre-action commentary to one short line at most.
 - Use the browser capability actually exposed for this turn. Personal and Shared Browser are visible interactive transports; the owner-local browser is a separate read-only headless observer. Never fall through from an unavailable transport to a different one.
 - For Personal or Shared Browser, default to one browser-capable runtime per conversation. Owner-local observation instead opens one fresh process per tool call and accepts one URL per call.
-- Do not start with install/bootstrap checks such as `node -v`, `npm -v`, `npx playwright --version`, `npm init`, or `npm i`.
-- Do not start with env or repo spelunking such as `env | rg PLAYWRIGHT`, `command -v playwright`, or broad `rg` scans for browser snippets. Use the exposed bounded tool and report its concrete error if provisioning failed.
-- Do not start browser tasks with `instafy runtime status`, `instafy --help`, or similar runtime/CLI introspection. A direct call to the exposed browser tool is the primary path.
+- Start with the exposed browser tool itself, not install checks (`node -v`, `npx playwright --version`, `npm i`), env or repo searches (`env | rg PLAYWRIGHT`, `command -v playwright`) or runtime introspection (`instafy runtime status`, `instafy --help`); report the tool's concrete error if provisioning failed.
 - For requests like “open this page”, “read the title”, “click this button”, or “continue the current browser session”, the first executable step must target the page directly. Do not spend the first turn proving the browser exists.
 - Do not reopen `INSTAFY.md`, `AGENTS.md`, or `.agents/skills/**` via shell before the first page action. Project memory and loaded learned blocks are already in context for this run.
 - If a learned block was loaded for this run, trust it first. Only reopen memory files after a concrete browser action failed and the missing cue is still unclear.
@@ -113,7 +116,6 @@ operations and never exposes arbitrary JavaScript execution.
 - On tables, listings, forms, and filtered result sets, prefer the exact visible control text or stable selector when it exists. Do not downgrade `button text "Apply filter"` or `link text "Epsilon account"` into substring regexes, `contains` checks, or vague phrases like `matching result`.
 - For local/dev/test sites, prefer route-level and selector-level memory over full absolute origins or debugger endpoints. Only preserve host/port when the host itself is the learned fact.
 - In Personal or Shared Browser, reuse the current tab when it already matches the task. If you must open or switch tabs, bring the controlled tab to the front so the user sees the same state.
-- In Personal or Shared Browser, do not create a second runtime/session just because the user wants to compare sites.
 - For “find me a good nearby place” style requests, treat a results list as a starting point, not the finish line. Continue until you can name concrete candidates or report a concrete blocker.
 - When the user wants a recommendation, do not stop at a generic results list unless they explicitly asked only for links. Open the most promising venues' own pages and open map data and extract real details; never open a site on `instafy-web-research`'s link-only list.
 - Prefer sources that can support an actual recommendation over repeating a search query or a list of blue links.

@@ -39,6 +39,42 @@ export function selectSharedBrowserHumanInput(
     ? request : null;
 }
 
+function runTimestamp(run: RunRecord): number {
+  return Date.parse(run.updatedAt ?? run.createdAt ?? "") || 0;
+}
+
+/**
+ * The browser run that Let AI continue continues: the newest Shared Browser
+ * run of this conversation on this machine and page that the person started
+ * and that has ended (they took over, or it stopped for their input). Studio
+ * names it in the continuation's metadata (`browserContinuesRunId`); the
+ * runtime carries that run's approvals into the new run only when it is the
+ * last run that held the browser, for the same person on the same page.
+ */
+export function continuedSharedBrowserRunId(
+  runs: readonly RunRecord[],
+  scope: { conversationId: string | null; runtimeId: string | null; pageId: string | null; userId: string | null },
+): string | null {
+  if (!scope.conversationId || !scope.runtimeId || !scope.pageId || !scope.userId) return null;
+  let newest: RunRecord | null = null;
+  for (const run of runs) {
+    const metadata = run.metadata;
+    if (
+      !UUID.test(run.id) ||
+      run.conversationId !== scope.conversationId ||
+      run.status === "queued" || run.status === "in_progress" || run.status === "awaiting_approval" ||
+      metadata?.browserTransport !== "shared" ||
+      metadata.browserRuntimeId !== scope.runtimeId ||
+      metadata.browserPageId !== scope.pageId ||
+      metadata.initiatingUserId !== scope.userId
+    ) {
+      continue;
+    }
+    if (!newest || runTimestamp(run) > runTimestamp(newest)) newest = run;
+  }
+  return newest?.id ?? null;
+}
+
 function activeSharedBrowserRuns(runs: readonly RunRecord[], runtimeId: string): RunRecord[] {
   return runs.filter((run) => {
     const metadata = run.metadata;

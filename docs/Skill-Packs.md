@@ -49,7 +49,8 @@ Before every turn the runtime writes, for each pack:
 - `.agents/skills/<pack>/SKILL.md`: the pack's skill with a short note on where its other files are;
 - for a pack with a command, a launcher at the path its manifest names. The launcher runs the pack's
   command from `INSTAFY_SKILL_PACKS_DIR` or `/opt/instafy/skill-packs` only; `--pack-dir` prints the
-  pack's folder.
+  pack's folder. Skills written for older runtimes run it; newer ones run the pack's commands by name
+  (below).
 
 These files are the runtime's and are never committed: they are listed in a managed block of the
 checkout's `info/exclude` (`.instafy/.git/info/exclude` in a hosted checkout) before they are written,
@@ -61,6 +62,45 @@ runtime's PATH is skipped.
 
 Importing a pack in full with `/skills import <url>` writes over the runtime's unchanged copy without
 `--overwrite`, and the imported files are saved and then kept by the space.
+
+## Commands on PATH
+
+A pack may name its commands, so a skill says `uw validate my-map` instead of a path to a script:
+
+```json
+{"bin": {"uw": "scripts/uw.mjs"}}
+```
+
+Each command runs its file with `node`. A pack may declare at most 8. A name is a lowercase letter
+followed by 1 to 31 lowercase letters, digits or dashes, and is never one of `instafy`, `node`, `npm`,
+`npx`, `pnpm`, `pnpx`, `yarn`, `corepack`, `git`, `sh`, `bash`, `zsh`, `dash`, `env`, `python`,
+`python3`, `pip`, `codex`, `runtime-agent`, `curl`, `wget`, `sudo` or `make`, nor one of the
+runtime's own helpers (`applypatch`, `rathole`, `runtime-entrypoint`, `browser-egress-proxy`,
+`browser-webrtc-sender`), nor a name starting with `codex-` or `instafy-`. The file must be a
+regular file inside the pack. The installer and the runtime refuse a manifest that breaks these rules.
+A name two packs declare goes to neither.
+
+The commands reach every shell, isolated tool worker and terminal the runtime starts:
+
+- Runtime images: the installer writes a small shim per command (`--install-root
+  /opt/instafy/skill-packs`), and both images copy the shims to `/usr/local/bin`. Model shells are
+  login shells, and on Debian a login shell resets PATH; `/usr/local/bin` stays on it, which is
+  also why `instafy` is linked there. The build fails when a login shell already finds a command of
+  that name.
+- Desktop and local runtimes: at startup the runtime writes the same shims, pointing at the pack's
+  absolute path, to a folder of its own (`instafy-pack-bin-<pid>-…` in its temp folder; mode 0755,
+  shims 0555) and appends that folder to the **end** of PATH, so a pack command never shadows another
+  command. It first checks that the temp folder lets programs run, skips a name that is already on
+  PATH (unless it is the image's shim for the same pack and version) and removes the folder on exit;
+  a folder left by a runtime that did not exit is removed after a day. On macOS a login shell keeps
+  it after the system folders. Windows gets no shims.
+
+The space note in each pack's `SKILL.md` says which of its commands are on PATH. A pack whose scripts
+need a newer Node.js than the one on PATH gets no commands, and a pack a space imports with
+`/skills import` gets none: only the packs installed with the runtime do, and a command always runs
+the runtime's copy of its pack. Where a login shell drops the
+runtime's folder (some Linux hosts outside the image), a skill should say how to run the command
+without it, for example `node "$INSTAFY_SKILL_PACKS_DIR/<pack>/scripts/<command>.mjs"`.
 
 ## Settings and state
 
@@ -84,3 +124,34 @@ workspace, so nothing in it is ever saved or published, and it is kept across tu
 caches, rate-limit holds and service health there, not in HOME or TMPDIR, which an isolated worker gets
 fresh every turn. An isolated worker may write the folder only when the runtime names it in the job's
 request, never when the job's environment does. A folder that cannot be created leaves the variable unset.
+
+## Activity labels
+
+A pack may give its commands plain words for a chat turn's activity line
+([Chat activity line](Chat-Activity.md)): "Looking up places" while a step runs, "looked up 14
+places" once the turn is done. It names its commands in `bin` and labels their subcommands in
+`activity`:
+
+```json
+{"bin": {"uw": "scripts/uw.mjs"},
+ "activity": {"uw": {
+   "add-point": {"live": "Looking up places",
+                 "done": {"one": "looked up a place", "other": "looked up {n} places", "some": "looked up places"}},
+   "validate":  {"live": "Checking the map", "done": "built the map", "role": "outcome", "when": "success"},
+   "fit":       {"live": "Framing the map", "role": "quiet"},
+   "*":         {"live": "Working on the map", "role": "quiet"}}}}
+```
+
+- Keys under `activity` must be commands declared in `bin` (see [Commands on PATH](#commands-on-path)
+  for the names a pack may declare), each with at most 64 subcommands; `*` labels the rest.
+- `live` starts with an upper-case letter and is at most 40 characters. Each `done` form starts
+  with a lower-case letter and is at most 48 characters with `{n}` as 999. `{n}` is the only
+  placeholder and is allowed only in `other`; `some` (the count is not known, as in a loop) is
+  required with `other`. A single string is used for any count.
+- Plain words only: no links, addresses, markup, brackets, control or bidi characters.
+- `role` is `content` (the default), `outcome` or `quiet`; `when: "success"` counts the step only
+  when the command exits 0.
+
+A pack whose `activity` breaks a rule still loads; the runtime drops its labels with a warning, and
+the installer warns too. Only packs installed with the runtime supply labels: a pack a space
+imports itself never does.

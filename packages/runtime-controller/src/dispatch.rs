@@ -989,6 +989,8 @@ pub(crate) async fn process_dispatch_prompt_timed(
     let started = Instant::now();
     crate::task_usage::strip_authoring_claims(&mut request.metadata);
     crate::user_input_requests::routing::strip_claims(&mut request.metadata);
+    // Only a runtime's step carries an activity label (crate::chat_activity).
+    crate::chat_activity::strip_activity_claims(&mut request.metadata);
     // "Via a site" is the controller's to say: a client's claim is checked
     // against the previews this sender can see below, and refused otherwise.
     let site_intent_claim = crate::site_intent::take_site_intent_claim(&mut request.metadata);
@@ -2066,10 +2068,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
             Utc::now() - ChronoDuration::hours(24),
         )
         .await?;
+        // Every target of this branch runs without a credential, so the
+        // person has no default connection here.
         let managed_ai = credentials::build_managed_ai_access_response(
             &state.config,
             &proxy_requirements,
-            default_credential_id.is_some(),
             daily_prompts_used,
         );
 

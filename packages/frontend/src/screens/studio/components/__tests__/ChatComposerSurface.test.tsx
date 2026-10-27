@@ -1670,7 +1670,8 @@ describe("ChatComposerSurface", () => {
     expect(queueTrigger?.getAttribute("aria-expanded")).toBe("false");
     const stashPopover = document.body.querySelector('[data-testid="chat-saved-message-popover"]');
     expect(stashPopover).not.toBeNull();
-    expect(stashPopover?.className).toContain("w-[min(24rem,calc(100dvw-1rem))]");
+    expect(stashPopover?.className).toContain("max-w-sm");
+    expect(stashPopover?.className).toContain("w-[calc(100dvw-1rem)]");
     expect(stashPopover?.getAttribute("data-placement")).toContain("top");
     expect(stashPopover?.querySelector('[aria-label="Stashed drafts"][role="region"]')).not.toBeNull();
     expect(controls?.contains(stashPopover)).toBe(false);

@@ -74,13 +74,30 @@ determines the winner. Arbitrary layout classes remain supported.
   in their accessible label and tooltip. The opened queue visibly names
   "Queued messages" above the bubbles. Chat / Browser retain visible text labels.
   Triggers do not supply their own border, palette or size.
-  Stash restore rows use the inline preset; their panel uses the subtle surface
+  Stash restore rows use the inline preset; their panel uses one solid surface
   and shared text variants. Delete, goal utilities, Collapse draft and Remove
   attachment use quiet utility icons with 8px corners. Goal actions move onto
   their own row in a narrow pane, preserving readable summary text and touch
   targets. Browser page chips use the inline preset with a neutral selected
   surface and quiet inactive actions. They retain their pressed/page-selection
   semantics and horizontal scrolling; they are not conversation navigation tabs.
+- Composer action menus use `StudioMenuAction` for the shared menu-row presentation
+  with button semantics inside their drill-in dialog. `StudioMenuItem` retains menu
+  semantics elsewhere. Both share compact mouse / 44px touch rows, focus treatment,
+  8px corners and `MenuItemContent` typography. Supporting descriptions use its
+  description slot; utility icons are plain 16px icons, not nested bordered tiles.
+  Shared separators reset the native rule border so only the themed 1px divider
+  is visible. Popover scroll areas follow the selected theme's native color scheme.
+- Queue and saved drafts use `ComposerMessagePanel` for their 384px maximum measure,
+  14px heading, 16px icon and 12px/8px header insets. `ComposerMessagePopover` owns
+  viewport clearance and anchoring, leaving extra side room for queue dragging.
+  The saved-draft list has one surface; the queue retains individual message bubbles.
+  Their scroll limits remain distinct to suit a compact draft list and message previews.
+  Queue drag previews use the shared floating surface and body typography.
+- Stop and Take over confirmations use the small modal, responsive body gutters,
+  bounded scrolling, subtitle/body typography and wrapping form-preset actions.
+  The confirmation button remains distinct from its quiet cancel action. Their
+  focus, busy state and browser-control permissions belong to the feature.
 - `Input` and both native/styled `Select` share medium defaults and control size tokens.
   `Field label` plus matching `htmlFor`/control `id` also labels app-rendered selects;
   explicit ARIA labels remain authoritative. `Checkbox` owns its interaction target
@@ -534,7 +551,13 @@ list of disabled providers when no personal connections exist.
 After the controller confirms its capabilities, show Instafy AI as the first connection row with
 the canonical Octo mark, its allowance and the same Default badge or Make default action
 as saved providers. Selecting it clears the default credential without deleting any saved
-connection. Keep quota exhaustion or service unavailability distinct from the chosen default.
+connection. Keep quota exhaustion or service unavailability distinct from the chosen default:
+Instafy AI is available or not whichever connection is the default, and when it cannot run turns
+the row says why in plain words (today's prompts are used and when more come, the server is not
+set up to run it, or it cannot be reached). Make default is offered while it can run turns or only
+today's prompts are used. Adding a connection from this page never takes the default from an
+available Instafy AI; connecting from chat ("Connect your own AI", the AI gate) is the person's
+choice of AI and does.
 Controllers without managed AI show "Unavailable on this server" without a Default badge,
 quota or switch action. An unresolved or failed capability check must not be presented as
 confirmed unavailability. Reserve the separate status summary for loading, errors or a saved

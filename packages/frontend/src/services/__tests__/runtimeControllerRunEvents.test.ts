@@ -1113,6 +1113,8 @@ describe("runtime controller run event streaming", () => {
     expect(kinds).toContain("credits.updated");
     // Follow mode's presence (who presents a site) rides the main stream; views never do.
     expect(kinds).toContain("preview.follow");
+    // A preview card's new picture rides it too (ids and a version only).
+    expect(kinds).toContain("preview.thumbnail_updated");
 
     const membersChanged = {
       kind: "project.members_changed",

@@ -300,17 +300,29 @@ export async function runSharedBrowserFormSubmissionFixture() {
     const collect = `POST ${sites().other}/collect`;
 
     // a. Enter in a search field whose default button posts to another
-    // site: Octo is asked for that site first, then for the step bound to
-    // it, and nothing is sent until both are allowed.
+    // site: Octo is asked for that site first (the prompt names where the
+    // form goes), then for the step bound to it, and nothing is sent until
+    // both are allowed. A declined site stays closed for the rest of the run
+    // without another prompt; the person's next run asks again.
     let snapshot = await ok("GET", "/v1/snapshot", null, ["allow_origin"]);
     let field = control(snapshot, "Search the shop");
     let start = prompts.length;
     requests.length = 0;
-    await refused(/approval_denied|denied/i, "POST", "/v1/type", { index: field.index, snapshotId: snapshot.snapshotId, text: "boots", submit: true }, ["deny"]);
+    await refused(/\[site_declined\]/, "POST", "/v1/type", { index: field.index, snapshotId: snapshot.snapshotId, text: "boots", submit: true }, ["deny"]);
     assert.deepEqual(promptsSince(start), [["origin", "approve-origin", sites().other]]);
-    assert.equal(prompts.at(-1).display.label, "Allow this form destination for this run");
+    assert.equal(prompts.at(-1).display.label, `Send this form to ${sites().other}/collect`);
     assert.deepEqual(sentTo(collect), [], "Nothing was sent to the other site");
     snapshot = await ok("GET", "/v1/snapshot");
+    field = control(snapshot, "Search the shop");
+    start = prompts.length;
+    await refused(/\[site_declined\]/, "POST", "/v1/type", { index: field.index, snapshotId: snapshot.snapshotId, text: "boots", submit: true });
+    assert.deepEqual(promptsSince(start), [], "A declined site is not asked for again in the run");
+    assert.deepEqual(sentTo(collect), [], "Nothing was sent to the declined site");
+    // The person's next run starts with no approvals and asks again.
+    for (const name of fs.readdirSync(approvalDirectory)) fs.rmSync(path.join(approvalDirectory, name));
+    Object.assign(authority, { ownerId: randomUUID(), runId: randomUUID() });
+    writeProtectedJson(markerPath, authority);
+    snapshot = await ok("GET", "/v1/snapshot", null, ["allow_origin"]);
     field = control(snapshot, "Search the shop");
     start = prompts.length;
     await ok("POST", "/v1/type", { index: field.index, snapshotId: snapshot.snapshotId, text: "boots", submit: true }, ["allow_origin", "allow_once"]);

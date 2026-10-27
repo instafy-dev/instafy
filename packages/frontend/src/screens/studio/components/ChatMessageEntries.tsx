@@ -19,8 +19,7 @@ import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import { getSkillImportMessageLabel } from "../../../conversations/conversationAutoTitle";
 import { useConversations } from "../../../conversations/ConversationsProvider";
-import { isChatAttachmentStoragePath } from "../../../lib/chatAttachments";
-import { loadChatAttachmentPreview } from "../../../lib/chatAttachmentPreviews";
+import { downloadChatAttachment, isChatAttachmentStoragePath } from "../../../lib/chatAttachments";
 import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { ChatMessage } from "../types";
@@ -59,6 +58,7 @@ import { resolveSpineToneFromStatus, ThreadSpine, type ThreadSpineTone } from ".
 import { buildAgentThreadBranchRows } from "./agentThreadBranchRows";
 import { extractThreadRunStatus } from "./threadPreviewHelpers";
 import { useAgentJobThreadPreviewState } from "./useAgentJobThreadPreviewState";
+import { useAuthorizedImage, useNearViewport } from "./useAuthorizedImage";
 import { sanitizeChatMessageCopyEvent } from "./chatSelectionCopy";
 
 const { getRawUrl: getWorkspaceFileRawUrl } = controllerClient.workspace.files;
@@ -255,99 +255,6 @@ export function extractImageAttachments(message: ChatMessage): ChatImageAttachme
   );
 }
 
-type StorageImageState =
-  | { storagePath: string; status: "loading" }
-  | { storagePath: string; status: "ready"; url: string }
-  | { storagePath: string; status: "unavailable" }
-  | { storagePath: string; status: "failed" };
-
-// Images further than this from the visible part of the transcript wait to
-// download until the person scrolls toward them.
-const STORAGE_IMAGE_PRELOAD_MARGIN_PX = 800;
-
-/**
- * True once the element is on screen or close to it, and from then on. Without
- * IntersectionObserver every image counts as near.
- */
-function useNearViewport(): [(node: HTMLElement | null) => void, boolean] {
-  const [near, setNear] = useState(() => typeof IntersectionObserver === "undefined");
-  const observerRef = useRef<IntersectionObserver | null>(null);
-  const ref = useCallback((node: HTMLElement | null) => {
-    observerRef.current?.disconnect();
-    observerRef.current = null;
-    if (!node || typeof IntersectionObserver === "undefined") {
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          observer.disconnect();
-          setNear(true);
-        }
-      },
-      {
-        root: node.closest('[data-testid="chat-message-scroll"]'),
-        rootMargin: `${STORAGE_IMAGE_PRELOAD_MARGIN_PX}px 0px`,
-      },
-    );
-    observer.observe(node);
-    observerRef.current = observer;
-  }, []);
-  useEffect(() => () => observerRef.current?.disconnect(), []);
-  return [ref, near];
-}
-
-/**
- * Downloads a Storage image with the person's own session once it is near the
- * screen, and shows it from an object URL that is revoked when the image goes
- * away. A read Storage refuses (someone who is not a reader of the
- * conversation) or an object that is gone is `unavailable`; a download that
- * could not reach Storage is `failed`, and `retry` tries it again.
- */
-function useChatStorageImageUrl(
-  storagePath: string,
-  enabled: boolean,
-): { state: StorageImageState; retry: () => void } {
-  const [state, setState] = useState<StorageImageState>({ storagePath, status: "loading" });
-  const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => {
-    if (!enabled) {
-      return;
-    }
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    void loadChatAttachmentPreview(storagePath).then((result) => {
-      if (cancelled) {
-        return;
-      }
-      if (!result.ok) {
-        setState({ storagePath, status: result.reason === "transient" ? "failed" : "unavailable" });
-        return;
-      }
-      objectUrl = URL.createObjectURL(result.blob);
-      setState({ storagePath, status: "ready", url: objectUrl });
-    });
-    return () => {
-      cancelled = true;
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [attempt, enabled, storagePath]);
-
-  const retry = useCallback(() => {
-    setState({ storagePath, status: "loading" });
-    setAttempt((value) => value + 1);
-  }, [storagePath]);
-
-  // A new path shows as loading until its own download settles.
-  return {
-    state: state.storagePath === storagePath ? state : { storagePath, status: "loading" },
-    retry,
-  };
-}
-
 function ChatAttachmentImageTile({
   imageUrl,
   alt,
@@ -394,7 +301,7 @@ function ChatMessageStorageImage({
   onOpenImage?: (src: string, alt: string) => void;
 }) {
   const [nearRef, near] = useNearViewport();
-  const { state, retry } = useChatStorageImageUrl(storagePath, near);
+  const { state, retry } = useAuthorizedImage(storagePath, () => downloadChatAttachment(storagePath), near);
   let tile: ReactNode;
   if (state.status === "unavailable") {
     tile = (

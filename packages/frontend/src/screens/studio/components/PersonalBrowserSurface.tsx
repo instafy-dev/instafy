@@ -20,9 +20,10 @@ import {
   MoreHoriz,
   Xmark,
 } from "iconoir-react";
-import { normalizeBrowserAddress } from "./browserAddress";
+import { normalizeBrowserAddress, personalBrowserAddressInput } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
 import { Checkbox } from "../../../components/Checkbox";
+import { Select } from "../../../components/Select";
 import { Button, IconButton } from "../../../components/Button";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
@@ -275,6 +276,7 @@ export function PersonalBrowserSurface({
   }, []);
   const [fullscreen, setFullscreen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const searchEngineFieldId = useId();
   const expanded = active && fullscreen;
   const selectedApprovalMode = model.preferredApprovalMode;
   const [dismissedClearDataFeedbackKey, setDismissedClearDataFeedbackKey] =
@@ -418,7 +420,11 @@ export function PersonalBrowserSurface({
       setAddress(nextAddress);
       model.clearNavigationError();
       void model.navigate(nextAddress);
-      if (!normalizeBrowserAddress(nextAddress)) return false;
+      // Words that are not an address search with the chosen engine, when the Desktop can.
+      const opens = model.searchChoice
+        ? personalBrowserAddressInput(nextAddress).kind !== "invalid"
+        : Boolean(normalizeBrowserAddress(nextAddress));
+      if (!opens) return false;
       addressInputRef.current?.blur();
       return true;
     },
@@ -561,7 +567,7 @@ export function PersonalBrowserSurface({
                 : humanInputLocked
                 ? "Pause agent control to navigate"
                 : ready
-                ? "Enter an address"
+                ? model.searchChoice ? "Search or enter an address" : "Enter an address"
                 : model.recovering
                   ? "Reopening Personal Browser…"
                   : model.status?.state === "error"
@@ -669,6 +675,22 @@ export function PersonalBrowserSurface({
                 </span>
               </div>
             ) : null}
+          {model.searchChoice ? (
+            <div className="flex items-center gap-2 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800">
+              <label htmlFor={searchEngineFieldId} className="shrink-0 text-slate-600 dark:text-slate-300">Search with</label>
+              <Select
+                id={searchEngineFieldId}
+                size="sm"
+                value={model.searchChoice.selected ?? ""}
+                data-testid="personal-browser-search-engine"
+                onChange={(event) => void model.setSearchEngine(event.target.value)}
+              >
+                {model.searchChoice.engines.map((engine) => (
+                  <option key={engine.id} value={engine.id}>{engine.name}</option>
+                ))}
+              </Select>
+            </div>
+          ) : null}
           <Button
             aria-label={
               model.clearDataState === "clearing"

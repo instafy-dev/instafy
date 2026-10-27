@@ -36,6 +36,7 @@ use crate::proxy_auth::ProxyClaims;
 use crate::stream_passthrough;
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 use crate::usage::responses_to_chat_usage;
+use crate::usage_diagnostics::UsageDiagnostics;
 
 const MAX_PROXY_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 const PUBLIC_PROXY_LANE_HEADER: &str = "x-instafy-proxy-lane";
@@ -384,11 +385,52 @@ const PINNED_LEASE_TOOL_TYPES: [&str; 4] = ["function", "custom", "namespace", "
 
 /// Codex tool types that OpenAI runs on its side, billed per call on top of
 /// tokens. A pinned lease drops them on purpose: credits price tokens only.
-/// The pin, not the lane, decides it. Only the platform lane is ever pinned
-/// (the controller's managed lease, static credentials with
-/// `PROXY_PINNED_MODEL`), and an unpinned lease keeps them: a user's own
-/// credential, and the platform lane before the pin reaches it.
+/// Web search, the only one codex sends, is also off on every other lease
+/// ([`is_hosted_web_search`]).
 const PINNED_LEASE_DROPPED_TOOL_TYPES: [&str; 1] = ["web_search"];
+
+/// OpenAI's hosted web search, under any of its tool types (`web_search`,
+/// `web_search_preview` and their dated forms). No lease forwards it, pinned
+/// or not, so it is off for Lite, own keys and ChatGPT logins alike: Octo
+/// searches the web only through Instafy's own command, which keeps the
+/// web-research skill's link-only sites link-only and caps searches per turn,
+/// and OpenAI's search can do neither. The runtime sets Codex's web search to
+/// disabled on every lane; this is the proxy's half of the same rule.
+fn is_hosted_web_search(tool_type: &str) -> bool {
+    tool_type == "web_search" || tool_type.starts_with("web_search_")
+}
+
+/// Why any lease, pinned or not, drops a client tool: hosted web search, on
+/// its own or inside a namespace.
+fn any_lease_tool_rejection(tool: &Value) -> Option<&'static str> {
+    let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or_default();
+    if is_hosted_web_search(tool_type) {
+        return Some("hosted");
+    }
+    if tool
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|members| {
+            members
+                .iter()
+                .any(|member| any_lease_tool_rejection(member).is_some())
+        })
+    {
+        return Some("member");
+    }
+    None
+}
+
+/// Why a lease drops a client tool, or `None` to forward it: a pinned lease
+/// forwards only codex's client tools ([`pinned_lease_tool_rejection`]), and
+/// every lease drops hosted web search ([`any_lease_tool_rejection`]).
+fn lease_tool_rejection(tool: &Value, pinned: bool) -> Option<&'static str> {
+    if pinned {
+        pinned_lease_tool_rejection(tool).or_else(|| any_lease_tool_rejection(tool))
+    } else {
+        any_lease_tool_rejection(tool)
+    }
+}
 
 /// Why a pinned lease drops a client tool, or `None` to forward it: its type
 /// must be one codex emits and not a hosted one, a tool search must run on
@@ -438,14 +480,24 @@ struct DroppedTool {
 }
 
 /// The client tools a pinned lease forwards, plus each one it drops.
+#[cfg(test)]
 fn tools_for_pinned_lease(
     tools: &[Value],
     carrier: &'static str,
 ) -> (Vec<Value>, Vec<DroppedTool>) {
+    tools_for_lease(tools, carrier, true)
+}
+
+/// The client tools a lease forwards, plus each one it drops.
+fn tools_for_lease(
+    tools: &[Value],
+    carrier: &'static str,
+    pinned: bool,
+) -> (Vec<Value>, Vec<DroppedTool>) {
     let mut kept = Vec::with_capacity(tools.len());
     let mut dropped = Vec::new();
     for tool in tools {
-        match pinned_lease_tool_rejection(tool) {
+        match lease_tool_rejection(tool, pinned) {
             None => kept.push(tool.clone()),
             Some(reason) => dropped.push(DroppedTool {
                 carrier,
@@ -514,7 +566,17 @@ const TOOL_CARRYING_INPUT_TYPES: [&str; 2] = ["additional_tools", "tool_search_o
 /// The input a pinned lease forwards: the tools inside tool-carrying items
 /// pass the same test as the request's `tools`. Borrowed unless one is
 /// dropped.
+#[cfg(test)]
 fn input_items_for_pinned_lease(input_items: &[Value]) -> (Cow<'_, [Value]>, Vec<DroppedTool>) {
+    input_items_for_lease(input_items, true)
+}
+
+/// The input a lease forwards, its tool-carrying items filtered like the
+/// request's `tools`. Borrowed unless a tool is dropped.
+fn input_items_for_lease(
+    input_items: &[Value],
+    pinned: bool,
+) -> (Cow<'_, [Value]>, Vec<DroppedTool>) {
     let mut filtered: Option<Vec<Value>> = None;
     let mut dropped = Vec::new();
     for (index, item) in input_items.iter().enumerate() {
@@ -532,7 +594,7 @@ fn input_items_for_pinned_lease(input_items: &[Value]) -> (Cow<'_, [Value]>, Vec
         let Some(tools) = item.get("tools").and_then(Value::as_array) else {
             continue;
         };
-        let (kept, item_dropped) = tools_for_pinned_lease(tools, carrier);
+        let (kept, item_dropped) = tools_for_lease(tools, carrier, pinned);
         if item_dropped.is_empty() {
             continue;
         }
@@ -1473,6 +1535,7 @@ struct RemoteResponseControls<'a> {
 }
 
 struct RemoteCompletionOptions<'a> {
+    usage_diagnostics: Option<UsageDiagnostics>,
     /// The proxy route the request came in on, as logged.
     route: &'a str,
     requested_model: &'a str,
@@ -1571,29 +1634,21 @@ fn build_remote_completion_client<'i>(
     }
     // Only the pinned model may run on a pinned lease, so a client tool that
     // brings its own model or hosted work does not go upstream, whether the
-    // request lists it in `tools` or in a tool-carrying input item. The
-    // client sends input items as given, so the filtered ones below are the
-    // ones the provider sees.
+    // request lists it in `tools` or in a tool-carrying input item. No lease
+    // forwards hosted web search. The client sends input items as given, so
+    // the filtered ones below are the ones the provider sees.
     let mut dropped_tools = Vec::new();
     let requested_tools = options
         .response_controls
         .as_ref()
         .and_then(|controls| controls.requested_tools)
         .map(|tools| {
-            if !pinned {
-                return tools.clone();
-            }
-            let (kept, dropped) = tools_for_pinned_lease(tools, "tools");
+            let (kept, dropped) = tools_for_lease(tools, "tools", pinned);
             dropped_tools.extend(dropped);
             kept
         });
-    let input_items = if pinned {
-        let (kept, dropped) = input_items_for_pinned_lease(input_items);
-        dropped_tools.extend(dropped);
-        kept
-    } else {
-        Cow::Borrowed(input_items)
-    };
+    let (input_items, dropped) = input_items_for_lease(input_items, pinned);
+    dropped_tools.extend(dropped);
     let run_id = run_id_from_claims(options.claims);
     if log_lease_policy && !dropped_tools.is_empty() {
         log_dropped_tools(&dropped_tools, run_id);
@@ -1628,6 +1683,7 @@ fn build_remote_completion_client<'i>(
     );
     let mut client = CodexClient::new(creds)
         .map_err(anyhow::Error::from)?
+        .with_usage_diagnostics(options.usage_diagnostics.clone())
         .with_model(upstream_model.clone())
         .with_context_controls(context_controls)
         .with_instructions(instructions)
@@ -1636,21 +1692,18 @@ fn build_remote_completion_client<'i>(
             options.service_tier.cloned(),
             options.service_tier_endpoints,
         );
-    if pinned {
-        // A ChatGPT login whose request keeps no tools gets the client's
-        // default tools, web search among them with CODEX_ENABLE_WEB_SEARCH,
-        // after the filter above, unless it is a Responses Lite request. The
-        // pin runs again on the list the request finally carries; tools it
-        // already kept pass unchanged.
-        let run_id = run_id.map(str::to_string);
-        client = client.with_tool_filter(move |tools| {
-            let (kept, dropped) = tools_for_pinned_lease(tools, "tools");
-            if log_lease_policy && !dropped.is_empty() {
-                log_dropped_tools(&dropped, run_id.as_deref());
-            }
-            kept
-        });
-    }
+    // A ChatGPT login whose request keeps no tools gets the client's default
+    // tools after the filter above, unless it is a Responses Lite request.
+    // The lease's filter runs again on the list the request finally carries;
+    // tools it already kept pass unchanged.
+    let run_id_for_filter = run_id.map(str::to_string);
+    client = client.with_tool_filter(move |tools| {
+        let (kept, dropped) = tools_for_lease(tools, "tools", pinned);
+        if log_lease_policy && !dropped.is_empty() {
+            log_dropped_tools(&dropped, run_id_for_filter.as_deref());
+        }
+        kept
+    });
 
     if required_tool_call && required_tool_call_attempt == RequiredToolCallAttempt::First {
         eprintln!(
@@ -1902,6 +1955,7 @@ async fn create_response(
 
     let reasoning_effort = requested_reasoning_effort(&payload);
     let completion_options = RemoteCompletionOptions {
+        usage_diagnostics: UsageDiagnostics::from_env(claims.as_ref()),
         route: "/v1/responses",
         requested_model: &model,
         payload: &payload,
@@ -2059,6 +2113,7 @@ async fn create_chat_completion(
         .and_then(Value::as_str)
         .and_then(normalize_reasoning_effort);
     let completion_options = RemoteCompletionOptions {
+        usage_diagnostics: UsageDiagnostics::from_env(claims.as_ref()),
         route: "/v1/chat/completions",
         requested_model: &requested_model,
         payload: &payload,

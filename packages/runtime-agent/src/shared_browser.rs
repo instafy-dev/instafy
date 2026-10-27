@@ -576,6 +576,7 @@ fn publish_private_file(temp_path: &Path, path: &Path, payload: &[u8], what: &st
 /// Starts the run's approval state in routine browsing, bound to the exact
 /// authority the marker will carry. The approval scripts read this file as
 /// the run's state; they reject it if any binding differs from the marker.
+#[cfg(test)]
 fn write_routine_approval_state(
     approval_dir: &Path,
     owner_id: &str,
@@ -583,15 +584,38 @@ fn write_routine_approval_state(
     initiator_user_id: Uuid,
     browser_page_id: &str,
 ) -> Result<()> {
+    write_starting_approval_state(
+        approval_dir,
+        owner_id,
+        run_id,
+        initiator_user_id,
+        browser_page_id,
+        &[],
+        true,
+    )
+}
+
+/// Starts the run's approval state with sites already approved on the page
+/// the person chose and, when `routine_browsing_allowed`, in routine
+/// browsing, bound to the exact authority the marker will carry.
+fn write_starting_approval_state(
+    approval_dir: &Path,
+    owner_id: &str,
+    run_id: Uuid,
+    initiator_user_id: Uuid,
+    browser_page_id: &str,
+    approved_origins: &[String],
+    routine_browsing_allowed: bool,
+) -> Result<()> {
     let payload = serde_json::to_vec(&json!({
         "version": 1,
         "ownerId": owner_id,
         "runId": run_id,
         "initiatorUserId": initiator_user_id,
         "browserPageId": browser_page_id,
-        "approvedOrigins": [],
+        "approvedOrigins": approved_origins,
         "consumedApprovalIds": [],
-        "routineBrowsingAllowed": true,
+        "routineBrowsingAllowed": routine_browsing_allowed,
     }))?;
     // The temporary name uses the prefix the approval directory cleanup
     // accepts, so a write cut short is revoked with the rest of the run.
@@ -601,6 +625,146 @@ fn write_routine_approval_state(
         &payload,
         "Shared Browser approval state",
     )
+}
+
+/// How long after a run ends a run that continues it may still take over its
+/// approvals: the ten minutes a manual browser step stays open.
+const CONTINUATION_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// The most sites one run approves on its page (the script's
+/// `MAX_APPROVED_ORIGINS`).
+const MAX_APPROVED_ORIGINS: usize = 32;
+const APPROVAL_STATE_FILE: &str = "state.json";
+const APPROVAL_STATE_MAX_BYTES: u64 = 16 * 1024;
+
+/// What the last run to hold the browser left for a run that continues it:
+/// the sites the person approved on the page they chose, and routine browsing
+/// when they allowed it. Octo's own tabs closed with that run, and the sites
+/// approved in them went with them. Kept in this process only, so a runtime
+/// that starts again (and its browser, whose page ids are new) carries
+/// nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EndedRunGrants {
+    run_id: Uuid,
+    initiator_user_id: Uuid,
+    browser_page_id: String,
+    approved_origins: Vec<String>,
+    routine_browsing_allowed: bool,
+    ended_at: std::time::Instant,
+}
+
+/// The last ended run's grants, by approval directory (one per runtime; a
+/// test has its own).
+static ENDED_RUN_GRANTS: Mutex<Option<std::collections::HashMap<PathBuf, EndedRunGrants>>> =
+    Mutex::new(None);
+
+fn with_ended_run_grants<T>(
+    operation: impl FnOnce(&mut std::collections::HashMap<PathBuf, EndedRunGrants>) -> T,
+) -> T {
+    let mut guard = ENDED_RUN_GRANTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation(guard.get_or_insert_with(Default::default))
+}
+
+/// Records what the run that just let go of the browser leaves for a run
+/// that continues it, or that it leaves nothing.
+fn store_ended_run_grants(approval_dir: &Path, grants: Option<EndedRunGrants>) {
+    with_ended_run_grants(|records| match grants {
+        Some(grants) => {
+            records.insert(approval_dir.to_path_buf(), grants);
+        }
+        None => {
+            records.remove(approval_dir);
+        }
+    });
+}
+
+fn forget_ended_run_grants(approval_dir: &Path) {
+    with_ended_run_grants(|records| {
+        records.remove(approval_dir);
+    });
+}
+
+/// The run's own approval state, read the way the approval script writes it.
+/// A state that is missing, bound to another run or not well formed leaves
+/// nothing to carry.
+fn ended_run_grants(approval_dir: &Path, binding: &RunBinding) -> Option<EndedRunGrants> {
+    let state = read_run_record_bounded(
+        approval_dir,
+        APPROVAL_STATE_FILE,
+        &[1],
+        binding,
+        APPROVAL_STATE_MAX_BYTES,
+    )
+    .ok()
+    .flatten()?;
+    let origins = state.get("approvedOrigins")?.as_array()?;
+    if origins.len() > MAX_APPROVED_ORIGINS {
+        return None;
+    }
+    let mut approved_origins = Vec::with_capacity(origins.len());
+    for origin in origins {
+        let origin = origin.as_str()?;
+        if !is_normalized_web_origin(origin) || approved_origins.iter().any(|seen| seen == origin) {
+            return None;
+        }
+        approved_origins.push(origin.to_string());
+    }
+    let routine_browsing_allowed = match state.get("routineBrowsingAllowed") {
+        None => false,
+        Some(value) => value.as_bool()?,
+    };
+    Some(EndedRunGrants {
+        run_id: binding.run_id,
+        initiator_user_id: binding.initiator_user_id,
+        browser_page_id: binding.browser_page_id.clone(),
+        approved_origins,
+        routine_browsing_allowed,
+        ended_at: std::time::Instant::now(),
+    })
+}
+
+/// `https://example.test` or `http://127.0.0.1:8080`, exactly as a browser
+/// serializes an origin.
+fn is_normalized_web_origin(raw: &str) -> bool {
+    raw.len() <= 512
+        && reqwest::Url::parse(raw).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.has_host()
+                && url.origin().ascii_serialization() == raw
+        })
+}
+
+/// What a new run starts with from the run it continues. Studio's Let AI
+/// continue names that run (`browserContinuesRunId`) after the person took
+/// over or did a manual step; the grants carry only when it is the last run
+/// that held this browser, for the same person on the same page, and ended
+/// less than [`CONTINUATION_WINDOW`] ago. Any new run uses up the record, so
+/// a run in between, another person, another page or a restarted browser
+/// starts with nothing, as every other run does.
+fn take_continued_run_grants(
+    approval_dir: &Path,
+    continues_run_id: Option<Uuid>,
+    initiator_user_id: Uuid,
+    browser_page_id: &str,
+) -> Option<EndedRunGrants> {
+    let grants = with_ended_run_grants(|records| records.remove(approval_dir))?;
+    (continues_run_id == Some(grants.run_id)
+        && grants.initiator_user_id == initiator_user_id
+        && grants.browser_page_id == browser_page_id
+        && grants.ended_at.elapsed() <= CONTINUATION_WINDOW)
+        .then_some(grants)
+}
+
+/// The run a Shared Browser job continues, as Studio's Let AI continue names
+/// it. A value that is not one UUID names none.
+pub fn continued_run_id_from_payload(payload: &JsonValue) -> Option<Uuid> {
+    payload
+        .get("metadata")
+        .and_then(JsonValue::as_object)
+        .and_then(|metadata| metadata.get("browserContinuesRunId"))
+        .and_then(JsonValue::as_str)
+        .and_then(|raw| Uuid::parse_str(raw.trim()).ok())
 }
 
 fn remove_owned_agent_control_marker(
@@ -705,12 +869,15 @@ impl SharedBrowserAgentControlGuard {
     /// Publishes a job's agent control. The run's approval start is this
     /// process's own decision (an attested browser host starts in routine
     /// browsing), never the job's or the model's, and its state is written
-    /// before any Codex or MCP process starts.
+    /// before any Codex or MCP process starts. `continues_run_id` is the run
+    /// Studio's Let AI continue names: its grants carry over only as
+    /// [`take_continued_run_grants`] allows.
     pub(crate) fn acquire(
         run_id: Uuid,
         initiator_user_id: Uuid,
         browser_page_id: &str,
         display_name: &str,
+        continues_run_id: Option<Uuid>,
         cancel_signal: JobCancelSignal,
     ) -> Result<Self> {
         let mut guard = Self::acquire_at(
@@ -720,6 +887,7 @@ impl SharedBrowserAgentControlGuard {
             initiator_user_id,
             browser_page_id,
             display_name,
+            continues_run_id,
             cancel_signal,
         )?;
         guard.start_window_watch();
@@ -728,6 +896,7 @@ impl SharedBrowserAgentControlGuard {
 
     /// [`Self::acquire`] at explicit paths, so a test reaches the same
     /// approval-start decision a job does.
+    #[allow(clippy::too_many_arguments)]
     fn acquire_at(
         path: PathBuf,
         approval_dir: PathBuf,
@@ -735,9 +904,10 @@ impl SharedBrowserAgentControlGuard {
         initiator_user_id: Uuid,
         browser_page_id: &str,
         display_name: &str,
+        continues_run_id: Option<Uuid>,
         cancel_signal: JobCancelSignal,
     ) -> Result<Self> {
-        Self::acquire_with_path(
+        Self::acquire_continuing(
             path,
             approval_dir,
             run_approval_start(),
@@ -745,11 +915,13 @@ impl SharedBrowserAgentControlGuard {
             initiator_user_id,
             browser_page_id,
             display_name,
+            continues_run_id,
             cancel_signal,
             AGENT_CONTROL_HEARTBEAT_INTERVAL,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn acquire_with_path(
         path: PathBuf,
         approval_dir: PathBuf,
@@ -761,6 +933,33 @@ impl SharedBrowserAgentControlGuard {
         cancel_signal: JobCancelSignal,
         heartbeat_interval: Duration,
     ) -> Result<Self> {
+        Self::acquire_continuing(
+            path,
+            approval_dir,
+            approval_start,
+            run_id,
+            initiator_user_id,
+            browser_page_id,
+            display_name,
+            None,
+            cancel_signal,
+            heartbeat_interval,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_continuing(
+        path: PathBuf,
+        approval_dir: PathBuf,
+        approval_start: ApprovalStart,
+        run_id: Uuid,
+        initiator_user_id: Uuid,
+        browser_page_id: &str,
+        display_name: &str,
+        continues_run_id: Option<Uuid>,
+        cancel_signal: JobCancelSignal,
+        heartbeat_interval: Duration,
+    ) -> Result<Self> {
         if !path.is_absolute() {
             bail!("Shared Browser agent-control marker must use an absolute runtime-local path");
         }
@@ -768,17 +967,34 @@ impl SharedBrowserAgentControlGuard {
         let display_name = normalized_agent_control_display_name(display_name);
         let browser_page_id = validate_page_id(browser_page_id)?;
         cancel_signal.reset_shared_browser_shutdown_confirmation();
+        // Every new run uses up what the last one left; only the run that
+        // continues it, on the same page for the same person, takes it.
+        let continued = take_continued_run_grants(
+            &approval_dir,
+            continues_run_id,
+            initiator_user_id,
+            &browser_page_id,
+        );
         prepare_clean_approval_directory(&approval_dir)?;
         // The starting state goes in before the marker, so no approval script
         // can act for this run without it, and a failed write ends the job
         // before anything holds the browser.
-        if approval_start == ApprovalStart::Routine {
-            write_routine_approval_state(
+        let routine_browsing_allowed = approval_start == ApprovalStart::Routine
+            || continued
+                .as_ref()
+                .is_some_and(|grants| grants.routine_browsing_allowed);
+        let approved_origins = continued
+            .map(|grants| grants.approved_origins)
+            .unwrap_or_default();
+        if routine_browsing_allowed || !approved_origins.is_empty() {
+            write_starting_approval_state(
                 &approval_dir,
                 &owner_id,
                 run_id,
                 initiator_user_id,
                 &browser_page_id,
+                &approved_origins,
+                routine_browsing_allowed,
             )?;
         }
         if let Err(error) = write_agent_control_marker(
@@ -1339,16 +1555,30 @@ fn read_run_record(
     versions: &[u64],
     binding: &RunBinding,
 ) -> Result<Option<JsonValue>> {
+    read_run_record_bounded(
+        approval_dir,
+        name,
+        versions,
+        binding,
+        AGENT_TABS_FILE_MAX_BYTES,
+    )
+}
+
+/// [`read_run_record`] for a record of at most `max_bytes`.
+fn read_run_record_bounded(
+    approval_dir: &Path,
+    name: &str,
+    versions: &[u64],
+    binding: &RunBinding,
+    max_bytes: u64,
+) -> Result<Option<JsonValue>> {
     let path = approval_dir.join(name);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("failed to inspect {name}")),
     };
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() > AGENT_TABS_FILE_MAX_BYTES
-    {
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > max_bytes {
         bail!("{name} is not a bounded regular file");
     }
     let bytes = std::fs::read(&path).with_context(|| format!("failed to read {name}"))?;
@@ -1526,12 +1756,18 @@ impl Drop for SharedBrowserAgentControlGuard {
                 self.cdp_base.as_ref(),
                 run_tabs,
             );
+            // What the person approved on their page stays available to the
+            // run that continues this one (Let AI continue), and only to it.
+            // It is read before the run's records are revoked, and kept only
+            // once the run has let go of the browser.
+            let ended = ended_run_grants(&self.approval_dir, &self.binding());
             if let Err(error) = prepare_clean_approval_directory(&self.approval_dir) {
                 tracing::error!(
                     ?error,
                     approval_dir = %self.approval_dir.display(),
                     "Shared Browser shutdown was confirmed but approval revocation failed; preserving authority and recycling the runtime"
                 );
+                forget_ended_run_grants(&self.approval_dir);
                 recycle_runtime_after_unconfirmed_browser_shutdown();
                 return;
             }
@@ -1547,13 +1783,17 @@ impl Drop for SharedBrowserAgentControlGuard {
                     marker_path = %self.path.display(),
                     "Shared Browser shutdown was confirmed but authority release failed; preserving fail-closed state and recycling the runtime"
                 );
+                forget_ended_run_grants(&self.approval_dir);
                 recycle_runtime_after_unconfirmed_browser_shutdown();
+                return;
             }
+            store_ended_run_grants(&self.approval_dir, ended);
         } else {
             tracing::error!(
                 marker_path = %self.path.display(),
                 "Shared Browser execution ended without confirmed tool shutdown; preserving authority and recycling the runtime"
             );
+            forget_ended_run_grants(&self.approval_dir);
             recycle_runtime_after_unconfirmed_browser_shutdown();
         }
     }
@@ -2396,13 +2636,17 @@ fn embedded_link_only_sites() -> String {
 }
 
 /// What the origin evaluates, in an isolated world of the page, to read a page
-/// a person sends to the chat: the redaction and page-capture scripts. The
-/// origin adds the call itself (see `origin_http_server::browser_page_capture`).
+/// a person sends to the chat: the redaction and page-capture scripts, and the
+/// link-only matcher with the skill's list, which mark the page's links to
+/// link-only sites. The origin adds the call itself (see
+/// `origin_http_server::browser_page_capture`).
 pub fn sent_page_capture_script() -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}\n{}",
         embedded_plain_script(BROWSER_REDACTION_SCRIPT),
         embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
+        embedded_plain_script(BROWSER_LINK_ONLY_SCRIPT),
+        embedded_link_only_sites(),
     )
 }
 

@@ -6,6 +6,7 @@ import test from "node:test";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { JSDOM } from "jsdom";
 
 // Send page to Octo on the Personal Browser: the owner's page is read once and
 // masked in Electron main before anything leaves Desktop, and reading it
@@ -60,7 +61,7 @@ function fixture(page) {
     "./personalBrowserPageBridge": {
       ...pageBridge,
       clearPersonalBrowserHumanInput: async () => {},
-      snapshotPersonalBrowserPage: async () => {
+      snapshotPersonalBrowserPage: async (_contents, options = {}) => {
         const snapshot = {
           url: page.url,
           title: page.title,
@@ -68,6 +69,7 @@ function fixture(page) {
           documentToken: page.documentToken ?? "document-1",
           signals: page.signals === undefined ? NO_SECRET_SIGNALS : page.signals,
           interactive: [],
+          ...(options.links ? { links: page.links ?? [] } : {}),
           capturedAt: "2026-10-26T09:30:00.000Z",
         };
         snapshots.push(snapshot);
@@ -192,4 +194,52 @@ test("only the current owner can read, only a web page, and only one document", 
   page.afterSnapshot = () => { page.currentUrl = "https://example.test/b"; };
   const moving = fixture(page);
   await assert.rejects(() => moving.host.readPageForOwner("owner-fixture"), /changed while it was read/);
+});
+
+test("a sent Personal page keeps up to 200 links, each to a link-only site marked as one", async () => {
+  const links = [
+    { text: "City Museum: opening hours", href: "https://museum.example/visit/hours" },
+    { text: "City Museum Inn", href: "https://www.booking.com/hotel/se/city-museum-inn.html" },
+    { text: "Its copy on a translator", href: "https://www-booking-com.translate.goog/hotel/se/x.html" },
+    { text: "Show more", href: "javascript:void(0)" },
+    { text: "Inline", href: "data:text/html,x" },
+    { text: `Reset ${KEY}`, href: `https://museum.example/reset?token=${KEY}` },
+    ...Array.from({ length: 250 }, (_, index) => ({ text: `Result ${index}`, href: `https://results.example/${index}` })),
+  ];
+  const { host, snapshots } = fixture({ url: "https://search.example/?q=museum", title: "museum - Search", text: "Results", links });
+  const page = await host.readPageForOwner("owner-fixture");
+  assert.ok(snapshots.at(-1).links, "the read asks the page for its links");
+  assert.equal(page.links.length, 200);
+  assert.deepEqual(page.links.slice(0, 4), [
+    { text: "City Museum: opening hours", href: "https://museum.example/visit/hours" },
+    { text: "City Museum Inn", href: "https://www.booking.com/hotel/se/city-museum-inn.html", linkOnly: "Booking.com" },
+    { text: "Its copy on a translator", href: "https://www-booking-com.translate.goog/hotel/se/x.html", linkOnly: "Booking.com" },
+    { text: "Reset [redacted secret]", href: "https://museum.example/reset?token=REDACTED" },
+  ]);
+  assert.ok(!JSON.stringify(page).includes(KEY));
+  assert.ok(page.links.every((link) => /^https:\/\//.test(link.href)));
+
+  // A secret screen sends no links.
+  const secret = fixture({ url: "https://console.example/keys", title: "API keys", text: "Keys", links, signals: { ...NO_SECRET_SIGNALS, secretField: true } });
+  assert.deepEqual((await secret.host.readPageForOwner("owner-fixture")).links, []);
+});
+
+test("the Send page snapshot lists the page's own web links inside the page, and only when asked", async () => {
+  // The real snapshot script, run in a hand-written results page.
+  const html = fs.readFileSync(path.join(packageRoot, "test", "fixtures", "send-page", "search-results.html"), "utf8");
+  const dom = new JSDOM(html, { url: "https://search.example/?q=city+museum", runScripts: "outside-only", pretendToBeVisual: true });
+  // Out of the page's realm, as Electron hands the result over.
+  const contents = { executeJavaScriptInIsolatedWorld: async (_world, [{ code }]) => JSON.parse(JSON.stringify(dom.window.eval(code))) };
+  const snapshot = await pageBridge.snapshotPersonalBrowserPage(contents, { links: 200 });
+  assert.deepEqual(snapshot.links.map((link) => link.href), [
+    "https://museum.example/visit/hours",
+    "https://www.booking.com/hotel/se/city-museum-inn.html",
+    "https://www.amazon.de/dp/B000000000",
+    "https://wiki.example/City_Museum",
+    "https://search.example/search?q=city+museum+opening+hours&page=2",
+    "https://museum.example/shop",
+  ]);
+  assert.equal(snapshot.links[5].text, "Museum shop");
+  // The agent's own snapshots do not list them.
+  assert.equal("links" in (await pageBridge.snapshotPersonalBrowserPage(contents)), false);
 });

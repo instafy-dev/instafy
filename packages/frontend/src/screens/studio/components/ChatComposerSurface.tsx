@@ -32,7 +32,7 @@ import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAc
 import { Surface } from "../../../components/Surface";
 import { AttachmentThumbnail } from "../../../components/AttachmentThumbnail";
 import { Text } from "../../../components/Text";
-import { StudioPopover } from "../../../components/aria/StudioPopover";
+import { ComposerMessagePopover } from "./ComposerMessagePanel";
 import {
   DARK_PANEL_BORDER_CLASS,
   DARK_RAISED_CONTROL_BG_CLASS,
@@ -1439,18 +1439,14 @@ export function ChatComposerSurface({
                         <span id={CHAT_SEND_QUEUE_ITEMS_ID} hidden />
                       ) : null}
                       {openSavedMessagePanel !== null && !queueEditingItem ? (
-                        <StudioPopover
+                        <ComposerMessagePopover
                           key={openSavedMessagePanel}
                           triggerRef={openSavedMessagePanel === "queue" ? joinedToolbarRef : savedMessagePopoverTriggerRef}
                           isOpen
                           onOpenChange={handleSavedMessagePopoverOpenChange}
                           isNonModal
-                          surface={openSavedMessagePanel === "queue" ? "none" : "default"}
+                          presentation={openSavedMessagePanel === "queue" ? "bubbles" : "list"}
                           isKeyboardDismissDisabled={queueDragActive}
-                          placement="top end"
-                          offset={openSavedMessagePanel === "queue" ? 16 : 8}
-                          containerPadding={8}
-                          className={`max-h-[calc(100dvh-1rem)] p-0 ${openSavedMessagePanel === "queue" ? "w-[min(24rem,calc(100dvw-4rem))]" : "w-[min(24rem,calc(100dvw-1rem))]"}`}
                           data-testid="chat-saved-message-popover"
                         >
                           <div
@@ -1496,7 +1492,7 @@ export function ChatComposerSurface({
                               )}
                             </div>
                           </div>
-                        </StudioPopover>
+                        </ComposerMessagePopover>
                       ) : null}
                     </div>
                   ) : null}

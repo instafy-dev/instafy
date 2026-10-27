@@ -17,8 +17,16 @@
 //!
 //! Each pack folder holds `.instafy-pack.json`:
 //! `{"schema": 1, "name", "version", "skill" | "skills": [..], "cli": {"entry", "space_path"} | "entry",
-//!   "engines": {"node": ">=22"}, "env": ["UW_*", "SOME_SETTING"], ...}`. A pack whose manifest does
-//! not parse or check out is skipped with a warning.
+//!   "engines": {"node": ">=22"}, "env": ["UW_*", "SOME_SETTING"], "bin": {"uw": "scripts/uw.mjs"}, ...}`.
+//! A pack whose manifest does not parse or check out is skipped with a warning.
+//!
+//! Commands on PATH: `bin` names the pack's commands (at most 8, plain names that are not reserved),
+//! each a file inside the pack that `node` runs. Model shells are login shells, which may reset PATH,
+//! so runtime images carry a shim per command in `/usr/local/bin` (`scripts/install-skill-packs.mjs
+//! --install-root`, `docker/runtime/Dockerfile`). Elsewhere [`prepare_pack_bins`] writes the shims to
+//! a folder of its own at startup and appends it to the end of PATH, so a pack command never shadows
+//! another command. A name that is already a command is skipped, and a name two packs declare is
+//! skipped for both.
 //!
 //! Settings and state:
 //! - `env` names the settings the pack's scripts read: exact names, or prefixes ending in `_*`. A
@@ -31,6 +39,9 @@
 //!   ([`skill_pack_cache_dir`]): a pack keeps its caches, rate-limit holds and health state there
 //!   instead of in a tool turn's HOME or TMPDIR, which may be new every turn.
 
+pub mod activity;
+
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -97,6 +108,50 @@ const RESERVED_SETTING_PREFIXES: &[&str] = &[
 ];
 /// Namespaces under `INSTAFY_` that are open to skill packs (settings several packs may share).
 const PACK_SETTING_NAMESPACES: &[&str] = &["INSTAFY_LOOKUP_"];
+/// At most this many commands (`bin`) per pack.
+pub const MAX_PACK_BINS: usize = 8;
+/// Command names no pack may declare: the runtime's own tools and the commands every shell needs
+/// (`scripts/install-skill-packs.mjs` refuses the same names). The runtime image's helpers are
+/// here too, because some reach `/usr/local/bin` after the pack commands do, and Codex's
+/// `applypatch` alias, which the runtime puts on PATH only at startup: an image build cannot see
+/// either, and a pack command must never take their place.
+pub const RESERVED_BIN_NAMES: &[&str] = &[
+    "instafy",
+    "node",
+    "npm",
+    "npx",
+    "pnpm",
+    "pnpx",
+    "yarn",
+    "corepack",
+    "git",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "env",
+    "python",
+    "python3",
+    "pip",
+    "codex",
+    "runtime-agent",
+    "curl",
+    "wget",
+    "sudo",
+    "make",
+    "applypatch",
+    "rathole",
+    "runtime-entrypoint",
+    "browser-egress-proxy",
+    "browser-webrtc-sender",
+];
+/// Name prefixes no pack command may start with: Codex's and Instafy's own commands
+/// (`codex-linux-sandbox`, `codex-code-mode-host`, `codex-execve-wrapper`, ...).
+pub const RESERVED_BIN_PREFIXES: &[&str] = &["codex-", "instafy-"];
+/// The second line of every pack command shim, followed by ` <pack> <version>`.
+pub const PACK_BIN_MARKER: &str = "# instafy:managed-pack-bin";
+/// The name of the folder [`prepare_pack_bins`] makes, followed by `<pid>-` and a random suffix.
+pub const PACK_BIN_DIR_PREFIX: &str = "instafy-pack-bin-";
 #[cfg(debug_assertions)]
 const SOURCE_SKILL_PACKS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/skill-packs");
 
@@ -115,6 +170,15 @@ pub struct InstalledPack {
     pub node: Option<NodeRequirement>,
     /// The settings the pack's scripts read (`env`): exact names or `PREFIX_*` patterns, checked.
     pub env: Vec<String>,
+    /// The pack's commands on PATH (`bin`), by name.
+    pub bin: Vec<PackBin>,
+}
+
+/// A command a pack puts on PATH: `name` runs `entry`, a file inside the pack, with `node`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackBin {
+    pub name: String,
+    pub entry: String,
 }
 
 /// A pack's command: `entry` inside the pack, run through a launcher written at `space_path`
@@ -178,6 +242,8 @@ struct Manifest {
     engines: Option<ManifestEngines>,
     #[serde(default)]
     env: Vec<String>,
+    #[serde(default)]
+    bin: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -216,6 +282,22 @@ fn is_plain_relative_path(path: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
         && !path.ends_with('/')
         && !path.contains("//")
+}
+
+/// A command name a pack may declare (`bin`): a lowercase letter, then 1 to 31 lowercase letters,
+/// digits or dashes, not one of [`RESERVED_BIN_NAMES`] and not starting with one of
+/// [`RESERVED_BIN_PREFIXES`].
+pub fn is_pack_bin_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (2..=32).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        && !RESERVED_BIN_NAMES.contains(&name)
+        && !RESERVED_BIN_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 /// A setting pattern a pack may declare: `NAME` or `PREFIX_*` (upper-case letters, digits and `_`,
@@ -455,6 +537,23 @@ pub fn load_pack(dir: &Path) -> Result<InstalledPack, String> {
         ),
         None => None,
     };
+    if manifest.bin.len() > MAX_PACK_BINS {
+        return Err(format!("bin lists more than {MAX_PACK_BINS} commands"));
+    }
+    let mut bin = Vec::with_capacity(manifest.bin.len());
+    for (name, entry) in manifest.bin {
+        if !is_pack_bin_name(&name) {
+            return Err(format!(
+                "bin {name:?} is not a command a pack may declare (a-z, 0-9 and -, 2 to 32 characters, not a reserved name)"
+            ));
+        }
+        if !is_plain_relative_path(&entry) || !is_regular_file(&dir.join(&entry)) {
+            return Err(format!(
+                "the command {name:?} runs {entry:?}, which is not a file inside the pack"
+            ));
+        }
+        bin.push(PackBin { name, entry });
+    }
     Ok(InstalledPack {
         name: manifest.name,
         version: manifest.version,
@@ -463,6 +562,7 @@ pub fn load_pack(dir: &Path) -> Result<InstalledPack, String> {
         cli,
         node,
         env: manifest.env,
+        bin,
     })
 }
 
@@ -599,6 +699,335 @@ pub fn report_startup() {
                 "skill pack installed, but no matching node is on PATH; spaces will not get it"
             );
         }
+    }
+}
+
+/// The commands `packs` declare, each with its pack, in pack and name order. A name two packs
+/// declare is left out for both, with a warning: neither pack may take it from the other.
+pub fn declared_pack_bins(packs: &[InstalledPack]) -> Vec<(&InstalledPack, &PackBin)> {
+    let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for pack in packs {
+        for bin in &pack.bin {
+            owners.entry(&bin.name).or_default().push(&pack.name);
+        }
+    }
+    for (name, packs) in &owners {
+        if packs.len() > 1 {
+            warn!(command = %name, packs = ?packs, "skill pack command declared by more than one pack; none of them gets it");
+        }
+    }
+    packs
+        .iter()
+        .flat_map(|pack| pack.bin.iter().map(move |bin| (pack, bin)))
+        .filter(|(_, bin)| {
+            owners
+                .get(bin.name.as_str())
+                .is_some_and(|packs| packs.len() == 1)
+        })
+        .collect()
+}
+
+/// The marker line of `pack`'s command shims.
+fn pack_bin_marker(pack: &InstalledPack) -> String {
+    format!("{PACK_BIN_MARKER} {} {}", pack.name, pack.version)
+}
+
+/// The shell script that runs `bin` with `node`: `#!/bin/sh`, the marker line, then `exec node
+/// '<pack folder>/<entry>' "$@"`. `None` when the path or version cannot be written into it as
+/// plain text (a quote or a control character).
+pub fn pack_bin_shim(pack: &InstalledPack, bin: &PackBin) -> Option<String> {
+    let target = pack.dir.join(&bin.entry);
+    let target = target.to_str()?;
+    let plain_path =
+        target.starts_with('/') && !target.chars().any(|c| c == '\'' || c.is_control());
+    let plain_version = !pack.version.is_empty()
+        && pack
+            .version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'));
+    (plain_path && plain_version).then(|| {
+        format!(
+            "#!/bin/sh\n{}\nexec node '{target}' \"$@\"\n",
+            pack_bin_marker(pack)
+        )
+    })
+}
+
+/// The `(pack, command)` pairs a shell finds on PATH, set once by [`prepare_pack_bins`].
+static LINKED_PACK_BINS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// The commands of the pack named `pack` that a shell finds on PATH (none before
+/// [`prepare_pack_bins`] has run).
+pub fn linked_pack_bins(pack: &str) -> Vec<String> {
+    LINKED_PACK_BINS
+        .get()
+        .map(|linked| {
+            linked
+                .iter()
+                .filter(|(owner, _)| owner == pack)
+                .map(|(_, name)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What [`prepare_pack_bins_in`] did.
+#[derive(Debug)]
+pub struct PreparedPackBins {
+    /// `(pack, command)` for every pack command a shell now finds on PATH: a shim this call wrote,
+    /// or one already on PATH with the same marker (a runtime image's).
+    pub linked: Vec<(String, String)>,
+    /// PATH for the runtime's processes: the one given, with the new folder at its end when one
+    /// was made.
+    pub path: OsString,
+    /// The folder of shims this call made, removed when it is dropped.
+    pub dir: Option<tempfile::TempDir>,
+}
+
+/// Puts the commands of `packs` on `path`: a command whose name already resolves to a shim with the
+/// same marker (a runtime image's) is kept; a name that resolves to anything else is skipped with a
+/// warning; the rest get a shim in a new folder under `temp_root` (mode 0755, shims 0555), which
+/// must let programs run, appended to the end of `path`. A pack whose scripts need a newer `node`
+/// than `node` gets none.
+#[cfg(unix)]
+pub fn prepare_pack_bins_in(
+    packs: &[InstalledPack],
+    node: Option<NodeVersion>,
+    temp_root: &Path,
+    path: &std::ffi::OsStr,
+) -> PreparedPackBins {
+    let mut linked = Vec::new();
+    let mut wanted: Vec<(&InstalledPack, &PackBin, String)> = Vec::new();
+    for (pack, bin) in declared_pack_bins(packs) {
+        let runnable = pack
+            .node
+            .as_ref()
+            .is_none_or(|requirement| node.is_some_and(|version| requirement.allows(version)));
+        if !runnable {
+            warn!(pack = %pack.name, command = %bin.name, "skill pack command not put on PATH: no matching node on PATH");
+            continue;
+        }
+        match find_command(&bin.name, path) {
+            Some(found) if second_line(&found).as_deref() == Some(&pack_bin_marker(pack)) => {
+                linked.push((pack.name.clone(), bin.name.clone()));
+            }
+            Some(found) => warn!(
+                pack = %pack.name,
+                command = %bin.name,
+                found = %found.display(),
+                "skill pack command not put on PATH: that name is already a command"
+            ),
+            None => match pack_bin_shim(pack, bin) {
+                Some(shim) => wanted.push((pack, bin, shim)),
+                None => warn!(
+                    pack = %pack.name,
+                    command = %bin.name,
+                    "skill pack command not put on PATH: the pack's path cannot be written into a shim"
+                ),
+            },
+        }
+    }
+    let unchanged = |linked| PreparedPackBins {
+        linked,
+        path: path.to_os_string(),
+        dir: None,
+    };
+    if wanted.is_empty() {
+        return unchanged(linked);
+    }
+    if path.is_empty() {
+        warn!("skill pack commands not put on PATH: PATH is empty");
+        return unchanged(linked);
+    }
+    let dir = match write_pack_bin_dir(temp_root, &wanted) {
+        Ok(dir) => dir,
+        Err(error) => {
+            warn!(%error, "skill pack commands not put on PATH: could not make a folder for them");
+            return unchanged(linked);
+        }
+    };
+    let joined = std::env::join_paths(
+        std::env::split_paths(path).chain(std::iter::once(dir.path().to_path_buf())),
+    );
+    match joined {
+        Ok(joined) => {
+            linked.extend(
+                wanted
+                    .iter()
+                    .map(|(pack, bin, _)| (pack.name.clone(), bin.name.clone())),
+            );
+            PreparedPackBins {
+                linked,
+                path: joined,
+                dir: Some(dir),
+            }
+        }
+        Err(error) => {
+            warn!(%error, "skill pack commands not put on PATH: their folder cannot join PATH");
+            unchanged(linked)
+        }
+    }
+}
+
+/// The first executable file named `name` in the absolute folders of `path`.
+#[cfg(unix)]
+fn find_command(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| {
+            std::fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+}
+
+/// The second line of a small file (a shim's marker line).
+#[cfg(unix)]
+fn second_line(file: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    std::fs::File::open(file)
+        .ok()?
+        .take(1024)
+        .read_to_end(&mut head)
+        .ok()?;
+    let text = String::from_utf8_lossy(&head);
+    text.lines().nth(1).map(str::to_owned)
+}
+
+/// Makes `<temp_root>/instafy-pack-bin-<pid>-<random>` with one shim per wanted command, after
+/// checking that a program in it runs (a temp folder mounted `noexec` cannot hold commands).
+#[cfg(unix)]
+fn write_pack_bin_dir(
+    temp_root: &Path,
+    wanted: &[(&InstalledPack, &PackBin, String)],
+) -> std::io::Result<tempfile::TempDir> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("{PACK_BIN_DIR_PREFIX}{}-", std::process::id()))
+        .tempdir_in(temp_root)?;
+    let write = |name: &str, content: &str| -> std::io::Result<PathBuf> {
+        let file = dir.path().join(name);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o555)
+            .open(&file)?
+            .write_all(content.as_bytes())?;
+        Ok(file)
+    };
+    let probe = write(".exec-probe", "#!/bin/sh\nexit 0\n")?;
+    let ran = run_probe(&probe);
+    std::fs::remove_file(&probe)?;
+    if !ran {
+        return Err(std::io::Error::other(format!(
+            "programs cannot run from {}",
+            temp_root.display()
+        )));
+    }
+    for (_, bin, shim) in wanted {
+        write(&bin.name, shim)?;
+    }
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))?;
+    Ok(dir)
+}
+
+/// Runs the probe, retrying while another process still holds it open for writing (a fork in
+/// another thread between our write and exec), which only test runs see.
+#[cfg(unix)]
+fn run_probe(probe: &Path) -> bool {
+    for _ in 0..20 {
+        match Command::new(probe)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) => return status.success(),
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// Removes the folders [`prepare_pack_bins`] left in `temp_root` (a runtime that did not exit
+/// cleanly): owned by this user, not a link, older than a day, and made by a process that is gone.
+#[cfg(unix)]
+pub fn remove_stale_pack_bin_dirs(temp_root: &Path, now: std::time::SystemTime) {
+    use std::os::unix::fs::MetadataExt;
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let Ok(entries) = std::fs::read_dir(temp_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(PACK_BIN_DIR_PREFIX))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let old = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_AFTER);
+        let owner_alive = rest
+            .split('-')
+            .next()
+            .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+            .filter(|pid| *pid > 0)
+            // SAFETY: signal 0 only checks that the process exists.
+            .is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
+        if metadata.is_dir() && metadata.uid() == uid && old && !owner_alive {
+            if let Err(error) = std::fs::remove_dir_all(&path) {
+                warn!(%error, dir = %path.display(), "could not remove a stale skill pack command folder");
+            }
+        }
+    }
+}
+
+/// Puts the installed packs' commands on PATH for every process the runtime starts
+/// ([`prepare_pack_bins_in`] with the runtime's temp folder and PATH), records which a shell finds
+/// ([`linked_pack_bins`]) and returns the folder to keep while the runtime runs; it is removed when
+/// dropped. Stale folders from earlier runs are removed first. Windows gets no shims.
+///
+/// # Safety
+///
+/// Mutates the process environment, so it must run before the process starts other threads.
+pub unsafe fn prepare_pack_bins() -> Option<tempfile::TempDir> {
+    #[cfg(unix)]
+    {
+        let temp_root = std::env::temp_dir();
+        remove_stale_pack_bin_dirs(&temp_root, std::time::SystemTime::now());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let prepared = prepare_pack_bins_in(installed_packs(), node_on_path(), &temp_root, &path);
+        for (pack, name) in &prepared.linked {
+            info!(pack = %pack, command = %name, "skill pack command on PATH");
+        }
+        let _ = LINKED_PACK_BINS.set(prepared.linked);
+        if prepared.dir.is_some() {
+            // SAFETY: the caller guarantees that no other thread reads or writes the environment.
+            unsafe { std::env::set_var("PATH", &prepared.path) };
+        }
+        prepared.dir
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = LINKED_PACK_BINS.set(Vec::new());
+        None
     }
 }
 
@@ -896,5 +1325,417 @@ pub(crate) mod tests {
         assert_eq!(parse_version("v25.0.0-nightly"), Some((25, 0, 0)));
         assert_eq!(parse_version("node"), None);
         assert_eq!(NodeRequirement::parse("^22"), None);
+    }
+
+    /// A Node.js version the test packs accept (they need `>=22`): tests that run a pack command
+    /// prepare it for this version, whatever `node` the machine has.
+    pub(crate) const TEST_PACK_NODE: NodeVersion = (22, 0, 0);
+
+    /// Rewrites `dir`'s manifest with `bin`.
+    pub(crate) fn declare_bin(dir: &Path, bin: serde_json::Value) {
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(PACK_MANIFEST)).unwrap()).unwrap();
+        manifest["bin"] = bin;
+        fs::write(dir.join(PACK_MANIFEST), manifest.to_string()).expect("manifest");
+    }
+
+    /// A pack `<root>/<name>` whose command `command` prints what it ran with.
+    pub(crate) fn pack_with_command(root: &Path, name: &str, command: &str) -> InstalledPack {
+        let dir = make_pack(root, name, true);
+        fs::write(
+            dir.join("scripts/run.mjs"),
+            format!("console.log('{name} ran', process.argv.slice(2).join(' '));\n"),
+        )
+        .expect("entry");
+        declare_bin(&dir, serde_json::json!({ command: "scripts/run.mjs" }));
+        load_pack(&dir).expect("pack")
+    }
+
+    #[cfg(unix)]
+    fn executable(dir: &Path, name: &str, content: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(dir).unwrap();
+        let file = dir.join(name);
+        fs::write(&file, content).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_bin_entry_must_be_a_file_inside_the_pack() {
+        let root = tempfile::tempdir().expect("tmp");
+        let dir = make_pack(root.path(), "demo", true);
+        fs::write(root.path().join("outside.mjs"), "").unwrap();
+        for entry in [
+            "../outside.mjs",
+            "/etc/passwd",
+            "scripts/missing.mjs",
+            "scripts",
+            "scripts/../SKILL.md",
+            "scripts/it's.mjs",
+            "",
+        ] {
+            declare_bin(&dir, serde_json::json!({ "demo": entry }));
+            let error = load_pack(&dir).unwrap_err();
+            assert!(
+                error.contains("not a file inside the pack"),
+                "{entry}: {error}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                root.path().join("outside.mjs"),
+                dir.join("scripts/link.mjs"),
+            )
+            .unwrap();
+            declare_bin(&dir, serde_json::json!({ "demo": "scripts/link.mjs" }));
+            assert!(
+                load_pack(&dir).is_err(),
+                "a link is not a file inside the pack"
+            );
+        }
+        declare_bin(&dir, serde_json::json!(["scripts/run.mjs"]));
+        assert!(load_pack(&dir).unwrap_err().contains("does not parse"));
+        declare_bin(&dir, serde_json::json!({ "demo": "scripts/run.mjs" }));
+        assert_eq!(
+            load_pack(&dir).expect("pack").bin,
+            vec![PackBin {
+                name: "demo".into(),
+                entry: "scripts/run.mjs".into()
+            }]
+        );
+        // A manifest without `bin` declares no command.
+        assert!(
+            load_pack(&make_pack(root.path(), "plain", true))
+                .unwrap()
+                .bin
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_bin_name_must_be_plain_and_unreserved() {
+        for good in ["uw", "map-tool", "a1", &"x".repeat(32)] {
+            assert!(is_pack_bin_name(good), "{good}");
+        }
+        for bad in [
+            "",
+            "u",
+            "Uw",
+            "1uw",
+            "-uw",
+            "uw_x",
+            "uw x",
+            "uw/x",
+            "..",
+            "uw.mjs",
+            "üw",
+            &"x".repeat(33),
+            "node",
+            "npx",
+            "git",
+            "instafy",
+            "sh",
+            "bash",
+            "env",
+            "codex",
+            "runtime-agent",
+            "sudo",
+            // The runtime's helpers and Codex's commands, which an image build or a PATH check at
+            // startup may not see yet.
+            "applypatch",
+            "rathole",
+            "runtime-entrypoint",
+            "browser-egress-proxy",
+            "browser-webrtc-sender",
+            "codex-linux-sandbox",
+            "codex-code-mode-host",
+            "codex-execve-wrapper",
+            "instafy-helper",
+        ] {
+            assert!(!is_pack_bin_name(bad), "{bad}");
+        }
+        // Only the namespace is reserved, not every name that starts with the same letters.
+        assert!(is_pack_bin_name("codexy"));
+        let root = tempfile::tempdir().expect("tmp");
+        let dir = make_pack(root.path(), "demo", true);
+        declare_bin(&dir, serde_json::json!({ "node": "scripts/run.mjs" }));
+        assert!(load_pack(&dir).unwrap_err().contains("\"node\""));
+        let nine: serde_json::Map<String, serde_json::Value> = (0..9)
+            .map(|index| (format!("cmd-{index}"), serde_json::json!("scripts/run.mjs")))
+            .collect();
+        declare_bin(&dir, serde_json::Value::Object(nine));
+        assert!(
+            load_pack(&dir)
+                .unwrap_err()
+                .contains("more than 8 commands")
+        );
+    }
+
+    #[test]
+    fn duplicate_bins_disable_both() {
+        let root = tempfile::tempdir().expect("tmp");
+        let one = pack_with_command(root.path(), "one", "demo");
+        let two = pack_with_command(root.path(), "two", "demo");
+        let mut three = pack_with_command(root.path(), "three", "other");
+        three.bin.push(PackBin {
+            name: "demo".into(),
+            entry: "scripts/run.mjs".into(),
+        });
+        let names = |packs: &[InstalledPack]| -> Vec<(String, String)> {
+            declared_pack_bins(packs)
+                .into_iter()
+                .map(|(pack, bin)| (pack.name.clone(), bin.name.clone()))
+                .collect()
+        };
+        assert_eq!(
+            names(std::slice::from_ref(&one)),
+            [("one".into(), "demo".into())]
+        );
+        assert_eq!(
+            names(&[one, two, three]),
+            [("three".to_string(), "other".to_string())],
+            "a name two packs declare goes to neither"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bin_name_already_on_path_is_skipped() {
+        let root = tempfile::tempdir().expect("tmp");
+        let temp = tempfile::tempdir().expect("tmp");
+        let pack = pack_with_command(root.path(), "demo", "demo");
+        let system = root.path().join("system-bin");
+        executable(&system, "demo", "#!/bin/sh\necho system\n");
+        let path = std::env::join_paths([system.clone(), PathBuf::from("/usr/bin")]).unwrap();
+        let prepared = prepare_pack_bins_in(
+            std::slice::from_ref(&pack),
+            Some((22, 0, 0)),
+            temp.path(),
+            &path,
+        );
+        assert!(prepared.linked.is_empty());
+        assert!(prepared.dir.is_none());
+        assert_eq!(prepared.path, path, "PATH is left alone");
+        assert_eq!(
+            fs::read_dir(temp.path()).unwrap().count(),
+            0,
+            "no folder is made"
+        );
+
+        // A runtime image's shim for this pack and version is the command itself.
+        fs::write(
+            system.join("demo"),
+            pack_bin_shim(&pack, &pack.bin[0]).expect("shim"),
+        )
+        .unwrap();
+        let prepared = prepare_pack_bins_in(
+            std::slice::from_ref(&pack),
+            Some((22, 0, 0)),
+            temp.path(),
+            &path,
+        );
+        assert_eq!(prepared.linked, [("demo".to_string(), "demo".to_string())]);
+        assert!(prepared.dir.is_none());
+        assert_eq!(prepared.path, path);
+
+        // Another version's shim is someone else's command.
+        let mut newer = pack.clone();
+        newer.version = "0.2.0".into();
+        let prepared = prepare_pack_bins_in(
+            std::slice::from_ref(&newer),
+            Some((22, 0, 0)),
+            temp.path(),
+            &path,
+        );
+        assert!(prepared.linked.is_empty());
+        assert!(prepared.dir.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_bins_are_appended_to_path() {
+        use std::os::unix::fs::PermissionsExt;
+        // The shim runs the pack with whatever `node` is on PATH; the pack's own Node.js
+        // requirement is checked in `a_pack_without_its_node_gets_no_command`, so this test does
+        // not depend on the machine's Node.js major.
+        if node_on_path().is_none() {
+            return;
+        }
+        let root = tempfile::tempdir().expect("tmp");
+        let temp = tempfile::tempdir().expect("tmp");
+        let pack = pack_with_command(root.path(), "demo", "demo");
+        let path = std::env::var_os("PATH").expect("PATH");
+        let prepared = prepare_pack_bins_in(
+            std::slice::from_ref(&pack),
+            Some(TEST_PACK_NODE),
+            temp.path(),
+            &path,
+        );
+        assert_eq!(prepared.linked, [("demo".to_string(), "demo".to_string())]);
+        let dir = prepared
+            .dir
+            .as_ref()
+            .expect("a folder")
+            .path()
+            .to_path_buf();
+        assert!(dir.starts_with(temp.path()));
+        assert!(
+            dir.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with(&format!("{PACK_BIN_DIR_PREFIX}{}-", std::process::id()))
+        );
+        let entries: Vec<PathBuf> = std::env::split_paths(&prepared.path).collect();
+        assert_eq!(
+            entries.last(),
+            Some(&dir),
+            "the folder is the last PATH entry"
+        );
+        assert_eq!(
+            entries[..entries.len() - 1],
+            std::env::split_paths(&path).collect::<Vec<_>>()[..],
+            "PATH is otherwise unchanged"
+        );
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(dir.join("demo")).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "only the command, no probe left behind"
+        );
+        let output = run_with_path("command -v demo && demo hello there", &prepared.path);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("{}\ndemo ran hello there\n", dir.join("demo").display())
+        );
+        drop(prepared);
+        assert!(!dir.exists(), "the folder goes with the runtime");
+    }
+
+    /// Runs `script` with `sh -c` in a cleared environment with only `path`, retrying while a
+    /// concurrent test's fork still holds a just-written shim open.
+    #[cfg(unix)]
+    pub(crate) fn run_with_path(script: &str, path: &std::ffi::OsStr) -> std::process::Output {
+        let mut last = None;
+        for _ in 0..20 {
+            let output = Command::new("/bin/sh")
+                .args(["-c", script])
+                .env_clear()
+                .env("PATH", path)
+                .output()
+                .expect("sh");
+            if !String::from_utf8_lossy(&output.stderr).contains("busy") {
+                return output;
+            }
+            last = Some(output);
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        last.unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pack_without_its_node_gets_no_command() {
+        let root = tempfile::tempdir().expect("tmp");
+        let temp = tempfile::tempdir().expect("tmp");
+        let pack = pack_with_command(root.path(), "demo", "demo");
+        for node in [None, Some((20, 18, 0))] {
+            let prepared = prepare_pack_bins_in(
+                std::slice::from_ref(&pack),
+                node,
+                temp.path(),
+                std::ffi::OsStr::new("/usr/bin:/bin"),
+            );
+            assert!(prepared.linked.is_empty() && prepared.dir.is_none());
+        }
+    }
+
+    #[test]
+    fn a_shim_runs_the_entry_with_node_and_quotes_its_path() {
+        let root = tempfile::tempdir().expect("tmp");
+        let pack = pack_with_command(root.path(), "demo", "demo");
+        let shim = pack_bin_shim(&pack, &pack.bin[0]).expect("shim");
+        assert_eq!(
+            shim,
+            format!(
+                "#!/bin/sh\n# instafy:managed-pack-bin demo 0.1.0\nexec node '{}' \"$@\"\n",
+                pack.dir.join("scripts/run.mjs").display()
+            )
+        );
+        let mut quoted = pack.clone();
+        quoted.dir = PathBuf::from("/tmp/it's here/demo");
+        assert_eq!(pack_bin_shim(&quoted, &pack.bin[0]), None);
+        let mut relative = pack.clone();
+        relative.dir = PathBuf::from("packs/demo");
+        assert_eq!(pack_bin_shim(&relative, &pack.bin[0]), None);
+        let mut odd = pack.clone();
+        odd.version = "1.0\nrm -rf /".into();
+        assert_eq!(pack_bin_shim(&odd, &pack.bin[0]), None);
+        let mut spaced = pack.clone();
+        spaced.dir = PathBuf::from("/Applications/My App/skill-packs/demo");
+        assert!(
+            pack_bin_shim(&spaced, &pack.bin[0]).unwrap().contains(
+                "exec node '/Applications/My App/skill-packs/demo/scripts/run.mjs' \"$@\""
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_pack_bin_folders_of_exited_runtimes_are_removed() {
+        let temp = tempfile::tempdir().expect("tmp");
+        let now = std::time::SystemTime::now();
+        let two_days_ago = now - std::time::Duration::from_secs(2 * 24 * 60 * 60);
+        let mut exited = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        exited.wait().unwrap();
+        let gone = exited.id();
+        let make = |name: String, aged: bool| -> PathBuf {
+            let dir = temp.path().join(name);
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("demo"), "#!/bin/sh\n").unwrap();
+            if aged {
+                fs::File::open(&dir)
+                    .unwrap()
+                    .set_modified(two_days_ago)
+                    .unwrap();
+            }
+            dir
+        };
+        let stale = make(format!("{PACK_BIN_DIR_PREFIX}{gone}-abc"), true);
+        let unnamed = make(format!("{PACK_BIN_DIR_PREFIX}x-abc"), true);
+        let fresh = make(format!("{PACK_BIN_DIR_PREFIX}{gone}-def"), false);
+        let running = make(
+            format!("{PACK_BIN_DIR_PREFIX}{}-ghi", std::process::id()),
+            true,
+        );
+        let other = make("someone-elses-folder".into(), true);
+        let target = make("target".into(), true);
+        let link = temp
+            .path()
+            .join(format!("{PACK_BIN_DIR_PREFIX}{gone}-link"));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        remove_stale_pack_bin_dirs(temp.path(), now);
+        assert!(!stale.exists(), "an old folder of a runtime that exited");
+        assert!(!unnamed.exists(), "an old folder with no runtime named");
+        assert!(fresh.exists(), "less than a day old");
+        assert!(running.exists(), "its runtime still runs");
+        assert!(other.exists() && target.join("demo").exists(), "not ours");
+        assert!(
+            fs::symlink_metadata(&link).is_ok(),
+            "a link is never followed or removed"
+        );
     }
 }

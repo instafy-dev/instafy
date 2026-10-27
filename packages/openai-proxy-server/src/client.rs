@@ -12,6 +12,7 @@ use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 use crate::context_controls::ScopedResponseContext;
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 use crate::usage::apply_chat_to_responses_usage;
+use crate::usage_diagnostics::{UsageAttempt, UsageDiagnostics};
 
 const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -81,6 +82,7 @@ pub struct CodexClient {
     context_controls: Option<ScopedResponseContext>,
     /// Whether the request in flight asks the upstream for a stream it passes on as it arrives.
     stream_upstream: bool,
+    usage_diagnostics: Option<UsageDiagnostics>,
 }
 
 pub(crate) fn conversation_id_enabled() -> bool {
@@ -207,7 +209,13 @@ impl CodexClient {
             user_agent: format!("openai-proxy-server/{}", env!("CARGO_PKG_VERSION")),
             context_controls: None,
             stream_upstream: false,
+            usage_diagnostics: None,
         })
+    }
+
+    pub(crate) fn with_usage_diagnostics(mut self, diagnostics: Option<UsageDiagnostics>) -> Self {
+        self.usage_diagnostics = diagnostics;
+        self
     }
 
     pub(crate) fn with_context_controls(mut self, controls: ScopedResponseContext) -> Self {
@@ -462,7 +470,7 @@ impl CodexClient {
         if let Some(send_hook) = self.send_hook.take() {
             send_hook();
         }
-        let response = match self
+        let (response, mut usage_attempt) = match self
             .send_upstream_request_with_retry(request_url.as_str(), &headers, &payload)
             .await
         {
@@ -525,13 +533,14 @@ impl CodexClient {
                 self.credentials.is_chatgpt(),
                 rate_limits,
                 turn_state,
+                usage_attempt,
             );
             events.read_until_output().await?;
             return Ok(CodexReply::Stream(events));
         }
 
         if self.credentials.is_chatgpt() {
-            let body = read_chatgpt_stream(response).await?;
+            let body = read_chatgpt_stream(response, usage_attempt.as_mut()).await?;
             let mut completion =
                 parse_completion(body).context(UpstreamFailure::InvalidResponse)?;
             completion.rate_limits = rate_limits;
@@ -543,6 +552,9 @@ impl CodexClient {
             .json()
             .await
             .context("failed to decode JSON response")?;
+        if let Some(attempt) = usage_attempt.as_mut() {
+            attempt.observe_json(&body);
+        }
         let mut completion = match upstream_wire_api {
             UpstreamWireApi::Responses => {
                 parse_completion(body).context(UpstreamFailure::InvalidResponse)?
@@ -673,12 +685,15 @@ impl CodexClient {
         request_url: &str,
         headers: &HeaderMap,
         payload: &Value,
-    ) -> Result<reqwest::Response> {
-        let mut response = self
+    ) -> Result<(reqwest::Response, Option<UsageAttempt>)> {
+        let (mut response, mut usage_attempt) = self
             .send_upstream_request(request_url, headers, payload)
             .await?;
 
         if response.status() == StatusCode::UNAUTHORIZED && self.credentials.is_chatgpt() {
+            if let Some(attempt) = usage_attempt.as_mut() {
+                attempt.failure("http_error");
+            }
             let response_headers = response.headers().clone();
             let body = response
                 .text()
@@ -691,7 +706,9 @@ impl CodexClient {
                     .await
                     .context(UpstreamFailure::CredentialRefresh)?
             {
-                response = self
+                // Settle the rejected attempt before allocating its retry.
+                drop(usage_attempt);
+                (response, usage_attempt) = self
                     .send_upstream_request(request_url, headers, payload)
                     .await?;
             } else {
@@ -705,6 +722,9 @@ impl CodexClient {
         }
 
         if !response.status().is_success() {
+            if let Some(attempt) = usage_attempt.as_mut() {
+                attempt.failure("http_error");
+            }
             let status = response.status();
             let response_headers = response.headers().clone();
             let text = response
@@ -714,7 +734,7 @@ impl CodexClient {
             return Err(UpstreamFailure::http_body(status, &response_headers, &text).into());
         }
 
-        Ok(response)
+        Ok((response, usage_attempt))
     }
 
     async fn send_upstream_request(
@@ -722,7 +742,7 @@ impl CodexClient {
         request_url: &str,
         headers: &HeaderMap,
         payload: &Value,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<(reqwest::Response, Option<UsageAttempt>)> {
         let mut request = self
             .http
             .post(request_url)
@@ -734,7 +754,29 @@ impl CodexClient {
             request = request.header("ChatGPT-Account-Id", account_id);
         }
 
-        request.send().await.context("failed to send request")
+        let wire_api = match wire_api_for(&self.credentials) {
+            UpstreamWireApi::Responses => "responses",
+            UpstreamWireApi::ChatCompletions => "chat_completions",
+            UpstreamWireApi::GeminiCodeAssist => "gemini_code_assist",
+        };
+        let mut usage_attempt = self
+            .usage_diagnostics
+            .as_ref()
+            .map(|diagnostics| diagnostics.start(&self.model, wire_api, payload));
+        let response = request
+            .send()
+            .await
+            .map_err(|error| {
+                if let Some(attempt) = usage_attempt.as_mut() {
+                    attempt.failure("transport_error");
+                }
+                error
+            })
+            .context("failed to send request")?;
+        if let Some(attempt) = usage_attempt.as_mut() {
+            attempt.http_status(response.status().as_u16());
+        }
+        Ok((response, usage_attempt))
     }
 }
 
@@ -1415,9 +1457,8 @@ fn resolve_chatgpt_tools(_model: &str) -> ChatGptToolMetadata {
         tools.push(plan_tool_spec());
     }
 
-    if truthy_env_flag("CODEX_ENABLE_WEB_SEARCH").unwrap_or(false) {
-        tools.push(web_search_tool_spec());
-    }
+    // No web search: OpenAI's hosted search is off on every lease (the proxy
+    // drops it from every request), whatever CODEX_ENABLE_WEB_SEARCH says.
 
     if truthy_env_flag("CODEX_INCLUDE_VIEW_IMAGE_TOOL").unwrap_or(true) {
         tools.push(view_image_tool_spec());
@@ -1524,12 +1565,6 @@ fn plan_tool_spec() -> Value {
     })
 }
 
-fn web_search_tool_spec() -> Value {
-    json!({
-        "type": "web_search"
-    })
-}
-
 fn view_image_tool_spec() -> Value {
     json!({
         "type": "function",
@@ -1550,14 +1585,23 @@ fn view_image_tool_spec() -> Value {
     })
 }
 
-async fn read_chatgpt_stream(mut response: reqwest::Response) -> Result<Value> {
+async fn read_chatgpt_stream(
+    mut response: reqwest::Response,
+    mut usage_attempt: Option<&mut UsageAttempt>,
+) -> Result<Value> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
         .context("failed to read streaming chunk from backend")?
     {
+        if let Some(attempt) = usage_attempt.as_deref_mut() {
+            attempt.observe_sse_bytes(&chunk);
+        }
         bytes.extend_from_slice(&chunk);
+    }
+    if let Some(attempt) = usage_attempt.as_deref_mut() {
+        attempt.finish_sse();
     }
 
     let text = String::from_utf8(bytes).context("streamed response was not valid UTF-8")?;
@@ -1866,6 +1910,7 @@ pub(crate) struct UpstreamEventStream {
     ended: bool,
     rate_limits: Option<Value>,
     turn_state: Option<String>,
+    usage_attempt: Option<UsageAttempt>,
 }
 
 impl UpstreamEventStream {
@@ -1874,6 +1919,7 @@ impl UpstreamEventStream {
         chatgpt: bool,
         rate_limits: Option<Value>,
         turn_state: Option<String>,
+        usage_attempt: Option<UsageAttempt>,
     ) -> Self {
         Self {
             response,
@@ -1883,6 +1929,7 @@ impl UpstreamEventStream {
             ended: false,
             rate_limits,
             turn_state,
+            usage_attempt,
         }
     }
 
@@ -1927,7 +1974,12 @@ impl UpstreamEventStream {
                         self.buffer.clear();
                         return Ok(None);
                     }
-                    StreamBlock::Event(event) => return Ok(Some(event)),
+                    StreamBlock::Event(event) => {
+                        if let Some(attempt) = self.usage_attempt.as_mut() {
+                            attempt.observe_event(&event);
+                        }
+                        return Ok(Some(event));
+                    }
                 }
             }
             if self.ended {
@@ -2370,6 +2422,159 @@ fn parse_codex_rate_limit_headers(headers: &reqwest::header::HeaderMap) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn usage_diagnostics_observe_streams_before_read_ahead_and_preserve_dropped_attempts() {
+        use axum::{Router, routing::get};
+        let terminal = json!({"type": "response.failed", "response": {
+            "id": "private-response", "status": "failed", "error": {"message": "private error"},
+            "usage": {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 40},
+                "output_tokens": 5, "total_tokens": 105}
+        }});
+        let body = format!("data: {terminal}\n\ndata: [DONE]\n\n");
+        let app = Router::new().route(
+            "/stream",
+            get(move || {
+                let body = body.clone();
+                async move { ([("content-type", "text/event-stream")], body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/stream", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (diagnostics, records) = crate::usage_diagnostics::recorder();
+        let response = reqwest::get(&url).await.unwrap();
+        let attempt = diagnostics.start("fixture-model", "responses", &json!({}));
+        let mut stream = UpstreamEventStream::new(response, true, None, None, Some(attempt));
+        // A terminal failure before output is observed even though the client
+        // returns it as an error and never delivers a response to the runtime.
+        assert!(stream.read_until_output().await.is_err());
+        drop(stream);
+        {
+            let records = records.lock().unwrap();
+            assert_eq!(records.len(), 3);
+            assert_eq!(records[1]["responseStatus"], "failed");
+            assert_eq!(records[1]["usage"]["fields"]["input_tokens"]["value"], 100);
+            assert_eq!(records[2]["outcome"], "failed");
+            assert!(
+                !serde_json::to_string(&*records)
+                    .unwrap()
+                    .contains("private")
+            );
+        }
+        let response = reqwest::get(&url).await.unwrap();
+        let mut attempt = diagnostics.start("fixture-model", "responses", &json!({}));
+        assert!(
+            read_chatgpt_stream(response, Some(&mut attempt))
+                .await
+                .is_err()
+        );
+        drop(attempt);
+        assert_eq!(records.lock().unwrap()[4]["responseStatus"], "failed");
+
+        let response = reqwest::get(&url).await.unwrap();
+        let attempt = diagnostics.start("fixture-model", "responses", &json!({}));
+        drop(UpstreamEventStream::new(
+            response,
+            true,
+            None,
+            None,
+            Some(attempt),
+        ));
+        let records = records.lock().unwrap();
+        assert_eq!(records.last().unwrap()["outcome"], "interrupted");
+        assert_eq!(records.last().unwrap()["terminalObservations"], 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn usage_diagnostics_count_json_before_adaptation_and_read_ahead_only_once() {
+        use axum::{
+            Json, Router,
+            routing::{get, post},
+        };
+        let response = json!({"id": "fixture-response", "status": "completed", "output": [],
+            "model": "provider-model-revision", "reasoning": {"effort": "high"},
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}});
+        let body = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"type": "response.completed", "response": response})
+        );
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                post(move |Json(payload): Json<Value>| {
+                    let response = response.clone();
+                    async move {
+                        assert_eq!(payload["model"], "outbound-model");
+                        assert_eq!(payload["reasoning"]["effort"], "low");
+                        Json(response)
+                    }
+                }),
+            )
+            .route(
+                "/stream",
+                get(move || {
+                    let body = body.clone();
+                    async move { ([("content-type", "text/event-stream")], body) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (diagnostics, records) = crate::usage_diagnostics::recorder();
+        let mut client = CodexClient::new(Credentials::ApiKey {
+            key: "inert".into(),
+            endpoint: Some(format!("{base}/v1/responses")),
+            default_model: None,
+        })
+        .unwrap()
+        .with_usage_diagnostics(Some(diagnostics.clone()))
+        .with_model("outbound-model")
+        .with_reasoning_effort(Some("low".into()));
+        client
+            .complete_with_input(&[json!({"role": "user", "content": "private prompt"})])
+            .await
+            .unwrap();
+        {
+            let records = records.lock().unwrap();
+            assert_eq!(records.len(), 3);
+            assert!(
+                records
+                    .iter()
+                    .all(|record| record["model"] == "outbound-model"
+                        && record["outboundReasoningEffort"] == "low")
+            );
+            assert_eq!(records[1]["providerModel"], "provider-model-revision");
+            assert_eq!(records[1]["providerReasoningEffort"], "high");
+            assert_eq!(
+                records[1]["usage"]["fields"]["input_tokens"],
+                json!({"state": "reported", "value": 0})
+            );
+            assert_eq!(
+                records[1]["usage"]["fields"]["cached_input_tokens"],
+                json!({"state": "missing"})
+            );
+            assert_eq!(records[2]["httpStatus"], 200);
+        }
+        let response = reqwest::get(format!("{base}/stream")).await.unwrap();
+        let attempt = diagnostics.start("fixture-model", "responses", &json!({}));
+        let mut stream = UpstreamEventStream::new(response, false, None, None, Some(attempt));
+        stream.read_until_output().await.unwrap();
+        assert!(stream.next_event().await.unwrap().is_some());
+        assert!(stream.next_event().await.unwrap().is_none());
+        drop(stream);
+        assert_eq!(
+            records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|record| record["event"] == "response_observed")
+                .count(),
+            2
+        );
+        server.abort();
+    }
 
     #[test]
     fn stream_blocks_end_at_a_blank_line_in_either_line_ending() {
@@ -3099,10 +3304,12 @@ mod tests {
             "content": [{ "type": "input_text", "text": "Run the tests." }]
         })];
         let fallbacks = Arc::new(Mutex::new(Vec::new()));
+        let (usage_diagnostics, usage_records) = crate::usage_diagnostics::recorder();
         let client = |required_tool_call: bool, tool_choice: Option<Value>| {
             let fallbacks = fallbacks.clone();
             CodexClient::new(api_key_at(&endpoint))
                 .unwrap()
+                .with_usage_diagnostics(Some(usage_diagnostics.clone()))
                 .with_response_controls(Some(tools.clone()), tool_choice, None, None)
                 .with_required_tool_call(required_tool_call)
                 .with_required_tool_call_fallback(Some(Box::new(
@@ -3126,6 +3333,24 @@ mod tests {
         assert_eq!(attempts[0]["tool_choice"], json!("required"));
         assert_eq!(attempts[1]["tool_choice"], json!("auto"));
         assert!(set_by_client.required_tool_call_refused());
+        {
+            let records = usage_records.lock().unwrap();
+            assert_eq!(records.len(), 4, "both rejected upstream attempts settle");
+            assert_eq!(records[0]["requestId"], records[2]["requestId"]);
+            assert_ne!(records[0]["attemptId"], records[2]["attemptId"]);
+            for finished in [&records[1], &records[3]] {
+                assert_eq!(finished["event"], "attempt_finished");
+                assert_eq!(finished["httpStatus"], 400);
+                assert_eq!(finished["outcome"], "http_error");
+                assert_eq!(finished["terminalObservations"], 0);
+                assert!(finished.get("usage").is_none());
+            }
+            assert!(
+                !serde_json::to_string(&*records)
+                    .unwrap()
+                    .contains("private-token")
+            );
+        }
         assert_eq!(
             fallbacks.lock().unwrap().clone(),
             vec![ToolControlRejection {

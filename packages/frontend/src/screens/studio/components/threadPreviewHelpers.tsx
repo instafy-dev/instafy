@@ -8,19 +8,12 @@ import {
   Threads,
 } from "iconoir-react";
 import {
-  isCompactionStatusText,
   looksLikeInternalLearnedBlocksStatus,
   normalizeAssistantStatusText,
 } from "./assistantStatusHeuristics";
 import {
   extractControllerConversationNoticeStatus,
 } from "./controllerConversationNotice";
-import {
-  parseCommandExecutionOutput,
-  parseTodoItems,
-  summarizeCommandInvocationForPreview,
-  truncate,
-} from "./chatContentHelpers";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import type { ThreadCompactUpdateKind } from "./threadPreviewState";
 import type { ChatMessage } from "../types";
@@ -45,10 +38,7 @@ const THREAD_TERMINAL_STATES = new Set([
 ]);
 
 export const THREAD_RECENT_ACTIVITY_WINDOW_MS = 45_000;
-export const THREAD_HYBRID_COMPACTION_MIN_WIDTH_PX = 760;
-export const THREAD_COMPACT_EVENT_ICON_CAP = 20;
 export const THREAD_SPINE_DEFAULT_NOTCH_OFFSET_PX = 9;
-export const THREAD_SPINE_COMPACT_NOTCH_OFFSET_PX = 16;
 export const THREAD_SPINE_END_SEGMENT_TOP_PX = -1;
 export const THREAD_SPINE_END_SEGMENT_HEIGHT_PX = 6;
 
@@ -64,24 +54,6 @@ const GENERIC_PROGRESS_LABELS = new Set([
   "syncing workspace changes",
   "applying changes to workspace",
 ]);
-
-export type ThreadCompactEvent = {
-  // The id of the first update in the chip's streak, so the chip keeps its
-  // key while the streak grows.
-  id: string;
-  kind: ThreadCompactUpdateKind;
-  actorHandle?: string | null;
-  // How many consecutive updates of this kind and actor the chip stands for.
-  // Absent means one.
-  count?: number;
-  // Short excerpt of what the step did, shown in the rail chip's hover card
-  // (#179). Null when the source message carries nothing worth previewing —
-  // the chip then keeps its plain title tooltip.
-  previewText?: string | null;
-  // True when the excerpt is code-shaped (a command line, a tool descriptor)
-  // and should render monospace, matching the file-preview card.
-  previewMono?: boolean;
-};
 
 // `/bin/bash -lc`, `bash -lc`, `zsh -lc`, `sh -c` (plus `-c`/`-lc`/`-cl` flag
 // spellings) at the start of a command line, optionally with an absolute
@@ -116,118 +88,6 @@ export function stripShellWrapperFromCommand(command: string): string {
     current = body;
   }
   return current;
-}
-
-// The hover card is a scent, not a viewer: hard caps keep it compact and the
-// full detail stays behind the expanded thread.
-export const THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS = 280;
-const THREAD_COMPACT_EVENT_PREVIEW_MAX_LINES = 3;
-
-export type ThreadCompactEventPreview = {
-  text: string;
-  mono: boolean;
-};
-
-function collapseWhitespaceForPreview(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function toSingleLineCompactEventPreview(value: string, mono: boolean): ThreadCompactEventPreview | null {
-  const collapsed = collapseWhitespaceForPreview(value);
-  if (!collapsed) {
-    return null;
-  }
-  return { text: truncate(collapsed, THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS), mono };
-}
-
-// Thinking/plan excerpts keep up to three lines so the scent reads like the
-// source text; everything else is collapsed to one line.
-function toMultilineCompactEventPreview(value: string): ThreadCompactEventPreview | null {
-  const lines = value
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line) => collapseWhitespaceForPreview(line))
-    .filter((line) => line.length > 0)
-    .slice(0, THREAD_COMPACT_EVENT_PREVIEW_MAX_LINES);
-  if (lines.length === 0) {
-    return null;
-  }
-  return { text: truncate(lines.join("\n"), THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS), mono: false };
-}
-
-function summarizeToolCallArgumentsForPreview(details: Record<string, unknown> | null): string | null {
-  if (!details) {
-    return null;
-  }
-  const candidates = [details["arguments"], details["args"], details["input"], details["params"]];
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim().length > 0) {
-      return collapseWhitespaceForPreview(candidate);
-    }
-    if ((isRecord(candidate) && Object.keys(candidate).length > 0) || (Array.isArray(candidate) && candidate.length > 0)) {
-      try {
-        return JSON.stringify(candidate);
-      } catch {
-        // Non-serializable arguments carry no scent.
-      }
-    }
-  }
-  return null;
-}
-
-export function resolveThreadCompactEventPreview(
-  update: ChatMessage,
-  kind: ThreadCompactUpdateKind,
-): ThreadCompactEventPreview | null {
-  const metadata = update.metadata && isRecord(update.metadata) ? update.metadata : null;
-  const details = extractMessageDetails(metadata);
-
-  switch (kind) {
-    case "command": {
-      const command = parseCommandExecutionOutput(update).command;
-      if (!command) {
-        return null;
-      }
-      const summarized = summarizeCommandInvocationForPreview(command, THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS);
-      return summarized ? { text: summarized, mono: true } : null;
-    }
-    case "search": {
-      const query = details && typeof details["query"] === "string" ? details["query"] : "";
-      return toSingleLineCompactEventPreview(query || update.content, false);
-    }
-    case "tool": {
-      const server = details && typeof details["server"] === "string" ? details["server"].trim() : "";
-      const tool = details && typeof details["tool"] === "string" ? details["tool"].trim() : "";
-      const descriptor = server && tool ? `${server}/${tool}` : tool || server;
-      if (!descriptor) {
-        return toSingleLineCompactEventPreview(update.content, false);
-      }
-      const argsSummary = summarizeToolCallArgumentsForPreview(details);
-      return toSingleLineCompactEventPreview(
-        argsSummary ? `${descriptor} ${argsSummary}` : descriptor,
-        true,
-      );
-    }
-    case "plan": {
-      const items = parseTodoItems(details);
-      if (items.length > 0) {
-        const lines = items
-          .slice(0, THREAD_COMPACT_EVENT_PREVIEW_MAX_LINES)
-          .map((item) => `${item.completed ? "✓" : "·"} ${item.text}`)
-          .join("\n");
-        return { text: truncate(lines, THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS), mono: false };
-      }
-      return toMultilineCompactEventPreview(update.content);
-    }
-    case "thinking":
-    case "compaction":
-      // Strip bold markers the way status normalization does, but keep the
-      // line structure — the excerpt may span up to three lines.
-      return toMultilineCompactEventPreview(update.content.replace(/\*\*/g, ""));
-    case "runtime":
-    default:
-      return toSingleLineCompactEventPreview(update.content, false);
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -299,26 +159,6 @@ export function looksLikeTerminalProgressLabel(value: string): boolean {
   );
 }
 
-function looksLikeHighPriorityThreadUpdateText(value: string): boolean {
-  const normalized = normalizeAssistantStatusText(value).toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  return (
-    normalized.includes("error") ||
-    normalized.includes("failed") ||
-    normalized.includes("failure") ||
-    normalized.includes("cancelled") ||
-    normalized.includes("canceled") ||
-    normalized.includes("aborted") ||
-    normalized.includes("timeout") ||
-    normalized.includes("approval") ||
-    normalized.includes("integration required") ||
-    normalized.includes("secret required") ||
-    normalized.includes("credential required")
-  );
-}
-
 // Cards that ask the person for something. Wherever one sits in a turn it
 // renders as its card, the moment it arrives; it is never the turn's reply
 // text and never a running preview.
@@ -327,67 +167,6 @@ export const THREAD_ACTION_CARD_TYPES: ReadonlySet<string> = new Set([
   "secret_request",
   "action_request",
 ]);
-
-function isThreadActionCard(update: ChatMessage): boolean {
-  return THREAD_ACTION_CARD_TYPES.has((getMessageType(update) ?? "").trim().toLowerCase());
-}
-
-/**
- * The newest `maxVisible` updates, plus every action card of the turn however
- * far back it sits. A card can hold what the person is typing; windowing it
- * away when the reply shrinks the window would unmount it mid-entry.
- */
-export function windowThreadUpdates(updates: readonly ChatMessage[], maxVisible: number): ChatMessage[] {
-  const firstInWindow = Math.max(0, updates.length - maxVisible);
-  return updates.filter((update, index) => index >= firstInWindow || isThreadActionCard(update));
-}
-
-export function shouldKeepThreadUpdateInline(update: ChatMessage): boolean {
-  const type = (getMessageType(update) ?? "").trim().toLowerCase();
-  if (THREAD_ACTION_CARD_TYPES.has(type)) {
-    return true;
-  }
-  if ((type === "status" || type === "reasoning") && looksLikeHighPriorityThreadUpdateText(update.content)) {
-    return true;
-  }
-  return false;
-}
-
-export function resolveThreadCompactUpdateKind(update: ChatMessage): ThreadCompactUpdateKind | null {
-  const type = (getMessageType(update) ?? "").trim().toLowerCase();
-  if (type === "reasoning" || type === "status") {
-    const normalized = normalizeAssistantStatusText(update.content);
-    if (!normalized) {
-      return null;
-    }
-    if (normalized.toLowerCase() === "completed") {
-      return null;
-    }
-    if (isGenericProgressLabel(normalized) || looksLikeTerminalProgressLabel(normalized)) {
-      return null;
-    }
-    if (isCompactionStatusText(update.content)) {
-      return "compaction";
-    }
-    return "thinking";
-  }
-  if (type === "todo_list") {
-    return "plan";
-  }
-  if (type === "mcp_tool_call") {
-    return "tool";
-  }
-  if (type === "command_execution") {
-    return "command";
-  }
-  if (type === "web_search") {
-    return "search";
-  }
-  if (type === "runtime_switch") {
-    return "runtime";
-  }
-  return null;
-}
 
 export function renderThreadCompactEventIcon(
   kind: ThreadCompactUpdateKind,

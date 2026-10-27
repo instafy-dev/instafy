@@ -17,9 +17,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -65,6 +65,9 @@ mod sessions;
 mod site_intent_tests;
 #[cfg(test)]
 mod tests;
+mod thumbnail;
+#[cfg(test)]
+mod thumbnail_tests;
 mod wake;
 
 pub(crate) use follow::{FollowBusMessage, FollowEnvelope, FollowHub};
@@ -107,6 +110,8 @@ const PREVIEW_DENIED_PORTS: [u16; 12] = [
     5900, 8789, 9222, 9223, 9225, 9226, 15900, 19223, 19225, 19226, 43127, 54332,
 ];
 const PREVIEW_TITLE_MAX_CHARS: usize = 120;
+/// The card's facts line (`instafy preview open --summary`), e.g. "Trip · 3 days · 14 places".
+const PREVIEW_SUMMARY_MAX_CHARS: usize = 80;
 const PREVIEW_PATH_MAX_CHARS: usize = 512;
 const PREVIEW_SOURCE_MAX_CHARS: usize = 64;
 /// The `messageIds` key prefix of a card written without a job run; the
@@ -152,6 +157,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/projects/:project_id/previews/:preview_id/close",
             post(post_preview_close),
+        )
+        .route(
+            "/projects/:project_id/previews/:preview_id/thumbnail",
+            put(thumbnail::put_preview_thumbnail)
+                .get(thumbnail::get_preview_thumbnail)
+                .layer(DefaultBodyLimit::max(
+                    thumbnail::THUMBNAIL_UPLOAD_MAX_BODY_BYTES,
+                )),
         )
         .route(
             "/projects/:project_id/previews/:preview_id/follow",
@@ -248,6 +261,9 @@ struct CreatePreviewBody {
     #[serde(default)]
     path: Option<String>,
     title: String,
+    /// One short line of facts for the card (`--summary`), validated like the title.
+    #[serde(default)]
+    summary: Option<String>,
     #[serde(default)]
     metadata: Option<JsonValue>,
     /// How the site was started (`instafy preview open` reads it from the
@@ -301,9 +317,21 @@ struct PreviewResponse {
     /// when this says so.
     #[serde(skip_serializing_if = "Option::is_none")]
     visibility: Option<String>,
+    /// The card's facts line as `instafy preview open --summary` gave it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    /// The page's own `<meta name="description">`, read when its picture was
+    /// taken. Only on `GET` of one preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_description: Option<String>,
+    /// The site's picture (`GET …/thumbnail?v=<version>`), or null when it
+    /// has none. Only on `GET` of one preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thumbnail: Option<Option<thumbnail::ThumbnailView>>,
     created_at: String,
-    /// A wake can start the site again: a `serve` command is recorded and
-    /// nobody closed the preview on purpose.
+    /// A wake can start the site again: a `serve` command is recorded and no
+    /// newer tunnel replaced the preview's. A preview someone closed on
+    /// purpose stays restartable for people who may change the space.
     restartable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     wake: Option<wake::WakeView>,
@@ -444,6 +472,11 @@ impl PreviewGrant {
         self.preview_str("path").unwrap_or("/").to_string()
     }
 
+    fn summary(&self) -> Option<String> {
+        self.preview_str("summary")
+            .and_then(|summary| validate_preview_summary(summary).ok())
+    }
+
     /// The recorded start command, when it is still a valid one.
     fn serve(&self) -> Option<PreviewServe> {
         self.preview_metadata()
@@ -451,16 +484,29 @@ impl PreviewGrant {
             .and_then(|serve| PreviewServe::from_json(serve).ok())
     }
 
-    /// Closed on purpose (`instafy preview close`, the close route): it never
-    /// wakes. A runtime stop revokes the grant too, but does not close it.
+    /// Closed on purpose (`instafy preview close`, the close route) or
+    /// superseded. A runtime stop revokes the grant too, but does not close
+    /// it. Starting a closed preview again changes the space, so only people
+    /// who may change it can (see `wake::caller_may_start`).
     fn is_closed(&self) -> bool {
         self.preview_metadata()
             .is_some_and(|metadata| metadata.contains_key("closedAt"))
     }
 
+    /// Closed because the broker replaced its tunnel
+    /// ([`retire_superseded_previews`]): the successor is the preview now, and
+    /// a wake would only get the successor's tunnel.
+    fn is_superseded(&self) -> bool {
+        self.preview_metadata()
+            .is_some_and(|metadata| metadata.contains_key("supersededBy"))
+    }
+
+    /// A wake can start the site again: its start command is recorded and its
+    /// tunnel is still its own. Closing it on purpose keeps the command, so
+    /// Open on its card brings back a site someone stopped.
     fn restartable(&self) -> bool {
         self.is_private_preview()
-            && !self.is_closed()
+            && !self.is_superseded()
             && self.serve().is_some()
             && self.tunnel_key().is_some()
     }
@@ -520,12 +566,57 @@ impl PreviewGrant {
             health,
             message_id: self.message_id(),
             visibility: self.preview_str("visibility").map(str::to_string),
+            summary: self.summary(),
+            page_description: None,
+            thumbnail: None,
             created_at: self.created_at.to_rfc3339(),
             restartable: self.restartable(),
             wake: None,
             can_start: None,
         }
     }
+}
+
+/// Whether a newer preview holds this stopped preview's tunnel key, so a wake
+/// may not reconnect it: the broker answers the key with the newer tunnel,
+/// and the reconnect would write this preview's command and title over the
+/// newer preview's. [`retire_superseded_previews`] marks a preview that was
+/// still open as `supersededBy`, but skips one someone had closed, so for
+/// that one a later grant of the same key is the record. A live preview's
+/// tunnel is its key's current one.
+pub(super) async fn preview_replaced(pool: &PgPool, grant: &PreviewGrant) -> ApiResult<bool> {
+    if grant.is_superseded() {
+        return Ok(true);
+    }
+    if grant.is_live() {
+        return Ok(false);
+    }
+    let Some(tunnel_key) = grant.tunnel_key() else {
+        return Ok(false);
+    };
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let newer = connection
+        .query_opt(
+            "select 1 from runtime_tunnel_grants
+             where project_id = $1
+               and tunnel_id <> $2
+               and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+               and metadata->'_instafyPreview'->>'tunnelKey' = $3
+               and created_at > $4
+             limit 1",
+            &[
+                &grant.record.project_id,
+                &grant.record.tunnel_id,
+                &tunnel_key,
+                &grant.created_at,
+            ],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to check for a newer preview: {error}")))?;
+    Ok(newer.is_some())
 }
 
 /// Whether grant metadata belongs to a preview: it holds the previews
@@ -598,6 +689,26 @@ fn validate_preview_title(raw: &str) -> ApiResult<String> {
         return Err(bad_request("title must not contain control characters"));
     }
     Ok(title.to_string())
+}
+
+/// The card's facts line: whitespace runs become one space, 1 to 80
+/// characters, no control or bidi-override characters. Shown as plain text.
+fn validate_preview_summary(raw: &str) -> ApiResult<String> {
+    let summary = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if summary.is_empty() || summary.chars().count() > PREVIEW_SUMMARY_MAX_CHARS {
+        return Err(bad_request(format!(
+            "summary must be 1 to {PREVIEW_SUMMARY_MAX_CHARS} characters"
+        )));
+    }
+    if summary
+        .chars()
+        .any(|c| c.is_control() || thumbnail::is_bidi_control(c))
+    {
+        return Err(bad_request(
+            "summary must not contain control or direction characters",
+        ));
+    }
+    Ok(summary)
 }
 
 /// A site path: absolute, not protocol-relative, printable ASCII without
@@ -804,6 +915,11 @@ async fn post_preview(
     let port = validate_preview_port(body.port, &state.config.previews.deny_ports)?;
     let title = validate_preview_title(&body.title)?;
     let path = validate_preview_path(body.path.as_deref())?;
+    let summary = body
+        .summary
+        .as_deref()
+        .map(validate_preview_summary)
+        .transpose()?;
     let serve = body
         .serve
         .as_ref()
@@ -899,6 +1015,9 @@ async fn post_preview(
     preview.insert("visibility".to_string(), json!(PREVIEW_VISIBILITY));
     preview.insert("path".to_string(), json!(path));
     preview.insert("title".to_string(), json!(title));
+    if let Some(summary) = summary {
+        preview.insert("summary".to_string(), json!(summary));
+    }
     // The grant upsert carries the cards of a still-live preview with the
     // same title and path over; anything else gets a card of its own.
     preview.insert("messageIds".to_string(), json!({}));
@@ -937,6 +1056,15 @@ async fn post_preview(
     )
     .await?;
     retire_previews_superseded_by(&state, &project_id, &tunnel_key, &grant.tunnel_id).await;
+    // A preview is keyed by its machine and port, so this open may be another
+    // site than the one an earlier picture shows. The picture goes with every
+    // open; the CLI takes a new one once the site is live.
+    thumbnail::delete_preview_thumbnails(
+        &state.pool,
+        &project_id,
+        std::slice::from_ref(&grant.tunnel_id),
+    )
+    .await;
 
     Ok((
         StatusCode::CREATED,
@@ -975,8 +1103,19 @@ async fn ensure_preview_capacity(
                 "Too many previews opened on this runtime. Try again in {seconds}s."
             ))
         })?;
-    let connection = state
-        .pool
+    ensure_preview_room(&state.pool, project_id, runtime_id, tunnel_key).await
+}
+
+/// Refuse a preview past [`PREVIEWS_PER_RUNTIME`] other live previews on its
+/// runtime: an open, and a wake that reconnects a stopped one (a preview
+/// someone closed frees its place, which another open may have taken since).
+pub(super) async fn ensure_preview_room(
+    pool: &PgPool,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+    tunnel_key: &str,
+) -> ApiResult<()> {
+    let connection = pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
@@ -1528,7 +1667,19 @@ async fn get_preview(
     record_preview_serving(&state, &mut grant, health.as_ref()).await;
     let listening = health.as_ref().map(|probe| probe.listening);
     let mut response = grant.response(Some(health));
+    if response.restartable && preview_replaced(&state.pool, &grant).await? {
+        response.restartable = false;
+    }
     response.wake = Some(wake::load_wake_view(&state, &project_id, &grant, listening).await?);
+    let picture = if grant.is_closed() {
+        None
+    } else {
+        thumbnail::load_thumbnail_view(&state.pool, &project_id, &grant.record.tunnel_id).await?
+    };
+    response.page_description = picture
+        .as_ref()
+        .and_then(|(_, description)| description.clone());
+    response.thumbnail = Some(picture.map(|(view, _)| view));
     if let PreviewReader::Context(context) = &reader {
         response.can_start =
             Some(wake::caller_may_start(&state, &project_id, &grant, context).await);
@@ -1573,9 +1724,16 @@ async fn post_preview_close(
     }
     if !tunnel_status_is_active(&grant.record.status) {
         // Already stopped (a runtime stop, say); make sure no viewer outlived
-        // it, that it no longer wakes, and that nobody still presents it.
+        // it, that only someone who may change the space starts it again,
+        // and that nobody still presents it.
         revoke_preview_sessions_for_tunnel(&state.pool, &grant.record.tunnel_id).await;
         mark_preview_closed(&state.pool, &grant.record.id).await?;
+        thumbnail::delete_preview_thumbnails(
+            &state.pool,
+            &project_id,
+            std::slice::from_ref(&grant.record.tunnel_id),
+        )
+        .await;
         state
             .follow
             .end_preview(&grant.record.tunnel_id, follow::EndReason::Closed);
@@ -1587,6 +1745,12 @@ async fn post_preview_close(
             .ok_or_else(|| not_found("preview not found"))?;
     revoke_tunnel_record(&state, record, None).await?;
     mark_preview_closed(&state.pool, &grant.record.id).await?;
+    thumbnail::delete_preview_thumbnails(
+        &state.pool,
+        &project_id,
+        std::slice::from_ref(&grant.record.tunnel_id),
+    )
+    .await;
     // A closed preview has nothing left to present.
     state
         .follow
@@ -1723,6 +1887,11 @@ async fn retire_superseded_previews(
     })?;
     drop(connection);
 
+    let retired_tunnels: Vec<String> = retired
+        .iter()
+        .map(|grant| grant.tunnel_id.clone())
+        .collect();
+    thumbnail::delete_preview_thumbnails(&state.pool, project_id, &retired_tunnels).await;
     for grant in &retired {
         tracing::info!(
             %project_id,
@@ -1808,10 +1977,11 @@ fn forget_preview_cards(metadata: Option<&mut JsonValue>, cards: &[String]) -> b
     changed
 }
 
-/// A closed preview stays closed: `closedAt` (in the controller-owned preview
-/// object, so only this module sets it) keeps a wake from starting it again.
-/// A later `instafy preview open` of the same port writes fresh metadata
-/// without it.
+/// A closed preview stays down until someone who may change the space starts
+/// it again: `closedAt` (in the controller-owned preview object, so only this
+/// module sets it) keeps viewers' wakes and a viewer's Open from bringing it
+/// back. A wake by a builder, or a later `instafy preview open` of the same
+/// port, writes fresh metadata without it.
 async fn mark_preview_closed(pool: &PgPool, grant_row_id: &Uuid) -> ApiResult<()> {
     let connection = pool
         .get()

@@ -33,6 +33,7 @@ import {
   type ProjectAccessRefreshEventDetail,
 } from "../../projects/projectAccessEvents";
 import { PREVIEW_FOLLOW_EVENT } from "../../services/runtimeController/previewFollow";
+import { SITE_PREVIEW_THUMBNAIL_EVENT, mapSitePreviewThumbnailEvent } from "../../services/runtimeController/previews";
 import {
   CREDITS_UPDATED_EVENT,
   type CreditsUpdatedEventDetail,
@@ -710,6 +711,11 @@ export function useRuntimeControllerSync({
           if (event.kind === "preview.follow" && typeof window !== "undefined") {
             // Presence only (who presents a site, away, ended); the follow store reads it.
             window.dispatchEvent(new CustomEvent(PREVIEW_FOLLOW_EVENT, { detail: event.data ?? null }));
+          }
+          if (event.kind === "preview.thumbnail_updated" && typeof window !== "undefined") {
+            // Ids and a version only: the preview's card asks the controller for the picture itself.
+            const detail = mapSitePreviewThumbnailEvent(event.data);
+            if (detail) window.dispatchEvent(new CustomEvent(SITE_PREVIEW_THUMBNAIL_EVENT, { detail }));
           }
           if (event.kind?.startsWith("tunnel.")) {
             const grant = mapTunnelGrantFromPayload(

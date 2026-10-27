@@ -515,9 +515,9 @@ The runtime origin serves space files over HTTP. When the origin is reachable fr
 
 ### Show a site in Studio: `open`, `list`, `close`
 
-`instafy preview` shows a site that runs in the space inside Studio. The conversation gets a
-"Ready to preview" card with an **Open** button, and only space members can open it. Unlike
-`instafy tunnel`, nothing becomes public and the CLI never prints a URL.
+`instafy preview` shows a site that runs in the space inside Studio. The conversation gets a preview
+card with a picture of the site, which opens it beside the chat, and only space members can open it.
+Unlike `instafy tunnel`, nothing becomes public and the CLI never prints a URL.
 
 ```bash
 instafy preview open --port 4173 --title "Site preview" --json
@@ -534,10 +534,12 @@ gives exit `5` and nothing else happens.
 2. Asks the server for a private preview tunnel, then starts a detached rathole client for it
    (logs: `~/.instafy/cli-preview-logs/*`). If anything fails before the client runs, the preview is
    closed on the server again.
-3. Once the client has stayed up for 250 ms, asks the server to post the card, and prints the result:
+3. Once the client has stayed up for 250 ms, asks the server to post the card.
+4. When the site is live, takes a picture of the page for the card and uploads it (see below), then prints
+   the result:
 
 ```json
-{"previewId":"<uuid>","title":"Site preview","port":4173,"path":"/","status":"live","httpStatus":200,"messageId":"<uuid>","viewerHostSuffix":"<preview domain>","restartable":true}
+{"previewId":"<uuid>","title":"Site preview","port":4173,"path":"/","status":"live","httpStatus":200,"messageId":"<uuid>","viewerHostSuffix":"<preview domain>","restartable":true,"thumbnail":"uploaded"}
 ```
 
 `viewerHostSuffix` is the part of the host name viewers reach the site under after its first label. A dev
@@ -558,8 +560,19 @@ request.
 `--conversation <id>` picks the conversation for the card; it is needed only without a job
 token, for example in an end-to-end test.
 
+The card's picture and facts: `--summary "<text>"` is one line under the card's title (1 to 80
+characters, no control or direction characters), for example `Trip · 3 days · 14 places`; without it the
+card shows the page's own `<meta name="description">`. Once the site is live, `open` loads the page in the
+same headless Chromium `check` uses, under the same request rules, and uploads a 640×400 JPEG of it
+within 15 s (`INSTAFY_PREVIEW_THUMBNAIL_BUDGET_MS`, 1000 to 120000, gives a slow machine longer). Without a
+browser it uses the page's `og:image` when that is on the site itself. Each `open` replaces the card's
+picture, since a later site on the same port is the same preview. The JSON's `thumbnail` is `uploaded`,
+`skipped` or `failed`, with `thumbnailReason` when it is not uploaded; the exit code never changes. `--thumbnail <file>` uploads a picture you made instead (JPEG, PNG or WebP, at most
+512 KiB and 2000×2000) and `--no-thumbnail` uploads none. See
+[Site previews](Previews.md#the-cards-picture-and-facts).
+
 Starting the site again after the space sleeps: `open` also records how the site was started, so a
-member's **Open** on the card can start it again without an Octo turn (see [Site previews](Previews.md#waking-a-stopped-site)).
+member's press on the card can start it again without an Octo turn (see [Site previews](Previews.md#waking-a-stopped-site)).
 On a Linux space it reads the argv and working directory of the process listening on the port from
 `/proc`. `--serve-cmd "<command>"` gives the command instead, run from the current directory: one command
 and its arguments, split as a shell would split one simple command but never run through a shell, so
@@ -607,14 +620,18 @@ Exit codes:
 - `list` shows the space's open previews from the server. Its `status` is the preview's (`active`
   while it is open), not whether the site answers: `check` does that. `--json` rows carry `restartable`
   when the server sends it. A preview whose machine stopped or restarted is not listed; its card reads
-  Stopped, and **Open** on a restartable card starts the site again. `close` stops the local client and
-  asks the server to close the preview; the server then also revokes its open viewers.
+  Stopped, and pressing a restartable card starts the site again. `close` stops the local client and
+  asks the server to close the preview; the server then also revokes its open viewers and forgets the
+  card's picture. A closed preview keeps its recorded start command: its card reads "Stopped · opening
+  restarts it", and a press by someone who may change the space starts the site again.
 
 ### Check a site: `check`
 
 `instafy preview check --port <port>` looks at a site served on this machine before anyone sees it. It is meant
-for agents that build sites, and works for any site or framework. It is local only: it calls no Instafy server
-and needs no login.
+for agents that build sites, and works for any site or framework. It calls no Instafy server and needs no login,
+except to refresh a card: when this machine has a preview open on that port and path (`open` recorded it), it
+uploads a 640×400 picture of the desktop page for the card, and the report says `thumbnail` (`uploaded`,
+`skipped` or `failed`). That never changes the exit code.
 
 ```bash
 instafy preview check --port 4173
@@ -629,6 +646,17 @@ screenshot cannot be read, the report says the blank check is incomplete; on a p
 for each run, readable only by you; the report names the files).
 `--framed` loads the site inside a frame on another origin instead, and then also reports a site that refuses to be
 framed (`X-Frame-Options` or CSP `frame-ancestors`).
+
+What the page may load is Instafy's rule, not the page's: the site's own origin directly, every other public
+address through the runtime image's egress proxy (public addresses on ports 80 and 443 only), and nothing else.
+Another local port, `localhost` names, private and reserved addresses and every site on the link-only list (a
+`no-reuse` one too, since the check's picture can become the card's) are blocked, and listed under `blocked` with
+the reason rather than as errors. Redirect hops follow the same rules: every connection off the site passes
+Instafy's own gate in front of the egress proxy, which refuses by the whole address of a plain-HTTP request and by the
+host of a TLS one; a redirect it cannot read (an https archive's copy of a link-only site) is a warning, and the card's
+picture is not updated from that check. People opening the preview cannot reach another local port or a private address
+either, so a page that needs one should serve it from the site itself. Without the egress proxy (a machine outside
+the runtime image) nothing off the site's origin loads (`offSite: "blocked"`).
 
 | Exit | Meaning |
 |---|---|
@@ -682,7 +710,8 @@ Each page comes back with:
 | `code`, `message`, `tell` | Why it stopped, was skipped or failed, and what to do instead |
 | `provenance` | `{requestedUrl, finalUrl, title, readAt, viewer: "server fetch"}`, to cite the page |
 | `text` | The page text, at most `--max-chars` (default 4,000, at most 12,000), or with `--find` only the passages that mention the terms, wrapped in `<untrusted_page_content url=… read_at=… viewer=…>` |
-| `links` | Plain `<a href>` links (`--links`, default 30, at most 200), each marked `linkOnly` when it leads to a link-only site or a wrapper's copy of one |
+| `links` | Plain `<a href>` links (`--links`, default 30, at most 200), each marked `linkOnly` when it leads to a `no-agents` link-only site or a wrapper's copy of one, and `noReuse` when it leads to a `no-reuse` site |
+| `noReuse` | `{site, reason, via?}` when the page is on a `no-reuse` site (its terms bar reusing its content, not reading it) or a copy of one; `tell` then says how its content may be used |
 | `structured` | The page's own JSON-LD, microdata and descriptive meta tags, raw and bounded (8,000 characters in all; items that do not fit are left out and counted in `structuredDropped`); skills map the fields they need |
 | `redirects`, `httpStatus`, `contentHash`, `fromCache` | How the page was reached, and whether it came from this workspace's cache |
 
@@ -698,17 +727,23 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   anthropic-ai, PerplexityBot, Perplexity-User, CCBot, Google-Extended, Applebot-Extended, meta-externalagent,
   meta-externalfetcher, Bytespider, Amazonbot, cohere-ai, MistralAI-User, DuckAssistBot) is not read. A robots.txt
   that answers 5xx counts as "disallow everything".
-- **Link-only sites.** Sites whose terms ban AI agents or copying are never fetched, nor a translator's, cache's or
-  archive's copy of one, and no request goes to one at any redirect hop (robots.txt redirects included). The list is
-  the `instafy-web-research` skill's own data (`references/link-only-sites.json`). The CLI is built with that file, so
+- **Link-only sites.** The list is the `instafy-web-research` skill's own data (`references/link-only-sites.json`), and
+  each site has a `kind`. A `no-agents` site (its terms ban AI agents, bots or automated access; also a site with no
+  kind or an unknown one) is never fetched, nor a translator's, cache's or archive's copy of one, and no request goes
+  to one at any redirect hop (robots.txt redirects included). A `no-reuse` site (its terms ban copying or republishing,
+  not reading) is read like any page, robots.txt included, and comes back with `noReuse` and a `tell`: summarize it in
+  your own words, cite "seen <date> on <host>", link back, never copy its reviews, photos or price lists, and keep its
+  content out of anything published or shared by public link. Each site also records the `terms` it rests on (`url`,
+  the day it was `checked`, a short `quote`, an optional `note`). The CLI is built with that file, so
   the list applies wherever the command runs; if it cannot be loaded, nothing is read (exit 70). A skill folder's own
   copy (`<skill>/references/link-only-sites.json` or `<skill>/link-only-sites.json` under `.agents/skills/` in the
   space and its parents, `~/.agents/skills/`, and the skill packs under `INSTAFY_SKILL_PACKS_DIR`), such as the
-  space's copy of the list, only adds sites and wrappers:
+  space's copy of the list, only adds sites and wrappers, or makes a site stricter: where several entries match an
+  address, the strictest kind wins, so a copy cannot turn a `no-agents` site into a `no-reuse` one:
 
   ```json
   { "schema": "instafy.link-only-sites@1",
-    "sites": [{ "name": "Example Travel", "match": ["example-travel.com", "exampletravel.*"], "why": "terms ban AI agents" }],
+    "sites": [{ "name": "Example Travel", "match": ["example-travel.com", "exampletravel.*"], "kind": "no-agents", "why": "terms ban AI agents" }],
     "wrappers": [{ "name": "Example Proxy", "match": ["proxy.example"], "embeds": ["subdomain"], "why": "serves sites at <host>.proxy.example" }] }
   ```
 
@@ -722,8 +757,9 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   page that says it is a copy of another address (the Memento `Link: <…>; rel="original"` header archives send) is
   checked as that address too, also when it is served from the cache. A copy that does not
   parse, has another schema or is not a list is ignored with a warning, and the bundled list still applies.
-  `guards.linkOnly` reports the sites, wrappers and sources (`bundled` and each copy) in force. The matching is
-  `@instafy/browser-action-policy`'s `linkOnly.js`, which the Shared and Personal Browser run too.
+  `guards.linkOnly` reports the sites (and how many are `noReuse`), wrappers and sources (`bundled` and each copy) in
+  force. The matching is `@instafy/browser-action-policy`'s `linkOnly.js`, which the Shared and Personal Browser run
+  too: they refuse `no-agents` sites the same way and let `no-reuse` sites through.
 - **Private networks.** Every hop's host is resolved and every address checked. Loopback, private, link-local,
   CGNAT, multicast, documentation, metadata (`169.254.169.254`) and other reserved addresses, their IPv6, IPv4-mapped,
   IPv4-translated, NAT64 (including local-use `64:ff9b:1::/48`) and 6to4 forms, and local names (`localhost`,
@@ -747,10 +783,36 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   (`INSTAFY_TURN_STARTED_AT`); outside a turn the budget lapses after 15 minutes without reads. A page from the cache
   costs nothing.
 
-Pages are cached per workspace for 6 hours (`$XDG_CACHE_HOME/instafy/web-read`, or `~/.cache`), keyed by the URL's
-hash (no address is stored in the clear), with the content hash; a page the site marks `no-store` or `private` is
-not cached. `--fresh` reads it again. The turn budget lives under `$XDG_STATE_HOME/instafy/web-read` (or
-`~/.local/state`).
+Pages are cached per workspace for 6 hours, keyed by the URL's hash (no address is stored in the clear), with the
+content hash; a page the site marks `no-store` or `private` is not cached. `--fresh` reads it again. On a runtime the
+cache, robots.txt answers, stop records and the turn budget live in the space's own folder
+(`$INSTAFY_CACHE_DIR/instafy/web-read/{cache,state}`), which outlasts the turn, so a worker whose home folder is new
+every turn still knows what an earlier turn stopped at, and every worker of a turn shares one budget. On a person's own
+computer, where nothing sets `INSTAFY_CACHE_DIR` (or where it names a folder this process may not write), the cache
+lives under `$XDG_CACHE_HOME/instafy/web-read` (or `~/.cache`) and the turn budget under
+`$XDG_STATE_HOME/instafy/web-read` (or `~/.local/state`).
+
+**Offline fixtures (test builds only).** A CLI built with `INSTAFY_TEST_BUILD=1`
+(`INSTAFY_TEST_BUILD=1 pnpm --filter @instafy/cli build`) answers from hand-written files when
+`INSTAFY_WEB_FIXTURES=<folder>` is set, so tests and evals never touch a live site. Every rule above still applies to
+the fixture answers (link-only sites, robots.txt, redirects, address checks, stops, budget, redaction and the untrusted
+wrapper); each page's `viewer` is `fixture` instead of `server fetch`, and the budget and cache of fixture runs are kept
+apart from real reads. `<folder>/fixtures.json` lists the answers:
+
+```json
+{ "schema": "instafy.web-fixtures@1",
+  "hosts": { "intranet.example": ["10.0.0.5"] },
+  "pages": {
+    "https://museum.example/hours": { "file": "hours.html" },
+    "https://museum.example/robots.txt": { "type": "text/plain", "body": "User-agent: *\nDisallow: /staff" },
+    "https://busy.example/": { "status": 429 },
+    "https://old.example/": { "status": 301, "headers": { "location": "https://museum.example/hours" } } } }
+```
+
+A page's body is `body`, or the file `file` names inside the folder (its type follows the extension unless `type` says
+otherwise). An address that is not listed answers 404, so a missing robots.txt means no rules; a host with no page and
+no address under `hosts` does not resolve. Every other build, the published package included, refuses
+`INSTAFY_WEB_FIXTURES` (exit 70) rather than reading the live web in its place.
 
 | Exit | Meaning |
 |---|---|
@@ -758,6 +820,27 @@ not cached. `--fresh` reads it again. The turn budget lives under `$XDG_STATE_HO
 | 2 | No page was read (every URL stopped, was skipped or failed) |
 | 64 | Bad options or URLs |
 | 70 | The command itself failed, so nothing was read |
+
+### Guiding the person to a link-only site: `instafy web link`
+
+`instafy web link <site> [name=value…] --json` gives the link the person opens in their own tab when a task needs a
+`no-agents` site (guided mode). It reads and fetches nothing. `<site>` is the site's name in the list, one of its hosts
+or an address on it; the values fill the placeholders of the site's `search` template.
+
+```bash
+instafy web link booking.com query=Lisbon checkin=2026-11-12 checkout=2026-11-14 adults=2 --json
+instafy web link Agoda query=Lisbon checkin=2026-11-12 --json
+```
+
+The answer is `{ok, site, kind, deepLinks, link, home, typeIn, tell, warnings}`. With a search template, `link` is the
+template filled in: each value checked against its placeholder's format (`text`, `date` as YYYY-MM-DD, or `count`
+from 0 to 99) and URL-encoded (a path value is one segment), with values not given left out of the query. A site whose
+terms bar deep links (`deepLinks: false`), or that has no template, gets its `home` page as `link`, and `typeIn` lists
+what to type there. A placeholder the list does not define, or that the site's template does not take, is refused, as
+is a site that is not on the list (exit 64); without a list that loads, exit 70. The list's `placeholders` define the
+names; a template is https on the site's own hosts, with each placeholder a whole path segment or a whole query value,
+or it is left out with a warning. The same list files apply as for `instafy web read`, so a space's copy may add a
+site's template or bar its deep links, but never allow deep links the bundled list bars.
 
 ## AI-readable diagnostics
 

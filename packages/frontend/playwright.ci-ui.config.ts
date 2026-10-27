@@ -35,6 +35,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-live-proof.spec.ts",
   "browser-transport-switch.spec.ts",
   "conversation-surfaces.spec.ts",
+  "composer-panels.spec.ts",
   "queue-composer.spec.ts",
   "mobile-sidebar-keyboard.spec.ts",
   "mobile-editor-dialogs.spec.ts",
@@ -42,7 +43,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "mobile-thumb-navigation.spec.ts",
   "notification-preferences.spec.ts",
   "organization-rail-reorder.spec.ts",
-  "run-icon-rail.spec.ts",
+  "preview-card-responsive.spec.ts",
   "run-stop-control.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
   "shared-browser-expanded-safe-area.spec.ts",
@@ -53,6 +54,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "segmented-control-responsive.spec.ts",
   "studio-history-controls.spec.ts",
   "thread-spine-surface.spec.ts",
+  "turn-activity-line.spec.ts",
   "typing-agent-stack.spec.ts",
 ];
 
@@ -64,10 +66,10 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 30_000,
-  // The 100+ required cases run serially; hosted timings project seven to
-  // eight minutes in total. Leave room for startup and teardown while
+  // The 163 required cases run serially; hosted timings project about
+  // fifteen minutes in total. Leave room for startup and teardown while
   // bounding the complete lane without extending any individual test.
-  globalTimeout: 600_000,
+  globalTimeout: 1_200_000,
   outputDir: "test-results/browser-ci/browser-ui",
   reporter: [
     ["list"],

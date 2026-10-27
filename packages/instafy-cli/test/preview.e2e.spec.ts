@@ -6,7 +6,9 @@ import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { parsePreviewPath, parsePreviewTitle, parseStudioOrigin, parseViewerHostSuffix } from "../src/preview.js";
+import { parsePreviewPath, parsePreviewSummary, parsePreviewTitle, parseStudioOrigin, parseViewerHostSuffix } from "../src/preview.js";
+import { sniffImage } from "../src/preview-thumbnail.js";
+import { launchChromium, loadPlaywright, locateBrowserEngine } from "../src/site-check.js";
 import { commandLineIsRatholeClient } from "../src/tunnel.js";
 
 type RequestCapture = {
@@ -160,6 +162,8 @@ async function startMockController(options: {
   studioOrigin?: string;
   // Replaces the credentials in the create response (null leaves them out).
   credentials?: Record<string, unknown> | null;
+  // What PUT …/thumbnail answers (default 200).
+  thumbnailStatus?: number;
 }) {
   const captures: RequestCapture[] = [];
   let created = 0;
@@ -220,6 +224,11 @@ async function startMockController(options: {
         ]);
         return;
       }
+      if (req.method === "PUT" && req.url?.startsWith(base) && req.url.endsWith("/thumbnail")) {
+        const status = options.thumbnailStatus ?? 200;
+        json(status, status === 200 ? { version: "0123456789abcdef", width: 640, height: 400, capturedAt: new Date().toISOString() } : { message: "nope" });
+        return;
+      }
       const match = req.url?.match(/\/previews\/([^/]+)\/(ready|close)$/);
       if (req.method === "POST" && match && req.url?.startsWith(base)) {
         if (match[2] === "ready" && options.readyStatus) {
@@ -270,7 +279,9 @@ async function execCli(args: string[], home: string, env: Record<string, string>
   return { code, stdout: await stdout, stderr: await stderr };
 }
 
-function openArgs(params: { projectId: string; controllerUrl?: string; port: number; rathole?: string; path?: string }) {
+// The card's picture is left out unless a test is about it (`thumbnail: true`), so no test depends on whether this
+// machine has a browser.
+function openArgs(params: { projectId: string; controllerUrl?: string; port: number; rathole?: string; path?: string; thumbnail?: boolean }) {
   return [
     "preview",
     "open",
@@ -283,6 +294,7 @@ function openArgs(params: { projectId: string; controllerUrl?: string; port: num
     "Site preview",
     ...(params.rathole ? ["--rathole-bin", params.rathole] : []),
     ...(params.path ? ["--path", params.path] : []),
+    ...(params.thumbnail ? [] : ["--no-thumbnail"]),
     "--json",
   ];
 }
@@ -672,6 +684,8 @@ describe("instafy preview", () => {
       restartable: false,
       restartNote: expect.any(String),
       viewerHostSuffix: "preview.localhost:8083",
+      thumbnail: "skipped",
+      thumbnailReason: "--no-thumbnail",
     });
     expect(output).not.toHaveProperty("url");
     expect(result.stdout).not.toMatch(/https?:|"url"/i);
@@ -1024,4 +1038,184 @@ describe("instafy preview", () => {
     });
     expect(readState(home).previews).toHaveLength(0);
   }, 30000);
+});
+
+/** A PNG header with its size: the CLI and the controller read pictures by their header, never their pixels. */
+function pngOf(width: number, height: number): Buffer {
+  const head = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(head, 0);
+  head.writeUInt32BE(13, 8);
+  head.write("IHDR", 12, "latin1");
+  head.writeUInt32BE(width, 16);
+  head.writeUInt32BE(height, 20);
+  return head;
+}
+
+const thumbnailPuts = (captures: RequestCapture[]) =>
+  captures.filter((capture) => capture.method === "PUT" && capture.path.endsWith("/thumbnail"));
+
+describe("instafy preview: the card's summary and picture", () => {
+  it("accepts a summary the server will accept, and refuses a bad one before any request", async () => {
+    expect(parsePreviewSummary("  Trip ·\n 3 days  ")).toBe("Trip · 3 days");
+    expect(parsePreviewSummary(undefined)).toBeUndefined();
+    for (const bad of ["", "   ", "x".repeat(81), "bell\u0007", "flip\u202Eped"]) {
+      expect(() => parsePreviewSummary(bad), JSON.stringify(bad)).toThrow(/--summary/);
+    }
+    const projectId = randomUUID();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startSite();
+    const result = await execCli([...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: "/usr/bin/false" }), "--summary", "x".repeat(81)], makeHome());
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--summary must be 1 to 80 characters");
+    expect(controller.captures).toHaveLength(0);
+  }, 30000);
+
+  it("sends --summary with the preview", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startSite();
+    const result = await execCli([...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), "--summary", "Trip · 3 days · 14 places"], makeHome());
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(controller.captures[0]!.body)).toMatchObject({ summary: "Trip · 3 days · 14 places" });
+  }, 30000);
+
+  it("--no-thumbnail uploads no picture, and --thumbnail <file> uploads the skill's own once the site is live", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startSite();
+    const home = makeHome();
+
+    const none = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), home);
+    expect(none.code, none.stderr).toBe(0);
+    expect(JSON.parse(none.stdout)).toMatchObject({ thumbnail: "skipped", thumbnailReason: "--no-thumbnail" });
+    expect(thumbnailPuts(controller.captures)).toHaveLength(0);
+
+    const file = path.join(home, "snapshot.png");
+    fs.writeFileSync(file, pngOf(640, 400));
+    const withFile = await execCli(
+      [...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file, thumbnail: true }), "--thumbnail", file],
+      home,
+    );
+    expect(withFile.code, withFile.stderr).toBe(0);
+    expect(JSON.parse(withFile.stdout)).toMatchObject({ status: "live", thumbnail: "uploaded" });
+    const puts = thumbnailPuts(controller.captures);
+    expect(puts.map((capture) => capture.path)).toEqual([`/projects/${projectId}/previews/preview-1/thumbnail`]);
+    const body = JSON.parse(puts[0]!.body) as Record<string, unknown>;
+    expect(body).toMatchObject({ contentType: "image/png", source: "file" });
+    expect(Buffer.from(String(body.image), "base64").equals(pngOf(640, 400))).toBe(true);
+    expect(puts[0]!.authorization).toBe("Bearer test-token");
+
+    // A file that is not a picture: the preview opens anyway, without one.
+    const svg = path.join(home, "snapshot.svg");
+    fs.writeFileSync(svg, "<svg xmlns='http://www.w3.org/2000/svg'/>");
+    const notAPicture = await execCli(
+      [...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file, thumbnail: true }), "--thumbnail", svg],
+      home,
+    );
+    expect(notAPicture.code, notAPicture.stderr).toBe(0);
+    expect(JSON.parse(notAPicture.stdout)).toMatchObject({ thumbnail: "skipped", thumbnailReason: expect.stringMatching(/not a JPEG, PNG or WebP/) });
+    expect(thumbnailPuts(controller.captures)).toHaveLength(1);
+  }, 60000);
+
+  it("a picture that cannot be uploaded leaves the exit code alone", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId, thumbnailStatus: 500 });
+    const sitePort = await startSite();
+    const home = makeHome();
+    const file = path.join(home, "snapshot.png");
+    fs.writeFileSync(file, pngOf(640, 400));
+    const result = await execCli(
+      [...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file, thumbnail: true }), "--thumbnail", file],
+      home,
+    );
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "live", thumbnail: "failed", thumbnailReason: expect.stringMatching(/500/) });
+  }, 30000);
+
+  it("takes no picture of a site that is not live through the preview", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId, readyBody: { messageId: "m-1", health: { listening: false } }, readyStatus: 200 });
+    const sitePort = await startSite();
+    const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file, thumbnail: true }), makeHome());
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "not_responding", thumbnail: "skipped" });
+    expect(thumbnailPuts(controller.captures)).toHaveLength(0);
+  }, 30000);
+});
+
+// This checkout's Playwright, handed over as the runtime image hands over its trusted copy.
+const checkoutEngine = locateBrowserEngine({ env: {}, globalRoots: [], workspace: true }).engine;
+let browserOk = false;
+if (checkoutEngine) {
+  try {
+    const { browser } = await launchChromium(loadPlaywright(checkoutEngine));
+    await browser.close();
+    browserOk = true;
+  } catch {
+    browserOk = false;
+  }
+}
+const browserEnv = { INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH: checkoutEngine?.playwright ?? "" };
+
+async function startPage(): Promise<number> {
+  return listen(
+    http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html><title>Lisbon weekend</title><meta name="description" content="Trip · 3 days · 14 places">
+<body style="margin:0;background:#e8f0e6;font:16px system-ui"><h1 style="padding:24px;background:#2a6;color:#fff">Lisbon weekend</h1><p>Three days.</p></body>`);
+    }),
+  );
+}
+
+describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser", () => {
+  it("preview open uploads a thumbnail when live and a browser exists", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startPage();
+    // A busy test machine gets more than the default 15 s for the picture.
+    const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file, thumbnail: true }), makeHome(), {
+      ...browserEnv,
+      INSTAFY_PREVIEW_THUMBNAIL_BUDGET_MS: "120000",
+    });
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "live", thumbnail: "uploaded" });
+    const puts = thumbnailPuts(controller.captures);
+    expect(puts).toHaveLength(1);
+    const body = JSON.parse(puts[0]!.body) as Record<string, unknown>;
+    expect(body).toMatchObject({ contentType: "image/jpeg", source: "capture", description: "Trip · 3 days · 14 places" });
+    expect(sniffImage(Buffer.from(String(body.image), "base64"))).toEqual({ contentType: "image/jpeg", width: 640, height: 400 });
+  }, 180000);
+
+  it("check uploads for an open preview on its port, and for none other", async () => {
+    const projectId = randomUUID();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startPage();
+    const otherPort = await startPage();
+    const home = makeHome();
+    writeState(home, [{
+      previewId: "preview-1", projectId, title: "Lisbon weekend", localPort: sitePort, path: "/", controllerUrl: controller.url,
+      pid: 999999, logFile: path.join(home, "log"), workdir: path.join(home, "wd"), startedAt: new Date().toISOString(),
+    }]);
+    const env = { ...browserEnv, INSTAFY_ACCESS_TOKEN: "test-token" };
+
+    const checked = await execCli(["preview", "check", "--port", String(sitePort), "--json"], home, env);
+    expect(checked.code, checked.stderr).toBe(0);
+    expect(JSON.parse(checked.stdout)).toMatchObject({ ok: true, thumbnail: "uploaded" });
+    const puts = thumbnailPuts(controller.captures);
+    expect(puts.map((capture) => capture.path)).toEqual([`/projects/${projectId}/previews/preview-1/thumbnail`]);
+    const body = JSON.parse(puts[0]!.body) as Record<string, unknown>;
+    expect(body).toMatchObject({ contentType: "image/jpeg", source: "capture", description: "Trip · 3 days · 14 places" });
+    expect(sniffImage(Buffer.from(String(body.image), "base64"))).toEqual({ contentType: "image/jpeg", width: 640, height: 400 });
+
+    // No preview is open on this port: nothing is uploaded, and the report says nothing about a picture.
+    const other = await execCli(["preview", "check", "--port", String(otherPort), "--json"], home, env);
+    expect(other.code, other.stderr).toBe(0);
+    expect(JSON.parse(other.stdout)).not.toHaveProperty("thumbnail");
+    expect(thumbnailPuts(controller.captures)).toHaveLength(1);
+  }, 240000);
 });

@@ -13,7 +13,7 @@ const noop = () => {};
 const reviewImageBytes = Uint8Array.from(atob(reviewImageUrl.split(",")[1]), character => character.charCodeAt(0));
 
 /** The real composer and Lexical editor; only submission and peripheral panes are inert. */
-export function Composer({ controller, readOnly, recording, viewNavigation, queueReview, utilityReview, attachmentCount, attachmentSending = false, fullPage = false, newTab = false }: { controller: ChatRunStopController; readOnly: boolean; recording: boolean; viewNavigation?: ReactNode; queueReview?: { count: number; initialDraft?: string; withStash?: boolean }; utilityReview?: { goalStatus: "active" | "paused" | "blocked" }; attachmentCount?: number; attachmentSending?: boolean; fullPage?: boolean; newTab?: boolean }) {
+export function Composer({ controller, readOnly, recording, viewNavigation, queueReview, utilityReview, attachmentCount, attachmentSending = false, fullPage = false, newTab = false, stashMessages, composerActions }: { controller: ChatRunStopController; readOnly: boolean; recording: boolean; viewNavigation?: ReactNode; queueReview?: { count: number; initialDraft?: string; withStash?: boolean }; utilityReview?: { goalStatus: "active" | "paused" | "blocked" }; attachmentCount?: number; attachmentSending?: boolean; fullPage?: boolean; newTab?: boolean; stashMessages?: string[]; composerActions?: Partial<Parameters<typeof ChatComposerSurface>[0]["composerActionMenuProps"]> }) {
   const overlay = useRef<HTMLDivElement>(null);
   const input = useRef<ChatInputHandle>(null);
   const image = useRef<HTMLInputElement>(null);
@@ -29,10 +29,10 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [imageLightbox]);
-  const [stashes, setStashes] = useState<ControllerMessageStash[]>(() => queueReview?.withStash ? (utilityReview ? [
+  const [stashes, setStashes] = useState<ControllerMessageStash[]>(() => queueReview?.withStash ? (stashMessages ?? (utilityReview ? [
     "Compare keyboard navigation and touch targets across the browser pages before sharing the design review",
     "Follow up on the saved research notes", "A short reminder",
-  ] : ["Draft idea to come back to later"]).map((text, index) => ({
+  ] : ["Draft idea to come back to later"])).map((text, index) => ({
     id: index ? `fixture-stash-${index}` : "fixture-stash", clientStashId: index ? `fixture-stash-${index}` : "fixture-stash", projectId: "fixture-project", conversationId: "fixture-conversation",
     text, editorState: null, composerEnvelope: {},
     createdAt: "2026-10-23T00:00:00Z", updatedAt: "2026-10-23T00:00:00Z",
@@ -92,7 +92,7 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
         composerNavigationDestination={viewNavigation ? "sheet" : "chats"} onOpenNavigation={noop} homeAttentionCount={0} homeAttentionBadge=""
         composerActionMenuProps={{ pendingNewBrowser: false, onOpenBrowser: noop, onOpenNewBrowser: noop,
           onOpenInvite: noop, onImportGithubRepo: noop, onInsertCommand: value => { setDraft(value); setEditorState(null); },
-          showBrowserAction: false, showNewBrowserAction: false, showInviteAction: false }}
+          showBrowserAction: false, showNewBrowserAction: false, showInviteAction: false, ...composerActions }}
         onOpenImagePicker={noop} imageUploadUnavailableReason="Attachments are disabled in this playground."
         sendingAttachment={false} showMobileGhostSuggestionAcceptButton={false} onAcceptGhostSuggestion={noop}
         showVoicePrimaryAction={recording || Boolean(viewNavigation && !draft.trim())} showVoiceSecondaryAction={Boolean(viewNavigation && draft.trim())}

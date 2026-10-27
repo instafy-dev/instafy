@@ -53,6 +53,8 @@ function createModel(): PersonalBrowserModel {
     pendingHandoff: null,
     readPage: vi.fn(async () => null),
     reload: vi.fn(async () => null),
+    searchChoice: null,
+    setSearchEngine: vi.fn(async () => undefined),
     selectTab: vi.fn(async () => null),
     recovering: false,
     retryAgentControl: vi.fn(async () => null),
@@ -783,6 +785,48 @@ describe("PersonalBrowserSurface", () => {
     expect(model.navigate).toHaveBeenCalledWith("https://instafy.dev/docs");
     expect(address.value).toBe("https://instafy.dev/docs");
     expect(document.activeElement).not.toBe(address);
+  });
+
+  it("searches typed words with the engine picked in the browser's settings", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false };
+    model.searchChoice = {
+      engines: [{ id: "duckduckgo", name: "DuckDuckGo" }, { id: "brave", name: "Brave Search" }],
+      selected: "duckduckgo",
+    };
+    await act(async () => {
+      root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />);
+    });
+    const address = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
+    const go = container.querySelector<HTMLButtonElement>('[data-testid="personal-browser-go"]')!;
+    expect(address.placeholder).toBe("Search or enter an address");
+    await act(async () => {
+      address.focus();
+      setInputValue(address, "best ramen tokyo");
+      go.focus();
+    });
+    await act(async () => go.click());
+    expect(model.navigate).toHaveBeenCalledWith("best ramen tokyo");
+    expect(document.activeElement).not.toBe(address);
+
+    const settings = container.querySelector<HTMLButtonElement>('button[aria-label="Browser settings"]')!;
+    await act(async () => settings.click());
+    const picker = document.querySelector<HTMLElement>('[data-testid="personal-browser-search-engine"]');
+    expect(picker).not.toBeNull();
+    expect(document.body.textContent).toContain("Search with");
+  });
+
+  it("keeps the plain address bar when the Desktop cannot search", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false };
+    await act(async () => {
+      root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />);
+    });
+    const address = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
+    expect(address.placeholder).toBe("Enter an address");
+    const settings = container.querySelector<HTMLButtonElement>('button[aria-label="Browser settings"]')!;
+    await act(async () => settings.click());
+    expect(document.querySelector('[data-testid="personal-browser-search-engine"]')).toBeNull();
   });
 
   it("opens a remembered address through the native navigation model", async () => {

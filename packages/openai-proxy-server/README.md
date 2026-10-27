@@ -144,14 +144,22 @@ any tool that names its own `model`, and a namespace holding either, and logs
 `credential lease drops client tools` with a count per tool type and reason. Hosted tools, which
 OpenAI runs and bills per call, are off on a pinned lease: `web_search`, which codex sends, and
 a tool search with any other `execution` are dropped with reason `hosted`, and a drift test fails
-when codex adds a tool type that is neither allowed nor dropped on purpose. The filter runs
-again on the tools the request finally carries, so the default tools the proxy gives a ChatGPT
-login's request that keeps none of its own lose `web_search` too, whatever
-`CODEX_ENABLE_WEB_SEARCH` says. The pin, not the lane, decides all of this. Only the platform
-lane is ever pinned, by the controller's managed lease or by `PROXY_PINNED_MODEL` below, but a
-platform lane without a pin is not filtered. Leases without `pinnedModel` (bring-your-own API
-keys, ChatGPT logins, and leases from a controller that predates the field) keep the rules above
-and forward client tools unchanged, hosted ones included.
+when codex adds a tool type that is neither allowed nor dropped on purpose. The pin, not the
+lane, decides all of this. Only the platform lane is ever pinned, by the controller's managed
+lease or by `PROXY_PINNED_MODEL` below, but a platform lane without a pin is not filtered by it.
+Leases without `pinnedModel` (bring-your-own API keys, ChatGPT logins, and leases from a
+controller that predates the field) forward client tools unchanged, hosted ones included, with
+one exception below.
+
+**No lease forwards OpenAI's hosted web search**, pinned or not: a tool of type `web_search`,
+`web_search_preview` or one of their dated forms, on its own or inside a namespace, in `tools` or
+in a tool-carrying input item, is dropped with reason `hosted`. Web search is off for every kind of
+AI (Lite, own keys and ChatGPT logins) because Octo searches only through Instafy's own commands,
+which keep the web-research skill's link-only sites link-only and cap searches per turn; OpenAI's
+search can do neither. The runtime also sets Codex's web search to disabled on every lane. The
+default tools the proxy gives a ChatGPT login's request that keeps none of its own no longer
+include web search (`CODEX_ENABLE_WEB_SEARCH` is ignored), and the filter runs again on the tools
+the request finally carries.
 
 With controller integration, static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve
 the platform lane: managed runs, whose controller-signed job tokens carry a `run_id` and no
@@ -656,3 +664,65 @@ nor changes Instafy's credit policy. Native Responses usage remains intact.
 Whole-task measurement must still include native children and controller workers
 and deduplicate returned response IDs. Cache compatibility alone establishes no
 latency, hit-rate or cost improvement.
+
+### Content-free upstream usage diagnostics
+
+Set `PROXY_USAGE_DIAGNOSTICS=1` on the proxy to emit JSON records prefixed with
+`[proxy] usage diagnostic `. This is independent of `PROXY_DEBUG_STREAM` and
+`CODEX_DEBUG_HTTP`; leave those content-logging flags disabled for usage measurement.
+Diagnostics do not change requests, response adaptation, runtime task receipts,
+controller metering, or credit deductions. The managed-AI billing gap for native
+children remains as documented in [Credits & Billing](../../docs/Credits-Billing.md).
+
+Schema version 1 emits `attempt_started`, `response_observed`, and
+`attempt_finished`. Each actual upstream HTTP send receives a fresh `attemptId`;
+`requestId` stays the same across credential renewal and required-tool-choice
+fallbacks. Runtime retries arrive as separate requests. Every record carries the
+resolved outbound `model`, wire API, timestamp, and the authenticated token's UUID `runId`,
+`jobId`, and positive `leaseAttempt` when present. It never copies request metadata,
+headers, credential identifiers, account details, prompts, outputs, or error text.
+
+`outboundReasoningEffort` observes the allowlisted effort in the final upstream
+request body. Terminal records separately retain the upstream response's bounded
+`providerModel` and allowlisted `providerReasoningEffort`. Missing or invalid
+values are `null` (unknown); an absent response effort never inherits the request
+effort. The outbound fields describe what the proxy sent, and the provider fields
+describe what the provider reported. Neither proves the provider's internal model
+or reasoning implementation. Native rollout turn contexts can establish what each
+child requested, joined through its own usage records as described below.
+
+Terminal responses are observed before response adaptation or client normalization.
+The response ID is retained only as its SHA-256 hash, so offline tools can join it
+to the same hashed ID in parent and native-child rollout records. A join must check
+the usage record's owning thread; inherited child history is not new child usage.
+Unjoined responses have unknown attribution. `usage.fields` retains the six
+input, cached-input, cache-write-input, output, reasoning-output, and total counters
+as `{state: "reported", value: <integer>}`, or `missing`, `null`, or `invalid`
+without a value. Usage and detail-container presence are retained separately.
+Absent cache-write or cached-read counters are not reported zeros. For Responses
+and Chat Completions, cached input is a subset of input and reasoning output is a
+subset of output; do not add either to the reported total. Gemini Code Assist
+preserves `candidatesTokenCount` as output and `thoughtsTokenCount` as separate
+reasoning output, following the provider's [usage metadata](https://ai.google.dev/api/generate-content#UsageMetadata).
+These are raw provider counters, not normalized billing categories. Preserve the
+reported total rather than reconstructing it from fields that may omit other usage.
+
+The finish record includes HTTP status, outcome, terminal observation count, and
+`truncated`. A cancelled/dropped request still finishes as `interrupted` when no
+terminal was observed; process termination can leave only a start record. HTTP
+rejections and transport failures without terminal usage remain unknown spend.
+Records are bounded to safe-integer counters, 128-byte model identifiers,
+512-byte response IDs before hashing, and 16 terminal observations per attempt.
+The buffered-stream diagnostic parser retains at most one 16 MiB event; exceeding
+either bound marks the attempt truncated without changing the delivered response.
+
+Count identical repeated terminal events once **within an attempt**. Keep distinct
+attempt provenance when the same response ID appears across attempts and report
+that collision instead of silently adding or deduplicating it. Missing starts or
+finishes, conflicting observations, truncation, or unknown counters prevent a
+complete total for the affected scope or counter. Correlate every job in a run,
+including controller workers, and wait for all attempts to settle before taking
+the final snapshot. Log loss, process loss, and routes outside Responses/Chat
+Completions still limit coverage. These observations do not establish a provider
+bill or a subscription price, and must not be added to overlapping runtime receipts
+or rollout totals.

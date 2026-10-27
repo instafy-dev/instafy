@@ -11,10 +11,16 @@ import zlib from "node:zlib";
 import {
   DEFAULT_PIN,
   MANIFEST,
+  checkPackActivity,
+  RESERVED_BIN_NAMES,
+  RESERVED_BIN_PREFIXES,
   installFromFolder,
   installPinned,
+  isDoneForm,
+  isLiveLabel,
   treeDigest,
   validatePin,
+  writeBinShims,
 } from "./install-skill-packs.mjs";
 
 const COMMIT = "1".repeat(40);
@@ -253,4 +259,148 @@ test("--require-pinned refuses a local pack folder, which is installed unpinned 
   assert.deepEqual(installed.packs.map(({ name, pinned }) => ({ name, pinned })), [{ name: "demo", pinned: false }]);
   fs.symlinkSync("/etc/passwd", path.join(source, "link"));
   assert.throws(() => installFromFolder({ from: source, out: tempOut() }), /links are not allowed/u);
+});
+
+const MAP_ACTIVITY = {
+  run: {
+    "add-point": { live: "Looking up places", done: { one: "looked up a place", other: "looked up {n} places", some: "looked up places" } },
+    validate: { live: "Checking the map", done: "built the map", role: "outcome", when: "success" },
+    "*": { live: "Working on the map", role: "quiet" },
+  },
+};
+
+test("activity labels follow the same rules as the runtime and Studio", () => {
+  const fixtures = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, "..", "packages", "runtime-contracts", "src", "chat_activity_fixtures.json"), "utf8"));
+  for (const label of fixtures.liveValid) assert.ok(isLiveLabel(label), label);
+  for (const label of fixtures.liveInvalid) assert.ok(!isLiveLabel(label), label);
+  for (const label of fixtures.doneValid) assert.ok(isDoneForm(label, false), label);
+  for (const label of fixtures.doneInvalid) assert.ok(!isDoneForm(label, false), label);
+  for (const label of fixtures.doneCountValid) assert.ok(isDoneForm(label, true), label);
+  for (const label of fixtures.doneCountInvalid) assert.ok(!isDoneForm(label, true), label);
+});
+
+test("a pack's activity labels name its bin commands and break no rule", () => {
+  const files = new Map([["scripts/run.mjs", Buffer.from("")]]);
+  const manifest = (overrides) => ({ bin: { run: "scripts/run.mjs" }, activity: MAP_ACTIVITY, ...overrides });
+  assert.equal(checkPackActivity(manifest({}), files), null);
+  assert.equal(checkPackActivity({}, files), null, "a pack without labels");
+  for (const [overrides, pattern] of [
+    [{ bin: undefined }, /only commands declared in `bin`/u],
+    [{ bin: { git: "scripts/run.mjs" }, activity: { git: MAP_ACTIVITY.run } }, /not a command name/u],
+    [{ bin: { run: "scripts/missing.mjs" } }, /not a file inside the pack/u],
+    [{ activity: { other: MAP_ACTIVITY.run } }, /not a command in `bin`/u],
+    [{ activity: { run: { "add-point": { live: "Visit example.com", done: "looked up a place" } } } }, /live breaks/u],
+    [{ activity: { run: { "add-point": { live: "Looking up places", done: "see https://example.com" } } } }, /done breaks/u],
+    [{ activity: { run: { "add-point": { live: "Looking up places", done: { one: "looked up a place", other: "looked up {n} places" } } } } }, /`some` form/u],
+    [{ activity: { run: { "add-point": { live: "Looking up places", done: { one: "a", other: "looked up places", some: "b" } } } } }, /done.other/u],
+    [{ activity: { run: { "add-point": { live: "Looking up places" } } } }, /needs done words/u],
+    [{ activity: { run: { "Add Point": { live: "Working", role: "quiet" } } } }, /not a subcommand name/u],
+  ]) {
+    assert.match(checkPackActivity(manifest(overrides), files) ?? "", pattern, JSON.stringify(overrides));
+  }
+});
+
+test("a pack whose activity labels break a rule still installs, with a warning", () => {
+  for (const [activity, warned] of [[MAP_ACTIVITY, false], [{ run: { "*": { live: "Open example.com", role: "quiet" } } }, true]]) {
+    const source = tempOut();
+    const { files } = packFiles("demo", { manifest: { bin: { run: "scripts/run.mjs" }, activity } });
+    for (const [rel, data] of files) {
+      fs.mkdirSync(path.dirname(path.join(source, rel)), { recursive: true });
+      fs.writeFileSync(path.join(source, rel), data);
+    }
+    const lines = [];
+    const out = tempOut();
+    assert.deepEqual(installFromFolder({ from: source, out, log: (line) => lines.push(line) }).map(({ status }) => status), ["installed"]);
+    assert.ok(fs.existsSync(path.join(out, "demo", MANIFEST)));
+    assert.equal(lines.some((line) => /activity labels break the label rules/u.test(line)), warned, lines.join("\n"));
+  }
+});
+
+function writeFolder(files) {
+  const source = tempOut();
+  for (const [rel, data] of files) {
+    fs.mkdirSync(path.dirname(path.join(source, rel)), { recursive: true });
+    fs.writeFileSync(path.join(source, rel), data);
+  }
+  return source;
+}
+
+test("writes one shim per bin with the install root", async () => {
+  const { files, tree } = packFiles("demo", {
+    extra: { "scripts/args.mjs": "console.log(JSON.stringify(process.argv.slice(2)));\n" },
+    manifest: { bin: { "demo-run": "scripts/args.mjs", "demo-check": "scripts/run.mjs" } },
+  });
+  const archive = tarball(packEntries("demo", files));
+  const out = tempOut();
+  await withServer({ "/demo.tar.gz": { body: archive } }, async (base) => {
+    await install(pinFor("demo", base, archive, tree), out);
+  });
+  assert.ok(!fs.existsSync(path.join(out, ".bin")), "no shims without --install-root");
+  assert.deepEqual(writeBinShims({ out, installRoot: "/opt/instafy/skill-packs" }), ["demo-check", "demo-run"]);
+  for (const [name, entry] of [["demo-run", "scripts/args.mjs"], ["demo-check", "scripts/run.mjs"]]) {
+    const shim = path.join(out, ".bin", name);
+    assert.equal(
+      fs.readFileSync(shim, "utf8"),
+      `#!/bin/sh\n# instafy:managed-pack-bin demo 0.1.0\nexec node '/opt/instafy/skill-packs/demo/${entry}' "$@"\n`,
+    );
+    assert.equal(fs.statSync(shim).mode & 0o777, 0o755);
+  }
+  assert.deepEqual(fs.readdirSync(out).filter((name) => !name.startsWith(".")).sort(), ["demo", "installed.json"]);
+
+  // The command line: a shim runs the installed pack with the arguments it was given.
+  const root = fs.realpathSync(tempOut());
+  const source = writeFolder(files);
+  const run = spawnSync(process.execPath, [script, "--from", source, "--out", root, "--install-root", root], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const ran = spawnSync("/bin/sh", [path.join(root, ".bin", "demo-run"), "a b", "c"], { encoding: "utf8" });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout, '["a b","c"]\n');
+  const refused = spawnSync(process.execPath, [script, "--from", source, "--out", tempOut(), "--install-root", "relative/root"], { encoding: "utf8" });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /--install-root must be an absolute path/u);
+});
+
+test("refuses a bin outside the pack", async () => {
+  for (const entry of ["../evil.mjs", "/bin/sh", "scripts/missing.mjs", "scripts", "scripts/it's.mjs"]) {
+    const { files, tree } = packFiles("demo", { manifest: { bin: { demo: entry } } });
+    await expectRefused(packEntries("demo", files), /not a file inside the pack|leaves its folder|is not a relative path/u, { tree });
+  }
+  const { files } = packFiles("demo", { manifest: { bin: ["scripts/run.mjs"] } });
+  assert.throws(() => installFromFolder({ from: writeFolder(files), out: tempOut() }), /bin must map command names to files/u);
+});
+
+test("refuses a reserved name", async () => {
+  for (const name of [
+    "node", "git", "instafy", "sh", "runtime-agent", "Uw", "u", "uw_x", "1uw", `u${"w".repeat(32)}`,
+    // The image's helpers and Codex's commands: an image build or a PATH check at startup may not see them yet.
+    "applypatch", "rathole", "runtime-entrypoint", "browser-egress-proxy", "browser-webrtc-sender",
+    "codex-linux-sandbox", "codex-code-mode-host", "codex-execve-wrapper", "instafy-helper",
+  ]) {
+    const { files, tree } = packFiles("demo", { manifest: { bin: { [name]: "scripts/run.mjs" } } });
+    await expectRefused(packEntries("demo", files), /is not a command a pack may declare/u, { tree });
+  }
+  const nine = Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`cmd-${index}`, "scripts/run.mjs"]));
+  const { files, tree } = packFiles("demo", { manifest: { bin: nine } });
+  await expectRefused(packEntries("demo", files), /more than 8 commands/u, { tree });
+});
+
+test("a command two packs declare gets no shim", () => {
+  const out = tempOut();
+  installFromFolder({ from: writeFolder(packFiles("one", { manifest: { bin: { shared: "scripts/run.mjs", "one-only": "scripts/run.mjs" } } }).files), out });
+  installFromFolder({ from: writeFolder(packFiles("two", { manifest: { bin: { shared: "scripts/run.mjs" } } }).files), out });
+  const lines = [];
+  assert.deepEqual(writeBinShims({ out, installRoot: "/opt/instafy/skill-packs", log: (line) => lines.push(line) }), ["one-only"]);
+  assert.deepEqual(fs.readdirSync(path.join(out, ".bin")), ["one-only"]);
+  assert.ok(lines.some((line) => /one and two all declare the command shared/u.test(line)), lines.join("\n"));
+});
+
+test("the installer and the runtime reserve the same command names", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "packages/runtime-agent/src/skill_packs.rs"), "utf8");
+  const list = (constant) => {
+    const body = source.match(new RegExp(`pub const ${constant}: &\\[&str\\] = &\\[([^\\]]*)\\];`, "u"))?.[1];
+    assert.ok(body, constant);
+    return [...body.matchAll(/"([^"]+)"/gu)].map(([, name]) => name).sort();
+  };
+  assert.deepEqual(list("RESERVED_BIN_NAMES"), [...RESERVED_BIN_NAMES].sort());
+  assert.deepEqual(list("RESERVED_BIN_PREFIXES"), [...RESERVED_BIN_PREFIXES].sort());
 });

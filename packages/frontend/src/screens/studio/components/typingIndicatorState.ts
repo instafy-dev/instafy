@@ -9,7 +9,6 @@ import {
   resolveAssistantStatusHeadline,
 } from "./assistantStatusHeuristics";
 import { getMessageType } from "./chatMessageMetadata";
-import { truncate } from "./chatContentHelpers";
 import {
   coerceThreadMessages,
   isFinalAgentOutcomeMessage,
@@ -109,7 +108,11 @@ export function resolveTypingIndicatorState(
         ? "typing"
         : "thinking";
 
-    return { phase, label: truncate(normalized, 120) };
+    // Octo's notes and reasoning titles are free text the model writes after
+    // reading pages, so they never become the row's words (docs/Chat-Activity.md):
+    // the row says what phase the run is in ("Thinking…") and the notes stay in
+    // the turn's Details.
+    return { phase, label: null };
   }
 
   if (fallback) {

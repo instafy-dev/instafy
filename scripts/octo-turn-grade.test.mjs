@@ -665,9 +665,10 @@ test("the spec finds the page through Studio's own preview card and the controll
   for (const selector of [".leaflet-container", ".maplibregl-map", "input[type=checkbox]"]) assert.ok(spec.includes(selector), `spec looks for ${selector}`);
   // The test ids the spec relies on exist in Studio.
   const studio = (file) => fs.readFileSync(path.join(REPO_ROOT, "packages/frontend/src/screens/studio/components", file), "utf8");
-  assert.match(studio("SitePreviewCard.tsx"), /testId="preview-ready-card"/);
-  assert.match(studio("SitePreviewCard.tsx"), /testId: "preview-ready-open"/);
-  assert.match(studio("SitePreviewCard.tsx"), /data-testid="preview-ready-status"/);
+  // The card's whole area is its open button (SitePreviewCardView.tsx draws it).
+  assert.match(studio("SitePreviewCardView.tsx"), /data-testid="preview-ready-card"/);
+  assert.match(studio("SitePreviewCardView.tsx"), /data-testid="preview-ready-open"/);
+  assert.match(studio("SitePreviewCardView.tsx"), /data-testid="preview-ready-status"/);
   assert.match(studio("SitePreviewPane.tsx"), /data-testid="site-preview-frame"/);
 });
 

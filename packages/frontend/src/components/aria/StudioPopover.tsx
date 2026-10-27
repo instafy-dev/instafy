@@ -121,7 +121,7 @@ export function StudioPopover({
               the small gutter preserves focus rings without moving content. */}
           <div
             data-studio-popover-content=""
-            className="relative z-10 -m-1 min-h-0 overflow-y-auto overscroll-contain p-1"
+            className="relative z-10 -m-1 min-h-0 overflow-y-auto overscroll-contain p-1 dark:[color-scheme:dark]"
           >
             {resolvedChildren}
           </div>

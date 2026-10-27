@@ -53,7 +53,10 @@ load `redaction.js` first.
   `captureSentPage(redaction, options)` reads a page a person chose to send
   with **Send page to Octo**: it runs in an isolated world next to
   `redaction.js`, masks the address, title and text with the snapshot rules,
-  and returns no text for a secret screen or a page it could not check.
+  and returns no text for a secret screen or a page it could not check. It also
+  sends up to 200 of the page's web links (`pageLinksInPage`, which a host can
+  run on its own), masked, with a link to a link-only site marked by name when
+  the call passes `linkOnly: { api, sites }`; without it, no links.
   `maskSentPage` is the masking step on its own, for a host that reads the
   page another way. Publishes `globalThis.__instafyBrowserPageCapture`; load
   `redaction.js` first.
@@ -63,8 +66,13 @@ load `redaction.js` first.
   this file only enforces it). `linkOnlyListFrom(bundled, additions)` compiles
   the bundled list plus what a space's copy adds (a copy only adds; one that is
   not a list is left out with a warning; no usable bundled list gives `null`,
-  and a host then reads nothing). `linkOnlyMatch(list, address)` returns
-  `{ site, why, via }` or `null`: hosts match however the address spells them
+  and a host then reads nothing). Each site has a `kind`: `no-agents` (its
+  terms bar AI agents or automated access; also a site with no kind or an
+  unknown one) or `no-reuse` (its terms bar copying, not reading). Where
+  several entries match, the strictest wins, so a space's copy can make a site
+  stricter and never looser. `linkOnlyMatch(list, address)` returns
+  `{ site, why, kind, via }` or `null`, and a reader refuses the address only
+  when `barsAgents(match)`: hosts match however the address spells them
   (case, trailing dots, port, user info, IDN), and an address on one of the
   list's `wrappers` (a translator, cache, archive or reader proxy) is checked
   as the site it embeds, wherever the wrapper's `embeds` says that site is
@@ -78,7 +86,13 @@ load `redaction.js` first.
   read a response's Memento `Link: <…>; rel="original"` header, so a page an
   archive serves at a short address is checked as the page it copies. The
   readers run one table of cases, `test/link-only-cases.json`, through their
-  own guards (a case's `pad` writes a long address out).
+  own guards (a case's `pad` writes a long address out; `kind` says whether it
+  is refused). `guidedLink(list, site, values)` is guided mode: it fills a
+  site's `search` template with values checked against the list's
+  `placeholders` (`text`, `date`, `count`) and URL-encoded, keeps the link
+  https on the site's own hosts, refuses an unknown placeholder, and gives the
+  site's `home` and what to type there when `deepLinks` is false
+  (`instafy web link`).
 
 The tests live with the Desktop Personal Browser
 (`packages/desktop-app/test/personal-browser-redaction.test.mjs`,

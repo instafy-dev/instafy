@@ -10,3 +10,10 @@ declare module "virtual:instafy/link-only-sites" {
   const data: unknown;
   export default data;
 }
+
+// The instafy-web-research skill's search-engines.json (address-bar search in
+// the Personal Browser), bundled the same way.
+declare module "virtual:instafy/search-engines" {
+  const data: unknown;
+  export default data;
+}

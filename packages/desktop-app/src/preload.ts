@@ -57,7 +57,15 @@ export type PersonalBrowserSentPage = {
   text: string;
   secretScreen: boolean;
   truncated: boolean;
+  /** Up to 200 of its web links; `linkOnly` names the link-only site one leads to. */
+  links: Array<{ text: string; href: string; linkOnly?: string }>;
   readAt: string;
+};
+
+/** The search engines the Personal Browser's address bar can use (names only) and the one it uses. */
+export type PersonalBrowserSearchChoice = {
+  engines: Array<{ id: string; name: string }>;
+  selected: string | null;
 };
 
 export type PersonalBrowserStatus = {
@@ -446,6 +454,20 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
     ownerId: string;
   }): Promise<PersonalBrowserStatus> => {
     return (await ipcRenderer.invoke("instafy:personalBrowserNavigate", options)) as PersonalBrowserStatus;
+  },
+  /** Address-bar search: opens a search for these words on the engine the person picked. */
+  personalBrowserSearch: async (options: {
+    query: string;
+    ownerId: string;
+  }): Promise<PersonalBrowserStatus> => {
+    return (await ipcRenderer.invoke("instafy:personalBrowserSearch", options)) as PersonalBrowserStatus;
+  },
+  /** The search engines the address bar can use, and the one it uses. */
+  personalBrowserSearchEngines: async (): Promise<PersonalBrowserSearchChoice> => {
+    return (await ipcRenderer.invoke("instafy:personalBrowserSearchEngines")) as PersonalBrowserSearchChoice;
+  },
+  personalBrowserSetSearchEngine: async (options: { engineId: string }): Promise<PersonalBrowserSearchChoice> => {
+    return (await ipcRenderer.invoke("instafy:personalBrowserSetSearchEngine", options)) as PersonalBrowserSearchChoice;
   },
   browserTabVideo: (options: {ownerId:string;captureId:string;operation:"open"|"answer"|"sync"|"viewport"|"close"|"stats";value:unknown}): Promise<unknown> => {
     if (!["open","answer","sync","viewport","close","stats"].includes(options.operation)) throw new Error("Invalid video operation.");
