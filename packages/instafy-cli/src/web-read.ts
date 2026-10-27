@@ -4,10 +4,11 @@
 // source. Plain HTTP (no browser, no JavaScript), an honest agent user agent, and fixed rules that no option turns off:
 //
 // - robots.txt is honoured for this agent, for "*" and for the AI-agent user agents, on every redirect hop;
-// - sites the web-research skill lists as link-only (their terms ban AI agents or copying) are never fetched, nor a
-//   translator's, cache's or archive's copy of one; the list is skill-owned data
+// - sites the web-research skill lists as "no-agents" (their terms ban AI agents or automated access) are never
+//   fetched, nor a translator's, cache's or archive's copy of one; a "no-reuse" site (its terms ban copying, not
+//   reading) is read and marked `noReuse`, with how its content may be used. The list is skill-owned data
 //   (`instafy-web-research/references/link-only-sites.json`), bundled into this command from that one file, and a space's
-//   copy (or any skill's) can only add to it. Without a list that loads, nothing is read;
+//   copy (or any skill's) can only add to it or make a site stricter. Without a list that loads, nothing is read;
 // - every hop's host is resolved and every address checked: private, loopback, link-local, CGNAT, metadata and other
 //   reserved addresses are refused, and the connection goes to the address that was checked (no second lookup, so DNS
 //   rebinding cannot swap it); at most 5 redirects, ports 80 and 443 only;
@@ -138,7 +139,9 @@ export type PageResult = {
   textChars?: number;
   truncated?: boolean;
   find?: { terms: string[]; passages: number; matchedLines: number };
-  links?: Array<{ index: number; text: string; href: string; linkOnly?: true }>;
+  links?: Array<{ index: number; text: string; href: string; linkOnly?: true; noReuse?: true }>;
+  /** the page is on a site whose terms bar reusing its content (not reading it); `tell` says how it may be used */
+  noReuse?: { site: string; reason: string; via?: string[] };
   structured?: StructuredItem[];
   /** structured items left out to keep the page's structured data within its bound */
   structuredDropped?: number;
@@ -160,8 +163,8 @@ export type WebReadReport = {
     hosts: Record<string, number>;
   };
   guards: {
-    /** `sources`: "bundled", then each skill copy that added to it */
-    linkOnly: { sites: number; wrappers: number; sources: string[] };
+    /** `sources`: "bundled", then each skill copy that added to it; `noReuse`: sites read but never reused */
+    linkOnly: { sites: number; noReuse: number; wrappers: number; sources: string[] };
     robotsAgents: readonly string[];
     maxRedirects: number;
   };
@@ -205,8 +208,12 @@ export class WebReadUsageError extends Error {}
 // ---------------------------------------------------------------------------------------------------------------
 // Link-only guard: skill-owned data, enforced here
 
-/** A link-only site an address is on: `via` names the wrappers (translator, cache, archive) it was found through. */
-export type LinkOnlySite = { name: string; reason: string; via: string[] };
+/**
+ * A listed site an address is on: `kind` is what its terms bar ("no-agents": AI agents and automated access, so it is
+ * never fetched; "no-reuse": copying, so it is read but not reused), `via` names the wrappers (translator, cache,
+ * archive) it was found through.
+ */
+export type LinkOnlySite = { name: string; reason: string; kind: linkOnly.LinkOnlyKind; via: string[] };
 export type LinkOnlyGuard = { list: linkOnly.LinkOnlyList; sources: string[]; warnings: string[] };
 
 /** The bundled list is missing or malformed: nothing is read rather than reading without it. */
@@ -305,10 +312,22 @@ export function loadLinkOnlyGuard(roots: string[], bundled: unknown = BUNDLED_LI
   return { list: merged.list, sources: merged.sources, warnings: [...warnings, ...merged.warnings] };
 }
 
-/** The link-only site an address is on, directly or as a wrapper's copy of it, or null. */
-export function linkOnlySite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
+/** The listed site an address is on, directly or as a wrapper's copy of it, of any kind (the strictest), or null. */
+export function listedSite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
   const hit = linkOnly.linkOnlyMatch(guard.list, url);
-  return hit ? { name: hit.site, reason: hit.why, via: hit.via } : null;
+  return hit ? { name: hit.site, reason: hit.why, kind: hit.kind, via: hit.via } : null;
+}
+
+/** The "no-agents" site an address is on, directly or as a wrapper's copy of it, or null: never fetched. */
+export function linkOnlySite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
+  const hit = listedSite(url, guard);
+  return hit && linkOnly.barsAgents(hit) ? hit : null;
+}
+
+/** The "no-reuse" site a read page is on, or null, when no address of it is on a "no-agents" site. */
+function noReuseSite(urls: string[], guard: LinkOnlyGuard): LinkOnlySite | null {
+  const hits = urls.map((url) => listedSite(url, guard)).filter((hit): hit is LinkOnlySite => hit !== null);
+  return hits.some((hit) => linkOnly.barsAgents(hit)) ? null : (hits[0] ?? null);
 }
 
 /** "Booking.com is link-only (terms bar AI agents); this address is its copy on the Wayback Machine" */
@@ -777,7 +796,7 @@ export function wrapUntrusted(text: string, url: string, readAt: string): string
   return `<${UNTRUSTED_TAG} url="${escapeAttribute(url)}" read_at="${readAt}" viewer="${VIEWER}">\n${safe}\n</${UNTRUSTED_TAG}>`;
 }
 
-const TELL: Record<StopCode | SkipCode | FailCode | "needs_browser", string> = {
+const TELL: Record<StopCode | SkipCode | FailCode | "needs_browser" | "no_reuse", string> = {
   link_only: `${STOP_TELL} A skill lists this site as link-only.`,
   robots: STOP_TELL,
   blocked_address: STOP_TELL,
@@ -798,6 +817,9 @@ const TELL: Record<StopCode | SkipCode | FailCode | "needs_browser", string> = {
   timeout: "The site did not answer in time. Use another source rather than retrying.",
   needs_browser:
     "This page builds its text with JavaScript, so a plain read sees almost nothing. Use another source, or ask for a visible browser turn for this page.",
+  no_reuse:
+    "This site's terms bar reusing its content. Summarize it in your own words, cite \"seen <date> on <host>\" and link back; " +
+    "never copy its reviews, photos or price lists, and keep its content out of anything published or shared by public link (links only there).",
 };
 
 /** The stops that end every read of the site for the rest of the turn, not just this URL. */
@@ -1134,9 +1156,13 @@ function present(
     body = full.length > options.maxChars ? `${full.slice(0, options.maxChars)}…` : full;
   }
   const links = record.links.slice(0, options.links).map((link, index) => {
-    const listed = Boolean(linkOnlySite(link.href, guard));
-    return { index, text: link.text, href: link.href, ...(listed ? { linkOnly: true as const } : {}) };
+    const listed = listedSite(link.href, guard);
+    const mark = !listed ? {} : linkOnly.barsAgents(listed) ? { linkOnly: true as const } : { noReuse: true as const };
+    return { index, text: link.text, href: link.href, ...mark };
   });
+  // A page from a "no-reuse" site (or a copy of one) is read, and says how its content may be used.
+  const reuse = noReuseSite([record.finalUrl, ...(record.originals ?? [])], guard);
+  const tells = [...(record.status === "needs_browser" ? [TELL.needs_browser] : []), ...(reuse ? [TELL.no_reuse] : [])];
   // Structured data is page-written too, so it shares a bound like the text does: whole items while they fit.
   const structured: StructuredItem[] = [];
   let structuredChars = 0;
@@ -1150,7 +1176,8 @@ function present(
   return {
     ...page,
     status: record.status,
-    ...(record.status === "needs_browser" ? { tell: TELL.needs_browser } : {}),
+    ...(tells.length ? { tell: tells.join(" ") } : {}),
+    ...(reuse ? { noReuse: { site: reuse.name, reason: reuse.reason, ...(reuse.via.length ? { via: reuse.via } : {}) } } : {}),
     provenance,
     httpStatus: record.httpStatus,
     ...(record.contentType ? { contentType: record.contentType } : {}),
@@ -1249,7 +1276,12 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
       hosts: state.hosts,
     },
     guards: {
-      linkOnly: { sites: guard.list.sites.length, wrappers: guard.list.wrappers.length, sources: guard.sources },
+      linkOnly: {
+        sites: guard.list.sites.length,
+        noReuse: guard.list.sites.filter((site) => !linkOnly.barsAgents(site)).length,
+        wrappers: guard.list.wrappers.length,
+        sources: guard.sources,
+      },
       robotsAgents: ROBOTS_AGENTS,
       maxRedirects: LIMITS.maxRedirects,
     },
@@ -1270,12 +1302,15 @@ export function formatWebRead(report: WebReadReport): string {
     if (page.tell) out.push(`  ${page.tell}`);
     if (page.text !== undefined) {
       out.push(`  read ${page.provenance.readAt} by ${page.provenance.viewer}${page.fromCache ? " (cached)" : ""}, HTTP ${page.httpStatus}`);
+      if (page.noReuse) out.push(`  no-reuse: ${page.noReuse.site} (${page.noReuse.reason})`);
       if (page.find) out.push(`  --find: ${page.find.passages} passage(s) for ${page.find.terms.join(", ")}${page.find.passages ? "" : ": this page does not say it"}`);
       // The title and link texts are written by the site too, so they go inside the untrusted wrapper with the text.
       const pageWritten = [`title: ${page.provenance.title || "(none)"}`];
       if (page.links?.length) {
         pageWritten.push("links:");
-        for (const link of page.links.slice(0, 15)) pageWritten.push(` ${link.index}. ${link.text || "(no text)"} <${link.href}>${link.linkOnly ? " [link-only]" : ""}`);
+        for (const link of page.links.slice(0, 15)) {
+          pageWritten.push(` ${link.index}. ${link.text || "(no text)"} <${link.href}>${link.linkOnly ? " [link-only]" : link.noReuse ? " [no-reuse]" : ""}`);
+        }
       }
       out.push(wrapUntrusted(pageWritten.join("\n"), page.provenance.finalUrl, page.provenance.readAt));
       out.push(page.text);
@@ -1332,7 +1367,10 @@ export async function runWebReadCli(
 export function registerWebCommand(program: Command): Command {
   const web = program
     .command("web")
-    .description("Read public web pages as untrusted data with their source (robots.txt, link-only sites and stop rules enforced)");
+    .description(
+      "Read public web pages as untrusted data with their source (robots.txt, link-only sites and stop rules enforced), " +
+        "and give the person links to link-only sites (guided mode)",
+    );
   web
     .command("read")
     .description(

@@ -1,5 +1,7 @@
-// Link-only sites: sites whose terms or robots.txt bar AI agents, which Octo
-// links to and never reads or drives. The list is the instafy-web-research
+// Link-only sites: sites whose terms limit what an agent may do with them.
+// Octo links to a "no-agents" site (its terms bar AI agents or automated
+// access) and never reads or drives it; a "no-reuse" site (its terms bar
+// copying, not reading) is not refused. The list is the instafy-web-research
 // skill's own data (references/link-only-sites.json). The build bundles that
 // same file, the one runtime-agent embeds, so there is one source; Desktop
 // only enforces it, on every step the agent drives in the Personal Browser.
@@ -13,7 +15,7 @@
 // the list, which the readers running in the space (`instafy web read`, the
 // Shared Browser) enforce as well; Desktop has no channel that carries a
 // space's files with a Personal Browser turn, so it does not read that copy.
-import { isWebAddress, linkOnlyCopyOf, linkOnlyListFrom, linkOnlyMatch } from "@instafy/browser-action-policy/linkOnly";
+import { barsAgents, isWebAddress, linkOnlyCopyOf, linkOnlyListFrom, linkOnlyMatch } from "@instafy/browser-action-policy/linkOnly";
 import bundledLinkOnlySites from "virtual:instafy/link-only-sites";
 
 export const LINK_ONLY_SITES_SCHEMA = "instafy.link-only-sites@1";
@@ -28,7 +30,11 @@ export type PersonalBrowserLinkOnlyRefusal =
 export type PersonalBrowserLinkOnlyGuard = {
   /** False when the list is missing or malformed: every agent-driven web page is then refused. */
   readonly available: boolean;
-  /** Why the agent may not read, open or act on this address, or null. Never refuses a non-web address. */
+  /**
+   * Why the agent may not read, open or act on this address (a "no-agents"
+   * site, or a wrapper's copy of one), or null. Never refuses a non-web
+   * address, nor a "no-reuse" site.
+   */
   refusal(url: string): PersonalBrowserLinkOnlyRefusal | null;
   /**
    * Why the agent may not read a page whose answer says it is a copy of a
@@ -50,7 +56,7 @@ export function createPersonalBrowserLinkOnlyGuard(data: unknown): PersonalBrows
       if (!isWebAddress(url)) return null;
       if (list === null) return { code: "link_only_list_unavailable" };
       const hit = linkOnlyMatch(list, url);
-      if (!hit) return null;
+      if (!hit || !barsAgents(hit)) return null;
       return hit.via.length ? { code: "link_only_site", site: hit.site, via: hit.via } : { code: "link_only_site", site: hit.site };
     },
     copyRefusal(headers, url) {
@@ -60,7 +66,7 @@ export function createPersonalBrowserLinkOnlyGuard(data: unknown): PersonalBrows
         .filter(([name]) => name.toLowerCase() === "link")
         .flatMap(([, value]) => (Array.isArray(value) ? value : [value]));
       const hit = link.length ? linkOnlyCopyOf(list, link, url) : null;
-      if (!hit) return null;
+      if (!hit || !barsAgents(hit)) return null;
       return { code: "link_only_site", site: hit.site, ...(hit.via.length ? { via: hit.via } : {}), copy: true };
     },
   };
@@ -77,6 +83,6 @@ export function personalBrowserLinkOnlyMessage(refusal: PersonalBrowserLinkOnlyR
   const copy = refusal.copy
     ? " This page says it is a copy of it."
     : refusal.via?.length ? ` This address is its copy on ${refusal.via.join(", then ")}.` : "";
-  return `${refusal.site} is link-only: its terms bar AI agents or automated copying, so the agent never reads, opens or uses it.${copy} ${action} ` +
+  return `${refusal.site} is link-only: its terms bar AI agents or automated access, so the agent never reads, opens or uses it.${copy} ${action} ` +
     "Give the person the plain link; they may open it themselves and use Send page to Octo.";
 }

@@ -7286,15 +7286,37 @@ fn link_only_case_url(case: &JsonValue) -> String {
     }
 }
 
-fn check_link_only_case(fixture: &EmbeddedControllerFixture, case: &JsonValue) {
+/// A case is refused when its site is "no-agents" (its kind when left out);
+/// a "no-reuse" site, whose terms bar copying and not reading, loads. With
+/// the space's copy, a bundled case expects its `withSpaceCopy` where it has
+/// one.
+fn check_link_only_case(
+    fixture: &EmbeddedControllerFixture,
+    case: &JsonValue,
+    with_space_copy: bool,
+    authority_since: &mut std::time::Instant,
+) {
+    // The fixture's authority lasts a minute and the table can take longer:
+    // a fresh one every half minute.
+    if authority_since.elapsed() > std::time::Duration::from_secs(30) {
+        fixture.prepare_routine_start("page-target");
+        *authority_since = std::time::Instant::now();
+    }
     let full_url = link_only_case_url(case);
     let url = case["url"].as_str().expect("case url");
+    let expected = match case.get("withSpaceCopy") {
+        Some(override_case) if with_space_copy => override_case,
+        _ => case,
+    };
+    let refused_site = expected["site"]
+        .as_str()
+        .filter(|_| expected["kind"].as_str() != Some("no-reuse"));
     std::fs::remove_file(&fixture.fetch_log).ok();
     let output = fixture.click_redirected_to(&full_url);
-    match case["site"].as_str() {
+    match refused_site {
         Some(site) => {
             let refused = failure_of(&output);
-            let via: Vec<&str> = case["via"]
+            let via: Vec<&str> = expected["via"]
                 .as_array()
                 .map(|via| via.iter().filter_map(JsonValue::as_str).collect())
                 .unwrap_or_default();
@@ -7338,19 +7360,33 @@ fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redir
     let cases: JsonValue = serde_json::from_str(LINK_ONLY_CASES).expect("cases JSON");
     let fixture = EmbeddedControllerFixture::new();
     fixture.prepare_routine_start("page-target");
-    for case in cases["bundled"].as_array().expect("bundled cases") {
-        check_link_only_case(&fixture, case);
+    let mut authority_since = std::time::Instant::now();
+    let bundled = cases["bundled"].as_array().expect("bundled cases");
+    let space_cases = cases["spaceCopy"]["cases"].as_array().expect("space cases");
+    // Both kinds are in the table: sites refused and sites that load (the
+    // bundled list bars agents on every site, so a "no-reuse" one comes from
+    // the space's copy).
+    for kind in ["no-agents", "no-reuse"] {
+        assert!(
+            space_cases
+                .iter()
+                .chain(bundled.iter().filter_map(|case| case.get("withSpaceCopy")))
+                .any(|case| case["site"].is_string()
+                    && case["kind"].as_str().unwrap_or("no-agents") == kind),
+            "{kind}"
+        );
+    }
+    for case in bundled {
+        check_link_only_case(&fixture, case, false, &mut authority_since);
     }
     // With the space's copy, its additions hold too, and the bundled list
-    // still does.
+    // still does: a copy can make a site stricter, never looser.
     fixture.write_space_link_only(&cases["spaceCopy"]["list"].to_string());
-    for case in cases["spaceCopy"]["cases"]
-        .as_array()
-        .expect("space cases")
-        .iter()
-        .chain(cases["bundled"].as_array().expect("bundled cases"))
-    {
-        check_link_only_case(&fixture, case);
+    for case in space_cases {
+        check_link_only_case(&fixture, case, false, &mut authority_since);
+    }
+    for case in bundled {
+        check_link_only_case(&fixture, case, true, &mut authority_since);
     }
 }
 
