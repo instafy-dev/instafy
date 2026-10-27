@@ -1,0 +1,4 @@
+---
+---
+
+A Shared Browser prompt now shows as one compact row inside Octo's turn, under its activity line, instead of a separate card with its own avatar: "🔒 Octo wants to send the form “Search” on visitlisboa.com. [Deny] [Allow]". The line says "Waiting for you" to the person who can answer, the row shows no countdown until the prompt's last minute, and once answered (here, in the browser view or on another device) or left to expire the row goes and the turn's done line gains one clause: "you allowed a search", "you said no to a form on visitlisboa.com" or "skipped a click on carris.pt: no answer in time", with an entry in Details. The clause comes from the step's own activity, so it reads the same after a reload. When the run's turn is not on screen, the same row shows at the end of the chat. No package changes.

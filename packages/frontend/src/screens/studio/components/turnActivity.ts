@@ -12,6 +12,7 @@
 // older runtimes and history read the same way.
 
 import type { ChatMessage } from "../types";
+import { displayActivityHost } from "./activityHost";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 
 export type ActivityRole = "content" | "outcome" | "quiet";
@@ -277,7 +278,29 @@ export type TurnStep = {
   label: string | null;
 };
 
-export type DetailItem = { kind: "step"; id: string; step: TurnStep } | { kind: "update"; id: string; message: ChatMessage };
+export type DetailItem =
+  | { kind: "step"; id: string; step: TurnStep }
+  | { kind: "update"; id: string; message: ChatMessage }
+  /** A browser prompt the person answered, or left: "You allowed a search on visitlisboa.com". */
+  | { kind: "approval"; id: string; text: string };
+
+export type BrowserApprovalOutcome = "allowed" | "denied" | "expired";
+
+/**
+ * A browser prompt of this turn's run that was answered (or left to expire)
+ * while this tab watched, from the approval lane. Only the operation and the
+ * sites the runtime's request names; never the prompt's label, which may
+ * carry the page's own words.
+ */
+export type SessionBrowserApproval = {
+  approvalId: string;
+  outcome: BrowserApprovalOutcome;
+  operation: string;
+  /** The site the step is on: an action's page, or the site a site prompt asks for. */
+  host: string | null;
+  /** Where a navigation goes. */
+  destinationHost: string | null;
+};
 
 export type TurnActivityPhase = "starting" | "running" | "completed" | "failed" | "cancelled" | "stale";
 
@@ -325,7 +348,7 @@ function stepPaths(message: ChatMessage): string[] {
 }
 
 function fillHost(text: string, host: string | undefined): string {
-  return host ? text.replace("{host}", host) : text;
+  return host ? text.replace("{host}", displayActivityHost(host)) : text;
 }
 
 /** One group's words for a count: `one`, `other` with the count, or `some`. */
@@ -384,7 +407,15 @@ type Group = {
   first: number;
   last: number;
   paths: Set<string> | null;
+  /** The distinct pages a browser group opened or read, by the runtime's key of each address. */
+  pageKeys: Set<string> | null;
+  /** Its steps that named no page key. */
+  unkeyed: number;
 };
+
+// Browser groups that count pages, not steps: reading the same page twice is
+// "read a page". A search counts each time it ran.
+const PAGE_COUNTED_KEYS = new Set(["browser/read", "browser/open"]);
 
 function groupCount(group: Group): number | null {
   if (group.unknown) {
@@ -393,11 +424,37 @@ function groupCount(group: Group): number | null {
   if (group.paths && group.paths.size > 0) {
     return group.paths.size;
   }
+  if (group.pageKeys && group.pageKeys.size > 0) {
+    return group.pageKeys.size + group.unkeyed;
+  }
   return group.known;
 }
 
-/** The done line from the turn's labelled steps, or null when none is shown. */
-function summarizeGroups(steps: TurnStep[]): string | null {
+/**
+ * A group's done words. After a group on the same site, its trailing
+ * " on {host}" goes: "Searched visitlisboa.com, read 2 pages".
+ */
+function groupWords(group: Group, previousHost: string | null): string {
+  let done = group.entry.done as ActivityDone;
+  const host = group.entry.host;
+  if (host && host === previousHost) {
+    const trim = (form: string) => (form.endsWith(" on {host}") ? form.slice(0, -" on {host}".length) : form);
+    done = typeof done === "string"
+      ? trim(done)
+      : {
+        one: trim(done.one),
+        ...(done.other !== undefined ? { other: trim(done.other) } : {}),
+        ...(done.some !== undefined ? { some: trim(done.some) } : {}),
+      };
+  }
+  return doneWords(done, groupCount(group), host);
+}
+
+/**
+ * The done line from the turn's labelled steps, or null when none is shown,
+ * with the host of the first group it shows.
+ */
+function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: string | null } {
   const groups = new Map<string, Group>();
   steps.forEach((step, index) => {
     if (!step.activity) {
@@ -413,7 +470,9 @@ function summarizeGroups(steps: TurnStep[]): string | null {
       const groupKey = entry.host ? `${entry.key}@${entry.host}` : entry.key;
       let group = groups.get(groupKey);
       if (!group) {
-        group = { entry, known: 0, unknown: false, members: 0, first: index, last: index, paths: null };
+        group = {
+          entry, known: 0, unknown: false, members: 0, first: index, last: index, paths: null, pageKeys: null, unkeyed: 0,
+        };
         groups.set(groupKey, group);
       }
       group.members += 1;
@@ -422,6 +481,14 @@ function summarizeGroups(steps: TurnStep[]): string | null {
         group.unknown = true;
       } else {
         group.known += entry.count;
+      }
+      if (PAGE_COUNTED_KEYS.has(entry.key)) {
+        if (entry.pageKey) {
+          group.pageKeys ??= new Set();
+          group.pageKeys.add(entry.pageKey);
+        } else {
+          group.unkeyed += entry.count ?? 1;
+        }
       }
       if (entry.key === "builtin/edit" && step.kind === "edit") {
         const paths = stepPaths(step.message);
@@ -443,10 +510,129 @@ function summarizeGroups(steps: TurnStep[]): string | null {
     .filter((group) => group.entry.role === "outcome")
     .sort((a, b) => b.last - a.last)
     .slice(0, 1);
-  const phrases = [...content, ...outcome].map((group) =>
-    doneWords(group.entry.done as ActivityDone, groupCount(group), group.entry.host),
-  );
-  return phrases.length > 0 ? phrases.join(", ") : null;
+  const shown = [...content, ...outcome];
+  let previousHost: string | null = null;
+  const phrases = shown.map((group) => {
+    const words = groupWords(group, previousHost);
+    previousHost = group.entry.host ?? null;
+    return words;
+  });
+  return {
+    text: phrases.length > 0 ? phrases.join(", ") : null,
+    firstHost: shown[0]?.entry.host ?? null,
+  };
+}
+
+type AnsweredApproval = {
+  outcome: BrowserApprovalOutcome;
+  /** What was asked: the site itself, opening a page, or a step on the site. */
+  noun: { kind: "site" } | { kind: "opening"; destination: string | null } | { kind: "step"; words: string };
+  host: string | null;
+};
+
+const STEP_APPROVAL_OUTCOMES: Record<string, BrowserApprovalOutcome> = {
+  once: "allowed",
+  denied: "denied",
+  expired: "expired",
+};
+
+/** What a browser step that waited on a prompt was, from its own activity (after a reload too). */
+function stepAnsweredApproval(activity: StepActivity | null): AnsweredApproval | null {
+  const outcome = activity?.approval ? STEP_APPROVAL_OUTCOMES[activity.approval] : undefined;
+  if (!activity || !outcome) {
+    return null;
+  }
+  const host = activity.host ?? null;
+  switch (activity.step) {
+    case "search":
+      return { outcome, noun: { kind: "step", words: "a search" }, host };
+    case "navigate":
+    case "open_tab":
+      return { outcome, noun: { kind: "opening", destination: host }, host };
+    case "click":
+      return { outcome, noun: { kind: "step", words: "a click" }, host };
+    case "submit":
+      return { outcome, noun: { kind: "step", words: "a form" }, host };
+    case "type":
+      return { outcome, noun: { kind: "step", words: "typing" }, host };
+    case "press":
+      return { outcome, noun: { kind: "step", words: "a key press" }, host };
+    default:
+      return { outcome, noun: { kind: "site" }, host };
+  }
+}
+
+/** What a prompt answered in this tab asked, from the runtime's operation. */
+function sessionAnsweredApproval(approval: SessionBrowserApproval): AnsweredApproval {
+  const host = isActivityHost(approval.host) ? approval.host : null;
+  const step = (words: string): AnsweredApproval => ({ outcome: approval.outcome, noun: { kind: "step", words }, host });
+  switch (approval.operation) {
+    case "approve-origin":
+      return { outcome: approval.outcome, noun: { kind: "site" }, host };
+    case "navigate":
+      return {
+        outcome: approval.outcome,
+        noun: { kind: "opening", destination: isActivityHost(approval.destinationHost) ? approval.destinationHost : host },
+        host,
+      };
+    case "click":
+      return step("a click");
+    case "type":
+      return step("typing");
+    case "form-submit":
+      return step("a form");
+    case "press-enter":
+    case "press-space":
+    case "press-key":
+      return step("a key press");
+    default:
+      return step("a step");
+  }
+}
+
+/**
+ * "you allowed a search on visitlisboa.com", "you said no to opening
+ * carris.pt", "skipped a click on carris.pt: no answer in time". The host is
+ * left out when it is the site the line already names first.
+ */
+function approvalWords(approval: AnsweredApproval, namedHost: string | null): string {
+  const host = approval.host && approval.host !== namedHost ? displayActivityHost(approval.host) : null;
+  const noun =
+    approval.noun.kind === "site"
+      ? (host ?? "the site")
+      : approval.noun.kind === "opening"
+        ? approval.noun.destination
+          ? `opening ${displayActivityHost(approval.noun.destination)}`
+          : "opening a page"
+        : `${approval.noun.words}${host ? ` on ${host}` : ""}`;
+  switch (approval.outcome) {
+    case "allowed":
+      return `you allowed ${noun}`;
+    case "denied":
+      return `you said no to ${noun}`;
+    default:
+      return `skipped ${noun}: no answer in time`;
+  }
+}
+
+/** One clause for the turn's answered prompts: the latest outcome, counted when it repeats. */
+function approvalsClause(answered: readonly AnsweredApproval[], namedHost: string | null): string | null {
+  const latest = answered.at(-1);
+  if (!latest) {
+    return null;
+  }
+  const same = answered.filter((approval) => approval.outcome === latest.outcome).length;
+  if (same === 1) {
+    return approvalWords(latest, namedHost);
+  }
+  switch (latest.outcome) {
+    case "allowed":
+      return `you allowed ${same} steps`;
+    case "denied":
+      return `you said no to ${same} steps`;
+    default:
+      return `skipped ${same} steps: no answer in time`;
+  }
 }
 
 function stepLabel(activity: StepActivity | null, state: StepState): string | null {
@@ -481,6 +667,12 @@ export type SummarizeTurnActivityOptions = {
   phase: TurnActivityPhase;
   /** The person viewing can answer a request the turn waits on. */
   viewerCanAnswer?: boolean;
+  /**
+   * Browser prompts of this turn's run answered while this tab watched. The
+   * steps' own activity says the same once they end (and after a reload);
+   * these stand in when no step does, as with an older runtime.
+   */
+  approvals?: readonly SessionBrowserApproval[];
   /** Non-step messages Details lists between the steps (notes, plan updates). */
   updates?: readonly ChatMessage[];
 };
@@ -538,13 +730,33 @@ export function summarizeTurnActivity(
     }
   });
 
-  const details: DetailItem[] = order.map((item) => {
+  const answered: AnsweredApproval[] = [];
+  const details: DetailItem[] = order.flatMap((item): DetailItem[] => {
     if (item.kind === "update") {
-      return { kind: "update", id: item.message.id, message: item.message };
+      return [{ kind: "update", id: item.message.id, message: item.message }];
     }
     const step = steps[stepIndexByKey.get(item.key) ?? 0];
-    return { kind: "step", id: item.key, step };
+    const approval = step.state === "running" ? null : stepAnsweredApproval(step.activity);
+    if (!approval) {
+      return [{ kind: "step", id: item.key, step }];
+    }
+    answered.push(approval);
+    return [
+      { kind: "step", id: item.key, step },
+      { kind: "approval", id: `approval:${item.key}`, text: capitalize(approvalWords(approval, null)) },
+    ];
   });
+  if (answered.length === 0) {
+    for (const approval of options.approvals ?? []) {
+      const sessionApproval = sessionAnsweredApproval(approval);
+      answered.push(sessionApproval);
+      details.push({
+        kind: "approval",
+        id: `approval:${approval.approvalId}`,
+        text: capitalize(approvalWords(sessionApproval, null)),
+      });
+    }
+  }
 
   const stepCount = steps.length;
   let live: string | null = null;
@@ -571,7 +783,9 @@ export function summarizeTurnActivity(
       live = "Thinking…";
     }
   } else {
-    const done = summarizeGroups(steps) ?? neutralCounts(steps);
+    const groups = summarizeGroups(steps);
+    const clause = approvalsClause(answered, groups.firstHost);
+    const done = [groups.text ?? neutralCounts(steps), clause].filter((part): part is string => Boolean(part)).join(" · ");
     if (phase === "cancelled") {
       summary = done ? `Stopped · ${done}` : "Stopped";
     } else {

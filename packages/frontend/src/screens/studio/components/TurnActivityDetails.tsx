@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, EditPencil, NavArrowDown, NavArrowRight, Xmark } from "iconoir-react";
+import { Check, EditPencil, Lock, NavArrowDown, NavArrowRight, Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 import type { ChatMessage } from "../types";
+import { displayActivityHost } from "./activityHost";
 import { parseCommandExecutionOutput } from "./chatContentHelpers";
 import { extractMessageDetails } from "./chatMessageMetadata";
 import { CommandOutputBlock } from "./CommandOutputBlock";
@@ -144,7 +145,7 @@ function stepDescription(step: TurnStep): { fallback: string; detail: string | n
       const server = text("server");
       const tool = text("tool");
       const descriptor = server && tool ? `${server}/${tool}` : server || tool;
-      const host = step.activity?.host ?? null;
+      const host = step.activity?.host ? displayActivityHost(step.activity.host) : null;
       return { fallback: "Tool call", detail: host ?? (descriptor || null), mono: !host };
     }
     case "search":
@@ -187,6 +188,18 @@ function OtherStepRow({ step }: { step: TurnStep }) {
   );
 }
 
+/** A browser prompt the person answered, or left: "You allowed a search on visitlisboa.com". */
+function ApprovalRow({ text }: { text: string }) {
+  return (
+    <div className={ROW_CLASS} data-testid="turn-activity-approval">
+      <Lock aria-hidden="true" className={ICON_CLASS} />
+      <span className="min-w-0 flex-1 truncate text-slate-600 dark:text-slate-300" title={text}>
+        {text}
+      </span>
+    </div>
+  );
+}
+
 export type TurnActivityDetailsProps = {
   id: string;
   items: readonly DetailItem[];
@@ -219,6 +232,8 @@ export function TurnActivityDetails({ id, items, renderUpdate, footer }: TurnAct
     const content =
       item.kind === "update" ? (
         renderUpdate(item.message)
+      ) : item.kind === "approval" ? (
+        <ApprovalRow text={item.text} />
       ) : item.step.kind === "command" ? (
         <CommandStepRow step={item.step} />
       ) : (

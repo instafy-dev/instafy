@@ -366,8 +366,13 @@ import {
   shouldDeleteRestoredMessageStashAfterAction,
 } from "./messageStashLifecycle";
 import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
-import { SharedBrowserApprovalChatCard } from "./SharedBrowserApprovalChatCard";
+import { BrowserApprovalRow } from "./BrowserApprovalRow";
 import { useChatSharedBrowserApproval } from "./useChatSharedBrowserApproval";
+import {
+  TurnBrowserApprovalContext,
+  TurnBrowserApprovalStateContext,
+  useTurnBrowserApprovalProvider,
+} from "./turnBrowserApproval";
 import type { SharedBrowserChromeProps } from "./SharedBrowserChrome";
 import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
 import { LocalBrowserSharing, LocalBrowserTabPublisher } from "./LocalBrowserSharing";
@@ -3269,6 +3274,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return getBuiltInAssistantDisplayName(handle) ??
       (profile?.displayName?.trim() ? profile.displayName.trim() : `@${handle}`);
   })();
+  // The run's turn shows its prompt under its activity line; the chat shows
+  // it at the end of the transcript only when no turn on screen claims it.
+  const turnBrowserApproval = useTurnBrowserApprovalProvider({
+    target: chatBrowserApprovalTarget,
+    approval: chatBrowserApproval.approval,
+    agentName: chatBrowserApprovalAgentName,
+  });
+  const recordBrowserApprovalSettled = turnBrowserApproval.value.recordSettled;
   const typingAgents = useMemo<AssistantTypingAgent[]>(() => {
     const order: string[] = [];
     const thinkingHandles = new Set<string>();
@@ -6464,12 +6477,21 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               typingStatusWraps={typingStatusIsRuntimeBusyNotice}
               renderAssistantAvatar={renderAssistantAvatar}
             />
-            {chatBrowserApprovalTarget ? (
-              <SharedBrowserApprovalChatCard
+            {chatBrowserApprovalTarget && turnBrowserApproval.showFallback ? (
+              <BrowserApprovalRow
                 key={chatBrowserApprovalTarget.runId}
                 agentDisplayName={chatBrowserApprovalAgentName}
                 approval={chatBrowserApproval.approval}
-                avatar={renderAssistantAvatar(chatBrowserApprovalTarget.runMetadata)}
+                onSettled={(settled) => recordBrowserApprovalSettled(chatBrowserApprovalTarget.runId, settled)}
+                frame={(row) => (
+                  <ChatBubbleRow
+                    align="left"
+                    avatar={renderAssistantAvatar(chatBrowserApprovalTarget.runMetadata)}
+                    testId="browser-approval-fallback"
+                  >
+                    {row}
+                  </ChatBubbleRow>
+                )}
               />
             ) : null}
             {stoppedTurnNotice ? <StoppedTurnRow text={stoppedTurnNotice} /> : null}
@@ -6621,6 +6643,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     <ConversationPreviewContext.Provider value={previewOpener}>
     <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
     <BrowserRequestHostContext.Provider value={browserRequestHost}>
+    <TurnBrowserApprovalContext.Provider value={turnBrowserApproval.value}>
+    <TurnBrowserApprovalStateContext.Provider value={chatBrowserApproval.approval}>
     <div
       ref={rootRef}
       className="relative flex h-full min-h-0 flex-col overflow-hidden"
@@ -6977,6 +7001,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         </StudioDialogModal>
       ) : null}
         </div>
+    </TurnBrowserApprovalStateContext.Provider>
+    </TurnBrowserApprovalContext.Provider>
     </BrowserRequestHostContext.Provider>
     </ChatRuntimeActivityContext.Provider>
     </ConversationPreviewContext.Provider>

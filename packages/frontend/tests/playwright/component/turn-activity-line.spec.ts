@@ -12,7 +12,7 @@ const FIXTURE_PATH = "/__turn-activity-line-fixture__";
 const LONG_SUMMARY =
   "Looked up 14 places in the old town of Lisbon, read 6 pages about Belém, built the map";
 
-type LineState = { running: boolean; long: boolean; longStep: boolean };
+type LineState = { running: boolean; long: boolean; longStep: boolean; approval: boolean };
 // The longest a done label may be (48 characters once {n} is 999).
 const LONG_STEP_LABEL = "Looked up 999 places in the old town of Lisbon";
 
@@ -23,6 +23,7 @@ async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {
     import ReactNS from "${deps.react}";
     import ReactDomClientNS from "${deps.reactDomClient}";
     import { AgentJobThreadPreviewLayout } from "/src/screens/studio/components/AgentJobThreadPreviewLayout.tsx";
+    import { TurnBrowserApprovalStateContext } from "/src/screens/studio/components/turnBrowserApproval.tsx";
     const React = ReactNS.default ?? ReactNS;
     const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
     const h = React.createElement;
@@ -48,19 +49,34 @@ async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {
         message: command("b", "bash -lc 'uw() { node .agents/skills/interactive-map/scripts/uw.mjs \\"$@\\"; }\\nfor spec in a b c; do uw add-point --json \\"$spec\\"; done'", running ? "in_progress" : "completed", "Serving map at http://localhost:4173/") } },
     ];
     function Fixture() {
-      const [state, setState] = React.useState({ running: true, long: false, longStep: false });
+      const [state, setState] = React.useState({ running: true, long: false, longStep: false, approval: false });
       const [detailsOpen, setDetailsOpen] = React.useState(false);
       window.__setLineState = (update) => setState((current) => ({ ...current, ...update }));
+      // A Shared Browser prompt of the turn's run, as the approval lane hands it over.
+      const browserApproval = state.approval ? { agentName: "Octo", onSettled() {} } : null;
+      const approvalState = {
+          pending: { runtimeId: "11111111-1111-4111-8111-111111111111", request: {
+            version: 1, approvalId: "22222222-2222-4222-8222-222222222222", kind: "action",
+            ownerId: "33333333-3333-4333-8333-333333333333", runId: jobId,
+            initiatorUserId: "55555555-5555-4555-8555-555555555555", browserPageId: "page",
+            operation: "form-submit", sourceOrigin: "https://www.visitlisboa.com",
+            destinationOrigin: "https://www.visitlisboa.com", destinationFingerprint: "a".repeat(64),
+            snapshotId: null, targetFingerprint: null, payloadFingerprint: null,
+            requestedAtMs: Date.now(), expiresAtMs: Date.now() + 120000, requestFingerprint: "e".repeat(64),
+            display: { label: "Search places, events and things to do", destinationOrigin: null },
+          } },
+          submitting: false, error: null, routineApprovedRunId: null, lastDecision: null, decide: async () => {},
+      };
       const activity = {
-        live: state.running ? (state.long ? "Judging calm and lively areas around the river…" : "Looking up places…") : null,
+        live: state.running ? (state.approval ? "Waiting for you" : state.long ? "Judging calm and lively areas around the river…" : "Looking up places…") : null,
         summary: state.running ? null : (state.long ? ${JSON.stringify(LONG_SUMMARY)} : "Looked up 14 places, read 6 pages, built the map"),
         stepCount: 2,
         details: steps(state.running, state.longStep),
       };
-      return h("main", { style: { padding: "16px 16px 16px 48px", maxWidth: "1000px" } },
+      return h(TurnBrowserApprovalStateContext.Provider, { value: approvalState }, h("main", { style: { padding: "16px 16px 16px 48px", maxWidth: "1000px" } },
         h(AgentJobThreadPreviewLayout, {
           message, projectId: "fixture-project", branchThreads: [], showHeaderAvatar: true,
-          assistantAvatarMotion: "idle", activity, detailsOpen, cards: [],
+          assistantAvatarMotion: "idle", activity, browserApproval, detailsOpen, cards: [],
           isThreadUnresolved: state.running, canCancelTerminalRun: false, cancelPending: false,
           expandedUpdateIds: {},
           finalSummaryMessage: state.running ? null : { id: "reply", role: "assistant", authorId: null,
@@ -77,7 +93,7 @@ async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {
           onToggleUpdateExpanded() {}, onCancelRun() {},
           MessageContent: ({ content }) => h("p", null, content), ChatFileChangeList: () => null,
         }),
-        h("p", { "data-testid": "following-content" }, "Following conversation content"));
+        h("p", { "data-testid": "following-content" }, "Following conversation content")));
     }
     createRoot(document.getElementById("root")).render(h(Fixture));`;
   const html = `<!doctype html><html><head><meta charset="utf-8" />
@@ -263,6 +279,63 @@ test.describe("touch", () => {
     await row.getByTestId("turn-activity-command-output-toggle").tap();
     await expect(page.getByTestId("chat-command-output")).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    expect(errors, errors.join("; ")).toEqual([]);
+  });
+});
+
+// A browser prompt is one row inside the turn, under its line, with no avatar
+// of its own: one line on a desktop, wrapping under its sentence on a phone,
+// with 44px buttons for a finger.
+test("a browser prompt is one compact row under the turn's line on a desktop", async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const errors = await mountFixture(page);
+  await setLine(page, { approval: true });
+  const row = page.getByTestId("agent-job-thread-preview").getByTestId("browser-approval-row");
+  await expect(row).toBeVisible();
+  await expect(row).toHaveAccessibleName("Octo wants to send the form “Search places, events and things to do” on visitlisboa.com.");
+  await expect(page.getByTestId("turn-activity-line")).toHaveAccessibleName("Waiting for you Details");
+  await expect(page.getByTestId("browser-approval-expiry")).toHaveCount(0);
+  await expect(row.locator("img, [data-testid='agent-job-thread-avatar']")).toHaveCount(0);
+  const geometry = await row.evaluate((element) => {
+    const sentence = element.querySelector('[data-testid="browser-approval-sentence"]')!.getBoundingClientRect();
+    const allow = element.querySelector('[data-testid="browser-approval-allow"]')!.getBoundingClientRect();
+    const line = document.querySelector('[data-testid="turn-activity"]')!.getBoundingClientRect();
+    return { sentenceTop: sentence.top, sentenceBottom: sentence.bottom, allowTop: allow.top, allowBottom: allow.bottom, lineBottom: line.bottom };
+  });
+  // One row: the buttons sit beside the sentence, under the line.
+  expect(geometry.allowTop).toBeLessThan(geometry.sentenceBottom);
+  expect(geometry.sentenceTop).toBeLessThan(geometry.allowBottom);
+  expect(geometry.sentenceTop).toBeGreaterThanOrEqual(geometry.lineBottom - 1);
+  // Neither button takes focus.
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("turn-browser-prompt-1280.png") });
+  expect(errors, errors.join("; ")).toEqual([]);
+});
+
+test.describe("touch prompt", () => {
+  test.use({ viewport: { width: 360, height: 800 }, hasTouch: true, isMobile: true });
+
+  test("a browser prompt wraps under its sentence on a phone and keeps 44px buttons", async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    const errors = await mountFixture(page);
+    await setLine(page, { approval: true });
+    const row = page.getByTestId("browser-approval-row");
+    await expect(row).toBeVisible();
+    for (const id of ["browser-approval-deny", "browser-approval-allow"]) {
+      const box = await page.getByTestId(id).boundingBox();
+      expect(box?.height, id).toBeGreaterThanOrEqual(44);
+    }
+    const geometry = await row.evaluate((element) => {
+      const sentence = element.querySelector('[data-testid="browser-approval-sentence"]')!.getBoundingClientRect();
+      const allow = element.querySelector('[data-testid="browser-approval-allow"]')!.getBoundingClientRect();
+      const turn = element.closest('[data-testid="chat-bubble-assistant"]')!.getBoundingClientRect();
+      return { sentenceBottom: sentence.bottom, allowTop: allow.top, allowRight: allow.right, turnRight: turn.right };
+    });
+    expect(geometry.allowTop).toBeGreaterThanOrEqual(geometry.sentenceBottom - 1);
+    expect(geometry.allowRight).toBeLessThanOrEqual(geometry.turnRight);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(360);
+    await page.screenshot({ path: testInfo.outputPath("turn-browser-prompt-360.png") });
     expect(errors, errors.join("; ")).toEqual([]);
   });
 });
