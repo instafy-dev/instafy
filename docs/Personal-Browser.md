@@ -210,7 +210,7 @@ does:
   editable combobox, share that approval. `type` with `submit` asks once to
   fill in and submit, and that dialog shows the exact text (up to 300
   characters) the agent will type; the submission asks again only when typing
-  changed what kind of step it is.
+  changed what kind of step it is or where the form goes.
 - **Risky addresses** are judged by the address: sign-out and unsubscribe,
   an action word next to an id or token (delete, remove, cancel, confirm,
   approve, accept, join, forward, verify, activate, reset, revoke, unlink,
@@ -227,6 +227,47 @@ does:
 
 Denials are final for that step: `activation_denied`, `typing_denied`,
 `form_submission_denied`, `navigation_denied` and `origin_not_approved`.
+
+**Form steps are judged by what the browser submits.** The page bridge runs the
+shared form rules (`@instafy/browser-action-policy/formSubmission`, the same
+ones the Shared Browser runs) and reports the submission a step makes: a submit
+button's `formaction`, `formmethod`, `formenctype` and `formtarget` over the
+form's own, Enter through the form's default button (a disabled one blocks it;
+Enter in a checkbox, radio, date field or select clicks the first enabled
+submit button, as Chromium does), a click followed up its event path to the
+submit button it reaches (a label of one, or anything inside one that passes
+the click on, through slots and however deep), addresses resolved against
+`<base href>` (an action of only spaces is the page itself), an empty target
+taking the `<base target>`, and `method="dialog"`, which sends nothing. The
+step rules, the link-only and private-address checks, the site prompt and the
+dialog all use that submission:
+
+- A form sent to another site is held to the rules of a link to it before
+  anything asks, and in Ask mode that site is allowed in this tab first; the
+  dialog then says where the form goes ("The form is sent to shop.example,
+  another site.").
+- A same-site GET search is free only when its submission is a known GET of
+  the page's own site in the same tab, to an address that is not risky.
+- A form step whose submission opens another window is refused before any
+  dialog with `new_window_blocked`; the tab's window-open handler denies any
+  window a page opens by itself.
+- A field or select inside a submit button submits through that button when
+  clicked and through the default button on Enter, which can go elsewhere: its
+  form steps are refused before any dialog with `form_submission_unclear`.
+- The page's keydown handlers run before the bridge's Enter or Space does
+  anything. When they move the submission the step was judged by (another
+  default button, a new `formaction`, `formmethod` or `formtarget`), the key
+  stops there and nothing is sent; the step fails as a changed target.
+- The bridge's own Enter performs implicit submission as the browser does: it
+  clicks the default button, or submits a form without one from its only text
+  field, and sends nothing when that is blocked. It no longer calls
+  `form.requestSubmit()`, which skips the default button and its overrides.
+- After typing with `submit`, the submission the form now makes is checked
+  again before Enter, and asks again when it goes elsewhere.
+
+`packages/browser-action-policy/formSubmissionCases.json` is one table of form
+steps both browsers run; the Electron smoke takes each through the built page
+bridge in real Chromium and checks the request it sends.
 
 On a Desktop host without policy version 2, routine keeps its older meaning: Electron requires one native confirmation before enabling routine mode. It permits
 ordinary navigation, searches, clicks, non-sensitive field filling and form
@@ -692,7 +733,7 @@ An explicit Personal/Shared choice is remembered per signed-in user on that devi
 
 - One page on screen at a time. The agent can open at most three visible tabs of its own (see Agent tabs); there are no window RPCs.
 - No Chrome extensions, Chrome Sync, existing Chrome tabs, or imported Chrome profile/password state.
-- No downloads, permission-granting flows, popups, or new windows.
+- No downloads, permission-granting flows, popups, or new windows (a form that targets one is refused with `new_window_blocked`).
 - No screenshot RPC. Snapshot returns structured text and interactive descriptors, not image bytes.
 - No general CDP, Playwright, arbitrary JavaScript, filesystem, or Electron debugging access.
 - Desktop Electron only; web and mobile continue to use Shared Browser.
