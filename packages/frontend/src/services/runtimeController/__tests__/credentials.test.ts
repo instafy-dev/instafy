@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSubscriptionUsage } from "../credentials";
+import { parseManagedAiAccess, parseSubscriptionUsage } from "../credentials";
 
 describe("parseSubscriptionUsage (controller contract boundary)", () => {
   it("keeps a window that has no reset time (proxy omits resetAt)", () => {
@@ -34,5 +34,35 @@ describe("parseSubscriptionUsage (controller contract boundary)", () => {
     expect(parseSubscriptionUsage(undefined)).toBeNull();
     expect(parseSubscriptionUsage({})).toBeNull();
     expect(parseSubscriptionUsage({ windows: [] })).toBeNull();
+  });
+});
+
+describe("parseManagedAiAccess (controller contract boundary)", () => {
+  const usedUp = {
+    enabled: true,
+    available: false,
+    label: "Instafy AI",
+    creditBurnAmount: 1,
+    dailyPromptLimit: 20,
+    dailyPromptsUsed: 20,
+    remainingPrompts: 0,
+  };
+
+  it("keeps when the next hosted AI prompt frees up", () => {
+    expect(
+      parseManagedAiAccess({ ...usedUp, nextAvailableAt: "2026-10-27T08:00:00Z" })?.nextAvailableAt,
+    ).toBe("2026-10-27T08:00:00Z");
+  });
+
+  it("reads an older controller without the time, or a malformed one, as unknown", () => {
+    expect(parseManagedAiAccess(usedUp)).toMatchObject({ remainingPrompts: 0, nextAvailableAt: null });
+    expect(parseManagedAiAccess({ ...usedUp, nextAvailableAt: "soon" })?.nextAvailableAt).toBeNull();
+    expect(parseManagedAiAccess({ ...usedUp, nextAvailableAt: 1761552000 })?.nextAvailableAt).toBeNull();
+  });
+
+  it("returns null without a managedAi block", () => {
+    expect(parseManagedAiAccess(undefined)).toBeNull();
+    expect(parseManagedAiAccess(null)).toBeNull();
+    expect(parseManagedAiAccess("managed")).toBeNull();
   });
 });

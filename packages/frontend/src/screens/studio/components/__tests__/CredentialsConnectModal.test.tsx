@@ -562,6 +562,95 @@ describe("CredentialsConnectModal", () => {
     expect(document.body.textContent).toContain("never ask you to paste your ChatGPT password");
   });
 
+  it("offers no code when ChatGPT device-code login is off", async () => {
+    // The controller's answer to OpenAI's 403 while polling.
+    const refusal =
+      "ChatGPT device-code login is not enabled. Enable it in ChatGPT Settings → Security, or ask your workspace admin to allow it in workspace permissions, then generate a new code.";
+    const onBeginDeviceAuth = vi.fn();
+    const onCancelDeviceAuthSession = vi.fn();
+    const onConnectCodex = vi.fn();
+    const refusedSession = {
+      sessionId: "session-refused",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-EFGH",
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      pollIntervalSeconds: 5,
+      status: "failed" as const,
+      error: refusal,
+    };
+    const render = async (overrides: Partial<CredentialsConnectModalProps>) => {
+      await act(async () => {
+        root.render(
+          <CredentialsConnectModal
+            {...createProps({
+              connectModalStep: "codex",
+              deviceAuthProvider: "codex",
+              deviceAuthError: refusal,
+              deviceAuthSession: refusedSession,
+              onBeginDeviceAuth,
+              onCancelDeviceAuthSession,
+              onConnectCodex,
+              ...overrides,
+            })}
+          />,
+        );
+      });
+    };
+    const button = (label: string) =>
+      Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+        (candidate) => candidate.textContent?.trim() === label,
+      );
+    const expectNoUnusableCode = () => {
+      const notice = document.querySelector('[data-testid="credentials-chatgpt-device-code-disabled"]');
+      expect(notice).toBeInstanceOf(HTMLElement);
+      expect(notice?.textContent).toContain("turn on device-code authorization");
+      expect(notice?.textContent).toContain("Settings, then Security");
+      expect(document.body.textContent).not.toContain("ABCD-EFGH");
+      expect(document.querySelector('button[aria-label="Copy device code"]')).toBeNull();
+      expect(document.body.textContent).not.toContain("Open auth.openai.com");
+      expect(document.body.textContent).not.toContain("Code expires in");
+      // The raw refusal is not repeated above the card.
+      expect(document.body.textContent).not.toContain("generate a new code");
+      expect(document.querySelectorAll('[role="alert"]')).toHaveLength(1);
+      expect(button("Try again")).toBeInstanceOf(HTMLButtonElement);
+      expect(button("Back")).toBeInstanceOf(HTMLButtonElement);
+      // Advanced options keep auth.json and, on Desktop, the local login.
+      expect(
+        document.querySelector('[data-testid="credentials-codex-advanced-toggle"]'),
+      ).toBeInstanceOf(HTMLButtonElement);
+    };
+
+    // Desktop: the local Codex login stays usable next to the explanation.
+    await render({ canUseDesktopConnect: true, showAdvanced: true });
+    expectNoUnusableCode();
+    expect(
+      document.querySelector('[data-testid="credentials-codex-auth-json-upload"]'),
+    ).toBeInstanceOf(HTMLButtonElement);
+    const localLogin = document.querySelector<HTMLButtonElement>(
+      '[data-testid="credentials-connect-codex"]',
+    );
+    expect(localLogin?.textContent).toBe("Use local Codex login");
+    expect(localLogin?.disabled).toBe(false);
+    await act(async () => localLogin?.click());
+    expect(onConnectCodex).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain("Use browser login instead");
+
+    await act(async () => button("Try again")?.click());
+    expect(onBeginDeviceAuth).toHaveBeenCalledWith("codex");
+    await act(async () => button("Back")?.click());
+    expect(onCancelDeviceAuthSession).toHaveBeenCalledTimes(1);
+
+    // Refused before a code was issued: the same card, not the "get a code"
+    // steps, in the browser and on Desktop.
+    await render({ canUseDesktopConnect: false, deviceAuthSession: null });
+    expectNoUnusableCode();
+    expect(document.body.textContent).not.toContain("Before you get a code");
+    await render({ canUseDesktopConnect: true, deviceAuthSession: null });
+    expectNoUnusableCode();
+    expect(document.body.textContent).not.toContain("Use browser login instead");
+    expect(document.body.textContent).not.toContain("Desktop found your local Codex login.");
+  });
+
   it("labels post-login finalization without offering another device login", async () => {
     await act(async () => {
       root.render(
