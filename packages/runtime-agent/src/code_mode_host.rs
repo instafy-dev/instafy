@@ -1,7 +1,7 @@
 //! The out-of-process V8 host that code-mode models run their tools in.
 //!
 //! Upstream Codex removed its in-process V8 runtime (rust-v0.159), so a model
-//! whose catalog entry is `code_mode_only` (gpt-6-luna, gpt-5.6-sol) cannot call
+//! whose catalog entry is `code_mode_only` (gpt-6-luna and gpt-6-sol among them) cannot call
 //! any tool without `codex-code-mode-host`. Runtime images
 //! (`docker/runtime/Dockerfile`) and Desktop packages
 //! (`packages/desktop-app/scripts/stage-runtime-agent.mjs`, which also records
@@ -96,7 +96,7 @@ pub fn report_startup_availability() {
         }
         Ok(host) => tracing::error!(
             host = %host.display(),
-            "Codex code-mode host is missing; turns on code-mode-only models (gpt-6-luna, gpt-5.6-sol) will be refused"
+            "Codex code-mode host is missing; turns on code-mode-only models (gpt-6-luna and gpt-6-sol among them) will be refused"
         ),
         Err(error) => tracing::error!(
             error = %error,
@@ -108,6 +108,7 @@ pub fn report_startup_availability() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job_model::DEFAULT_CODEX_MODEL;
     use codex_core::config::{ConfigBuilder, ConfigOverrides};
     use codex_core::test_support::construct_model_info_offline;
 
@@ -146,7 +147,12 @@ mod tests {
     async fn code_mode_only_models_fail_closed_without_the_host() {
         let missing = tempfile::tempdir().expect("tempdir");
         let missing_host = missing.path().join(EXECUTABLE_NAME);
-        for model in ["gpt-6-luna", "gpt-5.6-sol"] {
+        for model in [
+            "gpt-6-luna",
+            DEFAULT_CODEX_MODEL,
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+        ] {
             let (_home, config) = policy_config(model).await;
             let model_info = construct_model_info_offline(model, &config);
             assert!(model_requires_host(&model_info, &config), "{model}");
@@ -169,7 +175,12 @@ mod tests {
 
     #[test]
     fn the_bundled_catalog_names_the_code_mode_only_models() {
-        for model in ["gpt-6-luna", "gpt-5.6-sol"] {
+        for model in [
+            "gpt-6-luna",
+            DEFAULT_CODEX_MODEL,
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+        ] {
             assert!(bundled_model_is_code_mode_only(model).unwrap(), "{model}");
         }
         for model in ["gpt-5.5", "not-a-catalog-model"] {

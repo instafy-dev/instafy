@@ -3707,7 +3707,8 @@ mod tests {
     fn resolve_model_honors_explicit_model_over_credential_default() {
         // Issue #116: DEFAULT_MODEL used to double as a "use the credential
         // default" sentinel, so an explicit pick of that id was silently
-        // rewritten to the credential default (gpt-5.6-sol in production).
+        // rewritten to the credential default (the platform's OpenAI default
+        // in production).
         let creds = Credentials::ChatGpt {
             access_token: "test".to_string(),
             refresh_token: None,
@@ -3744,8 +3745,14 @@ mod tests {
     #[test]
     fn the_last_resort_model_is_the_platforms_openai_default() {
         // A model-less request on a credential without a default (a static
-        // auth.json) used to go upstream as the retired gpt-5.5.
-        assert_eq!(DEFAULT_MODEL, "gpt-5.6-sol");
+        // auth.json) used to go upstream as the retired gpt-5.5. The id is
+        // the own-AI default the controller and runtime share, named once in
+        // runtime-contracts' fixture.
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../runtime-contracts/src/own_ai_model_fixtures.json"
+        ))
+        .expect("own-AI model fixtures");
+        assert_eq!(fixtures["defaultModelId"], DEFAULT_MODEL);
     }
 
     #[test]

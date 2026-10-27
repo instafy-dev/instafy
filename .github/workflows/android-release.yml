@@ -175,6 +175,7 @@ jobs:
       VITE_OTA_CHANNEL: internal
       CAPACITOR_LIVE_UPDATE_DEFAULT_CHANNEL: internal
       VITE_BUILD_GIT_SHA: ${{ needs.authorize.outputs.source_sha }}
+      VITE_INSTAFY_ENABLE_GOOGLE_AUTH: ${{ vars.VITE_INSTAFY_ENABLE_GOOGLE_AUTH || '1' }}
       GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
     steps:
       - name: Checkout the exact tag commit

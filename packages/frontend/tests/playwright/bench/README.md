@@ -42,6 +42,11 @@ PLAYWRIGHT_BENCH_MODEL=gpt-5.5
 
 If unset, the benches fall back to `PLAYWRIGHT_LEARN_MODEL`, then `PLAYWRIGHT_RETRO_MODEL`, then `gpt-5.5`.
 
+On your own AI (an OpenAI key or a ChatGPT login) the controller raises an OpenAI id of an older
+version than the own-AI default (`OWN_AI_DEFAULT_MODEL_ID` in `runtime-contracts`) to that default,
+so a `gpt-5.5` bench there runs the default while its records still say `gpt-5.5`. Pin the default
+itself, or a newer id, to measure a model by its own name.
+
 Enable AI evaluation of learned blocks in bench diagnostics/rollups:
 
 ```bash

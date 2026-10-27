@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "license": "AGPL-3.0-only",
   "type": "commonjs",
-  "description": "Secret redaction, step classification, form submissions and sent-page reading shared by the Desktop Personal Browser and the hosted Shared Browser. Plain scripts with no dependencies.",
+  "description": "Secret redaction, step classification, form submissions, sent-page reading and link-only site matching shared by the Desktop Personal Browser, the hosted Shared Browser and instafy web read. Plain scripts with no dependencies.",
   "exports": {
     "./redaction": {
       "types": "./redaction.d.ts",
@@ -21,6 +21,10 @@
     "./formSubmission": {
       "types": "./formSubmission.d.ts",
       "default": "./formSubmission.js"
+    },
+    "./linkOnly": {
+      "types": "./linkOnly.d.ts",
+      "default": "./linkOnly.js"
     }
   },
   "files": [
@@ -32,6 +36,8 @@
     "pageCapture.d.ts",
     "formSubmission.js",
     "formSubmission.d.ts",
+    "linkOnly.js",
+    "linkOnly.d.ts",
     "README.md"
   ]
 }

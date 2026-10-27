@@ -21,7 +21,9 @@ use crate::auth::{
     authenticate_request, bearer_token, issue_proxy_envelope, require_user_session, RequestContext,
 };
 use crate::credential_keys::CredentialKeyRing;
-use crate::model_defaults::{default_chatgpt_model_id, default_model_for_provider};
+use crate::model_defaults::{
+    default_chatgpt_model_id, default_model_for_provider, floor_own_ai_model_for_provider,
+};
 use crate::{bad_request, internal_error, not_found, unauthorized, ApiError, AppState};
 
 const CREDENTIAL_KIND_CODEX_AUTH_JSON: &str = "codex_auth_json";
@@ -97,6 +99,10 @@ struct CredentialListItem {
     label: Option<String>,
     is_default: bool,
     metadata: JsonValue,
+    // The model the credential's jobs run when an agent names none
+    // (`credential_default_model`): `metadata.default_model` is the id stored
+    // when it was saved, which the own-AI floor may raise.
+    default_model: String,
     // Latest BYOC subscription-usage snapshot; `null` until a usage report lands.
     // Serialized as `subscriptionUsage` for the frontend usage meters.
     subscription_usage: Option<JsonValue>,
@@ -355,6 +361,11 @@ pub(crate) struct ManagedAiAccessResponse {
     pub(crate) daily_prompts_used: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) remaining_prompts: Option<i32>,
+    /// When the next prompt frees up, set only once the allowance is used up.
+    /// Usage is counted over a rolling window, so this is when the prompt that
+    /// brings the count back under the limit leaves that window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_available_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -804,6 +815,11 @@ async fn sleep_managed_ai_startup_retry(attempt: u32) {
     tokio::task::yield_now().await;
 }
 
+/// How far back managed AI prompts count against the daily allowance.
+fn managed_ai_prompt_window() -> chrono::Duration {
+    chrono::Duration::hours(24)
+}
+
 pub(crate) async fn count_recent_managed_ai_prompts(
     transaction: &Transaction<'_>,
     user_id: Option<Uuid>,
@@ -826,6 +842,52 @@ pub(crate) async fn count_recent_managed_ai_prompts(
         .map_err(|error| internal_error(format!("failed to count managed AI prompts: {error}")))?;
 
     Ok(row.get::<_, i32>("count"))
+}
+
+/// When the rolling window frees a prompt again for someone whose counted
+/// prompts were sent at `counted_prompt_times` (oldest first). With `n`
+/// counted prompts and a limit of `limit`, the count drops below the limit
+/// once the `n - limit + 1` oldest have left the window.
+fn managed_ai_next_available_at(
+    counted_prompt_times: &[DateTime<Utc>],
+    daily_prompt_limit: i32,
+    window: chrono::Duration,
+) -> Option<DateTime<Utc>> {
+    let limit = usize::try_from(daily_prompt_limit)
+        .ok()
+        .filter(|limit| *limit > 0)?;
+    let index = counted_prompt_times.len().checked_sub(limit)?;
+    counted_prompt_times
+        .get(index)
+        .map(|created_at| *created_at + window)
+}
+
+/// The send times of the managed AI prompts counted since `since`, oldest
+/// first, for [`managed_ai_next_available_at`].
+async fn load_recent_managed_ai_prompt_times(
+    transaction: &Transaction<'_>,
+    user_id: Uuid,
+    since: DateTime<Utc>,
+) -> Result<Vec<DateTime<Utc>>, (StatusCode, Json<ApiError>)> {
+    let rows = transaction
+        .query(
+            "select created_at
+             from prompts
+             where user_id = $1
+               and created_at >= $2
+               and metadata @> '{\"managedAiUsed\": true}'::jsonb
+             order by created_at asc",
+            &[&user_id, &since],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to load managed AI prompt times: {error}"))
+        })?;
+
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<_, DateTime<Utc>>("created_at"))
+        .collect())
 }
 
 pub(crate) fn build_managed_ai_access_response(
@@ -856,6 +918,7 @@ pub(crate) fn build_managed_ai_access_response(
         daily_prompt_limit: config.managed_ai_daily_prompt_limit,
         daily_prompts_used,
         remaining_prompts,
+        next_available_at: None,
     }
 }
 
@@ -895,6 +958,7 @@ async fn get_my_credential_requirements(
             } else {
                 None
             },
+            next_available_at: None,
         };
         return Ok(Json(CredentialRequirementsResponse {
             requires_user_credentials: true,
@@ -924,23 +988,29 @@ async fn get_my_credential_requirements(
     let has_default_credential = load_default_credential_id(&transaction, Some(user_id))
         .await?
         .is_some();
-    let daily_prompts_used = count_recent_managed_ai_prompts(
-        &transaction,
-        Some(user_id),
-        Utc::now() - chrono::Duration::hours(24),
-    )
-    .await?;
-    transaction
-        .rollback()
-        .await
-        .map_err(|error| internal_error(format!("failed to close transaction: {error}")))?;
-
-    let managed_ai = build_managed_ai_access_response(
+    let window = managed_ai_prompt_window();
+    let window_start = Utc::now() - window;
+    let daily_prompts_used =
+        count_recent_managed_ai_prompts(&transaction, Some(user_id), window_start).await?;
+    let mut managed_ai = build_managed_ai_access_response(
         &state.config,
         &proxy_requirements,
         has_default_credential,
         daily_prompts_used,
     );
+    if managed_ai.enabled && managed_ai.remaining_prompts == Some(0) {
+        let counted_prompt_times =
+            load_recent_managed_ai_prompt_times(&transaction, user_id, window_start).await?;
+        managed_ai.next_available_at = managed_ai_next_available_at(
+            &counted_prompt_times,
+            managed_ai.daily_prompt_limit,
+            window,
+        );
+    }
+    transaction
+        .rollback()
+        .await
+        .map_err(|error| internal_error(format!("failed to close transaction: {error}")))?;
 
     Ok(Json(build_credential_requirements_response(
         proxy_requirements,
@@ -1004,22 +1074,10 @@ async fn test_my_credential(
             CREDENTIAL_KIND_CODEX_AUTH_JSON => Some(DEFAULT_CHATGPT_ENDPOINT.to_string()),
             _ => None,
         });
-    let model = meta
-        .and_then(|map| map.get("default_model"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| match kind.trim() {
-            // BYO credential probe (ChatGPT login or API key): the user pays, so
-            // stay on the OpenAI BYO default (Sol), not the credits-funded
-            // managed tier default.
-            CREDENTIAL_KIND_CODEX_AUTH_JSON => default_chatgpt_model_id().to_string(),
-            _ => provider
-                .as_deref()
-                .map(default_model_for_provider)
-                .unwrap_or(default_model_for_provider("openai"))
-                .to_string(),
-        });
+    // The model a job on this credential runs without an agent model: the
+    // stored default (raised to the own-AI floor for OpenAI), else the own-AI default for
+    // its kind and provider, never the credits-funded managed tier's.
+    let model = credential_default_model(&kind, &metadata);
 
     // Always probe through the proxy. This keeps the credential test path aligned with real runs,
     // and avoids accumulating per-provider "direct" probing logic in the controller.
@@ -1887,12 +1945,14 @@ async fn load_credential_list(
             let created_at: DateTime<Utc> = row.get("created_at");
             let updated_at: DateTime<Utc> = row.get("updated_at");
 
+            let default_model = credential_default_model(&kind, &metadata);
             CredentialListItem {
                 id: id.to_string(),
                 kind,
                 label,
                 is_default,
                 metadata,
+                default_model,
                 subscription_usage,
                 last_used_at: last_used_at.map(|dt| dt.to_rfc3339()),
                 revoked_at: revoked_at.map(|dt| dt.to_rfc3339()),
@@ -2733,11 +2793,9 @@ fn materialize_internal_credential(
         .and_then(JsonValue::as_str)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let default_model = metadata_map
-        .and_then(|map| map.get("default_model"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    // The lease's default is what a job on this credential runs without a
+    // model of its own, the same rule as its job secrets and completions.
+    let default_model = Some(credential_default_model(kind, metadata));
     let auth_mode = metadata_map
         .and_then(|map| map.get("auth_mode"))
         .and_then(JsonValue::as_str)
@@ -2758,8 +2816,6 @@ fn materialize_internal_credential(
             .to_ascii_lowercase();
         let upstream_endpoint = upstream_endpoint
             .or_else(|| Some(default_endpoint_for_provider(&provider_key).to_string()));
-        let default_model =
-            default_model.or_else(|| Some(default_model_for_provider(&provider_key).to_string()));
 
         let key = auth
             .get("OPENAI_API_KEY")
@@ -2811,8 +2867,7 @@ fn materialize_internal_credential(
         openai_api_key: None,
         provider,
         upstream_endpoint,
-        // ChatGPT login lease: user-paid subscription, keep the Sol default.
-        default_model: default_model.or_else(|| Some(default_chatgpt_model_id().to_string())),
+        default_model,
         pinned_model: None,
         auth_mode,
         code_assist_project,
@@ -2856,19 +2911,24 @@ fn default_endpoint_for_provider(provider: &str) -> &'static str {
 }
 
 /// The model a bring-your-own credential runs when nothing more specific (an
-/// agent's model) is set: the credential's stored default, else the default
-/// for its kind and provider. Shared by completions and job secrets so a job
-/// never falls back to whatever model its runtime was launched with.
+/// agent's model) is set: the credential's stored default, raised to the own-AI
+/// default on OpenAI-like providers (`floor_own_ai_model_for_provider`), else the default
+/// for its kind and provider. Saving a credential stores the default of the
+/// day, so the floor is what moves credentials saved before a bump. Shared by
+/// the credential test, completions and job secrets, so a job never falls back
+/// to whatever model its runtime was launched with.
 pub(crate) fn credential_default_model(kind: &str, metadata: &JsonValue) -> String {
     let provider = provider_for_credential(kind, metadata);
-    metadata
+    match metadata
         .as_object()
         .and_then(|map| map.get("default_model"))
         .and_then(JsonValue::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default_model_for_credential(kind, &provider))
-        .to_string()
+    {
+        Some(stored) => floor_own_ai_model_for_provider(&provider, stored),
+        None => default_model_for_credential(kind, &provider).to_string(),
+    }
 }
 
 fn default_model_for_credential(kind: &str, provider: &str) -> &'static str {
@@ -2928,15 +2988,40 @@ fn decode_authoritative_credential_payload(
 #[cfg(test)]
 mod provider_metadata_tests {
     use super::{
-        augment_metadata_with_provider, default_endpoint_for_provider,
+        augment_metadata_with_provider, credential_default_model, default_endpoint_for_provider,
         default_model_for_credential, normalize_provider_id, provider_for_credential,
-        CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY, PROVIDER_GEMINI,
-        PROVIDER_OPENAI,
+        CredentialListItem, CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY,
+        PROVIDER_GEMINI, PROVIDER_OPENAI,
     };
     use crate::model_defaults::{
         default_chatgpt_model_id, default_managed_ai_model_id, default_model_for_provider,
+        DEFAULT_OPENAI_MODEL_ID,
     };
+    use runtime_contracts::own_ai_model::OWN_AI_SMALL_MODEL_ID;
     use serde_json::json;
+
+    #[test]
+    fn a_listed_credential_names_the_model_its_jobs_run() {
+        // `instafy credentials list` prints `defaultModel`; the stored id stays
+        // in `metadata` as it was saved.
+        let metadata = json!({ "provider": "openai", "default_model": "gpt-5.6-sol" });
+        let item = CredentialListItem {
+            id: "credential".to_string(),
+            kind: CREDENTIAL_KIND_CODEX_AUTH_JSON.to_string(),
+            label: None,
+            is_default: true,
+            default_model: credential_default_model(CREDENTIAL_KIND_CODEX_AUTH_JSON, &metadata),
+            metadata,
+            subscription_usage: None,
+            last_used_at: None,
+            revoked_at: None,
+            created_at: "2026-10-27T00:00:00+00:00".to_string(),
+            updated_at: "2026-10-27T00:00:00+00:00".to_string(),
+        };
+        let listed = serde_json::to_value(&item).expect("list item");
+        assert_eq!(listed["defaultModel"], DEFAULT_OPENAI_MODEL_ID);
+        assert_eq!(listed["metadata"]["default_model"], "gpt-5.6-sol");
+    }
 
     #[test]
     fn normalize_provider_id_accepts_gemini_aliases() {
@@ -2968,22 +3053,73 @@ mod provider_metadata_tests {
 
     #[test]
     fn provider_defaults_use_latest_general_openai_model_for_api_keys() {
-        assert_eq!(default_model_for_provider(PROVIDER_OPENAI), "gpt-5.6-sol");
+        assert_eq!(
+            default_model_for_provider(PROVIDER_OPENAI),
+            DEFAULT_OPENAI_MODEL_ID
+        );
     }
 
     #[test]
     fn chatgpt_credential_default_does_not_track_the_managed_tier() {
         // BYO ChatGPT logins are subscription-paid and keep Sol even though the
         // credits-funded managed tier defaults to the cheaper Luna.
-        assert_eq!(default_chatgpt_model_id(), "gpt-5.6-sol");
+        assert_eq!(default_chatgpt_model_id(), DEFAULT_OPENAI_MODEL_ID);
         assert_eq!(default_managed_ai_model_id(), "gpt-6-luna");
+        assert_ne!(DEFAULT_OPENAI_MODEL_ID, default_managed_ai_model_id());
         assert_eq!(
             default_model_for_credential(CREDENTIAL_KIND_CODEX_AUTH_JSON, PROVIDER_OPENAI),
-            "gpt-5.6-sol"
+            DEFAULT_OPENAI_MODEL_ID
         );
         assert_eq!(
             default_model_for_credential(CREDENTIAL_KIND_OPENAI_API_KEY, PROVIDER_OPENAI),
-            "gpt-5.6-sol"
+            DEFAULT_OPENAI_MODEL_ID
+        );
+    }
+
+    #[test]
+    fn a_stored_default_older_than_the_own_ai_default_runs_the_floor() {
+        // Saving a credential stores the default of the day, so a key or login
+        // saved before the GPT-6 move still says gpt-5.6-sol, and one saved
+        // now says today's default. Jobs, leases, the credential test and
+        // completions run the floor, which follows the default, without a
+        // migration.
+        let same_version = format!("{DEFAULT_OPENAI_MODEL_ID}-preview");
+        for kind in [
+            CREDENTIAL_KIND_CODEX_AUTH_JSON,
+            CREDENTIAL_KIND_OPENAI_API_KEY,
+        ] {
+            for (stored, runs) in [
+                ("gpt-6-sol", DEFAULT_OPENAI_MODEL_ID),
+                ("gpt-5.6-sol", DEFAULT_OPENAI_MODEL_ID),
+                ("gpt-5.5", DEFAULT_OPENAI_MODEL_ID),
+                ("gpt-5.6-luna", DEFAULT_OPENAI_MODEL_ID),
+                (" gpt-5.4-mini ", DEFAULT_OPENAI_MODEL_ID),
+                // A pick at the default's version runs as stored, and so does
+                // the cheaper model a person picks on purpose.
+                (DEFAULT_OPENAI_MODEL_ID, DEFAULT_OPENAI_MODEL_ID),
+                (OWN_AI_SMALL_MODEL_ID, OWN_AI_SMALL_MODEL_ID),
+                (same_version.as_str(), same_version.as_str()),
+            ] {
+                let metadata = json!({ "provider": "openai", "default_model": stored });
+                assert_eq!(
+                    credential_default_model(kind, &metadata),
+                    runs,
+                    "{kind} {stored}"
+                );
+            }
+            assert_eq!(
+                credential_default_model(kind, &json!({ "provider": "openai" })),
+                DEFAULT_OPENAI_MODEL_ID,
+                "{kind} without a stored default"
+            );
+        }
+        // Other providers' keys keep their stored model.
+        assert_eq!(
+            credential_default_model(
+                CREDENTIAL_KIND_OPENAI_API_KEY,
+                &json!({ "provider": "deepseek", "default_model": "deepseek-reasoner" })
+            ),
+            "deepseek-reasoner"
         );
     }
 
@@ -3311,30 +3447,58 @@ mod credential_lease_contract_tests {
 
         // User credentials keep the requested model: no pin on the wire for a
         // BYO API key or a ChatGPT login, even with a stored default model.
-        let byo_api_key = materialize_internal_credential(
-            Uuid::new_v4(),
-            CREDENTIAL_KIND_OPENAI_API_KEY,
-            &json!({ "OPENAI_API_KEY": "test-api-key" }),
-            &json!({ "provider": "openai", "default_model": "gpt-5.6-sol" }),
-        )
-        .expect("API key should materialize");
-        let chatgpt = materialize_internal_credential(
-            Uuid::new_v4(),
-            CREDENTIAL_KIND_CODEX_AUTH_JSON,
-            &json!({ "tokens": { "access_token": "test-access-token" } }),
-            &json!({ "provider": "openai", "default_model": "gpt-5.6-sol" }),
-        )
-        .expect("ChatGPT login should materialize");
-        for (name, lease) in [("API key", byo_api_key), ("ChatGPT", chatgpt)] {
-            let wire = serde_json::to_value(lease).expect("lease should serialize");
+        // The default itself runs the own-AI floor, as a job's model does.
+        let same_version = format!("{}-preview", crate::model_defaults::DEFAULT_OPENAI_MODEL_ID);
+        for (stored, default_model) in [
+            (same_version.as_str(), same_version.as_str()),
+            (
+                "gpt-5.6-sol",
+                crate::model_defaults::DEFAULT_OPENAI_MODEL_ID,
+            ),
+            (
+                "gpt-5.5-mini",
+                crate::model_defaults::DEFAULT_OPENAI_MODEL_ID,
+            ),
+        ] {
+            let byo_api_key = materialize_internal_credential(
+                Uuid::new_v4(),
+                CREDENTIAL_KIND_OPENAI_API_KEY,
+                &json!({ "OPENAI_API_KEY": "test-api-key" }),
+                &json!({ "provider": "openai", "default_model": stored }),
+            )
+            .expect("API key should materialize");
+            let chatgpt = materialize_internal_credential(
+                Uuid::new_v4(),
+                CREDENTIAL_KIND_CODEX_AUTH_JSON,
+                &json!({ "tokens": { "access_token": "test-access-token" } }),
+                &json!({ "provider": "openai", "default_model": stored }),
+            )
+            .expect("ChatGPT login should materialize");
+            for (name, lease) in [("API key", byo_api_key), ("ChatGPT", chatgpt)] {
+                let wire = serde_json::to_value(lease).expect("lease should serialize");
+                assert_eq!(
+                    wire.get("defaultModel").and_then(Value::as_str),
+                    Some(default_model),
+                    "{name} lease stored {stored}"
+                );
+                assert!(
+                    wire.get("pinnedModel").is_none(),
+                    "{name} lease must not pin a model: {wire}"
+                );
+            }
+        }
+
+        // An operator's managed model is theirs: the own-AI floor never
+        // touches it, even below GPT-6.
+        config.managed_ai_model_id = "gpt-5.6-luna".to_string();
+        let managed =
+            serde_json::to_value(managed_ai_internal_credential(&config).expect("managed lease"))
+                .expect("managed lease should serialize");
+        for field in ["defaultModel", "pinnedModel"] {
             assert_eq!(
-                wire.get("defaultModel").and_then(Value::as_str),
-                Some("gpt-5.6-sol"),
-                "{name} lease keeps its default"
-            );
-            assert!(
-                wire.get("pinnedModel").is_none(),
-                "{name} lease must not pin a model: {wire}"
+                managed.get(field).and_then(Value::as_str),
+                Some("gpt-5.6-luna"),
+                "{field}"
             );
         }
     }
@@ -3449,8 +3613,9 @@ mod credential_lease_contract_tests {
 mod requirement_tests {
     use super::{
         build_managed_ai_access_response, ensure_managed_ai_proxy_ready,
-        fetch_proxy_credential_requirements, platform_lane_pin_problem,
-        ProxyCredentialRequirements, ProxyPlatformLane, ProxyPlatformLaneServedBy,
+        fetch_proxy_credential_requirements, managed_ai_next_available_at,
+        managed_ai_prompt_window, platform_lane_pin_problem, ProxyCredentialRequirements,
+        ProxyPlatformLane, ProxyPlatformLaneServedBy,
     };
     use crate::tests::{build_app_config, test_origin_private_key, test_origin_public_key};
 
@@ -3748,6 +3913,70 @@ mod requirement_tests {
     }
 
     #[test]
+    fn managed_ai_next_available_at_is_when_a_counted_prompt_leaves_the_window() {
+        let window = managed_ai_prompt_window();
+        assert_eq!(window, chrono::Duration::hours(24));
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-26T08:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+        let sent = |count: i64| {
+            (0..count)
+                .map(|minute| start + chrono::Duration::minutes(minute * 10))
+                .collect::<Vec<_>>()
+        };
+
+        // Exactly at the limit: the oldest prompt frees the first slot.
+        assert_eq!(
+            managed_ai_next_available_at(&sent(20), 20, window),
+            Some(start + window)
+        );
+        // Over the limit (concurrent sends): three must leave, so the third
+        // oldest decides.
+        assert_eq!(
+            managed_ai_next_available_at(&sent(22), 20, window),
+            Some(start + chrono::Duration::minutes(20) + window)
+        );
+        // Still under the limit, or no limit at all: nothing to wait for.
+        assert_eq!(managed_ai_next_available_at(&sent(19), 20, window), None);
+        assert_eq!(managed_ai_next_available_at(&sent(5), 0, window), None);
+        assert_eq!(managed_ai_next_available_at(&[], 20, window), None);
+    }
+
+    #[test]
+    fn managed_ai_next_available_at_is_an_optional_wire_field() {
+        let config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "test-key-id",
+        );
+        let mut managed_ai = build_managed_ai_access_response(
+            &config,
+            &ProxyCredentialRequirements {
+                requires_user_credentials: false,
+                proxy_backend: "codex".to_string(),
+                platform_lane: None,
+                error: None,
+            },
+            false,
+            20,
+        );
+
+        // Older clients see the same shape as before until a time is known.
+        assert_eq!(managed_ai.next_available_at, None);
+        let wire = serde_json::to_value(&managed_ai).expect("json");
+        assert!(wire.get("nextAvailableAt").is_none());
+
+        managed_ai.next_available_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-10-27T08:00:00Z")
+                .expect("timestamp")
+                .with_timezone(&chrono::Utc),
+        );
+        let wire = serde_json::to_value(&managed_ai).expect("json");
+        assert_eq!(wire["nextAvailableAt"], json!("2026-10-27T08:00:00Z"));
+        assert_eq!(wire["remainingPrompts"], json!(0));
+    }
+
+    #[test]
     fn an_unpinned_or_mismatched_static_platform_lane_is_reported() {
         let lane = |served_by, pinned: Option<&str>| ProxyPlatformLane {
             served_by,
@@ -3965,3 +4194,7 @@ mod session_identity_tests {
 #[cfg(test)]
 #[path = "credentials_reserved_id_tests.rs"]
 pub(crate) mod reserved_id_tests;
+
+#[cfg(test)]
+#[path = "credentials_managed_ai_allowance_tests.rs"]
+mod managed_ai_allowance_tests;

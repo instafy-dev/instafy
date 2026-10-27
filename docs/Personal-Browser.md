@@ -549,13 +549,25 @@ only in the visible browser, so the rules are the ones a person sees:
   Chromium's connection is not caught for a WebSocket.
 - **Never a link-only site.** Sites whose terms or robots.txt bar AI agents
   (the `instafy-web-research` skill's `references/link-only-sites.json`:
-  Booking.com, Airbnb, Amazon, Google search and Maps and others) are never read
-  or driven by the agent. Desktop bundles that same file, the one runtime-agent
-  embeds, at build time, and a test fails when the bundled copy differs from the
-  skill's file. `open_tab` and `navigate` to such a site, a link to one, and
+  Booking.com, Airbnb, Amazon, Google search and Maps and others), and a
+  translator's, cache's or archive's copy of one (the list's `wrappers`), are
+  never read or driven by the agent. Desktop bundles that same file, the one
+  runtime-agent embeds, at build time, and a test fails when the bundled copy
+  differs from the skill's file. The matching is
+  `@instafy/browser-action-policy`'s `linkOnly.js`, shared with the Shared
+  Browser and `instafy web read`. Desktop enforces the bundled list: sites a
+  space adds to its own copy of the list are enforced by the readers that run in
+  the space (`instafy web read`, the Shared Browser), but no Personal Browser
+  channel carries a space's files, so Desktop does not read that copy.
+  `open_tab` and `navigate` to such a site, a link to one, and
   every page load or redirect hop of a driven tab, and every frame of a page the
   agent opened, that would land on one are refused with `link_only_site`,
-  before any prompt or lookup. On a page that is
+  before any prompt or lookup. A copy nested in another wrapper (a
+  translator's copy of an archive's copy) counts, and a page or frame of a
+  driven tab whose answer says it is a copy of a link-only site (an archive's
+  Memento `Link: <…>; rel="original"`, which names the page even at a short
+  address such as `archive.ph/AbCdE`) is stopped when the answer arrives,
+  before the page renders. On a page that is
   already on one, because the person left a tab there, `snapshot`, `click`,
   `type`, `press`, `scroll` and `request_human_input` are refused the same way;
   in a tab the agent holds, `status` and `list_tabs` give only the site's name

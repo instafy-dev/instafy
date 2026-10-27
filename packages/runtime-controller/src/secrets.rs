@@ -1621,6 +1621,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_operators_managed_model_is_not_raised_by_the_own_ai_floor() {
+        // The own-AI floor is for a person's own AI. MANAGED_AI_MODEL_ID is the
+        // operator's choice, and its prices are set with it, so the controller
+        // sends it as configured even below the own-AI default. (It must still
+        // be a model OpenAI serves: the runtime replaces retired ids, such as
+        // gpt-4* and o3*, with its own default.)
+        let mut config = build_app_config("test-private", "test-public", "test-key");
+        config.managed_ai_model_id = "gpt-5.6-luna".to_string();
+        let mut env = JsonMap::new();
+        env.insert(
+            "CODEX_MODEL".to_string(),
+            JsonValue::String(crate::model_defaults::DEFAULT_OPENAI_MODEL_ID.to_string()),
+        );
+
+        apply_managed_ai_env_overrides(&mut env, &config, None, Some("feature"));
+
+        assert_eq!(env_model(&env), (Some("gpt-5.6-luna"), Some("openai")));
+    }
+
     fn env_reasoning_effort(env: &JsonMap<String, JsonValue>) -> Option<&str> {
         env.get("CODEX_MANAGED_AI_REASONING_EFFORT")
             .and_then(JsonValue::as_str)

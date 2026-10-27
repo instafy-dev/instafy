@@ -39,7 +39,8 @@ Do not enter any secret until steps 1 and 2 are done and read back.
    `ANDROID_UPLOAD_KEYSTORE_TYPE`, `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`,
    `ANDROID_UPLOAD_KEY_PASSWORD` and `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`.
 5. **Set the repository variables:** `CAPACITOR_LIVE_UPDATE_PUBLIC_KEY`, `VITE_SUPABASE_URL`,
-   `VITE_SUPABASE_ANON_KEY` (must be `sb_publishable_*`), and optionally `VITE_CONTROLLER_URL`.
+   `VITE_SUPABASE_ANON_KEY` (must be `sb_publishable_*`), and optionally `VITE_CONTROLLER_URL` and
+   `VITE_INSTAFY_ENABLE_GOOGLE_AUTH` (Google sign-in kill switch, default `1`).
 
 ### OTA trust key format
 

@@ -440,11 +440,25 @@ Browser has tabs of its own (see Personal-Browser.md).
   field handoff are refused there in every mode, before any prompt.
 - **Never a link-only site, in any tab.** A site on the web-research skill's
   link-only list (runtime-agent embeds the skill's `link-only-sites.json` into
-  the controller) is never opened or read by Octo, in its own tabs and on the
-  page the person chose alike: `open_tab`, `navigate` and a link, form or
+  the controller, with `@instafy/browser-action-policy`'s `linkOnly.js`, the
+  matcher `instafy web read` and the Personal Browser use too), or a
+  translator's, cache's or archive's copy of one (the list's `wrappers`, such as
+  `www-example-com.translate.goog` or `web.archive.org/web/…/<address>`), is
+  never opened or read by Octo, in its own tabs and on the
+  page the person chose alike. Sites and wrappers the space's own copy of the
+  list adds (`.agents/skills/instafy-web-research/references/link-only-sites.json`,
+  passed to the controller as `INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE`)
+  count too; that copy can only add, and a copy that is not a plain JSON file
+  of the list is left out (`status` reports it in `linkOnlyListWarnings`) while
+  the bundled list still applies. `open_tab`, `navigate` and a link, form or
   activation key that leads there are refused before any prompt, and a
   redirect one of Octo's steps causes is stopped by the step's request guard
-  before the request leaves the browser. The guard watches the tab's own
+  before the request leaves the browser. A copy nested in another wrapper (a
+  translator's copy of an archive's copy) counts, and so does an answer that
+  says it is a copy of a link-only site (an archive's Memento
+  `Link: <…>; rel="original"`, which names the page even at a short address
+  such as `archive.ph/AbCdE`): the guard stops it when the answer arrives,
+  before the page renders. The guard watches the tab's own
   document: a frame an ordinary page embeds from a link-only site (a map, a
   sign-in button, a captcha) loads as the page asks, since Octo neither reads
   nor drives frames, and does not fail the step. A page that is on a

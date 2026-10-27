@@ -29,16 +29,20 @@ const MAX_AUTH_LOGIN_EVENT_LIMIT: i64 = 200;
 const MAX_STORED_AUTH_LOGIN_EVENTS: i64 = 5_000;
 const SCOPED_TELEMETRY_WRITE_SCOPE: &str = "telemetry.write";
 const SCOPED_RUNTIME_TELEMETRY_KINDS: &[&str] = &["telemetry.error"];
-const ANONYMOUS_AUTH_TELEMETRY_KINDS: &[&str] = &[
-    "auth.login.github.started",
-    "auth.login.github.start_failed",
-    "auth.login.github.browser_finished_without_completion",
-    "auth.login.github.callback_received",
-    "auth.login.github.callback_error",
-    "auth.login.github.exchange_failed",
-    "auth.login.github.session_failed",
-    "auth.login.github.callback_incomplete",
-    "auth.login.github.completed",
+// A signed-out app has no bearer token, so its OAuth sign-in attempts report as
+// `auth.login.<provider>.<event>` without one. Only the providers the login screen
+// offers and the attempt events below are accepted that way.
+const ANONYMOUS_AUTH_TELEMETRY_PROVIDERS: &[&str] = &["github", "google"];
+const ANONYMOUS_AUTH_TELEMETRY_EVENTS: &[&str] = &[
+    "started",
+    "start_failed",
+    "browser_finished_without_completion",
+    "callback_received",
+    "callback_error",
+    "exchange_failed",
+    "session_failed",
+    "callback_incomplete",
+    "completed",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -93,9 +97,14 @@ pub(crate) fn router() -> Router<AppState> {
 }
 
 fn kind_allows_anonymous_auth_telemetry(kind: &str) -> bool {
-    ANONYMOUS_AUTH_TELEMETRY_KINDS
-        .iter()
-        .any(|candidate| *candidate == kind)
+    let Some((provider, event)) = kind
+        .strip_prefix("auth.login.")
+        .and_then(|rest| rest.split_once('.'))
+    else {
+        return false;
+    };
+    ANONYMOUS_AUTH_TELEMETRY_PROVIDERS.contains(&provider)
+        && ANONYMOUS_AUTH_TELEMETRY_EVENTS.contains(&event)
 }
 
 fn is_service_role_bearer_token(state: &AppState, token: &str) -> bool {
@@ -853,7 +862,8 @@ fn auth_login_event_from_row(row: Row) -> Result<AuthLoginTelemetryEvent, anyhow
 mod tests {
     use super::{
         build_system_issue_from_telemetry, is_upstream_ai_failure,
-        kind_allows_anonymous_auth_telemetry, SCOPED_RUNTIME_TELEMETRY_KINDS,
+        kind_allows_anonymous_auth_telemetry, ANONYMOUS_AUTH_TELEMETRY_EVENTS,
+        ANONYMOUS_AUTH_TELEMETRY_PROVIDERS, SCOPED_RUNTIME_TELEMETRY_KINDS,
         SCOPED_TELEMETRY_WRITE_SCOPE,
     };
     use axum::{
@@ -925,9 +935,31 @@ mod tests {
         assert!(kind_allows_anonymous_auth_telemetry(
             "auth.login.github.completed"
         ));
-        assert!(!kind_allows_anonymous_auth_telemetry(
-            "auth.login.google.started"
-        ));
+        // Native Google sign-in reports the same attempt events as GitHub.
+        for event in ANONYMOUS_AUTH_TELEMETRY_EVENTS {
+            assert!(kind_allows_anonymous_auth_telemetry(&format!(
+                "auth.login.github.{event}"
+            )));
+            assert!(kind_allows_anonymous_auth_telemetry(&format!(
+                "auth.login.google.{event}"
+            )));
+        }
+        assert_eq!(ANONYMOUS_AUTH_TELEMETRY_PROVIDERS, &["github", "google"]);
+        assert_eq!(ANONYMOUS_AUTH_TELEMETRY_EVENTS.len(), 9);
+        for kind in [
+            "auth.login.apple.started",
+            "auth.login.google",
+            "auth.login.google.",
+            "auth.login.google.started.extra",
+            "auth.login.google.signed_in",
+            "auth.login..started",
+            "auth.login.github",
+            "auth.loginx.github.started",
+            "telemetry.auth.login.github.started",
+            "AUTH.LOGIN.GOOGLE.STARTED",
+        ] {
+            assert!(!kind_allows_anonymous_auth_telemetry(kind), "{kind}");
+        }
         assert!(!kind_allows_anonymous_auth_telemetry("telemetry.error"));
         assert_eq!(SCOPED_RUNTIME_TELEMETRY_KINDS, &["telemetry.error"]);
         assert_eq!(SCOPED_TELEMETRY_WRITE_SCOPE, "telemetry.write");

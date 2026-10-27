@@ -12,7 +12,11 @@ import {
   clearPendingNativeAuthAttempt,
   createPendingNativeAuthAttempt,
   NATIVE_AUTH_ERROR_EVENT,
+  NATIVE_AUTH_PROVIDER_LABELS,
   NATIVE_AUTH_SUCCESS_EVENT,
+  nativeAuthAttemptProvider,
+  nativeAuthCallbackErrorMessage,
+  type NativeAuthProvider,
   parseNativeAuthCallbackUrl,
   readNativeAuthCallbackAttemptId,
   readPendingNativeAuthAttempt,
@@ -34,12 +38,9 @@ export const OAUTH_REDIRECT_TARGET_KEY = "instafy.login.oauthRedirectTarget";
 // already provider-generic (attempts carry `provider: string`); only the
 // entry function and its user-facing strings need to know which provider a
 // click meant.
-export type LoginOAuthProvider = "github" | "google";
+export type LoginOAuthProvider = NativeAuthProvider;
 
-export const OAUTH_PROVIDER_LABELS: Record<LoginOAuthProvider, string> = {
-  github: "GitHub",
-  google: "Google",
-};
+export const OAUTH_PROVIDER_LABELS: Record<LoginOAuthProvider, string> = NATIVE_AUTH_PROVIDER_LABELS;
 
 /**
  * The query the auth server forwards to the provider. `prompt=select_account`
@@ -130,6 +131,7 @@ export function useNativeGithubAuth({
       kind: string,
       nextMessage: string,
       metadata: Record<string, unknown> = {},
+      telemetryMessage: string = nextMessage,
     ) => {
       const pendingAttempt = readPendingNativeAuthAttempt();
       clearNativeAuthCallbackAttemptId();
@@ -139,7 +141,7 @@ export function useNativeGithubAuth({
       setAwaitingBrowser(null);
       setError(nextMessage);
       setPendingProvider(null);
-      postGithubAuthTelemetry(kind, "warning", nextMessage, pendingAttempt, metadata);
+      postGithubAuthTelemetry(kind, "warning", telemetryMessage, pendingAttempt, metadata);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -151,7 +153,7 @@ export function useNativeGithubAuth({
       nextUserEmail: string | null,
     ) => {
       const pendingAttempt = readPendingNativeAuthAttempt();
-      const completedProvider = pendingAttempt?.provider ?? "github";
+      const completedProvider = nativeAuthAttemptProvider(pendingAttempt);
       postGithubAuthTelemetry(`auth.login.${completedProvider}.completed`, "info", null, pendingAttempt, {
         completionMethod,
         userEmail: nextUserEmail,
@@ -185,9 +187,8 @@ export function useNativeGithubAuth({
       if (readNativeAuthCallbackAttemptId() === expectedAttemptId) {
         return;
       }
-      const attemptProvider = pendingAttempt.provider ?? "github";
-      const attemptLabel =
-        OAUTH_PROVIDER_LABELS[attemptProvider as LoginOAuthProvider] ?? "GitHub";
+      const attemptProvider = nativeAuthAttemptProvider(pendingAttempt);
+      const attemptLabel = OAUTH_PROVIDER_LABELS[attemptProvider];
       failPendingGithubLoginAttempt(
         `auth.login.${attemptProvider}.browser_finished_without_completion`,
         `${attemptLabel} sign-in did not complete. Try again.`,
@@ -374,6 +375,8 @@ export function useNativeGithubAuth({
       if (pendingAttempt?.attemptId) {
         writeNativeAuthCallbackAttemptId(pendingAttempt.attemptId);
       }
+      const provider = nativeAuthAttemptProvider(pendingAttempt);
+      const kind = (event: string) => `auth.login.${provider}.${event}`;
 
       inFlight = true;
       handled.add(trimmed);
@@ -388,7 +391,7 @@ export function useNativeGithubAuth({
           extractAuthParam(parsed, hashParams, "error") ??
           null;
 
-        postGithubAuthTelemetry("auth.login.github.callback_received", "info", null, pendingAttempt, {
+        postGithubAuthTelemetry(kind("callback_received"), "info", null, pendingAttempt, {
           hasCode: Boolean(code),
           hasAccessToken: Boolean(accessToken),
           hasRefreshToken: Boolean(refreshToken),
@@ -397,10 +400,15 @@ export function useNativeGithubAuth({
         });
 
         if (oauthError) {
-          failPendingGithubLoginAttempt("auth.login.github.callback_error", oauthError, {
-            phase: "callback",
-            source: "login_page_direct_plugins",
-          });
+          failPendingGithubLoginAttempt(
+            kind("callback_error"),
+            nativeAuthCallbackErrorMessage(provider),
+            {
+              phase: "callback",
+              source: "login_page_direct_plugins",
+            },
+            oauthError,
+          );
           return;
         }
 
@@ -408,7 +416,7 @@ export function useNativeGithubAuth({
           const result = await supabase.auth.exchangeCodeForSession(code);
           if (result.error) {
             failPendingGithubLoginAttempt(
-              "auth.login.github.exchange_failed",
+              kind("exchange_failed"),
               describeExchangeError(result.error.message),
               {
                 phase: "exchange_code_for_session",
@@ -430,7 +438,7 @@ export function useNativeGithubAuth({
             refresh_token: refreshToken,
           });
           if (result.error) {
-            failPendingGithubLoginAttempt("auth.login.github.session_failed", result.error.message, {
+            failPendingGithubLoginAttempt(kind("session_failed"), result.error.message, {
               phase: "set_session",
               source: "login_page_direct_plugins",
             });
@@ -444,8 +452,8 @@ export function useNativeGithubAuth({
         }
 
         failPendingGithubLoginAttempt(
-          "auth.login.github.callback_incomplete",
-          "GitHub sign-in returned to the app without completing. Try again.",
+          kind("callback_incomplete"),
+          `${OAUTH_PROVIDER_LABELS[provider]} sign-in returned to the app without completing. Try again.`,
           {
             phase: "callback",
             source: "login_page_direct_plugins",
@@ -453,7 +461,7 @@ export function useNativeGithubAuth({
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        failPendingGithubLoginAttempt("auth.login.github.callback_handler_failed", message, {
+        failPendingGithubLoginAttempt(kind("callback_handler_failed"), message, {
           phase: "callback_handler",
           source: "login_page_direct_plugins",
         });

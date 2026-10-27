@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   cancelDeviceAuth: vi.fn(),
   deviceAuthCompleting: false,
   deviceAuthCompletionWarning: null as string | null,
+  deviceAuthError: null as string | null,
   deviceAuthOnCompleted: null as null | ((input: {
     provider: "codex" | "gemini" | "github";
     sessionId: string;
@@ -46,7 +47,7 @@ vi.mock("../device-auth/useDeviceAuthFlow", () => ({
     mocks.deviceAuthOnCompleted = options?.onCompleted ?? null;
     return {
       session: mocks.deviceAuthSession,
-      error: null,
+      error: mocks.deviceAuthError,
       busy: false,
       completing: mocks.deviceAuthCompleting,
       completionWarning: mocks.deviceAuthCompletionWarning,
@@ -94,6 +95,7 @@ describe("AiCredentialsStatusBubble", () => {
     root = createRoot(container);
     mocks.deviceAuthCompleting = false;
     mocks.deviceAuthCompletionWarning = null;
+    mocks.deviceAuthError = null;
     mocks.deviceAuthOnCompleted = null;
     mocks.deviceAuthSession = null;
     mocks.nativeBackEnabled = false;
@@ -388,6 +390,81 @@ describe("AiCredentialsStatusBubble", () => {
     expect(buttons().map((button) => button.textContent)).toEqual(["Connect AI"]);
   });
 
+  it("says when hosted AI is back once today's messages are used up", async () => {
+    const onConnectAi = vi.fn();
+    const onUseManagedAi = vi.fn();
+    const render = async (managedAi: Parameters<typeof AiCredentialsStatusBubble>[0]["managedAi"]) => {
+      await act(async () => {
+        root.render(
+          <AiCredentialsStatusBubble
+            state="missing"
+            intent="gate"
+            isBusy={false}
+            canUseDesktopConnect={false}
+            managedAi={managedAi}
+            onUseManagedAi={onUseManagedAi}
+            onConnectAi={onConnectAi}
+            onStashDraft={() => undefined}
+            onConnectDesktop={() => undefined}
+            onUploadAuthJson={() => undefined}
+            onSaveApiKey={async () => ({ success: true })}
+          />,
+        );
+      });
+    };
+    const buttons = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>("button")).map((button) => button.textContent);
+    const usedUpLine = () => container.querySelector('[data-testid="ai-gate-managed-ai-used-up"]');
+    const nextAvailableAt = new Date(Date.now() + 90 * 60_000).toISOString();
+    // What the controller sends once the allowance is used up: still enabled,
+    // no longer available, nothing left.
+    const usedUp = {
+      ...managedAiFixture({ remainingPrompts: 0 }),
+      available: false,
+      dailyPromptsUsed: 20,
+      nextAvailableAt,
+    };
+
+    await render(usedUp);
+    const indicator = container.querySelector<HTMLElement>('[data-testid="credentials-status-indicator"]');
+    expect(indicator?.textContent).toContain(
+      "You've used today's Instafy AI messages. Your message is kept.",
+    );
+    expect(indicator?.textContent).not.toContain("Connect AI to send this.");
+    const time = new Date(nextAvailableAt).toLocaleTimeString(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    expect(usedUpLine()?.textContent).toMatch(/^More are available (tomorrow )?at /);
+    expect(usedUpLine()?.textContent).toContain(`at ${time}.`);
+    expect(usedUpLine()?.textContent).toContain("Connect your own AI to send it now.");
+    expect(container.textContent).not.toContain("\u2014");
+    // One way forward: the person's own AI. No dead free-tier button.
+    expect(buttons()).toEqual(["Connect your own AI"]);
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="ai-gate-connect-ai"]')?.click();
+    });
+    expect(onConnectAi).toHaveBeenCalledTimes(1);
+    expect(onUseManagedAi).not.toHaveBeenCalled();
+
+    // An older controller sends no time.
+    await render({ ...usedUp, nextAvailableAt: undefined });
+    expect(usedUpLine()?.textContent).toBe(
+      "More are available later. Connect your own AI to send it now.",
+    );
+
+    // Hosted AI is off on this controller: nothing was used up.
+    await render({ ...usedUp, enabled: false });
+    expect(container.textContent).toContain("Connect AI to send this. Your message is kept.");
+    expect(usedUpLine()).toBeNull();
+    expect(buttons()).toEqual(["Connect AI"]);
+
+    // Paused with prompts left is not a used-up allowance either.
+    await render({ ...managedAiFixture({ remainingPrompts: 7 }), available: false });
+    expect(container.textContent).toContain("Connect AI to send this. Your message is kept.");
+    expect(usedUpLine()).toBeNull();
+  });
+
   it("offers the teammates caption below the actions only when the space has teammates", async () => {
     const onChatWithoutAi = vi.fn();
     await act(async () => {
@@ -614,6 +691,83 @@ describe("AiCredentialsStatusBubble", () => {
     );
 
     await clickButton("I’ve enabled it \u2014 get a code");
+    expect(mocks.beginDeviceAuth).toHaveBeenCalledWith({ provider: "codex" });
+  });
+
+  it("offers no code when ChatGPT device-code login is off", async () => {
+    seedOpenAiAuthStep();
+    const onStashDraft = vi.fn();
+    const onConnectDesktop = vi.fn();
+    window.instafyDesktop = {
+      codexAuthJsonStatus: vi.fn().mockResolvedValue({ exists: true }),
+      connectDefaultCodexAuthJson: vi.fn(),
+    } as Partial<typeof window.instafyDesktop> as typeof window.instafyDesktop;
+    // The controller's answer to OpenAI's 403 while polling.
+    const refusal =
+      "ChatGPT device-code login is not enabled. Enable it in ChatGPT Settings → Security, or ask your workspace admin to allow it in workspace permissions, then generate a new code.";
+    mocks.deviceAuthError = refusal;
+    mocks.deviceAuthSession = {
+      sessionId: "session-refused",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-EFGH",
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      pollIntervalSeconds: 5,
+      status: "failed",
+      error: refusal,
+    };
+
+    await act(async () => {
+      root.render(
+        <AiCredentialsStatusBubble
+          state="missing"
+          intent="connect"
+          storageKey={WIZARD_KEY}
+          isBusy={false}
+          canUseDesktopConnect
+          onStashDraft={onStashDraft}
+          onConnectDesktop={onConnectDesktop}
+          onUploadAuthJson={() => undefined}
+          onSaveApiKey={async () => ({ success: true })}
+        />,
+      );
+    });
+    const clickButton = async (label: string) => {
+      const button = Array.from(container.querySelectorAll("button")).find(
+        (candidate) => candidate.textContent?.trim() === label,
+      );
+      expect(button).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => {
+        button?.click();
+        await Promise.resolve();
+      });
+    };
+    await clickButton("ChatGPT login (Plus/Team)");
+
+    const notice = container.querySelector('[data-testid="chat-ai-device-code-disabled"]');
+    expect(notice).toBeInstanceOf(HTMLElement);
+    expect(notice?.querySelector('[role="alert"]')?.textContent).toContain(
+      "turn on device-code authorization",
+    );
+    expect(notice?.textContent).toContain("Settings, then Security");
+    // The refused session's code, its copy button and the login page are gone,
+    // and the raw refusal is not repeated above the card.
+    expect(container.textContent).not.toContain("ABCD-EFGH");
+    for (const label of ["Copy code", "Open login", "Copy link", "Cancel login"]) {
+      expect(container.textContent).not.toContain(label);
+    }
+    expect(container.textContent).not.toContain("generate a new code");
+    expect(container.textContent).not.toContain("\u2014");
+
+    // The local Codex login stays on offer beside it.
+    await clickButton("Use local Codex login");
+    expect(onConnectDesktop).toHaveBeenCalledTimes(1);
+
+    mocks.resetDeviceAuth.mockClear();
+    await clickButton("Back");
+    expect(mocks.resetDeviceAuth).toHaveBeenCalledTimes(1);
+    expect(mocks.beginDeviceAuth).not.toHaveBeenCalled();
+
+    await clickButton("Try again");
     expect(mocks.beginDeviceAuth).toHaveBeenCalledWith({ provider: "codex" });
   });
 

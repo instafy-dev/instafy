@@ -321,6 +321,12 @@ const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
 ));
+/// Earlier bundled copies of the link-only list a scaffold may replace. A copy a space edited is kept: readers
+/// enforce the bundled list plus what that copy adds.
+const LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES: &[&str] = &[
+    // From before it listed the translators, caches and archives that serve copies of other sites.
+    include_str!("legacy/web-research-link-only-v1.json"),
+];
 const SKILL_READING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-reading/SKILL.md"
@@ -749,7 +755,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         ),
         (
             &web_research_link_only_path,
-            &[],
+            LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES,
             WEB_RESEARCH_LINK_ONLY_TEMPLATE,
         ),
     ] {

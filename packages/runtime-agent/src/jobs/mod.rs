@@ -62,6 +62,8 @@ mod isolated_worker;
 mod isolated_worker_tests;
 mod isolated_workspace;
 mod learn;
+/// Where a space keeps its copy of the web-research skill's link-only list.
+pub(crate) use learn::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH;
 mod mcp;
 #[cfg(test)]
 mod preview_routing_tests;

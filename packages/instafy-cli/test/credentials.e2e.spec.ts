@@ -45,6 +45,8 @@ function seedCredentials(): MockCredential[] {
       id: ACTIVE_SECOND_ID,
       kind: "codex_auth_json",
       metadata: { provider: "openai", default_model: "gpt-5-codex" },
+      // What the controller says its jobs run, raised from the stored id.
+      defaultModel: "gpt-6.1-sol",
       lastUsedAt: null,
     }),
     credentialPayload({
@@ -242,7 +244,9 @@ describe("credentials cli", () => {
       expect(human.stdout).toContain("1 revoked hidden (use --all to show).");
       expect(human.stdout).toContain("openai_api_key");
       expect(human.stdout).toContain("deepseek");
-      expect(human.stdout).toContain("gpt-5-codex");
+      // The model a credential runs, not the stale id it was saved with.
+      expect(human.stdout).toContain("gpt-6.1-sol");
+      expect(human.stdout).not.toContain("gpt-5-codex");
       expect(human.stdout).toContain("work key");
       // Never echo unknown metadata or anything secret-shaped.
       expect(human.stdout).not.toContain("sk-should-never-print");
@@ -290,6 +294,9 @@ describe("credentials cli", () => {
         isDefault: true,
         revokedAt: null,
       });
+      // The controller's defaultModel wins over the stored id; without one (an
+      // older controller, as for the record above) the stored id is shown.
+      expect(records[1]).toMatchObject({ id: ACTIVE_SECOND_ID, defaultModel: "gpt-6.1-sol" });
       expect(json.stdout).not.toContain("sk-should-never-print");
 
       const jsonAll = await execCli(["credentials", "list", "--json", "--all", ...args]);

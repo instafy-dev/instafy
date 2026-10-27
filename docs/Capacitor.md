@@ -145,13 +145,30 @@ the repository or frontend environment.
 
 ## Auth note (Supabase redirects)
 
-Native builds use a deep link callback (`instafy://auth`) so OAuth (GitHub) can return to the app
-instead of leaving you in Safari/Chrome. The callback URL is defined in
-`packages/frontend/src/auth/nativeAuth.ts`.
+Native builds use a deep link callback (`instafy://auth`) so OAuth (GitHub and Google) can return
+to the app instead of leaving you in Safari/Chrome. The callback URL is defined in
+`packages/frontend/src/auth/nativeAuth.ts`. Both providers open in the system browser sheet
+(SFSafariViewController on iOS, Custom Tabs on Android), never in an embedded web view, which
+Google refuses.
 
 To make this work end-to-end:
 - Ensure `instafy://auth` is allowlisted in Supabase Auth “Redirect URLs” (local dev is in `supabase/supabase/config.toml`).
 - Ensure the native projects register the `instafy` URL scheme (iOS `Info.plist`, Android `AndroidManifest.xml`).
+
+The sign-in screen shows **Continue with Google** only when the web bundle was built with
+`VITE_INSTAFY_ENABLE_GOOGLE_AUTH=1`. The public mobile lanes (the OTA web layer, the iOS TestFlight
+shell and the Android Play shell) set it exactly as the hosted web release does, from the
+`VITE_INSTAFY_ENABLE_GOOGLE_AUTH` repository variable with a default of `1`. Set the variable to
+`0` to hide the button in those builds. A change reaches phones in two steps. An installed app
+stages a new OTA bundle in the background and runs it from its next cold launch, never in the
+session that downloaded it. A fresh install shows its first sign-in screen from the bundle embedded
+in its TestFlight or Play build, so first-run onboarding changes only with the next native release.
+`scripts/check-public-release-workflows.test.mjs` fails if a public build of the shipped web
+bundle stops setting the flag this way.
+
+Signed-out sign-in attempts report `auth.login.<provider>.<event>` telemetry without a bearer
+token. The controller accepts those kinds only for the providers the login screen offers (GitHub
+and Google) and the attempt events listed in `packages/runtime-controller/src/telemetry.rs`.
 
 ## Push notifications (iOS)
 

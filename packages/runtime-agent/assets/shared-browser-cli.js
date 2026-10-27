@@ -10,9 +10,13 @@ const pageCapture = globalThis.__instafyBrowserPageCapture;
 // does; the Desktop Personal Browser runs the same rules.
 const formSubmission = globalThis.__instafyBrowserFormSubmission;
 // The web-research skill's link-only list, embedded by the runtime agent ahead
-// of this script. Octo never opens, reads or acts on a site on it, in any tab:
-// its own tabs and the page the person chose alike.
-const LINK_ONLY_SITES = linkOnlySitesFrom(globalThis.__instafyLinkOnlySites);
+// of this script, plus what the space's own copy adds. Octo never opens, reads
+// or acts on a site on it, nor on a translator's, cache's or archive's copy of
+// one, in any tab: its own tabs and the page the person chose alike. Matching
+// is @instafy/browser-action-policy's linkOnly.js, embedded ahead of this
+// script too and shared with `instafy web read` and the Personal Browser.
+const LINK_ONLY = linkOnlyListForRun();
+const LINK_ONLY_SITES = LINK_ONLY.list;
 if (
   !redaction || typeof redaction.redactPageObservation !== "function" ||
   !actionPolicy || typeof actionPolicy.classifyStep !== "function" ||
@@ -142,56 +146,65 @@ function tabField() {
   return inAgentTab() ? { tabId: activePageId, tabLabel: tabName(activePageId) } : {};
 }
 
-// Each site's host patterns: "example.com" covers that host and its
-// subdomains; "example.*" covers the label followed by one or two short
-// public-suffix labels (example.de, www.example.co.uk). Null when the list is
+// The list this run enforces: the bundled copy and the sites and wrappers the
+// space's copy (INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE) adds. A space's
+// copy can only add; one that does not load is left out with a warning and
+// the bundled list still applies. Null when the bundled list or the matcher is
 // missing or malformed, which keeps Octo from opening, reading or acting on
 // anything in any tab.
-function linkOnlySitesFrom(data) {
-  if (!data || data.schema !== "instafy.link-only-sites@1" || !Array.isArray(data.sites)) {
-    return null;
+function linkOnlyListForRun() {
+  const api = globalThis.__instafyLinkOnly;
+  if (!api || typeof api.linkOnlyListFrom !== "function" || typeof api.linkOnlyMatch !== "function") {
+    return { api: null, list: null, warnings: [] };
   }
-  const label = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
-  const sites = [];
-  for (const site of data.sites) {
-    const patterns = Array.isArray(site?.match) ? site.match : Array.isArray(site?.domains) ? site.domains : [];
-    const matchers = [];
-    for (const raw of patterns) {
-      const pattern = String(raw || "").trim().toLowerCase().replace(/\.$/, "").replace(/^\*\./, "");
-      if (!new RegExp(`^${label}(?:\\.${label})*(?:\\.\\*)?$`).test(pattern)) continue;
-      // Escape every regex metacharacter, not only dots: the check above
-      // already admits only labels and dots, this keeps it safe on its own.
-      const escaped = pattern.replace(/\.\*$/, "").replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-      matchers.push(pattern.endsWith(".*")
-        ? new RegExp(`(?:^|\\.)${escaped}\\.[a-z]{2,3}(?:\\.[a-z]{2,3})?$`)
-        : new RegExp(`(?:^|\\.)${escaped}$`));
-    }
-    if (matchers.length) {
-      sites.push({ name: String(site.name || patterns[0]).slice(0, 80), matchers });
-    }
-  }
-  return sites.length ? sites : null;
+  const file = String(process.env.INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE || "").trim();
+  const copy = file && path.isAbsolute(file) ? readSpaceLinkOnlyCopy(file) : {};
+  const additions = "data" in copy ? [{ data: copy.data, source: "the space's link-only-sites.json" }] : [];
+  const merged = api.linkOnlyListFrom(globalThis.__instafyLinkOnlySites, additions);
+  return { api, list: merged.list, warnings: [...(copy.warning ? [copy.warning] : []), ...merged.warnings] };
 }
 
-// The link-only site an address is on, or null.
-function linkOnlySiteOf(rawUrl) {
-  let host;
+// The space's copy is read as data only: a regular file (never a link or a
+// pipe) of at most 256 KiB holding JSON. Nothing of its text is repeated.
+function readSpaceLinkOnlyCopy(file) {
+  const ignored = (why) => ({ warning: `the space's link-only-sites.json ${why} and was ignored; the bundled list still applies` });
+  let fd;
   try {
-    host = new URL(String(rawUrl)).hostname.toLowerCase();
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  } catch (error) {
+    return error && error.code === "ENOENT" ? {} : ignored("could not be read");
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > 256 * 1024) return ignored("is not a file of at most 256 KiB");
+    return { data: JSON.parse(fs.readFileSync(fd, "utf8")) };
   } catch (_) {
-    return null;
+    return ignored("is not valid JSON");
+  } finally {
+    fs.closeSync(fd);
   }
-  // Every trailing dot goes ("booking.com.." names the same site to a
-  // lenient resolver), with a loop rather than /\.+$/, which backtracks on
-  // a long run of dots.
-  let end = host.length;
-  while (end > 0 && host.charCodeAt(end - 1) === 0x2e) end -= 1;
-  host = host.slice(0, end);
-  if (!host) return null;
-  for (const site of LINK_ONLY_SITES || []) {
-    if (site.matchers.some((matcher) => matcher.test(host))) return site.name;
-  }
-  return null;
+}
+
+// The link-only site an address is on, or null. A wrapper's copy is named as
+// the site with the wrapper: "Booking.com (its copy on the Wayback Machine)".
+function linkOnlySiteOf(rawUrl) {
+  if (LINK_ONLY_SITES === null) return null;
+  const hit = LINK_ONLY.api.linkOnlyMatch(LINK_ONLY_SITES, String(rawUrl || ""));
+  if (!hit) return null;
+  return hit.via.length ? `${hit.site} (its copy on ${hit.via.join(", then ")})` : hit.site;
+}
+
+// The link-only site a document's answer says it is a copy of, or null: an
+// archive's Memento `Link: <…>; rel="original"` header names the page it
+// copies even at a short address (archive.ph/AbCdE) that names no site.
+// `headers` are CDP's [{ name, value }].
+function linkOnlyCopyOf(headers, rawUrl) {
+  if (LINK_ONLY_SITES === null) return null;
+  const link = (Array.isArray(headers) ? headers : [])
+    .filter((header) => String(header?.name || "").toLowerCase() === "link")
+    .map((header) => String(header?.value || ""));
+  const hit = link.length ? LINK_ONLY.api.linkOnlyCopyOf(LINK_ONLY_SITES, link, String(rawUrl || "")) : null;
+  return hit ? `${hit.site} (a page that says it is a copy of it)` : null;
 }
 
 const LIST_UNAVAILABLE_MESSAGE =
@@ -2722,14 +2735,23 @@ async function guardStepDocuments(page) {
     if (typeof mainFrameId !== "string" || !mainFrameId) {
       throw new Error("The tab's main frame is unknown");
     }
+    // Each document request pauses before it leaves, and again when its answer
+    // arrives (CDP marks that stage with a status or an error), before the
+    // page renders: an answer may say it is a copy of a link-only site.
     session.on("Fetch.requestPaused", (event) => {
       const url = event?.request?.url || "";
       const ownDocument = typeof event?.frameId !== "string" || event.frameId === mainFrameId;
-      const site = !ownDocument ? null : LINK_ONLY_SITES === null ? "an unknown site" : linkOnlySiteOf(url);
-      // A form the tab posts to a site the step may not send to. A redirect
-      // the server answers with is the server's own, so only the browser's
-      // first request counts.
-      const strayPost = !site && ownDocument && postOrigins !== null &&
+      const answered = event?.responseStatusCode !== undefined || event?.responseErrorReason !== undefined;
+      const site = !ownDocument
+        ? null
+        : LINK_ONLY_SITES === null
+          ? "an unknown site"
+          : linkOnlySiteOf(url) || (answered ? linkOnlyCopyOf(event.responseHeaders, url) : null);
+      // A form the tab posts to a site the step may not send to, judged when
+      // the request leaves: an answer belongs to a request already let
+      // through. A redirect the server answers with is the server's own, so
+      // only the browser's first request counts.
+      const strayPost = !site && ownDocument && !answered && postOrigins !== null &&
         String(event?.request?.method || "").toUpperCase() === "POST" &&
         !event?.redirectedRequestId &&
         !postOrigins.has(approvalProtocol.normalizedOrigin(url));
@@ -2741,7 +2763,10 @@ async function guardStepDocuments(page) {
       answer.catch(() => {});
     });
     await session.send("Fetch.enable", {
-      patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }],
+      patterns: [
+        { urlPattern: "*", resourceType: "Document", requestStage: "Request" },
+        { urlPattern: "*", resourceType: "Document", requestStage: "Response" },
+      ],
     });
     // A new document in the tab ends the limit on where forms may be sent:
     // the page the step acted on is gone.
@@ -2829,6 +2854,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       pageCount: browser.contexts().flatMap((context) => context.pages()).length,
       agentTabCount: tabs.registry.tabs.length,
       ...tabField(),
+      // A space's copy of the link-only list that was left out, so Octo can tell the person.
+      ...(LINK_ONLY.warnings.length ? { linkOnlyListWarnings: LINK_ONLY.warnings } : {}),
     };
     if (isBlankPage(page)) {
       return blankPageResult(page, shared);

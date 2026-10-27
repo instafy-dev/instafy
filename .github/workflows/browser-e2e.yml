@@ -334,7 +334,14 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
       - name: Install locked Chromium and operating-system dependencies
+        if: runner.environment == 'self-hosted'
         run: pnpm --filter @instafy/frontend exec playwright install --with-deps chromium
+      - name: Install locked Chromium on the provisioned hosted image
+        if: runner.environment == 'github-hosted'
+        timeout-minutes: 10
+        run: |
+          pnpm --filter @instafy/frontend exec playwright install chromium
+          node scripts/ensure-hosted-chromium-host.mjs install
       - name: Bind the launcher to the locked test Chromium
         working-directory: packages/frontend
         run: |
@@ -349,10 +356,22 @@ jobs:
         run: |
           set -euo pipefail
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler
-          for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler; do
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler
+          for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
+          # Hosted images put a newer CMake first on PATH; only hosts without one fetch Ubuntu's.
+          if ! command -v cmake >/dev/null; then
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends cmake
+            [[ "$(dpkg-query --show --showformat='${Status}' cmake)" == 'install ok installed' ]]
+          fi
+          command -v cmake
+          cmake_version="$(cmake --version | sed -n '1s/^cmake version //p')"
+          IFS=. read -r cmake_major cmake_minor _ <<<"$cmake_version"
+          # Only plain numbers reach (( )), which would evaluate any other text as an expression.
+          [[ "$cmake_major" =~ ^[0-9]+$ && "$cmake_minor" =~ ^[0-9]+$ ]] && (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) )) \
+            || { echo "::error::CMake '${cmake_version}' at $(command -v cmake) is older than 3.28 or unparsable."; exit 1; }
+          ld.lld --version
           pkg-config --exists libcap openssl
       - name: Restore compiler cache without saving
         if: runner.environment == 'self-hosted'
@@ -383,7 +402,7 @@ jobs:
         run: |
           pnpm supabase:up
       - name: Test fixture safety guards
-        run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs
+        run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs scripts/ensure-hosted-chromium-host.test.mjs
       - name: Exercise real Chromium and controller profile lifecycle
         env:
           INSTAFY_SHARED_BROWSER_COMPILER_PROXY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
@@ -488,7 +507,14 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
       - name: Install locked Chromium and operating-system dependencies
+        if: runner.environment == 'self-hosted'
         run: pnpm --filter @instafy/frontend exec playwright install --with-deps chromium
+      - name: Install locked Chromium on the provisioned hosted image
+        if: runner.environment == 'github-hosted'
+        timeout-minutes: 10
+        run: |
+          pnpm --filter @instafy/frontend exec playwright install chromium
+          node scripts/ensure-hosted-chromium-host.mjs install
       - name: Bind the launcher to the locked test Chromium
         working-directory: packages/frontend
         run: |
@@ -503,10 +529,22 @@ jobs:
         run: |
           set -euo pipefail
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler
-          for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler; do
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler
+          for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
+          # Hosted images put a newer CMake first on PATH; only hosts without one fetch Ubuntu's.
+          if ! command -v cmake >/dev/null; then
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends cmake
+            [[ "$(dpkg-query --show --showformat='${Status}' cmake)" == 'install ok installed' ]]
+          fi
+          command -v cmake
+          cmake_version="$(cmake --version | sed -n '1s/^cmake version //p')"
+          IFS=. read -r cmake_major cmake_minor _ <<<"$cmake_version"
+          # Only plain numbers reach (( )), which would evaluate any other text as an expression.
+          [[ "$cmake_major" =~ ^[0-9]+$ && "$cmake_minor" =~ ^[0-9]+$ ]] && (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) )) \
+            || { echo "::error::CMake '${cmake_version}' at $(command -v cmake) is older than 3.28 or unparsable."; exit 1; }
+          ld.lld --version
           pkg-config --exists libcap openssl
       - name: Restore compiler cache without saving
         if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
@@ -537,7 +575,7 @@ jobs:
         run: |
           pnpm supabase:up
       - name: Test fixture safety guards
-        run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs
+        run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs scripts/ensure-hosted-chromium-host.test.mjs
       - name: Exercise signed-in Studio launch, input, snapshot restore and clear
         env:
           INSTAFY_SHARED_BROWSER_COMPILER_PROXY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}

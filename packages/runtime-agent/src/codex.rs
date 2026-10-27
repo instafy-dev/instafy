@@ -88,6 +88,7 @@ use crate::shared_browser::{
     CDP_URL_ENV as SHARED_BROWSER_CDP_URL_ENV, MCP_COMMAND as SHARED_BROWSER_MCP_COMMAND,
     PAGE_ID_ENV as SHARED_BROWSER_PAGE_ID_ENV,
     PLAYWRIGHT_MODULE_PATH_ENV as SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
+    SPACE_LINK_ONLY_FILE_ENV as SHARED_BROWSER_SPACE_LINK_ONLY_FILE_ENV,
     TRUSTED_NODE_MODULES_ROOT_ENV as SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
 };
 use crate::task_usage::{UsageAttempt, UsageCall, UsageCounts, UsageOutcome};
@@ -3659,11 +3660,21 @@ fn scope_configured_mcp_server_environment(servers: &mut HashMap<String, McpServ
 /// Node among them) and the session flag the relay checks.
 fn shared_browser_mcp_environment(
     page_id: String,
+    workspace: &Path,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<HashMap<String, String>> {
     let mut environment =
         HashMap::from([(SHARED_BROWSER_SESSION_ENV.to_string(), "1".to_string())]);
     environment.insert(SHARED_BROWSER_PAGE_ID_ENV.to_string(), page_id);
+    // The space's copy of the web-research skill's link-only list: the
+    // controller adds what it lists to the bundled list (it never removes).
+    environment.insert(
+        SHARED_BROWSER_SPACE_LINK_ONLY_FILE_ENV.to_string(),
+        workspace
+            .join(crate::jobs::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH)
+            .to_string_lossy()
+            .into_owned(),
+    );
     for key in [
         SHARED_BROWSER_ACTIONS_FILE_ENV,
         SHARED_BROWSER_AGENT_CONTROL_FILE_ENV,
@@ -3764,7 +3775,7 @@ fn install_browser_mcp_servers(
             .parent()
             .context("runtime-agent executable has no trusted parent directory")?
             .to_path_buf();
-        let mut environment = shared_browser_mcp_environment(page_id, optional_env)?;
+        let mut environment = shared_browser_mcp_environment(page_id, workspace, optional_env)?;
         let process_groups = crate::mcp_process_groups::McpProcessGroupRegistry::create()?;
         environment.insert(
             crate::mcp_process_groups::REGISTRY_ENV.to_string(),
@@ -6569,12 +6580,18 @@ mod tests {
             ("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON", "turn-secret"),
             ("RUNTIME_ACCESS_TOKEN", "runtime-secret"),
         ]);
-        let environment = shared_browser_mcp_environment("page-1".to_string(), |key| {
+        let workspace = Path::new("/workspace/space");
+        let environment = shared_browser_mcp_environment("page-1".to_string(), workspace, |key| {
             lazy_environment.get(key).map(|value| value.to_string())
         })
         .expect("relay environment");
         assert_eq!(environment[SHARED_BROWSER_SESSION_ENV], "1");
         assert_eq!(environment[SHARED_BROWSER_PAGE_ID_ENV], "page-1");
+        // The controller reads the space's own copy of the link-only list.
+        assert_eq!(
+            environment[SHARED_BROWSER_SPACE_LINK_ONLY_FILE_ENV],
+            "/workspace/space/.agents/skills/instafy-web-research/references/link-only-sites.json"
+        );
         assert_eq!(environment[SHARED_BROWSER_CDP_PORT_ENV], "19223");
         assert_eq!(
             environment[SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV],
@@ -6592,7 +6609,7 @@ mod tests {
         assert!(!environment.contains_key("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"));
         assert!(!environment.contains_key("RUNTIME_ACCESS_TOKEN"));
 
-        let missing = shared_browser_mcp_environment("page-1".to_string(), |_| None);
+        let missing = shared_browser_mcp_environment("page-1".to_string(), workspace, |_| None);
         assert!(
             missing.is_err(),
             "the trusted Playwright paths are required"
@@ -7188,18 +7205,20 @@ mod tests {
 
     #[test]
     fn normalize_runtime_codex_model_id_migrates_retired_codex_slugs() {
-        assert_eq!(
-            normalize_runtime_codex_model_id("gpt-5-codex"),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.2"), "gpt-5.6-sol");
-        assert_eq!(
-            normalize_runtime_codex_model_id("gpt-5.3-codex"),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.3"), "gpt-5.6-sol");
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.4"), "gpt-5.6-sol");
-        assert_eq!(normalize_runtime_codex_model_id("  "), "gpt-5.6-sol");
+        for retired in [
+            "gpt-5-codex",
+            "gpt-5.2",
+            "gpt-5.3-codex",
+            "gpt-5.3",
+            "gpt-5.4",
+            "  ",
+        ] {
+            assert_eq!(
+                normalize_runtime_codex_model_id(retired),
+                DEFAULT_CODEX_MODEL,
+                "{retired:?}"
+            );
+        }
     }
 
     #[test]

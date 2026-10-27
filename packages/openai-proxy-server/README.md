@@ -184,7 +184,7 @@ request that lists `tools` sends them with its `tool_choice` (`auto` when absent
 tool control, and a ChatGPT login gets the proxy's default tools (`shell`, `apply_patch`,
 `update_plan` and `view_image`, which the `CODEX_*` tool flags can change) with
 `tool_choice: "auto"` and `parallel_tool_calls: false`. Codex sends the tools of a Responses Lite
-model, such as gpt-6-luna or gpt-5.6-sol, in an `additional_tools` input item and omits `tools`,
+model, such as gpt-6-luna or gpt-6-sol, in an `additional_tools` input item and omits `tools`,
 so the request's own `tool_choice` is not forwarded on either path. The OpenAI API does get such a
 request's own `parallel_tool_calls` when the request sends a boolean, as codex does (`false` for
 these models), since the API's own default is `true`; a request that sends none, or a value that

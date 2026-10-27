@@ -30,6 +30,7 @@ const DNS = {
   "docs.example.test": ["93.184.216.35"],
   "news.example.test": ["93.184.216.36"],
   "shop.example.test": ["93.184.216.37"],
+  "web.archive.org": ["93.184.216.38"],
   "rebind.example.test": ["10.0.0.5"],
   // Public when Desktop checks it, private when Chromium connects (DNS rebinding).
   "rebound.example.test": ["93.184.216.40"],
@@ -644,6 +645,65 @@ test("in every tab the agent drives, each page, frame and redirect hop to a link
   assert.equal(started, true);
   assert.equal(dialogs.length, asked + 1, "only the new tab's own site asked");
   await rejectsWith(host.handleControlOperation("snapshot", {}), "link_only_site");
+});
+
+test("a translator's, cache's or archive's copy of a link-only site is refused like the site, on every route, before any prompt or lookup", async () => {
+  const { host, views, dialogs, personView } = fixture();
+  await resume(host, "ask");
+  await assert.rejects(host.handleControlOperation("open_tab", { url: "https://www-booking-com.translate.goog/hotel?_x_tr_sl=auto" }), (error) => {
+    assert.equal(error.code, "link_only_site");
+    assert.match(error.message, /^Booking\.com is link-only/);
+    assert.match(error.message, /its copy on Google Translate's page proxy/);
+    return true;
+  });
+  await rejectsWith(host.handleControlOperation("navigate", { url: "https://web.archive.org/web/2024/https://www.amazon.de/dp/1" }), "link_only_site");
+  assert.equal(views.length, 1, "no tab was created");
+  assert.deepEqual(personView.webContents.loads, []);
+  assert.equal(dialogs.length, 0, "nothing asked");
+  assert.deepEqual(lookups, [], "no name was resolved");
+  // A link to one, and a page load or redirect hop that reaches one.
+  personView.webContents.linkHref = "https://archive.ph/newest/https://www.airbnb.com/rooms/1";
+  await host.handleControlOperation("snapshot", {});
+  await rejectsWith(host.handleControlOperation("click", { index: 0 }), "link_only_site");
+  assert.equal(personView.webContents.clicks ?? 0, 0);
+  assert.deepEqual(
+    plain(await beforeRequest(personView.webContents, { resourceType: "mainFrame", url: "https://webcache.googleusercontent.com/search?q=cache:www.tripadvisor.com/x" })),
+    { cancel: true },
+  );
+  // The wrapper's copy of another site is an ordinary page.
+  await host.handleControlOperation("open_tab", { url: "https://web.archive.org/web/2024/https://docs.example.test/" });
+  assert.deepEqual(views[1].webContents.loads, ["https://web.archive.org/web/2024/https://docs.example.test/"]);
+});
+
+test("a page that says it is a copy of a link-only site (Memento rel=original) is stopped when its answer arrives, in every tab the agent drives", async () => {
+  const { host, views, personView } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  const copyOf = (original, name = "Link") => ({ [name]: [`<${original}>; rel="original", <https://archive.ph/timegate/${original}>; rel="timegate"`] });
+  // A short archive address names no site; its answer says which page it copies.
+  for (const contents of [views[1].webContents, personView.webContents]) {
+    for (const resourceType of ["mainFrame", "subFrame"]) {
+      const answer = await headersReceived(contents, {
+        resourceType,
+        url: "https://archive.ph/AbCdE",
+        ip: "93.184.216.36",
+        responseHeaders: copyOf("https://www.booking.com/hotel/x.html", resourceType === "mainFrame" ? "Link" : "link"),
+      });
+      assert.deepEqual(plain(answer), { cancel: true }, resourceType);
+    }
+    // A copy of another site, or an answer without the header, is an ordinary page.
+    assert.deepEqual(plain(await headersReceived(contents, { resourceType: "mainFrame", url: "https://archive.ph/FgHiJ", ip: "93.184.216.36", responseHeaders: copyOf("https://docs.example.test/") })), {});
+    assert.deepEqual(plain(await headersReceived(contents, { resourceType: "mainFrame", url: "https://archive.ph/FgHiJ", ip: "93.184.216.36", responseHeaders: { "Content-Type": ["text/html"] } })), {});
+  }
+  await assert.rejects(host.handleControlOperation("snapshot", {}), (error) => {
+    assert.equal(error.code, "link_only_site");
+    assert.match(error.message, /Booking\.com is link-only/);
+    assert.match(error.message, /This page says it is a copy of it\. Desktop stopped the page before it loaded/);
+    return true;
+  });
+  // The person's own browsing, once paused, is untouched.
+  host.pauseAgentControl();
+  assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType: "mainFrame", url: "https://archive.ph/AbCdE", ip: "93.184.216.36", responseHeaders: copyOf("https://www.booking.com/") })), {});
 });
 
 test("the person's own browsing is unchanged: once paused, link-only sites and private addresses load as before", async () => {

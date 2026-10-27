@@ -89,6 +89,10 @@ function asWebUrl(url: string): string {
  *   is the proxy's, which resolved the name itself, so again only that first
  *   check applies. A request no tab makes (a service worker's own fetch) is
  *   not attributed to a tab and not checked.
+ * - When a page or frame answer arrives that says it is a copy of a
+ *   link-only site (an archive's Memento `Link: <…>; rel="original"`, which
+ *   names the archived page even at a short address such as
+ *   archive.ph/AbCdE), it is cancelled before the page renders.
  * - While the person has control, a page the agent opened (or one it opened
  *   in turn) is only watched: its requests go on, and one that reaches a
  *   private address is reported, so the agent does not read that page later.
@@ -167,6 +171,13 @@ export function installPersonalBrowserRequestGuard<Tab>(session: Session, option
           () => options.onWatched?.(watched, { resourceType: details.resourceType, url: details.url, phase: "response", privateAddress: true }),
         );
       }
+      return;
+    }
+    const pageType = pageResourceType(details.resourceType);
+    const copy = pageType ? options.linkOnly.copyRefusal(details.responseHeaders, details.url) : null;
+    if (pageType && copy) {
+      options.onStopped(tab, pageType, { code: copy.code, message: personalBrowserLinkOnlyMessage(copy, STOPPED) });
+      callback({ cancel: true });
       return;
     }
     void personalBrowserConnectedAddressAllowed(ip, isProxy(details.url)).then(

@@ -1786,11 +1786,13 @@ jobs:
           key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-agent-${{ hashFiles('packages/*/Cargo.lock') }}
 
       - name: Build the Codex code-mode host
-        # Code-mode-only models (gpt-6-luna, gpt-5.6-sol) run every tool in
+        # Code-mode-only models (gpt-6-luna, gpt-6-sol) run every tool in
         # codex-code-mode-host, which links Codex's sandboxed V8 build (fetched and
         # checked against the checksums pinned in the codex checkout). It lands in
         # the shared target directory, where proxy_retry_budget stages it beside
-        # its test binary; the suite then runs once per model the runtime offers.
+        # its test binary; the suite then runs once per model the runtime offers:
+        # gpt-6-luna by default, the own-AI default (own-ai-default resolves it from
+        # runtime-contracts) and gpt-5.5 for the classic tool path.
         run: |
           eval "$(scripts/fetch-rusty-v8.sh "$(rustc -vV | sed -n 's/^host: //p')" "$RUNNER_TEMP/rusty-v8" | sed 's/^/export /')"
           cargo build --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host -p runtime-agent -p codex-code-mode-host
@@ -1803,7 +1805,7 @@ jobs:
           fi
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --no-run
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client --test proxy_retry_budget -- --test-threads=1
-          INSTAFY_TEST_CODEX_MODEL=gpt-5.6-sol cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_retry_budget -- --test-threads=1
+          INSTAFY_TEST_CODEX_MODEL=own-ai-default cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_retry_budget -- --test-threads=1
           INSTAFY_TEST_CODEX_MODEL=gpt-5.5 cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_retry_budget -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration codex_read_reference_ -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration native_compaction:: -- --test-threads=1

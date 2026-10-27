@@ -1,8 +1,10 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import { assertMainOnlySave, assertNoPullRequestCacheSave, cacheStepRuns, CACHE_REFS, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
-import { withoutSharedPrerequisiteTimeout } from "./lib/sharedBrowserPrerequisitesTestBaseline.mjs";
+import { HOSTED_CHROMIUM_STEP, PATH_RESOLVED_CMAKE, withoutSharedPrerequisiteTimeout } from "./lib/sharedBrowserPrerequisitesTestBaseline.mjs";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import test from "node:test";
@@ -23,6 +25,12 @@ const jobs = [
   { key: "shared-studio", label: "public-shared-browser-studio", name: "Shared Browser Studio journey", minutes: 30, script: "shared-browser-studio-e2e.mjs" },
 ];
 const section = (key, text = workflow) => text.split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
+const chromiumStep = "      - name: Install locked Chromium and operating-system dependencies\n";
+const selfHostedIf = "        if: runner.environment == 'self-hosted'\n";
+const withDeps = "        run: pnpm --filter @instafy/frontend exec playwright install --with-deps chromium\n";
+const bindStep = "      - name: Bind the launcher to the locked test Chromium\n";
+const fixtureGuards = "scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs";
+const hostedGuard = "scripts/ensure-hosted-chromium-host.test.mjs";
 const compilerSegmentTimeout = '        env:\n          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"\n';
 const withoutCompilerSegmentTimeout = text => text.replaceAll(compilerSegmentTimeout, "");
 // Reconstruct only the removed standalone migration-image preparation for
@@ -162,10 +170,22 @@ test("only both Shared prerequisite steps allow ten minutes while network limits
     "        run: |",
     "          set -euo pipefail",
     "          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update",
-    "          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler",
-    "          for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler; do",
+    "          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler",
+    "          for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler; do",
     '            [[ "$(dpkg-query --show --showformat=\'${Status}\' "$package")" == \'install ok installed\' ]]',
     "          done",
+    "          # Hosted images put a newer CMake first on PATH; only hosts without one fetch Ubuntu's.",
+    "          if ! command -v cmake >/dev/null; then",
+    "            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends cmake",
+    '            [[ "$(dpkg-query --show --showformat=\'${Status}\' cmake)" == \'install ok installed\' ]]',
+    "          fi",
+    "          command -v cmake",
+    "          cmake_version=\"$(cmake --version | sed -n '1s/^cmake version //p')\"",
+    "          IFS=. read -r cmake_major cmake_minor _ <<<\"$cmake_version\"",
+    "          # Only plain numbers reach (( )), which would evaluate any other text as an expression.",
+    "          [[ \"$cmake_major\" =~ ^[0-9]+$ && \"$cmake_minor\" =~ ^[0-9]+$ ]] && (( cmake_major > 3 || (cmake_major == 3 && cmake_minor >= 28) )) \\",
+    "            || { echo \"::error::CMake '${cmake_version}' at $(command -v cmake) is older than 3.28 or unparsable.\"; exit 1; }",
+    "          ld.lld --version",
     "          pkg-config --exists libcap openssl",
   ].join("\n");
   for (const job of jobs.filter(job => job.script)) {
@@ -177,12 +197,150 @@ test("only both Shared prerequisite steps allow ten minutes while network limits
   assert.doesNotMatch(section("shared-profile"), /Install fixture display, database and compiler prerequisites/u);
   const previous = withoutSharedPrerequisiteTimeout("browser-e2e.yml", workflow);
   assert.equal(previous.split(`${marker}        timeout-minutes: 5\n`).length - 1, 2);
-  assert.equal(previous.replaceAll(`${marker}        timeout-minutes: 5\n`, `${marker}        timeout-minutes: 10\n`), workflow);
+  // Composite round trip: re-applying the budget, the PATH-resolved CMake and
+  // the hosted Chromium split in turn restores every current byte.
+  assert.equal(previous.replaceAll(`${marker}        timeout-minutes: 5\n`, `${marker}        timeout-minutes: 10\n`)
+    .replaceAll(PATH_RESOLVED_CMAKE[1], PATH_RESOLVED_CMAKE[0])
+    .replaceAll(`${chromiumStep}${withDeps}${bindStep}`, `${chromiumStep}${selfHostedIf}${withDeps}${HOSTED_CHROMIUM_STEP}${bindStep}`)
+    .replaceAll(`${fixtureGuards}\n`, `${fixtureGuards} ${hostedGuard}\n`), workflow);
+  const install = "            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends cmake\n";
   for (const changed of [
     workflow.replace(`${marker}        timeout-minutes: 10\n`, `${marker}        timeout-minutes: 11\n`),
     workflow.replace(marker, ""),
     workflow + `${marker}        timeout-minutes: 10\n`,
+    workflow.replace("pkg-config libssl-dev clang lld libcap-dev", "pkg-config libssl-dev clang lld cmake libcap-dev"),
+    workflow.replace("cmake_minor >= 28", "cmake_minor >= 0"),
+    workflow.replace(install, ""),
+    workflow.replace(install, install.replace(" install --yes", " install --no-upgrade --yes")),
+    workflow.replace("          ld.lld --version\n", ""),
+    workflow + PATH_RESOLVED_CMAKE[0],
   ]) assert.throws(() => withoutSharedPrerequisiteTimeout("browser-e2e.yml", changed));
+});
+test("hosted Shared children install the locked Chromium without Playwright's apt pass; self-hosted guests keep --with-deps", () => {
+  const names = ["Install locked Chromium and operating-system dependencies", "Install locked Chromium on the provisioned hosted image",
+    "Bind the launcher to the locked test Chromium", "Install fixture display, database and compiler prerequisites"];
+  const browserUi = cacheStep("browser-ui", names[0]);
+  for (const job of jobs.filter(job => job.script)) {
+    const source = section(job.key), at = names.map(name => source.indexOf(`      - name: ${name}\n`));
+    for (const name of names) assert.equal(source.split(`      - name: ${name}\n`).length - 1, 1, `${job.key}: ${name}`);
+    assert.ok(at.every((index, i) => index >= 0 && (i === 0 || index > at[i - 1])), `${job.key}: install order`);
+    const [self, hosted, bind] = names.slice(0, 3).map(name => cacheStep(job.key, name));
+    // The self-hosted command is the unchanged Browser UI step plus only its guard.
+    assert.equal(self, browserUi.replace(`\n${withDeps.trimEnd()}`, `\n${selfHostedIf}${withDeps.trimEnd()}`));
+    assert.equal(`${hosted}\n`, HOSTED_CHROMIUM_STEP);
+    assert.ok(source.includes(`${self}\n${hosted}\n${bindStep}`), job.key);
+    assert.doesNotMatch(hosted, /--with-deps|install-deps|apt-get|sudo|continue-on-error/u);
+    // Exactly one twin runs on either runner type and neither on an empty or
+    // unknown one, where the binding's executable check then fails closed.
+    for (const ref of CACHE_REFS) for (const environment of ["self-hosted", "github-hosted", "", "unknown", undefined]) {
+      assert.deepEqual([self, hosted].map(step => cacheStepRuns(step, environment, ref)),
+        [environment === "self-hosted", environment === "github-hosted"], `${job.key}: ${environment} ${ref}`);
+    }
+    assert.match(bind, /\n          test -x "\$chromium_path"\n/u);
+    assert.ok(source.includes(`run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs ${fixtureGuards} ${hostedGuard}\n`), job.key);
+  }
+  for (const key of ["personal", "browser-ui"]) assert.doesNotMatch(section(key), /ensure-hosted-chromium-host|provisioned hosted image/u, key);
+  assert.equal(workflow.split("--with-deps").length - 1, 4);
+  assert.equal(workflow.split(`${withDeps.trimEnd().split("run: ")[1]}\n`).length - 1, 4);
+  assert.equal(workflow.split("          pnpm --filter @instafy/frontend exec playwright install chromium\n").length - 1, 2);
+  assert.ok(fs.statSync(path.join(root, "scripts/ensure-hosted-chromium-host.mjs")).isFile());
+  assert.ok(fs.statSync(path.join(root, "scripts/ensure-hosted-chromium-host.test.mjs")).isFile());
+  const pair = `${chromiumStep}${selfHostedIf}${withDeps}${HOSTED_CHROMIUM_STEP}`;
+  for (const changed of [
+    workflow.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace("playwright install chromium", "playwright install --with-deps chromium")),
+    workflow.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace("        timeout-minutes: 10\n", "")),
+    workflow.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace(" install\n", " verify\n")),
+    workflow.replace(`${chromiumStep}${selfHostedIf}`, chromiumStep),
+    workflow.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace("        if: runner.environment == 'github-hosted'\n", "")),
+    workflow.replace(HOSTED_CHROMIUM_STEP, ""),
+    workflow.replace(pair, `${pair}${HOSTED_CHROMIUM_STEP}`),
+    workflow + HOSTED_CHROMIUM_STEP,
+    workflow.replace(`${fixtureGuards} ${hostedGuard}\n`, `${fixtureGuards}\n`),
+    workflow.replace(`${chromiumStep}${withDeps}`, `${chromiumStep}${selfHostedIf}${withDeps}`),
+  ]) assert.throws(() => withoutSharedPrerequisiteTimeout("browser-e2e.yml", changed));
+});
+// Actions' `shell: bash` resolves bash from PATH. The step relies on errexit
+// for failed [[ ]] tests, which bash 4.1+ provides; fail, never skip. The stubs
+// are written once and each run only links them, because a newly written
+// executable can take half a second to start the first time on macOS. A run
+// that is killed or times out throws; it never counts as the step failing.
+function prerequisiteRunner(tools, body) {
+  const probe = spawnSync("bash", ["-c", 'command -v bash; echo "${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"'], { encoding: "utf8" });
+  const [bash, version = ""] = (probe.stdout ?? "").trim().split("\n"), [major, minor] = version.split(" ").map(Number);
+  assert.ok(probe.status === 0 && (major > 4 || (major === 4 && minor >= 1)), `bash 4.1 or newer must be on PATH to run this test; found ${bash || "none"} ${version.replace(" ", ".")}`);
+  const bin = path.join(tools, "bin"), stub = (file, text) => fs.writeFileSync(file, `#!/bin/sh\n${text}\n`, { mode: 0o755 });
+  fs.mkdirSync(bin);
+  for (const tool of ["env", "sed"]) {
+    const real = ["/usr/bin", "/bin"].map(dir => path.join(dir, tool)).find(candidate => fs.existsSync(candidate));
+    fs.symlinkSync(real, path.join(bin, tool));
+  }
+  stub(path.join(bin, "sudo"), '[ "$1" = -n ] || exit 97\nshift\nexec "$@"');
+  stub(path.join(bin, "apt-get"), `printf 'DEBIAN_FRONTEND=%s apt-get %s\\n' "\${DEBIAN_FRONTEND:-}" "$*" >> "$STUB_RUN/calls.log"\n`
+    + 'case " $* " in *" install "*" cmake ") [ -z "$STUB_CMAKE_NOT_LANDED" ] || exit 0; exec /bin/ln -s "$STUB_TOOLS/cmake" "$STUB_RUN/bin/cmake";; *" install "*) exit "$STUB_APT_STATUS";; esac');
+  stub(path.join(bin, "dpkg-query"), 'case "$3" in cmake) printf \'dpkg-query %s\\n\' "$3" >> "$STUB_RUN/calls.log"; [ -e "$STUB_RUN/bin/cmake" ] || { printf \'unknown ok not-installed\'; exit 0; };; esac\n'
+    + 'case " $STUB_MISSING " in *" $3 "*) printf \'deinstall ok config-files\'; exit 0;; esac\nprintf \'install ok installed\'');
+  stub(path.join(bin, "pkg-config"), `printf 'pkg-config %s\\n' "$*" >> "$STUB_RUN/calls.log"`);
+  // Linked into a run's PATH only when that host has them.
+  stub(path.join(tools, "cmake"), "printf 'cmake version %s\\n\\nCMake suite maintained and supported by Kitware (kitware.com/cmake).\\n' \"$STUB_CMAKE_VERSION\"");
+  stub(path.join(tools, "ld.lld"), "printf 'Ubuntu LLD 18.1.3 (compatible with GNU linkers)\\n'");
+  let runs = 0;
+  return ({ cmake, cmakeLands = true, lld = true, missing = [], aptStatus = 0 }) => {
+    const run = path.join(tools, `run-${++runs}`), runBin = path.join(run, "bin"), log = path.join(run, "calls.log");
+    fs.mkdirSync(runBin, { recursive: true });
+    if (cmake !== undefined) fs.symlinkSync(path.join(tools, "cmake"), path.join(runBin, "cmake"));
+    if (lld) fs.symlinkSync(path.join(tools, "ld.lld"), path.join(runBin, "ld.lld"));
+    // Without a host CMake, the one apt links in is Ubuntu 24.04's.
+    const result = spawnSync(bash, ["-c", body], { cwd: run, encoding: "utf8", timeout: 60_000, env: { PATH: `${runBin}:${bin}`, STUB_TOOLS: tools,
+      STUB_RUN: run, STUB_CMAKE_VERSION: cmake ?? "3.28.3", STUB_CMAKE_NOT_LANDED: cmakeLands ? "" : "1", STUB_MISSING: missing.join(" "), STUB_APT_STATUS: String(aptStatus) } });
+    assert.ok(result.error === undefined && result.signal === null, `the step body did not finish: ${result.error?.message ?? result.signal}`);
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr, run, cmake: path.join(runBin, "cmake"),
+      calls: fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [] };
+  };
+}
+test("the prerequisite step fetches Ubuntu's CMake only where none is on PATH and verifies the resolved CMake and LLD", () => {
+  const options = "-o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30";
+  const packages = "x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler";
+  const update = `DEBIAN_FRONTEND= apt-get ${options} update`, install = `DEBIAN_FRONTEND=noninteractive apt-get ${options} install --yes --no-install-recommends`;
+  const lld = "Ubuntu LLD 18.1.3 (compatible with GNU linkers)\n";
+  // Both children run the same pinned bytes, so one set of runs covers both.
+  const [body, ...others] = jobs.filter(job => job.script).map(job => cacheStep(job.key, "Install fixture display, database and compiler prerequisites")
+    .split("        run: |\n")[1].replace(/^ {10}/gmu, ""));
+  for (const other of others) assert.equal(other, body);
+  const tools = fs.mkdtempSync(path.join(os.tmpdir(), "shared-prerequisites-"));
+  try {
+    const run = prerequisiteRunner(tools, body);
+    // Hosted image: CMake 3.31.6 already precedes Ubuntu's on PATH, so only the shared list installs.
+    const hosted = run({ cmake: "3.31.6" });
+    assert.equal(hosted.status, 0, hosted.stderr);
+    assert.deepEqual(hosted.calls, [update, `${install} ${packages}`, "pkg-config --exists libcap openssl"]);
+    assert.equal(hosted.stdout, `${hosted.cmake}\n${lld}`);
+    // A guest without CMake installs exactly Ubuntu's package with the same options, then checks it.
+    const guest = run({});
+    assert.equal(guest.status, 0, guest.stderr);
+    assert.deepEqual(guest.calls, [update, `${install} ${packages}`, `${install} cmake`, "dpkg-query cmake", "pkg-config --exists libcap openssl"]);
+    assert.equal(guest.stdout, `${guest.cmake}\n${lld}`);
+    for (const cmake of ["3.28.0", "4.1.2"]) assert.equal(run({ cmake }).status, 0, cmake);
+    // An older or unparsable CMake fails with an error naming it, before LLD or
+    // pkg-config, and a version written as an arithmetic expression is never evaluated.
+    for (const cmake of ["3.27.9", "2.8.12", "garbage", "x.y", "", "BASH_VERSINFO[0].99", "BASH_VERSINFO[$(:>evaluated)0].99"]) {
+      const rejected = run({ cmake });
+      assert.equal(rejected.status, 1, cmake);
+      assert.equal(rejected.stdout, `${rejected.cmake}\n::error::CMake '${cmake}' at ${rejected.cmake} is older than 3.28 or unparsable.\n`);
+      assert.deepEqual(rejected.calls, [update, `${install} ${packages}`], cmake);
+      assert.equal(fs.existsSync(path.join(rejected.run, "evaluated")), false, cmake);
+    }
+    // A CMake install that does not land, a failed install and an unverified
+    // package stop the step before it resolves CMake; a missing LLD driver stops it before pkg-config.
+    for (const [failure, status, calls] of [[{ cmakeLands: false }, 1, [update, `${install} ${packages}`, `${install} cmake`, "dpkg-query cmake"]],
+      [{ cmake: "3.31.6", aptStatus: 100 }, 100, [update, `${install} ${packages}`]],
+      [{ cmake: "3.31.6", missing: ["libcap-dev"] }, 1, [update, `${install} ${packages}`]]]) {
+      const stopped = run(failure);
+      assert.deepEqual([stopped.status, stopped.stdout, stopped.calls], [status, "", calls], JSON.stringify(failure));
+    }
+    const noLld = run({ cmake: "3.31.6", lld: false });
+    assert.deepEqual([noLld.status, noLld.stdout, noLld.calls], [127, `${noLld.cmake}\n`, [update, `${install} ${packages}`]]);
+    assert.match(noLld.stderr, /ld\.lld: command not found/u);
+  } finally { fs.rmSync(tools, { recursive: true, force: true }); }
 });
 function withoutPersonalElectronPreparation(source) {
   const step = "      - name: Install the locked Electron binary\n        timeout-minutes: 5\n        env:\n          NODE_USE_ENV_PROXY: \"1\"\n        run: pnpm --filter @instafy/desktop-app exec install-electron\n";
@@ -218,8 +376,10 @@ test("the Cargo default changes only four compiler environments and its exact he
     assert.equal(createHash("sha256").update(original).digest("hex"), hash, relative);
   }
   for (const job of jobs.filter(job => job.script)) {
-    assert.match(section(job.key), /install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler/);
-    assert.match(section(job.key), /for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler/);
+    assert.match(section(job.key), /install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler\n/);
+    assert.match(section(job.key), /for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld libcap-dev protobuf-compiler; do\n/);
+    // The fixtures link with -fuse-ld=lld, so the step proves the driver exists.
+    assert.match(section(job.key), /\n          ld\.lld --version\n/);
   }
 });
 test("the reviewed fixtures need no Edge Functions and retain their exact assertions and global stack configuration", () => {

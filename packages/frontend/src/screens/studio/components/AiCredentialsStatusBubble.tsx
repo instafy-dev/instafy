@@ -21,6 +21,7 @@ import {
   type AiConnectWizardStep,
 } from "./aiConnectWizardStorage";
 import { AccessDecisionCard } from "./AccessDecisionCard";
+import { ChatGptDeviceCodeDisabledNotice } from "./ChatGptDeviceCodeDisabledNotice";
 import { ChatGptDeviceCodePrerequisite } from "./ChatGptDeviceCodePrerequisite";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { ChatActivityBubble } from "./ChatActivityBubble";
@@ -34,7 +35,9 @@ import {
   CHATGPT_CONNECTION_RESOLUTION_WARNING,
   CHATGPT_CONNECTION_VERIFICATION_WARNING,
 } from "./device-auth/deviceAuthCompletion";
+import { isChatGptDeviceCodeLoginDisabledError } from "./device-auth/deviceAuthErrors";
 import { useDeviceAuthFlow } from "./device-auth/useDeviceAuthFlow";
+import { describeManagedAiNextAvailable, isManagedAiAllowanceUsedUp } from "./managedAiAllowance";
 
 const {
   list: listMyCredentials,
@@ -76,6 +79,7 @@ interface AiCredentialsStatusBubbleProps {
     dailyPromptLimit: number;
     dailyPromptsUsed: number;
     remainingPrompts: number | null;
+    nextAvailableAt?: string | null;
   } | null;
   onSetDefaultCredential?: (credentialId: string) => void;
   onUseManagedAi?: () => void | Promise<void>;
@@ -218,6 +222,15 @@ export function AiCredentialsStatusBubble({
   const resetDeviceAuthFlow = deviceAuth.reset;
   const hydrateDeviceAuthFlow = deviceAuth.hydrate;
   const wizardBusy = isBusy || deviceAuthBusy || deviceAuthCompleting;
+  // OpenAI refused device-code login: the session's code can never be
+  // approved, so the login step explains how to turn it on instead.
+  const deviceCodeLoginDisabled =
+    isChatGptDeviceCodeLoginDisabledError(deviceAuthSession?.error) ||
+    isChatGptDeviceCodeLoginDisabledError(deviceAuthError);
+  // The gate is up only because today's hosted AI messages are used up, not
+  // because AI was never set up: say so, and when more are available.
+  const managedAiUsedUp =
+    intent === "gate" && effectiveState === "missing" && isManagedAiAllowanceUsedUp(managedAi);
 
   const title = useMemo(() => {
     if (intent === "connect") {
@@ -242,12 +255,20 @@ export function AiCredentialsStatusBubble({
       case "error":
         return "I couldn't load your AI setup.";
       default:
-        return "Connect AI to send this. Your message is kept.";
+        return managedAiUsedUp && managedAi
+          ? `You've used today's ${managedAi.label} messages. Your message is kept.`
+          : "Connect AI to send this. Your message is kept.";
     }
-  }, [connectedCredentials.length, effectiveState, intent, managedAi?.available, managedAi?.label]);
+  }, [
+    connectedCredentials.length,
+    effectiveState,
+    intent,
+    managedAi,
+    managedAiUsedUp,
+  ]);
 
   const resolvedDetail = useMemo(() => {
-    if (deviceAuthError) {
+    if (deviceAuthError && !deviceCodeLoginDisabled) {
       return deviceAuthError;
     }
     if (detail !== undefined) {
@@ -286,6 +307,7 @@ export function AiCredentialsStatusBubble({
     connectedCredentials.length,
     detail,
     deviceAuthError,
+    deviceCodeLoginDisabled,
     effectiveState,
     intent,
     managedAi?.available,
@@ -317,6 +339,16 @@ export function AiCredentialsStatusBubble({
     resetDeviceAuthFlow();
   }, [cancelDeviceAuthFlow, deviceAuthSession?.status, resetDeviceAuthFlow, wizardBusy]);
 
+  // Back from "device-code login is off" returns to the login methods, where
+  // the local Codex login stays on offer.
+  const leaveDisabledDeviceCodeLogin = useCallback(() => {
+    if (wizardBusy) {
+      return;
+    }
+    setShowDeviceAuthPrerequisite(false);
+    resetDeviceAuthFlow();
+  }, [resetDeviceAuthFlow, wizardBusy]);
+
   const resetConnectState = useCallback(() => {
     setSelectedProvider(null);
     setConnectStep("provider");
@@ -334,6 +366,13 @@ export function AiCredentialsStatusBubble({
       return;
     }
     if (connectStep === "provider") {
+      return;
+    }
+    // The header and Android back do what the notice's own Back does. The
+    // refusal is the device-auth error, so hiding only the prerequisite would
+    // leave the notice on screen.
+    if (connectStep === "openai-login" && deviceCodeLoginDisabled) {
+      leaveDisabledDeviceCodeLogin();
       return;
     }
     if (connectStep === "openai-login" && showDeviceAuthPrerequisite && !deviceAuthSession) {
@@ -371,6 +410,8 @@ export function AiCredentialsStatusBubble({
     cancelDeviceAuthSession,
     connectStep,
     deviceAuthSession,
+    deviceCodeLoginDisabled,
+    leaveDisabledDeviceCodeLogin,
     resetDeviceAuthFlow,
     resetConnectState,
     showDeviceAuthPrerequisite,
@@ -502,6 +543,27 @@ export function AiCredentialsStatusBubble({
     }
   }, [allowAuthJsonUpload, connectStep]);
 
+  const localCodexLoginButton = canUseDesktopConnect ? (
+    <Button
+      onPress={() => {
+        if (shouldPromptForAuthJsonUpload) {
+          handleTriggerUpload();
+          return;
+        }
+        onStashDraft();
+        onConnectDesktop();
+      }}
+      variant="primary"
+      size="xs"
+      radius="full"
+      fullWidth
+      isDisabled={isBusy}
+      className="justify-start"
+    >
+      {shouldPromptForAuthJsonUpload ? "Choose auth.json" : "Use local Codex login"}
+    </Button>
+  ) : null;
+
   if (effectiveState === "checking" && intent === "gate") {
     return (
       <ChatActivityBubble
@@ -596,6 +658,18 @@ export function AiCredentialsStatusBubble({
             Currently using: {resolveCredentialLabel(defaultCredential)}
           </Text>
         ) : null}
+        {managedAiUsedUp ? (
+          <Text
+            as="p"
+            variant="caption"
+            tone="muted"
+            className="mt-1 text-xs"
+            data-testid="ai-gate-managed-ai-used-up"
+          >
+            {describeManagedAiNextAvailable(managedAi?.nextAvailableAt)} Connect your own AI to send it
+            now.
+          </Text>
+        ) : null}
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
           <Button
             variant="primary"
@@ -605,7 +679,7 @@ export function AiCredentialsStatusBubble({
             isDisabled={wizardBusy}
             data-testid="ai-gate-connect-ai"
           >
-            Connect AI
+            {managedAiUsedUp ? "Connect your own AI" : "Connect AI"}
           </Button>
           {managedAiOffered && managedAi ? (
             <Button
@@ -814,8 +888,21 @@ export function AiCredentialsStatusBubble({
             </div>
           ) : null}
 
+          {showConnectWizard && connectStep === "openai-login" && deviceCodeLoginDisabled ? (
+            <div className="mt-2 space-y-2" data-testid="chat-ai-device-code-disabled">
+              <ChatGptDeviceCodeDisabledNotice
+                busy={wizardBusy}
+                onTryAgain={() => void beginDeviceAuth()}
+                onBack={leaveDisabledDeviceCodeLogin}
+                className="rounded-2xl border border-slate-200/70 bg-slate-50/60 p-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300"
+              />
+              {localCodexLoginButton}
+            </div>
+          ) : null}
+
           {showConnectWizard &&
           connectStep === "openai-login" &&
+          !deviceCodeLoginDisabled &&
           !showDeviceAuthPanel &&
           !showDeviceAuthPrerequisite ? (
             <div className="mt-2 space-y-2">
@@ -823,26 +910,7 @@ export function AiCredentialsStatusBubble({
                 Pick a login method:
               </Text>
               <div className="flex flex-col gap-2">
-                {canUseDesktopConnect ? (
-                  <Button
-                    onPress={() => {
-                      if (shouldPromptForAuthJsonUpload) {
-                        handleTriggerUpload();
-                        return;
-                      }
-                      onStashDraft();
-                      onConnectDesktop();
-                    }}
-                    variant="primary"
-                    size="xs"
-                    radius="full"
-                    fullWidth
-                    isDisabled={isBusy}
-                    className="justify-start"
-                  >
-                    {shouldPromptForAuthJsonUpload ? "Choose auth.json" : "Use local Codex login"}
-                  </Button>
-                ) : null}
+                {localCodexLoginButton}
                 <Button
                   onPress={() => setShowDeviceAuthPrerequisite(true)}
                   variant={canUseDesktopConnect ? "outline" : "primary"}
@@ -869,6 +937,7 @@ export function AiCredentialsStatusBubble({
 
           {showConnectWizard &&
           connectStep === "openai-login" &&
+          !deviceCodeLoginDisabled &&
           !showDeviceAuthPanel &&
           showDeviceAuthPrerequisite ? (
             <ChatGptDeviceCodePrerequisite
@@ -882,7 +951,10 @@ export function AiCredentialsStatusBubble({
             />
           ) : null}
 
-          {showConnectWizard && connectStep === "openai-login" && showDeviceAuthPanel ? (
+          {showConnectWizard &&
+          connectStep === "openai-login" &&
+          !deviceCodeLoginDisabled &&
+          showDeviceAuthPanel ? (
             <div className="mt-2 space-y-2">
               <Text as="div" variant="caption" tone="muted" className="text-xs">
                 Open the login page and enter this one‑time code:

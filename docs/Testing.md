@@ -561,7 +561,7 @@ pull requests and manual runs retain always-run, fail-closed aggregation.
 | Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
 | Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
 | Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
-| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `gpt-5.6-sol` and to `gpt-5.5`, plus `proxy_integration codex_read_reference_`, `proxy_integration native_compaction::` and `proxy_integration native_images::`, each with `--test-threads=1` | `public-rust-test-agent` |
+| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `own-ai-default` (the own-AI default, `OWN_AI_DEFAULT_MODEL_ID`) and to `gpt-5.5`, plus `proxy_integration codex_read_reference_`, `proxy_integration native_compaction::` and `proxy_integration native_images::`, each with `--test-threads=1` | `public-rust-test-agent` |
 | Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
 | Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
 | Rust test git service | Complete git-service suite | `public-rust-test-git` |
@@ -1234,7 +1234,8 @@ only after the children end, without holding a worker while waiting.
 | Shared Browser Studio journey | `xvfb-run -a node scripts/shared-browser-studio-e2e.mjs` | `public-shared-browser-studio` |
 
 Each child has a 30-minute limit and repeats the full locked workspace,
-Chromium, Go/Rust, system-library and fixture-safety preparation. Each owns a
+Chromium, Go/Rust, system-library and fixture-safety preparation (hosted
+children skip Playwright's own APT pass, as described below). Each owns a
 fresh migrated Supabase stack with local authentication and always attempts
 stack teardown. The profile-only script still permits a separately provisioned
 migrated loopback database; the signed-in Studio journey needs real local
@@ -1251,6 +1252,36 @@ step limit inside each child's unchanged 30-minute budget. Slow but progressing
 APT downloads can exceed five minutes. Both steps retain two download retries,
 30-second HTTP/HTTPS timeouts, noninteractive installation and explicit package
 verification; an incomplete installation still fails before the fixture runs.
+The step installs Ubuntu's `cmake` only when no CMake is on `PATH`. Hosted
+images already put a newer CMake in `/usr/local/bin`, ahead of the package's
+`/usr/bin` copy, so hosted builds used it before this change too; self-hosted
+guests without one still install the package, in a second APT call. Either way
+the step logs the resolved CMake's path, then fails with an error naming that
+CMake and its version unless the version is at least 3.28, Ubuntu 24.04's
+version; only plain version numbers reach the comparison. It also proves the
+`ld.lld` driver that the Linux Cargo fixtures link with.
+
+On hosted runners each child installs the locked Chromium with
+`playwright install chromium`, then runs
+`node scripts/ensure-hosted-chromium-host.mjs install` within a ten-minute
+step limit, instead of Playwright's `--with-deps` APT call, which accepts no
+options. The script runs only on a GitHub-hosted Ubuntu 24.04 x64 runner. It
+reads the locked Playwright's Ubuntu 24.04 dependency table and fails, asking
+for re-review, when that table names a package outside the reviewed list. It
+names to APT only the reviewed packages that the image lacks, never an
+installed one, with the same retries and timeouts, and logs their names. APT
+may still add or upgrade their dependencies from the signed Ubuntu archive, and
+its own output in the step log lists each of them. It then requires every
+reviewed package and checks with `ldd` that both locked Chromium executables
+load all of their shared libraries. The reviewed list is Playwright's Chromium
+libraries, `xvfb`, the font configuration libraries and the Liberation and Noto
+emoji fonts; it leaves out seven CJK, Thai, Cyrillic and X11 core font packages
+that no Shared fixture renders. On 2026-10-26 the hosted Ubuntu mirror served
+packages at about 33 kB/s: the former `--with-deps` pass spent 11 minutes on
+22.7 MB of fonts and upgrades, Ubuntu's unused 13.6 MB CMake chain took almost
+six more, and five profile and two Studio children hit the 30-minute limit. The
+current image already holds every reviewed package, so the Chromium step
+downloads no packages and the prerequisite step about 2.7 MB.
 
 The two restore-only compiler steps used by self-hosted runs set
 `SEGMENT_DOWNLOAD_TIMEOUT_MINS=2`; the Studio step also serves hosted runs
@@ -1305,9 +1336,15 @@ Neither the ordinary browser switch nor another CI switch enables this lane.
 
 Only the two Shared compiler children use 8GiB/two CPUs, two parallel Cargo
 jobs, and fresh-guest APT plus Docker proxy preparation; the aggregate retains
-standard resources and neither daemon setup. Native package installation is
-visible in the workflow and bounded inside each job. The base template, TLS
-checks, network restrictions and 35-minute worker/cleanup budget are unchanged.
+standard resources and neither daemon setup. Self-hosted children keep
+Playwright's `--with-deps` installation; the hosted-image script never runs
+there. The prerequisite step is shared by both runner types, so guests also
+install Ubuntu's `cmake` only when they have none and must pass the same CMake
+3.28 floor and LLD check; an Ubuntu 24.04 guest meets both, but a guest whose
+`PATH` resolves an older CMake fails that step. Native package
+installation is visible in the workflow and bounded inside each job. The base
+template, TLS checks, network restrictions and 35-minute worker/cleanup budget
+are unchanged.
 Before checkout, each child verifies a non-root ephemeral Linux ARM64 runner,
 Node22 and an actual Linux ARM64 Docker daemon.
 
@@ -1334,8 +1371,11 @@ warm caches do not qualify these split jobs. Keep activation supervised until
 both full jobs and guest teardown pass; do not shorten scenarios or ignore
 timeouts. Disable the switch to restore hosted selection for new runs;
 already queued jobs keep their chosen pool. Run
-`node --test scripts/check-shared-browser-ci.test.mjs scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs`
+`node --test scripts/check-shared-browser-ci.test.mjs scripts/ensure-hosted-chromium-host.test.mjs scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs`
 for local routing and environment regressions, not live browser qualification.
+The prerequisite test runs the real step body with stub package tools under
+bash 4.1 or newer from `PATH`; it fails rather than skips without one, and
+macOS's `/bin/bash` 3.2 is too old.
 
 These lanes use disposable data, do not load local `.env` files, and do not
 need a real account, model API key, or production controller. Personal and UI

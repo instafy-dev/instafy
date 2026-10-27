@@ -73,7 +73,3 @@ regex = '''(?i)\bV[I]TE_[A-Z0-9_]*SERVICE_ROLE(?:_[A-Z0-9_]+)?\b'''
 id = "instafy-private-product"
 description = "Private product marker outside its public contract"
 regex = '''(?i)k[n]osh'''
-
-  [[rules.allowlists]]
-  description = "The public provider contract and the vendored hosted-web robot slice name the product"
-  paths = ['''(?:^|/)packages/provider-contract(?:/|$)''', '''(?:^|/)packages/frontend/hosted/robot(?:/|$)''']

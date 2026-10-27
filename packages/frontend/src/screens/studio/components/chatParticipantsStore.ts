@@ -71,7 +71,7 @@ export interface ParticipantAgent extends ConversationRosterAgent {
   canEditProfile?: boolean;
   /** Effective AI provider id (e.g. "openai"), for model options + gating. */
   providerId?: string | null;
-  /** Model id the agent pins, e.g. "gpt-5.6-sol"; null when it runs on the lane's default. */
+  /** Model id the agent pins; null when it runs on the lane's default. */
   model: string | null;
   /** What to show for the model when that differs from `model` (the managed lane's model). */
   modelLabel?: string | null;
