@@ -197,7 +197,8 @@ test("npm artifact installs and runs without workspace dependencies", () => {
       },
     );
     assert.equal(existsSync(path.join(fixtureHome, ".cache")), false, "the refused read touched no cache");
-    // `instafy web search` refuses the variable the same way, in a live turn with a key set, before anything is sent.
+    // `instafy web search` refuses the variable the same way, in a live turn. No search key is set, so even a build
+    // that ignored the variable would stop at `no_provider` and could never reach a real search API from this test.
     assert.throws(
       () =>
         execFileSync(process.execPath, [installedCli, "web", "search", "ramen", "--json"], {
@@ -214,7 +215,8 @@ test("npm artifact installs and runs without workspace dependencies", () => {
             INSTAFY_WEB_FIXTURES: fixtures,
             INSTAFY_TURN_STARTED_AT: new Date(Date.now() - 1000).toISOString(),
             INSTAFY_TURN_DEADLINE: new Date(Date.now() + 600_000).toISOString(),
-            BRAVE_SEARCH_API_KEY: "package-test-not-a-key",
+            BRAVE_SEARCH_API_KEY: "",
+            KAGI_API_KEY: "",
           },
         }),
       (error) => {
