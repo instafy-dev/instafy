@@ -62,6 +62,17 @@
     { "url": "https://xn--a.booking.com/", "site": "Booking.com" },
     { "url": "https://web.archive.org/web/2024/https://xn--a.booking.com/", "site": "Booking.com", "via": ["the Wayback Machine"] },
     { "url": "https://web.archive.org/web/2024/https://xn--a.example/", "site": null }
+,
+    { "url": "https://api.allorigins.win/raw?url=https%3A%2F%2Fwww.booking.com%2Fhotel%2Fx.html", "site": "Booking.com", "via": ["an open fetch proxy"] },
+    { "url": "https://corsproxy.io/?url=https://www.airbnb.com/rooms/1", "site": "Airbnb", "via": ["an open fetch proxy"] },
+    { "url": "https://corsproxy.io/?https://www.airbnb.co.uk/rooms/1", "site": "Airbnb", "via": ["an open fetch proxy"] },
+    { "url": "https://cors-anywhere.herokuapp.com/https://www.agoda.com/x", "site": "Agoda", "via": ["an open fetch proxy"] },
+    { "url": "https://thingproxy.freeboard.io/fetch/https://www.tripadvisor.com/x", "site": "Tripadvisor", "via": ["an open fetch proxy"] },
+    { "url": "https://api.codetabs.com/v1/proxy?quest=https://www.expedia.com/x", "site": "Expedia group", "via": ["an open fetch proxy"] },
+    { "url": "https://12ft.io/proxy?q=https://www.nike.com/t/x", "site": "Nike", "via": ["12ft.io"] },
+    { "url": "https://translated.turbopages.org/proxy_u/en-ru.ru.0a1b2c3d-65f0f1e2-3a4b5c6d-74722d776562/https/www.booking.com/hotel/x.html", "site": "Booking.com", "via": ["Yandex's page translator"] },
+    { "url": "https://api.allorigins.win/raw?url=https://example.org/", "site": null },
+    { "url": "https://corsproxy.io/", "site": null }
   ],
   "spaceCopy": {
     "list": {

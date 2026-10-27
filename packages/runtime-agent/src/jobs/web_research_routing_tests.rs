@@ -297,6 +297,10 @@ fn the_link_only_list_is_well_formed_data() {
         "archive.ph",
         "archive.is",
         "archive.today",
+        "r.jina.ai",
+        "corsproxy.io",
+        "api.allorigins.win",
+        "translated.turbopages.org",
     ] {
         assert!(wrapped.contains(expected), "{expected}");
     }
