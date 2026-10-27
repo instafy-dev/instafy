@@ -64,6 +64,9 @@ importers:
 
   packages/desktop-app:
     dependencies:
+      '@instafy/bind':
+        specifier: workspace:*
+        version: link:../instafy-bind
       '@instafy/browser-action-policy':
         specifier: workspace:*
         version: link:../browser-action-policy
