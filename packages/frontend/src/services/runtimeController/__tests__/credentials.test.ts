@@ -60,6 +60,17 @@ describe("parseManagedAiAccess (controller contract boundary)", () => {
     expect(parseManagedAiAccess({ ...usedUp, nextAvailableAt: 1761552000 })?.nextAvailableAt).toBeNull();
   });
 
+  it("keeps why hosted AI is unavailable, and drops reasons it does not know", () => {
+    expect(
+      parseManagedAiAccess({ ...usedUp, unavailableReason: "daily_limit_reached" })?.unavailableReason,
+    ).toBe("daily_limit_reached");
+    expect(parseManagedAiAccess({ ...usedUp, unavailableReason: "no_proxy" })?.unavailableReason).toBe(
+      "no_proxy",
+    );
+    expect(parseManagedAiAccess({ ...usedUp, unavailableReason: "solar_flare" })?.unavailableReason).toBeNull();
+    expect(parseManagedAiAccess(usedUp)?.unavailableReason).toBeNull();
+  });
+
   it("returns null without a managedAi block", () => {
     expect(parseManagedAiAccess(undefined)).toBeNull();
     expect(parseManagedAiAccess(null)).toBeNull();

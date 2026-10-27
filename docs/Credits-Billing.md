@@ -83,6 +83,15 @@ Managed Instafy AI can run without a user-provided provider key and burn the sha
 - Set `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` (default `500`, that is `$0.50 / 1M`)
 - Set `BILLING_UNITS_PER_USD` if you want the UI to expose USD equivalents for the shared balance
 
+A person's spaces run on their default AI connection when they have one, and on managed AI
+otherwise. A newly saved connection becomes the default only when the person asks for it
+(`makeDefault` on `POST /me/credentials/codex`, Make default, or connecting from chat), or when
+managed AI cannot run their turns. `GET /me/credentials/requirements` reports
+`managedAi.available` whether or not the person has a default, and `managedAi.unavailableReason`
+when it is false: `disabled`, `no_proxy` (`PROXY_BASE_URL` unset), `proxy_unreachable` (its
+`/healthz` failed), `proxy_needs_credential` (it reports `requiresCredential=true` and the
+controller has no `MANAGED_AI_OPENAI_API_KEY` to lease) or `daily_limit_reached`.
+
 Managed AI still runs through the proxy, and the proxy that matters is the one the runtime calls:
 hosted runtimes talk to their own per-runtime proxy sidecar (`http://proxy:8789` in
 `docker/docker-compose.runtime.provider.yml`), not to the controller's `PROXY_BASE_URL` proxy.

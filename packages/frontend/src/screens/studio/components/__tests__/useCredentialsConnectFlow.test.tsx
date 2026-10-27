@@ -16,6 +16,9 @@ const deviceAuthMocks = vi.hoisted(() => ({
   begin: vi.fn(),
   cancel: vi.fn(),
   reset: vi.fn(),
+  onCompleted: null as
+    | ((input: { credentialId?: string | null }) => Promise<{ success: true; warning?: string }>)
+    | null,
 }));
 
 vi.mock("../../../../sdk/instafy", () => ({
@@ -33,14 +36,17 @@ vi.mock("../desktopCodexAuthJson", () => ({
 }));
 
 vi.mock("../device-auth/useDeviceAuthFlow", () => ({
-  useDeviceAuthFlow: () => ({
+  useDeviceAuthFlow: (options: { onCompleted?: typeof deviceAuthMocks.onCompleted }) => {
+    deviceAuthMocks.onCompleted = options.onCompleted ?? null;
+    return {
     session: null,
     provider: null,
     error: null,
     begin: deviceAuthMocks.begin,
     cancel: deviceAuthMocks.cancel,
     reset: deviceAuthMocks.reset,
-  }),
+    };
+  },
 }));
 
 type HookOptions = Parameters<typeof useCredentialsConnectFlow>[0];
@@ -395,5 +401,117 @@ describe("useCredentialsConnectFlow replace ordering", () => {
     // The only revoke is the cleanup of the credential just created.
     expect(controllerMocks.revoke).toHaveBeenCalledWith("new-credential");
     expect(controllerMocks.revoke).not.toHaveBeenCalledWith("old-credential");
+  });
+});
+
+describe("useCredentialsConnectFlow default choice", () => {
+  // A live test found a new space on "Codex on this computer" while the
+  // included Instafy AI went unused: connecting an AI made it the default by
+  // itself. Each caller now says whether the connection is the person's
+  // choice of AI (true), must keep the current default (false), or leaves it
+  // to the controller (undefined).
+  let container: HTMLDivElement;
+  let root: Root;
+
+  async function mount(newConnectionDefault?: () => boolean | undefined) {
+    await act(async () => {
+      root.render(
+        <Harness
+          options={{
+            userPresent: true,
+            loadCredentials: vi.fn().mockResolvedValue(undefined),
+            notifyAiConfigChanged: vi.fn(),
+            showStatus: vi.fn(),
+            formatCredentialTestFailureMessage: (raw) => raw ?? null,
+            newConnectionDefault,
+          }}
+        />,
+      );
+    });
+  }
+
+  async function connectOpenAiKey() {
+    await act(async () => {
+      captured?.openConnectModalAtStep("openai");
+      captured?.connectModalProps.onOpenaiApiKeyDraftChange("unit-test-value");
+    });
+    await act(async () => {
+      await captured?.connectModalProps.onConnectApiKey("openai");
+    });
+  }
+
+  async function completeChatGptLogin() {
+    let result: { success: true; warning?: string } | undefined;
+    await act(async () => {
+      result = await deviceAuthMocks.onCompleted?.({ credentialId: "chatgpt-credential" });
+    });
+    return result;
+  }
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.clearAllMocks();
+    deviceAuthMocks.onCompleted = null;
+    controllerMocks.createCodex.mockResolvedValue({ success: true, credentialId: "credential-1" });
+    controllerMocks.test.mockResolvedValue({ success: true, ok: true });
+    controllerMocks.setDefault.mockResolvedValue({ success: true });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    captured = null;
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("keeps Instafy AI the default when the caller says so", async () => {
+    await mount(() => false);
+    await connectOpenAiKey();
+    expect(controllerMocks.createCodex).toHaveBeenCalledWith(
+      expect.objectContaining({ makeDefault: false }),
+    );
+    expect(await completeChatGptLogin()).toEqual({ success: true });
+    expect(controllerMocks.test).toHaveBeenCalledWith("chatgpt-credential");
+    expect(controllerMocks.setDefault).not.toHaveBeenCalled();
+  });
+
+  it("makes the connection the default when it is the person's choice of AI", async () => {
+    await mount(() => true);
+    await connectOpenAiKey();
+    expect(controllerMocks.createCodex).toHaveBeenCalledWith(
+      expect.objectContaining({ makeDefault: true }),
+    );
+    expect(await completeChatGptLogin()).toEqual({ success: true });
+    expect(controllerMocks.setDefault).toHaveBeenCalledWith("chatgpt-credential");
+  });
+
+  it("reads the choice when the connection is saved, not when the modal opened", async () => {
+    // Another tab switched the default to Instafy AI while the modal was open.
+    let instafyAiIsDefault = false;
+    await mount(() => (instafyAiIsDefault ? false : undefined));
+    await act(async () => {
+      captured?.openConnectModalAtStep("openai");
+      captured?.connectModalProps.onOpenaiApiKeyDraftChange("unit-test-value");
+    });
+    instafyAiIsDefault = true;
+    await act(async () => {
+      await captured?.connectModalProps.onConnectApiKey("openai");
+    });
+    expect(controllerMocks.createCodex).toHaveBeenCalledWith(
+      expect.objectContaining({ makeDefault: false }),
+    );
+  });
+
+  it("leaves the default to the controller without a choice, as before", async () => {
+    await mount();
+    await connectOpenAiKey();
+    expect(controllerMocks.createCodex.mock.calls[0]?.[0]).not.toHaveProperty("makeDefault");
+    await completeChatGptLogin();
+    expect(controllerMocks.setDefault).toHaveBeenCalledWith("chatgpt-credential");
   });
 });
