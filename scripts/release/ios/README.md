@@ -101,7 +101,8 @@ block it. The first dry run should show the step succeeding before App Store Con
 
 Repository variables: `CAPACITOR_LIVE_UPDATE_PUBLIC_KEY` (RSA SPKI PEM, the OTA trust
 anchor), `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (`sb_publishable_` only),
-optional `VITE_CONTROLLER_URL`, `IOS_APP_STORE_PROFILE_ID`, `APP_STORE_CONNECT_APP_ID`,
+optional `VITE_CONTROLLER_URL`, `VITE_INSTAFY_ENABLE_GOOGLE_AUTH` (Google sign-in kill switch,
+default `1`), `IOS_APP_STORE_PROFILE_ID`, `APP_STORE_CONNECT_APP_ID`,
 `APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID`. The OTA signing private key is not used here.
 
 Enter `APP_STORE_CONNECT_PRIVATE_KEY` with real newlines (paste the `.p8` file as-is); the lane

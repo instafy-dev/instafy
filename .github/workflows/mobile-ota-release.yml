@@ -155,6 +155,7 @@ jobs:
       VITE_INSTAFY_SHARED_BROWSER_WEBRTC: "0"
       VITE_REQUIRE_AUTH: ${{ vars.VITE_REQUIRE_AUTH }}
       VITE_USE_WEBCONTAINER: ${{ vars.VITE_USE_WEBCONTAINER }}
+      VITE_INSTAFY_ENABLE_GOOGLE_AUTH: ${{ vars.VITE_INSTAFY_ENABLE_GOOGLE_AUTH || '1' }}
       VITE_OTA_CHANNEL: internal
     outputs:
       dist_inventory_sha256: ${{ steps.dist.outputs.inventory_sha256 }}

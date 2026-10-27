@@ -20,6 +20,35 @@ export interface PendingNativeAuthAttempt {
   platform: string;
 }
 
+/** The OAuth providers the login screen offers. */
+export type NativeAuthProvider = "github" | "google";
+
+export const NATIVE_AUTH_PROVIDER_LABELS: Record<NativeAuthProvider, string> = {
+  github: "GitHub",
+  google: "Google",
+};
+
+/**
+ * The provider a callback belongs to, read from the attempt that opened the
+ * browser, so its telemetry kind and its message name that provider. With no
+ * attempt (or one naming an unknown provider) it is GitHub, the only provider
+ * native sign-in offered before Google.
+ */
+export function nativeAuthAttemptProvider(
+  attempt: Pick<PendingNativeAuthAttempt, "provider"> | null,
+): NativeAuthProvider {
+  return attempt?.provider === "google" ? "google" : "github";
+}
+
+/**
+ * What sign-in says when the callback reports a provider error. The callback
+ * is a deep link that any app can open, so the screen and the stored error
+ * never repeat the URL's error text; only telemetry records it.
+ */
+export function nativeAuthCallbackErrorMessage(provider: NativeAuthProvider): string {
+  return `${NATIVE_AUTH_PROVIDER_LABELS[provider]} sign-in was cancelled or refused. Try again.`;
+}
+
 function normalizeCallbackPathname(pathname: string): string {
   const trimmed = pathname.trim();
   if (!trimmed) {
