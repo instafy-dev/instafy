@@ -7,6 +7,7 @@ import { Text } from "../../../components/Text";
 import { StudioListBox, StudioListBoxItem } from "../../../components/aria/StudioListBox";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { FormPickerPopover, FormPickerTrigger } from "../../../components/FormPicker";
+import { DEFAULT_PROJECT_AI_MODEL } from "../../../ai/modelDefaults";
 import type { AiModelOption } from "../../../utils/aiProviderModels";
 
 export interface ModelMenuSelectProps {
@@ -40,7 +41,7 @@ export function ModelMenuSelect({
   onSelect,
   triggerTestId,
   menuTestId,
-  customPlaceholder = "e.g. gpt-5.5-mini",
+  customPlaceholder = `e.g. ${DEFAULT_PROJECT_AI_MODEL}`,
   customLabel = "Custom model id",
   presentation = "menu",
 }: ModelMenuSelectProps) {

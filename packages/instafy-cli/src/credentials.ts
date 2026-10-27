@@ -180,7 +180,10 @@ function normalizeCredentialRecord(input: unknown): CredentialRecord | null {
     kind: toMaybeString(record.kind) ?? "unknown",
     label: toMaybeString(record.label),
     provider: toMaybeString(metadata.provider),
-    defaultModel: toMaybeString(metadata.default_model),
+    // The controller's `defaultModel` is the model the credential's jobs run;
+    // `metadata.default_model` is the id stored when it was saved, which an
+    // older controller sends alone.
+    defaultModel: toMaybeString(record.defaultModel) ?? toMaybeString(metadata.default_model),
     isDefault: record.isDefault === true,
     lastUsedAt: toMaybeString(record.lastUsedAt),
     revokedAt: toMaybeString(record.revokedAt),

@@ -1,4 +1,8 @@
-import { DEFAULT_OPENAI_MODEL_OPTION } from "../ai/modelDefaults";
+import {
+  DEFAULT_OPENAI_MODEL_OPTION,
+  DEFAULT_PROJECT_AI_MODEL,
+  OWN_AI_SMALL_MODEL_ID,
+} from "../ai/modelDefaults";
 
 export type AiProviderId = "openai" | "deepseek" | "zai" | "gemini";
 
@@ -19,31 +23,60 @@ export const AI_PROVIDER_OPTIONS: AiProviderOption[] = [
   { id: "gemini", label: "Gemini" },
 ];
 
-// Anything below gpt-5.5 is no longer served upstream; saved selections
-// migrate to the closest current model instead of failing at run time.
-// Full-size retirements floor to the bring-your-own OpenAI default
-// (gpt-5.6-sol; mirrors the controller's is_stale_openai_model →
-// DEFAULT_OPENAI_MODEL_ID path, which is distinct from the credits-funded
-// managed tier default); the
-// mini tier stays on gpt-5.5-mini, which is still served.
-const OPENAI_MODEL_MIGRATIONS: Record<string, string> = {
-  "gpt-5.4": "gpt-5.6-sol",
-  "gpt-5.4-mini": "gpt-5.5-mini",
-  "gpt-5-codex": "gpt-5.6-sol",
-  "gpt-5.3-codex": "gpt-5.6-sol",
-  "gpt-5.2-codex": "gpt-5.6-sol",
-  "gpt-5.2": "gpt-5.6-sol",
-  "gpt-5.1-codex-max": "gpt-5.6-sol",
-  "gpt-5.1-codex": "gpt-5.6-sol",
-  "gpt-5.1-codex-mini": "gpt-5.5-mini",
-  "gpt-4.5": "gpt-5.6-sol",
-  "o3-mini": "gpt-5.5-mini",
-};
+// `[N, M]` for a lowercase `gpt-N[.M]…` id (gpt-6.1-sol is 6.1, gpt-5.10 is
+// 5.10), null for an id without a version.
+function openAiVersion(model: string): [number, number] | null {
+  const match = /^gpt-(\d+)(?:\.(\d+))?/u.exec(model);
+  return match ? [Number(match[1]), match[2] === undefined ? 0 : Number(match[2])] : null;
+}
+
+// The tiers the Codex catalog names after an OpenAI id's version, cheapest
+// first, as in runtime-contracts' OPENAI_TIERS.
+const OPENAI_TIERS = ["luna", "terra", "sol", "astra"];
+
+// The rank in OPENAI_TIERS of the word after a lowercase id's version
+// (gpt-6-astra and gpt-6-astra-mini are Astra), -1 for a word that is not a
+// tier.
+function openAiTier(model: string): number {
+  const match = /^gpt-\d+(?:\.\d+)?-([^-]+)/u.exec(model);
+  return match ? OPENAI_TIERS.indexOf(match[1]!) : -1;
+}
+
+// Own AI runs at least its default: the controller raises a bare OpenAI id of
+// an older version than the default when a job runs (runtime-contracts'
+// own_ai_model_floor), Luna, mini and nano ids included, and o-series ids
+// always. The exceptions are OWN_AI_SMALL_MODEL_ID, the cheaper model a
+// person picks on purpose, and an older id of a higher tier than the
+// default's (gpt-6-astra under a Sol default), which raising would lower.
+// Studio shows the model that runs, so it applies the same rule; both are
+// checked against runtime-contracts' own_ai_model_fixtures.json.
+// `defaultModel` is a parameter only so the tests can check a later bump.
+export function ownAiModelFloor(
+  model: string,
+  defaultModel: string = DEFAULT_PROJECT_AI_MODEL,
+): string | null {
+  const defaultId = defaultModel.trim().toLowerCase();
+  const floor = openAiVersion(defaultId);
+  if (!floor) {
+    return null;
+  }
+  const normalized = model.trim().toLowerCase();
+  if (normalized === OWN_AI_SMALL_MODEL_ID) {
+    return null;
+  }
+  const version = openAiVersion(normalized);
+  const defaultTier = openAiTier(defaultId);
+  const higherTier = defaultTier >= 0 && openAiTier(normalized) > defaultTier;
+  const older = version
+    ? (version[0] < floor[0] || (version[0] === floor[0] && version[1] < floor[1])) &&
+      !higherTier
+    : /^o\d/u.test(normalized);
+  return older ? defaultModel : null;
+}
 
 const OPENAI_MODEL_OPTIONS: AiModelOption[] = [
   DEFAULT_OPENAI_MODEL_OPTION,
-  { id: "gpt-5.5", label: "gpt-5.5" },
-  { id: "gpt-5.5-mini", label: "gpt-5.5-mini" },
+  { id: OWN_AI_SMALL_MODEL_ID, label: OWN_AI_SMALL_MODEL_ID },
 ];
 
 const DEEPSEEK_MODEL_OPTIONS: AiModelOption[] = [
@@ -113,7 +146,7 @@ export function normalizeAiModelId(
     return null;
   }
   if (provider === "openai") {
-    return OPENAI_MODEL_MIGRATIONS[normalized] ?? normalized;
+    return ownAiModelFloor(normalized) ?? normalized;
   }
   return normalized;
 }

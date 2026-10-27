@@ -72,7 +72,7 @@ const cancellationWorkflows = [
   // aggregate, also bound by check-rust-ci; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: 'e0d981e5a4d0db8d8d8dbe1d143db368385edbebba328e2e603e74f9bc393ecf' },
+    previousHash: 'cb554bda2c99862abe0e7a229c78da54372e9d6fae4e8cda58761c69f2dc9a83' },
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];

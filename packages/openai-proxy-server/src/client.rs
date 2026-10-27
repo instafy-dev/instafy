@@ -21,10 +21,10 @@ const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
 /// Last-resort model for requests that carry no model AND resolve against a
 /// credential with no default (local/dev auth.json paths). NOT a sentinel:
 /// requests that name this id explicitly are served exactly this model.
-/// Kept equal to the controller's OpenAI default (`DEFAULT_OPENAI_MODEL_ID`)
-/// and the runtime's `DEFAULT_CODEX_MODEL`: the retired gpt-5.5 it used to
-/// name was rejected upstream.
-pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+/// Kept equal to the own-AI default the controller and runtime share
+/// (runtime-contracts `OWN_AI_DEFAULT_MODEL_ID`); the proxy does not depend on
+/// that crate, so a test checks this copy against `own_ai_model_fixtures.json`.
+pub const DEFAULT_MODEL: &str = "gpt-6.1-sol";
 pub const DEFAULT_INSTRUCTIONS: &str = include_str!("../prompt_gpt5_codex.md");
 
 #[derive(Debug, Clone)]

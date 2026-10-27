@@ -296,8 +296,9 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         // the run timeout instead of failing with the connection error.
         Feature::UnboundedConnectionRetries => Off,
 
-        // Upstream removed the in-process V8 runtime, so code-mode-only models
-        // (gpt-6-luna, gpt-5.6-sol) run every tool through this host.
+        // Upstream removed the in-process V8 runtime, so code-mode-only models (the catalog's
+        // `code_mode_only` entries, GPT-6 Luna and the own-AI default among them) run every
+        // tool through this host.
         Feature::CodeModeHost => On,
 
         Feature::ShellTool
@@ -498,7 +499,17 @@ mod tests {
     use codex_core::test_support::construct_model_info_offline;
     use codex_protocol::openai_models::ToolMode;
 
-    const POLICY_MODELS: &[&str] = &["gpt-6-luna", "gpt-5.6-sol", "gpt-5.5"];
+    /// The models the runtime runs: the managed tier's (GPT-6 Luna, also own AI's cheaper pick)
+    /// and the own-AI default (GPT-6.1 Sol), plus older ids an operator can still pin (GPT-6
+    /// Sol, the previous own-AI default, among them). A new own-AI default must be added here,
+    /// with its prompt sections below (`policy_models_include_the_own_ai_default`).
+    const POLICY_MODELS: &[&str] = &[
+        "gpt-6-luna",
+        "gpt-6.1-sol",
+        "gpt-6-sol",
+        "gpt-5.6-sol",
+        "gpt-5.5",
+    ];
 
     /// The top-level sections of each policy model's upstream prompt at rust-v0.159.2, then of
     /// the prompt its catalog lanes send. Fails closed: a bump that renames, drops or adds a
@@ -507,6 +518,49 @@ mod tests {
     const CATALOG_PROMPT_SECTIONS: &[(&str, &[&str], &[&str])] = &[
         (
             "gpt-6-luna",
+            &[
+                "Personality",
+                "When to ask the user for permission",
+                "Autonomy and persistence",
+                "Working with the user",
+                "Rules for getting work done",
+                "Using skills",
+                "Apps (Connectors)",
+                "Plugins",
+            ],
+            &[
+                "Personality",
+                "When to ask the user for permission",
+                "Autonomy and persistence",
+                "Working with the user",
+                "Rules for getting work done",
+                "Destructive Actions",
+            ],
+        ),
+        (
+            // GPT-6.1 Sol moves Personality after the autonomy sections.
+            "gpt-6.1-sol",
+            &[
+                "When to ask the user for permission",
+                "Autonomy and persistence",
+                "Personality",
+                "Working with the user",
+                "Rules for getting work done",
+                "Using skills",
+                "Apps (Connectors)",
+                "Plugins",
+            ],
+            &[
+                "When to ask the user for permission",
+                "Autonomy and persistence",
+                "Personality",
+                "Working with the user",
+                "Rules for getting work done",
+                "Destructive Actions",
+            ],
+        ),
+        (
+            "gpt-6-sol",
             &[
                 "Personality",
                 "When to ask the user for permission",
@@ -656,6 +710,22 @@ mod tests {
                         | "skills"
                 )
             })
+    }
+
+    #[test]
+    fn policy_models_include_the_own_ai_default() {
+        // A turn without a model from the controller runs this one, so its prompt sections and
+        // billing pins must be checked like every other model's.
+        // Studio's cheaper own-AI pick runs as picked, so it is checked the same way.
+        for model in [
+            crate::job_model::DEFAULT_CODEX_MODEL,
+            runtime_contracts::own_ai_model::OWN_AI_SMALL_MODEL_ID,
+        ] {
+            assert!(
+                POLICY_MODELS.contains(&model),
+                "add {model} to POLICY_MODELS and CATALOG_PROMPT_SECTIONS"
+            );
+        }
     }
 
     #[test]
@@ -955,12 +1025,15 @@ mod tests {
             assert!(compact <= MAX_BILLED_CONTEXT_WINDOW, "{model}: {compact}");
             assert_eq!(resolved.default_service_tier, None, "{model}");
         }
-        // Upstream lets GPT-6 Luna grow beyond the billed window.
+        // Upstream lets GPT-6 Luna grow beyond the billed window, and GPT-6 Sol defaults to the
+        // paid priority tier; the loop above holds both at the standard tier and window. GPT-6.1
+        // Sol names no default tier upstream, and the policy clears it either way.
         assert!(
             upstream_model("gpt-6-luna")
                 .max_context_window
                 .is_some_and(|window| window > MAX_BILLED_CONTEXT_WINDOW)
         );
+        assert!(upstream_model("gpt-6-sol").default_service_tier.is_some());
     }
 
     #[tokio::test]

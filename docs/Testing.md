@@ -561,7 +561,7 @@ pull requests and manual runs retain always-run, fail-closed aggregation.
 | Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
 | Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
 | Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
-| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `gpt-5.6-sol` and to `gpt-5.5`, plus `proxy_integration codex_read_reference_`, `proxy_integration native_compaction::` and `proxy_integration native_images::`, each with `--test-threads=1` | `public-rust-test-agent` |
+| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `own-ai-default` (the own-AI default, `OWN_AI_DEFAULT_MODEL_ID`) and to `gpt-5.5`, plus `proxy_integration codex_read_reference_`, `proxy_integration native_compaction::` and `proxy_integration native_images::`, each with `--test-threads=1` | `public-rust-test-agent` |
 | Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
 | Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
 | Rust test git service | Complete git-service suite | `public-rust-test-git` |

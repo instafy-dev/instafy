@@ -26,9 +26,13 @@ const FINISHED_CALL_ID: &str = "call-local-finished";
 const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
 const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
 /// Selects the Codex model the scenarios run; every Codex bump runs them for each model the
-/// runtime offers (for example gpt-6-luna, gpt-5.6-sol and gpt-5.5).
+/// runtime offers (for example gpt-6-luna, the own-AI default and gpt-5.5).
 const TEST_MODEL_ENV: &str = "INSTAFY_TEST_CODEX_MODEL";
 const DEFAULT_TEST_MODEL: &str = "gpt-6-luna";
+/// `INSTAFY_TEST_CODEX_MODEL=own-ai-default` runs the own-AI default
+/// (runtime-contracts `OWN_AI_DEFAULT_MODEL_ID`), so CI follows a bump without naming the id.
+/// Test-only: the proxy and the runtime have no such sentinel.
+const OWN_AI_DEFAULT_TEST_MODEL: &str = "own-ai-default";
 const PERSONAL_BROWSER_TOKEN: &str = "inert-local-personal-browser-token";
 const LONG_RETRY_WAIT_SECONDS: u64 = 15;
 /// The command that opened the first-run FreeFinance setup of Oct 18.
@@ -531,7 +535,7 @@ fn offered_tool_names(request: &Value) -> Vec<String> {
 }
 
 /// Collects every line of every string in a request. The prompt travels as `instructions`, or
-/// for a Responses Lite model (gpt-6-luna, gpt-5.6-sol) as a developer input item.
+/// for a Responses Lite model (gpt-6-luna, gpt-6-sol) as a developer input item.
 fn request_text_lines(value: &Value, output: &mut Vec<String>) {
     match value {
         Value::String(text) => output.extend(text.lines().map(str::to_string)),
@@ -561,7 +565,27 @@ async fn start_poison_proxy() -> Result<(String, Arc<Mutex<usize>>, tokio::task:
 }
 
 fn test_model() -> String {
-    std::env::var(TEST_MODEL_ENV).unwrap_or_else(|_| DEFAULT_TEST_MODEL.to_string())
+    use std::io::Write as _;
+
+    static MODEL: OnceLock<String> = OnceLock::new();
+    MODEL
+        .get_or_init(|| {
+            let model = match std::env::var(TEST_MODEL_ENV) {
+                Ok(value) if value.trim() == OWN_AI_DEFAULT_TEST_MODEL => {
+                    runtime_contracts::own_ai_model::OWN_AI_DEFAULT_MODEL_ID.to_string()
+                }
+                Ok(value) => value,
+                Err(_) => DEFAULT_TEST_MODEL.to_string(),
+            };
+            // libtest captures `eprintln!` in a passing test; a direct write to the process's
+            // stderr is not captured, so a green CI run still logs which model it exercised.
+            let _ = writeln!(
+                std::io::stderr(),
+                "proxy_retry_budget scenarios run {model}"
+            );
+            model
+        })
+        .clone()
 }
 
 /// Code-mode-only models, including the default gpt-6-luna, run every tool in
