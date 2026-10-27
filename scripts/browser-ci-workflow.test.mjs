@@ -1,4 +1,5 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
+import { withoutBrowserUiJobBudget } from "./lib/browserUiBudgetTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -251,4 +252,20 @@ test("the expanded browser UI inventory has a bounded suite budget without relax
   const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
   assert.match(job, /\|\| 'ubuntu-24\.04' }}/);
   assert.match(job, /^\s+timeout-minutes: 40$/m);
+});
+
+test("historical workflow proofs reverse only the reviewed Browser UI job budget", () => {
+  const source = read(".github/workflows/browser-e2e.yml");
+  const job = jobSource("browser-ui");
+  const previous = source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 30"));
+  assert.equal(withoutBrowserUiJobBudget("browser-e2e.yml", source), previous);
+  assert.equal(withoutBrowserUiJobBudget("build.yml", source), source);
+  for (const changed of [
+    source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 30")),
+    source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 41")),
+    source.replace(job, job.replace("    timeout-minutes: 40\n", "")),
+    source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 40\n    timeout-minutes: 40")),
+    source.replace("\n  browser-ui:\n", "\n  another-job:\n"),
+    source + "\n  browser-ui:\n" + job,
+  ]) assert.throws(() => withoutBrowserUiJobBudget("browser-e2e.yml", changed));
 });
