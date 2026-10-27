@@ -1,0 +1,17 @@
+html, body, #root { margin: 0; width: 100%; height: 100%; }
+body { background: var(--color-slate-50); color: var(--color-slate-800); font-family: system-ui, sans-serif; }
+.dark body { background: var(--color-studio-dark-panel); color: var(--color-slate-100); }
+.composer-panels-review { display: flex; flex-direction: column; min-height: 100%; padding: 16px; }
+.composer-panels-review > header { max-width: 52rem; margin: 0 auto; width: 100%; }
+.composer-panels-review h1 { margin: 0; font-size: 18px; font-weight: 600; }
+.composer-panels-review header p { margin: 6px 0 0; font-size: 13px; color: var(--color-slate-500); }
+.composer-panels-context { flex: 1; width: 100%; max-width: 52rem; min-height: 20rem; margin: 36px auto 24px; }
+.composer-panels-conversation { font-size: 14px; line-height: 1.6; max-width: 36rem; }
+.composer-panels-conversation p { margin: 4px 0; color: var(--color-slate-500); }
+.composer-panels-composer { width: 100%; max-width: 52rem; margin: auto auto 0; }
+.composer-panels-browser-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--color-slate-200); font-size: 14px; }
+.composer-panels-browser-page { padding: 24px; background: white; color: #293b4b; min-height: 300px; }
+.composer-panels-browser-page h2 { margin: 0 0 12px; font-size: 22px; font-weight: 600; }
+.composer-panels-browser-page p { max-width: 32rem; line-height: 1.6; }
+.dark .composer-panels-browser-toolbar { border-color: var(--color-studio-dark-panel-border); }
+@media (max-width: 639px) { .composer-panels-review { padding: 12px; } .composer-panels-context { margin-top: 24px; } }
