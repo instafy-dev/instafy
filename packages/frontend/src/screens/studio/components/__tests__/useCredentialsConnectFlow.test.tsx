@@ -29,8 +29,14 @@ vi.mock("../../../../sdk/instafy", () => ({
   },
 }));
 
+const desktopMocks = vi.hoisted(() => ({
+  available: false,
+  connect: vi.fn(),
+}));
+
 vi.mock("../desktopCodexAuthJson", () => ({
-  canUseDesktopCodexAuthJson: () => false,
+  canUseDesktopCodexAuthJson: () => desktopMocks.available,
+  connectDesktopCodexAuthJson: desktopMocks.connect,
   selectDesktopCodexAuthJson: vi.fn(),
   useDesktopCodexAuthJsonStatus: () => null,
 }));
@@ -452,6 +458,8 @@ describe("useCredentialsConnectFlow default choice", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     deviceAuthMocks.onCompleted = null;
+    desktopMocks.available = false;
+    desktopMocks.connect.mockResolvedValue({ success: true, credentialId: "desktop-credential" });
     controllerMocks.createCodex.mockResolvedValue({ success: true, credentialId: "credential-1" });
     controllerMocks.test.mockResolvedValue({ success: true, ok: true });
     controllerMocks.setDefault.mockResolvedValue({ success: true });
@@ -505,6 +513,31 @@ describe("useCredentialsConnectFlow default choice", () => {
     expect(controllerMocks.createCodex).toHaveBeenCalledWith(
       expect.objectContaining({ makeDefault: false }),
     );
+  });
+
+  it("saves Codex on this computer without taking the default from Instafy AI", async () => {
+    // The live test's space ran on exactly this connection. Desktop saves it
+    // through its own bridge, which must carry the caller's choice too.
+    desktopMocks.available = true;
+    await mount(() => false);
+    await act(async () => {
+      await captured?.connectModalProps.onConnectCodex();
+    });
+    expect(desktopMocks.connect).toHaveBeenCalledWith({
+      label: "Codex on this computer",
+      makeDefault: false,
+    });
+
+    desktopMocks.connect.mockClear();
+    await mount(() => true);
+    await act(async () => {
+      await captured?.connectModalProps.onConnectCodex();
+    });
+    expect(desktopMocks.connect).toHaveBeenCalledWith({
+      label: "Codex on this computer",
+      makeDefault: true,
+    });
+    expect(deviceAuthMocks.begin).not.toHaveBeenCalled();
   });
 
   it("leaves the default to the controller without a choice, as before", async () => {

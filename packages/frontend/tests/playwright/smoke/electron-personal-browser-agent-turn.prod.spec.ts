@@ -663,6 +663,37 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
 
     await expect
       .poll(
+        async () =>
+          (
+            await fetchConnectedCodexCredentialProof(
+              adminRequest,
+              config.controllerUrl,
+              provisioned.session.accessToken,
+            )
+          )?.kind ?? null,
+        { timeout: 60_000 },
+      )
+      .toBe("codex_auth_json");
+    const connectedProof = await fetchConnectedCodexCredentialProof(
+      adminRequest,
+      config.controllerUrl,
+      provisioned.session.accessToken,
+    );
+    if (!connectedProof) {
+      throw new Error("Connected Codex credential metadata disappeared after onboarding.");
+    }
+    electronBrowserLiveCleanup.credentialId = connectedProof.credentialId;
+    // Connecting from the Your AI panel keeps an available Instafy AI the
+    // default. This proof runs the turn on the local login, so choose it.
+    if (!connectedProof.isDefault) {
+      const makeDefault = page.getByTestId(
+        `credentials-connection-default-${connectedProof.credentialId}`,
+      );
+      await expect(makeDefault).toBeVisible({ timeout: 30_000 });
+      await makeDefault.click();
+    }
+    await expect
+      .poll(
         async () => {
           const proof = await fetchConnectedCodexCredentialProof(
             adminRequest,
@@ -670,12 +701,16 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
             provisioned.session.accessToken,
           );
           return proof
-            ? { kind: proof.kind, isDefault: proof.isDefault }
+            ? { credentialId: proof.credentialId, kind: proof.kind, isDefault: proof.isDefault }
             : null;
         },
         { timeout: 60_000 },
       )
-      .toEqual({ kind: "codex_auth_json", isDefault: true });
+      .toEqual({
+        credentialId: connectedProof.credentialId,
+        kind: "codex_auth_json",
+        isDefault: true,
+      });
     const credentialProof = await fetchConnectedCodexCredentialProof(
       adminRequest,
       config.controllerUrl,
