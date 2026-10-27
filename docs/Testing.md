@@ -1430,6 +1430,25 @@ be used explicitly with
 That verifies the installed channel, not the lockfile's Chromium revision;
 CI always installs and uses the locked Playwright browser.
 
+To verify Shared/Personal handoffs in the actual Desktop app without a remote
+runtime or account, run the explicit native switching lane:
+
+```bash
+pnpm --filter @instafy/desktop-app build
+pnpm --filter @instafy/frontend exec playwright test --config playwright.electron-switch.config.ts
+```
+
+This launches the built Electron app with its real preload, native Personal
+WebContentsView and a disposable profile. It mounts production browser surfaces
+with a controlled Shared pixel transport and loopback identity fixture. The four
+cases cover narrow and wide Desktop windows in both themes, repeated switches,
+returning before Shared repaints, Personal menu/resize capture ordering, and
+preserved native page, draft and scroll position. A missing Electron build fails
+the lane. It does not prove remote runtime allocation, live network transport or
+mobile native browsing. Screenshots are retained under
+`packages/frontend/test-results/electron-browser-switch`; Personal reference
+images composite the separately captured native view into the renderer.
+
 The two Shared session/status cases mount the complete production modal at
 390×844 and 844×390 with touch input and safe-area insets. They verify bounded
 scrolling, readable save-status guidance, 44px touch controls, token-free resume
@@ -1526,6 +1545,20 @@ click's result shows a menu with a 900 ms opening transition fully open.
 Only fixed-schema results, timing summaries and inert-page screenshots are kept
 under `packages/frontend/test-results/browser-ci/shared-cobrowsing`; the profile
 and raw session files are removed.
+
+The same step then runs `scripts/shared-browser-form-submission-e2e.mjs`. It
+takes every case of the form-submission table both browsers share
+(`packages/browser-action-policy/formSubmissionCases.json`) in real Chromium and
+checks that the shared rules report what Chromium then sends (default buttons,
+`formaction`/`formmethod`/`formtarget`, `<base href>`, dialogs, new windows).
+It then drives the production controller through a hostile default button, a
+label of a hidden submit button, a form that opens another window, a
+`<base href>` to another site, a keydown handler that moves the form after
+approval, submit buttons in a closed shadow tree or laid over a control, and
+controls nested inside a hostile submit button, and checks that no cross-site
+POST goes out without the prompts for that site. The Personal Browser lane runs
+the same table through the built page bridge in Electron, and a keydown handler
+that moves the form there too.
 
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across

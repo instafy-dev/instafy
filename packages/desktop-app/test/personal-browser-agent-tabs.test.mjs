@@ -1104,6 +1104,112 @@ test("a form the agent submits to a link-only site or a private address is refus
   assert.equal(personView.webContents.clicks, 1);
 });
 
+// Form steps are judged by the submission the page bridge reports, as the
+// browser makes it: a submit button's formaction and formtarget, or those of
+// the default button Enter clicks.
+const searchField = (submission) => ({
+  tag: "input", type: "search", ariaLabel: "Search", formOwnerIdentity: "document-0:form", formActionText: "Search",
+  formMethod: "get", formActionUrl: "https://example.test/search", formSubmission: "implicit", formSubmits: true,
+  ...submission,
+});
+
+test("a form step whose submission opens another window is refused before any prompt", async () => {
+  const { host, dialogs, personView } = fixture();
+  await resume(host, "ask");
+  await host.handleControlOperation("snapshot", {});
+  const button = { ...searchField({ formNewWindow: true, formTarget: "_blank" }), tag: "button", type: "submit", formSubmission: "button" };
+  for (const [descriptor, operation, payload] of [
+    [button, "click", { index: 0 }],
+    [button, "press", { index: 0, key: "Enter" }],
+    [searchField({ formNewWindow: true, formTarget: "results" }), "press", { index: 0, key: "Enter" }],
+    [searchField({ formNewWindow: true, formTarget: "_blank" }), "type", { index: 0, text: "Lisbon", submit: true }],
+  ]) {
+    personView.webContents.targetDescriptor = descriptor;
+    await host.handleControlOperation("snapshot", {});
+    const asked = dialogs.length;
+    await rejectsWith(host.handleControlOperation(operation, payload), "new_window_blocked");
+    assert.equal(dialogs.length, asked, `${operation} asked nothing`);
+  }
+  assert.equal(personView.webContents.clicks ?? 0, 0);
+  assert.equal(personView.webContents.typed ?? 0, 0);
+  assert.equal(personView.webContents.presses ?? 0, 0);
+  // A target of a frame on the page stays in the tab and asks as before.
+  personView.webContents.targetDescriptor = searchField({ formTarget: "results" });
+  await host.handleControlOperation("snapshot", {});
+  await host.handleControlOperation("press", { index: 0, key: "Enter" });
+  assert.equal(personView.webContents.presses, 1);
+});
+
+test("a field inside a submit button is refused before any prompt: a click and Enter send its form in different ways", async () => {
+  const { host, dialogs, personView } = fixture();
+  await resume(host, "routine");
+  const nested = {
+    ...searchField({ formSubmission: "nested", formMethod: "post", formActionUrl: "https://example.test/collect" }),
+    type: "text",
+    ariaLabel: "Shoe size",
+  };
+  for (const [operation, payload] of [
+    ["click", { index: 0 }],
+    ["press", { index: 0, key: "Enter" }],
+    ["type", { index: 0, text: "42", submit: true }],
+  ]) {
+    personView.webContents.targetDescriptor = nested;
+    await host.handleControlOperation("snapshot", {});
+    const asked = dialogs.length;
+    await rejectsWith(host.handleControlOperation(operation, payload), "form_submission_unclear");
+    assert.equal(dialogs.length, asked, `${operation} asked nothing`);
+  }
+  assert.equal(personView.webContents.clicks ?? 0, 0);
+  assert.equal(personView.webContents.typed ?? 0, 0);
+  assert.equal(personView.webContents.presses ?? 0, 0);
+});
+
+test("Enter through a default button that posts to another site asks for that site first, then for the step, which names it", async () => {
+  let denySite = true;
+  const { host, dialogs, personView } = fixture({
+    choose: async (options) => ({ response: denySite && /shop\.example\.test/.test(options.message) ? 0 : 1 }),
+  });
+  await resume(host, "ask");
+  await host.handleControlOperation("snapshot", {});
+  personView.webContents.targetDescriptor = searchField({ formMethod: "post", formActionUrl: "https://shop.example.test/collect" });
+  await host.handleControlOperation("snapshot", {});
+  let asked = dialogs.length;
+  await rejectsWith(host.handleControlOperation("press", { index: 0, key: "Enter" }), "origin_not_approved");
+  assert.equal(dialogs.length, asked + 1, "only the site was asked");
+  assert.match(dialogs.at(-1).message, /shop\.example\.test/);
+  assert.equal(personView.webContents.presses ?? 0, 0, "nothing was sent");
+
+  denySite = false;
+  await host.handleControlOperation("snapshot", {});
+  asked = dialogs.length;
+  await host.handleControlOperation("press", { index: 0, key: "Enter" });
+  assert.equal(dialogs.length, asked + 2);
+  assert.match(dialogs.at(-2).message, /shop\.example\.test/);
+  assert.match(dialogs.at(-1).message, /submit/);
+  assert.match(dialogs.at(-1).detail, /The form is sent to shop\.example\.test, another site\./);
+  assert.equal(personView.webContents.presses, 1);
+});
+
+test("typing that changes where the form goes holds the new destination to the form rules before it is sent", async () => {
+  const { host, personView } = fixture();
+  await resume(host, "routine");
+  personView.webContents.targetDescriptor = searchField();
+  await host.handleControlOperation("snapshot", {});
+  // The page moves its default button's formaction while the agent types.
+  let typed = 0;
+  Object.defineProperty(personView.webContents, "typed", {
+    configurable: true,
+    get: () => typed,
+    set: (value) => {
+      typed = value;
+      personView.webContents.targetDescriptor = searchField({ formActionUrl: "https://www.booking.com/searchresults.html" });
+    },
+  });
+  await rejectsWith(host.handleControlOperation("type", { index: 0, text: "Lisbon", submit: true }), "link_only_site");
+  assert.equal(typed, 1);
+  assert.equal(personView.webContents.presses ?? 0, 0, "the changed form was not submitted");
+});
+
 test("a stopped page load is reported to the next step as its previous step's, so that step is not taken as refused", async () => {
   const { host, personView } = fixture();
   await resume(host, "routine");
