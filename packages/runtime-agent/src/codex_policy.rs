@@ -2,7 +2,8 @@
 //!
 //! Every runtime run applies this policy to its loaded Codex `Config` before a
 //! thread manager or thread sees it. It keeps billing fixed across Codex bumps
-//! (no paid service tier, a 272k context window), blocks experimental tools the
+//! (no paid service tier, a 272k context window), keeps OpenAI's hosted web
+//! search off on every lane, blocks experimental tools the
 //! runtime cannot deliver, composes the instructions of every lane (upstream's
 //! prompt without its Codex-product sections, or the runtime's own, plus
 //! Instafy's Destructive Actions section), and sets every Codex feature through
@@ -12,6 +13,7 @@
 use anyhow::{Context, Result, bail};
 use codex_core::config::{Config, ManagedFeatures};
 use codex_features::{FEATURES, Feature};
+use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::openai_models::{ModelInfo, ModelsResponse};
 use runtime_contracts::multi_agent::NativeSubagentLimit;
 
@@ -188,6 +190,18 @@ pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded_browser: b
     // Model traffic uses only the configured provider route (the Instafy proxy).
     config.respect_system_proxy = false;
 
+    // No hosted web search on any lane, for every kind of AI (Lite, own keys,
+    // ChatGPT logins): Octo searches the web only through Instafy's own
+    // command, which keeps the web-research skill's link-only sites
+    // link-only and caps searches per turn. OpenAI's search can do neither,
+    // and Codex has no setting to block sites. The feature pins below keep
+    // the search features off; the proxy drops the tool from every request
+    // as well.
+    config
+        .web_search_mode
+        .set(WebSearchMode::Disabled)
+        .context("Codex requirements keep web search on, which the Instafy runtime never allows")?;
+
     if bounded_browser {
         // A model whose catalog entry selects multi-agent v2 (gpt-6-luna) gets the child-agent
         // tools even with the Collab and MultiAgentV2 features off; only `[agents]` disables them.
@@ -296,6 +310,10 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         // the run timeout instead of failing with the connection error.
         Feature::UnboundedConnectionRetries => Off,
 
+        // OpenAI's hosted web search, cached or live, and its standalone form:
+        // off on every lane (see `apply_runtime_codex_policy`).
+        Feature::StandaloneWebSearch | Feature::WebSearchCached | Feature::WebSearchRequest => Off,
+
         // Upstream removed the in-process V8 runtime, so code-mode-only models (the catalog's
         // `code_mode_only` entries, GPT-6 Luna and the own-AI default among them) run every
         // tool through this host.
@@ -312,9 +330,6 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         | Feature::MultiAgentV2
         | Feature::Collab
         | Feature::CollaborationModes
-        | Feature::StandaloneWebSearch
-        | Feature::WebSearchCached
-        | Feature::WebSearchRequest
         | Feature::ImageGeneration
         | Feature::ToolSuggest
         | Feature::Apps
@@ -1186,6 +1201,80 @@ mod tests {
             // Codex forces unified exec on; a bounded browser turn is kept off
             // shell tools by ShellTool and by selecting no environment.
             assert!(config.features.enabled(Feature::UnifiedExec));
+        }
+    }
+
+    /// Every kind of AI a runtime turn runs on, as its job arrives: Lite runs the managed model,
+    /// an own OpenAI key or a ChatGPT login the own-AI default unless the person picked another.
+    /// Each comes with a Codex config that asks for web search the way a person's own setup could
+    /// (`web_search = "live"`, the legacy feature flags), plus what CODEX_ENABLE_WEB_SEARCH=1 used
+    /// to ask for. Search must be off for all of them on every lane. All of them reach OpenAI
+    /// through the Instafy proxy, which drops the tool as well (openai-proxy-server's
+    /// `web_search_never_reaches_openai_on_any_lease`).
+    #[tokio::test]
+    async fn web_search_is_disabled_for_every_kind_of_ai_on_every_lane() {
+        use runtime_contracts::own_ai_model::{OWN_AI_DEFAULT_MODEL_ID, OWN_AI_SMALL_MODEL_ID};
+        let kinds = [
+            ("Lite", OWN_AI_SMALL_MODEL_ID, ""),
+            (
+                "own OpenAI key",
+                OWN_AI_DEFAULT_MODEL_ID,
+                "web_search = \"live\"\n",
+            ),
+            (
+                "own OpenAI key on an older model",
+                "gpt-5.5",
+                "web_search = \"cached\"\n",
+            ),
+            (
+                "ChatGPT login",
+                OWN_AI_DEFAULT_MODEL_ID,
+                "[features]\nweb_search_request = true\nweb_search_cached = true\nstandalone_web_search = true\n",
+            ),
+        ];
+        for (kind, model, config_toml) in kinds {
+            for bounded_browser in [false, true] {
+                let lane = if bounded_browser {
+                    "a browser turn"
+                } else {
+                    "an ordinary turn"
+                };
+                let home = tempfile::tempdir().expect("codex home");
+                std::fs::write(home.path().join("config.toml"), config_toml).expect("config.toml");
+                let mut config = ConfigBuilder::default()
+                    .codex_home(home.path().to_path_buf())
+                    .harness_overrides(ConfigOverrides {
+                        model: Some(model.to_string()),
+                        cwd: Some(home.path().to_path_buf()),
+                        tools_web_search_request: Some(true),
+                        ..Default::default()
+                    })
+                    .build()
+                    .await
+                    .expect("load Codex config");
+                assert_ne!(
+                    config.web_search_mode.value(),
+                    WebSearchMode::Disabled,
+                    "{kind}: the config asks for search before the policy runs"
+                );
+                apply_runtime_codex_policy(&mut config, bounded_browser).expect("policy");
+                assert_eq!(
+                    config.web_search_mode.value(),
+                    WebSearchMode::Disabled,
+                    "{kind} on {lane}"
+                );
+                for feature in [
+                    Feature::StandaloneWebSearch,
+                    Feature::WebSearchCached,
+                    Feature::WebSearchRequest,
+                ] {
+                    assert!(
+                        !config.features.enabled(feature),
+                        "{kind} on {lane}: {}",
+                        feature.key()
+                    );
+                }
+            }
         }
     }
 

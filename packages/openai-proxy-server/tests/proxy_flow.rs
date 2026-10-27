@@ -1371,27 +1371,74 @@ async fn pinned_lease_drops_web_search_in_tools_and_additional_tools() -> Result
     }
 
     // An unpinned lease (a controller that predates the pin) forwards every
-    // client tool exactly as before.
+    // client tool but hosted web search, which no lease forwards.
     let (proxy_addr, _controller, upstream, _env, _guards) =
         spawn_managed_stack(Some(MANAGED_STUB_KEY), None, false).await?;
     let (status, body) = responses_with_tools_through_proxy(proxy_addr, &token, &tools).await?;
     assert_eq!(status, StatusCode::OK, "unpinned lease: {body}");
+    let without_web_search = without_hosted_web_search(&tools);
     assert_eq!(
         upstream.tools.lock().expect("tool log").clone(),
-        vec![tools.clone()]
+        vec![without_web_search.clone()]
     );
-    assert_eq!(upstream_additional_tools(&upstream), vec![tools]);
+    assert_eq!(
+        upstream_additional_tools(&upstream),
+        vec![without_web_search]
+    );
 
     Ok(())
 }
 
+/// `tools` without the hosted web search entries.
+fn without_hosted_web_search(tools: &Value) -> Value {
+    Value::Array(
+        tools
+            .as_array()
+            .expect("tool list")
+            .iter()
+            .filter(|tool| !is_hosted_web_search_tool(tool))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Whether a tool is OpenAI's hosted web search, under any of its types.
+fn is_hosted_web_search_tool(tool: &Value) -> bool {
+    tool.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|tool_type| tool_type == "web_search" || tool_type.starts_with("web_search_"))
+}
+
+/// Every tool list an upstream request body carries: `tools`, and the tools
+/// of its tool-carrying input items.
+fn body_tool_lists(body: &Value) -> Vec<&Value> {
+    let mut lists = vec![&body["tools"]];
+    for item in body["input"].as_array().into_iter().flatten() {
+        if item.get("tools").is_some() {
+            lists.push(&item["tools"]);
+        }
+    }
+    lists
+}
+
+/// Whether a tool list holds hosted web search, on its own or in a namespace.
+fn carries_hosted_web_search(tools: &Value) -> bool {
+    tools
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| is_hosted_web_search_tool(tool) || carries_hosted_web_search(&tool["tools"]))
+}
+
 #[tokio::test]
 #[serial]
-async fn byo_lane_forwards_web_search() -> Result<()> {
+async fn byo_lane_keeps_its_tools_but_never_web_search() -> Result<()> {
     // A user's own credential pays for its own hosted tools: the platform
-    // pin never applies to it, so every tool goes upstream unchanged, on a
+    // pin never applies to it, so its tools go upstream unchanged, on a
     // dynamic proxy whose managed lease is pinned and on a pinned static one.
+    // Hosted web search is the exception: no lease forwards it.
     let (_, tools) = client_and_hosted_tools();
+    let forwarded = without_hosted_web_search(&tools);
     let byo = proxy_token(Some(RUN_ID), Some(BYO_CREDENTIAL_ID));
     for name in ["dynamic", "static"] {
         let (proxy_addr, controller, upstream, _env, _guards) = if name == "dynamic" {
@@ -1403,13 +1450,13 @@ async fn byo_lane_forwards_web_search() -> Result<()> {
         assert_eq!(status, StatusCode::OK, "{name}: {body}");
         assert_eq!(
             upstream.tools.lock().expect("tool log").clone(),
-            vec![tools.clone()],
-            "{name}: every tool reaches the provider"
+            vec![forwarded.clone()],
+            "{name}: every tool but web search reaches the provider"
         );
         assert_eq!(
             upstream_additional_tools(&upstream),
-            vec![tools.clone()],
-            "{name}: the input keeps every tool"
+            vec![forwarded.clone()],
+            "{name}: the input keeps every tool but web search"
         );
         assert_eq!(
             upstream.models.lock().expect("model log").clone(),
@@ -1450,9 +1497,10 @@ fn tool_labels(tools: &Value) -> Vec<&str> {
 
 #[tokio::test]
 #[serial]
-async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<()> {
+async fn the_proxy_default_tools_never_carry_web_search() -> Result<()> {
     // A ChatGPT login whose request keeps no tools gets the proxy's default
-    // tools, and CODEX_ENABLE_WEB_SEARCH adds web search to them. Codex lists
+    // tools, which never include web search, CODEX_ENABLE_WEB_SEARCH or not
+    // (it used to add it). Codex lists
     // a Responses Lite model's tools, the managed model's among them, only in
     // an `additional_tools` input item, and such a request gets no default
     // tools. A Responses request without that item, and a Chat Completions
@@ -1481,8 +1529,7 @@ async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<
     });
 
     // Pinned by PROXY_PINNED_MODEL, then the same platform lane unpinned,
-    // which keeps every tool: the pin decides, and the unpinned run shows
-    // the defaults do carry web search here.
+    // which keeps every client tool but web search.
     for (name, pinned_model) in [("pinned", Some(PINNED_MODEL)), ("unpinned", None)] {
         let (proxy_addr, _controller, upstream, _stack_env, _guards) = spawn_stack(
             None,
@@ -1506,14 +1553,8 @@ async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<
             )
         } else {
             (
-                vec![
-                    "shell",
-                    "apply_patch",
-                    "update_plan",
-                    "web_search",
-                    "view_image",
-                ],
-                tools.clone(),
+                vec!["shell", "apply_patch", "update_plan", "view_image"],
+                without_hosted_web_search(&tools),
             )
         };
         let sent_tools = upstream.tools.lock().expect("tool log").clone();
@@ -1539,6 +1580,128 @@ async fn pinned_lease_drops_web_search_from_the_proxy_default_tools() -> Result<
                 "{name}: a managed run on the pinned model"
             );
         }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn web_search_never_reaches_openai_on_any_lease() -> Result<()> {
+    // OpenAI's hosted web search is off for every kind of AI: Lite (the
+    // managed lease, pinned, or self-hosted with PROXY_PINNED_MODEL), the
+    // platform lane before the pin reaches it, a person's own OpenAI key, a
+    // person's own ChatGPT login, and an operator's ChatGPT login. Octo
+    // searches only through Instafy's own command, which keeps link-only
+    // sites link-only; OpenAI's search cannot. Whatever shape the tool takes
+    // (codex's, the preview and dated types, inside a namespace) and wherever
+    // the request carries it (`tools`, `additional_tools`, the proxy's own
+    // default tools with CODEX_ENABLE_WEB_SEARCH set), it never goes upstream.
+    let _env = [
+        EnvGuard::set("CODEX_ENABLE_WEB_SEARCH", Some("1")),
+        EnvGuard::set("CODEX_INCLUDE_APPLY_PATCH_TOOL", None),
+        EnvGuard::set("CODEX_INCLUDE_PLAN_TOOL", None),
+        EnvGuard::set("CODEX_INCLUDE_VIEW_IMAGE_TOOL", None),
+    ];
+    let shell = json!({
+        "type": "function",
+        "name": "exec_command",
+        "description": "Runs a command.",
+        "strict": false,
+        "parameters": { "type": "object", "properties": {} }
+    });
+    let tools = json!([
+        shell,
+        { "type": "web_search", "external_web_access": true },
+        { "type": "web_search", "external_web_access": false },
+        { "type": "web_search_preview", "search_context_size": "high" },
+        { "type": "web_search_preview_2025_03_11" },
+        { "type": "web_search_2025_08_26", "filters": { "allowed_domains": [] } },
+        { "type": "namespace", "name": "hand_built", "tools": [{ "type": "web_search" }] }
+    ]);
+    let lite_input_only = json!({
+        "model": "gpt-6-luna",
+        "stream": false,
+        "input": [
+            { "type": "additional_tools", "role": "developer", "tools": tools },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": CHAT_PROMPT }]
+            }
+        ]
+    });
+    let platform = proxy_token(Some(RUN_ID), None);
+    let own_key = proxy_token(Some(RUN_ID), Some(BYO_CREDENTIAL_ID));
+    let own_chatgpt = proxy_token(Some(RUN_ID), Some(BYO_CHATGPT_CREDENTIAL_ID));
+    let lanes: [(&str, StackProxy<'_>, Option<&str>, &str); 6] = [
+        (
+            "Lite, managed lease",
+            StackProxy::Dynamic,
+            Some(PINNED_MODEL),
+            &platform,
+        ),
+        (
+            "Lite, self-hosted",
+            StackProxy::Static {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            None,
+            &platform,
+        ),
+        (
+            "platform lane before the pin",
+            StackProxy::Dynamic,
+            None,
+            &platform,
+        ),
+        (
+            "own OpenAI key",
+            StackProxy::Dynamic,
+            Some(PINNED_MODEL),
+            &own_key,
+        ),
+        (
+            "own ChatGPT login",
+            StackProxy::Dynamic,
+            Some(PINNED_MODEL),
+            &own_chatgpt,
+        ),
+        (
+            "operator's ChatGPT login",
+            StackProxy::StaticChatGpt { pinned_model: None },
+            None,
+            &platform,
+        ),
+    ];
+    for (name, proxy, managed_pin, token) in lanes {
+        let (proxy_addr, _controller, upstream, _stack_env, _guards) =
+            spawn_stack(Some(MANAGED_STUB_KEY), managed_pin, false, proxy).await?;
+        let (status, body) = responses_with_tools_through_proxy(proxy_addr, token, &tools).await?;
+        assert_eq!(status, StatusCode::OK, "{name} tools: {body}");
+        let (status, body) =
+            post_through_proxy(proxy_addr, token, "/v1/responses", lite_input_only.clone()).await?;
+        assert_eq!(status, StatusCode::OK, "{name} Lite input: {body}");
+        let (status, body) = responses_through_proxy(proxy_addr, token, "gpt-5.6-sol").await?;
+        assert_eq!(status, StatusCode::OK, "{name} no tools: {body}");
+        let (status, body) = chat_through_proxy(proxy_addr, token).await?;
+        assert_eq!(status, StatusCode::OK, "{name} chat: {body}");
+
+        let bodies = upstream.bodies.lock().expect("body log").clone();
+        assert_eq!(bodies.len(), 4, "{name}: every request went upstream");
+        for (index, body) in bodies.iter().enumerate() {
+            for list in body_tool_lists(body) {
+                assert!(
+                    !carries_hosted_web_search(list),
+                    "{name}: request {index} sent web search upstream: {list}"
+                );
+            }
+        }
+        // The rest of the request's tools still go upstream: only web search is dropped.
+        assert_eq!(
+            bodies[0]["tools"][0]["name"], "exec_command",
+            "{name}: the client's own tool is forwarded"
+        );
     }
 
     Ok(())
@@ -2067,32 +2230,23 @@ async fn chatgpt_login_sends_a_responses_lite_request_no_default_tools() -> Resu
         credential_id,
         chatgpt: true,
     };
-    for (lane, pinned) in [
-        (
-            chatgpt_lane(
-                "static ChatGPT login",
-                StackProxy::StaticChatGpt { pinned_model: None },
-                None,
-            ),
-            false,
+    for lane in [
+        chatgpt_lane(
+            "static ChatGPT login",
+            StackProxy::StaticChatGpt { pinned_model: None },
+            None,
         ),
-        (
-            chatgpt_lane(
-                "pinned static ChatGPT login",
-                StackProxy::StaticChatGpt {
-                    pinned_model: Some(PINNED_MODEL),
-                },
-                None,
-            ),
-            true,
+        chatgpt_lane(
+            "pinned static ChatGPT login",
+            StackProxy::StaticChatGpt {
+                pinned_model: Some(PINNED_MODEL),
+            },
+            None,
         ),
-        (
-            chatgpt_lane(
-                "own ChatGPT login",
-                StackProxy::Dynamic,
-                Some(BYO_CHATGPT_CREDENTIAL_ID),
-            ),
-            false,
+        chatgpt_lane(
+            "own ChatGPT login",
+            StackProxy::Dynamic,
+            Some(BYO_CHATGPT_CREDENTIAL_ID),
         ),
     ] {
         let name = lane.name;
@@ -2108,12 +2262,13 @@ async fn chatgpt_login_sends_a_responses_lite_request_no_default_tools() -> Resu
         )
         .await?;
 
-        // Responses Lite: no `tools`, the item as the pin leaves it, and the
-        // tool controls a request without `tools` gets.
+        // Responses Lite: no `tools`, the item emptied of hosted web search
+        // (which no lease forwards, pinned or not), and the tool controls a
+        // request without `tools` gets.
         let emptied_item = json!({
             "type": "additional_tools",
             "role": "developer",
-            "tools": if pinned { json!([]) } else { hosted_only.clone() }
+            "tools": []
         });
         for (case, body, item, tool_choice) in [
             ("Lite", &bodies[0], &lite["input"][0], "auto"),
