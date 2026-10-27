@@ -133,6 +133,34 @@ const special = {
     policy: { formHasPassword: true, formPasswordCount: 1, formFieldCount: 2, signInIdentifier: true },
   },
   "file-input": { description: control("", { tag: "input", inputType: "file", ariaLabel: "Receipt" }) },
+  // Form steps as the page describer reports them, with the submission the
+  // browser makes (formSubmission.js): a label that clicks a hidden submit
+  // button posting to another site, a search field whose default button opens
+  // another window, and a field whose default button closes a dialog.
+  "label-submits-elsewhere": {
+    description: control("Read the reviews", {
+      tag: "label", inputType: "", formMethod: "post", formAction: "https://other.example/collect",
+      formActionText: "form post https://other.example/collect Read the reviews",
+    }),
+    policy: { formActionUrl: "https://other.example/collect", formSubmission: "button", formSubmits: true },
+  },
+  "new-window-search": {
+    description: control("", {
+      tag: "input", inputType: "search", ariaLabel: "Search", labels: "Search", formMethod: "get",
+      formAction: "https://example.test/search", formTarget: "_blank",
+      formActionText: "form get https://example.test/search Search",
+    }),
+    policy: {
+      formActionUrl: "https://example.test/search", formSubmission: "implicit", formSubmits: true, formNewWindow: true,
+    },
+  },
+  "dialog-field": {
+    description: control("", {
+      tag: "input", inputType: "text", ariaLabel: "Name", labels: "Name", formMethod: "dialog",
+      formAction: "https://other.example/collect", formActionText: "form dialog https://other.example/collect Done",
+    }),
+    policy: { formActionUrl: "https://other.example/collect", formSubmission: "implicit", formSubmits: true },
+  },
   "canary-label": { description: control(`Copy ${CANARY}`) },
   "click-error-canary": { description: control("Show details") },
   "no-policy": { description: control("Show details"), policy: null },
@@ -2036,6 +2064,87 @@ fn routine_form_buttons_preserve_one_shot_confirmation_for_submission_controls()
 }
 
 #[test]
+fn a_label_that_clicks_a_submit_button_asks_under_routine_with_the_forms_own_destination() {
+    let fixture = EmbeddedControllerFixture::new();
+    let mode = "label-submits-elsewhere";
+    let body = json!({"index": 0, "snapshotId": fixture.snapshot_id(mode)});
+    let (output, requests) = fixture.run_with_decisions(
+        mode,
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body.to_string()),
+        &[],
+        &["allow_routine", "deny"],
+    );
+    assert!(
+        !output.status.success(),
+        "a click that submits a form ran without confirmation"
+    );
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[1]["kind"], "action");
+    assert_eq!(requests[1]["operation"], "click");
+    assert_eq!(requests[1]["destinationOrigin"], "https://other.example");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("approval_denied"));
+}
+
+#[test]
+fn a_form_step_that_opens_another_window_is_refused_before_any_prompt() {
+    for (path, extra) in [
+        ("/v1/press", json!({"key": "Enter"})),
+        ("/v1/type", json!({"text": "boots", "submit": true})),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let mode = "new-window-search";
+        let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id(mode)});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            path,
+            Some(&body.to_string()),
+            &["https://example.test"],
+            &["allow_once"],
+        );
+        assert!(
+            !output.status.success(),
+            "{path} submitted into another window"
+        );
+        assert!(requests.is_empty(), "{path}: {requests:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("opens another window"), "{path}: {stderr}");
+    }
+}
+
+#[test]
+fn a_dialog_submission_has_no_destination_of_its_own() {
+    let fixture = EmbeddedControllerFixture::new();
+    let mode = "dialog-field";
+    let body = json!({"index": 0, "snapshotId": fixture.snapshot_id(mode), "key": "Enter"});
+    let (output, requests) = fixture.run_with_decisions(
+        mode,
+        "page-target",
+        "POST",
+        "/v1/press",
+        Some(&body.to_string()),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // No prompt for the action's site: a dialog submission sends nothing.
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["kind"], "action");
+    assert_eq!(requests[0]["destinationOrigin"], "https://example.test");
+}
+
+#[test]
 fn routine_policy_still_confirms_consequential_controls_submissions_and_activation_keys() {
     for (mode, path, extra) in [
         ("aria-delete", "/v1/click", json!({})),
@@ -3195,10 +3304,11 @@ impl EmbeddedControllerFixture {
 fn embedded_policy_modules_publish_their_api_without_commonjs() {
     use std::process::Stdio;
     let script = format!(
-        "{}\n{}\n{}\nprocess.stdout.write(JSON.stringify([typeof module, typeof globalThis.__instafyBrowserRedaction.redactPageObservation, typeof globalThis.__instafyBrowserActionPolicy.classifyStep, typeof globalThis.__instafyBrowserPageCapture.pageSecretSignalsInPage]));",
+        "{}\n{}\n{}\n{}\nprocess.stdout.write(JSON.stringify([typeof module, typeof globalThis.__instafyBrowserRedaction.redactPageObservation, typeof globalThis.__instafyBrowserActionPolicy.classifyStep, typeof globalThis.__instafyBrowserPageCapture.pageSecretSignalsInPage, typeof globalThis.__instafyBrowserFormSubmission.formSubmissionRulesInPage]));",
         embedded_plain_script(BROWSER_REDACTION_SCRIPT),
         embedded_plain_script(BROWSER_ACTION_POLICY_SCRIPT),
         embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
+        embedded_plain_script(BROWSER_FORM_SUBMISSION_SCRIPT),
     );
     let mut child = StdCommand::new("node")
         .arg("-")
@@ -3223,7 +3333,7 @@ fn embedded_policy_modules_publish_their_api_without_commonjs() {
     // scripts on their global path.
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        r#"["object","function","function","function"]"#
+        r#"["object","function","function","function","function"]"#
     );
     let embedded = embedded_shared_browser_script();
     assert!(
@@ -3234,6 +3344,11 @@ fn embedded_policy_modules_publish_their_api_without_commonjs() {
     assert!(
         embedded.find("root.__instafyBrowserPageCapture")
             < embedded.find("globalThis.__instafyBrowserPageCapture;")
+    );
+    // So must the form submission rules the page describer joins in.
+    assert!(
+        embedded.find("root.__instafyBrowserFormSubmission")
+            < embedded.find("globalThis.__instafyBrowserFormSubmission;")
     );
     // Larger than one Linux argv string may be, which is why it travels on stdin.
     assert!(embedded.len() > 64 * 1024);

@@ -1,0 +1,4 @@
+---
+---
+
+In the desktop app's Personal Browser, Octo's form steps are judged and taken by the submission the browser makes: the default button's `formaction`, `formmethod` and `formtarget` for Enter, a submit button's own for a click, `<base href>` for relative actions. A form sent to another site is held to the link-only and private-address rules and, in Ask mode, asks for that site in the tab before the step's dialog, which now says where the form goes. Enter in a search field whose default button posts to another site now asks, and then sends what the browser would send. A form step that would open another window is refused with `new_window_blocked`. Enter now clicks the default button the way the browser does (a disabled one blocks it) instead of submitting the form without its button, and typing that changes where a form goes is checked again before Enter. No package changes.

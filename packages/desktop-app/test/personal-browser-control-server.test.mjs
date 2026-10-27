@@ -192,6 +192,8 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     );
     // A page load stopped after the previous step is reported as that step's, not as a refusal of this one.
     assert.match(initialized.body.result.instructions, /this step was not run because Desktop stopped a page load after your previous step, it is the previous step's/);
+    // A form that would open another window is refused for good.
+    assert.match(initialized.body.result.instructions, /new_window_blocked is final for that step/);
 
     const listed = await requestJson(`${credentials.controlUrl}/mcp`, {
       method: "POST",

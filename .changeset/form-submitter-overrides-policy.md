@@ -1,0 +1,4 @@
+---
+---
+
+`@instafy/browser-action-policy` has `formSubmission.js`, the one place both browsers compute the submission a form step makes, as the browser does: a submit button's `formaction`, `formmethod`, `formenctype` and `formtarget` over the form's own, Enter through the form's default button (the first submit button in tree order, one joined with `form=` included; a disabled one blocks it), `<base href>` and `<base target>`, frame names, and `method="dialog"`, which sends nothing. The step classifier judges those facts: a same-site GET search is free only when its submission is a known GET of the page's own site in the same tab, to an address that is not risky, and a submission to a risky address (sign-out, export) takes that address's category. `formSubmissionCases.json` is one table of form steps both browsers' tests run. No package changes.

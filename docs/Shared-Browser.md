@@ -458,7 +458,8 @@ Browser has tabs of its own (see Personal-Browser.md).
   only the site of a link-only page. Octo can only take the tab elsewhere, or
   close one of its own. Without the list, Octo opens, reads and does nothing
   in any tab. The person's own browsing is unchanged.
-- **No other windows.** A step of Octo's, in any tab, that opens another window
+- **No other windows.** A form step whose submission opens another window is
+  refused before any prompt. A step of Octo's, in any tab, that opens another window
   (a `target="_blank"` link, a script) has that window's requests stopped
   before they leave the browser, the window closed, and the step reported as
   refused. A window a page in one of Octo's tabs opens by itself between steps
@@ -554,6 +555,37 @@ earlier consequential-word check stays as a floor, and a step whose structural
 facts are missing asks. The category leads the approval label, for example
 `Download or export: Export CSV`, so the request shape is unchanged for Studio
 and the origin. In Ask mode every step still asks.
+
+**Form steps are judged by what the browser submits.** The page describer runs
+the shared form rules (`@instafy/browser-action-policy/formSubmission`, the
+same ones the Desktop Personal Browser runs) and reports the submission a step
+makes, not just the form's `action` and `method`:
+
+- A submit button's `formaction`, `formmethod`, `formenctype` and `formtarget`
+  replace the form's. Enter in a field submits through the form's default
+  button (its first submit button in tree order, one outside the form joined
+  with `form=` included); a disabled default button blocks it, and the step is
+  then judged by what that button would send. Enter in a checkbox, radio, date
+  field or select clicks the first submit button that is not disabled, as
+  Chromium does. A click on a label of a submit button, or on something inside
+  one, submits with that button.
+- Addresses are absolute and resolved against `<base href>`; an empty action is
+  the page itself. `method="dialog"` closes a dialog and sends nothing, so it
+  has no destination.
+- The step's destination, its link-only check, the prompt for another site
+  ("Allow this form destination for this run") and the approval's destination
+  binding all use that submission. A same-site GET search is free only when
+  its submission is a known GET of the page's own site in the same tab, to an
+  address that is not risky.
+- A form step whose submission opens another window (`_blank`, a `<base
+  target>`, or a name that is no frame of the page) is refused before any
+  prompt.
+
+`packages/browser-action-policy/formSubmissionCases.json` is one table of form
+steps both browsers run: `scripts/shared-browser-form-submission-e2e.mjs`
+checks every case against what real Chromium sends and drives the production
+controller through a hostile default button, a label of a hidden submit
+button, a form that opens a window and a `<base href>` to another site.
 
 **Refused in every mode, before any prompt.** Revealing or copying a credential
 (`step_refused_secret`), sign-in submits, identity-provider sign-in buttons and

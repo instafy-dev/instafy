@@ -77,6 +77,7 @@ import {
   personalBrowserActivationRequiresConfirmation,
   personalBrowserKeyRequiresConfirmation,
   personalBrowserKeyMutatesSensitiveField,
+  personalBrowserStepFormSubmission,
   requirePersonalBrowserTarget,
   sanitizePersonalBrowserBrokerStatus,
   PERSONAL_BROWSER_APPROVAL_POLICY_VERSION,
@@ -408,26 +409,28 @@ function sameDocument(href: string, pageUrl: string): boolean {
   }
 }
 
+type PersonalBrowserFormSubmission = ReturnType<typeof personalBrowserStepFormSubmission>;
+
 /**
- * The address a step sends a form to, when the step submits one: a click or
- * Space on its submit control, Enter there or in one of its fields, or typing
- * with submit. Null for every other step.
+ * The sentence an approval dialog adds for a form sent to another site, so
+ * the person sees where it goes. Empty for the page's own site.
  */
-function submittedFormAction(
-  descriptor: PersonalBrowserTargetDescriptor,
-  step: "click" | "press" | "submit",
-  key = "",
-): string | null {
-  if (!descriptor.formOwnerIdentity?.trim() || (descriptor.formMethod ?? "").trim().toLowerCase() === "dialog") return null;
-  const tag = descriptor.tag?.trim().toLowerCase() ?? "";
-  const type = descriptor.type?.trim().toLowerCase() ?? "";
-  const submitControl = (tag === "button" && (type === "submit" || type === "")) ||
-    (tag === "input" && (type === "submit" || type === "image"));
-  const implicitField = tag === "input" && !["button", "reset", "file", "hidden"].includes(type);
-  const submits = step === "submit" ||
-    (step === "click" && submitControl) ||
-    (step === "press" && ((key === "Enter" && (submitControl || implicitField)) || (key === " " && submitControl)));
-  return submits ? descriptor.formActionUrl?.trim() || null : null;
+function formDestinationDetail(submission: PersonalBrowserFormSubmission, pageUrl: string): string {
+  if (!submission?.action) return "";
+  let destination: URL;
+  try {
+    destination = new URL(submission.action);
+  } catch {
+    return "";
+  }
+  let pageOrigin: string | null = null;
+  try {
+    pageOrigin = new URL(pageUrl).origin;
+  } catch {
+    pageOrigin = null;
+  }
+  if (destination.origin === pageOrigin || !destination.host) return "";
+  return `The form is sent to ${destination.host.slice(0, 160)}, another site.`;
 }
 
 function siteName(value: string): string | null {
@@ -2078,7 +2081,7 @@ export class PersonalBrowserHost {
 
   private async confirmAgentActivation(
     descriptor: PersonalBrowserTargetDescriptor,
-    options: { formSubmission?: boolean; fill?: boolean; category?: string; typedText?: string } = {},
+    options: { formSubmission?: boolean; fill?: boolean; category?: string; typedText?: string; destination?: string } = {},
   ): Promise<boolean> {
     const owner = this.ownerWindow;
     if (!owner || owner.isDestroyed() || !owner.isVisible()) {
@@ -2104,7 +2107,7 @@ export class PersonalBrowserHost {
         : options.fill
           ? `Allow the agent to fill in ${fillDescription(descriptor)}?`
           : `Allow the agent to activate ${activationLabel(descriptor)}?`,
-      detail: [typedTextDetail(options.typedText), categoryDetail, genericDetail].filter(Boolean).join(" "),
+      detail: [typedTextDetail(options.typedText), options.destination, categoryDetail, genericDetail].filter(Boolean).join(" "),
       buttons: ["Deny", "Allow once"],
       defaultId: 0,
       cancelId: 0,
@@ -2684,14 +2687,18 @@ export class PersonalBrowserHost {
         resolvedTarget = await this.revalidateControlTarget(contents, target, resolvedTarget);
       }
       // A form it submits to another site is a navigation it starts too.
-      await this.requireFormActionAllowed(submittedFormAction(resolvedTarget.descriptor, "click"), pageUrl, operationEpoch);
+      const clickSubmission = personalBrowserStepFormSubmission(resolvedTarget.descriptor, "click");
+      await this.requireFormSubmissionAllowed(clickSubmission, pageUrl, operationEpoch);
       const activationApproved = personalBrowserActivationRequiresConfirmation(
         resolvedTarget.descriptor,
         this.approvalMode,
         { pageUrl },
       );
       if (activationApproved) {
-        if (!(await this.confirmAgentActivation(resolvedTarget.descriptor, { category: step.category }))) {
+        if (!(await this.confirmAgentActivation(resolvedTarget.descriptor, {
+          category: step.category,
+          destination: formDestinationDetail(clickSubmission, pageUrl),
+        }))) {
           throw new PersonalBrowserControlError(403, "activation_denied", "The user denied the browser activation.");
         }
         this.assertControlEpoch(operationEpoch);
@@ -2750,12 +2757,14 @@ export class PersonalBrowserHost {
         ? null
         : this.typingApprovalKey(resolvedTarget.descriptor, typeStep.category);
       const typingNeedsApproval = typingKey !== null && !this.typingApprovals.has(typingKey);
-      let approvedSubmitCategory: string | null = null;
+      let approvedSubmit: { category: string; submission: PersonalBrowserFormSubmission } | null = null;
       let plannedSubmit: PersonalBrowserStepClassification | null = null;
+      let plannedSubmission: PersonalBrowserFormSubmission = null;
       if (payload.submit === true) {
         plannedSubmit = classifyPersonalBrowserStep("submit", resolvedTarget.descriptor, { pageUrl });
         this.assertStepNotRefused(plannedSubmit);
-        await this.requireFormActionAllowed(submittedFormAction(resolvedTarget.descriptor, "submit"), pageUrl, operationEpoch);
+        plannedSubmission = personalBrowserStepFormSubmission(resolvedTarget.descriptor, "submit");
+        await this.requireFormSubmissionAllowed(plannedSubmission, pageUrl, operationEpoch);
       }
       const plannedSubmitNeedsApproval = plannedSubmit !== null && (this.approvalMode === "ask" ||
         personalBrowserKeyRequiresConfirmation("Enter", resolvedTarget.descriptor, this.approvalMode, { pageUrl }));
@@ -2767,6 +2776,7 @@ export class PersonalBrowserHost {
           fill: typingNeedsApproval,
           category: plannedSubmitNeedsApproval && plannedSubmit ? plannedSubmit.category : typeStep.category,
           typedText: text,
+          destination: plannedSubmitNeedsApproval ? formDestinationDetail(plannedSubmission, pageUrl) : "",
         });
         if (!approved) {
           throw new PersonalBrowserControlError(
@@ -2778,7 +2788,9 @@ export class PersonalBrowserHost {
         this.assertControlEpoch(operationEpoch);
         resolvedTarget = await this.revalidateControlTarget(contents, target, resolvedTarget);
         if (typingKey) this.rememberTypingApproval(typingKey);
-        if (plannedSubmitNeedsApproval && plannedSubmit) approvedSubmitCategory = plannedSubmit.category;
+        if (plannedSubmitNeedsApproval && plannedSubmit) {
+          approvedSubmit = { category: plannedSubmit.category, submission: plannedSubmission };
+        }
       }
       this.assertControlEpoch(operationEpoch);
       const result = await typeIntoPersonalBrowserTarget(
@@ -2811,15 +2823,22 @@ export class PersonalBrowserHost {
         this.assertNonSensitiveActivation(submitTarget.descriptor);
         let submitStep = classifyPersonalBrowserStep("submit", submitTarget.descriptor, { pageUrl });
         this.assertStepNotRefused(submitStep);
+        // Typing can change where the form goes: the submission it now makes
+        // is held to the form rules again.
+        const submission = personalBrowserStepFormSubmission(submitTarget.descriptor, "submit");
+        await this.requireFormSubmissionAllowed(submission, pageUrl, operationEpoch);
         const submissionNeedsConfirmation = this.approvalMode === "ask" ||
           personalBrowserKeyRequiresConfirmation("Enter", submitTarget.descriptor, this.approvalMode, { pageUrl });
         // Typing can change what the form does: a submission that became a
-        // different kind of step asks again.
-        const alreadyApproved = approvedSubmitCategory !== null && approvedSubmitCategory === submitStep.category;
+        // different kind of step, or now goes elsewhere, asks again.
+        const alreadyApproved = approvedSubmit !== null && approvedSubmit.category === submitStep.category &&
+          approvedSubmit.submission?.action === submission?.action &&
+          approvedSubmit.submission?.method === submission?.method;
         if (submissionNeedsConfirmation && !alreadyApproved &&
           !(await this.confirmAgentActivation(submitTarget.descriptor, {
             formSubmission: true,
             category: submitStep.category,
+            destination: formDestinationDetail(submission, pageUrl),
           }))) {
           throw new PersonalBrowserControlError(403, "form_submission_denied", "The user denied form submission.");
         }
@@ -2879,7 +2898,8 @@ export class PersonalBrowserHost {
       if (pressedHrefOrigin) await this.requireAgentNavigationAllowed(pressedHref, operationEpoch);
     }
     // So does Enter or Space that submits a form to another site.
-    await this.requireFormActionAllowed(submittedFormAction(resolvedTarget.descriptor, "press", key), pressPageUrl, operationEpoch);
+    const pressSubmission = personalBrowserStepFormSubmission(resolvedTarget.descriptor, "press", key);
+    await this.requireFormSubmissionAllowed(pressSubmission, pressPageUrl, operationEpoch);
     // Space, Backspace and Delete in a field are typing: they share the
     // form's typing approval. So do arrow keys in an editable combobox, which
     // pick an autocomplete option.
@@ -2908,6 +2928,7 @@ export class PersonalBrowserHost {
         !(await this.confirmAgentActivation(resolvedTarget.descriptor, {
           formSubmission: isImplicitFormSubmission,
           category: pressStep.category,
+          destination: formDestinationDetail(pressSubmission, pressPageUrl),
         }))
       ) {
         throw new PersonalBrowserControlError(403, "activation_denied", "The user denied browser activation.");
@@ -3016,12 +3037,29 @@ export class PersonalBrowserHost {
   }
 
   /**
-   * A form the agent submits to another site opens that site: the same
-   * rules as a link to it, before anything asks. A form of the page's own
-   * site is often handled by the page's script without loading anything; a
-   * page it does load is still held to the rules by the navigation guard.
+   * A form the agent submits, judged by the submission the browser makes
+   * (the submitter's formaction and formtarget included). One that opens
+   * another window is refused: the agent uses no other windows. One sent to
+   * another site opens that site: the same rules as a link to it, before
+   * anything asks, and that site is allowed in this tab first. A form of the
+   * page's own site is often handled by the page's script without loading
+   * anything; a page it does load is still held to the rules by the
+   * navigation guard.
    */
-  private async requireFormActionAllowed(action: string | null, pageUrl: string, operationEpoch: number) {
+  private async requireFormSubmissionAllowed(
+    submission: PersonalBrowserFormSubmission,
+    pageUrl: string,
+    operationEpoch: number,
+  ) {
+    if (!submission) return;
+    if (submission.newWindow) {
+      throw new PersonalBrowserControlError(
+        403,
+        "new_window_blocked",
+        "This form opens another window, which the agent never uses, so it was not submitted. Nothing was sent.",
+      );
+    }
+    const action = submission.action;
     if (!action) return;
     let actionOrigin: string | null;
     let pageOrigin: string | null;
@@ -3035,7 +3073,12 @@ export class PersonalBrowserHost {
     } catch {
       pageOrigin = null;
     }
-    if (actionOrigin && actionOrigin !== pageOrigin) await this.requireAgentNavigationAllowed(action, operationEpoch);
+    if (!actionOrigin || actionOrigin === pageOrigin) return;
+    await this.requireAgentNavigationAllowed(action, operationEpoch);
+    if (!(await this.requestOriginApproval(actionOrigin))) {
+      throw new PersonalBrowserControlError(403, "origin_not_approved", "The user denied access to the site the form is sent to.");
+    }
+    this.assertControlEpoch(operationEpoch);
   }
 
   private assertCurrentAgentPagePublic() {

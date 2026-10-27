@@ -912,6 +912,117 @@ test.describe("Electron Personal Browser", () => {
     }
   });
 
+  test("judges and takes form steps by the submission the browser makes, the default button's formaction, formmethod and formtarget included", async () => {
+    // The form-submission table both browsers run, through Desktop's own
+    // built page bridge in a minimal Electron main process: real Chromium,
+    // one loopback fixture server answering for two sites.
+    type FormCase = {
+      name: string;
+      html: string;
+      step: "enter" | "click";
+      submission: Record<string, unknown> & { action: string; newWindow: boolean; submits: boolean };
+      sends: string;
+      enter?: "allow" | "ask";
+    };
+    const table = JSON.parse(fs.readFileSync(
+      path.join(REPO_ROOT, "packages", "browser-action-policy", "formSubmissionCases.json"),
+      "utf8",
+    )) as { cases: FormCase[] };
+    const formRequests: string[] = [];
+    let formPort = 0;
+    const fill = (value: string, name: string) => value
+      .replaceAll("{shop}", `http://shop.test:${formPort}`)
+      .replaceAll("{other}", `http://other.test:${formPort}`)
+      .replaceAll("{page}", `http://shop.test:${formPort}/case/${name}`);
+    const formServer = createServer((request, response) => {
+      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "invalid"}`);
+      request.resume();
+      if (url.pathname === "/favicon.ico") {
+        response.writeHead(404).end();
+        return;
+      }
+      formRequests.push(`${request.method} ${url.origin}${url.pathname}`);
+      const name = url.pathname.startsWith("/case/") ? decodeURIComponent(url.pathname.slice("/case/".length)) : "";
+      const entry = table.cases.find((candidate) => candidate.name === name);
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      response.end(`<!doctype html><html><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>${name || "Fixture"}</title></head>` +
+        `<body>${entry ? fill(entry.html, entry.name) : "<p>sent</p>"}</body></html>`);
+    });
+    formPort = await listen(formServer);
+    // A disposable profile, never the default Electron one.
+    const formUserData = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-form-submission-"));
+    const formApp = await electron.launch({
+      executablePath: DESKTOP_APP_REQUIRE("electron"),
+      args: [path.join(DESKTOP_APP_DIR, "test", "fixtures", "personal-browser-form-submission-app.cjs"), `--user-data-dir=${formUserData}`],
+      cwd: REPO_ROOT,
+      env: { ...personalBrowserFixtureEnvironment(process.env), TMPDIR: os.tmpdir() },
+    }).catch((error: unknown) => {
+      fs.rmSync(formUserData, { recursive: true, force: true });
+      throw error;
+    });
+    type StepResult = {
+      observed: boolean;
+      facts: Record<string, unknown>;
+      enterVerdict: string;
+      enterAsksInRoutine: boolean;
+      enterAsksInAsk: boolean;
+      clickAsksInRoutine: boolean;
+      submission: { action: string | null; method: string; newWindow: boolean } | null;
+      performed: boolean;
+      targetChanged: boolean;
+      deniedWindows: string[];
+    };
+    const takeStep = async (entry: FormCase) => {
+      formRequests.length = 0;
+      const result = await formApp.evaluate(
+        async (_electron, options) => (globalThis as unknown as {
+          __instafyFormSubmissionStep: (value: typeof options) => Promise<unknown>;
+        }).__instafyFormSubmissionStep(options),
+        { shop: `http://shop.test:${formPort}`, name: entry.name, step: entry.step },
+      ) as StepResult;
+      // The page load itself was the first request.
+      return { result, sent: formRequests.slice(1) };
+    };
+    try {
+      for (const entry of table.cases) {
+        const { result, sent } = await takeStep(entry);
+        expect(result.observed, entry.name).toBe(true);
+        expect(result.facts, entry.name).toEqual({ ...entry.submission, action: fill(entry.submission.action, entry.name) });
+        if (entry.enter) {
+          expect(result.enterVerdict, entry.name).toBe(entry.enter);
+          expect(result.enterAsksInRoutine, entry.name).toBe(entry.enter === "ask");
+        }
+        expect(result.performed, entry.name).toBe(true);
+        expect(result.targetChanged, entry.name).toBe(false);
+        // The bridge's own step sends what Chromium sends, except that a
+        // Personal Browser tab opens no other window: that one is denied.
+        const opensWindow = entry.submission.newWindow && entry.submission.submits;
+        expect(sent, entry.name).toEqual(entry.sends && !opensWindow ? [fill(entry.sends, entry.name)] : []);
+        expect(result.deniedWindows.length, entry.name).toBe(opensWindow ? 1 : 0);
+      }
+
+      // A hostile default button: Enter in the search field asks in both
+      // modes, and its submission names the other site, which the host
+      // holds to the link-only, private-address and site rules before any
+      // dialog. Allowed, Enter sends exactly that POST.
+      const hostile = table.cases.find((entry) => entry.name === "hostile-default-button")!;
+      const { result, sent } = await takeStep(hostile);
+      expect(result.enterAsksInRoutine).toBe(true);
+      expect(result.enterAsksInAsk).toBe(true);
+      expect(result.submission).toEqual({ action: `http://other.test:${formPort}/collect`, method: "post", newWindow: false });
+      expect(sent).toEqual([`POST http://other.test:${formPort}/collect`]);
+      // A label that clicks a hidden submit button asks in routine too.
+      const label = table.cases.find((entry) => entry.name === "click-label-of-a-hidden-submit-button")!;
+      const labelled = await takeStep(label);
+      expect(labelled.result.clickAsksInRoutine).toBe(true);
+      expect(labelled.result.submission).toEqual({ action: `http://other.test:${formPort}/collect`, method: "post", newWindow: false });
+    } finally {
+      await formApp.close();
+      await new Promise<void>((resolve) => formServer.close(() => resolve()));
+      fs.rmSync(formUserData, { recursive: true, force: true });
+    }
+  });
+
   test("revokes ownership and control when the Studio renderer reloads", async () => {
     const targetUrl = `${fixtureOrigin}/target`;
     const ownerId = "reload-owner";

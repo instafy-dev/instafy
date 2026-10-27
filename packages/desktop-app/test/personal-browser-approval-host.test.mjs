@@ -103,7 +103,7 @@ test("Personal routine grant requires native consent and ends synchronously on P
 // earlier routine, which submitted ordinary forms without asking.
 for (const { name, mode, field, after, dialogs: expectedDialogs, title } of [
   { name: "a same-site GET search", mode: "routine", after: "Search", dialogs: 0,
-    field: { type: "search", formMethod: "get", formActionText: "Search" } },
+    field: { type: "search", formMethod: "get", formActionUrl: "https://example.test/search", formActionText: "Search" } },
   { name: "an ordinary form in Ask mode", mode: "ask", after: "Search", dialogs: 1, title: "Change something",
     field: { type: "text", formActionText: "Search" } },
   { name: "an ordinary form", mode: "routine", after: "Save", dialogs: 1, title: "Change something",

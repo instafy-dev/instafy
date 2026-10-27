@@ -60,6 +60,14 @@ test("Personal lane fails when its real-Chromium request-guard proof is filtered
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
 });
 
+test("Personal lane fails when its real-Chromium form-submission proof is filtered out", async (t) => {
+  const formProof = "judges and takes form steps by the submission the browser makes, the default button's formaction, formmethod and formtarget included";
+  assert.ok(REQUIRED_BROWSER_LANES.personal.titles.includes(formProof));
+  const run = setup(t); const others = run.tests.filter((item) => item.title !== formProof);
+  run.begin(others); run.pass(others);
+  assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
+});
+
 test("rejects skipped, expected-failure, unexecuted and retry/flaky cases", async (t) => {
   for (const scenario of ["skipped", "expected-failure", "not-run", "retry", "flaky"]) {
     const run = setup(t); run.begin(); run.pass(run.tests.slice(1));

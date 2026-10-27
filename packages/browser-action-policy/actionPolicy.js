@@ -305,12 +305,37 @@
     return lower(target.areas).split(/\s+/).filter(Boolean);
   }
 
+  // A control whose click submits its form: a submit button, or a label or
+  // a child of one that the page describer found activates one
+  // (formSubmission "button").
   function isSubmitControl(target) {
     const tag = lower(target.tag);
     const type = lower(target.type);
     const owned = Boolean(cleanText(target.formOwnerIdentity));
     return owned && ((tag === "button" && (type === "submit" || type === "")) ||
-      (tag === "input" && (type === "submit" || type === "image")));
+      (tag === "input" && (type === "submit" || type === "image")) ||
+      target.formSubmission === "button");
+  }
+
+  // The risk of the address a form step sends to, judged like a link's. The
+  // address is the submission's own: the submitter's formaction when it has
+  // one. A dialog submission sends nothing.
+  function submissionAddressRisk(target) {
+    if (lower(target.formMethod) === "dialog") return null;
+    const action = cleanText(target.formActionUrl);
+    return action ? classifyAddress(action) : null;
+  }
+
+  // A plain GET of the page's own site in the same tab, as a site's search
+  // box sends. The method, address and target are the submission's own, so a
+  // default button that posts elsewhere, or opens another window, is not
+  // one; neither is a submission whose address is unknown or risky.
+  function isSameSiteGetSubmission(target, ctx) {
+    const action = cleanText(target.formActionUrl);
+    if (!action || target.formNewWindow === true || lower(target.formMethod || "get") !== "get") return false;
+    const actionSite = siteOf(action);
+    const pageSite = ctx && ctx.pageUrl ? siteOf(ctx.pageUrl) : null;
+    return Boolean(actionSite) && actionSite === pageSite && !classifyAddress(action);
   }
 
   function isButtonLike(target) {
@@ -600,7 +625,8 @@
     // A submit control is checked before the disclosure rules: a submit
     // button that also opens a menu still submits its form.
     if (isSubmitControl(target)) {
-      return ask(categoryOfLabel(`${label} ${cleanText(target.formSubmitLabels)}`) || "change", "form submit");
+      const risky = submissionAddressRisk(target);
+      return ask(categoryOfLabel(`${label} ${cleanText(target.formSubmitLabels)}`) || (risky && risky.category) || "change", "form submit");
     }
 
     const namedCategory = categoryOfLabel(label);
@@ -686,14 +712,12 @@
     const owned = Boolean(cleanText(target.formOwnerIdentity));
     if (isSearchField(target) && !categoryOfLabel(labels)) {
       if (!owned) return allow("search", "search without a form");
-      const actionSite = cleanText(target.formActionUrl) ? siteOf(target.formActionUrl) : null;
-      const pageSite = ctx && ctx.pageUrl ? siteOf(ctx.pageUrl) : null;
-      if (lower(target.formMethod || "get") === "get" && (!cleanText(target.formActionUrl) || (actionSite && actionSite === pageSite))) {
-        return allow("search", "same-site GET search");
-      }
+      if (isSameSiteGetSubmission(target, ctx)) return allow("search", "same-site GET search");
     }
     const named = categoryOfLabel(labels);
     if (named) return ask(named, "form submit");
+    const risky = submissionAddressRisk(target);
+    if (risky) return ask(risky.category, "form submit to a risky address");
     const tag = lower(target.tag);
     if (!owned && (target.contentEditable === true || tag === "textarea" || lower(target.role) === "textbox")) {
       return ask("message", "Enter in a composer");
