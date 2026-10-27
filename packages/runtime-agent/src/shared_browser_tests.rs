@@ -2456,9 +2456,18 @@ fn origin_form_navigation_and_activation_each_use_the_bounded_consent_lane() {
         "approved navigation failed: {}",
         String::from_utf8_lossy(&navigate.stderr)
     );
-    assert_eq!(navigate_requests.len(), 2);
+    // A plain address asks once: its site's prompt names the page and is
+    // bound to it, and covers the navigation it was raised for.
+    assert_eq!(navigate_requests.len(), 1, "{navigate_requests:?}");
     assert_eq!(navigate_requests[0]["kind"], "origin");
-    assert_eq!(navigate_requests[1]["operation"], "navigate");
+    assert_eq!(
+        navigate_requests[0]["display"]["label"],
+        "Open https://destination.example/path"
+    );
+    assert_eq!(
+        navigate_requests[0]["destinationFingerprint"],
+        json!(approval_test_sha256("https://destination.example/path"))
+    );
 }
 
 #[test]
@@ -2750,7 +2759,7 @@ fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
     );
     assert!(!click_error.contains("_non_retryable"), "{click_error}");
 
-    // Navigating away still asks for the destination site and the step.
+    // Navigating away still asks for the destination site, once.
     let (navigated, navigate_requests) = fixture.run_with_decisions(
         "blank-page",
         "page-target",
@@ -2758,12 +2767,15 @@ fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
         "/v1/navigate",
         Some(r#"{"url":"https://example.test/"}"#),
         &[],
-        &["allow_origin", "allow_once"],
+        &["allow_origin"],
     );
     let navigated = payload_of(&navigated);
-    assert_eq!(navigate_requests.len(), 2);
+    assert_eq!(navigate_requests.len(), 1);
     assert_eq!(navigate_requests[0]["kind"], "origin");
-    assert_eq!(navigate_requests[1]["kind"], "action");
+    assert_eq!(
+        navigate_requests[0]["display"]["label"],
+        "Open https://example.test/"
+    );
     assert_eq!(navigated["url"], "https://example.test/");
     assert_eq!(navigated["visibleText"], "Fixture page");
 }
@@ -3651,7 +3663,8 @@ fn secret_screens_withhold_text_and_stay_withheld_until_a_new_page() {
     assert_eq!(payload["secretScreen"], true);
     assert_eq!(payload["visibleText"], "");
 
-    // A new page lifts it.
+    // A new page lifts it. The site is approved, so the plain address opens
+    // without a prompt.
     let (output, requests) = fixture.run_with_decisions(
         "safe",
         "page-target",
@@ -3659,9 +3672,9 @@ fn secret_screens_withhold_text_and_stay_withheld_until_a_new_page() {
         "/v1/navigate",
         Some(r#"{"url":"https://example.test/next"}"#),
         &["https://example.test"],
-        &["allow_once"],
+        &[],
     );
-    assert_eq!(requests.len(), 1);
+    assert!(requests.is_empty(), "{requests:?}");
     let payload = payload_of(&output);
     assert_eq!(payload["secretScreen"], false);
     assert_eq!(payload["visibleText"], "Fixture page");
@@ -3866,14 +3879,18 @@ fn navigate_takes_a_snapshot_link_path_on_the_page_site_only() {
         "POST",
         "/v1/navigate",
         Some(r#"{"url":"/reports/q3?view=full"}"#),
-        &["https://example.test"],
-        &["allow_once"],
+        &[],
+        &["allow_origin"],
     );
     let payload = payload_of(&output);
     assert_eq!(payload["url"], "https://example.test/reports/q3?view=full");
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0]["operation"], "navigate");
+    assert_eq!(requests[0]["operation"], "approve-origin");
     assert_eq!(requests[0]["destinationOrigin"], "https://example.test");
+    assert_eq!(
+        requests[0]["display"]["label"],
+        "Open https://example.test/reports/q3?view=full"
+    );
     let full_address = {
         use sha2::{Digest, Sha256};
         Sha256::digest(b"https://example.test/reports/q3?view=full")
@@ -3976,8 +3993,12 @@ fn routine_asks_for_named_categories_with_the_category_in_the_label() {
     assert!(!output.status.success());
     assert_eq!(requests.len(), 2);
     assert_eq!(
+        requests[0]["display"]["label"],
+        "Open https://example.test/reports/export.csv"
+    );
+    assert_eq!(
         requests[1]["display"]["label"],
-        "Download or export: Navigate the Shared Browser"
+        "Download or export: Go to https://example.test/reports/export.csv"
     );
 
     // Without the page's structural facts nothing is assumed safe.
@@ -4311,6 +4332,7 @@ async fn a_jobs_guard_starts_its_run_as_the_runtime_decides() {
             Uuid::new_v4(),
             "page-target",
             "Octo",
+            None,
             cancel_signal.clone(),
         )
         .expect("acquire a job's guard");
@@ -5087,13 +5109,14 @@ fn a_site_prompt_and_its_step_prompt_share_one_deadline() {
 
     let fixture = EmbeddedControllerFixture::new();
     fixture.prepare_authority("page-target", &[]);
+    // A risky address on a new site asks for the site, then for the step.
     let mut child = fixture
         .command_for(
             "safe",
             "page-target",
             "POST",
             "/v1/navigate",
-            Some(r#"{"url":"https://new.example/x"}"#),
+            Some(r#"{"url":"https://new.example/reports/export.csv"}"#),
         )
         .spawn()
         .expect("spawn Ask-mode navigation");
@@ -5423,30 +5446,19 @@ fn a_site_approved_in_one_of_octos_tabs_holds_in_that_tab_only() {
         &["allow_origin", "allow_once"],
     );
     let opened = payload_of(&output);
-    let tab_id = opened["tabId"].as_str().expect("tab id").to_string();
-    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(opened["tabId"].as_str().is_some(), "tab id");
+    // One prompt: the site in the new tab, naming the address it opens and
+    // bound to it. The site's approval in the tab covers opening it.
+    assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(requests[0]["kind"], "origin");
     assert_eq!(requests[0]["browserPageId"], "page-target");
     assert_eq!(
         requests[0]["display"]["label"],
-        "Octo's tab 1: Allow the assistant to open this site in a new tab for this run"
-    );
-    assert_eq!(requests[1]["operation"], "navigate");
-    assert_eq!(
-        requests[1]["display"]["label"],
-        "Octo's tab 1: Open a new tab"
-    );
-    // The step's approval is bound to the tab, not only to the address.
-    assert_ne!(
-        requests[1]["payloadFingerprint"],
-        json!(approval_test_sha256("open-tab"))
+        "Octo's tab 1: Open https://example.test/report in a new tab"
     );
     assert_eq!(
-        requests[1]["payloadFingerprint"],
-        json!(approval_test_sha256(&format!(
-            r#"{{"tabId":"{tab_id}","payload":"{}"}}"#,
-            approval_test_sha256("open-tab")
-        )))
+        requests[0]["destinationFingerprint"],
+        json!(approval_test_sha256("https://example.test/report"))
     );
 
     let record = fixture.tab_record();
@@ -5496,7 +5508,7 @@ fn a_denied_or_unanswered_new_tab_is_closed_again() {
         &["deny"],
     );
     let error = failure_of(&output);
-    assert!(error.contains("approval_denied"), "{error}");
+    assert!(error.contains("[site_declined]"), "{error}");
     assert_eq!(requests.len(), 1);
     assert!(
         fixture.browser_tabs().is_empty(),
@@ -5504,6 +5516,317 @@ fn a_denied_or_unanswered_new_tab_is_closed_again() {
     );
     assert_eq!(fixture.tab_record()["tabs"], json!([]));
     assert_eq!(fixture.tab_record()["currentTabId"], JsonValue::Null);
+}
+
+#[test]
+fn a_plain_navigation_to_a_site_approved_in_its_tab_asks_nothing() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_authority(
+        "page-target",
+        &["https://example.test", "https://destination.example"],
+    );
+    let (output, requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://destination.example/en/places/belem-tower"}"#),
+        &[],
+    );
+    assert_eq!(
+        payload_of(&output)["url"],
+        "https://destination.example/en/places/belem-tower"
+    );
+    assert!(requests.is_empty(), "{requests:?}");
+
+    // A risky address on an approved site still asks for the step, and the
+    // prompt names the address.
+    let (output, requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/reports/export.csv"}"#),
+        &["deny"],
+    );
+    assert!(failure_of(&output).contains("approval_denied_non_retryable"));
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["kind"], "action");
+    assert_eq!(
+        requests[0]["display"]["label"],
+        "Download or export: Go to https://example.test/reports/export.csv"
+    );
+}
+
+#[test]
+fn a_declined_site_stays_closed_and_the_run_takes_another_route_until_a_second_decline() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_authority("page-target", &["https://example.test"]);
+    // The person declines the search engine Octo chose.
+    let (output, requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://search.example/?q=belem+tower"}"#),
+        &["deny"],
+    );
+    let error = failure_of(&output);
+    assert_eq!(requests.len(), 1);
+    assert!(error.contains("[site_declined]"), "{error}");
+    assert!(error.contains("Take another route"), "{error}");
+    assert!(!error.contains("_non_retryable"), "{error}");
+    // Not a code that ends the run.
+    assert_eq!(
+        terminal_consent_failure_code_from_error(&anyhow!(error.clone())),
+        None
+    );
+    let state: JsonValue = serde_json::from_slice(
+        &std::fs::read(fixture.approval_dir.join("state.json")).expect("state"),
+    )
+    .expect("state JSON");
+    assert_eq!(state["declinedOrigins"], json!(["https://search.example"]));
+
+    // The declined site is not asked for again in this run.
+    let (output, requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://search.example/other"}"#),
+        &["allow_origin"],
+    );
+    assert!(failure_of(&output).contains("[site_declined]"));
+    assert!(requests.is_empty(), "{requests:?}");
+
+    // Another route that fits the request: the site the person named.
+    let (output, requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://tourism.example/en"}"#),
+        &["allow_origin"],
+    );
+    assert_eq!(payload_of(&output)["url"], "https://tourism.example/en");
+    assert_eq!(requests.len(), 1);
+
+    // Declining a second site ends the run.
+    let (output, requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://other.example/"}"#),
+        &["deny"],
+    );
+    assert_eq!(requests.len(), 1);
+    assert!(failure_of(&output).contains("approval_denied_non_retryable"));
+}
+
+/// Writes the run's approval state the way the approval script does, for the
+/// run that holds `marker_path`.
+fn write_run_state(marker_path: &Path, approval_dir: &Path, approved: &[&str], routine: bool) {
+    let marker: JsonValue =
+        serde_json::from_slice(&std::fs::read(marker_path).expect("marker")).expect("marker JSON");
+    let state_path = approval_dir.join("state.json");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "ownerId": marker["ownerId"],
+            "runId": marker["runId"],
+            "initiatorUserId": marker["initiatorUserId"],
+            "browserPageId": marker["browserPageId"],
+            "approvedOrigins": approved,
+            "consumedApprovalIds": [],
+            "routineBrowsingAllowed": routine,
+        }))
+        .expect("state JSON"),
+    )
+    .expect("write state");
+    #[cfg(unix)]
+    std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600))
+        .expect("protect state");
+}
+
+#[tokio::test]
+async fn a_run_keeps_the_last_runs_approvals_only_when_it_continues_that_run_for_the_same_person_and_page()
+ {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let path = directory.path().join("agent-control.json");
+    let approval_dir = directory.path().join("approvals");
+    let person = Uuid::new_v4();
+    let acquire = |run_id: Uuid, person: Uuid, page: &str, continues: Option<Uuid>| {
+        let cancel_signal = JobCancelSignal::new();
+        let guard = SharedBrowserAgentControlGuard::acquire_continuing(
+            path.clone(),
+            approval_dir.clone(),
+            ApprovalStart::Ask,
+            run_id,
+            person,
+            page,
+            "Octo",
+            continues,
+            cancel_signal.clone(),
+            Duration::from_secs(60),
+        )
+        .expect("acquire run");
+        (guard, cancel_signal)
+    };
+    let end = |(guard, cancel_signal): (SharedBrowserAgentControlGuard, JobCancelSignal)| {
+        cancel_signal.confirm_shared_browser_shutdown();
+        drop(guard);
+    };
+    let state = || -> Option<JsonValue> {
+        std::fs::read(approval_dir.join("state.json"))
+            .ok()
+            .map(|bytes| serde_json::from_slice(&bytes).expect("state JSON"))
+    };
+
+    // The person approves a site on their page and allows routine browsing,
+    // then takes over: the run ends.
+    let first = Uuid::new_v4();
+    let run = acquire(first, person, "page-target", None);
+    write_run_state(&path, &approval_dir, &["https://example.test"], true);
+    end(run);
+    assert!(state().is_none(), "the run's own records are revoked");
+
+    // Let AI continue names that run: the new run starts with its grants,
+    // bound to the new run.
+    let second = Uuid::new_v4();
+    let run = acquire(second, person, "page-target", Some(first));
+    let marker: JsonValue =
+        serde_json::from_slice(&std::fs::read(&path).expect("marker")).expect("marker JSON");
+    let carried = state().expect("carried state");
+    assert_eq!(carried["approvedOrigins"], json!(["https://example.test"]));
+    assert_eq!(carried["routineBrowsingAllowed"], true);
+    assert_eq!(carried["consumedApprovalIds"], json!([]));
+    for key in ["ownerId", "runId", "initiatorUserId", "browserPageId"] {
+        assert_eq!(carried[key], marker[key], "{key}");
+    }
+    assert_eq!(carried["runId"], second.to_string());
+    end(run);
+
+    // Only the last run can be continued: naming an earlier one carries
+    // nothing.
+    let run = acquire(Uuid::new_v4(), person, "page-target", Some(first));
+    assert!(state().is_none());
+    end(run);
+
+    // Another page, another person, an unnamed continuation, a run in
+    // between or a record that is too old carry nothing.
+    let cases: [(&str, Uuid, bool, bool, bool); 5] = [
+        ("other-page", person, true, false, false),
+        ("page-target", Uuid::new_v4(), true, false, false),
+        ("page-target", person, false, false, false),
+        ("page-target", person, true, true, false),
+        ("page-target", person, true, false, true),
+    ];
+    for (page, who, named, run_in_between, too_old) in cases {
+        let ended = Uuid::new_v4();
+        let run = acquire(ended, person, "page-target", None);
+        write_run_state(&path, &approval_dir, &["https://example.test"], false);
+        end(run);
+        if run_in_between {
+            end(acquire(Uuid::new_v4(), person, "page-target", None));
+        }
+        if too_old {
+            with_ended_run_grants(|records| {
+                let record = records.get_mut(&approval_dir).expect("ended run record");
+                record.ended_at = std::time::Instant::now()
+                    .checked_sub(CONTINUATION_WINDOW + Duration::from_secs(1))
+                    .expect("an earlier instant");
+            });
+        }
+        let run = acquire(Uuid::new_v4(), who, page, named.then_some(ended));
+        assert!(
+            state().is_none(),
+            "{page} {who} named={named} between={run_in_between} old={too_old}"
+        );
+        end(run);
+    }
+
+    // A state that is not the run's own leaves nothing to carry.
+    let ended = Uuid::new_v4();
+    let run = acquire(ended, person, "page-target", None);
+    write_run_state(&path, &approval_dir, &["https://example.test/path"], false);
+    end(run);
+    let run = acquire(Uuid::new_v4(), person, "page-target", Some(ended));
+    assert!(state().is_none());
+    end(run);
+}
+
+#[tokio::test]
+async fn let_ai_continue_keeps_the_site_the_person_approved_and_a_fresh_turn_asks_again() {
+    let fixture = EmbeddedControllerFixture::new();
+    // The fixture answers prompts as this person.
+    let person = fixture.initiator_user_id;
+    let acquire = |run_id: Uuid, continues: Option<Uuid>| {
+        let cancel_signal = JobCancelSignal::new();
+        let guard = SharedBrowserAgentControlGuard::acquire_continuing(
+            fixture.authority_path.clone(),
+            fixture.approval_dir.clone(),
+            ApprovalStart::Ask,
+            run_id,
+            person,
+            "page-target",
+            "Octo",
+            continues,
+            cancel_signal.clone(),
+            Duration::from_secs(60),
+        )
+        .expect("acquire run");
+        (guard, cancel_signal)
+    };
+    let end = |(guard, cancel_signal): (SharedBrowserAgentControlGuard, JobCancelSignal)| {
+        cancel_signal.confirm_shared_browser_shutdown();
+        drop(guard);
+    };
+    let navigate = |url: &str, decisions: &[&str]| {
+        let (output, requests) = fixture.call_deciding(
+            "safe",
+            "POST",
+            "/v1/navigate",
+            Some(&json!({ "url": url }).to_string()),
+            decisions,
+        );
+        (payload_of(&output), requests)
+    };
+
+    // Octo asks for the transport site; the person allows it, then takes over.
+    let first = Uuid::new_v4();
+    let run = acquire(first, None);
+    let (_, requests) = navigate("https://transport.example/lines", &["allow_origin"]);
+    assert_eq!(requests.len(), 1);
+    end(run);
+
+    // Let AI continue: the approved site opens without asking again.
+    let run = acquire(Uuid::new_v4(), Some(first));
+    let (page, requests) = navigate("https://transport.example/tram-15", &[]);
+    assert_eq!(page["url"], "https://transport.example/tram-15");
+    assert!(requests.is_empty(), "{requests:?}");
+    end(run);
+
+    // A fresh turn that continues nothing asks again.
+    let run = acquire(Uuid::new_v4(), None);
+    let (_, requests) = navigate("https://transport.example/tram-15", &["allow_origin"]);
+    assert_eq!(requests.len(), 1);
+    end(run);
+}
+
+#[test]
+fn the_continued_run_is_read_from_studio_metadata_and_nothing_else_names_one() {
+    let run = Uuid::new_v4();
+    assert_eq!(
+        continued_run_id_from_payload(
+            &json!({ "metadata": { "browserContinuesRunId": run.to_string() } })
+        ),
+        Some(run)
+    );
+    for payload in [
+        json!({}),
+        json!({ "metadata": {} }),
+        json!({ "metadata": { "browserContinuesRunId": "not-a-run" } }),
+        json!({ "metadata": { "browserContinuesRunId": 7 } }),
+        json!({ "browserContinuesRunId": run.to_string() }),
+    ] {
+        assert_eq!(continued_run_id_from_payload(&payload), None, "{payload}");
+    }
 }
 
 #[test]
@@ -6030,7 +6353,7 @@ fn closing_octos_tabs_never_leaves_a_persons_tab_in_front() {
         Some(r#"{"url":"https://example.test/three"}"#),
         &["deny"],
     );
-    assert!(failure_of(&output).contains("approval_denied"));
+    assert!(failure_of(&output).contains("[site_declined]"));
     assert!(fixture.browser_tabs().is_empty());
     assert_eq!(fixture.front(), "page-target");
 }
@@ -6052,9 +6375,7 @@ fn each_of_octos_tabs_keeps_one_label_in_prompts_and_list_tabs_while_it_is_open(
         assert_eq!(opened["tabLabel"], format!("Octo's tab {number}"));
         assert_eq!(
             requests[0]["display"]["label"],
-            format!(
-                "Octo's tab {number}: Allow the assistant to open this site in a new tab for this run"
-            )
+            format!("Octo's tab {number}: Open https://example.test/report-{number} in a new tab")
         );
         tab_ids.push(fixture.tab_id_of(&opened));
     }
@@ -6089,10 +6410,7 @@ fn each_of_octos_tabs_keeps_one_label_in_prompts_and_list_tabs_while_it_is_open(
                 .expect("label")
                 .to_string())
             .collect::<Vec<_>>(),
-        vec![
-            "Octo's tab 3: Allow the assistant to access this destination for this run".to_string(),
-            "Octo's tab 3: Navigate the Shared Browser".to_string(),
-        ]
+        vec!["Octo's tab 3: Open https://other.example/pricing".to_string()]
     );
     let listed = payload_of(&fixture.call("safe", "GET", "/v1/tabs", None));
     let labels = listed["tabs"]
@@ -7015,15 +7333,37 @@ fn link_only_case_url(case: &JsonValue) -> String {
     }
 }
 
-fn check_link_only_case(fixture: &EmbeddedControllerFixture, case: &JsonValue) {
+/// A case is refused when its site is "no-agents" (its kind when left out);
+/// a "no-reuse" site, whose terms bar copying and not reading, loads. With
+/// the space's copy, a bundled case expects its `withSpaceCopy` where it has
+/// one.
+fn check_link_only_case(
+    fixture: &EmbeddedControllerFixture,
+    case: &JsonValue,
+    with_space_copy: bool,
+    authority_since: &mut std::time::Instant,
+) {
+    // The fixture's authority lasts a minute and the table can take longer:
+    // a fresh one every half minute.
+    if authority_since.elapsed() > std::time::Duration::from_secs(30) {
+        fixture.prepare_routine_start("page-target");
+        *authority_since = std::time::Instant::now();
+    }
     let full_url = link_only_case_url(case);
     let url = case["url"].as_str().expect("case url");
+    let expected = match case.get("withSpaceCopy") {
+        Some(override_case) if with_space_copy => override_case,
+        _ => case,
+    };
+    let refused_site = expected["site"]
+        .as_str()
+        .filter(|_| expected["kind"].as_str() != Some("no-reuse"));
     std::fs::remove_file(&fixture.fetch_log).ok();
     let output = fixture.click_redirected_to(&full_url);
-    match case["site"].as_str() {
+    match refused_site {
         Some(site) => {
             let refused = failure_of(&output);
-            let via: Vec<&str> = case["via"]
+            let via: Vec<&str> = expected["via"]
                 .as_array()
                 .map(|via| via.iter().filter_map(JsonValue::as_str).collect())
                 .unwrap_or_default();
@@ -7067,19 +7407,33 @@ fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redir
     let cases: JsonValue = serde_json::from_str(LINK_ONLY_CASES).expect("cases JSON");
     let fixture = EmbeddedControllerFixture::new();
     fixture.prepare_routine_start("page-target");
-    for case in cases["bundled"].as_array().expect("bundled cases") {
-        check_link_only_case(&fixture, case);
+    let mut authority_since = std::time::Instant::now();
+    let bundled = cases["bundled"].as_array().expect("bundled cases");
+    let space_cases = cases["spaceCopy"]["cases"].as_array().expect("space cases");
+    // Both kinds are in the table: sites refused and sites that load (the
+    // bundled list bars agents on every site, so a "no-reuse" one comes from
+    // the space's copy).
+    for kind in ["no-agents", "no-reuse"] {
+        assert!(
+            space_cases
+                .iter()
+                .chain(bundled.iter().filter_map(|case| case.get("withSpaceCopy")))
+                .any(|case| case["site"].is_string()
+                    && case["kind"].as_str().unwrap_or("no-agents") == kind),
+            "{kind}"
+        );
+    }
+    for case in bundled {
+        check_link_only_case(&fixture, case, false, &mut authority_since);
     }
     // With the space's copy, its additions hold too, and the bundled list
-    // still does.
+    // still does: a copy can make a site stricter, never looser.
     fixture.write_space_link_only(&cases["spaceCopy"]["list"].to_string());
-    for case in cases["spaceCopy"]["cases"]
-        .as_array()
-        .expect("space cases")
-        .iter()
-        .chain(cases["bundled"].as_array().expect("bundled cases"))
-    {
-        check_link_only_case(&fixture, case);
+    for case in space_cases {
+        check_link_only_case(&fixture, case, false, &mut authority_since);
+    }
+    for case in bundled {
+        check_link_only_case(&fixture, case, true, &mut authority_since);
     }
 }
 

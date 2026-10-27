@@ -9,6 +9,13 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   const STATE_MAX_BYTES = 16 * 1024;
   const WITHHOLD_MAX_BYTES = 4 * 1024;
   const MAX_APPROVED_ORIGINS = 32;
+  // A site the person declined stays closed for the rest of the run, without
+  // another prompt. The first site declined in a run leaves the run going, so
+  // Octo can take another route that fits the person's request (the site they
+  // named, opened directly); declining another site ends the run, so a denial
+  // never turns into a chain of prompts. A declined step (not a site) ends the
+  // run at once.
+  const MAX_DECLINED_ORIGINS = 1;
   const MAX_CONSUMED_APPROVALS = 64;
   const MAX_ORIGIN_BYTES = 512;
   const MAX_OPERATION_BYTES = 64;
@@ -63,6 +70,14 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
 
   function fail(code, message) {
     throw new Error(`${message} [${code}_non_retryable]`);
+  }
+
+  // Not a terminal code: the run goes on, so Octo can take another route that
+  // fits the person's request. The site itself stays closed for the run.
+  function siteDeclinedError(origin) {
+    return new Error(
+      `The person declined ${origin} for this run, so nothing there was opened or read, and Octo does not ask for it again in this run. Take another route that fits their request, such as opening the site they named directly, or end the turn and ask them how to continue. Declining another site ends the run. [site_declined]`,
+    );
   }
 
   function storageCall(message, operation) {
@@ -428,9 +443,20 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
           "approvedOrigins",
           "consumedApprovalIds",
           ...(Object.hasOwn(raw, "routineBrowsingAllowed") ? ["routineBrowsingAllowed"] : []),
+          ...(Object.hasOwn(raw, "declinedOrigins") ? ["declinedOrigins"] : []),
         ],
         "Shared Browser approval state",
       );
+      const validOrigins = (origins, max) =>
+        Array.isArray(origins) &&
+        origins.length <= max &&
+        !origins.some(
+          (origin) =>
+            typeof origin !== "string" ||
+            byteLength(origin) > MAX_ORIGIN_BYTES ||
+            normalizedOrigin(origin) !== origin,
+        ) &&
+        new Set(origins).size === origins.length;
       if (
         state.version !== 1 ||
         state.ownerId !== authority.ownerId ||
@@ -439,15 +465,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         state.browserPageId !== authority.browserPageId ||
         (Object.hasOwn(state, "routineBrowsingAllowed") &&
           typeof state.routineBrowsingAllowed !== "boolean") ||
-        !Array.isArray(state.approvedOrigins) ||
-        state.approvedOrigins.length > MAX_APPROVED_ORIGINS ||
-        state.approvedOrigins.some(
-          (origin) =>
-            typeof origin !== "string" ||
-            byteLength(origin) > MAX_ORIGIN_BYTES ||
-            normalizedOrigin(origin) !== origin,
-        ) ||
-        new Set(state.approvedOrigins).size !== state.approvedOrigins.length ||
+        !validOrigins(state.approvedOrigins, MAX_APPROVED_ORIGINS) ||
+        (Object.hasOwn(state, "declinedOrigins") &&
+          !validOrigins(state.declinedOrigins, MAX_DECLINED_ORIGINS)) ||
         !Array.isArray(state.consumedApprovalIds) ||
         state.consumedApprovalIds.length > MAX_CONSUMED_APPROVALS ||
         state.consumedApprovalIds.some((id) => !UUID_PATTERN.test(id)) ||
@@ -739,7 +759,18 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
               ...state.consumedApprovalIds,
               decision.approvalId,
             ].slice(-MAX_CONSUMED_APPROVALS);
+            const declined = state.declinedOrigins || [];
+            const siteDeclined =
+              decision.decision === "deny" &&
+              request.kind === "origin" &&
+              declined.length < MAX_DECLINED_ORIGINS;
+            if (siteDeclined) {
+              state.declinedOrigins = [...declined, request.sourceOrigin];
+            }
             writeState(state);
+            if (siteDeclined) {
+              throw siteDeclinedError(request.sourceOrigin);
+            }
             if (decision.decision === "deny") {
               fail("approval_denied", "The user denied this Shared Browser action; it was not performed");
             }
@@ -756,7 +787,10 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       }
     }
 
-    async function ensureOriginApproved(rawUrl, label = "", tabId = null) {
+    // `destinationUrl`: the exact address the step that asks will load. The
+    // prompt is then bound to it (and its label names it), not only to its
+    // site.
+    async function ensureOriginApproved(rawUrl, label = "", tabId = null, { destinationUrl = null } = {}) {
       const origin = normalizedOrigin(rawUrl);
       if (!origin) {
         // Not a consent decision, so not final: navigating to an http(s)
@@ -771,13 +805,20 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       if (current.routineBrowsingAllowed === true || approved.includes(origin)) {
         return origin;
       }
+      if ((current.declinedOrigins || []).includes(origin)) {
+        throw siteDeclinedError(origin);
+      }
       if (approved.length >= MAX_APPROVED_ORIGINS) {
         fail("approval_state_full", "Shared Browser reached its per-run approved-origin limit");
       }
-      const destination = destinationBinding(origin);
+      const destination = destinationBinding(
+        destinationUrl && normalizedOrigin(destinationUrl) === origin ? destinationUrl : origin,
+      );
+      // A label given as a function is made only now, when a prompt shows.
+      const shownLabel = typeof label === "function" ? label() : label;
       const request = buildRequest("origin", {
         operation: "approve-origin",
-        label: label || `Allow ${origin} for this run`,
+        label: shownLabel || `Allow ${origin} for this run`,
         sourceOrigin: origin,
         ...destination,
         snapshotId: null,

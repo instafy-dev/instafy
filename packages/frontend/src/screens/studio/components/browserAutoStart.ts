@@ -9,6 +9,7 @@ import {
   listBrowserRuntimeCandidates,
   listBrowserSessionCandidates,
   runtimeEntryIsLazyBrowserHost,
+  runtimeEntryLooksLikeBrowserSession,
 } from "./browserSessionRuntimeEnsure";
 import { isBrowserNoticePrompt } from "./browserHandBack";
 import { browserRequestJobId } from "./browserRequest";
@@ -199,9 +200,17 @@ function hostedButton(
   runtimes: readonly ControllerRuntimeStatusEntry[],
   sessions: readonly unknown[],
 ): BrowserAutoStartPlan {
-  if (sessions.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.severalSessions };
+  // A browser session machine that is starting again, or whose heartbeat is
+  // late, is still this space's browser session: a press opens that machine
+  // again (the controller restarts one that stopped answering) and never
+  // starts a second one, so the card says so, as it does while it answers.
+  const sessionCount = Math.max(
+    sessions.length,
+    runtimes.filter((entry) => isLiveHostedMachine(entry) && runtimeEntryLooksLikeBrowserSession(entry)).length,
+  );
+  if (sessionCount > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.severalSessions };
   // Whoever started it: the controller does not record that.
-  if (sessions.length === 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession };
+  if (sessionCount === 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession };
   // Opening a browser here would start a machine, or restart this space's
   // own one.
   const machines = runtimes.filter(isLiveHostedMachine);

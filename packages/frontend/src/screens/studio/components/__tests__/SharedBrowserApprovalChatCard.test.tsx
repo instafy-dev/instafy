@@ -100,6 +100,31 @@ describe("SharedBrowserApprovalChatCard", () => {
     expect(text()).not.toMatch(/—/);
   });
 
+  it("names the exact page a site prompt or a navigation will load", async () => {
+    // The runtime names the page in the label: the person approves the page
+    // that loads, not only its site.
+    const site = "https://www.visitlisboa.com";
+    await render(withPending(request({
+      kind: "origin", operation: "approve-origin", sourceOrigin: site, destinationOrigin: site,
+      display: { label: "Octo's tab 1: Open https://www.visitlisboa.com/en/places/belem-tower in a new tab", destinationOrigin: site },
+    })));
+    expect(text()).toContain("Octo paused before opening www.visitlisboa.com/en/places/belem-tower.");
+    await render(withPending(request({
+      approvalId: "66666666-6666-4666-8666-666666666666", operation: "navigate",
+      sourceOrigin: site, destinationOrigin: site,
+      display: { label: "Download or export: Go to https://www.visitlisboa.com/files/guide.pdf", destinationOrigin: site },
+    })));
+    expect(text()).toContain("Octo is waiting to open www.visitlisboa.com/files/guide.pdf.");
+    // An address on another site than the prompt's is never shown as its page,
+    // and a prompt that names none shows its site.
+    await render(withPending(request({
+      approvalId: "77777777-7777-4777-8777-777777777777",
+      kind: "origin", operation: "approve-origin", sourceOrigin: site, destinationOrigin: site,
+      display: { label: "Open https://elsewhere.example/belem-tower", destinationOrigin: site },
+    })));
+    expect(text()).toContain("Octo paused before reading or acting on www.visitlisboa.com.");
+  });
+
   it("answers with the same decisions as the sheet", async () => {
     const actionState = withPending(request());
     await render(actionState);

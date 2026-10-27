@@ -11,10 +11,12 @@ const pageCapture = globalThis.__instafyBrowserPageCapture;
 const formSubmission = globalThis.__instafyBrowserFormSubmission;
 // The web-research skill's link-only list, embedded by the runtime agent ahead
 // of this script, plus what the space's own copy adds. Octo never opens, reads
-// or acts on a site on it, nor on a translator's, cache's or archive's copy of
-// one, in any tab: its own tabs and the page the person chose alike. Matching
-// is @instafy/browser-action-policy's linkOnly.js, embedded ahead of this
-// script too and shared with `instafy web read` and the Personal Browser.
+// or acts on a "no-agents" site on it, nor on a translator's, cache's or
+// archive's copy of one, in any tab: its own tabs and the page the person
+// chose alike. A "no-reuse" site (its terms bar copying, not reading) is not
+// refused. Matching is @instafy/browser-action-policy's linkOnly.js, embedded
+// ahead of this script too and shared with `instafy web read` and the Personal
+// Browser.
 const LINK_ONLY = linkOnlyListForRun();
 const LINK_ONLY_SITES = LINK_ONLY.list;
 if (
@@ -154,7 +156,12 @@ function tabField() {
 // anything in any tab.
 function linkOnlyListForRun() {
   const api = globalThis.__instafyLinkOnly;
-  if (!api || typeof api.linkOnlyListFrom !== "function" || typeof api.linkOnlyMatch !== "function") {
+  if (
+    !api ||
+    typeof api.linkOnlyListFrom !== "function" ||
+    typeof api.linkOnlyMatch !== "function" ||
+    typeof api.barsAgents !== "function"
+  ) {
     return { api: null, list: null, warnings: [] };
   }
   const file = String(process.env.INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE || "").trim();
@@ -185,16 +192,16 @@ function readSpaceLinkOnlyCopy(file) {
   }
 }
 
-// The link-only site an address is on, or null. A wrapper's copy is named as
+// The "no-agents" site an address is on, or null. A wrapper's copy is named as
 // the site with the wrapper: "Booking.com (its copy on the Wayback Machine)".
 function linkOnlySiteOf(rawUrl) {
   if (LINK_ONLY_SITES === null) return null;
   const hit = LINK_ONLY.api.linkOnlyMatch(LINK_ONLY_SITES, String(rawUrl || ""));
-  if (!hit) return null;
+  if (!LINK_ONLY.api.barsAgents(hit)) return null;
   return hit.via.length ? `${hit.site} (its copy on ${hit.via.join(", then ")})` : hit.site;
 }
 
-// The link-only site a document's answer says it is a copy of, or null: an
+// The "no-agents" site a document's answer says it is a copy of, or null: an
 // archive's Memento `Link: <…>; rel="original"` header names the page it
 // copies even at a short address (archive.ph/AbCdE) that names no site.
 // `headers` are CDP's [{ name, value }].
@@ -204,7 +211,7 @@ function linkOnlyCopyOf(headers, rawUrl) {
     .filter((header) => String(header?.name || "").toLowerCase() === "link")
     .map((header) => String(header?.value || ""));
   const hit = link.length ? LINK_ONLY.api.linkOnlyCopyOf(LINK_ONLY_SITES, link, String(rawUrl || "")) : null;
-  return hit ? `${hit.site} (a page that says it is a copy of it)` : null;
+  return LINK_ONLY.api.barsAgents(hit) ? `${hit.site} (a page that says it is a copy of it)` : null;
 }
 
 const LIST_UNAVAILABLE_MESSAGE =
@@ -320,12 +327,27 @@ function siteApproved(rawUrl) {
   return approvalProtocol.isOriginApproved(rawUrl, inAgentTab() ? activePageId : null);
 }
 
-async function ensureSiteApproved(rawUrl, label) {
+// `destinationUrl`: the exact address the step loads, when it loads one. The
+// site's prompt is bound to it and its label names it. `label` may be a
+// function, so a label that masks an address is made only when a prompt shows.
+async function ensureSiteApproved(rawUrl, label, { destinationUrl = null } = {}) {
   return await approvalProtocol.ensureOriginApproved(
     rawUrl,
-    tabLabel(label),
+    () => tabLabel(typeof label === "function" ? label() : label),
     inAgentTab() ? activePageId : null,
+    { destinationUrl },
   );
+}
+
+// The address a prompt names, so the person approves the page the step will
+// load and not only its site: masked like a snapshot's address (it keeps its
+// host and path), and cut with "…" to fit a prompt's label.
+const MAX_LABEL_ADDRESS_CHARS = 160;
+function labelAddress(rawUrl) {
+  const address = maskedUrl(rawUrl) || "";
+  return address.length <= MAX_LABEL_ADDRESS_CHARS
+    ? address
+    : `${address.slice(0, MAX_LABEL_ADDRESS_CHARS - 1)}…`;
 }
 
 // Octo's own tabs are for reading: they take only the steps routine browsing
@@ -2583,18 +2605,10 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
     let loading = false;
     try {
       await page.bringToFront();
-      await ensureSiteApproved(url, "Allow the assistant to open this site in a new tab for this run");
-      const destination = approvalProtocol.destinationBinding(url);
-      await allowStepOnce({
-        operation: "navigate",
-        label: "Open a new tab",
-        categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
-        sourceOrigin: null,
-        ...destination,
-        snapshotId: null,
-        targetFingerprint: null,
-        payloadFingerprint: approvalProtocol.sha256("open-tab"),
-      }, { routine: true });
+      // A tab opens only a plain address (a risky one was refused above), so
+      // the site's approval in this tab covers opening it: one prompt, which
+      // names the exact address, and none once the site is approved here.
+      await ensureSiteApproved(url, () => `Open ${labelAddress(url)} in a new tab`, { destinationUrl: url });
       const opened = await resolveExpectedPage(browser);
       const documents = await guardStepDocuments(opened);
       try {
@@ -2957,21 +2971,23 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const readingStep = step.verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url);
     assertMayOpen(url);
     refuseUnlessReadingStep(readingStep);
-    await ensureSiteApproved(
-      url,
-      "Allow the assistant to access this destination for this run",
-    );
-    const destination = approvalProtocol.destinationBinding(url);
-    await allowStepOnce({
-      operation: "navigate",
-      label: "Navigate the Shared Browser",
-      categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
-      sourceOrigin,
-      ...destination,
-      snapshotId: null,
-      targetFingerprint: null,
-      payloadFingerprint: approvalProtocol.sha256("navigate"),
-    }, { routine: readingStep });
+    // A plain address (a reading step) needs only its site's approval in this
+    // tab: the site prompt names the exact address, and a site already
+    // approved here opens without one. A risky address still asks for the
+    // step itself, in every mode.
+    await ensureSiteApproved(url, () => `Open ${labelAddress(url)}`, { destinationUrl: url });
+    if (!readingStep) {
+      await allowStepOnce({
+        operation: "navigate",
+        label: `Go to ${labelAddress(url)}`,
+        categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
+        sourceOrigin,
+        ...approvalProtocol.destinationBinding(url),
+        snapshotId: null,
+        targetFingerprint: null,
+        payloadFingerprint: approvalProtocol.sha256("navigate"),
+      });
+    }
     page = await resolveExpectedPage(browser);
     if (sourceOrigin) {
       assertSameOrigin(page.url(), sourceOrigin);
@@ -3019,7 +3035,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     ) {
       await ensureSiteApproved(
         rawDestination,
-        "Allow the assistant to follow this control to another site for this run",
+        () => `Follow this control to ${labelAddress(rawDestination)}`,
+        { destinationUrl: rawDestination },
       );
     }
     await allowStepOnce({
@@ -3108,7 +3125,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ) {
         await ensureSiteApproved(
           rawDestination,
-          "Allow this form destination for this run",
+          () => `Send this form to ${labelAddress(rawDestination)}`,
+          { destinationUrl: rawDestination },
         );
       }
     }
@@ -3212,7 +3230,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ) {
         await ensureSiteApproved(
           rawDestination,
-          "Allow this activation destination for this run",
+          () => `Follow this control to ${labelAddress(rawDestination)}`,
+          { destinationUrl: rawDestination },
         );
       }
     }

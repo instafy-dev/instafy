@@ -72,6 +72,14 @@ describe("BrowserHumanInputControls", () => {
     expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
   });
 
+  it("hands the browser back with words that are true whether or not the person used it", () => {
+    // Let AI continue also follows a take-over where the person only watched.
+    expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).not.toMatch(/\bI have finished\b|\bI entered\b/);
+    expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toMatch(/^Continue the previous browser task on this same page\./);
+    expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toMatch(/Take a fresh snapshot before acting/);
+    expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toMatch(/do not reuse old target indices or request, reveal, or repeat any values/);
+  });
+
   it("keeps the collaboration menu available when there are no human-input actions", async () => {
     props.canTakeOver = false;
     props.renderControls = compactControls;
