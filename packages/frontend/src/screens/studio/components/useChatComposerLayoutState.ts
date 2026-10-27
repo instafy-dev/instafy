@@ -54,7 +54,6 @@ type UseChatComposerLayoutStateOptions = {
   scrollContainerRef: MutableRefObject<HTMLDivElement | null>;
   sendingAttachment: boolean;
   shouldAutoScrollRef: MutableRefObject<boolean>;
-  showBrowserSessionPageStrip: boolean;
   totalQueuedCount: number;
   touchLikeInput: boolean;
   voiceHoldActive: boolean;
@@ -86,7 +85,6 @@ export function useChatComposerLayoutState({
   scrollContainerRef,
   sendingAttachment,
   shouldAutoScrollRef,
-  showBrowserSessionPageStrip,
   totalQueuedCount,
   touchLikeInput,
   voiceHoldActive,
@@ -127,31 +125,18 @@ export function useChatComposerLayoutState({
   ]);
 
   const chatScrollPaddingBottom = useMemo(() => {
-    if (showBrowserSessionPageStrip) {
-      return undefined;
-    }
     if (composerScrollOverlapPaddingPx <= 0) {
       return undefined;
     }
     return `${Math.ceil(composerScrollOverlapPaddingPx + 12)}px`;
-  }, [composerScrollOverlapPaddingPx, showBrowserSessionPageStrip]);
+  }, [composerScrollOverlapPaddingPx]);
 
-  const browserPageStripBottomInset = useMemo(() => {
+  const browserModalBottomInset = useMemo(() => {
     if (composerOverlayHeight <= 0) {
       return undefined;
     }
     return `${Math.ceil(composerOverlayHeight + browserSurfaceGapPx)}px`;
   }, [browserSurfaceGapPx, composerOverlayHeight]);
-
-  const browserModalBottomInset = useMemo(() => {
-    if (showBrowserSessionPageStrip) {
-      return `${browserSurfaceGapPx}px`;
-    }
-    if (composerOverlayHeight <= 0) {
-      return undefined;
-    }
-    return `${Math.ceil(composerOverlayHeight + browserSurfaceGapPx)}px`;
-  }, [browserSurfaceGapPx, composerOverlayHeight, showBrowserSessionPageStrip]);
 
   // The transcript's size at the last scroll event. When the size changed in
   // between, the scroll event came from a reflow, not from the reader: a pane
@@ -508,15 +493,14 @@ export function useChatComposerLayoutState({
     [],
   );
 
-  // A page strip or a browser session moves the composer without resizing
-  // it, which a ResizeObserver does not see.
+  // A browser session moves the composer without resizing it, which a
+  // ResizeObserver does not see.
   useEffect(() => {
     scheduleOverlapSyncRef.current?.();
-  }, [activeConversationId, browserSessionOpen, composerOverlayHeight, showBrowserSessionPageStrip]);
+  }, [activeConversationId, browserSessionOpen, composerOverlayHeight]);
 
   return {
     browserModalBottomInset,
-    browserPageStripBottomInset,
     chatScrollPaddingBottom,
     composerAutoHidden,
     composerOverlayHeight,

@@ -12,7 +12,6 @@ export const RUN_STOP_FIXTURE_STUBS: Record<string, string> = {
     export const hasSupabaseConfig = false;
     export const supabase = new Proxy({}, { get() { throw new Error("Storage is disabled in this playground"); } });
   `,
-  "/src/screens/studio/components/ChatBrowserDock.tsx": "export const ChatBrowserDock = () => null;",
   "/src/screens/studio/components/ComposerInviteModal.tsx": "export const ComposerInviteModal = () => null;",
   "/src/services/runtimeController/conversationStop.ts": `export const stopConversationJobs = async () => { throw new Error("Use the playground's injected cancel transport"); };`,
   "/src/services/runtimeController/jobs.ts": `

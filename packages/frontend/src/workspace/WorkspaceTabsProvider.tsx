@@ -48,11 +48,29 @@ import {
   type PersistedWorkspaceTabsState,
 } from "./workspaceTabPersistence";
 
+/** What a conversation's Browser view tab shows, published by its chat panel. */
+export type ConversationBrowserState = {
+  available: boolean;
+  /** A browser approval waits for the viewer. */
+  attention: boolean;
+  /** The title of the browser's active tab, where a message goes. */
+  pageTitle?: string | null;
+  /** The agent using the browser now, or null. */
+  agentName?: string | null;
+};
+
+const NO_CONVERSATION_BROWSER: ConversationBrowserState = { available: false, attention: false };
+
+function sameConversationBrowser(left: ConversationBrowserState | undefined, right: ConversationBrowserState): boolean {
+  return Boolean(left) && left!.available === right.available && left!.attention === right.attention &&
+    (left!.pageTitle ?? null) === (right.pageTitle ?? null) && (left!.agentName ?? null) === (right.agentName ?? null);
+}
+
 interface WorkspaceTabsContextValue {
   conversationWorkspace: boolean;
   conversationWorkspaceScope: string | null;
-  conversationBrowser: { available: boolean; attention: boolean };
-  setConversationBrowser: (scope: string | null, available: boolean, attention: boolean) => void;
+  conversationBrowser: ConversationBrowserState;
+  setConversationBrowser: (scope: string | null, state: ConversationBrowserState) => void;
   conversationSurfaces: ReturnType<typeof useConversationSurfacesOwner>;
   tabs: WorkspaceTabState[];
   activeTab: WorkspaceTabState | null;
@@ -134,11 +152,10 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
 }) {
   const conversationSurfaces = useConversationSurfacesOwner();
   const conversationWorkspace = Boolean(conversationWorkspaceUserId);
-  const [browsers, setBrowsers] = useState<Record<string, { available: boolean; attention: boolean }>>({});
-  const setConversationBrowser = useCallback((scope: string | null, available: boolean, attention: boolean) => {
+  const [browsers, setBrowsers] = useState<Record<string, ConversationBrowserState>>({});
+  const setConversationBrowser = useCallback((scope: string | null, state: ConversationBrowserState) => {
     if (!scope) return;
-    setBrowsers(current => current[scope]?.available === available && current[scope]?.attention === attention
-      ? current : { ...current, [scope]: { available, attention } });
+    setBrowsers(current => sameConversationBrowser(current[scope], state) ? current : { ...current, [scope]: state });
   }, []);
   const { activePanel, setActivePanel } = useWorkspaceUi();
   const draftSnapshot = useStudioDraftSnapshot();
@@ -263,7 +280,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
   const conversationTabsReady = conversationsMatchProject && !conversationHistoryPending;
   const conversationWorkspaceScope = conversationTabsReady
     ? conversationSurfaceScope(conversationWorkspaceUserId, workspaceProjectId, activeConversationId) : null;
-  const conversationBrowser = useMemo(() => (conversationWorkspaceScope && browsers[conversationWorkspaceScope]) || { available: false, attention: false }, [conversationWorkspaceScope, browsers]);
+  const conversationBrowser = useMemo(() => (conversationWorkspaceScope && browsers[conversationWorkspaceScope]) || NO_CONVERSATION_BROWSER, [conversationWorkspaceScope, browsers]);
   const savedConversationIds = workspaceProjectId
     ? persistedStateRef.current?.projects[workspaceProjectId]?.conversations ?? []
     : [];

@@ -13,7 +13,7 @@ const noop = () => {};
 const reviewImageBytes = Uint8Array.from(atob(reviewImageUrl.split(",")[1]), character => character.charCodeAt(0));
 
 /** The real composer and Lexical editor; only submission and peripheral panes are inert. */
-export function Composer({ controller, readOnly, recording, viewNavigation, queueReview, utilityReview, attachmentCount, attachmentSending = false, fullPage = false, stashMessages, composerActions }: { controller: ChatRunStopController; readOnly: boolean; recording: boolean; viewNavigation?: ReactNode; queueReview?: { count: number; initialDraft?: string; withStash?: boolean }; utilityReview?: { goalStatus: "active" | "paused" | "blocked" }; attachmentCount?: number; attachmentSending?: boolean; fullPage?: boolean; stashMessages?: string[]; composerActions?: Partial<Parameters<typeof ChatComposerSurface>[0]["composerActionMenuProps"]> }) {
+export function Composer({ controller, readOnly, recording, viewNavigation, queueReview, utilityReview, attachmentCount, attachmentSending = false, fullPage = false, newTab = false, stashMessages, composerActions }: { controller: ChatRunStopController; readOnly: boolean; recording: boolean; viewNavigation?: ReactNode; queueReview?: { count: number; initialDraft?: string; withStash?: boolean }; utilityReview?: { goalStatus: "active" | "paused" | "blocked" }; attachmentCount?: number; attachmentSending?: boolean; fullPage?: boolean; newTab?: boolean; stashMessages?: string[]; composerActions?: Partial<Parameters<typeof ChatComposerSurface>[0]["composerActionMenuProps"]> }) {
   const overlay = useRef<HTMLDivElement>(null);
   const input = useRef<ChatInputHandle>(null);
   const image = useRef<HTMLInputElement>(null);
@@ -49,6 +49,7 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
     previewUrl: reviewImageUrl,
   })));
   const [restoredStashId, setRestoredStashId] = useState<string | null>(null);
+  const [newTabPending, setNewTabPending] = useState(newTab);
   const onDraftChange = useCallback((value: string, state: string | null) => { setDraft(value); setEditorState(state); }, []);
   const focusInput = useCallback(() => input.current?.focus(), []);
   const queue = useQueueReview({ count: queueReview?.count ?? 0, draft, editorState, onDraftChange, focusInput, setSent, readOnly });
@@ -67,10 +68,7 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
       <ChatComposerSurface
         composerOverlayRef={overlay} composerAutoHidden={false} compactBrowserViewport={matchMedia("(max-width: 639px)").matches}
         viewNavigation={viewNavigation} touchLikeInput={Boolean(viewNavigation)}
-        browserDockProps={{ renderModal: false, browserSessionOpen: false, onBrowserSessionOpenChange: noop,
-          projectId: null, preferredRuntimeId: null, showBrowserSessionPageStrip: false, browserSessionExpandRequestToken: 0,
-          onBrowserRuntimeIdResolved: noop, browserSessionPages: [], onSelectBrowserSessionPage: noop,
-          onToggleBrowserSession: noop, onClearPendingNewBrowserSession: noop, hasHiddenBrowserSession: false, pendingBrowserLaunchMode: null }}
+        pendingNewTab={newTabPending ? { onCancel: () => setNewTabPending(false) } : null}
         onSubmit={event => { event.preventDefault(); send(); }}
         queueSurfaceProps={queue.props}
         stashTrayProps={queueReview?.withStash ? { stashes, restoredStashId, busy: readOnly,
@@ -118,6 +116,7 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
     <output hidden data-testid="queue-order">{JSON.stringify(queue.items.map(item => item.id))}</output>
     <output hidden data-testid="queue-messages">{JSON.stringify(queue.items.map(item => item.message))}</output>
     {utilityReview ? <output hidden data-testid="review-goal-status">{goalStatus ?? "cleared"}</output> : null}
+    {newTab ? <output hidden data-testid="review-new-tab-pending">{String(newTabPending)}</output> : null}
     {queue.status ? <p role="status" data-testid="queue-status" className="pointer-events-none fixed left-4 right-4 top-20 mx-auto max-w-md rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">{queue.status}</p> : null}
   </>;
 }

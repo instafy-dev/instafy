@@ -51,42 +51,6 @@ export function shouldRenderBrowserSessionFullscreen({
   return transportActive && (fullscreen || forceViewportFullscreen);
 }
 
-export function shouldShowBrowserSessionPageStrip({
-  browserHidden,
-  browserOpen,
-  hasPages,
-  pendingNewBrowser,
-  smallViewport,
-}: {
-  browserHidden: boolean;
-  browserOpen: boolean;
-  hasPages: boolean;
-  pendingNewBrowser: boolean;
-  smallViewport: boolean;
-}): boolean {
-  if (!browserHidden && !browserOpen) {
-    return false;
-  }
-
-  if (browserOpen && smallViewport && !pendingNewBrowser) {
-    return false;
-  }
-
-  return hasPages || pendingNewBrowser || browserHidden;
-}
-
-export function shouldShowBrowserSessionPageStripInComposer({
-  browserModeActive,
-  pendingNewBrowser,
-  showPageStrip,
-}: {
-  browserModeActive: boolean;
-  pendingNewBrowser: boolean;
-  showPageStrip: boolean;
-}): boolean {
-  return showPageStrip && (!browserModeActive || pendingNewBrowser);
-}
-
 export function getVisualViewportBottomInset({
   layoutViewportHeight,
   visualViewportHeight,

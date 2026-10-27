@@ -470,10 +470,13 @@ Chat and Browser share one conversation composer and draft. In a single Browser 
 requests use the current browser context; selecting Chat returns to the conversation history.
 The Browser view contains its webpage tabs: compact browser controls expose a numbered tab
 picker beside the address when more than one page exists. Compact Browser options groups Back,
-Forward and Reload, keeping room for the address and page picker. The composer's **Ask AI for a new
-tab** action prepares the next AI request to ask for another page; it does not immediately
-create a blank browser tab. A cancellable **Next AI request: new tab** indicator makes that
-pending intent visible.
+Forward and Reload, keeping room for the address and page picker. A message goes to the
+browser's active tab, which that picker chooses; the chat does not repeat the tabs in a strip of
+its own. The Browser view tab names the active tab in its tooltip and accessible description, and
+shows a violet dot ("Octo is using the browser" to screen readers) while the agent uses the
+browser. The composer's **Ask AI for a new tab** action prepares the next AI request to ask for
+another page; it does not immediately create a blank browser tab. A removable **New tab for the
+next message** token above the input makes that pending intent visible.
 
 The workspace tab owner remembers each conversation's selected resource, open file references,
 layout preference and divider width for this Studio tab, scoped by account and project. Closing

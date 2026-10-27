@@ -53,7 +53,6 @@ function Harness() {
     scrollContainerRef,
     sendingAttachment: false,
     shouldAutoScrollRef: autoScroll,
-    showBrowserSessionPageStrip: false,
     totalQueuedCount: 0,
     touchLikeInput: false,
     voiceHoldActive: false,

@@ -103,15 +103,16 @@ clicking the shared page can still open the takeover confirmation.
 
 While the agent holds the browser (the origin publishes it as the control
 owner), the tabs it holds carry its name: in the tab picker each option reads
-"Octo · <title>" and the compact page count turns violet, and the chat's page
-strip shows the same name on each chip. The agent holds the tab its run is
+"Octo · <title>" and the compact page count turns violet, and the
+conversation's Browser view tab shows a violet dot that screen readers read as
+"Octo is using the browser". The agent holds the tab its run is
 bound to (`browserPageId`) and every tab the page list reports with
 `openedBy: "agent"`; `openedBy` is optional, only `agent` and `person` are
 kept, and an absent value is the person's tab. A compact **Octo is reading**
 row under the toolbar lists those tabs as host and title text (page titles are
 shown as text only, never followed) with one **Take over** button. A tab an
 earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
-earlier tab" in the tab picker and keeps its badge in the page strip. Take over
+earlier tab" in the tab picker. Take over
 is the same action as the toolbar's take-over, without a confirmation: it
 cancels the run, and ending its runtime-wide agent marker returns every tab to
 people. On a tab the agent opened itself, take-over finds the runtime's one
@@ -437,8 +438,8 @@ Browser has tabs of its own (see Personal-Browser.md).
 - **One label per tab.** A run numbers its tabs 1, 2, 3, … as it opens them,
   never gives a number twice, and a tab keeps its number while it is open.
   Prompts ("Octo's tab 2: …"), `list_tabs` (`label`, `number`), tool results
-  (`tabLabel`) and Studio's tab list ("Octo's tab 2: <title>") and page strip
-  all use that label.
+  (`tabLabel`) and Studio's tab list ("Octo's tab 2: <title>") all use that
+  label.
 - **Only its own tabs.** Octo can use the page the person chose and the tabs it
   opened in this run, never another tab a person or a page opened, and it can
   close only its own tabs.
