@@ -3225,6 +3225,53 @@ impl EmbeddedControllerFixture {
 }
 
 #[test]
+fn the_sent_page_reader_carries_the_link_only_list_and_marks_links_with_it() {
+    use std::process::Stdio;
+    // What the origin evaluates for Send page to Octo, run against a results
+    // page with a link to a link-only site, a script link and an ordinary one.
+    let page = r#"
+globalThis.location = { protocol: "https:", href: "https://search.example/?q=museum" };
+const anchors = [
+  ["City Museum", "https://museum.example/hours"],
+  ["Hotels nearby", "https://www.booking.com/hotel/x.html"],
+  ["Run", "javascript:alert(1)"],
+].map(([innerText, href]) => ({ tagName: "A", innerText, href, getAttribute: (name) => name === "href" ? href : null }));
+globalThis.document = { title: "museum", baseURI: "https://search.example/", body: { innerText: "Results" }, querySelectorAll: (s) => s === "*" ? anchors : [] };
+"#;
+    let script = format!(
+        "{page}\n{}\nconst linkOnly = {{ api: globalThis.__instafyLinkOnly, sites: globalThis.__instafyLinkOnlySites }};\nprocess.stdout.write(JSON.stringify(globalThis.__instafyBrowserPageCapture.captureSentPage(globalThis.__instafyBrowserRedaction, {{ withhold: false, linkOnly }}).links));",
+        sent_page_capture_script(),
+    );
+    let mut child = StdCommand::new("node")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn node");
+    child
+        .stdin
+        .take()
+        .expect("node stdin")
+        .write_all(script.as_bytes())
+        .expect("write script");
+    let output = child.wait_with_output().expect("node output");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let links: serde_json::Value = serde_json::from_slice(&output.stdout).expect("links");
+    assert_eq!(
+        links,
+        serde_json::json!([
+            { "text": "City Museum", "href": "https://museum.example/hours" },
+            { "text": "Hotels nearby", "href": "https://www.booking.com/hotel/x.html", "linkOnly": "Booking.com" }
+        ])
+    );
+}
+
+#[test]
 fn embedded_policy_modules_publish_their_api_without_commonjs() {
     use std::process::Stdio;
     let script = format!(

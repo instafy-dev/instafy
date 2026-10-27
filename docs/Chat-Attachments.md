@@ -116,6 +116,13 @@ by itself and keeps no way to read it again.
   or consent, and the page's text follows inside an `untrusted_page_content`
   block. The block's name is taken out of the page's text however it is
   spelled, so the page cannot close the block or open another.
+- The page's links follow in a second `untrusted_page_content` block
+  (`part="links"`): up to 200, each its text and address, web links only
+  (`javascript:`, `data:` and other schemes are dropped). A link to a site the
+  web-research skill keeps link-only is marked `[link-only: <site>]`, and the
+  attachment tells Octo to give such a link to the person as a plain link and
+  never open it. A browser that predates links, or that could not load the
+  link-only list, sends none.
 - A page that seemed to show a password or key is not attached, and the composer
   says so. Only `http` and `https` pages are sent, at most five per message.
 - The tray lists a staged page by its title and host; it can be removed until the

@@ -37,7 +37,10 @@ load `redaction.js` first.
   `captureSentPage(redaction, options)` reads a page a person chose to send
   with **Send page to Octo**: it runs in an isolated world next to
   `redaction.js`, masks the address, title and text with the snapshot rules,
-  and returns no text for a secret screen or a page it could not check.
+  and returns no text for a secret screen or a page it could not check. It also
+  sends up to 200 of the page's web links (`pageLinksInPage`, which a host can
+  run on its own), masked, with a link to a link-only site marked by name when
+  the call passes `linkOnly: { api, sites }`; without it, no links.
   `maskSentPage` is the masking step on its own, for a host that reads the
   page another way. Publishes `globalThis.__instafyBrowserPageCapture`; load
   `redaction.js` first.

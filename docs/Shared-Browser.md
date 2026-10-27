@@ -1488,8 +1488,12 @@ reads that page once for the person who pressed it:
 - The origin creates a fresh isolated world in the page's main frame and runs
   `redaction.js` and `pageCapture.js` there, so page scripts cannot reach the
   reader or the masking. Only the masked address, title and text (at most 50,000
-  characters, cut after masking) leave the machine, with `readAt` and
-  `Cache-Control: no-store`.
+  characters, cut after masking) and up to 200 masked web links leave the
+  machine, with `readAt` and `Cache-Control: no-store`. runtime-agent's reader
+  carries `linkOnly.js` and the skill's link-only list, so a link to a
+  link-only site carries the site's name; without the list no links are sent,
+  and `javascript:`, `data:` and other non-web links never are. The origin
+  refuses an answer whose links the reader could not have produced.
 - A secret screen, a page the agent's controller marked withheld (read in the
   page's own world, failing closed), the page a credential step of the agent's
   run opened before the controller marked it (`withhold-next.json` in the
