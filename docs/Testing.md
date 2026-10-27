@@ -1430,6 +1430,25 @@ be used explicitly with
 That verifies the installed channel, not the lockfile's Chromium revision;
 CI always installs and uses the locked Playwright browser.
 
+To verify Shared/Personal handoffs in the actual Desktop app without a remote
+runtime or account, run the explicit native switching lane:
+
+```bash
+pnpm --filter @instafy/desktop-app build
+pnpm --filter @instafy/frontend exec playwright test --config playwright.electron-switch.config.ts
+```
+
+This launches the built Electron app with its real preload, native Personal
+WebContentsView and a disposable profile. It mounts production browser surfaces
+with a controlled Shared pixel transport and loopback identity fixture. The four
+cases cover narrow and wide Desktop windows in both themes, repeated switches,
+returning before Shared repaints, Personal menu/resize capture ordering, and
+preserved native page, draft and scroll position. A missing Electron build fails
+the lane. It does not prove remote runtime allocation, live network transport or
+mobile native browsing. Screenshots are retained under
+`packages/frontend/test-results/electron-browser-switch`; Personal reference
+images composite the separately captured native view into the renderer.
+
 The two Shared session/status cases mount the complete production modal at
 390×844 and 844×390 with touch input and safe-area insets. They verify bounded
 scrolling, readable save-status guidance, 44px touch controls, token-free resume

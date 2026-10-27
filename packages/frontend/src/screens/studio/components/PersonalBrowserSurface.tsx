@@ -256,10 +256,16 @@ export function PersonalBrowserSurface({
   });
   const addressInputRef = useRef<HTMLInputElement | null>(null);
   const [address, setAddress] = useState("");
-  const [overlayPreview, setOverlayPreview] = useState<string | null>(null);
+  const [overlayPreview, setOverlayPreview] = useState<{ identity: string; url: string } | null>(null);
+  const boundsRequestRef = useRef(0);
   const [overlayCount, setOverlayCount] = useState(0);
   const overlayCountRef = useRef(overlayCount);
   overlayCountRef.current = overlayCount;
+  const overlayEpochRef = useRef({ occluded: false, generation: 0 });
+  if (overlayEpochRef.current.occluded !== (overlayCount > 0)) {
+    overlayEpochRef.current = { occluded: overlayCount > 0, generation: overlayEpochRef.current.generation + 1 };
+  }
+  const acceptedPreviewRequestRef = useRef(0);
   const agentWorkingRef = useRef(agentWorking);
   agentWorkingRef.current = agentWorking;
   const reportBoundsRef = useRef<(() => void) | null>(null);
@@ -277,6 +283,8 @@ export function PersonalBrowserSurface({
   const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false || model.status?.tabControlActive === true;
   const visible = active && model.available && ready;
   const ownerId = model.ownerId;
+  const previewIdentity = JSON.stringify([ownerId, model.status?.ownerId, model.status?.activeTabId, model.status?.url, ready]);
+  const previewUrl = overlayPreview?.identity === previewIdentity ? overlayPreview.url : null;
   const routineApprovalAvailable = personalBrowserRoutineAvailable(model.status);
   // On an owner-tier Desktop, "routine" frees reading and links only.
   const ownerTierApproval = personalBrowserOwnerTier(model.status);
@@ -306,45 +314,64 @@ export function PersonalBrowserSurface({
 
     let disposed = false;
     let frame: number | null = null;
-    const report = () => {
-      if (frame !== null) {
-        window.cancelAnimationFrame(frame);
+    const reportNow = () => {
+      const rect = viewport.getBoundingClientRect();
+      const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
+      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+      const offsetLeft = window.visualViewport?.offsetLeft ?? 0;
+      const offsetTop = window.visualViewport?.offsetTop ?? 0;
+      const left = Math.max(rect.left, offsetLeft);
+      const top = Math.max(rect.top, offsetTop);
+      const right = Math.min(rect.right, offsetLeft + viewportWidth);
+      const bottom = Math.min(rect.bottom, offsetTop + viewportHeight);
+      const width = Math.max(0, right - left);
+      const height = Math.max(0, bottom - top);
+      if (width >= 1 && height >= 1) {
+        lastValidBoundsRef.current = {
+          x: Math.round(left),
+          y: Math.round(top),
+          width: Math.max(1, Math.round(width)),
+          height: Math.max(1, Math.round(height)),
+        };
       }
+      const shown = visible && width > 0 && height > 0;
+      const occluded = overlayCountRef.current > 0;
+      const overlayGeneration = overlayEpochRef.current.generation;
+      const request = ++boundsRequestRef.current;
+      void bridge.personalBrowserSetBounds?.({
+        ...lastValidBoundsRef.current,
+        visible: shown,
+        occluded,
+        agentWorking: agentWorkingRef.current,
+        ownerId,
+      }).then(result => {
+        if (disposed) return;
+        const resultIdentity = JSON.stringify([ownerId, result.ownerId, result.activeTabId, result.url, result.state === "ready"]);
+        const sameOverlay = occluded && overlayCountRef.current > 0 && overlayGeneration === overlayEpochRef.current.generation;
+        // Native capture happens only when occlusion starts. A later geometry
+        // report has no preview and must not invalidate that pending capture.
+        if (sameOverlay && request >= acceptedPreviewRequestRef.current && result.previewDataUrl && result.ownerId === ownerId && resultIdentity === previewIdentity) {
+          acceptedPreviewRequestRef.current = request;
+          setOverlayPreview({ identity: previewIdentity, url: result.previewDataUrl });
+        } else if (request === boundsRequestRef.current && shown && !occluded) {
+          // Keep the matching menu preview until the native view has been
+          // restored. A late hide/capture reply must not replace this frame.
+          setOverlayPreview(null);
+        }
+      }).catch(() => undefined);
+    };
+    const report = () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
         frame = null;
-        const rect = viewport.getBoundingClientRect();
-        const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
-        const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-        const offsetLeft = window.visualViewport?.offsetLeft ?? 0;
-        const offsetTop = window.visualViewport?.offsetTop ?? 0;
-        const left = Math.max(rect.left, offsetLeft);
-        const top = Math.max(rect.top, offsetTop);
-        const right = Math.min(rect.right, offsetLeft + viewportWidth);
-        const bottom = Math.min(rect.bottom, offsetTop + viewportHeight);
-        const width = Math.max(0, right - left);
-        const height = Math.max(0, bottom - top);
-        if (width >= 1 && height >= 1) {
-          lastValidBoundsRef.current = {
-            x: Math.round(left),
-            y: Math.round(top),
-            width: Math.max(1, Math.round(width)),
-            height: Math.max(1, Math.round(height)),
-          };
-        }
-        void bridge.personalBrowserSetBounds?.({
-          ...lastValidBoundsRef.current,
-          visible: visible && width > 0 && height > 0,
-          occluded: overlayCountRef.current > 0,
-          agentWorking: agentWorkingRef.current,
-          ownerId,
-        }).then(result => {
-          if (!disposed && overlayCountRef.current > 0 && result.previewDataUrl) setOverlayPreview(result.previewDataUrl);
-        }).catch(() => undefined);
+        reportNow();
       });
     };
 
-    reportBoundsRef.current = report;
-    report();
+    reportBoundsRef.current = reportNow;
+    // Visibility is a handoff, not a resize: send it in this layout pass so
+    // switching back does not insert an extra hidden native frame.
+    reportNow();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(report);
     observer?.observe(viewport);
     window.addEventListener("resize", report);
@@ -362,19 +389,26 @@ export function PersonalBrowserSurface({
       window.removeEventListener("scroll", report, true);
       window.visualViewport?.removeEventListener("resize", report);
       window.visualViewport?.removeEventListener("scroll", report);
-      void bridge.personalBrowserSetBounds?.({
+    };
+  }, [expanded, ownerId, visible, previewIdentity]);
+
+  useLayoutEffect(() => {
+    const bridge = window.instafyDesktop;
+    return () => {
+      // Only an owner change or actual unmount needs a separate hide. Effect
+      // restarts (including fullscreen) report the new bounds directly.
+      if (ownerId) void bridge?.personalBrowserSetBounds?.({
         ...lastValidBoundsRef.current,
         visible: false,
         ownerId,
       }).catch(() => undefined);
     };
-  }, [expanded, ownerId, visible]);
+  }, [ownerId]);
 
   useLayoutEffect(() => {
-    if (overlayCount === 0) setOverlayPreview(null);
     reportBoundsRef.current?.();
   }, [overlayCount, agentWorking]);
-  useLayoutEffect(() => { setOverlayPreview(null); }, [ownerId]);
+  useLayoutEffect(() => { setOverlayPreview(null); }, [previewIdentity]);
 
   const navigateToAddress = useCallback(
     (nextAddress: string) => {
@@ -697,7 +731,7 @@ export function PersonalBrowserSurface({
         className="relative min-h-0 flex-1 overflow-hidden bg-slate-100 dark:bg-slate-950"
         data-testid="personal-browser-viewport"
       >
-        {overlayCount > 0 && overlayPreview ? <img alt="" aria-hidden src={overlayPreview} className="pointer-events-none absolute inset-0 h-full w-full object-fill" data-testid="personal-browser-overlay-preview" /> : null}
+        {visible && previewUrl ? <img alt="" aria-hidden src={previewUrl} className="pointer-events-none absolute inset-0 h-full w-full object-fill" data-testid="personal-browser-overlay-preview" /> : null}
         {!ready ? (
           <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
             <div className="max-w-sm text-sm text-slate-500 dark:text-slate-400">
