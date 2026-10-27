@@ -599,7 +599,11 @@ makes, not just the form's `action` and `method`:
   over the control), is stopped before it leaves the browser and the step
   fails saying so. A step the person approved that sends no form of its own
   is not limited, since a page may build and send one after it, and neither
-  is a page the step went on to load.
+  is a page the step went on to load. Like the link-only check, the guard
+  covers the tab's own document, not the page's frames: a form the page sends
+  into one of its own frames (a keydown handler pointing the default button's
+  `formtarget` at an iframe, say) goes out like any other request the page's
+  script makes.
 
 `packages/browser-action-policy/formSubmissionCases.json` is one table of form
 steps both browsers run: `scripts/shared-browser-form-submission-e2e.mjs`

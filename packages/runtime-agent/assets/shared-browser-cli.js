@@ -2041,7 +2041,9 @@ function refuseNewWindowOrNestedSubmission(submission) {
 // own site only. A step the person approved that sends no form of its own is
 // not limited: a page may build and send one after it, as checkout pages do.
 // A page the step went on to load is not the one it acted on, so the limit
-// ends when one does.
+// ends when one does. Like the link-only check, it covers the tab's own
+// document, not the page's frames: a form the page sends into one of its
+// frames goes out like any other request the page's script makes.
 function stepPostOrigins(readingStep, sourceOrigin, submission, destination) {
   if (submission) return [sourceOrigin, destination.destinationOrigin];
   return readingStep ? [sourceOrigin] : null;
