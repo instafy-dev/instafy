@@ -1311,6 +1311,22 @@ unless the policy is `"covered"`.
   sentence again, so it cannot repeat. It reads nothing by itself, and it does
   nothing while the view is off, cannot open, is closed, or shows the browser
   on this device.
+- **A browser session machine that stopped answering.** On the legacy path,
+  after an open ensures the space's browser session machine, Studio waits until
+  that machine can take work (a fresh heartbeat) and lists its origin. An
+  origin listed for a machine that does not answer (its runtime started again,
+  or the controller has not replaced a silent generation yet) is never used:
+  connecting to it could only fail. It reads status every 0.5 to 4 s for the
+  first minute, then every 10 s, for at most ten minutes, as the cold press
+  does, and after a minute says "Still starting this space's machine…". Two
+  reads in a row that show the machine stopped or gone end the wait at once
+  with "Instafy's browser did not open. Try again." The controller hands a
+  silent generation back to an ensure until the machine's idle time (300 s for
+  a browser session) has passed since its last heartbeat, and while a job is
+  still active on it; once that time has passed, Studio asks for that machine
+  again, once and by its id, which replaces the generation when no job holds
+  it, and keeps waiting for the new launch. Only the person's own open
+  asks again, never an automatic reconnect or Studio by itself.
 - **Press on a card.** A press never waits silently. Once the browser view
   shows an error, the card says so at once, in the sentence the view shows
   when it is one of the view's own (such as "Instafy's browser is off."),
