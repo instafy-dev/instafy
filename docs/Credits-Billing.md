@@ -178,14 +178,16 @@ transcription are refused on it. A pinned request also forwards only codex's cli
 the `additional_tools` and `tool_search_output` input items, and drops any tool that names its own
 model, so a hand-built hosted tool such as `image_generation` cannot run on the platform key.
 Hosted OpenAI tools are off on a pinned lease: credits price tokens, and a hosted tool bills per
-call on top of them. The proxy therefore also drops `web_search`, which codex does send, and any
-tool search OpenAI would run, from the tools a pinned request finally carries, including the
-default tools the proxy adds for a ChatGPT login, so pinned managed turns run without web search.
+call on top of them. The proxy therefore also drops any tool search OpenAI would run from the tools
+a pinned request finally carries, including the default tools the proxy adds for a ChatGPT login.
 The tool filter follows the pin, like the model and the audio refusal, not the lane: only the
-platform lane is ever pinned, and a user's own key or ChatGPT login is never pinned and keeps
-every tool. The pin needs both a controller and a proxy that know `pinnedModel`. Either can be
-updated first: until both are, requests keep the model they ask for and every tool, web search
-included. This is separate from the key rollout order in the next paragraph. Static proxy
+platform lane is ever pinned, and a user's own key or ChatGPT login is never pinned. The pin needs
+both a controller and a proxy that know `pinnedModel`. Either can be updated first: until both
+are, requests keep the model they ask for. This is separate from the key rollout order in the
+next paragraph. OpenAI's hosted web search is off on every lease, pinned or not, and on every
+runtime lane, for Lite, own keys and ChatGPT logins alike: Octo searches the web only through
+Instafy's own commands, which keep link-only sites link-only, so no turn is billed for OpenAI's
+search. Static proxy
 credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
 The pricing envs are standard-tier rates, so the platform key also serves only OpenAI's standard
