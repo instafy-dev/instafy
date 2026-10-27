@@ -36,6 +36,7 @@ use crate::proxy_auth::ProxyClaims;
 use crate::stream_passthrough;
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 use crate::usage::responses_to_chat_usage;
+use crate::usage_diagnostics::UsageDiagnostics;
 
 const MAX_PROXY_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 const PUBLIC_PROXY_LANE_HEADER: &str = "x-instafy-proxy-lane";
@@ -1534,6 +1535,7 @@ struct RemoteResponseControls<'a> {
 }
 
 struct RemoteCompletionOptions<'a> {
+    usage_diagnostics: Option<UsageDiagnostics>,
     /// The proxy route the request came in on, as logged.
     route: &'a str,
     requested_model: &'a str,
@@ -1681,6 +1683,7 @@ fn build_remote_completion_client<'i>(
     );
     let mut client = CodexClient::new(creds)
         .map_err(anyhow::Error::from)?
+        .with_usage_diagnostics(options.usage_diagnostics.clone())
         .with_model(upstream_model.clone())
         .with_context_controls(context_controls)
         .with_instructions(instructions)
@@ -1952,6 +1955,7 @@ async fn create_response(
 
     let reasoning_effort = requested_reasoning_effort(&payload);
     let completion_options = RemoteCompletionOptions {
+        usage_diagnostics: UsageDiagnostics::from_env(claims.as_ref()),
         route: "/v1/responses",
         requested_model: &model,
         payload: &payload,
@@ -2109,6 +2113,7 @@ async fn create_chat_completion(
         .and_then(Value::as_str)
         .and_then(normalize_reasoning_effort);
     let completion_options = RemoteCompletionOptions {
+        usage_diagnostics: UsageDiagnostics::from_env(claims.as_ref()),
         route: "/v1/chat/completions",
         requested_model: &requested_model,
         payload: &payload,
