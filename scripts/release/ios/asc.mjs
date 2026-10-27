@@ -30,9 +30,13 @@ const MAX_PAGES = 20;
 const MAX_ITEMS = 2_000;
 // App Store Connect documents HTTP 500 as a potentially temporary outage.
 // Retry only idempotent reads; a provider mutation remains an ambiguity boundary.
+// A read that gets no response at all (connection reset, DNS, TLS, or the
+// per-request timeout below) is retried the same way.
 const APPLE_TRANSIENT_READ_ATTEMPTS = 3;
 const APPLE_TRANSIENT_READ_STATUSES = new Set([500, 502, 503, 504]);
 const APPLE_TRANSIENT_READ_DELAYS_MS = [1_000, 3_000];
+// Without a bound, a stalled request waits for undici's 300 s header timeout.
+const APPLE_REQUEST_TIMEOUT_MS = 60_000;
 const APPLE_RELATIONSHIP_NOT_FOUND = Symbol("apple-relationship-not-found");
 const APPLE_RELATIONSHIP_PATHS = new Map([
   ["bundle-profile", /^\/v1\/bundleIds\/[^/]{1,600}\/profiles$/u],
@@ -60,16 +64,58 @@ function fail(message) {
 }
 
 class AppStoreConnectHttpError extends Error {
-  constructor(requestLabel, status, attempts = 1) {
+  constructor(requestLabel, status, attempts = 1, { transient = false, method = "GET" } = {}) {
     super(
-      `[ios-asc] ${requestLabel} request failed with HTTP ${status}` +
-        (attempts > 1 ? ` after ${attempts} attempts` : ""),
+      method === "GET"
+        ? `[ios-asc] ${requestLabel} request failed with HTTP ${status}` +
+          (attempts > 1 ? ` after ${attempts} attempts` : "")
+        : `[ios-asc] ${requestLabel} ${method} request failed with HTTP ${status}` +
+          (status >= 500 ? "; App Store Connect may or may not have applied it" : ""),
     );
     this.name = "AppStoreConnectHttpError";
     this.requestLabel = requestLabel;
     this.status = status;
     this.attempts = attempts;
+    this.transient = transient;
   }
+}
+
+// Only a fixed vocabulary reaches the message: the error's own text and cause
+// can carry provider bytes, so they never do.
+function networkFailureReason(error, timeoutMs) {
+  if (error?.name === "TimeoutError") return `timed out after ${timeoutMs / 1000} s`;
+  for (const code of [error?.cause?.code, error?.code]) {
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/u.test(code)) return code;
+  }
+  if (typeof error?.name === "string" && /^[A-Za-z]{1,40}$/u.test(error.name)) return error.name;
+  return "unknown network failure";
+}
+
+class AppStoreConnectNetworkError extends Error {
+  constructor(requestLabel, method, error, attempts, timeoutMs, phase) {
+    const reason = networkFailureReason(error, timeoutMs);
+    super(
+      method === "GET"
+        ? `[ios-asc] ${requestLabel} request got no ${phase} (${reason})` +
+          (attempts > 1 ? ` after ${attempts} attempts` : "")
+        : `[ios-asc] ${requestLabel} ${method} request got no ${phase} (${reason}); ` +
+          "App Store Connect may or may not have applied it",
+    );
+    this.name = "AppStoreConnectNetworkError";
+    this.requestLabel = requestLabel;
+    this.reason = reason;
+    this.attempts = attempts;
+    this.transient = method === "GET";
+  }
+}
+
+// A read that still failed after its own retries: a polling caller may try
+// again on its next interval.
+function isTransientAppleReadFailure(error) {
+  return (
+    (error instanceof AppStoreConnectNetworkError || error instanceof AppStoreConnectHttpError) &&
+    error.transient === true
+  );
 }
 
 function sleepMilliseconds(milliseconds) {
@@ -285,6 +331,16 @@ export function safeProviderUrl(value, origin = APPLE_API_ORIGIN, label = "App S
   return url;
 }
 
+// The body of a NOT_FOUND answer stalled or dropped mid-read; kept apart from
+// the validator's own fail() so appleRequest can retry the read.
+class AppleBodyReadError extends Error {
+  constructor(cause) {
+    super("[ios-asc] App Store Connect response body could not be read");
+    this.name = "AppleBodyReadError";
+    this.cause = cause;
+  }
+}
+
 async function validateAppleNotFoundResponse(response, label) {
   const invalid = () => fail(`${label} response is invalid or unbounded`);
   const mediaType = response.headers.get("content-type");
@@ -313,7 +369,13 @@ async function validateAppleNotFoundResponse(response, label) {
   let length = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        throw new AppleBodyReadError(error);
+      }
+      const { done, value } = chunk;
       if (done) break;
       if (!(value instanceof Uint8Array)) invalid();
       length += value.byteLength;
@@ -379,60 +441,92 @@ async function appleRequest(fetchImpl, token, value, {
   requestLabel = "App Store Connect",
   relationshipNotFoundPhase = null,
   retrySleep = sleepMilliseconds,
+  timeoutMs = APPLE_REQUEST_TIMEOUT_MS,
 } = {}) {
   const url = safeProviderUrl(value, APPLE_API_ORIGIN, "App Store Connect request");
   if (typeof retrySleep !== "function") {
     fail("App Store Connect retry sleep is invalid");
   }
-  let response;
+  const idempotent = method === "GET";
   let attempts = 0;
-  while (attempts < APPLE_TRANSIENT_READ_ATTEMPTS) {
+  for (;;) {
     attempts += 1;
-    response = await fetchImpl(url, {
-      method,
-      redirect: "error",
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: "application/json",
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (
-      method !== "GET" ||
-      !APPLE_TRANSIENT_READ_STATUSES.has(response.status) ||
-      attempts === APPLE_TRANSIENT_READ_ATTEMPTS
-    ) {
-      break;
+    const final = !idempotent || attempts === APPLE_TRANSIENT_READ_ATTEMPTS;
+    const retry = () => retrySleep(APPLE_TRANSIENT_READ_DELAYS_MS[attempts - 1]);
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method,
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/json",
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch (error) {
+      if (final) {
+        throw new AppStoreConnectNetworkError(requestLabel, method, error, attempts, timeoutMs, "response");
+      }
+      await retry();
+      continue;
     }
-    await response.body?.cancel().catch(() => {});
-    await retrySleep(APPLE_TRANSIENT_READ_DELAYS_MS[attempts - 1]);
-  }
-  if (response.status === 404 && relationshipNotFoundPhase !== null) {
-    const pathPattern = APPLE_RELATIONSHIP_PATHS.get(relationshipNotFoundPhase);
-    if (
-      method !== "GET" ||
-      body !== undefined ||
-      pathPattern === undefined ||
-      !pathPattern.test(url.pathname)
-    ) {
-      fail("App Store Connect relationship NOT_FOUND request scope is invalid");
+    if (!final && APPLE_TRANSIENT_READ_STATUSES.has(response.status)) {
+      await response.body?.cancel().catch(() => {});
+      await retry();
+      continue;
     }
-    return validateAppleRelationshipNotFound(response, relationshipNotFoundPhase);
-  }
-  if (allowNotFound && response.status === 404) {
-    await response.body?.cancel().catch(() => {});
-    return null;
-  }
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => {});
-    throw new AppStoreConnectHttpError(requestLabel, response.status, attempts);
-  }
-  if (response.status === 204) return null;
-  try {
-    return await response.json();
-  } catch {
-    fail("App Store Connect returned malformed JSON");
+    if (response.status === 404 && relationshipNotFoundPhase !== null) {
+      const pathPattern = APPLE_RELATIONSHIP_PATHS.get(relationshipNotFoundPhase);
+      if (
+        method !== "GET" ||
+        body !== undefined ||
+        pathPattern === undefined ||
+        !pathPattern.test(url.pathname)
+      ) {
+        fail("App Store Connect relationship NOT_FOUND request scope is invalid");
+      }
+      try {
+        return await validateAppleRelationshipNotFound(response, relationshipNotFoundPhase);
+      } catch (error) {
+        if (!(error instanceof AppleBodyReadError)) throw error;
+        if (final) {
+          throw new AppStoreConnectNetworkError(requestLabel, method, error.cause, attempts, timeoutMs, "complete response body");
+        }
+        await retry();
+        continue;
+      }
+    }
+    if (allowNotFound && response.status === 404) {
+      await response.body?.cancel().catch(() => {});
+      return null;
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw new AppStoreConnectHttpError(requestLabel, response.status, attempts, {
+        transient: idempotent && APPLE_TRANSIENT_READ_STATUSES.has(response.status),
+        method,
+      });
+    }
+    if (response.status === 204) return null;
+    let text;
+    try {
+      text = await response.text();
+    } catch (error) {
+      // The headers arrived but the body stalled or the connection dropped.
+      if (final) {
+        throw new AppStoreConnectNetworkError(requestLabel, method, error, attempts, timeoutMs, "complete response body");
+      }
+      await retry();
+      continue;
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      fail("App Store Connect returned malformed JSON");
+    }
   }
 }
 
@@ -558,12 +652,13 @@ async function readAppleDistributionCertificate({
   token,
   certificateSha256,
   nowMilliseconds,
+  retrySleep,
 }) {
   const response = await appleRequest(
     fetchImpl,
     token,
     appleDistributionCertificatesUrl(),
-    { requestLabel: "App Store Connect distribution certificates" },
+    { requestLabel: "App Store Connect distribution certificates", retrySleep },
   );
   const payload = record(response, "App Store Connect distribution certificates");
   if (!Array.isArray(payload.data)) {
@@ -686,6 +781,7 @@ export async function downloadAppleAppStoreProfile({
   fetchImpl = fetch,
   now = new Date(),
   relationshipDiagnostic = null,
+  retrySleep = sleepMilliseconds,
 }) {
   exactString(bundleId, BUNDLE_ID, "iOS bundle ID");
   if (profileId !== "") {
@@ -723,6 +819,7 @@ export async function downloadAppleAppStoreProfile({
     token,
     bundleIdsUrl,
     "App Store Connect bundle IDs",
+    { retrySleep },
   );
   if (bundleIds.length === 0) {
     fail("App Store Connect did not resolve the requested bundle identifier");
@@ -793,7 +890,7 @@ export async function downloadAppleAppStoreProfile({
       token,
       profilesUrl,
       "App Store Connect bundle profiles",
-      { initialRelationshipNotFoundPhase: "bundle-profile" },
+      { initialRelationshipNotFoundPhase: "bundle-profile", retrySleep },
     );
     if (profiles === null) {
       relationshipNotFoundCounts.bundleProfile += 1;
@@ -902,6 +999,7 @@ export async function downloadAppleAppStoreProfile({
     token,
     certificateSha256,
     nowMilliseconds,
+    retrySleep,
   });
   // This API lookup proves the imported certificate is active account state.
   // The caller's mandatory CMS verification binds that exact certificate to
@@ -1389,27 +1487,43 @@ async function reconcileLoop({
   sleep,
   timeoutSeconds,
   intervalSeconds,
+  onTransientFailure,
 }) {
   providerVersionString(buildNumber, "iOS build number");
   exactString(requestedAppId, OPAQUE_ID, "App Store Connect app ID");
   exactString(requestedBetaGroupId, OPAQUE_ID, "TestFlight beta group ID");
   validateReconcileTiming(timeoutSeconds, intervalSeconds);
+  if (typeof onTransientFailure !== "function") fail("App Store Connect transient-failure reporter is invalid");
   const nextToken = appleReconcileTokenSource({ token, tokenFactory });
   const deadline = now().getTime() + timeoutSeconds * 1000;
   let assigned = false;
+  let lastReadFailure = null;
   while (now().getTime() < deadline) {
     let artifactProof = null;
     const observationToken = await nextToken();
-    const observation = await observeAppleStore({
-      bundleId,
-      nativeVersion,
-      requestedAppId,
-      requestedBetaGroupId,
-      token: observationToken,
-      fetchImpl,
-      now: now(),
-      retrySleep: sleep,
-    });
+    let observation;
+    try {
+      observation = await observeAppleStore({
+        bundleId,
+        nativeVersion,
+        requestedAppId,
+        requestedBetaGroupId,
+        token: observationToken,
+        fetchImpl,
+        now: now(),
+        retrySleep: sleep,
+      });
+    } catch (error) {
+      // Reads change nothing at Apple, so an outage that outlasts one request's
+      // retries costs a polling interval, not the run. After the upload a failed
+      // run cannot simply be re-run, so this matters most here.
+      if (!isTransientAppleReadFailure(error)) throw error;
+      lastReadFailure = error;
+      onTransientFailure(`${error.message}; polling again in ${intervalSeconds} s`);
+      await sleep(intervalSeconds * 1000);
+      continue;
+    }
+    lastReadFailure = null;
     if (observation.betaGroup === null) fail("No deterministic internal TestFlight beta group is configured");
     const uploadMatches = observation.buildUploads.filter(
       (value) => value.buildNumber === buildNumber,
@@ -1488,6 +1602,7 @@ async function reconcileLoop({
             {
               method: "POST",
               body: { data: [{ type: "betaGroups", id: observation.betaGroup.id }] },
+              requestLabel: "TestFlight beta-group assignment",
             },
           );
           assigned = true;
@@ -1496,7 +1611,16 @@ async function reconcileLoop({
     }
     await sleep(intervalSeconds * 1000);
   }
-  fail("TestFlight build processing or internal-group distribution timed out");
+  fail(
+    "TestFlight build processing or internal-group distribution timed out" +
+      (lastReadFailure === null
+        ? ""
+        : ` (the last read failed: ${lastReadFailure.message.replace(/^\[ios-asc\] /u, "")})`),
+  );
+}
+
+function writeTransientFailure(message) {
+  process.stderr.write(`${message}\n`);
 }
 
 export async function reconcileAppleBuild({
@@ -1515,6 +1639,7 @@ export async function reconcileAppleBuild({
   sleep = sleepMilliseconds,
   timeoutSeconds = 5_400,
   intervalSeconds = 30,
+  onTransientFailure = writeTransientFailure,
 }) {
   positiveInteger(artifactSizeBytes, "iOS artifact size");
   exactString(artifactMd5, MD5, "iOS artifact MD5");
@@ -1533,6 +1658,7 @@ export async function reconcileAppleBuild({
     sleep,
     timeoutSeconds,
     intervalSeconds,
+    onTransientFailure,
   });
   return result.observation;
 }
@@ -1552,6 +1678,7 @@ export async function reconcileExistingAppleBuild({
   sleep = sleepMilliseconds,
   timeoutSeconds = 5_400,
   intervalSeconds = 30,
+  onTransientFailure = writeTransientFailure,
 }) {
   const { observation, artifactProof } = await reconcileLoop({
     bundleId,
@@ -1567,6 +1694,7 @@ export async function reconcileExistingAppleBuild({
     sleep,
     timeoutSeconds,
     intervalSeconds,
+    onTransientFailure,
   });
   return {
     ...observation,
@@ -1699,20 +1827,54 @@ function pollSettings() {
   };
 }
 
-// Resolve the app and deterministic internal group once (honouring the
-// optional pins) so the poll is bound to exact resource ids.
-async function resolveAppleTargets(bundleId, nativeVersion, credentials) {
-  const observation = await observeAppleStore({
-    bundleId,
-    nativeVersion,
-    requestedAppId: process.env.APP_STORE_CONNECT_APP_ID ?? "",
-    requestedBetaGroupId: process.env.APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID ?? "",
-    token: createAppStoreConnectJwt(credentials),
-  });
-  if (observation.betaGroup === null) {
-    fail("No deterministic internal TestFlight beta group; set APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID");
+// Resolve the app and deterministic internal group (honouring the optional
+// pins) so the poll is bound to exact resource ids. This is the first read after
+// the upload, so a read outage costs a polling interval here as in the poll, and
+// both share the poll's one deadline: the poll gets what is left of it.
+export async function resolveAppleTargets({
+  bundleId,
+  nativeVersion,
+  requestedAppId = "",
+  requestedBetaGroupId = "",
+  tokenFactory,
+  fetchImpl = fetch,
+  now = () => new Date(),
+  sleep = sleepMilliseconds,
+  timeoutSeconds,
+  intervalSeconds,
+  onTransientFailure = writeTransientFailure,
+}) {
+  validateReconcileTiming(timeoutSeconds, intervalSeconds);
+  if (typeof tokenFactory !== "function") fail("App Store Connect token factory is invalid");
+  const deadline = now().getTime() + timeoutSeconds * 1000;
+  for (;;) {
+    let observation;
+    try {
+      observation = await observeAppleStore({
+        bundleId,
+        nativeVersion,
+        requestedAppId,
+        requestedBetaGroupId,
+        token: await tokenFactory(),
+        fetchImpl,
+        now: now(),
+        retrySleep: sleep,
+      });
+    } catch (error) {
+      if (!isTransientAppleReadFailure(error) || now().getTime() + intervalSeconds * 1000 >= deadline) throw error;
+      onTransientFailure(`${error.message}; polling again in ${intervalSeconds} s`);
+      await sleep(intervalSeconds * 1000);
+      continue;
+    }
+    if (observation.betaGroup === null) {
+      fail("No deterministic internal TestFlight beta group; set APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID");
+    }
+    return {
+      appId: observation.appId,
+      betaGroupId: observation.betaGroup.id,
+      timeoutSeconds: Math.max(30, Math.floor((deadline - now().getTime()) / 1000)),
+    };
   }
-  return { appId: observation.appId, betaGroupId: observation.betaGroup.id };
 }
 
 function readJsonFile(filePath, label) {
@@ -1779,6 +1941,22 @@ function reportAssessment(result) {
   return result;
 }
 
+async function resolveCliTargets(bundleId, nativeVersion, credentials) {
+  const settings = pollSettings();
+  const resolved = await resolveAppleTargets({
+    bundleId,
+    nativeVersion,
+    requestedAppId: process.env.APP_STORE_CONNECT_APP_ID ?? "",
+    requestedBetaGroupId: process.env.APP_STORE_CONNECT_INTERNAL_BETA_GROUP_ID ?? "",
+    tokenFactory: () => createAppStoreConnectJwt(credentials),
+    ...settings,
+  });
+  return {
+    targets: { appId: resolved.appId, betaGroupId: resolved.betaGroupId },
+    timing: { timeoutSeconds: resolved.timeoutSeconds, intervalSeconds: settings.intervalSeconds },
+  };
+}
+
 async function cliStore(argv) {
   const command = argv[0] ?? "";
   if (command === "download-profile" && (argv.length === 3 || argv.length === 4)) {
@@ -1794,7 +1972,7 @@ async function cliStore(argv) {
     // Keep the key only in memory and mint per request; a 15-minute JWT must
     // not bound the up-to-115-minute processing poll.
     const credentials = appleCredentials();
-    const targets = await resolveAppleTargets(argv[1], argv[2], credentials);
+    const { targets, timing } = await resolveCliTargets(argv[1], argv[2], credentials);
     return reconcileAppleBuild({
       bundleId: argv[1],
       nativeVersion: argv[2],
@@ -1805,12 +1983,12 @@ async function cliStore(argv) {
       requestedAppId: targets.appId,
       requestedBetaGroupId: targets.betaGroupId,
       tokenFactory: () => createAppStoreConnectJwt(credentials),
-      ...pollSettings(),
+      ...timing,
     });
   }
   if (command === "reconcile-existing" && argv.length === 4) {
     const credentials = appleCredentials();
-    const targets = await resolveAppleTargets(argv[1], argv[2], credentials);
+    const { targets, timing } = await resolveCliTargets(argv[1], argv[2], credentials);
     return reconcileExistingAppleBuild({
       bundleId: argv[1],
       nativeVersion: argv[2],
@@ -1818,7 +1996,7 @@ async function cliStore(argv) {
       requestedAppId: targets.appId,
       requestedBetaGroupId: targets.betaGroupId,
       tokenFactory: () => createAppStoreConnectJwt(credentials),
-      ...pollSettings(),
+      ...timing,
     });
   }
   fail(USAGE);
