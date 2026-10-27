@@ -419,15 +419,22 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
     expect(errors).toMatch(/HTTP 404: \/missing\.js/);
   });
 
-  it("another server whose port starts with the site's (3000 vs 30001) is another origin: a warning, not an error", { timeout: 90_000 }, async () => {
+  it("another server whose port starts with the site's (3000 vs 30001) is another origin: blocked and listed as such, not an error", { timeout: 180_000 }, async () => {
     const siteRoutes: Record<string, Route> = {};
-    const [port, otherPort] = await servePrefixPair(siteRoutes, {});
+    // Records every path the other server is asked for.
+    const otherSeen: string[] = [];
+    const other = new Proxy({} as Record<string, Route>, { get: (_t, key) => { otherSeen.push(String(key)); return undefined; } });
+    const [port, otherPort] = await servePrefixPair(siteRoutes, other);
     expect(String(otherPort).startsWith(String(port))).toBe(true);
-    // the other server 404s the image; the routes are read per request, so the page can name its port now
+    // the routes are read per request, so the page can name the other port now
     siteRoutes["/"] = { body: GOOD.replace("</body>", `<img src="http://127.0.0.1:${otherPort}/gone.png" alt=""></body>`) };
     const result = await check({ port, outDir: path.join(tmp, "prefix"), phone: true });
     expect(result.code, JSON.stringify(result.report?.viewports.map((v) => v.errors))).toBe(CHECK_EXIT_OK);
-    expect(result.report!.viewports[0]!.warnings.join("\n")).toContain(`HTTP 404: http://127.0.0.1:${otherPort}/gone.png`);
+    const v = result.report!.viewports[0]!;
+    expect(v.blocked.join("\n")).toContain(`http://127.0.0.1:${otherPort}/gone.png (another local server`);
+    expect([...v.errors, ...v.warnings].join("\n")).not.toContain(String(otherPort));
+    expect(formatSiteCheck(result.report!)).toMatch(/blocked: http:\/\/127\.0\.0\.1:\d+\/gone\.png/);
+    expect(otherSeen).toEqual([]);
   });
 
   it("a minimal page (one heading on a plain background) passes", { timeout: 90_000 }, async () => {

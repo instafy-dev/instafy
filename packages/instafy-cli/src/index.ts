@@ -32,11 +32,13 @@ import {
 import { listTunnelSessions, startTunnelDetached, stopTunnelSession, tailTunnelLogs, runTunnelCommand } from "./tunnel.js";
 import {
   PreviewCommandError,
+  hasOpenPreviewFor,
   previewClose,
   previewList,
   previewOpen,
   printPreviewList,
   printPreviewOpen,
+  uploadCheckThumbnail,
 } from "./preview.js";
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
@@ -2236,10 +2238,11 @@ function exitWithPreviewError(error: unknown): never {
 
 const previewCommand = program
   .command("preview")
-  .description("Look at sites running in this space, and show them in Studio as a private Ready to preview card");
+  .description("Look at sites running in this space, and show them in Studio as a private preview card");
 
 failWithGroupHelp(previewCommand);
-registerPreviewCheckCommand(previewCommand);
+// A check of a site with an open preview refreshes the picture on its card.
+registerPreviewCheckCommand(previewCommand, { hasOpenPreview: hasOpenPreviewFor, uploadThumbnail: uploadCheckThumbnail });
 
 failWithGroupHelp(registerWebCommand(program));
 
@@ -2250,7 +2253,10 @@ const previewOpenCommand = previewCommand
   )
   .requiredOption("--port <port>", "Local port the site listens on (1024-65535)")
   .requiredOption("--title <title>", "Card title (at most 120 characters)")
-  .option("--path <path>", "Path the preview opens at (default /)");
+  .option("--path <path>", "Path the preview opens at (default /)")
+  .option("--summary <text>", "One line of facts under the card's title, e.g. \"Trip · 3 days · 14 places\" (at most 80 characters); default: the page's own meta description")
+  .option("--thumbnail <file>", "Use this picture on the card (JPEG, PNG or WebP, at most 512 KiB and 2000×2000) instead of taking one")
+  .option("--no-thumbnail", "Put no picture of the site on the card");
 
 addSpaceOption(previewOpenCommand, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
 addServerUrlOptions(previewOpenCommand);
@@ -2281,6 +2287,9 @@ previewOpenCommand
         ratholeBin: opts.ratholeBin,
         serveCmd: opts.serveCmd,
         start: Boolean(opts.start),
+        summary: opts.summary,
+        thumbnail: opts.thumbnail !== false,
+        thumbnailFile: typeof opts.thumbnail === "string" ? opts.thumbnail : undefined,
       });
       printPreviewOpen(result, Boolean(opts.json));
     } catch (error) {

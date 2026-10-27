@@ -135,8 +135,9 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // from before the card could start a sleeping site again, v8 the one that
 // named a fixed tunnel domain for Vite's allowed hosts, and v9 the one from
 // before `instafy preview open --start` kept a site running after the turn (and
-// before the location, Present and tunnel material moved to references/), and
-// v10 the one that said rerunning `instafy preview open` refreshes the card. A
+// before the location, Present and tunnel material moved to references/),
+// v10 the one that said rerunning `instafy preview open` refreshes the card, and
+// v11 the one from before the card showed a picture and a summary of the site. A
 // workspace still holding an unedited earlier bundled copy of this skill,
 // browser automation or skill import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -150,6 +151,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v8.md"),
     include_str!("legacy/frontend-previews-v9.md"),
     include_str!("legacy/frontend-previews-v10.md"),
+    include_str!("legacy/frontend-previews-v11.md"),
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -2338,6 +2340,9 @@ mod tests {
             "Open on a `restartable` card starts the site again with no turn",
             "its status says the preview is open, not that the site answers",
             "Report what each command returned",
+            "--summary \"<facts>\"",
+            "--thumbnail <file>",
+            "it also takes a new picture for the card",
         ] {
             assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
         }
@@ -2383,7 +2388,8 @@ mod tests {
         let v7 = include_str!("legacy/frontend-previews-v7.md");
         let v8 = include_str!("legacy/frontend-previews-v8.md");
         let v9 = include_str!("legacy/frontend-previews-v9.md");
-        let previous = include_str!("legacy/frontend-previews-v10.md");
+        let v10 = include_str!("legacy/frontend-previews-v10.md");
+        let previous = include_str!("legacy/frontend-previews-v11.md");
         assert!(!v3.contains("instafy preview open"));
         assert!(v4.contains("instafy preview open"));
         assert!(!v4.contains("Allow the preview host before the person opens the card."));
@@ -2398,8 +2404,10 @@ mod tests {
         assert!(v9.contains("--serve-cmd"));
         assert!(!v9.contains("--start"));
         assert!(!v9.contains(".rt.instafy.dev"));
-        assert!(previous.contains("--start"));
-        assert!(previous.contains("refreshes the card"));
+        assert!(v10.contains("--start"));
+        assert!(v10.contains("refreshes the card"));
+        assert!(!previous.contains("refreshes the card"));
+        assert!(!previous.contains("--summary"));
         // Octo reports what a command returned: a rerun posts this turn's
         // card, it never refreshes an earlier one, and `instafy preview list`
         // does not say whether a site answers.
@@ -2430,7 +2438,7 @@ mod tests {
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&reference).unwrap(), edited);
         }
-        for old in [v3, v4, v5, v6, v7, v8, v9, previous] {
+        for old in [v3, v4, v5, v6, v7, v8, v9, v10, previous] {
             fs::write(&skill, old).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(
