@@ -11,12 +11,7 @@ import type {
   ChatMessageFileChange,
   ChatMessageUnsavedReason,
 } from "../types";
-import {
-  parseCommandExecutionOutput,
-  parseTodoItems,
-  summarizeActiveCommandForPreview,
-  truncate,
-} from "./chatContentHelpers";
+import { parseCommandExecutionOutput, parseTodoItems, truncate } from "./chatContentHelpers";
 import {
   formatPromptContextModeLabel,
   formatTokenCountLabel,
@@ -30,6 +25,7 @@ import {
 import { getMessageType } from "./chatMessageMetadata";
 import { CommandOutputBlock } from "./CommandOutputBlock";
 import { TemplateToolCallDetails } from "./TemplateToolCallDetails";
+import { TurnCommandRow } from "./TurnActivityDetails";
 
 type MessageContentProps = {
   content: string;
@@ -127,6 +123,55 @@ export function TimelineEntry({
   const pendingSteps = stepsWithIndex.filter((item) => !item.completed);
   const nextStep = pendingSteps[0] ?? null;
   const isCommandExecutionWithOutput = messageType === "command_execution" && Boolean(aggregatedOutput);
+
+  // A command on its own in the conversation reads as one row: what it was
+  // for when the runtime labelled it, the command itself in mono, its state,
+  // and the output one press away. Run traces keep their full builder view.
+  if (messageType === "command_execution" && !isRunTrace) {
+    return (
+      <Surface
+        tone="default"
+        radius="2xl"
+        shadow="sm"
+        data-testid="chat-bubble-assistant"
+        data-message-type={messageType}
+        className="w-full max-w-[min(100%,42rem)] min-w-0 px-3 py-1.5 text-sm text-slate-700"
+      >
+        <TurnCommandRow message={message} />
+        {canOpenBrowser ? (
+          <div className="mt-1.5">
+            <Button
+              variant="outline"
+              size="xs"
+              radius="full"
+              onPress={() => {
+                if (typeof window === "undefined") {
+                  return;
+                }
+                window.dispatchEvent(
+                  new CustomEvent("instafy:browser-open", {
+                    detail: {
+                      args: browserToolRuntimeId ? [browserToolRuntimeId] : [],
+                      runtimeId: browserToolRuntimeId ?? undefined,
+                      conversationLocalId: conversationLocalId ?? undefined,
+                      conversationControllerId: conversationControllerId ?? undefined,
+                    },
+                  }),
+                );
+              }}
+            >
+              Open browser
+            </Button>
+          </div>
+        ) : null}
+        {message.files && message.files.length > 0 ? (
+          <div className="mt-2">
+            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} unsavedReason={message.unsavedReason ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
+          </div>
+        ) : null}
+      </Surface>
+    );
+  }
   const bubbleClassName = isCommandExecutionWithOutput
     ? "flex-1 min-w-0 max-w-[56rem] border-0 bg-transparent p-0 shadow-none dark:bg-transparent"
     : "max-w-[min(80%,42rem)] px-3 py-2.5 text-sm text-slate-700";
@@ -159,18 +204,10 @@ export function TimelineEntry({
             </div>
             {messageType !== "todo_list" ? (
               <MessageContent
-                // A command that produced no output renders here, at the same
-                // weight as a sentence octo wrote. The raw invocation carries
-                // the space id and reads as leaked plumbing during a first run
-                // whose promise is that setup does not fill the chat with
-                // commands, so it is summarised into what it was for. With
-                // output, the branch above renders it inside CommandOutputBlock
-                // instead, where a command belongs.
-                content={
-                  messageType === "command_execution"
-                    ? summarizeActiveCommandForPreview(message.content)
-                    : message.content
-                }
+                // A command reaches this only in a run trace, the builder's full
+                // view: in a conversation it is one labelled row (above), with
+                // the command and its output behind its chevron.
+                content={message.content}
                 projectId={projectId ?? null}
               />
             ) : null}

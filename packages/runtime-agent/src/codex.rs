@@ -5238,34 +5238,54 @@ const MAX_WEB_SEARCH_ACTIVITY_CHARS: usize = 400;
 /// What the room keeps of a web search whose output named no activity line (it failed, or was cut short).
 const WEB_SEARCH_OUTPUT_NOT_KEPT: &str = "web search: results are not kept";
 
-/// Whether a command runs `instafy web search`: the words `instafy` (or a path ending in `instafy` or
-/// `instafy.js`), `web` and `search` in a row, wherever they stand in the script. Shell punctuation and
-/// quotes separate words. A command that only mentions it (an `echo`, say) also matches, which keeps its
-/// output out of the room too.
+/// Whether a command runs `instafy web search`: the words `instafy` (a path ending in `instafy` or
+/// `instafy.js`, the `@instafy/cli` package as `npx` names it, or the package's own `cli.js`), `web` and
+/// `search` in a row, wherever they stand in the script. Shell punctuation and quotes separate words. A
+/// command that only mentions it (an `echo`, say) also matches, which keeps its output out of the room too.
 fn runs_instafy_web_search(command: &str) -> bool {
     let words: Vec<&str> = command
         .split(|c: char| c.is_whitespace() || ";&|()`'\"{}<>".contains(c))
         .filter(|word| !word.is_empty())
         .collect();
     words.windows(3).any(|window| {
-        let program = window[0].rsplit('/').next().unwrap_or(window[0]);
-        (program == "instafy" || program == "instafy.js")
+        let word = window[0];
+        let program = word.rsplit('/').next().unwrap_or(word);
+        (program == "instafy"
+            || program == "instafy.js"
+            || word == "@instafy/cli"
+            || word.starts_with("@instafy/cli@")
+            || (program == "cli.js" && word.contains("instafy")))
             && window[1] == "web"
             && window[2] == "search"
     })
 }
 
+/// Whether a command's output is (or holds) an `instafy web search` report, however the command ran
+/// it: through `npx`, from a script, or from a file the report was saved to. A report says so itself:
+/// a result's untrusted wrapper (`… read_at="…" viewer="search result">`, as text or inside JSON) or its
+/// own activity line. Text that only describes the format, such as the CLI's documentation, does not.
+fn output_holds_web_search_report(output: &str) -> bool {
+    output.contains("\" viewer=\"search result\">")
+        || output.contains("\\\" viewer=\\\"search result\\\">")
+        || output.lines().any(|line| {
+            line.starts_with("activity: web search \"")
+                || line
+                    .trim_start()
+                    .starts_with("\"activity\": \"web search \\\"")
+        })
+}
+
 /// What the room's activity log (and the run log) keeps of an `instafy web search` command: the
 /// query and the number of results, from the command's own `activity:` lines, never the result list.
 /// The providers' terms allow storing results only as long as the search needs them, so a command that
-/// searched keeps nothing else of its output, whatever else the script ran. `None` for any other
-/// command.
+/// searched, or whose output holds a search's report, keeps nothing else of its output, whatever else
+/// the script ran. `None` for any other command.
 ///
 /// The CLI writes the line at the start of a line in text (`activity: web search "…" · 8 results`)
 /// and as the report's top-level field in JSON (` "activity": "web search …",`); page-written text
 /// never starts a line in either form, so a result cannot pose as one.
 fn web_search_activity_output(command: &str, output: &str) -> Option<String> {
-    if !runs_instafy_web_search(command) {
+    if !runs_instafy_web_search(command) && !output_holds_web_search_report(output) {
         return None;
     }
     let mut lines: Vec<String> = Vec::new();
@@ -8737,6 +8757,42 @@ required = true
             "{\"pages\": []}\n",
         );
         assert_eq!(kept, "{\"pages\": []}\n");
+    }
+
+    /// However the search ran (`npx`, the CLI's own bundle, a script, or a file its report was saved to and
+    /// printed later), the room keeps only its activity line: the output itself says it is a search report.
+    #[test]
+    fn a_web_search_report_keeps_no_result_however_the_command_ran_it() {
+        let kept_json = "web search \"ramen shinjuku\" · 2 results\n(search results are not kept)";
+        for script in [
+            "npx -y @instafy/cli web search \"ramen shinjuku\" --json",
+            "node /usr/lib/node_modules/@instafy/cli/dist/cli.js web search \"ramen shinjuku\" --json",
+            "python3 -c \"import subprocess; print(subprocess.run(['instafy','web','search','ramen shinjuku','--json'], capture_output=True, text=True).stdout)\"",
+            "cat /tmp/search.json",
+        ] {
+            assert_eq!(
+                run_command(script, WEB_SEARCH_JSON_OUTPUT),
+                kept_json,
+                "{script}"
+            );
+        }
+        // The same report, compacted by jq: one line, so no activity line of its own; still nothing of it is kept.
+        let compact = "{\"ok\":true,\"status\":\"ok\",\"activity\":\"web search \\\"ramen\\\" · 1 result\",\"results\":[{\"rank\":1,\"url\":\"https://blog.example.org/ramen\",\"text\":\"<untrusted_page_content url=\\\"https://blog.example.org/ramen\\\" read_at=\\\"x\\\" viewer=\\\"search result\\\">\\ntitle: Ramen diary\\n</untrusted_page_content>\"}]}\n";
+        assert_eq!(
+            run_command("cat /tmp/search.json | jq -c .", compact),
+            "web search: results are not kept"
+        );
+        // npx with the result links only: the command names the CLI's package.
+        assert_eq!(
+            run_command(
+                "npx @instafy/cli@latest web search ramen --json | jq -r '.results[].url'",
+                "https://blog.example.org/ramen\nhttps://www.ramen-guide.example.jp/\n"
+            ),
+            "web search: results are not kept"
+        );
+        // Text that only describes the format (documentation) is not a report, and is kept as it is.
+        let docs = "Each result is {rank, url, site, text?}: wrapped in `<untrusted_page_content url=… read_at=… viewer=\"search result\">`.\n";
+        assert_eq!(run_command("cat docs/CLI.md", docs), docs);
     }
 
     #[test]
