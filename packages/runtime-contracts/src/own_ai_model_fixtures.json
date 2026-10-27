@@ -1,6 +1,18 @@
 {
-  "_comment": "The own-AI default model id, named once. runtime-contracts (own_ai_model.rs) checks OWN_AI_DEFAULT_MODEL_ID against defaultModelId, its retired-id rule against `retired` and `served`, and own_ai_model_floor against `floor` (cases against defaultModelId) and `floorForDefault` (cases against a stated default, so a bump is checked before it happens). In both, `default` means the id runs that default and `keep` means it runs as picked; `floor` names only ids that stay below or outside every GPT-6-or-later default, so a bump needs no case edits. The proxy's test the_last_resort_model_is_the_platforms_openai_default (proxy.rs) checks client.rs DEFAULT_MODEL, and Studio's aiProviderModels.test.ts checks DEFAULT_PROJECT_AI_MODEL and runs both case lists through its own floor. To move the own-AI default, change defaultModelId here, OWN_AI_DEFAULT_MODEL_ID, the proxy's DEFAULT_MODEL and Studio's DEFAULT_PROJECT_AI_MODEL: a test fails until all four agree.",
-  "defaultModelId": "gpt-6-sol",
+  "_comment": "The own-AI default model id and the cheaper pick, named once. runtime-contracts (own_ai_model.rs) checks OWN_AI_DEFAULT_MODEL_ID against defaultModelId, OWN_AI_SMALL_MODEL_ID against smallModelId, its retired-id rule against `retired` and `served`, and own_ai_model_floor against `floor` (cases against defaultModelId) and `floorForDefault` (cases against a stated default, so a bump is checked before it happens). In both, `default` means the id runs that default and `keep` means it runs as picked; neither list names smallModelId, and `floor` names only ids that stay below or outside every default from gpt-6.1 on, so a bump needs no case edits. The proxy's test the_last_resort_model_is_the_platforms_openai_default (proxy.rs) checks client.rs DEFAULT_MODEL, and Studio's aiProviderModels.test.ts checks DEFAULT_PROJECT_AI_MODEL and OWN_AI_SMALL_MODEL_ID and runs both case lists through its own floor.",
+  "_bump": [
+    "Every edit a move of the own-AI default needs; the tests named here fail until each is made.",
+    "1. The new id must be in the pinned Codex catalog (codex/codex-rs/models-manager/models.json): the runtime-agent policy tests look it up there.",
+    "2. Four literals: defaultModelId here, OWN_AI_DEFAULT_MODEL_ID (runtime-contracts own_ai_model.rs), DEFAULT_MODEL (openai-proxy-server client.rs) and DEFAULT_PROJECT_AI_MODEL (frontend src/ai/modelDefaults.ts).",
+    "3. runtime-agent codex_policy.rs tests: add the new id to POLICY_MODELS and its upstream and composed prompt sections to CATALOG_PROMPT_SECTIONS (policy_models_include_the_own_ai_default, catalog_prompts_lose_exactly_the_codex_product_sections). Keep the old default in both while an operator can still pin it.",
+    "4. runtime-agent code_mode_host.rs tests run DEFAULT_CODEX_MODEL and fail on purpose if the new default is not code_mode_only; name the old default there explicitly to keep it covered.",
+    "5. Studio's picker (frontend src/utils/aiProviderModels.ts) leads with the default. Decide whether the cheaper pick stays: if it moves or goes, change smallModelId here, OWN_AI_SMALL_MODEL_ID in runtime-contracts and in modelDefaults.ts, and the picker; it must be served by the catalog and listed in POLICY_MODELS.",
+    "6. docs/Credits-Billing.md: the own-AI list price, verified on OpenAI's pricing page; README.md and the controller README name only the constant.",
+    "7. Nothing in CI: build.yml runs proxy_retry_budget with INSTAFY_TEST_CODEX_MODEL=own-ai-default, which resolves to the constant.",
+    "Known gap: a new default of the same version (a tier change such as gpt-6.1-sol to gpt-6.1-terra) raises nothing, so rows saved with the old default keep running it (the last floorForDefault case)."
+  ],
+  "defaultModelId": "gpt-6.1-sol",
+  "smallModelId": "gpt-6-luna",
   "retired": [
     "gpt-4o",
     "gpt-4.5",
@@ -25,12 +37,16 @@
     "gpt-5.10",
     "gpt-6-sol",
     "gpt-6-luna",
+    "gpt-6.1-sol",
     "o4-mini",
     "deepseek-chat",
     "glm-5",
     "gemini-2.5-pro"
   ],
   "floor": [
+    { "model": "gpt-6-sol", "runs": "default" },
+    { "model": " GPT-6-Sol ", "runs": "default" },
+    { "model": "gpt-6-terra", "runs": "default" },
     { "model": "gpt-5.6-sol", "runs": "default" },
     { "model": "gpt-5.6-terra", "runs": "default" },
     { "model": "gpt-5.6-luna", "runs": "default" },
@@ -61,17 +77,17 @@
   ],
   "floorForDefault": [
     { "default": "gpt-6-sol", "model": "gpt-6-sol", "runs": "keep" },
-    { "default": "gpt-6-sol", "model": "gpt-6-luna", "runs": "keep" },
     { "default": "gpt-6-sol", "model": "gpt-6.1-sol", "runs": "keep" },
     { "default": "gpt-6-sol", "model": "gpt-7", "runs": "keep" },
     { "default": "gpt-6-sol", "model": "gpt-5.6-luna", "runs": "default" },
     { "default": "gpt-6.1-sol", "model": "gpt-6-sol", "runs": "default" },
-    { "default": "gpt-6.1-sol", "model": "gpt-6-luna", "runs": "default" },
+    { "default": "gpt-6.1-sol", "model": "gpt-6-terra", "runs": "default" },
     { "default": "gpt-6.1-sol", "model": "gpt-6.1-luna", "runs": "keep" },
     { "default": "gpt-6.1-sol", "model": "gpt-6.10-sol", "runs": "keep" },
+    { "default": "gpt-6.2-sol", "model": "gpt-6.1-sol", "runs": "default" },
     { "default": "gpt-7-sol", "model": "gpt-6.1-sol", "runs": "default" },
     { "default": "gpt-7-sol", "model": "o4-mini", "runs": "default" },
     { "default": "gpt-7-sol", "model": "gpt-image-2", "runs": "keep" },
-    { "default": "gpt-6-terra", "model": "gpt-6-sol", "runs": "keep" }
+    { "default": "gpt-6.1-terra", "model": "gpt-6.1-sol", "runs": "keep" }
   ]
 }

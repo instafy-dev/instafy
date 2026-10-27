@@ -24,7 +24,7 @@ const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
 /// Kept equal to the own-AI default the controller and runtime share
 /// (runtime-contracts `OWN_AI_DEFAULT_MODEL_ID`); the proxy does not depend on
 /// that crate, so a test checks this copy against `own_ai_model_fixtures.json`.
-pub const DEFAULT_MODEL: &str = "gpt-6-sol";
+pub const DEFAULT_MODEL: &str = "gpt-6.1-sol";
 pub const DEFAULT_INSTRUCTIONS: &str = include_str!("../prompt_gpt5_codex.md");
 
 #[derive(Debug, Clone)]

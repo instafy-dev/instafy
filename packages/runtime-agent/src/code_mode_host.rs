@@ -147,7 +147,12 @@ mod tests {
     async fn code_mode_only_models_fail_closed_without_the_host() {
         let missing = tempfile::tempdir().expect("tempdir");
         let missing_host = missing.path().join(EXECUTABLE_NAME);
-        for model in ["gpt-6-luna", DEFAULT_CODEX_MODEL, "gpt-5.6-sol"] {
+        for model in [
+            "gpt-6-luna",
+            DEFAULT_CODEX_MODEL,
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+        ] {
             let (_home, config) = policy_config(model).await;
             let model_info = construct_model_info_offline(model, &config);
             assert!(model_requires_host(&model_info, &config), "{model}");
@@ -170,7 +175,12 @@ mod tests {
 
     #[test]
     fn the_bundled_catalog_names_the_code_mode_only_models() {
-        for model in ["gpt-6-luna", DEFAULT_CODEX_MODEL, "gpt-5.6-sol"] {
+        for model in [
+            "gpt-6-luna",
+            DEFAULT_CODEX_MODEL,
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+        ] {
             assert!(bundled_model_is_code_mode_only(model).unwrap(), "{model}");
         }
         for model in ["gpt-5.5", "not-a-catalog-model"] {

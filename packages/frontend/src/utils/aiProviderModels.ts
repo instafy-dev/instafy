@@ -23,7 +23,7 @@ export const AI_PROVIDER_OPTIONS: AiProviderOption[] = [
   { id: "gemini", label: "Gemini" },
 ];
 
-// `[N, M]` for a lowercase `gpt-N[.M]…` id (gpt-6-sol is 6.0, gpt-5.10 is
+// `[N, M]` for a lowercase `gpt-N[.M]…` id (gpt-6.1-sol is 6.1, gpt-5.10 is
 // 5.10), null for an id without a version.
 function openAiVersion(model: string): [number, number] | null {
   const match = /^gpt-(\d+)(?:\.(\d+))?/u.exec(model);
@@ -33,9 +33,11 @@ function openAiVersion(model: string): [number, number] | null {
 // Own AI runs at least its default: the controller raises a bare OpenAI id of
 // an older version than the default when a job runs (runtime-contracts'
 // own_ai_model_floor), Luna, mini and nano ids included, and o-series ids
-// always. Studio shows the model that runs, so it applies the same rule; both
-// are checked against runtime-contracts' own_ai_model_fixtures.json.
-// `defaultModel` is a parameter only so the tests can check a later bump.
+// always. The one exception is OWN_AI_SMALL_MODEL_ID, the cheaper model a
+// person picks on purpose. Studio shows the model that runs, so it applies
+// the same rule; both are checked against runtime-contracts'
+// own_ai_model_fixtures.json. `defaultModel` is a parameter only so the tests
+// can check a later bump.
 export function ownAiModelFloor(
   model: string,
   defaultModel: string = DEFAULT_PROJECT_AI_MODEL,
@@ -45,6 +47,9 @@ export function ownAiModelFloor(
     return null;
   }
   const normalized = model.trim().toLowerCase();
+  if (normalized === OWN_AI_SMALL_MODEL_ID) {
+    return null;
+  }
   const version = openAiVersion(normalized);
   const older = version
     ? version[0] < floor[0] || (version[0] === floor[0] && version[1] < floor[1])

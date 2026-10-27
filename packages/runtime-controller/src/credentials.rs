@@ -1007,7 +1007,7 @@ async fn test_my_credential(
             _ => None,
         });
     // The model a job on this credential runs without an agent model: the
-    // stored default (raised to GPT-6 for OpenAI), else the own-AI default for
+    // stored default (raised to the own-AI floor for OpenAI), else the own-AI default for
     // its kind and provider, never the credits-funded managed tier's.
     let model = credential_default_model(&kind, &metadata);
 
@@ -2841,8 +2841,8 @@ fn default_endpoint_for_provider(provider: &str) -> &'static str {
 }
 
 /// The model a bring-your-own credential runs when nothing more specific (an
-/// agent's model) is set: the credential's stored default, raised to GPT-6 on
-/// OpenAI-like providers (`floor_own_ai_model_for_provider`), else the default
+/// agent's model) is set: the credential's stored default, raised to the own-AI
+/// default on OpenAI-like providers (`floor_own_ai_model_for_provider`), else the default
 /// for its kind and provider. Saving a credential stores the default of the
 /// day, so the floor is what moves credentials saved before a bump. Shared by
 /// the credential test, completions and job secrets, so a job never falls back
@@ -2927,6 +2927,7 @@ mod provider_metadata_tests {
         default_chatgpt_model_id, default_managed_ai_model_id, default_model_for_provider,
         DEFAULT_OPENAI_MODEL_ID,
     };
+    use runtime_contracts::own_ai_model::OWN_AI_SMALL_MODEL_ID;
     use serde_json::json;
 
     #[test]
@@ -2995,12 +2996,15 @@ mod provider_metadata_tests {
             CREDENTIAL_KIND_OPENAI_API_KEY,
         ] {
             for (stored, runs) in [
+                ("gpt-6-sol", DEFAULT_OPENAI_MODEL_ID),
                 ("gpt-5.6-sol", DEFAULT_OPENAI_MODEL_ID),
                 ("gpt-5.5", DEFAULT_OPENAI_MODEL_ID),
                 ("gpt-5.6-luna", DEFAULT_OPENAI_MODEL_ID),
                 (" gpt-5.4-mini ", DEFAULT_OPENAI_MODEL_ID),
-                // A pick at the default's version runs as stored.
+                // A pick at the default's version runs as stored, and so does
+                // the cheaper model a person picks on purpose.
                 (DEFAULT_OPENAI_MODEL_ID, DEFAULT_OPENAI_MODEL_ID),
+                (OWN_AI_SMALL_MODEL_ID, OWN_AI_SMALL_MODEL_ID),
                 (same_version.as_str(), same_version.as_str()),
             ] {
                 let metadata = json!({ "provider": "openai", "default_model": stored });

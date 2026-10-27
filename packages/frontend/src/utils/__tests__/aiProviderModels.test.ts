@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_PROJECT_AI_MODEL } from "../../ai/modelDefaults";
+import { DEFAULT_PROJECT_AI_MODEL, OWN_AI_SMALL_MODEL_ID } from "../../ai/modelDefaults";
 import { modelOptionsForProvider, normalizeAiModelId, ownAiModelFloor } from "../aiProviderModels";
 
 // The own-AI default and floor cases are runtime-contracts' fixture: the same
@@ -16,6 +16,7 @@ const fixtures = JSON.parse(readFileSync(
   resolve(repo, "packages/runtime-contracts/src/own_ai_model_fixtures.json"), "utf8",
 )) as {
   defaultModelId: string;
+  smallModelId: string;
   floor: FloorCase[];
   floorForDefault: (FloorCase & { default: string })[];
 };
@@ -23,6 +24,17 @@ const fixtures = JSON.parse(readFileSync(
 describe("aiProviderModels", () => {
   it("keeps Studio's own-AI default equal to the shared fixture", () => {
     expect(DEFAULT_PROJECT_AI_MODEL).toBe(fixtures.defaultModelId);
+  });
+
+  it("runs the cheaper pick as picked, and only that exact id", () => {
+    expect(OWN_AI_SMALL_MODEL_ID).toBe(fixtures.smallModelId);
+    expect(OWN_AI_SMALL_MODEL_ID).not.toBe(DEFAULT_PROJECT_AI_MODEL);
+    expect(ownAiModelFloor(OWN_AI_SMALL_MODEL_ID)).toBeNull();
+    expect(normalizeAiModelId("openai", ` ${OWN_AI_SMALL_MODEL_ID.toUpperCase()} `))
+      .toBe(OWN_AI_SMALL_MODEL_ID.toUpperCase());
+    // Under any later default too; a variant of it is raised like any older id.
+    expect(ownAiModelFloor(OWN_AI_SMALL_MODEL_ID, "gpt-99-sol")).toBeNull();
+    expect(ownAiModelFloor(`${OWN_AI_SMALL_MODEL_ID}-mini`, "gpt-99-sol")).toBe("gpt-99-sol");
   });
 
   it("raises OpenAI picks older than the default the way the controller does", () => {
@@ -45,7 +57,7 @@ describe("aiProviderModels", () => {
 
   it("offers only models that run as picked, the default first", () => {
     const options = modelOptionsForProvider("openai").map((option) => option.id);
-    expect(options[0]).toBe(DEFAULT_PROJECT_AI_MODEL);
+    expect(options).toEqual([DEFAULT_PROJECT_AI_MODEL, OWN_AI_SMALL_MODEL_ID]);
     for (const id of options) {
       expect(ownAiModelFloor(id), id).toBeNull();
     }

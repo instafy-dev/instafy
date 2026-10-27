@@ -12,7 +12,8 @@ pub use runtime_contracts::own_ai_model::OWN_AI_DEFAULT_MODEL_ID as DEFAULT_OPEN
 
 /// Default model for the operator-paid managed "Instafy AI" tier (credits).
 /// GPT-6 Luna is priced at $0.10 / $0.01 cached / $0.50 per 1M tokens (public
-/// price pages, 2026-09-22), versus GPT-6 Sol at $2 / $0.20 / $10. Managed
+/// price pages, 2026-09-22), versus the own-AI default GPT-6.1 Sol at $2 /
+/// $0.10 / $10 (docs/Credits-Billing.md). Managed
 /// turns are charged to the shared team balance, so the cheaper model is the
 /// default; operators override it with `MANAGED_AI_MODEL_ID`.
 pub const DEFAULT_MANAGED_AI_MODEL_ID: &str = "gpt-6-luna";
@@ -101,8 +102,10 @@ pub fn agent_model_is_compatible_with_provider(provider: &str, model: &str) -> b
 /// providers (those without an agent default), unchanged on DeepSeek, z.ai and
 /// Gemini.
 ///
-/// Owner decision 2026-10-26: own AI runs at least the own-AI default (GPT-6
-/// Sol), while Instafy AI stays on GPT-6 Luna. Saved agents and credentials
+/// Owner decisions 2026-10-26 and 2026-10-27: own AI runs at least the own-AI
+/// default (GPT-6.1 Sol), except GPT-6 Luna when a person picks it on purpose
+/// as the cheaper model (`OWN_AI_SMALL_MODEL_ID`), while Instafy AI stays on
+/// GPT-6 Luna. Saved agents and credentials
 /// keep the id they were created with, so this is applied when a job or lease
 /// is built, not by rewriting rows. The managed lane never passes through
 /// here: its model is the operator's `MANAGED_AI_MODEL_ID`.
@@ -140,7 +143,7 @@ mod tests {
         DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_MODEL_ID,
         DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K, DEFAULT_OPENAI_MODEL_ID,
     };
-    use runtime_contracts::own_ai_model::own_ai_model_floor;
+    use runtime_contracts::own_ai_model::{own_ai_model_floor, OWN_AI_SMALL_MODEL_ID};
 
     #[test]
     fn managed_tier_defaults_to_luna_while_byo_credentials_run_sol() {
@@ -148,6 +151,7 @@ mod tests {
         // to Luna. ChatGPT logins, API keys, and the stale-model floor stay on Sol.
         // 2026-09-22: the managed tier follows Luna to GPT-6 Luna on its release.
         // 2026-10-26: own AI moves to GPT-6 Sol; Instafy AI stays on GPT-6 Luna.
+        // 2026-10-27: own AI moves to GPT-6.1 Sol, the catalog's current Sol.
         assert_eq!(default_managed_ai_model_id(), "gpt-6-luna");
         assert_eq!(default_managed_ai_model_label(), "GPT-6 Luna");
         assert_eq!(default_chatgpt_model_id(), DEFAULT_OPENAI_MODEL_ID);
@@ -176,6 +180,8 @@ mod tests {
         // The floor rule and its cases live in runtime-contracts; this checks
         // that an agent's model goes through it.
         for model in [
+            // GPT-6 Sol, the previous own-AI default, is older than GPT-6.1 Sol.
+            "gpt-6-sol",
             "gpt-5.6-sol",
             "gpt-5.5",
             " gpt-4o ",
@@ -195,9 +201,11 @@ mod tests {
                 "{model:?}"
             );
         }
-        // An id at the default's version, or without one, runs as picked.
+        // An id at the default's version, or without one, runs as picked, and
+        // so does the cheaper model a person picks on purpose.
         for model in [
             DEFAULT_OPENAI_MODEL_ID.to_string(),
+            OWN_AI_SMALL_MODEL_ID.to_string(),
             format!("{DEFAULT_OPENAI_MODEL_ID}-preview"),
             "gpt-image-1".to_string(),
             "openai/gpt-5.5".to_string(),

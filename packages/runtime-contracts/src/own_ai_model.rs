@@ -1,7 +1,8 @@
 //! The model a person's own AI runs by default: a bring-your-own OpenAI key, a
 //! ChatGPT login and "Codex on this computer". The controller and the runtime
-//! read these items; the proxy and Studio keep one literal each, and
-//! `own_ai_model_fixtures.json` fails their tests when a copy drifts.
+//! read these items; the proxy keeps a copy of the default and Studio a copy
+//! of the default and of the cheaper pick, and `own_ai_model_fixtures.json`
+//! fails their tests when a copy drifts.
 //!
 //! The managed "Instafy AI" lane is separate: its model is the controller's
 //! `DEFAULT_MANAGED_AI_MODEL_ID` (or the operator's `MANAGED_AI_MODEL_ID`).
@@ -9,8 +10,22 @@
 /// Default model for a person's own AI, and the least that their OpenAI picks
 /// run ([`own_ai_model_floor`]). Moving it moves every saved agent and
 /// credential whose OpenAI id is of an older version, the previous default
-/// included.
-pub const OWN_AI_DEFAULT_MODEL_ID: &str = "gpt-6-sol";
+/// included. `own_ai_model_fixtures.json` lists every edit a move needs.
+///
+/// GPT-6.1 Sol is the pinned Codex catalog's current Sol ("Latest workhorse
+/// model"); its GPT-6 Sol entry is the previous generation.
+pub const OWN_AI_DEFAULT_MODEL_ID: &str = "gpt-6.1-sol";
+
+/// The cheaper model a person may pick for their own AI on purpose (Studio's
+/// picker offers it after the default). Instafy never picks it: defaults and
+/// older picks run [`OWN_AI_DEFAULT_MODEL_ID`], and only this exact id runs as
+/// picked although its version is older than the default's. Other Luna, mini
+/// and nano ids are still raised.
+///
+/// The pinned Codex catalog does not list it for the ChatGPT plans it calls
+/// `promax` and `law`, so a ChatGPT login on those plans that picks it may be
+/// refused upstream; the catalog lists the default for every plan.
+pub const OWN_AI_SMALL_MODEL_ID: &str = "gpt-6-luna";
 
 /// OpenAI ids that are no longer served upstream (`gpt-4*`, `o3*`, `gpt-5`,
 /// `gpt-5-codex` and `gpt-5.0` to `gpt-5.4` with any suffix). A job must not
@@ -40,11 +55,14 @@ pub fn is_retired_openai_model(model: &str) -> bool {
 /// pick is a bare OpenAI id of an older version than the default (`gpt-N.M…`
 /// compared by `N.M`, and every `o<digit>` reasoning model), else `None`, and
 /// the pick runs as it is. Luna, mini and nano ids are raised to the default
-/// too: Instafy never lands a person's own AI below it on its own.
+/// too: Instafy never lands a person's own AI below it on its own. The one
+/// exception is [`OWN_AI_SMALL_MODEL_ID`], the cheaper model a person picks on
+/// purpose.
 ///
 /// Ids without a version (`gpt-image-1`), other providers' ids and namespaced
 /// ids (`openai/gpt-5.5`) are never raised. A new default of the same version
-/// (a tier change such as `gpt-6-sol` to `gpt-6-terra`) raises nothing.
+/// (a tier change such as `gpt-6.1-sol` to `gpt-6.1-terra`) raises nothing:
+/// rows saved with the old default keep running it.
 ///
 /// Saved agents and credentials keep the id they were created with, often the
 /// default of that day, so the controller applies this when it builds a job or
@@ -58,6 +76,9 @@ pub fn own_ai_model_floor(model: &str) -> Option<&'static str> {
 fn floor_for_default<'a>(default: &'a str, model: &str) -> Option<&'a str> {
     let floor = openai_version(&default.trim().to_ascii_lowercase())?;
     let model = model.trim().to_ascii_lowercase();
+    if model == OWN_AI_SMALL_MODEL_ID {
+        return None;
+    }
     let older = match openai_version(&model) {
         Some(version) => version < floor,
         None => model
@@ -88,7 +109,7 @@ fn leading_number(text: &str) -> Option<(u32, &str)> {
 mod tests {
     use super::{
         floor_for_default, is_retired_openai_model, openai_version, own_ai_model_floor,
-        OWN_AI_DEFAULT_MODEL_ID,
+        OWN_AI_DEFAULT_MODEL_ID, OWN_AI_SMALL_MODEL_ID,
     };
     use serde_json::Value;
 
@@ -128,6 +149,27 @@ mod tests {
         assert_eq!(fixtures()["defaultModelId"], OWN_AI_DEFAULT_MODEL_ID);
         // Without a version the floor would raise nothing.
         assert!(openai_version(OWN_AI_DEFAULT_MODEL_ID).is_some());
+    }
+
+    #[test]
+    fn the_cheaper_pick_runs_as_picked_and_is_never_the_default() {
+        assert_eq!(fixtures()["smallModelId"], OWN_AI_SMALL_MODEL_ID);
+        assert_ne!(OWN_AI_SMALL_MODEL_ID, OWN_AI_DEFAULT_MODEL_ID);
+        assert!(!is_retired_openai_model(OWN_AI_SMALL_MODEL_ID));
+        for pick in [
+            OWN_AI_SMALL_MODEL_ID.to_string(),
+            format!(" {} ", OWN_AI_SMALL_MODEL_ID.to_ascii_uppercase()),
+        ] {
+            assert_eq!(own_ai_model_floor(&pick), None, "{pick:?}");
+        }
+        // Under any later default too; a variant of it is raised like any
+        // older id.
+        assert_eq!(floor_for_default("gpt-99-sol", OWN_AI_SMALL_MODEL_ID), None);
+        let variant = format!("{OWN_AI_SMALL_MODEL_ID}-mini");
+        assert_eq!(
+            floor_for_default("gpt-99-sol", &variant),
+            Some("gpt-99-sol")
+        );
     }
 
     #[test]
