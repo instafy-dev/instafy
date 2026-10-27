@@ -614,3 +614,28 @@ fn the_research_skill_searches_with_instafy_web_search() {
     learn::ensure_project_memory_scaffold(tmp.path());
     assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
 }
+
+/// Reference search: Wikipedia, Wikivoyage and Wikidata's official websites through `instafy web search --chain
+/// reference-search` are the skill's open sources (step 3), with no key, their own budget and each source's attribution
+/// kept. An unedited earlier copy is upgraded.
+#[test]
+fn the_research_skill_names_reference_search_for_open_sources() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let research = flat(RESEARCH_SKILL);
+    for needle in [
+        "3. Open data and open APIs: `instafy web search \"<words>\" --chain reference-search --json` for Wikipedia and Wikivoyage articles and the official websites Wikidata records (no key needed)",
+        "`--chain reference-search` asks Wikipedia, Wikivoyage and Wikidata at once, with no key and 4 searches a turn of its own; each result names its source's `attribution`.",
+        "as a reference-search result's `attribution` gives it",
+    ] {
+        assert!(research.contains(needle), "{needle}");
+    }
+    assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+
+    let previous = include_str!("legacy/web-research-v4.md");
+    assert!(!previous.contains("reference-search"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::WEB_RESEARCH_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
+}

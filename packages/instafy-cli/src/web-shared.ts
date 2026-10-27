@@ -153,6 +153,50 @@ export function loadLinkOnlyGuard(
   return { list: merged.list, sources: merged.sources, warnings: [...warnings, ...merged.warnings] };
 }
 
+/**
+ * Every skill folder's copy of a skill data file (`<root>/<skill>/references/<file>` or `<root>/<skill>/<file>`),
+ * parsed, each once however many roots reach it. A copy that is not a file, is larger than 256 KB or is not JSON is
+ * left out with a warning; its content is never echoed. What a copy may change is the reader's rule, not this one's.
+ */
+export function skillDataCopies(roots: string[], file: string): { copies: Array<{ data: unknown; source: string }>; warnings: string[] } {
+  const copies: Array<{ data: unknown; source: string }> = [];
+  const warnings: string[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      for (const place of [path.join("references", file), file]) {
+        const candidate = path.join(root, entry.name, place);
+        let real: string;
+        try {
+          real = fs.realpathSync(candidate);
+        } catch {
+          continue;
+        }
+        if (seen.has(real)) continue;
+        seen.add(real);
+        try {
+          const stat = fs.statSync(real);
+          if (!stat.isFile() || stat.size > MAX_LINK_ONLY_BYTES) {
+            warnings.push(`${candidate} is not a file of at most ${MAX_LINK_ONLY_BYTES} bytes and was ignored`);
+            continue;
+          }
+          copies.push({ data: JSON.parse(fs.readFileSync(real, "utf8")) as unknown, source: candidate });
+        } catch (error) {
+          warnings.push(`${candidate} ${error instanceof SyntaxError ? "is not valid JSON" : "could not be read"} and was ignored`);
+        }
+      }
+    }
+  }
+  return { copies, warnings };
+}
+
 /** The listed site an address is on, directly or as a wrapper's copy of it, of any kind (the strictest), or null. */
 export function listedSite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
   const hit = linkOnly.linkOnlyMatch(guard.list, url);

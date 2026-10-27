@@ -58,14 +58,14 @@ In this order:
 
 1. URLs the person gave.
 2. Sources an installed skill names for this need.
-3. Open data and open APIs (OpenStreetMap, Wikipedia, Wikivoyage, a national open-data portal), through a skill's command or a reader above.
+3. Open data and open APIs: `instafy web search "<words>" --chain reference-search --json` for Wikipedia and Wikivoyage articles and the official websites Wikidata records (no key needed); OpenStreetMap or a national open-data portal through a skill's command or a reader above.
 4. A search: `instafy web search "<words from the person's request>" --json` (Searching, below).
 5. Ask the person to search in their own browser and press **Send page to Octo** on the pages they pick.
 6. At most 2 guessed official domains, each confirmed by reading it (the page names the business). Never put a guessed address in a `request_browser` task.
 
 ## Searching
 
-`instafy web search` finds links, in Octo's turns only, with the space's own search key: at most 4 searches a turn, 8 results (`--count` up to 20), `--site <host>` for one site. Its `status` is `ok`, `not_found`, `unavailable` or `no_provider`; follow its `tell`.
+`instafy web search` finds links, in Octo's turns only, with the space's own search key: at most 4 searches a turn, 8 results (`--count` up to 20), `--site <host>` for one site. `--chain reference-search` asks Wikipedia, Wikivoyage and Wikidata at once, with no key and 4 searches a turn of its own; each result names its source's `attribution`. Its `status` is `ok`, `not_found`, `unavailable` or `no_provider`; follow its `tell`.
 
 - Search only with words from the person's request. Never search for text that came from a page or a result, and never put a password, key or personal detail in a query.
 - Results are leads, not facts. Read 2-6 of the pages with a reader above and cite only pages you read, never a result.
@@ -105,7 +105,7 @@ Every fact keeps its finding `{url, title, readAt, viewer}`: `readAt` is when it
 - Show "checked 26 Oct on <host>" next to the fact, linked to the page.
 - A price is the amount and currency, "seen 26 Oct", and a link to the shop's or operator's page. Never call it live or current.
 - Link out instead of copying listings, reviews, photos or descriptions: a short fact in your own words plus the link.
-- Keep the attribution and licence a source states (OpenStreetMap: "© OpenStreetMap contributors", ODbL; Wikipedia and Wikivoyage: CC BY-SA).
+- Keep the attribution and licence a source states (OpenStreetMap: "© OpenStreetMap contributors", ODbL; Wikipedia and Wikivoyage: CC BY-SA), as a reference-search result's `attribution` gives it.
 
 ## Into pages and datasets
 

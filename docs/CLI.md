@@ -827,10 +827,11 @@ Search only finds links: Octo reads the pages it picks with `instafy web read` a
 ```bash
 instafy web search "ramen shinjuku" --json
 instafy web search "belem tower opening hours" --site visitlisboa.com --lang pt --country PT --count 5 --json
+instafy web search "Belém Tower" --chain reference-search --lang pt --json
 ```
 
-The answer is `{status, code?, activity, query, queryRedacted?, chain, provider?, tried?, searchedAt, viewer, count,
-results, tell, notice, offer?, budget, warnings}`:
+The answer is `{status, code?, activity, query, queryRedacted?, chain, provider?, providers?, tried?, searchedAt, viewer,
+count, results, tell, notice, offer?, budget, warnings}`:
 
 | `status` | Meaning |
 |---|---|
@@ -839,7 +840,7 @@ results, tell, notice, offer?, budget, warnings}`:
 | `unavailable` | No provider could answer: `code` is `turn_limit`, `day_limit`, `time_limit`, `rate_limited`, `key_refused`, `provider_error`, `unreachable` or `timeout`, and `tried` lists each provider that did not answer |
 | `no_provider` | No provider in the chain has its key in this space. The first time in a space, `offer` is the `request_secret` action for the first provider's key (`BRAVE_SEARCH_API_KEY`), whose card says: "Everyone in this space can search with this key, up to 100 searches a day. Brave bills the key's owner." |
 
-Each result is `{rank, url, site, text?, linkOnly?, noReuse?}`. `text` holds the title and snippet, redacted and
+Each result is `{rank, url, site, text?, linkOnly?, noReuse?, source?, provider?, attribution?}`. `text` holds the title and snippet, redacted and
 wrapped in `<untrusted_page_content url=… read_at=… viewer="search result">` like page text. A result on a `no-agents`
 link-only site, or a translator's, cache's or archive's copy of one, keeps only its link and `linkOnly: {site, reason,
 via?}`: its title and snippet, which often carry prices and ratings, are dropped. Links that are not http(s), carry a
@@ -851,10 +852,28 @@ the same page twice (by address, without its fragment) is one result.
 `"Bearer "`), read from the environment variable `key_env`. Values may use `{query}`, `{site}` (the entry's
 `site_filter` with `{host}` filled in, or nothing), `{count}`, `{lang}` and `{country}`; a value whose placeholder is
 not given is left out. `results` names the result list (`list`, a dotted path) and each result's `title`, `url` and
-`snippet`. `chains` orders the providers (`web-search`: `brave-own-key`, then `kagi-own-key`); a provider whose key is
-not set is skipped. An entry is refused, with a warning, when its address is not plain https on a public host, when it
+`snippet` (a list of paths takes the first that holds text; `url` and `source` may also be an https template of the
+result's fields, such as `https://{lang}.wikipedia.org/wiki/{key}`). `chains` orders the providers: a list is asked in
+order until one answers (`web-search`: `brave-own-key`, then `kagi-own-key`), and `{"mode": "all", "providers": […]}`
+asks each one (`reference-search`). A provider whose key is not set is skipped; `--provider <id>` asks only one
+provider of the chain. A provider without a key may put `{lang}` first in its host (with `defaults.lang`). A value
+writes a literal brace as `{{` or `}}`, and `{query:sparql}` writes the query escaped for a SPARQL string. An entry is refused, with a warning, when its address is not plain https on a public host, when it
 asks for page text (`extra_snippets`, `summary` or `extract`, anywhere), when it would set a reserved header, or when
-it allows caching. If the file itself does not load, nothing is searched (exit 70).
+it allows caching, and Nominatim is never used (its usage policy bars use as a generic geocoder by platforms like this
+one). If the file itself does not load, nothing is searched (exit 70).
+
+**Reference search.** `--chain reference-search` asks Wikipedia's and Wikivoyage's search
+(`https://<lang>.wikipedia.org/w/rest.php/v1/search/page`, the same on `wikivoyage.org`) and Wikidata's query service
+for the official websites (P856) of the items that match, all at once and with no key. `--lang` picks the wikis
+(`pt-br` asks `pt.wikipedia.org`) and the labels' language; it is English by default. Each result carries the
+`provider` that gave it and its `attribution` (Wikipedia and Wikivoyage: CC BY-SA 4.0; Wikidata: CC0), `providers`
+lists each source with its count, licence and terms, and a Wikidata result's `source` is its item. Requests carry the
+user agent `Instafy-Agent/1.0 (+https://instafy.dev; contact@instafy.dev; …)`, go one at a time to each source (so at
+most 3 at once), and a source that answers 429 is not asked again in the turn; the chain has its own 4 searches a turn.
+A space switches a source off with its own copy of the file (`references/search-providers.json` under a skill folder,
+found like the link-only list's copies): `{"schema": "instafy.search-providers@1", "off": ["wikidata-official-site"]}`,
+or `"off": true` in a provider's entry. A copy can do nothing else: it never adds a provider or changes where a request
+or a key goes.
 
 **Rules no option turns off.**
 

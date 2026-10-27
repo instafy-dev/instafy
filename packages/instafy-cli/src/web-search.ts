@@ -53,6 +53,7 @@ import {
   loadWebFixtures,
   readJson,
   sha256,
+  skillDataCopies,
   turnScope,
   webDirs,
   webFixturesFolder,
@@ -115,6 +116,12 @@ export type SearchCode =
 /** A parameter that would ask a provider for page text instead of links: never sent. */
 const PAGE_TEXT_PARAMS = new Set(["extra_snippets", "summary", "extract"]);
 const PLACEHOLDERS = new Set(["query", "site", "count", "lang", "country"]);
+/** Services never used, whatever a provider entry says. */
+const NEVER_HOSTS: ReadonlyArray<{ host: string; why: string }> = [
+  { host: "nominatim.openstreetmap.org", why: "its usage policy bars use as a generic geocoder by platforms like this one" },
+];
+const LANG = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/;
+const COUNTRY = /^[A-Z]{2}$/;
 /** Headers a provider entry may not set for its key. */
 const RESERVED_HEADERS = new Set(["host", "content-length", "content-type", "cookie", "user-agent", "accept", "accept-encoding", "connection", "transfer-encoding"]);
 
@@ -124,30 +131,51 @@ const RESERVED_HEADERS = new Set(["host", "content-length", "content-type", "coo
 type FieldPath = string[];
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
+/** Where a result's link (or source) comes from: fields of the result, or an address template filled from them. */
+type ResultLink = { paths: FieldPath[] } | { template: string };
+
 export type SearchProvider = {
   id: string;
   label: string;
   protocol: "http-json-search";
   method: "GET" | "POST";
   url: string;
-  /** the one host this provider's requests (and its key) go to */
+  /** the one host this provider's requests (and its key) go to; with `langInHost`, the host after the language */
   host: string;
+  /** a provider without a key may name the language in its host (`https://{lang}.wikipedia.org/…`) */
+  langInHost: boolean;
+  /** values for {lang} and {country} when the search gives none */
+  defaults: { lang?: string; country?: string };
   query: Array<[string, string]>;
   body: Json | null;
   auth: { header: string; prefix: string } | null;
   keyEnv: string | null;
   keyRequest: { description: string } | null;
-  results: { list: FieldPath; title: FieldPath[]; url: FieldPath[]; snippet: FieldPath[]; where: Array<[FieldPath, string | number | boolean]> };
+  results: {
+    list: FieldPath;
+    title: FieldPath[];
+    url: ResultLink;
+    snippet: FieldPath[];
+    /** where the result comes from, such as its Wikidata item */
+    source: ResultLink | null;
+    where: Array<[FieldPath, string | number | boolean]>;
+  };
   siteFilter: string | null;
   maxCount: number;
   dailyLimit: number;
   attribution: string | null;
+  license: string | null;
   terms: string | null;
 };
 
+/** A chain's providers: "first" asks them in order until one answers, "all" asks each (reference sources). */
+export type SearchChain = { mode: "first" | "all"; providers: string[] };
+
 export type SearchCatalog = {
   providers: Map<string, SearchProvider>;
-  chains: Map<string, string[]>;
+  chains: Map<string, SearchChain>;
+  /** providers a space's copy of the file switched off */
+  off: string[];
   warnings: string[];
 };
 
@@ -156,15 +184,27 @@ export class SearchProvidersUnavailableError extends Error {}
 
 const isObject = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-/** The placeholder names a template uses, or null when it has a stray brace or a name this command does not fill. */
+/** How a placeholder's value is written: as is, or escaped for a SPARQL string literal (`{query:sparql}`). */
+const ENCODERS = new Set(["sparql"]);
+const PLACEHOLDER = /\{([a-z]+)(?::([a-z]+))?\}/g;
+/** `{{` and `}}` are literal braces (a SPARQL query has its own); they never start a placeholder. */
+const withoutLiteralBraces = (template: string) => template.replace(/\{\{|\}\}/g, "");
+
+/** The placeholder names a template uses, or null when it has a stray brace, an unknown encoder or a name this
+ * command does not fill. */
 function templateNames(template: string, allowed: Set<string> = PLACEHOLDERS): string[] | null {
   const names: string[] = [];
-  const rest = template.replace(/\{([a-z]+)\}/g, (_, name: string) => {
-    names.push(name);
+  const rest = withoutLiteralBraces(template).replace(PLACEHOLDER, (_, name: string, encoder?: string) => {
+    names.push(encoder && !ENCODERS.has(encoder) ? "" : name);
     return "";
   });
   if (/[{}]/.test(rest) || names.some((name) => !allowed.has(name))) return null;
   return names;
+}
+
+/** A value inside a SPARQL "…" literal: backslashes, quotes and line breaks escaped. */
+function sparqlString(value: string): string {
+  return value.replace(/[\\"'\n\r\t]/g, (c) => ({ "\\": "\\\\", '"': '\\"', "'": "\\'", "\n": "\\n", "\r": "\\r", "\t": "\\t" })[c]!);
 }
 
 function fieldPaths(value: unknown): FieldPath[] | null {
@@ -201,16 +241,21 @@ function compileProvider(id: string, raw: unknown): SearchProvider | string {
   const method = request.method ?? "GET";
   if (method !== "GET" && method !== "POST") return `${id}: request.method must be GET or POST`;
   if (typeof request.url !== "string") return `${id}: no request.url`;
+  // A provider without a key may name the language in its host, as its first label.
+  const langInHost = request.url.startsWith("https://{lang}.");
+  if (langInHost && (raw.key_env !== undefined || request.auth !== undefined)) return `${id}: only a provider without a key may put {lang} in its host`;
   let url: URL;
   try {
-    url = new URL(request.url);
+    url = new URL(langInHost ? request.url.replace("{lang}", "xx") : request.url);
   } catch {
     return `${id}: request.url is not an address`;
   }
   if (url.protocol !== "https:") return `${id}: request.url must be https`;
   if (url.username || url.password || (url.port && url.port !== "443") || url.hash) return `${id}: request.url must be a plain https address`;
-  const host = url.hostname.toLowerCase();
+  const host = langInHost ? url.hostname.toLowerCase().replace(/^xx\./, "") : url.hostname.toLowerCase();
   if (net.isIP(host.replace(/^\[|\]$/g, "")) || isLocalHostName(host)) return `${id}: request.url must name a public host`;
+  const never = NEVER_HOSTS.find((entry) => host === entry.host || host.endsWith(`.${entry.host}`));
+  if (never) return `${id}: ${never.host} is never used (${never.why})`;
   if (/[{}]/.test(decodeURIComponent(url.href))) return `${id}: request.url may not hold placeholders`;
   for (const name of url.searchParams.keys()) {
     if (PAGE_TEXT_PARAMS.has(name.toLowerCase())) return `${id}: request.url asks for page text (${name}), which is never requested`;
@@ -267,13 +312,27 @@ function compileProvider(id: string, raw: unknown): SearchProvider | string {
     keyRequest = { description: raw.key_request.description };
   }
 
+  const defaults: SearchProvider["defaults"] = {};
+  if (raw.defaults !== undefined) {
+    if (!isObject(raw.defaults)) return `${id}: defaults must be an object`;
+    const { lang, country } = raw.defaults;
+    if (lang !== undefined && (typeof lang !== "string" || !LANG.test(lang))) return `${id}: defaults.lang must be a language code`;
+    if (country !== undefined && (typeof country !== "string" || !COUNTRY.test(country))) return `${id}: defaults.country must be a country code`;
+    if (lang !== undefined) defaults.lang = lang as string;
+    if (country !== undefined) defaults.country = country as string;
+  }
+  if (langInHost && !defaults.lang) return `${id}: a provider with {lang} in its host needs defaults.lang`;
+
   const results = raw.results;
   if (!isObject(results)) return `${id}: no results mapping`;
   const list = typeof results.list === "string" ? fieldPaths(results.list) : null;
   const title = fieldPaths(results.title);
-  const resultUrl = fieldPaths(results.url);
+  const resultUrl = resultLink(results.url);
   const snippet = results.snippet === undefined ? [] : fieldPaths(results.snippet);
-  if (!list || list.length !== 1 || !title || !resultUrl || !snippet) return `${id}: results needs list, title and url as dotted paths (and snippet, if any)`;
+  const source = results.source === undefined ? null : resultLink(results.source);
+  if (!list || list.length !== 1 || !title || !resultUrl || !snippet || source === undefined) {
+    return `${id}: results needs list and title as dotted paths, url as dotted paths or an https template of the result's fields (and snippet and source, if any)`;
+  }
   const where: Array<[FieldPath, string | number | boolean]> = [];
   if (results.where !== undefined) {
     if (!isObject(results.where)) return `${id}: results.where must be an object`;
@@ -307,47 +366,87 @@ function compileProvider(id: string, raw: unknown): SearchProvider | string {
     auth,
     keyEnv: keyEnv as string | null,
     keyRequest,
-    results: { list: list[0]!, title, url: resultUrl, snippet, where },
+    langInHost,
+    defaults,
+    results: { list: list[0]!, title, url: resultUrl, snippet, source, where },
     siteFilter: siteFilter as string | null,
     maxCount: maxCount as number,
     dailyLimit: dailyLimit as number,
     attribution: text(raw.attribution, 120),
+    license: text(raw.license, 80),
     terms: text(raw.terms, 300),
   };
 }
 
+/** A result link: dotted paths to the result's own link, or an https address template of its fields and {lang}. */
+function resultLink(value: unknown): ResultLink | undefined {
+  if (typeof value === "string" && value.startsWith("https://")) {
+    const fields = [...value.matchAll(/\{([\w-]+(?:\.[\w-]+)*)\}/g)];
+    const rest = value.replace(/\{([\w-]+(?:\.[\w-]+)*)\}/g, "");
+    if (!fields.length || /[{}]/.test(rest)) return undefined;
+    try {
+      new URL(value.replace(/\{[^}]*\}/g, "x"));
+    } catch {
+      return undefined;
+    }
+    return { template: value };
+  }
+  const paths = fieldPaths(value);
+  return paths ? { paths } : undefined;
+}
+
 /**
  * The providers and chains of the skill's file. A provider entry that breaks a rule is left out with a warning, and
- * so is a chain's mention of a provider that is not there. Throws SearchProvidersUnavailableError when the file
- * itself does not load, so nothing is sent.
+ * so is a chain's mention of a provider that is not there. A chain is a list of providers asked in order until one
+ * answers, or `{ "mode": "all", "providers": [...] }` to ask each of them (reference sources). A space's copy of the
+ * file (`copies`) can only switch providers off, with `"off": ["<id>", …]` or `"off": true` in a provider's entry;
+ * nothing else in a copy is read, so a copy can never add a provider or change where a request (or a key) goes.
+ * Throws SearchProvidersUnavailableError when the bundled file itself does not load, so nothing is sent.
  */
-export function loadSearchProviders(bundled: unknown = BUNDLED_SEARCH_PROVIDERS): SearchCatalog {
+export function loadSearchProviders(
+  bundled: unknown = BUNDLED_SEARCH_PROVIDERS,
+  copies: ReadonlyArray<{ data: unknown; source: string }> = [],
+): SearchCatalog {
   if (!isObject(bundled) || bundled.schema !== SEARCH_PROVIDERS_SCHEMA || !isObject(bundled.providers) || !isObject(bundled.chains)) {
     throw new SearchProvidersUnavailableError(
       "The search provider list built into `instafy web search` could not be loaded, so nothing was searched. Reinstall or update the Instafy CLI.",
     );
   }
   const warnings: string[] = [];
+  const off = new Set<string>();
+  for (const copy of copies) {
+    if (!isObject(copy.data) || copy.data.schema !== SEARCH_PROVIDERS_SCHEMA) {
+      warnings.push(`${copy.source} is not a ${SEARCH_PROVIDERS_SCHEMA} file and was ignored`);
+      continue;
+    }
+    if (Array.isArray(copy.data.off)) for (const id of copy.data.off) if (typeof id === "string") off.add(id);
+    if (isObject(copy.data.providers)) {
+      for (const [id, entry] of Object.entries(copy.data.providers)) if (isObject(entry) && entry.off === true) off.add(id);
+    }
+  }
   const providers = new Map<string, SearchProvider>();
   for (const [id, entry] of Object.entries(bundled.providers)) {
     const compiled = compileProvider(id, entry);
     if (typeof compiled === "string") warnings.push(`search provider ${compiled}; it is not used`);
-    else providers.set(id, compiled);
+    else if (!off.has(id)) providers.set(id, compiled);
   }
-  const chains = new Map<string, string[]>();
-  for (const [name, members] of Object.entries(bundled.chains)) {
-    if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(name) || !Array.isArray(members)) {
+  const chains = new Map<string, SearchChain>();
+  for (const [name, value] of Object.entries(bundled.chains)) {
+    const mode = Array.isArray(value) ? "first" : isObject(value) && (value.mode === "first" || value.mode === "all") ? value.mode : null;
+    const members = Array.isArray(value) ? value : isObject(value) ? value.providers : null;
+    if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(name) || !mode || !Array.isArray(members)) {
       warnings.push(`search chain "${name.slice(0, 60)}" is not a list of providers; it is not used`);
       continue;
     }
     const kept: string[] = [];
     for (const member of members) {
+      if (typeof member === "string" && off.has(member)) continue;
       if (typeof member === "string" && providers.has(member) && !kept.includes(member)) kept.push(member);
       else warnings.push(`search chain ${name}: ${JSON.stringify(member)} is not a usable provider; it is skipped`);
     }
-    chains.set(name, kept);
+    chains.set(name, { mode, providers: kept });
   }
-  return { providers, chains, warnings };
+  return { providers, chains, off: [...off].filter((id) => id in (bundled.providers as Record<string, unknown>)).sort(), warnings };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -360,13 +459,14 @@ function fill(template: string, vars: Vars): string | number | undefined {
   const whole = /^\{([a-z]+)\}$/.exec(template);
   if (whole && whole[1] === "count") return vars.count;
   let missing = false;
-  const out = template.replace(/\{([a-z]+)\}/g, (_, name: keyof Vars) => {
+  const out = template.replace(/\{\{|\}\}|\{([a-z]+)(?::([a-z]+))?\}/g, (match, name: keyof Vars | undefined, encoder?: string) => {
+    if (!name) return match[0]!;
     const value = vars[name];
     if (value === undefined) {
       missing = true;
       return "";
     }
-    return String(value);
+    return encoder === "sparql" ? sparqlString(String(value)) : String(value);
   });
   return missing ? undefined : out;
 }
@@ -388,7 +488,9 @@ export type SearchRequest = { url: URL; method: "GET" | "POST"; headers: Record<
 
 /** The request a provider gets for this search. The key goes in its entry's header, and only to its entry's host. */
 export function buildSearchRequest(provider: SearchProvider, vars: Vars, key: string | null): SearchRequest {
-  const url = new URL(provider.url);
+  // Only the language's first part names a wiki's host ("pt-br" is pt.wikipedia.org); it is a checked code.
+  const hostLang = (vars.lang ?? provider.defaults.lang ?? "").split("-")[0]!;
+  const url = new URL(provider.langInHost ? provider.url.replace("https://xx.", `https://${hostLang}.`) : provider.url);
   for (const [name, template] of provider.query) {
     const value = fill(template, vars);
     if (value !== undefined) url.searchParams.set(name, String(value));
@@ -397,7 +499,7 @@ export function buildSearchRequest(provider: SearchProvider, vars: Vars, key: st
   const body = provider.body === null ? null : (fillJson(provider.body, vars) ?? {});
   if (body !== null) headers["Content-Type"] = "application/json";
   if (provider.auth && key !== null) {
-    if (url.protocol !== "https:" || url.hostname.toLowerCase() !== provider.host) throw new Error(`${provider.id}: the key would leave its host`);
+    if (provider.langInHost || url.protocol !== "https:" || url.hostname.toLowerCase() !== provider.host) throw new Error(`${provider.id}: the key would leave its host`);
     headers[provider.auth.header] = `${provider.auth.prefix}${key}`;
   }
   return { url, method: provider.method, headers, body };
@@ -513,6 +615,11 @@ export type SearchResult = {
   linkOnly?: { site: string; reason: string; via?: string[] };
   /** a "no-reuse" site: it may be read, but its content is never copied */
   noReuse?: { site: string; reason: string };
+  /** where the result comes from, such as its Wikidata item */
+  source?: string;
+  /** with a chain that asks every provider: which one gave this result, and the attribution its licence asks for */
+  provider?: string;
+  attribution?: string;
 };
 
 function at(value: unknown, field: FieldPath): unknown {
@@ -583,8 +690,33 @@ function resultAddress(raw: string): URL | null {
   return url;
 }
 
+/** A result's link from its fields: the first of its paths that holds text, or its template filled in (each field
+ * value encoded as one path segment, `/` and `:` kept). Empty when a field is missing. */
+function linkOf(item: unknown, link: ResultLink, lang: string): string {
+  if ("paths" in link) return firstText(item, link.paths);
+  let missing = false;
+  const out = link.template.replace(/\{([\w-]+(?:\.[\w-]+)*)\}/g, (_, field: string) => {
+    if (field === "lang") return lang;
+    const value = at(item, field.split("."));
+    if (typeof value !== "string" && typeof value !== "number") {
+      missing = true;
+      return "";
+    }
+    return encodeURIComponent(String(value).replace(/ /g, "_")).replace(/%2F/gi, "/").replace(/%3A/gi, ":");
+  });
+  return missing ? "" : out;
+}
+
 /** The results of one answer, mapped by the provider's entry and filtered by the rules above. */
-export function searchResults(provider: SearchProvider, answer: unknown, count: number, guard: LinkOnlyGuard, searchedAt: string, viewer: WebViewer): SearchResult[] {
+export function searchResults(
+  provider: SearchProvider,
+  answer: unknown,
+  count: number,
+  guard: LinkOnlyGuard,
+  searchedAt: string,
+  viewer: WebViewer,
+  lang = provider.defaults.lang ?? "en",
+): SearchResult[] {
   const list = at(answer, provider.results.list);
   if (!Array.isArray(list)) return [];
   const results: SearchResult[] = [];
@@ -592,7 +724,7 @@ export function searchResults(provider: SearchProvider, answer: unknown, count: 
   for (const item of list) {
     if (results.length >= count) break;
     if (!provider.results.where.every(([field, value]) => at(item, field) === value)) continue;
-    const url = resultAddress(firstText(item, provider.results.url));
+    const url = resultAddress(linkOf(item, provider.results.url, lang.split("-")[0]!));
     if (!url || seen.has(url.href)) continue;
     seen.add(url.href);
     const shown = redaction.redactUrl(url.href).text;
@@ -607,12 +739,14 @@ export function searchResults(provider: SearchProvider, answer: unknown, count: 
     const title = cleanText(firstText(item, provider.results.title), SEARCH_LIMITS.maxTitleChars);
     const snippet = cleanText(firstText(item, provider.results.snippet), SEARCH_LIMITS.maxSnippetChars);
     const body = [`title: ${title || "(none)"}`, ...(snippet ? [`snippet: ${snippet}`] : [])].join("\n");
+    const source = provider.results.source ? resultAddress(linkOf(item, provider.results.source, lang.split("-")[0]!)) : null;
     results.push({
       rank,
       url: shown,
       site,
       text: wrapUntrusted(body, shown, searchedAt, viewer),
       ...(listed ? { noReuse: { site: listed.name, reason: listed.reason } } : {}),
+      ...(source ? { source: redaction.redactUrl(source.href).text } : {}),
     });
   }
   return results;
@@ -791,7 +925,10 @@ export type WebSearchReport = {
   /** what was removed from the query before it was sent */
   queryRedacted?: string[];
   chain: string;
+  /** the provider that answered (a chain asked in order) */
   provider?: { id: string; label: string; attribution?: string; terms?: string };
+  /** every provider that answered (a chain that asks each, such as reference-search), with its attribution */
+  providers?: Array<{ id: string; label: string; count: number; attribution?: string; license?: string; terms?: string }>;
   /** providers that were tried and did not answer, or skipped */
   tried?: Array<{ id: string; code: SearchCode; message: string }>;
   searchedAt: string;
@@ -816,6 +953,8 @@ export type WebSearchOptions = {
   lang?: string;
   country?: string;
   chain?: string;
+  /** only this provider of the chain */
+  provider?: string;
 };
 
 export type WebSearchDeps = {
@@ -864,7 +1003,7 @@ function plural(n: number, one: string, many: string) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-function activityLine(query: string, status: SearchStatus, count: number, extra: { code?: SearchCode; repeat?: boolean }): string {
+function activityLine(query: string, status: SearchStatus, count: number, extra: { code?: SearchCode; repeat?: boolean; chain?: string }): string {
   const what = extra.repeat
     ? "already searched in this turn, not sent again"
     : status === "ok"
@@ -874,7 +1013,7 @@ function activityLine(query: string, status: SearchStatus, count: number, extra:
         : status === "no_provider"
           ? "no search key in this space"
           : `not available${extra.code ? ` (${extra.code})` : ""}`;
-  return `web search ${JSON.stringify(query)} · ${what}`;
+  return `web search ${JSON.stringify(query)} · ${what}${extra.chain && extra.chain !== DEFAULT_CHAIN ? ` (${extra.chain})` : ""}`;
 }
 
 /** Searches once under the rules above. Throws WebSearchUsageError for bad input or outside a live turn. */
@@ -895,16 +1034,18 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
   const fixtureFolder = webFixturesFolder(env, cwd);
   const fixtures = fixtureFolder ? loadWebFixtures(fixtureFolder) : null;
   const viewer: WebViewer = fixtures ? FIXTURE_VIEWER : SEARCH_VIEWER;
-  const catalog = loadSearchProviders("bundledProviders" in deps ? deps.bundledProviders : BUNDLED_SEARCH_PROVIDERS);
+  const roots = deps.skillRoots ?? defaultSkillRoots(cwd, env);
+  const copies = skillDataCopies(roots, SEARCH_PROVIDERS_FILE);
+  const catalog = loadSearchProviders("bundledProviders" in deps ? deps.bundledProviders : BUNDLED_SEARCH_PROVIDERS, copies.copies);
   const chainName = options.chain ?? DEFAULT_CHAIN;
   const chain = catalog.chains.get(chainName);
   if (!chain) throw new WebSearchUsageError(`There is no search chain "${chainName.slice(0, 60)}" (there are: ${[...catalog.chains.keys()].join(", ") || "none"}).`);
+  if (options.provider !== undefined && !chain.providers.includes(options.provider)) {
+    const off = catalog.off.includes(options.provider) ? " (this space switched it off)" : "";
+    throw new WebSearchUsageError(`${options.provider.slice(0, 60)} is not a provider of ${chainName}${off}; it has: ${chain.providers.join(", ") || "none"}.`);
+  }
   // Loaded before any request, so a link-only result is never passed on with its title.
-  const guard = loadLinkOnlyGuard(
-    deps.skillRoots ?? defaultSkillRoots(cwd, env),
-    "bundledLinkOnly" in deps ? deps.bundledLinkOnly : BUNDLED_LINK_ONLY_SITES,
-    "`instafy web search`",
-  );
+  const guard = loadLinkOnlyGuard(roots, "bundledLinkOnly" in deps ? deps.bundledLinkOnly : BUNDLED_LINK_ONLY_SITES, "`instafy web search`");
 
   const count = Math.min(SEARCH_LIMITS.maxCount, Math.max(1, Math.trunc(options.count ?? SEARCH_LIMITS.defaultCount)));
   const site = options.site === undefined ? null : siteHost(options.site);
@@ -915,16 +1056,19 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
     }
   }
   const lang = options.lang?.trim().toLowerCase();
-  if (lang !== undefined && !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/.test(lang)) throw new WebSearchUsageError("--lang needs a language code, such as en or pt-br.");
+  if (lang !== undefined && !LANG.test(lang)) throw new WebSearchUsageError("--lang needs a language code, such as en or pt-br.");
   const country = options.country?.trim().toUpperCase();
-  if (country !== undefined && !/^[A-Z]{2}$/.test(country)) throw new WebSearchUsageError("--country needs a two-letter country code, such as PT.");
+  if (country !== undefined && !COUNTRY.test(country)) throw new WebSearchUsageError("--country needs a two-letter country code, such as PT.");
 
   // Keys are read only here, and only ever leave in their own entry's header.
   const keyOf = (provider: SearchProvider): string | null => {
     const value = provider.keyEnv ? env[provider.keyEnv]?.trim() : undefined;
     return value && value.length <= 512 && /^[\x21-\x7e]+$/.test(value) ? value : null;
   };
-  const members = chain.map((id) => catalog.providers.get(id)!);
+  const members = chain.providers.filter((id) => options.provider === undefined || id === options.provider).map((id) => catalog.providers.get(id)!);
+  // A search of one site goes only to providers that can do that.
+  const capable = site ? members.filter((provider) => provider.siteFilter) : members;
+  if (site && members.length && !capable.length) throw new WebSearchUsageError(`--site is not supported by ${chainName}: its providers do not search one site.`);
   const keys = members.map(keyOf).filter((key): key is string => key !== null);
   const prepared = prepareQuery(options.query, keys);
   const query = prepared.query;
@@ -939,9 +1083,9 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
   state.prune();
   const deadline = Math.min(started + SEARCH_LIMITS.callMs, turn.deadline - SEARCH_LIMITS.deadlineMarginMs);
   const searchedAt = new Date(started).toISOString();
-  const warnings = [...catalog.warnings, ...guard.warnings];
+  const warnings = [...catalog.warnings, ...copies.warnings, ...guard.warnings];
   if (fixtures) warnings.unshift(`test build: search answers come from the fixtures in ${fixtures.folder}, not the web`);
-  const usable = members.filter((provider) => !provider.keyEnv || keyOf(provider) !== null);
+  const usable = capable.filter((provider) => !provider.keyEnv || keyOf(provider) !== null);
 
   const report = async (status: SearchStatus, extra: Partial<WebSearchReport> = {}): Promise<WebSearchReport> => {
     const used = await state.turn((s) => s.searches[chainName] ?? 0);
@@ -951,11 +1095,12 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
       ok: true,
       status,
       ...(extra.code ? { code: extra.code } : {}),
-      activity: activityLine(query, status, results.length, { code: extra.code, repeat: extra.repeat }),
+      activity: activityLine(query, status, results.length, { code: extra.code, repeat: extra.repeat, chain: chainName }),
       query,
       ...(prepared.removed.length ? { queryRedacted: prepared.removed } : {}),
       chain: chainName,
       ...(extra.provider ? { provider: extra.provider } : {}),
+      ...(extra.providers ? { providers: extra.providers } : {}),
       ...(extra.tried?.length ? { tried: extra.tried } : {}),
       searchedAt,
       viewer,
@@ -986,11 +1131,13 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
       };
       return report("no_provider", { offer, tell: OFFER_TELL });
     }
-    return report("no_provider");
+    return report("no_provider", first ? {} : { tell: `Every provider of ${chainName} is switched off in this space. ${TELL.unavailable}` });
   }
 
   // One search of this turn's budget, unless it ran already.
-  const searchKey = sha256(`${scope.key}|${chainName}|${query.toLowerCase()}|${site ?? ""}|${lang ?? ""}|${country ?? ""}|${count}`);
+  const searchKey = sha256(
+    `${scope.key}|${chainName}|${options.provider ?? ""}|${query.toLowerCase()}|${site ?? ""}|${lang ?? ""}|${country ?? ""}|${count}`,
+  );
   const reservation = await state.turn((s) => {
     if (s.sent[searchKey]) return "repeat" as const;
     const used = s.searches[chainName] ?? 0;
@@ -1005,43 +1152,36 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
     return report("unavailable", { code: "turn_limit" });
   }
 
-  const vars: Vars = {
-    query,
-    site: "",
-    count,
-    ...(lang ? { lang } : {}),
-    ...(country ? { country } : {}),
-  };
   const resolve = fixtures?.resolve ?? deps.resolve ?? (async (host: string) => dns.promises.lookup(host, { all: true, verbatim: true }));
   const transport = deps.transport ?? (fixtures ? fixtureTransport(fixtures) : networkTransport(deps.dial ?? ((address, port) => ({ host: address, port }))));
-  const tried: NonNullable<WebSearchReport["tried"]> = [];
   const stops = await state.turn((s) => ({ ...s.stops }));
   const stop = (provider: SearchProvider, code: SearchCode, message: string) =>
     state.turn((s) => {
       s.stops[provider.id] = { code, message, at: now() };
     });
 
-  for (const provider of usable) {
-    if (stops[provider.id]) {
-      tried.push({ id: provider.id, code: stops[provider.id]!.code, message: `stopped earlier in this turn: ${stops[provider.id]!.message}` });
-      continue;
-    }
+  type Attempt = { results: SearchResult[] } | { tried: { id: string; code: SearchCode; message: string } };
+  /** One provider, once: under its lock (one search at a time), within the deadline, never retried. */
+  const attempt = async (provider: SearchProvider): Promise<Attempt> => {
+    const fail = (code: SearchCode, message: string): Attempt => ({ tried: { id: provider.id, code, message } });
+    const earlier = stops[provider.id];
+    if (earlier) return fail(earlier.code, `stopped earlier in this turn: ${earlier.message}`);
+    if (deadline - now() < 1_000) return fail("time_limit", "no time left before the turn ends");
     const key = keyOf(provider);
-    if (deadline - now() < 1_000) {
-      tried.push({ id: provider.id, code: "time_limit", message: "no time left before the turn ends" });
-      break;
-    }
-    const providerVars = { ...vars, site: site && provider.siteFilter ? provider.siteFilter.split("{host}").join(site) : "", count: Math.min(count, provider.maxCount) };
-    const request = buildSearchRequest(provider, providerVars, key);
+    const vars: Vars = {
+      query,
+      site: site && provider.siteFilter ? provider.siteFilter.split("{host}").join(site) : "",
+      count: Math.min(count, provider.maxCount),
+      ...((lang ?? provider.defaults.lang) ? { lang: lang ?? provider.defaults.lang } : {}),
+      ...((country ?? provider.defaults.country) ? { country: country ?? provider.defaults.country } : {}),
+    };
+    const request = buildSearchRequest(provider, vars, key);
     const checked = await checkAddress(request.url, resolve);
-    if ("refused" in checked) {
-      tried.push({ id: provider.id, code: checked.unresolved ? "unreachable" : "provider_error", message: checked.refused });
-      continue;
-    }
+    if ("refused" in checked) return fail(checked.unresolved ? "unreachable" : "provider_error", checked.refused);
     if (key !== null && !(await state.takeDaily(provider.id, provider.dailyLimit))) {
-      tried.push({ id: provider.id, code: "day_limit", message: `this space's key made its ${provider.dailyLimit} searches today` });
-      continue;
+      return fail("day_limit", `this space's key made its ${provider.dailyLimit} searches today`);
     }
+    const host = request.url.hostname;
     let answer: SearchAnswer;
     try {
       answer = await state.providerLock(
@@ -1055,48 +1195,75 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
       );
     } catch (error) {
       const code: SearchCode = error instanceof TransportError ? error.code : "unreachable";
-      const message = error instanceof TransportError ? error.message : `${provider.host} did not answer`;
-      tried.push({ id: provider.id, code: message.startsWith("no time left") ? "time_limit" : code, message });
-      continue;
+      const message = error instanceof TransportError ? error.message : `${host} did not answer`;
+      return fail(message.startsWith("no time left") ? "time_limit" : code, message);
     }
     if (answer.status === 429) {
-      const message = `${provider.host} asked for fewer requests (HTTP 429)`;
+      const message = `${host} asked for fewer requests (HTTP 429)`;
       await stop(provider, "rate_limited", message);
-      tried.push({ id: provider.id, code: "rate_limited", message });
-      continue;
+      return fail("rate_limited", message);
     }
     if (answer.status === 401 || answer.status === 403) {
-      const message = `${provider.host} refused the key (HTTP ${answer.status})`;
+      const message = `${host} refused ${key !== null ? "the key" : "the request"} (HTTP ${answer.status})`;
       await stop(provider, "key_refused", message);
-      tried.push({ id: provider.id, code: "key_refused", message });
-      continue;
+      return fail("key_refused", message);
     }
-    if (answer.status < 200 || answer.status >= 300) {
-      // A redirect is never followed, so a key never reaches another address.
-      tried.push({ id: provider.id, code: "provider_error", message: `${provider.host} answered HTTP ${answer.status}` });
-      continue;
-    }
+    // A redirect is never followed, so a key never reaches another address.
+    if (answer.status < 200 || answer.status >= 300) return fail("provider_error", `${host} answered HTTP ${answer.status}`);
     let parsed: unknown;
     try {
       parsed = JSON.parse(answer.body.toString("utf8"));
     } catch {
-      tried.push({ id: provider.id, code: "provider_error", message: `${provider.host} did not answer with JSON` });
-      continue;
+      return fail("provider_error", `${host} did not answer with JSON`);
     }
-    const results = searchResults(provider, parsed, providerVars.count, guard, searchedAt, viewer);
+    return { results: searchResults(provider, parsed, vars.count, guard, searchedAt, viewer, vars.lang ?? "en") };
+  };
+  const shown = (provider: SearchProvider) => ({
+    id: provider.id,
+    label: provider.label,
+    ...(provider.attribution ? { attribution: provider.attribution } : {}),
+    ...(provider.terms ? { terms: provider.terms } : {}),
+  });
+  const answered = async (status: SearchStatus, extra: Partial<WebSearchReport>) => {
     await state.turn((s) => {
       s.sent[searchKey] = now();
     });
-    const shownProvider = {
-      id: provider.id,
-      label: provider.label,
-      ...(provider.attribution ? { attribution: provider.attribution } : {}),
-      ...(provider.terms ? { terms: provider.terms } : {}),
-    };
-    return report(results.length ? "ok" : "not_found", { provider: shownProvider, results, tried });
+    return report(status, extra);
+  };
+
+  const tried: NonNullable<WebSearchReport["tried"]> = [];
+  if (chain.mode === "all") {
+    // Each source once, side by side: one request at a time per provider, so at most one per source at once.
+    const attempts = await Promise.all(usable.map((provider) => attempt(provider)));
+    const providers: NonNullable<WebSearchReport["providers"]> = [];
+    const results: SearchResult[] = [];
+    const seen = new Set<string>();
+    attempts.forEach((outcome, index) => {
+      const provider = usable[index]!;
+      if ("tried" in outcome) {
+        tried.push(outcome.tried);
+        return;
+      }
+      providers.push({ ...shown(provider), count: outcome.results.length, ...(provider.license ? { license: provider.license } : {}) });
+      for (const result of outcome.results) {
+        if (seen.has(result.url)) continue;
+        seen.add(result.url);
+        results.push({ ...result, rank: results.length + 1, provider: provider.id, ...(provider.attribution ? { attribution: provider.attribution } : {}) });
+      }
+    });
+    if (!providers.length) return report("unavailable", { code: tried[tried.length - 1]?.code ?? "provider_error", tried });
+    return answered(results.length ? "ok" : "not_found", { providers, results, tried });
   }
-  const last = tried[tried.length - 1];
-  return report("unavailable", { code: last?.code ?? "provider_error", tried });
+  for (const provider of usable) {
+    const outcome = await attempt(provider);
+    if ("tried" in outcome) {
+      tried.push(outcome.tried);
+      if (outcome.tried.code === "time_limit") break;
+      continue;
+    }
+    return answered(outcome.results.length ? "ok" : "not_found", { provider: shown(provider), results: outcome.results, tried });
+  }
+  return report("unavailable", { code: tried[tried.length - 1]?.code ?? "provider_error", tried });
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1104,7 +1271,11 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
 
 export function formatWebSearch(report: WebSearchReport): string {
   const out: string[] = [];
-  const from = report.provider ? ` from ${report.provider.label}${report.provider.attribution ? ` · ${report.provider.attribution}` : ""}` : "";
+  const from = report.provider
+    ? ` from ${report.provider.label}${report.provider.attribution ? ` · ${report.provider.attribution}` : ""}`
+    : report.providers?.length
+      ? ` from ${report.providers.map((p) => `${p.label} (${p.count})`).join(", ")}`
+      : "";
   const what = report.status === "ok" ? `${plural(report.count, "result", "results")}${from}` : `${report.status}${report.code ? `: ${report.code}` : ""}`;
   out.push(`web search ${JSON.stringify(report.query)}: ${report.repeat ? "already searched in this turn" : what}`);
   if (report.queryRedacted) out.push(`removed from the query before it was sent: ${report.queryRedacted.join(", ")}`);
@@ -1113,7 +1284,9 @@ export function formatWebSearch(report: WebSearchReport): string {
       out.push(`${result.rank}. ${result.url} (${result.site}): link-only, ${result.linkOnly.site}. Give the person this plain link; never read or open it.`);
       continue;
     }
-    out.push(`${result.rank}. ${result.url} (${result.site})${result.noReuse ? ` [no-reuse: ${result.noReuse.site}]` : ""}`);
+    const credit = result.attribution ? ` [${result.attribution}]` : "";
+    out.push(`${result.rank}. ${result.url} (${result.site})${result.noReuse ? ` [no-reuse: ${result.noReuse.site}]` : ""}${credit}`);
+    if (result.source) out.push(`   source: ${result.source}`);
     if (result.text) out.push(result.text);
   }
   for (const attempt of report.tried ?? []) out.push(`not used: ${attempt.id} (${attempt.code}): ${attempt.message}`);
@@ -1127,7 +1300,7 @@ export function formatWebSearch(report: WebSearchReport): string {
   return out.join("\n");
 }
 
-export type WebSearchCliOptions = { count?: string; site?: string; lang?: string; country?: string; chain?: string; json?: boolean };
+export type WebSearchCliOptions = { count?: string; site?: string; lang?: string; country?: string; chain?: string; provider?: string; json?: boolean };
 
 /** Never prints a key, whatever went wrong. */
 function scrubKeys(text: string, env: NodeJS.ProcessEnv, catalog: SearchCatalog | null): string {
@@ -1159,7 +1332,7 @@ export async function runWebSearchCli(
       if (!Number.isInteger(count) || count < 1 || count > SEARCH_LIMITS.maxCount) throw new WebSearchUsageError(`--count must be a whole number from 1 to ${SEARCH_LIMITS.maxCount}.`);
     }
     const report = await webSearch(
-      { query: words.join(" "), count, site: opts.site, lang: opts.lang, country: opts.country, chain: opts.chain },
+      { query: words.join(" "), count, site: opts.site, lang: opts.lang, country: opts.country, chain: opts.chain, provider: opts.provider },
       deps,
     );
     io.out(scrubKeys(opts.json ? JSON.stringify(report, null, 1) : formatWebSearch(report), env, catalog));
@@ -1194,7 +1367,8 @@ export function registerWebSearchCommand(web: Command): Command {
     .option("--site <host>", "Only results from this site, such as visitlisboa.com")
     .option("--lang <code>", "Language of the results, such as pt")
     .option("--country <code>", "Country the results come from, such as PT")
-    .option("--chain <name>", `The skill's provider chain to use (default ${DEFAULT_CHAIN})`)
+    .option("--chain <name>", `The skill's provider chain to use (default ${DEFAULT_CHAIN}; reference-search for Wikipedia, Wikivoyage and Wikidata)`)
+    .option("--provider <id>", "Only this provider of the chain, such as wikivoyage")
     .option("--json", "Output JSON")
     .action(async (words: string[], opts: WebSearchCliOptions) => {
       process.exitCode = await runWebSearchCli(words, opts);
