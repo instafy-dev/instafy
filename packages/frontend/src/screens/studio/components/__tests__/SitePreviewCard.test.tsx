@@ -7,7 +7,7 @@ import { ControllerApiError } from "../../../../services/runtimeController/core"
 import type { ControllerSitePreview } from "../../../../services/runtimeController/previews";
 import { mapTunnelGrantFromPayload } from "../../../../services/runtimeController/runtimes";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../../workspace/ConversationPreviewContext";
-import { SitePreviewCard } from "../SitePreviewCard";
+import { SitePreviewCard, shareSitePreviewRecord } from "../SitePreviewCard";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const mocks = vi.hoisted(() => ({
@@ -145,16 +145,24 @@ describe("SitePreviewCard", () => {
       mocks.getSitePreview.mockResolvedValue(server());
       mocks.runtime = { tunnelGrants: {}, runtimeStatuses: [{ runtimeId: "runtime-1", status: "stopped" }] };
     }],
-  ])("reads Stopped, with Open disabled, when %s", async (_name, arrange) => {
+  ])("reads Stopped and says to ask Octo, with no dead Open, when %s and nothing records how to start it", async (_name, arrange) => {
     arrange();
     await render();
     expect(status().dataset.state).toBe("stopped");
-    expect(status().textContent).toBe("Stopped");
-    expect(openButton()?.disabled).toBe(true);
+    expect(status().textContent).toBe("Stopped · ask Octo to start it again");
+    expect(openButton()).toBeNull();
     // A stopped site's pane may still be selected; the card never says Showing for it.
     opener = { ...opener!, visiblePreviewId: PREVIEW_ID };
     await render();
-    expect(openButton()?.textContent).toBe("Open");
+    expect(card().textContent).not.toContain("Showing");
+  });
+
+  it("reads Stopped with Open while the controller has not said whether it can start the site", async () => {
+    mocks.getSitePreview.mockReturnValue(new Promise(() => {}));
+    mocks.runtime = { tunnelGrants: { [PREVIEW_ID]: { id: PREVIEW_ID, tunnelId: "tunnel-1", status: "revoked" } }, runtimeStatuses: [] };
+    await render();
+    expect(status().textContent).toBe("Stopped");
+    expect(openButton()?.disabled).toBe(true);
   });
 
   it("reads Stopped from a revoked tunnel event even when asking again fails", async () => {
@@ -173,7 +181,8 @@ describe("SitePreviewCard", () => {
     await render();
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
     expect(status().dataset.state).toBe("stopped");
-    expect(status().textContent).toBe("Stopped");
+    // Its last record recorded no start command, so the card says how to get it back.
+    expect(status().textContent).toBe("Stopped · ask Octo to start it again");
   });
 
   it("says Status unavailable after a failed check, and asks again", async () => {
@@ -259,39 +268,35 @@ describe("SitePreviewCard", () => {
     expect(openButton()?.disabled).toBe(true);
   });
 
-  it("keeps up with the site while its pane is on screen, and only then", async () => {
+  // The pane checks its site every 15 s while it is on screen; the cards read
+  // those checks instead of asking the controller the same thing again.
+  it("keeps up with the site while its pane is on screen from the pane's own checks, asking nothing itself", async () => {
     vi.useFakeTimers();
     mocks.getSitePreview.mockResolvedValue(server());
     await render();
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(1);
 
-    mocks.getSitePreview.mockResolvedValue(server({ health: { listening: false, status: null } }));
     opener = { ...opener!, visiblePreviewId: PREVIEW_ID };
     await render();
-    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(1);
+    await act(async () => shareSitePreviewRecord(PREVIEW_ID, server({ health: { listening: false, status: null } })));
     expect(status().textContent).toBe("Not responding on port 4173");
   });
 
-  it("lets only one of several cards for a preview follow it while its pane is on screen, and tells them all", async () => {
+  it("tells every card of a preview what its pane found, while none of them asks", async () => {
     vi.useFakeTimers();
     mocks.getSitePreview.mockResolvedValue(server());
     opener = { ...opener!, visiblePreviewId: PREVIEW_ID };
     await render(3);
     // Each card checks once when it is drawn.
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(3);
-    mocks.getSitePreview.mockResolvedValue(server({ health: { listening: false, status: null } }));
     await advanceMinutes(1);
-    // One follow-up every 15 seconds for the preview, not one per card.
-    expect(mocks.getSitePreview).toHaveBeenCalledTimes(7);
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(3);
+    await act(async () => shareSitePreviewRecord(PREVIEW_ID, server({ health: { listening: false, status: null } })));
     const states = [...container.querySelectorAll<HTMLElement>("[data-testid=preview-ready-status]")].map((element) => element.textContent);
     expect(states).toEqual(Array(3).fill("Not responding on port 4173"));
-
-    // The follower goes away: another card takes over.
-    await render(2);
-    const before = mocks.getSitePreview.mock.calls.length;
-    await advanceMinutes(1);
-    expect(mocks.getSitePreview.mock.calls.length - before).toBe(4);
   });
 
   it("follows a site that is not responding a bounded number of times for all its cards together", async () => {
