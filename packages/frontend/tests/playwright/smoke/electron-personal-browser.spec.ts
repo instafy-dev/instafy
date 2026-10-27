@@ -814,11 +814,16 @@ test.describe("Electron Personal Browser", () => {
     const proxyOrigin = `http://127.0.0.1:${await listen(proxyServer)}`;
     guardRequestHosts.length = 0;
     guardRequests.length = 0;
+    // A disposable profile, never the default Electron one.
+    const guardUserData = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-request-guard-"));
     const guardApp = await electron.launch({
       executablePath: DESKTOP_APP_REQUIRE("electron"),
-      args: [path.join(DESKTOP_APP_DIR, "test", "fixtures", "personal-browser-request-guard-app.cjs")],
+      args: [path.join(DESKTOP_APP_DIR, "test", "fixtures", "personal-browser-request-guard-app.cjs"), `--user-data-dir=${guardUserData}`],
       cwd: REPO_ROOT,
       env: { ...personalBrowserFixtureEnvironment(process.env), TMPDIR: os.tmpdir() },
+    }).catch((error: unknown) => {
+      fs.rmSync(guardUserData, { recursive: true, force: true });
+      throw error;
     });
     try {
       type Outcome = { result: string; text: string };
@@ -868,6 +873,7 @@ test.describe("Electron Personal Browser", () => {
     } finally {
       await guardApp.close();
       await new Promise<void>((resolve) => proxyServer.close(() => resolve()));
+      fs.rmSync(guardUserData, { recursive: true, force: true });
     }
   });
 
