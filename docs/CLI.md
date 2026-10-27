@@ -1023,7 +1023,9 @@ instafy credentials revoke <id-or-prefix> --yes
 ```
 
 - `list` prints the short id, kind, provider, default model, default marker, last-used and
-  revoked timestamps. Revoked credentials are hidden unless `--all` is passed.
+  revoked timestamps. The default model is the one the credential's jobs run: a stored OpenAI id
+  that the own-AI floor raises ([Credits and billing](Credits-Billing.md)) shows the own-AI
+  default. A controller that predates this field shows the stored id. Revoked credentials are hidden unless `--all` is passed.
 - `test` calls the upstream provider through the configured proxy, so it can take up to a minute
   and counts as real usage of the credential. It prints `ok` or `failed`, the provider and model,
   and the first ~300 characters of the model output.

@@ -12,10 +12,10 @@ pub use runtime_contracts::own_ai_model::OWN_AI_DEFAULT_MODEL_ID as DEFAULT_OPEN
 
 /// Default model for the operator-paid managed "Instafy AI" tier (credits).
 /// GPT-6 Luna is priced at $0.10 / $0.01 cached / $0.50 per 1M tokens (public
-/// price pages, 2026-09-22), versus the own-AI default GPT-6.1 Sol at $2 /
-/// $0.10 / $10 (docs/Credits-Billing.md). Managed
-/// turns are charged to the shared team balance, so the cheaper model is the
-/// default; operators override it with `MANAGED_AI_MODEL_ID`.
+/// price pages, 2026-09-22), a fraction of the own-AI default's price
+/// (docs/Credits-Billing.md). Managed turns are charged to the shared team
+/// balance, so the cheaper model is the default; operators override it with
+/// `MANAGED_AI_MODEL_ID`.
 pub const DEFAULT_MANAGED_AI_MODEL_ID: &str = "gpt-6-luna";
 pub const DEFAULT_MANAGED_AI_MODEL_LABEL: &str = "GPT-6 Luna";
 
@@ -103,9 +103,10 @@ pub fn agent_model_is_compatible_with_provider(provider: &str, model: &str) -> b
 /// Gemini.
 ///
 /// Owner decisions 2026-10-26 and 2026-10-27: own AI runs at least the own-AI
-/// default (GPT-6.1 Sol), except GPT-6 Luna when a person picks it on purpose
-/// as the cheaper model (`OWN_AI_SMALL_MODEL_ID`), while Instafy AI stays on
-/// GPT-6 Luna. Saved agents and credentials
+/// default (`DEFAULT_OPENAI_MODEL_ID`), except GPT-6 Luna when a person picks it
+/// on purpose as the cheaper model (`OWN_AI_SMALL_MODEL_ID`) and an older pick
+/// of a higher tier (GPT-6 Astra), while Instafy AI stays on GPT-6 Luna. Saved
+/// agents and credentials
 /// keep the id they were created with, so this is applied when a job or lease
 /// is built, not by rewriting rows. The managed lane never passes through
 /// here: its model is the operator's `MANAGED_AI_MODEL_ID`.
@@ -180,7 +181,7 @@ mod tests {
         // The floor rule and its cases live in runtime-contracts; this checks
         // that an agent's model goes through it.
         for model in [
-            // GPT-6 Sol, the previous own-AI default, is older than GPT-6.1 Sol.
+            // GPT-6 Sol, the own-AI default before GPT-6.1 Sol.
             "gpt-6-sol",
             "gpt-5.6-sol",
             "gpt-5.5",
@@ -202,10 +203,12 @@ mod tests {
             );
         }
         // An id at the default's version, or without one, runs as picked, and
-        // so does the cheaper model a person picks on purpose.
+        // so do the cheaper model a person picks on purpose and an older pick
+        // of a higher tier (GPT-6 Astra, the catalog's frontier model).
         for model in [
             DEFAULT_OPENAI_MODEL_ID.to_string(),
             OWN_AI_SMALL_MODEL_ID.to_string(),
+            "gpt-6-astra".to_string(),
             format!("{DEFAULT_OPENAI_MODEL_ID}-preview"),
             "gpt-image-1".to_string(),
             "openai/gpt-5.5".to_string(),

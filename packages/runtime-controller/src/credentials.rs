@@ -99,6 +99,10 @@ struct CredentialListItem {
     label: Option<String>,
     is_default: bool,
     metadata: JsonValue,
+    // The model the credential's jobs run when an agent names none
+    // (`credential_default_model`): `metadata.default_model` is the id stored
+    // when it was saved, which the own-AI floor may raise.
+    default_model: String,
     // Latest BYOC subscription-usage snapshot; `null` until a usage report lands.
     // Serialized as `subscriptionUsage` for the frontend usage meters.
     subscription_usage: Option<JsonValue>,
@@ -1877,12 +1881,14 @@ async fn load_credential_list(
             let created_at: DateTime<Utc> = row.get("created_at");
             let updated_at: DateTime<Utc> = row.get("updated_at");
 
+            let default_model = credential_default_model(&kind, &metadata);
             CredentialListItem {
                 id: id.to_string(),
                 kind,
                 label,
                 is_default,
                 metadata,
+                default_model,
                 subscription_usage,
                 last_used_at: last_used_at.map(|dt| dt.to_rfc3339()),
                 revoked_at: revoked_at.map(|dt| dt.to_rfc3339()),
@@ -2920,8 +2926,8 @@ mod provider_metadata_tests {
     use super::{
         augment_metadata_with_provider, credential_default_model, default_endpoint_for_provider,
         default_model_for_credential, normalize_provider_id, provider_for_credential,
-        CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY, PROVIDER_GEMINI,
-        PROVIDER_OPENAI,
+        CredentialListItem, CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY,
+        PROVIDER_GEMINI, PROVIDER_OPENAI,
     };
     use crate::model_defaults::{
         default_chatgpt_model_id, default_managed_ai_model_id, default_model_for_provider,
@@ -2929,6 +2935,29 @@ mod provider_metadata_tests {
     };
     use runtime_contracts::own_ai_model::OWN_AI_SMALL_MODEL_ID;
     use serde_json::json;
+
+    #[test]
+    fn a_listed_credential_names_the_model_its_jobs_run() {
+        // `instafy credentials list` prints `defaultModel`; the stored id stays
+        // in `metadata` as it was saved.
+        let metadata = json!({ "provider": "openai", "default_model": "gpt-5.6-sol" });
+        let item = CredentialListItem {
+            id: "credential".to_string(),
+            kind: CREDENTIAL_KIND_CODEX_AUTH_JSON.to_string(),
+            label: None,
+            is_default: true,
+            default_model: credential_default_model(CREDENTIAL_KIND_CODEX_AUTH_JSON, &metadata),
+            metadata,
+            subscription_usage: None,
+            last_used_at: None,
+            revoked_at: None,
+            created_at: "2026-10-27T00:00:00+00:00".to_string(),
+            updated_at: "2026-10-27T00:00:00+00:00".to_string(),
+        };
+        let listed = serde_json::to_value(&item).expect("list item");
+        assert_eq!(listed["defaultModel"], DEFAULT_OPENAI_MODEL_ID);
+        assert_eq!(listed["metadata"]["default_model"], "gpt-5.6-sol");
+    }
 
     #[test]
     fn normalize_provider_id_accepts_gemini_aliases() {

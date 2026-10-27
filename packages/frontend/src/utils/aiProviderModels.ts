@@ -30,19 +30,33 @@ function openAiVersion(model: string): [number, number] | null {
   return match ? [Number(match[1]), match[2] === undefined ? 0 : Number(match[2])] : null;
 }
 
+// The tiers the Codex catalog names after an OpenAI id's version, cheapest
+// first, as in runtime-contracts' OPENAI_TIERS.
+const OPENAI_TIERS = ["luna", "terra", "sol", "astra"];
+
+// The rank in OPENAI_TIERS of the word after a lowercase id's version
+// (gpt-6-astra and gpt-6-astra-mini are Astra), -1 for a word that is not a
+// tier.
+function openAiTier(model: string): number {
+  const match = /^gpt-\d+(?:\.\d+)?-([^-]+)/u.exec(model);
+  return match ? OPENAI_TIERS.indexOf(match[1]!) : -1;
+}
+
 // Own AI runs at least its default: the controller raises a bare OpenAI id of
 // an older version than the default when a job runs (runtime-contracts'
 // own_ai_model_floor), Luna, mini and nano ids included, and o-series ids
-// always. The one exception is OWN_AI_SMALL_MODEL_ID, the cheaper model a
-// person picks on purpose. Studio shows the model that runs, so it applies
-// the same rule; both are checked against runtime-contracts'
-// own_ai_model_fixtures.json. `defaultModel` is a parameter only so the tests
-// can check a later bump.
+// always. The exceptions are OWN_AI_SMALL_MODEL_ID, the cheaper model a
+// person picks on purpose, and an older id of a higher tier than the
+// default's (gpt-6-astra under a Sol default), which raising would lower.
+// Studio shows the model that runs, so it applies the same rule; both are
+// checked against runtime-contracts' own_ai_model_fixtures.json.
+// `defaultModel` is a parameter only so the tests can check a later bump.
 export function ownAiModelFloor(
   model: string,
   defaultModel: string = DEFAULT_PROJECT_AI_MODEL,
 ): string | null {
-  const floor = openAiVersion(defaultModel.trim().toLowerCase());
+  const defaultId = defaultModel.trim().toLowerCase();
+  const floor = openAiVersion(defaultId);
   if (!floor) {
     return null;
   }
@@ -51,8 +65,11 @@ export function ownAiModelFloor(
     return null;
   }
   const version = openAiVersion(normalized);
+  const defaultTier = openAiTier(defaultId);
+  const higherTier = defaultTier >= 0 && openAiTier(normalized) > defaultTier;
   const older = version
-    ? version[0] < floor[0] || (version[0] === floor[0] && version[1] < floor[1])
+    ? (version[0] < floor[0] || (version[0] === floor[0] && version[1] < floor[1])) &&
+      !higherTier
     : /^o\d/u.test(normalized);
   return older ? defaultModel : null;
 }

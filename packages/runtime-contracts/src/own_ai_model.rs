@@ -1,16 +1,17 @@
 //! The model a person's own AI runs by default: a bring-your-own OpenAI key, a
 //! ChatGPT login and "Codex on this computer". The controller and the runtime
 //! read these items; the proxy keeps a copy of the default and Studio a copy
-//! of the default and of the cheaper pick, and `own_ai_model_fixtures.json`
-//! fails their tests when a copy drifts.
+//! of the default, the cheaper pick and the floor rule, and
+//! `own_ai_model_fixtures.json` fails their tests when a copy drifts.
 //!
 //! The managed "Instafy AI" lane is separate: its model is the controller's
 //! `DEFAULT_MANAGED_AI_MODEL_ID` (or the operator's `MANAGED_AI_MODEL_ID`).
 
 /// Default model for a person's own AI, and the least that their OpenAI picks
 /// run ([`own_ai_model_floor`]). Moving it moves every saved agent and
-/// credential whose OpenAI id is of an older version, the previous default
-/// included. `own_ai_model_fixtures.json` lists every edit a move needs.
+/// credential whose OpenAI id is of an older version and not of a higher tier,
+/// the previous default included. `own_ai_model_fixtures.json` lists every
+/// edit a move needs.
 ///
 /// GPT-6.1 Sol is the pinned Codex catalog's current Sol ("Latest workhorse
 /// model"); its GPT-6 Sol entry is the previous generation.
@@ -59,6 +60,11 @@ pub fn is_retired_openai_model(model: &str) -> bool {
 /// exception is [`OWN_AI_SMALL_MODEL_ID`], the cheaper model a person picks on
 /// purpose.
 ///
+/// An older id of a higher tier than the default's ([`OPENAI_TIERS`], so
+/// `gpt-6-astra` under a Sol default) runs as picked: raising it would lower
+/// it. An id without a listed tier (`gpt-5.5`, `gpt-5.1-codex-max`), and any id
+/// under a default without one, gets no such exception.
+///
 /// Ids without a version (`gpt-image-1`), other providers' ids and namespaced
 /// ids (`openai/gpt-5.5`) are never raised. A new default of the same version
 /// (a tier change such as `gpt-6.1-sol` to `gpt-6.1-terra`) raises nothing:
@@ -71,16 +77,27 @@ pub fn own_ai_model_floor(model: &str) -> Option<&'static str> {
     floor_for_default(OWN_AI_DEFAULT_MODEL_ID, model)
 }
 
+/// The tiers the Codex catalog names after an OpenAI id's version, cheapest
+/// first. Only the floor's tier exception reads them.
+const OPENAI_TIERS: &[&str] = &["luna", "terra", "sol", "astra"];
+
 /// [`own_ai_model_floor`] for a given default, so the tests can check what a
 /// later bump of the default does to ids saved before it.
 fn floor_for_default<'a>(default: &'a str, model: &str) -> Option<&'a str> {
-    let floor = openai_version(&default.trim().to_ascii_lowercase())?;
+    let default_id = default.trim().to_ascii_lowercase();
+    let floor = openai_version(&default_id)?;
     let model = model.trim().to_ascii_lowercase();
     if model == OWN_AI_SMALL_MODEL_ID {
         return None;
     }
     let older = match openai_version(&model) {
-        Some(version) => version < floor,
+        Some(version) => {
+            version < floor
+                && !matches!(
+                    (openai_tier(&model), openai_tier(&default_id)),
+                    (Some(tier), Some(default_tier)) if tier > default_tier
+                )
+        }
         None => model
             .strip_prefix('o')
             .is_some_and(|rest| rest.starts_with(|character: char| character.is_ascii_digit())),
@@ -91,12 +108,24 @@ fn floor_for_default<'a>(default: &'a str, model: &str) -> Option<&'a str> {
 /// `(N, M)` for a lowercase `gpt-N[.M]…` id (`gpt-6-sol` is 6.0, `gpt-5.10` is
 /// 5.10), `None` for an id without a version.
 fn openai_version(model: &str) -> Option<(u32, u32)> {
+    openai_version_and_rest(model).map(|(version, _)| version)
+}
+
+/// The rank in [`OPENAI_TIERS`] of the word after a lowercase id's version
+/// (`gpt-6-astra` and `gpt-6-astra-mini` are Astra), `None` for a word that is
+/// not a tier.
+fn openai_tier(model: &str) -> Option<usize> {
+    let (_, rest) = openai_version_and_rest(model)?;
+    let word = rest.strip_prefix('-')?.split('-').next()?;
+    OPENAI_TIERS.iter().position(|tier| *tier == word)
+}
+
+fn openai_version_and_rest(model: &str) -> Option<((u32, u32), &str)> {
     let (major, rest) = leading_number(model.strip_prefix("gpt-")?)?;
-    let minor = rest
-        .strip_prefix('.')
-        .and_then(leading_number)
-        .map_or(0, |(minor, _)| minor);
-    Some((major, minor))
+    match rest.strip_prefix('.').and_then(leading_number) {
+        Some((minor, rest)) => Some(((major, minor), rest)),
+        None => Some(((major, 0), rest)),
+    }
 }
 
 fn leading_number(text: &str) -> Option<(u32, &str)> {
@@ -108,8 +137,8 @@ fn leading_number(text: &str) -> Option<(u32, &str)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        floor_for_default, is_retired_openai_model, openai_version, own_ai_model_floor,
-        OWN_AI_DEFAULT_MODEL_ID, OWN_AI_SMALL_MODEL_ID,
+        floor_for_default, is_retired_openai_model, openai_tier, openai_version,
+        own_ai_model_floor, OWN_AI_DEFAULT_MODEL_ID, OWN_AI_SMALL_MODEL_ID,
     };
     use serde_json::Value;
 
@@ -147,8 +176,29 @@ mod tests {
     #[test]
     fn the_default_is_the_fixtures_id_and_has_a_version() {
         assert_eq!(fixtures()["defaultModelId"], OWN_AI_DEFAULT_MODEL_ID);
-        // Without a version the floor would raise nothing.
+        // Without a version the floor would raise nothing; without a tier it
+        // would lower an older pick of a higher tier (GPT-6 Astra) to it.
         assert!(openai_version(OWN_AI_DEFAULT_MODEL_ID).is_some());
+        assert!(openai_tier(OWN_AI_DEFAULT_MODEL_ID).is_some());
+    }
+
+    #[test]
+    fn tiers_are_read_from_the_word_after_the_version() {
+        assert_eq!(ids(&fixtures(), "tiers"), super::OPENAI_TIERS);
+        assert_eq!(openai_tier("gpt-6-luna"), Some(0));
+        assert_eq!(openai_tier("gpt-5.6-terra"), Some(1));
+        assert_eq!(openai_tier("gpt-6.1-sol"), Some(2));
+        assert_eq!(openai_tier("gpt-6-astra"), Some(3));
+        assert_eq!(openai_tier("gpt-6-astra-mini"), Some(3));
+        for untiered in [
+            "gpt-5.5",
+            "gpt-5.5-mini",
+            "gpt-5.1-codex-max",
+            "gpt-4o",
+            "gpt-6.x-sol",
+        ] {
+            assert_eq!(openai_tier(untiered), None, "{untiered}");
+        }
     }
 
     #[test]

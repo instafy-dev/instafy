@@ -296,8 +296,9 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         // the run timeout instead of failing with the connection error.
         Feature::UnboundedConnectionRetries => Off,
 
-        // Upstream removed the in-process V8 runtime, so code-mode-only models
-        // (gpt-6-luna, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol) run every tool through this host.
+        // Upstream removed the in-process V8 runtime, so code-mode-only models (the catalog's
+        // `code_mode_only` entries, GPT-6 Luna and the own-AI default among them) run every
+        // tool through this host.
         Feature::CodeModeHost => On,
 
         Feature::ShellTool

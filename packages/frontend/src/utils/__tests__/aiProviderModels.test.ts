@@ -17,6 +17,7 @@ const fixtures = JSON.parse(readFileSync(
 )) as {
   defaultModelId: string;
   smallModelId: string;
+  tiers: string[];
   floor: FloorCase[];
   floorForDefault: (FloorCase & { default: string })[];
 };
@@ -53,6 +54,19 @@ describe("aiProviderModels", () => {
       expect(ownAiModelFloor(model, defaultModel), `${model} with default ${defaultModel}`)
         .toBe(runs === "default" ? defaultModel : null);
     }
+  });
+
+  it("keeps an older pick of a higher tier than the default's as picked", () => {
+    // The controller's OPENAI_TIERS, cheapest first.
+    const { tiers } = fixtures;
+    expect(tiers.length).toBeGreaterThan(1);
+    tiers.forEach((lower, low) => {
+      tiers.slice(low + 1).forEach((higher) => {
+        expect(ownAiModelFloor(`gpt-5.9-${higher}`, `gpt-7-${lower}`)).toBeNull();
+        expect(ownAiModelFloor(`gpt-5.9-${lower}`, `gpt-7-${higher}`)).toBe(`gpt-7-${higher}`);
+      });
+    });
+    expect(normalizeAiModelId("openai", "gpt-6-astra")).toBe("gpt-6-astra");
   });
 
   it("offers only models that run as picked, the default first", () => {

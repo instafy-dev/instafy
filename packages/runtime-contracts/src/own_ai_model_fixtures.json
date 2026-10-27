@@ -1,18 +1,21 @@
 {
-  "_comment": "The own-AI default model id and the cheaper pick, named once. runtime-contracts (own_ai_model.rs) checks OWN_AI_DEFAULT_MODEL_ID against defaultModelId, OWN_AI_SMALL_MODEL_ID against smallModelId, its retired-id rule against `retired` and `served`, and own_ai_model_floor against `floor` (cases against defaultModelId) and `floorForDefault` (cases against a stated default, so a bump is checked before it happens). In both, `default` means the id runs that default and `keep` means it runs as picked; neither list names smallModelId, and `floor` names only ids that stay below or outside every default from gpt-6.1 on, so a bump needs no case edits. The proxy's test the_last_resort_model_is_the_platforms_openai_default (proxy.rs) checks client.rs DEFAULT_MODEL, and Studio's aiProviderModels.test.ts checks DEFAULT_PROJECT_AI_MODEL and OWN_AI_SMALL_MODEL_ID and runs both case lists through its own floor.",
+  "_comment": "The own-AI default model id and the cheaper pick, named once. runtime-contracts (own_ai_model.rs) checks OWN_AI_DEFAULT_MODEL_ID against defaultModelId, OWN_AI_SMALL_MODEL_ID against smallModelId, its retired-id rule against `retired` and `served`, and own_ai_model_floor against `floor` (cases against defaultModelId) and `floorForDefault` (cases against a stated default, so a bump is checked before it happens). In both, `default` means the id runs that default and `keep` means it runs as picked; neither list names smallModelId. `tiers` is OPENAI_TIERS, cheapest first: an older id of a tier above the default's runs as picked. `floor` names only ids whose outcome holds under every Sol default from gpt-6.1 on (older ids are raised, an older Astra is kept as a higher tier), so a bump to a later Sol needs no case edits; a default of another tier may. The proxy's test the_last_resort_model_is_the_platforms_openai_default (proxy.rs) checks client.rs DEFAULT_MODEL, and Studio's aiProviderModels.test.ts checks DEFAULT_PROJECT_AI_MODEL and OWN_AI_SMALL_MODEL_ID and runs both case lists through its own floor.",
   "_bump": [
-    "Every edit a move of the own-AI default needs; the tests named here fail until each is made.",
+    "Every edit a move of the own-AI default needs; the tests named here fail until each is made (step 8 has no test).",
     "1. The new id must be in the pinned Codex catalog (codex/codex-rs/models-manager/models.json): the runtime-agent policy tests look it up there.",
     "2. Four literals: defaultModelId here, OWN_AI_DEFAULT_MODEL_ID (runtime-contracts own_ai_model.rs), DEFAULT_MODEL (openai-proxy-server client.rs) and DEFAULT_PROJECT_AI_MODEL (frontend src/ai/modelDefaults.ts).",
     "3. runtime-agent codex_policy.rs tests: add the new id to POLICY_MODELS and its upstream and composed prompt sections to CATALOG_PROMPT_SECTIONS (policy_models_include_the_own_ai_default, catalog_prompts_lose_exactly_the_codex_product_sections). Keep the old default in both while an operator can still pin it.",
     "4. runtime-agent code_mode_host.rs tests run DEFAULT_CODEX_MODEL and fail on purpose if the new default is not code_mode_only; name the old default there explicitly to keep it covered.",
     "5. Studio's picker (frontend src/utils/aiProviderModels.ts) leads with the default. Decide whether the cheaper pick stays: if it moves or goes, change smallModelId here, OWN_AI_SMALL_MODEL_ID in runtime-contracts and in modelDefaults.ts, and the picker; it must be served by the catalog and listed in POLICY_MODELS.",
     "6. docs/Credits-Billing.md: the own-AI list price, verified on OpenAI's pricing page; README.md and the controller README name only the constant.",
-    "7. Nothing in CI: build.yml runs proxy_retry_budget with INSTAFY_TEST_CODEX_MODEL=own-ai-default, which resolves to the constant.",
-    "Known gap: a new default of the same version (a tier change such as gpt-6.1-sol to gpt-6.1-terra) raises nothing, so rows saved with the old default keep running it (the last floorForDefault case)."
+    "7. A default of another tier, or a tier the catalog adds: `tiers` here, OPENAI_TIERS in own_ai_model.rs and in Studio's aiProviderModels.ts (cheapest first), and the `floor` cases, which assume a Sol default.",
+    "8. Comments naming the default by name (search for the old id and for its name, such as GPT-6.1 Sol): the doc comment on OWN_AI_DEFAULT_MODEL_ID and the POLICY_MODELS doc in codex_policy.rs. Dated owner-decision notes in tests stay as history. No comment repeats the own-AI price; docs/Credits-Billing.md holds it.",
+    "9. Nothing in CI: build.yml runs proxy_retry_budget with INSTAFY_TEST_CODEX_MODEL=own-ai-default, which resolves to the constant. Its code-mode comment names gpt-6-luna and gpt-6-sol only as examples of code_mode_only models; editing it means updating the build.yml hashes in scripts/check-rust-ci.test.mjs.",
+    "Known gap: a new default of the same version (a tier change such as gpt-6.1-sol to gpt-6.1-terra) raises nothing, so rows saved with the old default keep running it (the floorForDefault case with default gpt-6.1-terra)."
   ],
   "defaultModelId": "gpt-6.1-sol",
   "smallModelId": "gpt-6-luna",
+  "tiers": ["luna", "terra", "sol", "astra"],
   "retired": [
     "gpt-4o",
     "gpt-4.5",
@@ -38,6 +41,7 @@
     "gpt-6-sol",
     "gpt-6-luna",
     "gpt-6.1-sol",
+    "gpt-6-astra",
     "o4-mini",
     "deepseek-chat",
     "glm-5",
@@ -68,6 +72,9 @@
     { "model": "o3-mini", "runs": "default" },
     { "model": "o4-mini", "runs": "default" },
     { "model": " GPT-5.6-Sol ", "runs": "default" },
+    { "model": "gpt-6-astra", "runs": "keep" },
+    { "model": " GPT-6-Astra ", "runs": "keep" },
+    { "model": "gpt-5.6-astra", "runs": "keep" },
     { "model": "gpt-image-1", "runs": "keep" },
     { "model": "gpt-oss-120b", "runs": "keep" },
     { "model": "gpt-test", "runs": "keep" },
@@ -88,6 +95,13 @@
     { "default": "gpt-7-sol", "model": "gpt-6.1-sol", "runs": "default" },
     { "default": "gpt-7-sol", "model": "o4-mini", "runs": "default" },
     { "default": "gpt-7-sol", "model": "gpt-image-2", "runs": "keep" },
-    { "default": "gpt-6.1-terra", "model": "gpt-6.1-sol", "runs": "keep" }
+    { "default": "gpt-6.1-terra", "model": "gpt-6.1-sol", "runs": "keep" },
+    { "default": "gpt-6-sol", "model": "gpt-6-astra", "runs": "keep" },
+    { "default": "gpt-6.1-sol", "model": "gpt-6-astra", "runs": "keep" },
+    { "default": "gpt-6.1-sol", "model": "gpt-6-astra-mini", "runs": "keep" },
+    { "default": "gpt-7-sol", "model": "gpt-6.1-astra", "runs": "keep" },
+    { "default": "gpt-7-astra", "model": "gpt-6-astra", "runs": "default" },
+    { "default": "gpt-7-astra", "model": "gpt-6.1-sol", "runs": "default" },
+    { "default": "gpt-7", "model": "gpt-6-astra", "runs": "default" }
   ]
 }

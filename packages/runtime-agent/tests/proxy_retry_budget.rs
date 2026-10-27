@@ -565,6 +565,8 @@ async fn start_poison_proxy() -> Result<(String, Arc<Mutex<usize>>, tokio::task:
 }
 
 fn test_model() -> String {
+    use std::io::Write as _;
+
     static MODEL: OnceLock<String> = OnceLock::new();
     MODEL
         .get_or_init(|| {
@@ -575,7 +577,12 @@ fn test_model() -> String {
                 Ok(value) => value,
                 Err(_) => DEFAULT_TEST_MODEL.to_string(),
             };
-            eprintln!("proxy_retry_budget scenarios run {model}");
+            // libtest captures `eprintln!` in a passing test; a direct write to the process's
+            // stderr is not captured, so a green CI run still logs which model it exercised.
+            let _ = writeln!(
+                std::io::stderr(),
+                "proxy_retry_budget scenarios run {model}"
+            );
             model
         })
         .clone()
