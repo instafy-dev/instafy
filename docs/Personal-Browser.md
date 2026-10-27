@@ -464,17 +464,29 @@ only in the visible browser, so the rules are the ones a person sees:
   below too. A page the person opened keeps working as it is while the agent
   reads it (a local app's scripts, requests and frames go on), but navigating
   away from it is the agent's. Once the person has control again (Pause,
-  Escape, **Take over**), none of the rules below apply to their browsing.
-- **Public pages only, in every tab.** `open_tab`, `navigate` and a link the
-  agent clicks open only public addresses: a loopback, private-network,
-  link-local or local host name is refused with `private_address_blocked`
-  before anything asks, and so is a name that resolves to one. Every page and
-  frame request of a driven tab, each redirect hop included, resolves its host
-  the same way in the session's request filter and is cancelled before it
-  connects when it is not public (frames only in a page the agent opened); a
-  local name written with a final dot (`localhost.`) is still local. A
-  redirect or page-started navigation to such an address is stopped without a
-  prompt.
+  Escape, **Take over**), none of the rules below stop their browsing.
+- **A page the agent opened stays the agent's.** While the person has
+  control, a page the agent opened keeps running, and so does every page it
+  goes on to open by itself or through a link in it. Nothing is stopped then,
+  but such a page that loads from, or sends a request to, a private or local
+  address is marked: after the next Resume the agent does not read or use it
+  (`private_address_blocked`, before anything asks), and `status` and
+  `list_tabs` show no address or title for it. A page the person opens from
+  the toolbar (address bar, Back, Forward, Reload) is theirs, as before.
+- **Public pages only, in every tab.** `open_tab`, `navigate`, a link the
+  agent clicks (or presses Enter or Space on) and a form it submits to another
+  site open only public addresses: a loopback, private-network, link-local or
+  local host name is refused with `private_address_blocked` before anything
+  asks, and so is a name that resolves to one. Every page and frame request of
+  a driven tab, each redirect hop included, resolves its host the same way in
+  the session's request filter and is cancelled before it connects when it is
+  not public (frames only in a page the agent opened); a local name written
+  with a final dot (`localhost.`) is still local. A redirect or page-started
+  navigation to such an address is stopped without a prompt. A page the agent
+  opened sends none of its own requests (scripts, images, `fetch`,
+  WebSockets) to an address literal or local name that is not public; a
+  WebSocket's name is resolved too before it connects, because its handshake
+  reports no connected address.
 - **The address actually connected to.** Chromium resolves the name again when
   it connects, so a name can answer with a public address for that check and a
   private one for the connection (DNS rebinding). Every response reports the
@@ -491,7 +503,9 @@ only in the visible browser, so the rules are the ones a person sees:
   reports no address, so the check before the request stands. Through a proxy
   the address is the proxy's own, and the proxy resolved the name, so again
   only the check before the request applies. A service worker's own requests
-  belong to no tab and are not checked.
+  belong to no tab and are not checked. A WebSocket reports no connected
+  address, so a name that changes its answer between Desktop's lookup and
+  Chromium's connection is not caught for a WebSocket.
 - **Never a link-only site.** Sites whose terms or robots.txt bar AI agents
   (the `instafy-web-research` skill's `references/link-only-sites.json`:
   Booking.com, Airbnb, Amazon, Google search and Maps and others) are never read
@@ -503,15 +517,20 @@ only in the visible browser, so the rules are the ones a person sees:
   before any prompt or lookup. On a page that is
   already on one, because the person left a tab there, `snapshot`, `click`,
   `type`, `press`, `scroll` and `request_human_input` are refused the same way;
-  `status` and `list_tabs` give only the site's name (`linkOnlySite`), and the
-  agent may still navigate the tab elsewhere or close one of its own. Without a
+  in a tab the agent holds, `status` and `list_tabs` give only the site's name
+  (`linkOnlySite`), and the agent may still navigate the tab elsewhere or close
+  one of its own. A tab of the person's that the agent does not drive, and
+  every tab while the agent is paused, shows nothing of its page, as for any
+  other site. A form the agent submits to such a site is refused before it
+  asks, like a link. Without a
   valid list, every agent-driven step on a web page fails closed with
   `link_only_list_unavailable`. The person opens such a site themselves and may
   use **Send page to Octo**, which is their own action.
 - **Stopped pages are reported.** A page Desktop stopped in a driven tab leaves
   the browser ready and is reported once, to the agent's next page step in that
-  tab (`navigate` and `open_tab` report their own; a stopped first page of
-  `open_tab` closes the new tab again).
+  tab, which then does not run and says so: the refusal is the earlier load's,
+  not that step's (`navigate` and `open_tab` report their own; a stopped first
+  page of `open_tab` closes the new tab again).
 - **Limits.** At most three agent tabs (`agent_tab_limit`); changing the tab on
   screen never runs alongside another step (`browser_busy`); a tab share is
   scoped to the page on screen, so showing another tab ends it, and the agent
