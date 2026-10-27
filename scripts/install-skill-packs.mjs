@@ -13,7 +13,14 @@
 //   6. moves the pack into place in one rename and records it in installed.json.
 // A pack that is already installed with the pinned tree_sha256 is left as it is.
 //
-//   node scripts/install-skill-packs.mjs [--out <dir>] [--pin <skill-packs.json>] [--require-pinned]
+// A pack's commands (`bin` in its manifest: {"uw": "scripts/uw.mjs"}) are checked with the pack: at
+// most 8, plain names (a-z, 0-9, -) that are not reserved, each a file inside the pack. With
+// --install-root <dir> (the absolute folder the packs are copied to, /opt/instafy/skill-packs in the
+// runtime image) the installer also writes one shim per command to <out>/.bin/<name>, which runs
+// `node <dir>/<pack>/<entry>`; the image puts them in /usr/local/bin. A name two packs declare gets
+// no shim.
+//
+//   node scripts/install-skill-packs.mjs [--out <dir>] [--pin <skill-packs.json>] [--require-pinned] [--install-root <dir>]
 //   node scripts/install-skill-packs.mjs --from <pack folder> [--out <dir>]   (pack authors: not pinned)
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -37,6 +44,17 @@ const HEX40 = /^[0-9a-f]{40}$/u;
 const HEX64 = /^[0-9a-f]{64}$/u;
 const VERSION = /^\d+\.\d+\.\d+$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9._@+-]+$/u;
+export const BIN_DIR = ".bin";
+export const BIN_MARKER = "# instafy:managed-pack-bin";
+export const MAX_PACK_BINS = 8;
+const BIN_NAME = /^[a-z][a-z0-9-]{1,31}$/u;
+// The same names packages/runtime-agent/src/skill_packs.rs refuses.
+export const RESERVED_BIN_NAMES = new Set([
+  "instafy", "node", "npm", "npx", "pnpm", "pnpx", "yarn", "corepack", "git", "sh", "bash", "zsh", "dash",
+  "env", "python", "python3", "pip", "codex", "runtime-agent", "curl", "wget", "sudo", "make",
+]);
+// A path written into a shim: plain characters only, single-quoted there.
+const PLAIN_PATH = /^[A-Za-z0-9._/-]+$/u;
 
 export class InstallError extends Error {}
 
@@ -285,7 +303,60 @@ export function checkPack(files, { name, version = null, tree_sha256 = null }) {
   if (typeof skill !== "string" || !files.has(safeRelative(skill, `${name} skill`))) fail(`${name}: the skill file ${JSON.stringify(skill)} is missing`);
   const entry = manifest.cli?.entry ?? manifest.entry;
   if (entry !== undefined && (typeof entry !== "string" || !files.has(safeRelative(entry, `${name} entry`)))) fail(`${name}: the command ${JSON.stringify(entry)} is missing`);
-  return { manifest, tree };
+  return { manifest, tree, bins: packBins(manifest, files, name) };
+}
+
+/// The commands a pack declares (`bin`: {name: entry}), checked: at most MAX_PACK_BINS, plain names
+/// that are not reserved, each entry a file inside the pack. Returns [{name, entry}].
+export function packBins(manifest, files, name) {
+  if (manifest.bin === undefined) return [];
+  if (!manifest.bin || typeof manifest.bin !== "object" || Array.isArray(manifest.bin)) fail(`${name}: bin must map command names to files in the pack`);
+  const bins = Object.entries(manifest.bin);
+  if (bins.length > MAX_PACK_BINS) fail(`${name}: bin lists more than ${MAX_PACK_BINS} commands`);
+  return bins.map(([bin, entry]) => {
+    if (!BIN_NAME.test(bin) || RESERVED_BIN_NAMES.has(bin)) fail(`${name}: bin ${JSON.stringify(bin)} is not a command a pack may declare (a-z, 0-9 and -, 2 to 32 characters, not a reserved name)`);
+    if (typeof entry !== "string" || !PLAIN_PATH.test(entry) || !files.has(safeRelative(entry, `${name} bin ${bin}`))) {
+      fail(`${name}: the command ${bin} runs ${JSON.stringify(entry)}, which is not a file inside the pack`);
+    }
+    return { name: bin, entry };
+  });
+}
+
+/// The shim for one command: `#!/bin/sh`, the marker the runtime looks for, then node on the entry.
+export function binShim({ pack, version, entry, installRoot }) {
+  return `#!/bin/sh\n${BIN_MARKER} ${pack} ${version}\nexec node '${installRoot}/${pack}/${entry}' "$@"\n`;
+}
+
+/// Writes <out>/.bin/<name> (mode 0755) for every command of the packs installed in `out`, running
+/// the pack from `installRoot`. Replaces the folder; a name two packs declare gets no shim.
+export function writeBinShims({ out, installRoot, log = () => {} }) {
+  if (typeof installRoot !== "string" || !installRoot.startsWith("/") || !PLAIN_PATH.test(installRoot) || installRoot.split("/").some((segment) => segment === "." || segment === "..")) {
+    fail(`--install-root must be an absolute path of plain characters, not ${JSON.stringify(installRoot)}`);
+  }
+  const root = installRoot.replace(/\/+$/u, "");
+  const owners = new Map();
+  for (const record of readInstalled(out).packs) {
+    if (!NAME.test(record?.name ?? "")) continue;
+    const { manifest, bins } = checkPack(readPackFolder(path.join(out, record.name)), { name: record.name });
+    if (!VERSION.test(manifest.version ?? "")) fail(`${record.name}: ${MANIFEST} version must be x.y.z`);
+    for (const bin of bins) owners.set(bin.name, [...(owners.get(bin.name) ?? []), { pack: record.name, version: manifest.version, entry: bin.entry }]);
+  }
+  const binDir = path.join(out, BIN_DIR);
+  fs.rmSync(binDir, { recursive: true, force: true });
+  fs.mkdirSync(binDir, { recursive: true, mode: 0o755 });
+  const written = [];
+  for (const [name, declared] of [...owners].sort(([a], [b]) => compareBytes(a, b))) {
+    if (declared.length > 1) {
+      log(`warning: ${declared.map(({ pack }) => pack).join(" and ")} all declare the command ${name}; none of them gets it`);
+      continue;
+    }
+    const file = path.join(binDir, name);
+    fs.writeFileSync(file, binShim({ ...declared[0], installRoot: root }), { mode: 0o755, flag: "wx" });
+    fs.chmodSync(file, 0o755);
+    written.push(name);
+    log(`${declared[0].pack}: command ${name}`);
+  }
+  return written;
 }
 
 function readInstalled(out) {
@@ -393,7 +464,7 @@ export function installFromFolder({ from, out, log = () => {} }) {
 }
 
 function parseArguments(argv) {
-  const options = { out: DEFAULT_OUT, pin: DEFAULT_PIN, from: null, requirePinned: false };
+  const options = { out: DEFAULT_OUT, pin: DEFAULT_PIN, from: null, requirePinned: false, installRoot: null };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = () => {
@@ -405,6 +476,7 @@ function parseArguments(argv) {
     else if (argument === "--pin") options.pin = path.resolve(value());
     else if (argument === "--from") options.from = path.resolve(value());
     else if (argument === "--require-pinned") options.requirePinned = true;
+    else if (argument === "--install-root") options.installRoot = value();
     else fail(`unknown argument ${argument}`);
   }
   if (options.requirePinned && options.from) fail("--require-pinned refuses --from: only pinned release archives are installed");
@@ -416,10 +488,11 @@ async function main() {
   const log = (line) => process.stdout.write(`[skill-packs] ${line}\n`);
   if (options.from) {
     installFromFolder({ from: options.from, out: options.out, log });
-    return;
+  } else {
+    const pin = JSON.parse(fs.readFileSync(options.pin, "utf8"));
+    await installPinned({ pin, out: options.out, log });
   }
-  const pin = JSON.parse(fs.readFileSync(options.pin, "utf8"));
-  await installPinned({ pin, out: options.out, log });
+  if (options.installRoot !== null) writeBinShims({ out: options.out, installRoot: options.installRoot, log });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

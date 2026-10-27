@@ -1397,20 +1397,31 @@ test("runtime skill packs come only from pinned release archives, checked before
     "COPY packages/runtime-agent/skill-packs.json packages/runtime-agent/skill-packs.json",
     "COPY scripts/install-skill-packs.mjs scripts/install-skill-packs.mjs",
   ]);
-  assert.deepEqual(stage.split("\n").filter((line) => line.startsWith("RUN ")), [
-    "RUN node scripts/install-skill-packs.mjs --require-pinned --pin packages/runtime-agent/skill-packs.json --out /out/skill-packs",
-  ]);
-  // Both runtime images take the packs from that stage and nothing else writes their folder.
+  const installStep = "RUN node scripts/install-skill-packs.mjs --require-pinned --pin packages/runtime-agent/skill-packs.json --out /out/skill-packs --install-root /opt/instafy/skill-packs";
+  assert.deepEqual(stage.split("\n").filter((line) => line.startsWith("RUN ")), [installStep]);
+  // Both runtime images take the packs from that stage and nothing else writes their folder; the
+  // only other step that names it reads the pack command shims the installer wrote for it.
   const writers = dockerfile.split("\n").filter((line) => line.includes("/opt/instafy/skill-packs"));
+  const linkShims = "    for shim in /opt/instafy/skill-packs/.bin/*; do \\";
   assert.deepEqual(writers, [
+    installStep,
     "COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs",
+    linkShims,
     "    INSTAFY_SKILL_PACKS_DIR=/opt/instafy/skill-packs \\",
     "COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs",
+    linkShims,
     "    INSTAFY_SKILL_PACKS_DIR=/opt/instafy/skill-packs \\",
   ]);
   for (const target of ["runtime", "runtime-webdev"]) {
     const section = dockerfile.split(/^FROM /mu).find((part) => part.startsWith(`\${`) && part.split("\n")[0].endsWith(` AS ${target}`));
     assert.ok(section?.includes("COPY --from=skill-packs /out/skill-packs /opt/instafy/skill-packs\n"), target);
+    // Each pack command goes to /usr/local/bin (a login shell keeps it on PATH) only after a login
+    // shell found no command of that name, and the build checks a login shell then finds the shim.
+    const link = section.slice(section.indexOf(`${linkShims}\n`));
+    const check = link.indexOf(`if found="$(bash -lc 'command -v -- "$1"' bash "$name")"; then`);
+    const copy = link.indexOf('install -m 0755 "$shim" "/usr/local/bin/$name";');
+    assert.ok(check > 0 && copy > check, target);
+    assert.ok(link.includes(`[ "$(bash -lc 'command -v -- "$1"' bash "$name")" = "/usr/local/bin/$name" ]`), target);
   }
   // A pack installed for local development never enters the build context.
   const ignore = read(".dockerignore").split("\n");
