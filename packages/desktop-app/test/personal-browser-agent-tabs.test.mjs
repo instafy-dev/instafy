@@ -582,7 +582,7 @@ test("a page on a link-only site is never read or used, in any tab, and nothing 
   assert.deepEqual(personView.webContents.loads, ["https://example.test/"]);
 });
 
-test("a link the agent clicks to a link-only site or a private address is refused before the site prompt", async () => {
+test("a link the agent clicks or presses Enter on to a link-only site or a private address is refused before any prompt", async () => {
   const { host, dialogs, personView } = fixture();
   await resume(host, "ask");
   for (const [href, code] of [
@@ -591,10 +591,12 @@ test("a link the agent clicks to a link-only site or a private address is refuse
     ["https://rebind.example.test/", "private_address_blocked"],
   ]) {
     personView.webContents.linkHref = href;
-    await host.handleControlOperation("snapshot", {});
-    const asked = dialogs.length;
-    await rejectsWith(host.handleControlOperation("click", { index: 0 }), code);
-    assert.equal(dialogs.length, asked, `${href} asked nothing`);
+    for (const [operation, payload] of [["click", { index: 0 }], ["press", { index: 0, key: "Enter" }]]) {
+      await host.handleControlOperation("snapshot", {});
+      const asked = dialogs.length;
+      await rejectsWith(host.handleControlOperation(operation, payload), code);
+      assert.equal(dialogs.length, asked, `${operation} on ${href} asked nothing`);
+    }
     assert.equal(personView.webContents.clicks ?? 0, 0, `${href} was not clicked`);
   }
   // A link to a place on the same page loads nothing and stays allowed.

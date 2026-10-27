@@ -2774,6 +2774,18 @@ export class PersonalBrowserHost {
       this.assertNonSensitiveActivation(resolvedTarget.descriptor);
     }
     this.assertStepNotRefused(pressStep);
+    // Enter or Space on a link follows it: the same navigation rules as a
+    // click on it, before anything asks.
+    const pressedHref = resolvedTarget.descriptor.href;
+    if (isPersonalBrowserActivationKey(key) && pressedHref && !sameDocument(pressedHref, pressPageUrl)) {
+      let pressedHrefOrigin: string | null = null;
+      try {
+        pressedHrefOrigin = getPersonalBrowserOrigin(pressedHref);
+      } catch {
+        pressedHrefOrigin = null;
+      }
+      if (pressedHrefOrigin) await this.requireAgentNavigationAllowed(pressedHref, operationEpoch);
+    }
     // Space, Backspace and Delete in a field are typing: they share the
     // form's typing approval. So do arrow keys in an editable combobox, which
     // pick an autocomplete option.
