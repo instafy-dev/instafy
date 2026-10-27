@@ -1,16 +1,18 @@
 # @instafy/browser-action-policy
 
-Secret redaction, step classification and sent-page reading for browsers an
-agent drives. Two hosts use the same files:
+Secret redaction, step classification, sent-page reading and link-only site
+matching for browsers an agent drives. The hosts use the same files:
 
 - the Desktop Personal Browser bundles them from this workspace package;
-- the hosted Shared Browser controller in runtime-agent embeds the source.
+- the hosted Shared Browser controller in runtime-agent embeds the source;
+- `instafy web read` (`@instafy/cli`) bundles `linkOnly.js` and `redaction.js`.
 
 The files are plain scripts with no imports and no build step. Loaded through
 CommonJS they export their API. Evaluated where `module` is undefined, they
 publish it on `globalThis.__instafyBrowserRedaction`,
-`globalThis.__instafyBrowserActionPolicy` and
-`globalThis.__instafyBrowserPageCapture`; load `redaction.js` first.
+`globalThis.__instafyBrowserActionPolicy`,
+`globalThis.__instafyBrowserPageCapture` and `globalThis.__instafyLinkOnly`;
+load `redaction.js` first.
 
 - `redaction.js`: masks key-like values in page text, titles, addresses and
   control names, and decides when a page is a secret screen.
@@ -39,6 +41,19 @@ publish it on `globalThis.__instafyBrowserRedaction`,
   `maskSentPage` is the masking step on its own, for a host that reads the
   page another way. Publishes `globalThis.__instafyBrowserPageCapture`; load
   `redaction.js` first.
+
+- `linkOnly.js`: whether an address is on a site the `instafy-web-research`
+  skill keeps link-only (`references/link-only-sites.json`, skill-owned data;
+  this file only enforces it). `linkOnlyListFrom(bundled, additions)` compiles
+  the bundled list plus what a space's copy adds (a copy only adds; one that is
+  not a list is left out with a warning; no usable bundled list gives `null`,
+  and a host then reads nothing). `linkOnlyMatch(list, address)` returns
+  `{ site, why, via }` or `null`: hosts match however the address spells them
+  (case, trailing dots, port, user info, IDN), and an address on one of the
+  list's `wrappers` (a translator, cache, archive or reader proxy) is checked
+  as the site it embeds, wherever the wrapper's `embeds` says that site is
+  written. The readers run one table of cases,
+  `test/link-only-cases.json`, through their own guards.
 
 The tests live with the Desktop Personal Browser
 (`packages/desktop-app/test/personal-browser-redaction.test.mjs`,

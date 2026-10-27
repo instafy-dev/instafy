@@ -4,8 +4,10 @@
 // source. Plain HTTP (no browser, no JavaScript), an honest agent user agent, and fixed rules that no option turns off:
 //
 // - robots.txt is honoured for this agent, for "*" and for the AI-agent user agents, on every redirect hop;
-// - sites a skill lists as link-only (their terms ban AI agents or copying) are never fetched; the list is skill-owned
-//   data (`link-only-sites.json` in any skill folder), this command only enforces it;
+// - sites the web-research skill lists as link-only (their terms ban AI agents or copying) are never fetched, nor a
+//   translator's, cache's or archive's copy of one; the list is skill-owned data
+//   (`instafy-web-research/references/link-only-sites.json`), bundled into this command from that one file, and a space's
+//   copy (or any skill's) can only add to it. Without a list that loads, nothing is read;
 // - every hop's host is resolved and every address checked: private, loopback, link-local, CGNAT, metadata and other
 //   reserved addresses are refused, and the connection goes to the address that was checked (no second lookup, so DNS
 //   rebinding cannot swap it); at most 5 redirects, ports 80 and 443 only;
@@ -27,7 +29,9 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import type { Command } from "commander";
+import * as linkOnly from "@instafy/browser-action-policy/linkOnly";
 import * as redaction from "@instafy/browser-action-policy/redaction";
+import bundledLinkOnlySites from "virtual:instafy/link-only-sites";
 import { checkPublicUrl } from "@instafy/bind/net";
 import { AI_AGENTS, USER_AGENT, challengeReason, parseRobots, robotsAllows, type RobotsGroup } from "@instafy/bind/web";
 import {
@@ -49,7 +53,11 @@ export const WEB_USER_AGENT = USER_AGENT;
 export const ROBOTS_AGENTS: readonly string[] = ["*", "instafy-agent", ...AI_AGENTS];
 export const UNTRUSTED_TAG = "untrusted_page_content";
 export const LINK_ONLY_FILE = "link-only-sites.json";
-export const LINK_ONLY_SCHEMA = "instafy.link-only-sites@1";
+export const LINK_ONLY_SCHEMA = linkOnly.LINK_ONLY_SITES_SCHEMA;
+/** Where a skill folder keeps its copy of the list: the web-research skill's `references/`, or the folder itself. */
+export const LINK_ONLY_PLACES: readonly string[] = [path.join("references", LINK_ONLY_FILE), LINK_ONLY_FILE];
+/** The web-research skill's list as the build bundled it (from the skill's own file, so there is one source). */
+export const BUNDLED_LINK_ONLY_SITES: unknown = bundledLinkOnlySites;
 
 export const LIMITS = Object.freeze({
   urlsPerCall: 6,
@@ -152,7 +160,8 @@ export type WebReadReport = {
     hosts: Record<string, number>;
   };
   guards: {
-    linkOnly: { sites: number; sources: string[] };
+    /** `sources`: "bundled", then each skill copy that added to it */
+    linkOnly: { sites: number; wrappers: number; sources: string[] };
     robotsAgents: readonly string[];
     maxRedirects: number;
   };
@@ -176,6 +185,8 @@ export type WebReadDeps = {
   cacheDir?: string | null;
   /** folders whose skill subfolders may hold link-only-sites.json (default: .agents/skills from cwd upwards, ~/.agents/skills and the skill packs) */
   skillRoots?: string[];
+  /** the bundled link-only list (default: the copy built into this command); one that does not load stops every read */
+  bundledLinkOnly?: unknown;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
 };
@@ -194,12 +205,14 @@ export class WebReadUsageError extends Error {}
 // ---------------------------------------------------------------------------------------------------------------
 // Link-only guard: skill-owned data, enforced here
 
-export type LinkOnlySite = { name: string; reason: string; domains: string[]; source: string };
-export type LinkOnlyGuard = { sites: LinkOnlySite[]; sources: string[]; warnings: string[] };
+/** A link-only site an address is on: `via` names the wrappers (translator, cache, archive) it was found through. */
+export type LinkOnlySite = { name: string; reason: string; via: string[] };
+export type LinkOnlyGuard = { list: linkOnly.LinkOnlyList; sources: string[]; warnings: string[] };
 
-const DOMAIN_PATTERN = /^(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?:\.\*)?$/;
+/** The bundled list is missing or malformed: nothing is read rather than reading without it. */
+export class LinkOnlyListUnavailableError extends Error {}
+
 const MAX_LINK_ONLY_BYTES = 256 * 1024;
-const MAX_LINK_ONLY_SITES = 500;
 
 /** Folders that may hold skills: `.agents/skills` in cwd and every parent, `~/.agents/skills`, and the skill packs. */
 export function defaultSkillRoots(cwd: string, env: NodeJS.ProcessEnv): string[] {
@@ -226,13 +239,37 @@ export function defaultSkillRoots(cwd: string, env: NodeJS.ProcessEnv): string[]
   return roots;
 }
 
+/** One skill's copy of the list, or why it is left out. Never echoes the file's content. */
+function readLinkOnlyCopy(file: string): { data: unknown } | { warning: string } | null {
+  let real: string;
+  try {
+    real = fs.realpathSync(file);
+  } catch {
+    return null;
+  }
+  try {
+    const stat = fs.statSync(real);
+    if (!stat.isFile()) return { warning: `${file} is not a file and was ignored; the bundled list still applies` };
+    if (stat.size > MAX_LINK_ONLY_BYTES) {
+      return { warning: `${file} is larger than ${MAX_LINK_ONLY_BYTES} bytes and was ignored; the bundled list still applies` };
+    }
+    return { data: JSON.parse(fs.readFileSync(real, "utf8")) as unknown };
+  } catch (error) {
+    const why = error instanceof SyntaxError ? "is not valid JSON" : "could not be read";
+    return { warning: `${file} ${why} and was ignored; the bundled list still applies` };
+  }
+}
+
 /**
- * Loads every `<root>/<skill>/link-only-sites.json`. More data only adds sites: a file can never allow anything.
- * A file that does not parse, or has another schema, is skipped with a warning.
+ * The list this command enforces: the bundled copy of the web-research skill's list, plus every
+ * `<root>/<skill>/references/link-only-sites.json` (and `<root>/<skill>/link-only-sites.json`) a skill folder holds,
+ * such as the space's own copy. A copy only adds sites and wrappers; one that is not a list is left out with a warning.
+ * Throws LinkOnlyListUnavailableError when the bundled copy does not load.
  */
-export function loadLinkOnlyGuard(roots: string[]): LinkOnlyGuard {
-  const guard: LinkOnlyGuard = { sites: [], sources: [], warnings: [] };
-  const seenFiles = new Set<string>();
+export function loadLinkOnlyGuard(roots: string[], bundled: unknown = BUNDLED_LINK_ONLY_SITES): LinkOnlyGuard {
+  const additions: Array<{ data: unknown; source: string }> = [];
+  const warnings: string[] = [];
+  const seen = new Set<string>();
   for (const root of roots) {
     let entries: fs.Dirent[];
     try {
@@ -242,69 +279,65 @@ export function loadLinkOnlyGuard(roots: string[]): LinkOnlyGuard {
     }
     for (const entry of entries) {
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      const file = path.join(root, entry.name, LINK_ONLY_FILE);
-      let real: string;
-      try {
-        real = fs.realpathSync(file);
-      } catch {
-        continue;
-      }
-      if (seenFiles.has(real)) continue;
-      seenFiles.add(real);
-      try {
-        const stat = fs.statSync(real);
-        if (!stat.isFile()) continue;
-        if (stat.size > MAX_LINK_ONLY_BYTES) throw new Error(`larger than ${MAX_LINK_ONLY_BYTES} bytes`);
-        const data = JSON.parse(fs.readFileSync(real, "utf8")) as { schema?: unknown; sites?: unknown };
-        if (data?.schema !== LINK_ONLY_SCHEMA) throw new Error(`schema is not ${LINK_ONLY_SCHEMA}`);
-        if (!Array.isArray(data.sites)) throw new Error("sites is not a list");
-        let added = 0;
-        for (const raw of data.sites as unknown[]) {
-          if (guard.sites.length >= MAX_LINK_ONLY_SITES) break;
-          const site = raw as { name?: unknown; reason?: unknown; domains?: unknown };
-          const domains = Array.isArray(site?.domains)
-            ? (site.domains as unknown[])
-                .filter((d): d is string => typeof d === "string")
-                .map((d) => d.trim().toLowerCase().replace(/\.$/, ""))
-                .filter((d) => DOMAIN_PATTERN.test(d))
-            : [];
-          if (!domains.length) {
-            guard.warnings.push(`${file}: an entry without a valid domain was skipped`);
-            continue;
-          }
-          guard.sites.push({
-            name: typeof site.name === "string" && site.name.trim() ? site.name.trim().slice(0, 80) : domains[0]!,
-            reason: typeof site.reason === "string" ? site.reason.trim().slice(0, 200) : "listed as link-only",
-            domains,
-            source: file,
-          });
-          added += 1;
+      for (const place of LINK_ONLY_PLACES) {
+        const file = path.join(root, entry.name, place);
+        let real: string;
+        try {
+          real = fs.realpathSync(file);
+        } catch {
+          continue;
         }
-        if (added) guard.sources.push(file);
-      } catch (error) {
-        guard.warnings.push(`${file} was skipped: ${error instanceof Error ? error.message : String(error)}`);
+        if (seen.has(real)) continue;
+        seen.add(real);
+        const copy = readLinkOnlyCopy(file);
+        if (!copy) continue;
+        if ("warning" in copy) warnings.push(copy.warning);
+        else additions.push({ data: copy.data, source: file });
       }
     }
   }
-  return guard;
-}
-
-/** Does `host` match one domain pattern? "example.com" covers its subdomains; "example.*" covers any ending. */
-export function domainMatches(host: string, pattern: string): boolean {
-  const name = host.toLowerCase().replace(/\.$/, "");
-  const bare = pattern.startsWith("*.") ? pattern.slice(2) : pattern;
-  if (bare.endsWith(".*")) {
-    const stem = `.${bare.slice(0, -2)}.`;
-    const dotted = `.${name}`;
-    const at = dotted.indexOf(stem);
-    return at >= 0 && at + stem.length < dotted.length;
+  const merged = linkOnly.linkOnlyListFrom(bundled, additions);
+  if (!merged.list) {
+    throw new LinkOnlyListUnavailableError(
+      "The link-only site list built into `instafy web read` could not be loaded, so nothing was read. Reinstall or update the Instafy CLI.",
+    );
   }
-  return name === bare || name.endsWith(`.${bare}`);
+  return { list: merged.list, sources: merged.sources, warnings: [...warnings, ...merged.warnings] };
 }
 
-export function linkOnlySite(host: string, guard: LinkOnlyGuard): LinkOnlySite | null {
-  for (const site of guard.sites) if (site.domains.some((pattern) => domainMatches(host, pattern))) return site;
-  return null;
+/** The link-only site an address is on, directly or as a wrapper's copy of it, or null. */
+export function linkOnlySite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
+  const hit = linkOnly.linkOnlyMatch(guard.list, url);
+  return hit ? { name: hit.site, reason: hit.why, via: hit.via } : null;
+}
+
+/** "Booking.com is link-only (terms bar AI agents); this address is its copy on the Wayback Machine" */
+function linkOnlyMessage(site: LinkOnlySite): string {
+  const copy = site.via.length ? `; this address is its copy on ${site.via.join(", then ")}` : "";
+  return `${site.name} is link-only (${site.reason})${copy}`;
+}
+
+/** Addresses a response says it is a copy of: the Memento `Link: <…>; rel="original"` header (RFC 7089). */
+export function mementoOriginals(header: string | string[] | undefined, base: URL): string[] {
+  const text = (Array.isArray(header) ? header.join(",") : header ?? "").slice(0, 16_384);
+  const originals: string[] = [];
+  for (const match of text.matchAll(/<([^>]*)>([^<]*)/g)) {
+    // The parameters up to the comma that starts the next link value.
+    const rel = match[2]!
+      .replace(/,\s*$/, "")
+      .split(";")
+      .map((param) => param.trim())
+      .find((param) => /^rel\s*=/i.test(param));
+    const values = rel?.replace(/^rel\s*=\s*/i, "").replace(/^"|"$/g, "").toLowerCase().split(/\s+/) ?? [];
+    if (!values.includes("original")) continue;
+    try {
+      originals.push(new URL(match[1]!.trim(), base).href);
+    } catch {
+      // not an address
+    }
+    if (originals.length >= 4) break;
+  }
+  return originals;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -502,7 +535,7 @@ const TEXTUAL_TYPE =
 const ACCEPT = "text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.8,application/xml;q=0.7";
 
 type Fetched =
-  | { kind: "response"; url: URL; status: number; contentType: string; noStore: boolean; body: Buffer; truncated: boolean }
+  | { kind: "response"; url: URL; status: number; contentType: string; noStore: boolean; body: Buffer; truncated: boolean; originals: string[] }
   | { kind: "redirect"; url: URL; status: number; location: string }
   | { kind: "download"; url: URL; status: number; contentType: string }
   | { kind: "blocked"; url: URL; reason: string }
@@ -602,7 +635,7 @@ function attempt(
         const noStore = /\b(?:no-store|private)\b/i.test(String(response.headers["cache-control"] ?? ""));
         if (status === 401 || status === 403 || status === 429) {
           request.destroy();
-          finish({ kind: "response", url, status, contentType: fullType, noStore: true, body: Buffer.alloc(0), truncated: false });
+          finish({ kind: "response", url, status, contentType: fullType, noStore: true, body: Buffer.alloc(0), truncated: false, originals: [] });
           return;
         }
         const disposition = String(response.headers["content-disposition"] ?? "");
@@ -619,8 +652,9 @@ function attempt(
         const chunks: Buffer[] = [];
         let size = 0;
         let truncated = false;
+        const originals = mementoOriginals(response.headers.link, url);
         const done = () =>
-          finish({ kind: "response", url, status, contentType: fullType, noStore, body: Buffer.concat(chunks), truncated });
+          finish({ kind: "response", url, status, contentType: fullType, noStore, body: Buffer.concat(chunks), truncated, originals });
         stream.on("data", (chunk: Buffer) => {
           if (truncated) return;
           if (size + chunk.length > options.maxBytes) {
@@ -847,6 +881,8 @@ async function loadRobots(
       } catch {
         break;
       }
+      const listed = linkOnlySite(current, ctx.guard);
+      if (listed) return { refused: `robots.txt for ${origin} redirects to ${listed.name}, which is link-only (treated as disallow)` };
       continue;
     }
     let stored: Stored;
@@ -933,14 +969,8 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
   if (!options.fresh) {
     const cached = ctx.cache.get<CachedPage>("pages", requested, LIMITS.pageTtlMs, ctx.now());
     // A site listed as link-only since the page was cached is not served from the cache either.
-    const listed = (url: string) => {
-      try {
-        return Boolean(linkOnlySite(new URL(url).hostname, ctx.guard));
-      } catch {
-        return false;
-      }
-    };
-    if (cached && !listed(requested) && !listed(cached.finalUrl)) return present(page, cached, true, options, ctx.guard);
+    const listed = (url: string) => Boolean(linkOnlySite(url, ctx.guard));
+    if (cached && ![requested, cached.finalUrl, ...cached.redirects].some(listed)) return present(page, cached, true, options, ctx.guard);
   }
 
   // Over budget or out of time: nothing is fetched, not even robots.txt (the reservation below re-checks under the lock).
@@ -966,8 +996,8 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     const via = hop ? `redirected to ${shownCurrent}: ` : "";
     const hopExtra: Partial<PageResult> = { redirects, provenance: { ...page.provenance, finalUrl: shownCurrent } };
 
-    const listed = linkOnlySite(host, ctx.guard);
-    if (listed) return stop("link_only", `${via}${listed.name} is link-only (${listed.reason})`, host, hopExtra);
+    const listed = linkOnlySite(current, ctx.guard);
+    if (listed) return stop("link_only", `${via}${linkOnlyMessage(listed)}`, host, hopExtra);
     if (hop) {
       const siteStop = await ctx.turn.update((state) => state.hostStops[site] ?? null);
       if (siteStop) return { ...page, ...hopExtra, status: "stopped", code: siteStop.code, message: via + siteStop.message, tell: TELL[siteStop.code], previouslyStopped: true };
@@ -1046,6 +1076,14 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     contentType: response.contentType.split(";")[0]!.trim() || undefined,
     provenance: { ...page.provenance, finalUrl: shownFinal },
   };
+  // An archive's page that says which address it is a copy of (Memento) is checked as that address too, so a short
+  // archive link to a link-only site is not read either.
+  for (const original of response.originals) {
+    const listed = linkOnlySite(original, ctx.guard);
+    if (listed) {
+      return stop("link_only", `the page is a copy of ${redaction.redactUrl(original).text}: ${linkOnlyMessage(listed)}`, host, extra);
+    }
+  }
   if (response.status === 401) return stop("login", "the site asks for a login (HTTP 401)", host, extra);
   if (response.status === 403) return stop("forbidden", "the site refused the read (HTTP 403)", host, extra);
   if (response.status === 429) return stop("rate_limited", "the site asked for fewer requests (HTTP 429)", host, extra);
@@ -1107,13 +1145,8 @@ function present(
     body = full.length > options.maxChars ? `${full.slice(0, options.maxChars)}…` : full;
   }
   const links = record.links.slice(0, options.links).map((link, index) => {
-    let linkOnly = false;
-    try {
-      linkOnly = Boolean(linkOnlySite(new URL(link.href).hostname, guard));
-    } catch {
-      // not a URL after redaction
-    }
-    return { index, text: link.text, href: link.href, ...(linkOnly ? { linkOnly: true as const } : {}) };
+    const listed = Boolean(linkOnlySite(link.href, guard));
+    return { index, text: link.text, href: link.href, ...(listed ? { linkOnly: true as const } : {}) };
   });
   // Structured data is page-written too, so it shares a bound like the text does: whole items while they fit.
   const structured: StructuredItem[] = [];
@@ -1188,11 +1221,9 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
   const scope = turnScope(env);
   const turn = new TurnStore(deps.stateDir ?? defaultStateDir(env), scope, now);
   turn.prune();
-  const guard = loadLinkOnlyGuard(deps.skillRoots ?? defaultSkillRoots(cwd, env));
+  // Loaded before any request, so nothing is fetched without the list.
+  const guard = loadLinkOnlyGuard(deps.skillRoots ?? defaultSkillRoots(cwd, env), "bundledLinkOnly" in deps ? deps.bundledLinkOnly : BUNDLED_LINK_ONLY_SITES);
   const warnings = [...guard.warnings];
-  if (!guard.sites.length) {
-    warnings.push(`No link-only site data was found (a skill's ${LINK_ONLY_FILE}); robots.txt and the stop rules still apply.`);
-  }
   const started = now();
   const hostDeadline = turnDeadline(env);
   const deadline = Math.min(started + LIMITS.callMs, hostDeadline === null ? Infinity : hostDeadline - 5_000);
@@ -1229,7 +1260,7 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
       hosts: state.hosts,
     },
     guards: {
-      linkOnly: { sites: guard.sites.length, sources: guard.sources },
+      linkOnly: { sites: guard.list.sites.length, wrappers: guard.list.wrappers.length, sources: guard.sources },
       robotsAgents: ROBOTS_AGENTS,
       maxRedirects: LIMITS.maxRedirects,
     },
@@ -1299,7 +1330,9 @@ export async function runWebReadCli(
   } catch (error) {
     const usage = error instanceof WebReadUsageError;
     const code = usage ? WEB_READ_EXIT_USAGE : WEB_READ_EXIT_INTERNAL;
-    const message = usage ? error.message : `web read failed, nothing was read: ${error instanceof Error ? error.message : String(error)}`;
+    const message = usage || error instanceof LinkOnlyListUnavailableError
+      ? (error as Error).message
+      : `web read failed, nothing was read: ${error instanceof Error ? error.message : String(error)}`;
     if (opts.json) io.out(JSON.stringify({ ok: false, exitCode: code, error: message }));
     else io.err(message);
     return code;

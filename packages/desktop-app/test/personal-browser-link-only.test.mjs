@@ -19,18 +19,23 @@ const SKILL_LIST = path.join(
   "../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json",
 );
 const source = JSON.parse(fs.readFileSync(SKILL_LIST, "utf8"));
+// The matching cases every reader runs through its own guard (`instafy web read`, the Shared Browser and this one).
+const CASES = JSON.parse(fs.readFileSync(path.join(packageRoot, "../browser-action-policy/test/link-only-cases.json"), "utf8"));
 
 test("the bundled link-only list is the web-research skill's own file, in every Desktop bundle that enforces it", () => {
   assert.deepEqual(linkOnly.BUNDLED_LINK_ONLY_SITES, source, "dist/personalBrowserLinkOnly.js was built from another copy");
   assert.equal(linkOnly.PERSONAL_BROWSER_LINK_ONLY_GUARD.available, true);
   // The main process bundle (the Personal Browser host) carries the same list.
   const main = fs.readFileSync(path.join(packageRoot, "dist/main.js"), "utf8");
-  for (const site of source.sites) {
+  assert.ok(source.wrappers.length > 0, "the skill's list names its wrappers");
+  for (const site of [...source.sites, ...source.wrappers]) {
     assert.ok(main.includes(JSON.stringify(site.name)), `dist/main.js lacks ${site.name}`);
     for (const pattern of site.match) {
       assert.ok(main.includes(JSON.stringify(pattern)), `dist/main.js lacks ${pattern}`);
     }
   }
+  // The matcher is the shared one, bundled into the main process too.
+  assert.match(main, /__instafyLinkOnly/);
   // Single source: Desktop keeps no copy of its own.
   const copies = fs.readdirSync(path.join(packageRoot, "src")).filter((name) => name.endsWith(".json"));
   assert.deepEqual(copies, []);
@@ -62,6 +67,25 @@ test("example.* covers one or two short suffix labels; example.com covers its su
   for (const url of ["https://maps.example.org/", "https://notmaps.example/"]) assert.equal(site(url), null, url);
   // Only web pages are ever refused.
   for (const url of ["about:blank", "data:text/html,shop.de", "not a url"]) assert.equal(guard.refusal(url), null, url);
+});
+
+test("every case in the readers' shared table is refused or let through, wrappers' copies and host spellings included", () => {
+  const guard = linkOnly.PERSONAL_BROWSER_LINK_ONLY_GUARD;
+  for (const kase of CASES.bundled) {
+    const refusal = guard.refusal(kase.url);
+    const expected = kase.site === null
+      ? null
+      : kase.via ? { code: "link_only_site", site: kase.site, via: kase.via } : { code: "link_only_site", site: kase.site };
+    assert.deepEqual(refusal === null ? null : { ...refusal }, expected, kase.url);
+  }
+});
+
+test("a wrapper's copy is named with the wrapper in what the agent is told", () => {
+  const refusal = linkOnly.PERSONAL_BROWSER_LINK_ONLY_GUARD.refusal("https://web.archive.org/web/2024/https://www.booking.com/hotel/x.html");
+  const message = linkOnly.personalBrowserLinkOnlyMessage(refusal, "Nothing was opened.");
+  assert.match(message, /^Booking\.com is link-only/);
+  assert.match(message, /This address is its copy on the Wayback Machine\./);
+  assert.match(message, /Send page to Octo/);
 });
 
 test("a missing, unknown or empty list fails closed for every web page", () => {

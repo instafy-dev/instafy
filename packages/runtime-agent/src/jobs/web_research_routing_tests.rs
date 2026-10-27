@@ -245,6 +245,83 @@ fn the_link_only_list_is_well_formed_data() {
     ] {
         assert!(seen.contains(expected), "{expected}");
     }
+
+    // Wrappers: services that serve other sites' pages at their own address. Each says where its address writes the
+    // site, in the words every reader's matcher knows.
+    let wrappers = parsed["wrappers"].as_array().expect("wrappers");
+    let mut wrapped = HashSet::new();
+    for wrapper in wrappers {
+        let object = wrapper.as_object().expect("wrapper object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["embeds", "match", "name", "why"], "{wrapper}");
+        assert!(
+            wrapper["name"]
+                .as_str()
+                .is_some_and(|name| !name.trim().is_empty())
+        );
+        let embeds = wrapper["embeds"].as_array().expect("embeds");
+        assert!(!embeds.is_empty(), "{wrapper}");
+        for embed in embeds {
+            assert!(
+                ["subdomain", "subdomain-dashes", "path", "query"]
+                    .contains(&embed.as_str().unwrap_or("")),
+                "{wrapper}: {embed}"
+            );
+        }
+        for pattern in wrapper["match"].as_array().expect("match list") {
+            let pattern = pattern.as_str().expect("pattern");
+            assert!(
+                pattern.split('.').count() >= 2
+                    && pattern.split('.').all(|label| !label.is_empty()
+                        && label
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')),
+                "{pattern}: a lowercase host"
+            );
+            assert!(
+                !seen.contains(pattern),
+                "{pattern} is both a site and a wrapper"
+            );
+            assert!(
+                wrapped.insert(pattern.to_string()),
+                "{pattern} listed twice"
+            );
+        }
+    }
+    for expected in [
+        "translate.goog",
+        "cdn.ampproject.org",
+        "webcache.googleusercontent.com",
+        "archive.org",
+        "archive.ph",
+        "archive.is",
+        "archive.today",
+    ] {
+        assert!(wrapped.contains(expected), "{expected}");
+    }
+}
+
+/// A space whose copy of the list is the earlier bundled one gets the current list (with its wrappers); a copy the
+/// space edited is kept, since readers enforce the bundled list plus what that copy adds.
+#[test]
+fn an_unedited_earlier_link_only_list_is_upgraded_and_an_edited_one_kept() {
+    let previous = include_str!("legacy/web-research-link-only-v1.json");
+    assert!(!previous.contains("\"wrappers\""));
+    let tmp = scaffolded_space();
+    let sites = tmp.path().join(learn::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH);
+    fs::write(&sites, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&sites).unwrap(), LINK_ONLY);
+
+    let edited = previous.replace(
+        "\"sites\": [",
+        "\"sites\": [\n    { \"name\": \"Example Shop\", \"match\": [\"shop.example\"], \"why\": \"terms bar AI agents\" },",
+    );
+    assert_ne!(edited, previous);
+    fs::write(&sites, &edited).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&sites).unwrap(), edited);
 }
 
 /// The part of the browser skill a snapshot carries (the first `PROJECT_MEMORY_MAX_FILE_BYTES`) says how

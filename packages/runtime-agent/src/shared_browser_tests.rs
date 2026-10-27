@@ -427,7 +427,10 @@ const makePage = (targetId, opened = null) => {
         pauseDocument("child-frame", "https://www.google.com/maps/embed?pb=fixture");
       }
       if (mode === "redirects-to-link-only") {
-        pauseDocument("main", "https://www.booking.com/hotel/fixture.html");
+        pauseDocument(
+          "main",
+          process.env.INSTAFY_SHARED_BROWSER_FAKE_REDIRECT_URL || "https://www.booking.com/hotel/fixture.html",
+        );
       }
       if (mode === "click-error-canary") {
         throw new Error(`element <button data-key="${CANARY}"> is not attached to the DOM`);
@@ -656,6 +659,7 @@ struct EmbeddedControllerFixture {
     front_tab: PathBuf,
     open_windows: PathBuf,
     fetch_log: PathBuf,
+    space_link_only: PathBuf,
     owner_id: Uuid,
     run_id: Uuid,
     initiator_user_id: Uuid,
@@ -690,6 +694,8 @@ impl EmbeddedControllerFixture {
         let front_tab = tempdir.path().join("front-tab");
         let open_windows = tempdir.path().join("open-windows.json");
         let fetch_log = tempdir.path().join("fetch-answers.jsonl");
+        // Where the space keeps its copy of the link-only list; absent unless a test writes it.
+        let space_link_only = hostile_cwd.join(crate::jobs::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH);
         std::fs::create_dir_all(&approval_dir).expect("approval fixture directory");
 
         Self {
@@ -709,6 +715,7 @@ impl EmbeddedControllerFixture {
             front_tab,
             open_windows,
             fetch_log,
+            space_link_only,
             owner_id: Uuid::new_v4(),
             run_id: Uuid::new_v4(),
             initiator_user_id: Uuid::new_v4(),
@@ -809,6 +816,7 @@ impl EmbeddedControllerFixture {
             .env("INSTAFY_SHARED_BROWSER_FAKE_FRONT", &self.front_tab)
             .env("INSTAFY_SHARED_BROWSER_FAKE_WINDOWS", &self.open_windows)
             .env("INSTAFY_SHARED_BROWSER_FAKE_FETCH_LOG", &self.fetch_log)
+            .env(SPACE_LINK_ONLY_FILE_ENV, &self.space_link_only)
             .env("HOSTILE_MARKER", &self.hostile_marker);
         if let Some(body) = body {
             command.arg(body);
@@ -6625,4 +6633,233 @@ fn a_link_only_site_is_refused_however_its_address_writes_the_host() {
         }
     }
     assert!(fixture.browser_tabs().is_empty());
+}
+
+// The link-only list on every route Octo uses: the readers' shared table of
+// cases (wrappers, host spelling), and the sites a space's own copy adds.
+
+const LINK_ONLY_CASES: &str = include_str!("../../browser-action-policy/test/link-only-cases.json");
+
+impl EmbeddedControllerFixture {
+    /// A step of Octo's whose document is redirected to `url`: the step's
+    /// guard decides before the request leaves the browser.
+    fn click_redirected_to(&self, url: &str) -> Output {
+        let snapshot_id = self.snapshot_id_in("redirects-to-link-only");
+        let mut command = self.command_for(
+            "redirects-to-link-only",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&json!({ "index": 0, "snapshotId": snapshot_id }).to_string()),
+        );
+        command
+            .0
+            .env("INSTAFY_SHARED_BROWSER_FAKE_REDIRECT_URL", url);
+        command.output().expect("run the redirected click")
+    }
+
+    fn write_space_link_only(&self, content: &str) {
+        std::fs::create_dir_all(self.space_link_only.parent().expect("space copy folder"))
+            .expect("space copy folder");
+        std::fs::write(&self.space_link_only, content).expect("write the space's copy");
+    }
+}
+
+fn check_link_only_case(fixture: &EmbeddedControllerFixture, case: &JsonValue) {
+    let url = case["url"].as_str().expect("case url");
+    std::fs::remove_file(&fixture.fetch_log).ok();
+    let output = fixture.click_redirected_to(url);
+    match case["site"].as_str() {
+        Some(site) => {
+            let refused = failure_of(&output);
+            let via: Vec<&str> = case["via"]
+                .as_array()
+                .map(|via| via.iter().filter_map(JsonValue::as_str).collect())
+                .unwrap_or_default();
+            let named = if via.is_empty() {
+                site.to_string()
+            } else {
+                format!("{site} (its copy on {})", via.join(", then "))
+            };
+            assert!(
+                refused.contains(&format!(
+                    "led to {named}, which is link-only, so it was not opened"
+                )),
+                "{url}: {refused}"
+            );
+            assert_eq!(
+                fixture.fetch_answers(),
+                vec![("Fetch.failRequest".to_string(), "request-main".to_string())],
+                "{url}"
+            );
+        }
+        None => {
+            assert!(
+                output.status.success(),
+                "{url}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                fixture.fetch_answers(),
+                vec![(
+                    "Fetch.continueRequest".to_string(),
+                    "request-main".to_string()
+                )],
+                "{url}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redirect_hop() {
+    let cases: JsonValue = serde_json::from_str(LINK_ONLY_CASES).expect("cases JSON");
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    for case in cases["bundled"].as_array().expect("bundled cases") {
+        check_link_only_case(&fixture, case);
+    }
+    // With the space's copy, its additions hold too, and the bundled list
+    // still does.
+    fixture.write_space_link_only(&cases["spaceCopy"]["list"].to_string());
+    for case in cases["spaceCopy"]["cases"]
+        .as_array()
+        .expect("space cases")
+        .iter()
+        .chain(cases["bundled"].as_array().expect("bundled cases"))
+    {
+        check_link_only_case(&fixture, case);
+    }
+}
+
+#[test]
+fn octo_never_opens_a_translator_cache_or_archive_copy_of_a_link_only_site() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    for (path, url, named) in [
+        (
+            "/v1/tabs/open",
+            "https://www-booking-com.translate.goog/hotel?_x_tr_sl=auto",
+            "Booking.com (its copy on Google Translate's page proxy)",
+        ),
+        (
+            "/v1/navigate",
+            "https://web.archive.org/web/2024/https://www.amazon.de/dp/1",
+            "Amazon (its copy on the Wayback Machine)",
+        ),
+        (
+            "/v1/navigate",
+            "https://archive.ph/newest/https://www.airbnb.com/rooms/1",
+            "Airbnb (its copy on archive.today)",
+        ),
+    ] {
+        let error = failure_of(&fixture.call(
+            "safe",
+            "POST",
+            path,
+            Some(&json!({ "url": url }).to_string()),
+        ));
+        assert!(
+            error.contains(&format!("{named} is link-only: Octo never opens it")),
+            "{url}: {error}"
+        );
+    }
+    assert!(fixture.browser_tabs().is_empty());
+    // A wrapper's copy of another site, and the wrapper itself, are not
+    // link-only.
+    for url in [
+        "https://web.archive.org/web/2024/https://example.test/report",
+        "https://www-example-test.translate.goog/report",
+    ] {
+        let opened = fixture.open_tab(url);
+        assert!(opened.to_string().contains("tabId"), "{url}: {opened}");
+    }
+}
+
+#[test]
+fn the_spaces_copy_of_the_list_adds_sites_and_never_removes_a_bundled_one() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let navigate = |url: &str| {
+        fixture.call(
+            "safe",
+            "POST",
+            "/v1/navigate",
+            Some(&json!({ "url": url }).to_string()),
+        )
+    };
+    // Without a copy, a site only a space lists is opened.
+    payload_of(&navigate("https://www.shop.example/item"));
+
+    // The space's copy adds a site and a wrapper; a copy without Booking.com
+    // does not unlist it.
+    fixture.write_space_link_only(
+        &json!({
+            "schema": "instafy.link-only-sites@1",
+            "sites": [{ "name": "Example Shop", "match": ["shop.example"], "why": "terms bar AI agents" }],
+            "wrappers": [{ "name": "Example proxy", "match": ["proxy.example"], "embeds": ["subdomain"] }],
+        })
+        .to_string(),
+    );
+    for (url, named) in [
+        ("https://www.shop.example/item", "Example Shop"),
+        (
+            "https://www.booking.com.proxy.example/",
+            "Booking.com (its copy on Example proxy)",
+        ),
+        ("https://www.booking.com/hotel/fixture.html", "Booking.com"),
+    ] {
+        let error = failure_of(&navigate(url));
+        assert!(
+            error.contains(&format!("{named} is link-only: Octo never opens it")),
+            "{url}: {error}"
+        );
+    }
+    let status = payload_of(&fixture.call("safe", "GET", "/v1/status", None));
+    assert!(status.get("linkOnlyListWarnings").is_none(), "{status}");
+
+    // A copy that is not a list, or not a plain file, is left out with a
+    // warning, and the bundled list still applies.
+    let outside = fixture.hostile_cwd.join("elsewhere.json");
+    std::fs::write(
+        &outside,
+        r#"{"schema":"instafy.link-only-sites@1","sites":[{"name":"Linked","match":["linked.example"]}]}"#,
+    )
+    .expect("a file elsewhere");
+    for (copy, why) in [
+        ("{ not json", "is not valid JSON"),
+        (
+            r#"{"schema":"instafy.link-only-sites@2","sites":[]}"#,
+            "schema is not instafy.link-only-sites@1",
+        ),
+        ("link", "could not be read"),
+    ] {
+        std::fs::remove_file(&fixture.space_link_only).ok();
+        if copy == "link" {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&outside, &fixture.space_link_only).expect("link the copy");
+            #[cfg(not(unix))]
+            continue;
+        } else {
+            fixture.write_space_link_only(copy);
+        }
+        let error = failure_of(&navigate("https://www.booking.com/hotel/fixture.html"));
+        assert!(
+            error.contains("Booking.com is link-only"),
+            "{copy}: {error}"
+        );
+        payload_of(&navigate("https://www.shop.example/item"));
+        payload_of(&navigate("https://linked.example/"));
+        let status = payload_of(&fixture.call("safe", "GET", "/v1/status", None));
+        let warnings = status["linkOnlyListWarnings"].to_string();
+        assert!(warnings.contains(why), "{copy}: {status}");
+        assert!(
+            warnings.contains("the bundled list still applies"),
+            "{copy}: {status}"
+        );
+        assert!(
+            !warnings.contains("not json"),
+            "the copy's text is not repeated: {status}"
+        );
+    }
 }

@@ -1,0 +1,74 @@
+{
+  "about": "One table of link-only matching cases that every reader runs through its own guard: `instafy web read` (packages/instafy-cli/test/web-read.spec.ts), the Shared Browser controller (packages/runtime-agent/src/shared_browser_tests.rs) and the Personal Browser (packages/desktop-app/test/personal-browser-link-only.test.mjs). `bundled` runs against the web-research skill's own list; `spaceCopy` runs against that list plus `spaceCopy.list` as a space's additions, where the reader can see the space. `site` is the link-only site the address is on, or null; `via` names the wrappers it was found through.",
+  "bundled": [
+    { "url": "https://www.booking.com/hotel/x.html", "site": "Booking.com" },
+    { "url": "HTTPS://WWW.BOOKING.COM/hotel/x.html", "site": "Booking.com" },
+    { "url": "https://www.booking.com./hotel", "site": "Booking.com" },
+    { "url": "https://www.booking.com...:443/hotel", "site": "Booking.com" },
+    { "url": "https://secure.booking.com:8443/x", "site": "Booking.com" },
+    { "url": "https://user:secret@www.booking.com/x", "site": "Booking.com" },
+    { "url": "https://www.booking.com@example.org/x", "site": null },
+    { "url": "https://booking%2ecom/x", "site": "Booking.com" },
+    { "url": "https://ｂｏｏｋｉｎｇ.com/x", "site": "Booking.com" },
+    { "url": "https://booking。com/x", "site": "Booking.com" },
+    { "url": "https://notbooking.com/", "site": null },
+    { "url": "https://booking.com.example.org/", "site": null },
+    { "url": "https://www.amazon.co.uk/dp/1", "site": "Amazon" },
+    { "url": "https://smile.amazon.de./x", "site": "Amazon" },
+    { "url": "https://a.co/d/1", "site": "Amazon" },
+    { "url": "https://amazon.example.io/", "site": null },
+    { "url": "https://myamazon.de/", "site": null },
+    { "url": "http://93.184.216.34/", "site": null },
+    { "url": "http://[2606:2800:220:1:248:1893:25c8:1946]/", "site": null },
+    { "url": "https://xn--mnchen-3ya.example/", "site": null },
+    { "url": "https://www.google.com/search?q=x", "site": "Google search, Maps, Travel and Hotels" },
+    { "url": "https://example.org/?u=https://www.booking.com/", "site": null },
+
+    { "url": "https://www-booking-com.translate.goog/hotel?_x_tr_sl=auto&_x_tr_tl=en", "site": "Booking.com", "via": ["Google Translate's page proxy"] },
+    { "url": "https://WWW-BOOKING-COM.TRANSLATE.GOOG./hotel", "site": "Booking.com", "via": ["Google Translate's page proxy"] },
+    { "url": "https://www-example-com.translate.goog/", "site": null },
+    { "url": "https://my--shop-example.translate.goog/", "site": null },
+    { "url": "https://translate.goog/", "site": null },
+    { "url": "https://www-amazon-co-uk.cdn.ampproject.org/c/s/www.amazon.co.uk/dp/1", "site": "Amazon", "via": ["the AMP cache"] },
+    { "url": "https://example-org.cdn.ampproject.org/c/s/example.org/", "site": null },
+    { "url": "https://web.archive.org/web/20240101000000/https://www.booking.com/hotel/x.html", "site": "Booking.com", "via": ["the Wayback Machine"] },
+    { "url": "https://web.archive.org/web/2024*/booking.com*", "site": "Booking.com", "via": ["the Wayback Machine"] },
+    { "url": "https://web.archive.org/web/20240101000000id_/https%3A%2F%2Fwww.airbnb.co.uk%2Frooms%2F1", "site": "Airbnb", "via": ["the Wayback Machine"] },
+    { "url": "https://web.archive.org/web/20240101000000/https://example.org/", "site": null },
+    { "url": "https://archive.org/wayback/available?url=tripadvisor.com", "site": "Tripadvisor", "via": ["the Wayback Machine"] },
+    { "url": "https://archive.org/details/booking.com-sitemap", "site": null },
+    { "url": "https://archive.ph/2024.01.01-000000/https://www.tripadvisor.co.uk/x", "site": "Tripadvisor", "via": ["archive.today"] },
+    { "url": "https://archive.is/newest/https://www.nike.com/t/x", "site": "Nike", "via": ["archive.today"] },
+    { "url": "https://archive.today/o/AbCdE/https://www.expedia.de/", "site": "Expedia group", "via": ["archive.today"] },
+    { "url": "https://archive.ph/AbCdE", "site": null },
+    { "url": "https://webcache.googleusercontent.com/search?q=cache:www.booking.com/hotel/x.html", "site": "Booking.com", "via": ["Google's page cache"] },
+    { "url": "https://webcache.googleusercontent.com/search?q=cache:abc123:https://www.vrbo.com/1", "site": "Expedia group", "via": ["Google's page cache"] },
+    { "url": "https://r.jina.ai/https://www.agoda.com/x", "site": "Agoda", "via": ["the Jina reader proxy"] },
+    { "url": "https://web.archive.org/web/2024/https://www-booking-com.translate.goog/", "site": "Booking.com", "via": ["the Wayback Machine", "Google Translate's page proxy"] },
+    { "url": "https://archive.ph/newest/https://web.archive.org/web/2024/https%253A%252F%252Fwww.booking.com%252F", "site": "Booking.com", "via": ["archive.today"] }
+  ],
+  "spaceCopy": {
+    "list": {
+      "schema": "instafy.link-only-sites@1",
+      "about": "A space's additions, as a space would write them into its copy of the list.",
+      "sites": [
+        { "name": "Example Shop", "match": ["shop.example", "bücher.example"], "why": "terms bar AI agents" }
+      ],
+      "wrappers": [
+        { "name": "Example proxy", "match": ["proxy.example"], "embeds": ["subdomain"], "why": "serves sites at <host>.proxy.example" }
+      ]
+    },
+    "cases": [
+      { "url": "https://www.shop.example/item", "site": "Example Shop" },
+      { "url": "https://xn--bcher-kva.example/", "site": "Example Shop" },
+      { "url": "https://BÜCHER.example./", "site": "Example Shop" },
+      { "url": "https://shop.example.proxy.example/", "site": "Example Shop", "via": ["Example proxy"] },
+      { "url": "https://www.booking.com.proxy.example/", "site": "Booking.com", "via": ["Example proxy"] },
+      { "url": "https://web.archive.org/web/2024/https://shop.example/", "site": "Example Shop", "via": ["the Wayback Machine"] },
+      { "url": "https://xn--www-bcher-example-62b.cdn.ampproject.org/", "site": "Example Shop", "via": ["the AMP cache"] },
+      { "url": "https://other.example.proxy.example/", "site": null },
+      { "url": "https://proxy.example/", "site": null },
+      { "url": "https://www.booking.com/hotel/x.html", "site": "Booking.com" }
+    ]
+  }
+}

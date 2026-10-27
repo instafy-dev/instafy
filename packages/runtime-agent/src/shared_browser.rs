@@ -40,6 +40,10 @@ pub const PAGE_ID_ENV: &str = "INSTAFY_SHARED_BROWSER_PAGE_ID";
 pub const AGENT_CONTROL_FILE_ENV: &str = "INSTAFY_BROWSER_AGENT_CONTROL_FILE";
 pub const APPROVAL_DIR_ENV: &str = "INSTAFY_SHARED_BROWSER_APPROVAL_DIR";
 pub const APPROVAL_TIMEOUT_MS_ENV: &str = "INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS";
+/// The space's own copy of the web-research skill's link-only list. The
+/// controller enforces the sites and wrappers it adds on top of the bundled
+/// list; it can never remove one.
+pub const SPACE_LINK_ONLY_FILE_ENV: &str = "INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE";
 pub const MCP_COMMAND: &str = "shared-browser-mcp";
 pub(crate) const DEFAULT_ACTIONS_FILE: &str = "/tmp/instafy/playwright/actions.jsonl";
 const DEFAULT_AGENT_CONTROL_FILE: &str = "/run/instafy/browser/agent-control.json";
@@ -58,10 +62,13 @@ const BROWSER_ACTION_POLICY_SCRIPT: &str =
 const BROWSER_PAGE_CAPTURE_SCRIPT: &str =
     include_str!("../../browser-action-policy/pageCapture.js");
 // The sites the web-research skill keeps link-only. Octo never opens them in
-// its own tabs; the controller enforces the skill's list, it does not own it.
+// any tab; the controller enforces the skill's list, it does not own it. The
+// matching (wrappers, host spelling) is the package's linkOnly.js, which
+// `instafy web read` and the Desktop Personal Browser use too.
 const LINK_ONLY_SITES_DATA: &str = include_str!(
     "../assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
 );
+const BROWSER_LINK_ONLY_SCRIPT: &str = include_str!("../../browser-action-policy/linkOnly.js");
 
 const DEFAULT_SHARED_BROWSER_NODE_BINARY: &str = "/usr/bin/node";
 /// The Node binaries the Shared Browser controller may run with: the image's
@@ -2370,10 +2377,11 @@ fn controller_failure(status: std::process::ExitStatus, stderr: &[u8]) -> anyhow
 
 fn embedded_shared_browser_script() -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
+        "{}\n{}\n{}\n{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
         embedded_plain_script(BROWSER_REDACTION_SCRIPT),
         embedded_plain_script(BROWSER_ACTION_POLICY_SCRIPT),
         embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
+        embedded_plain_script(BROWSER_LINK_ONLY_SCRIPT),
         embedded_link_only_sites(),
     )
 }
