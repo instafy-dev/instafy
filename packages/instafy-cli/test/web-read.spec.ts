@@ -25,6 +25,7 @@ import {
   formatWebRead,
   linkOnlySite,
   loadLinkOnlyGuard,
+  mementoOriginals,
   registerWebCommand,
   runWebReadCli,
   turnScope,
@@ -533,6 +534,16 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
     expect(result.message).toMatch(/robots\.txt for http:\/\/news\.example\.org redirects to Booking\.com, which is link-only/);
     expect(hits).toEqual(["news.example.org/robots.txt"]);
     expect(resolved).not.toContain("www.booking.com");
+  });
+
+  it("reads a hostile Memento header in linear time", () => {
+    const base = new URL("https://archive.ph/AbCdE");
+    for (const link of ["<" + "<=".repeat(100_000), "<".repeat(200_000)]) {
+      const started = performance.now();
+      expect(mementoOriginals(link, base)).toEqual([]);
+      expect(performance.now() - started, `${link.length} characters`).toBeLessThan(1_000);
+    }
+    expect(mementoOriginals(`<${"<=".repeat(1_000)}, <https://www.booking.com/>; rel="original"`, base)).toEqual(["https://www.booking.com/"]);
   });
 
   it("withholds a page that says it is a copy of a link-only site (Memento rel=original)", async () => {

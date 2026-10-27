@@ -82,6 +82,20 @@ test("every case in the readers' shared table is refused or let through, wrapper
   }
 });
 
+test("an answer's Memento header is read in linear time, however a hostile server writes it", () => {
+  const guard = linkOnly.PERSONAL_BROWSER_LINK_ONLY_GUARD;
+  // A Link header of unclosed "<" runs: a backtracking pattern takes minutes on it, in Desktop's main process.
+  for (const link of ["<" + "<=".repeat(100_000), "<x>" + ";rel=".repeat(50_000), "<".repeat(200_000)]) {
+    const started = process.hrtime.bigint();
+    assert.equal(guard.copyRefusal({ Link: [link] }, "https://archive.ph/AbCdE"), null);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 1_000, `${ms} ms for a ${link.length}-character header`);
+  }
+  // The original after such a run still counts.
+  const tail = "<" + "<=".repeat(1_000) + ', <https://www.booking.com/>; rel="original"';
+  assert.deepEqual({ ...guard.copyRefusal({ link: tail }, "https://archive.ph/AbCdE") }, { code: "link_only_site", site: "Booking.com", copy: true });
+});
+
 test("a wrapper's copy is named with the wrapper in what the agent is told", () => {
   const refusal = linkOnly.PERSONAL_BROWSER_LINK_ONLY_GUARD.refusal("https://web.archive.org/web/2024/https://www.booking.com/hotel/x.html");
   const message = linkOnly.personalBrowserLinkOnlyMessage(refusal, "Nothing was opened.");

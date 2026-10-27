@@ -564,15 +564,25 @@
     const values = Array.isArray(header) ? header : [header];
     const text = values.filter((value) => typeof value === "string").join(",");
     const originals = new Set();
-    for (const match of text.matchAll(/<([^>]*)>([^<]*)/g)) {
+    // Each "<address>" (an address holds no "<" or ">") and the parameters
+    // after it, up to the next "<", found with indexOf in one pass: a pattern
+    // that backtracks takes minutes on a header of unclosed "<" runs, and the
+    // header is the server's to write.
+    for (let at = text.indexOf("<"); at >= 0; ) {
+      const close = text.indexOf(">", at + 1);
+      if (close < 0) break;
+      const open = text.lastIndexOf("<", close);
+      const next = text.indexOf("<", close + 1);
+      const target = text.slice(open + 1, close).trim();
+      const params = text.slice(close + 1, next < 0 ? text.length : next);
+      at = next;
       // The parameters up to the comma that starts the next link value.
-      const rel = match[2]
+      const rel = params
         .split(";")
         .map((param) => param.trim())
         .find((param) => /^rel\s*=/i.test(param));
       const names = rel ? rel.replace(/^rel\s*=\s*/i, "").replace(/,.*$/s, "").replace(/"/g, "").toLowerCase().split(/\s+/) : [];
       if (!names.includes("original")) continue;
-      const target = match[1].trim();
       try {
         originals.add(new URL(target, base).href);
       } catch (_) {
