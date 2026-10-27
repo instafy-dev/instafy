@@ -59,6 +59,7 @@ import {
 import { CredentialsConnectionChoices } from "./CredentialsConnectionChoices";
 import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
 import { isExpiredCredentialProxyError } from "./proxyError";
+import { canChooseManagedAi, describeManagedAiUnavailable } from "./managedAiAllowance";
 
 const {
   create: createMyAgent,
@@ -443,6 +444,15 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     // move while the connect modal is open.
     isCredentialDefault: (credentialId: string) =>
       Boolean(credentialsById.get(credentialId)?.isDefault),
+    // Adding a connection here never takes the default from Instafy AI while
+    // it can run this person's turns; "Make default" on the new row does.
+    newConnectionDefault: () =>
+      credentialRequirements?.success &&
+      !credentialRequirements.hasDefaultCredential &&
+      credentialRequirements.managedAi?.enabled &&
+      credentialRequirements.managedAi.available
+        ? false
+        : undefined,
   });
 
   useStudioNavigationProtection(connectModalProps.connectModalOpen, "AI connection setup",
@@ -722,7 +732,12 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     credentialRequirements?.success && !credentialRequirements.error);
   const managedAiSelected = showManagedAi && managedAiEnabled &&
     !credentialRequirements?.hasDefaultCredential && !defaultCodexCredential;
-  const canSwitchToManagedAi = showManagedAi && managedAiEnabled && Boolean(defaultCodexCredential);
+  // Why Instafy AI can't run turns now, in plain words; null when it can.
+  const managedAiUnavailable = describeManagedAiUnavailable(managedAi, {
+    hasOwnDefault: Boolean(credentialRequirements?.hasDefaultCredential || defaultCodexCredential),
+  });
+  const canSwitchToManagedAi = showManagedAi && managedAiEnabled && Boolean(defaultCodexCredential) &&
+    canChooseManagedAi(managedAi);
   const managedAiDetail = !managedAiEnabled
     ? "Unavailable on this server."
     : managedAi?.dailyPromptLimit && managedAi.dailyPromptLimit > 0
@@ -1209,7 +1224,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
             : managedAiSelected
             ? managedAi?.available
               ? `Uses ${managedAi?.label?.trim() || "Instafy AI"} by default.`
-              : `Uses ${managedAi?.label?.trim() || "Instafy AI"} by default. It is currently unavailable.`
+              : `Uses ${managedAi?.label?.trim() || "Instafy AI"} by default. ${managedAiUnavailable ?? "It is currently unavailable."}`
             : "No AI connection yet. You can save this profile now and connect AI before chatting."
           : undefined}
         onModelChange={(modelId) => { setAgentModelDraft(modelId); setAgentModelDirty(true); }}
@@ -1311,9 +1326,9 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                       title={managedAi?.label?.trim() || "Instafy AI"}
                       subtitle={managedAiEnabled ? `Built in · ${managedAiDetail}` : managedAiDetail}
                       subtitleClassName="!whitespace-normal"
-                      detail={managedAiEnabled && !managedAi?.available ? (
-                        <Text as="div" variant="caption" tone="muted">
-                          Currently unavailable; use your own connection to continue.
+                      detail={managedAiEnabled && managedAiUnavailable ? (
+                        <Text as="div" variant="caption" tone="muted" data-testid="credentials-managed-ai-unavailable">
+                          {managedAiUnavailable}
                         </Text>
                       ) : null}
                       className="items-start"

@@ -253,6 +253,21 @@ pub(crate) async fn insert_user_credential(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
+    // Whether Instafy AI can run this person's turns decides an unasked
+    // default. Probe the proxy before the transaction so no database
+    // connection waits on it. Without a proxy Instafy AI cannot run at all.
+    let included_ai_proxy = match (make_default, state.config.proxy_base_url.as_ref()) {
+        (None, Some(proxy_base_url)) if state.config.managed_ai_enabled => Some(
+            fetch_proxy_credential_requirements(
+                &state.http_client,
+                proxy_base_url,
+                Duration::from_secs(2),
+            )
+            .await,
+        ),
+        _ => None,
+    };
+
     let mut connection = state
         .pool
         .get()
@@ -271,7 +286,21 @@ pub(crate) async fn insert_user_credential(
         .await
         .map_err(|error| internal_error(format!("failed to check default credential: {error}")))?;
 
-    let should_default = make_default.unwrap_or(default_row.is_none());
+    let included_ai_available = match included_ai_proxy.as_ref() {
+        Some(proxy_requirements) if default_row.is_none() => {
+            let daily_prompts_used = count_recent_managed_ai_prompts(
+                &transaction,
+                Some(user_id),
+                Utc::now() - managed_ai_prompt_window(),
+            )
+            .await?;
+            build_managed_ai_access_response(&state.config, proxy_requirements, daily_prompts_used)
+                .available
+        }
+        _ => false,
+    };
+    let should_default =
+        new_credential_becomes_default(make_default, default_row.is_some(), included_ai_available);
 
     if should_default {
         transaction
@@ -346,11 +375,35 @@ pub(crate) async fn insert_user_credential(
     })
 }
 
+/// Why Instafy AI cannot run a turn for this person right now. Studio shows it
+/// in plain words instead of a bare "unavailable".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ManagedAiUnavailableReason {
+    /// MANAGED_AI_ENABLED is off on this server.
+    Disabled,
+    /// No model proxy is configured (PROXY_BASE_URL is unset).
+    NoProxy,
+    /// The model proxy did not answer its health check.
+    ProxyUnreachable,
+    /// The proxy needs a personal credential for every turn: it has no
+    /// static credentials and this controller has no managed key to lease.
+    ProxyNeedsCredential,
+    /// This person has used today's prompts.
+    DailyLimitReached,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ManagedAiAccessResponse {
     pub(crate) enabled: bool,
+    /// Whether Instafy AI can run this person's next turn. It does not depend
+    /// on which connection is the default: a person whose default is their
+    /// own AI can still switch to an available Instafy AI.
     pub(crate) available: bool,
+    /// Set exactly when `available` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unavailable_reason: Option<ManagedAiUnavailableReason>,
     pub(crate) label: String,
     /// The model managed turns run on (the controller resolves every managed
     /// job to it), so Studio shows that rather than a copy of its own.
@@ -366,6 +419,19 @@ pub(crate) struct ManagedAiAccessResponse {
     /// brings the count back under the limit leaves that window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) next_available_at: Option<DateTime<Utc>>,
+}
+
+/// Whether a newly saved connection becomes the person's default. An explicit
+/// `makeDefault` always wins. Without one, a connection becomes the default
+/// only when there is none and Instafy AI cannot run this person's turns:
+/// while it can, it stays what new spaces use, and the person chooses the
+/// connection with "Make default" (or by connecting with `makeDefault`).
+pub(crate) fn new_credential_becomes_default(
+    make_default: Option<bool>,
+    has_default_credential: bool,
+    included_ai_available: bool,
+) -> bool {
+    make_default.unwrap_or(!has_default_credential && !included_ai_available)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -893,7 +959,6 @@ async fn load_recent_managed_ai_prompt_times(
 pub(crate) fn build_managed_ai_access_response(
     config: &crate::config::AppConfig,
     proxy_requirements: &ProxyCredentialRequirements,
-    has_default_credential: bool,
     daily_prompts_used: i32,
 ) -> ManagedAiAccessResponse {
     let remaining_prompts = if config.managed_ai_daily_prompt_limit > 0 {
@@ -902,15 +967,22 @@ pub(crate) fn build_managed_ai_access_response(
         None
     };
     let within_daily_limit = remaining_prompts.map(|value| value > 0).unwrap_or(true);
-    let available = config.managed_ai_enabled
-        && !has_default_credential
-        && proxy_requirements.error.is_none()
-        && proxy_can_serve_managed_turns(config, proxy_requirements)
-        && within_daily_limit;
+    let unavailable_reason = if !config.managed_ai_enabled {
+        Some(ManagedAiUnavailableReason::Disabled)
+    } else if proxy_requirements.error.is_some() {
+        Some(ManagedAiUnavailableReason::ProxyUnreachable)
+    } else if !proxy_can_serve_managed_turns(config, proxy_requirements) {
+        Some(ManagedAiUnavailableReason::ProxyNeedsCredential)
+    } else if !within_daily_limit {
+        Some(ManagedAiUnavailableReason::DailyLimitReached)
+    } else {
+        None
+    };
 
     ManagedAiAccessResponse {
         enabled: config.managed_ai_enabled,
-        available,
+        available: unavailable_reason.is_none(),
+        unavailable_reason,
         label: config.managed_ai_label.clone(),
         model_id: config.managed_ai_model_id.clone(),
         model_label: config.managed_ai_model_label.clone(),
@@ -947,6 +1019,11 @@ async fn get_my_credential_requirements(
         let managed_ai = ManagedAiAccessResponse {
             enabled: state.config.managed_ai_enabled,
             available: false,
+            unavailable_reason: Some(if state.config.managed_ai_enabled {
+                ManagedAiUnavailableReason::NoProxy
+            } else {
+                ManagedAiUnavailableReason::Disabled
+            }),
             label: state.config.managed_ai_label.clone(),
             model_id: state.config.managed_ai_model_id.clone(),
             model_label: state.config.managed_ai_model_label.clone(),
@@ -992,12 +1069,8 @@ async fn get_my_credential_requirements(
     let window_start = Utc::now() - window;
     let daily_prompts_used =
         count_recent_managed_ai_prompts(&transaction, Some(user_id), window_start).await?;
-    let mut managed_ai = build_managed_ai_access_response(
-        &state.config,
-        &proxy_requirements,
-        has_default_credential,
-        daily_prompts_used,
-    );
+    let mut managed_ai =
+        build_managed_ai_access_response(&state.config, &proxy_requirements, daily_prompts_used);
     if managed_ai.enabled && managed_ai.remaining_prompts == Some(0) {
         let counted_prompt_times =
             load_recent_managed_ai_prompt_times(&transaction, user_id, window_start).await?;
@@ -3863,7 +3936,6 @@ mod requirement_tests {
                 platform_lane: None,
                 error: None,
             },
-            false,
             3,
         );
 
@@ -3889,6 +3961,75 @@ mod requirement_tests {
     }
 
     #[test]
+    fn managed_ai_availability_does_not_depend_on_the_default_connection() {
+        // A person whose default is their own AI saw "20 of 20 prompts left
+        // today. Currently unavailable": availability folded in the default.
+        // It now only says whether Instafy AI can run their turn, and why not.
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "test-key-id",
+        );
+        let serving_proxy = ProxyCredentialRequirements {
+            requires_user_credentials: false,
+            proxy_backend: "codex".to_string(),
+            platform_lane: None,
+            error: None,
+        };
+        let managed_ai = build_managed_ai_access_response(&config, &serving_proxy, 0);
+        assert!(managed_ai.available);
+        assert_eq!(managed_ai.unavailable_reason, None);
+        let wire = serde_json::to_value(&managed_ai).expect("json");
+        assert!(wire.get("unavailableReason").is_none(), "{wire}");
+
+        let reason =
+            |config: &crate::config::AppConfig, proxy: &ProxyCredentialRequirements, used: i32| {
+                let managed_ai = build_managed_ai_access_response(config, proxy, used);
+                assert_eq!(
+                    managed_ai.available,
+                    managed_ai.unavailable_reason.is_none()
+                );
+                serde_json::to_value(&managed_ai).expect("json")["unavailableReason"].clone()
+            };
+        assert_eq!(
+            reason(&config, &serving_proxy, 20),
+            json!("daily_limit_reached")
+        );
+        let unreachable = ProxyCredentialRequirements {
+            error: Some("proxy request timed out".to_string()),
+            ..serving_proxy.clone()
+        };
+        assert_eq!(reason(&config, &unreachable, 0), json!("proxy_unreachable"));
+        let needs_credential = ProxyCredentialRequirements {
+            requires_user_credentials: true,
+            proxy_backend: "remote_dynamic".to_string(),
+            ..serving_proxy.clone()
+        };
+        assert_eq!(
+            reason(&config, &needs_credential, 0),
+            json!("proxy_needs_credential")
+        );
+        config.managed_ai_enabled = false;
+        assert_eq!(reason(&config, &serving_proxy, 0), json!("disabled"));
+    }
+
+    #[test]
+    fn a_new_connection_becomes_the_default_only_when_asked_or_nothing_else_runs() {
+        use super::new_credential_becomes_default as becomes_default;
+        // Instafy AI can run this person's turns: it stays the default.
+        assert!(!becomes_default(None, false, true));
+        // Nothing else can run them: the connection becomes the default.
+        assert!(becomes_default(None, false, false));
+        // An existing default is kept.
+        assert!(!becomes_default(None, true, false));
+        assert!(!becomes_default(None, true, true));
+        // An explicit choice always wins.
+        assert!(becomes_default(Some(true), false, true));
+        assert!(becomes_default(Some(true), true, false));
+        assert!(!becomes_default(Some(false), false, false));
+    }
+
+    #[test]
     fn managed_ai_becomes_unavailable_after_daily_limit() {
         let config = build_app_config(
             test_origin_private_key(),
@@ -3903,7 +4044,6 @@ mod requirement_tests {
                 platform_lane: None,
                 error: None,
             },
-            false,
             20,
         );
 
@@ -3957,7 +4097,6 @@ mod requirement_tests {
                 platform_lane: None,
                 error: None,
             },
-            false,
             20,
         );
 
@@ -4126,11 +4265,11 @@ mod requirement_tests {
 
         // Unset key: byte-for-byte today's behaviour, the dynamic proxy cannot
         // serve the managed lane.
-        let managed_ai = build_managed_ai_access_response(&config, &dynamic_proxy, false, 0);
+        let managed_ai = build_managed_ai_access_response(&config, &dynamic_proxy, 0);
         assert!(!managed_ai.available);
 
         config.managed_ai_openai_api_key = Some("sk-managed".to_string());
-        let managed_ai = build_managed_ai_access_response(&config, &dynamic_proxy, false, 0);
+        let managed_ai = build_managed_ai_access_response(&config, &dynamic_proxy, 0);
         assert!(managed_ai.available);
 
         // A probe error still fails closed, key or not.
@@ -4140,7 +4279,7 @@ mod requirement_tests {
             platform_lane: None,
             error: Some("connection refused".to_string()),
         };
-        let managed_ai = build_managed_ai_access_response(&config, &failing_proxy, false, 0);
+        let managed_ai = build_managed_ai_access_response(&config, &failing_proxy, 0);
         assert!(!managed_ai.available);
     }
 
@@ -4198,3 +4337,7 @@ pub(crate) mod reserved_id_tests;
 #[cfg(test)]
 #[path = "credentials_managed_ai_allowance_tests.rs"]
 mod managed_ai_allowance_tests;
+
+#[cfg(test)]
+#[path = "credentials_default_choice_tests.rs"]
+mod default_choice_tests;

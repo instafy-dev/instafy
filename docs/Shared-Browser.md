@@ -1856,9 +1856,10 @@ An opt-in local agent-turn proof may connect the machine's existing `~/.codex/au
 visible Desktop credential flow. Electron main keeps only the supported ChatGPT subscription fields,
 removes API-key and unknown fields, and sends the sanitized credential directly to the configured
 controller. Renderer and preload code receive only availability and created-credential metadata,
-never the path or contents. Disable traces, video, and automatic screenshots before exercising this
-flow, use disposable local accounts and projects, and verify that the turn is recorded as BYOC with
-no managed-credit debit. Hosted canary accounts and orchestration are deployment-private.
+never the path or contents. Connecting from the Your AI panel keeps an available Instafy AI the
+default, so the proof then presses Make default on the new connection before its turn. Disable
+traces, video, and automatic screenshots before exercising this flow, use disposable local accounts
+and projects, and verify that the turn is recorded as BYOC with no managed-credit debit. Hosted canary accounts and orchestration are deployment-private.
 
 The runtime entrypoint gives a newly launched headed Chromium up to 30 seconds to answer on its CDP
 port, and stops waiting as soon as that process exits. The first launch on a cold machine is the
