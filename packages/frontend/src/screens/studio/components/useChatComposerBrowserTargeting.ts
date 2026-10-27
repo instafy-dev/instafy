@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ChatMessage } from "../types";
 import type { StatusIntent } from "../../../status/useStatus";
-import { shouldShowBrowserSessionPageStrip } from "./browserSessionLayout";
 import {
   browserSessionPageIsPlaceholder,
   resolveBrowserSessionPages,
@@ -18,7 +17,6 @@ type UseChatComposerBrowserTargetingOptions = {
   browserSessionId: string;
   sharedBrowserActivated: boolean;
   browserTransport: BrowserTransport;
-  compactBrowserViewport: boolean;
   focusInput: (options?: { force?: boolean }) => void;
   hasHiddenBrowserSession: boolean;
   messages: ChatMessage[];
@@ -46,7 +44,6 @@ export function useChatComposerBrowserTargeting({
   browserSessionId,
   sharedBrowserActivated,
   browserTransport,
-  compactBrowserViewport,
   focusInput,
   hasHiddenBrowserSession,
   messages,
@@ -169,16 +166,6 @@ export function useChatComposerBrowserTargeting({
       showStatus,
     ],
   );
-  const showBrowserSessionPageStrip =
-    sharedBrowserTargetingEnabled &&
-    shouldShowBrowserSessionPageStrip({
-      browserHidden: hasHiddenBrowserSession,
-      browserOpen: browserSessionOpen,
-      hasPages: browserSessionPages.length > 0,
-      pendingNewBrowser: effectivePendingBrowserLaunchMode === "new_page",
-      smallViewport: compactBrowserViewport,
-    });
-
   useEffect(() => {
     setPendingBrowserLaunchMode(null);
   }, [activeConversationId, browserTransport]);
@@ -265,6 +252,5 @@ export function useChatComposerBrowserTargeting({
     reloadSharedBrowserPage,
     keepSharedBrowserPage,
     setPendingBrowserLaunchMode: updatePendingBrowserLaunchMode,
-    showBrowserSessionPageStrip,
   };
 }

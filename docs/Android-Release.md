@@ -85,6 +85,11 @@ The refused forms include CRLF, other line wrapping and PKCS#1 `RSA PUBLIC KEY` 
   tag stays, no Play or GitHub Release write happened, and the recheck still passes, so re-run
   that cancelled run with the bot token (`gh run rerun <id>`) once the group is idle. This is a
   GitHub concurrency limit, not something the workflow can queue around.
+- **Never replace a tag run with a dispatch.** A `dry_run=false` dispatch can publish an
+  existing tag, but the internal OTA lane accepts an Android build only through the receipt of
+  its own tag-push run (event `push`, `instafy-bot` as actor and triggering actor). Such a
+  receipt fails that check and stops live updates on both platforms until the next
+  `versionCode`. Re-run the tag run instead.
 - **Anything after a successful publication** needs a new `versionCode` and a new tag.
 
 ## Contract notes for the private train

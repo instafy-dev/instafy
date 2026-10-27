@@ -64,8 +64,9 @@ from trusted data only, in this order:
    pinned by its release sha256 in `packages/runtime-agent/skill-packs.json`, which is the trust
    root. A pack a space imports itself never supplies labels.
 2. **Instafy's own CLI**, from a table in `runtime-agent` (`jobs/activity_labels.rs`):
-   `instafy web read <url>…` is "Reading pages" and counts its URL arguments; `instafy preview
-   open` and `instafy preview check` are quiet (the preview card already says it);
+   `instafy web read <url>…` is "Reading pages" and counts its URL arguments; `instafy web search`
+   is "Searching the web" (the step itself keeps only the query and the number of results);
+   `instafy preview open` and `instafy preview check` are quiet (the preview card already says it);
    `instafy bind init|serve`, `instafy tunnel start` and `instafy conversation search|grep|show`
    have their own words; `instafy secrets …` and `instafy agents context …` are quiet.
 3. **A few common tools**: package installs (`pnpm`/`npm`/`yarn` `install|i|add`), test runners

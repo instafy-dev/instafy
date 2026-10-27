@@ -18,17 +18,6 @@ export type BrowserAgentTabsInput = {
   agentPageIds?: readonly string[];
 };
 
-function agentOpenedOrBoundTabIds(
-  pages: readonly BrowserSessionPage[],
-  agentPageIds: readonly string[],
-  includeLeftovers: boolean,
-): ReadonlySet<string> {
-  const bound = new Set(agentPageIds.map((id) => id.trim()).filter(Boolean));
-  return new Set(pages
-    .filter((page) => (page.openedBy === "agent" && (includeLeftovers || !page.leftover)) || bound.has(page.id))
-    .map((page) => page.id));
-}
-
 /**
  * The tabs the agent holds now: the tabs it opened and the tab its run is
  * bound to. Empty while the agent has no control, so a badge never outlives
@@ -37,21 +26,10 @@ function agentOpenedOrBoundTabIds(
  */
 export function resolveAgentTabIds({ pages, agentControlActive, agentPageIds = [] }: BrowserAgentTabsInput): ReadonlySet<string> {
   if (!agentControlActive) return new Set();
-  return agentOpenedOrBoundTabIds(pages, agentPageIds, false);
-}
-
-/**
- * The Shared Browser tabs that carry the agent's badge in the chat's page
- * strip: every tab the browser's page list says the agent opened, whichever
- * conversation's run opened it (the browser lists them only while a run holds
- * it, or until it closes the tabs an earlier run left open), and the tab this
- * conversation's running turn is bound to.
- */
-export function resolveSharedPageStripAgentTabIds({ pages, agentPageIds = [] }: {
-  pages: readonly BrowserSessionPage[];
-  agentPageIds?: readonly string[];
-}): ReadonlySet<string> {
-  return agentOpenedOrBoundTabIds(pages, agentPageIds, true);
+  const bound = new Set(agentPageIds.map((id) => id.trim()).filter(Boolean));
+  return new Set(pages
+    .filter((page) => (page.openedBy === "agent" && !page.leftover) || bound.has(page.id))
+    .map((page) => page.id));
 }
 
 /**

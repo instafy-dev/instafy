@@ -1,0 +1,4 @@
+{
+  "meta": { "trace": "fixture" },
+  "data": { "search": [ { "url": "https://www.example.org/busy", "title": "Busy query answered by Kagi", "snippet": "after Brave asked for fewer requests" } ] }
+}

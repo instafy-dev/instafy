@@ -53,7 +53,6 @@ function Harness({ mountScroller }: { mountScroller: boolean }) {
     scrollContainerRef,
     sendingAttachment: false,
     shouldAutoScrollRef: flag,
-    showBrowserSessionPageStrip: false,
     totalQueuedCount: 0,
     touchLikeInput: false,
     voiceHoldActive: false,

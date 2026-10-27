@@ -73,7 +73,6 @@ import { isRunActivelyProgressing } from "../../../conversations/runLiveness";
 import { useRuntimeMenuOptions, type RuntimeMenuOption } from "../../../runtime/useRuntimeMenu";
 import {
   shouldPinChatMessagesToBottom,
-  shouldShowBrowserSessionPageStripInComposer,
   shouldUseCompactBrowserChrome,
 } from "./browserSessionLayout";
 import {
@@ -380,6 +379,7 @@ import { ConversationSurfaceLayout, ConversationSurfaceTabs, type ConversationSu
 import { ConversationWorkspaceViews } from "../../../workspace/ConversationWorkspaceViews";
 import { ConversationFileContext } from "../../../workspace/ConversationFileContext";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
+import { browserViewTabDetails } from "../../../workspace/browserViewTab";
 import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
 import { SitePreviewPanel } from "./SitePreviewPanel";
 import { askOutcomesFromRuns, composerAskSender, siteAskAccess } from "./previewHost/siteAsks";
@@ -433,7 +433,7 @@ import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./use
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserAgentPageIds, sharedBrowserConversationRunIds } from "./browserHandoffRouting";
-import { BROWSER_AGENT_DEFAULT_NAME, resolveSharedPageStripAgentTabIds } from "./browserAgentTabs";
+import { BROWSER_AGENT_DEFAULT_NAME } from "./browserAgentTabs";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
 const {
@@ -1825,7 +1825,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       isRunActivelyProgressing(run, now));
   }, [activeProjectId, runs]);
   const {
-    browserSessionPages,
     clearPendingBrowserLaunchMode,
     handleClearPendingNewBrowserSession,
     handleOpenBrowserFromLauncher,
@@ -1849,7 +1848,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     reloadSharedBrowserPage,
     keepSharedBrowserPage,
     setPendingBrowserLaunchMode,
-    showBrowserSessionPageStrip,
   } = useChatComposerBrowserTargeting({
     activeConversationId,
     activeProjectId,
@@ -1857,7 +1855,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     browserSessionId: sharedBrowserSurfaceSessionId,
     sharedBrowserActivated,
     browserTransport,
-    compactBrowserViewport,
     focusInput,
     hasHiddenBrowserSession,
     messages,
@@ -1887,12 +1884,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [activeConversationEntry?.title, hasMoreRecentHistory, recentMessages],
   );
   const browserRequestIdentity = JSON.stringify([currentUserId, activeProjectId, activeConversationId]);
-  const showBrowserSessionPageStripForComposer =
-    shouldShowBrowserSessionPageStripInComposer({
-      browserModeActive,
-      pendingNewBrowser: pendingBrowserLaunchMode === "new_page",
-      showPageStrip: showBrowserSessionPageStrip,
-    });
   const sharedBrowserViewerKind = useMemo(
     () =>
       resolveSharedBrowserViewerKind(
@@ -3222,8 +3213,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     browserRuntimeId: resolvedBrowserRuntimeId,
   });
   // The tabs this conversation's browser runs are bound to. With the tabs the
-  // agent opened, they carry its name in the tab picker and the chat's page
-  // strip, and fill the Reading row, while it has control.
+  // agent opened, they carry its name in the tab picker and fill the Reading
+  // row, while it has control.
   const sharedBrowserAgentPages = useMemo(
     () => sharedBrowserAgentPageIds(activeConversationRuns, resolvedBrowserRuntimeId),
     [activeConversationRuns, resolvedBrowserRuntimeId],
@@ -3234,16 +3225,21 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       : null,
     [sharedBrowserAgentPages, sharedBrowserChromeWithSend],
   );
-  // The browser's page list says which tabs the agent opened, also when
-  // another conversation's run on this machine opened them.
-  const browserPageStripAgentTabIds = useMemo(
-    () => browserTransport === "shared"
-      ? resolveSharedPageStripAgentTabIds({ pages: browserSessionPages, agentPageIds: sharedBrowserAgentPages })
-      : new Set<string>(),
-    [browserSessionPages, browserTransport, sharedBrowserAgentPages],
-  );
-  const browserPageStripAgentName =
+  // The Browser view tab says when the agent is using the browser: one of
+  // this conversation's runs holds a tab of it (Shared), or drives this
+  // device's browser (Personal).
+  const browserAgentActive = browserTransport === "shared"
+    ? sharedBrowserAgentPages.length > 0
+    : activeConversationRuns.some((run) =>
+      run.metadata?.browserTransport === "desktop-personal" &&
+      (run.status === "in_progress" || run.status === "queued"));
+  const browserAgentName =
     sharedBrowserControlOwner.kind === "agent" ? sharedBrowserControlOwner.displayName : BROWSER_AGENT_DEFAULT_NAME;
+  // The page a message goes to, the browser's active tab, as the pane's own
+  // tab picker names it.
+  const browserActivePageTitle = preferredBrowserPage
+    ? preferredBrowserPage.title?.trim() || preferredBrowserPage.label.trim() || preferredBrowserPage.host
+    : null;
   // The prompts of this conversation's running Instafy's browser job, for the
   // person who started it, whatever the browser view is doing.
   const chatBrowserApproval = useChatSharedBrowserApproval({
@@ -3263,8 +3259,24 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   );
   const browserApprovalAttention = sharedBrowserApprovalPending || chatBrowserApprovalAsking;
   useEffect(() => {
-    if (conversationWorkspace) setConversationBrowser(surfaceScope, hasBrowserView, browserApprovalAttention);
-  }, [conversationWorkspace, setConversationBrowser, surfaceScope, hasBrowserView, browserApprovalAttention]);
+    if (conversationWorkspace) {
+      setConversationBrowser(surfaceScope, {
+        available: hasBrowserView,
+        attention: browserApprovalAttention,
+        pageTitle: browserActivePageTitle,
+        agentName: browserAgentActive ? browserAgentName : null,
+      });
+    }
+  }, [
+    browserActivePageTitle,
+    browserAgentActive,
+    browserAgentName,
+    browserApprovalAttention,
+    conversationWorkspace,
+    hasBrowserView,
+    setConversationBrowser,
+    surfaceScope,
+  ]);
   const chatBrowserApprovalAgentName = (() => {
     const handle = chatBrowserApprovalTarget
       ? extractAgentIdentityFromMetadata(chatBrowserApprovalTarget.runMetadata)?.handle ?? null
@@ -5424,7 +5436,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const {
     browserModalBottomInset,
-    browserPageStripBottomInset,
     chatScrollPaddingBottom,
     composerAutoHidden,
     composerOverlayHeight,
@@ -5455,7 +5466,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     scrollContainerRef,
     sendingAttachment,
     shouldAutoScrollRef,
-    showBrowserSessionPageStrip: showBrowserSessionPageStripForComposer,
     totalQueuedCount,
     touchLikeInput,
     voiceHoldActive,
@@ -6203,6 +6213,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const resourceTabs: ConversationSurface[] = [
     ...(hasBrowserView ? [{
       id: "browser", label: "Browser", panelId: browserPanelId, icon: <Globe className="h-3.5 w-3.5" />,
+      ...browserViewTabDetails({ pageTitle: browserActivePageTitle, agentName: browserAgentActive ? browserAgentName : null }),
       attention: browserApprovalAttention ? <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-400/15 dark:text-amber-200" data-testid="shared-browser-approval-attention">Approve</span> : undefined,
     }] : []),
     ...surfaces.files.map(file => ({
@@ -6518,7 +6529,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           hidden={!browserVisible}
           className={browserVisible ? "flex h-full min-h-0 flex-col" : "hidden"}
           style={
-            !splitSurfaces && !showBrowserSessionPageStripForComposer && browserModalBottomInset
+            !splitSurfaces && browserModalBottomInset
               ? { height: `calc(100% - ${browserModalBottomInset})` }
               : undefined
           }
@@ -6720,29 +6731,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             : null
         }
         accessChecking={!projectReadOnly && projectCapabilitiesResolved === false}
-        browserDockProps={{
-          browserModalBottomInset,
-          browserSessionOpen,
-          onBrowserSessionOpenChange: handleBrowserSessionOpenChange,
-          projectId: activeProjectId ?? null,
-          preferredRuntimeId: preferredBrowserRuntimeId,
-          showBrowserSessionPageStrip: showBrowserSessionPageStripForComposer,
-          browserSessionExpandRequestToken,
-          onBrowserRuntimeIdResolved: handleBrowserRuntimeIdResolved,
-          browserPageStripBottomInset,
-          browserSessionPages,
-          browserSessionAgentTabIds: browserPageStripAgentTabIds,
-          browserSessionAgentName: browserPageStripAgentName,
-          onSelectBrowserSessionPage: (pageId) => {
-            setBrowserSubtab("browser");
-            void handleSelectBrowserSessionPage(pageId);
-          },
-          onToggleBrowserSession: () => handleBrowserSubtabChange("browser"),
-          onClearPendingNewBrowserSession: handleClearPendingNewBrowserSession,
-          hasHiddenBrowserSession,
-          pendingBrowserLaunchMode,
-          renderModal: false,
-        }}
+        pendingNewTab={pendingBrowserLaunchMode === "new_page"
+          ? { onCancel: handleClearPendingNewBrowserSession }
+          : null}
         composerOverlayRef={composerOverlayRef}
         composerAutoHidden={composerAutoHidden}
         touchLikeInput={touchLikeInput}

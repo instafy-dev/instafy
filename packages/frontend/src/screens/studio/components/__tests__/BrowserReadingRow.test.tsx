@@ -4,7 +4,6 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserReadingRow } from "../BrowserReadingRow";
-import { BrowserSessionPageStrip } from "../BrowserSessionPageStrip";
 import type { BrowserSessionPage } from "../browserSessionPages";
 
 function page(id: string, overrides: Partial<BrowserSessionPage> = {}): BrowserSessionPage {
@@ -87,48 +86,8 @@ describe("BrowserReadingRow", () => {
     expect(container.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
   });
 
-  it("badges only the agent's tabs in the chat's page strip", async () => {
-    const strip = (agentTabIds?: ReadonlySet<string>) => (
-      <BrowserSessionPageStrip
-        pages={[page("alpha", { isActive: true }), page("beta")]}
-        agentTabIds={agentTabIds}
-        agentName="Octo"
-        onSelectPage={vi.fn()}
-        onToggleBrowser={vi.fn()}
-        onClearPendingNewBrowser={vi.fn()}
-        browserHidden
-        browserOpen={false}
-        pendingNewBrowser={false}
-      />
-    );
-    await act(async () => root.render(strip(new Set(["beta"]))));
-    const chips = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="browser-session-page-chip"]')];
-    expect(chips.map((chip) => Boolean(chip.querySelector('[data-testid="browser-agent-tab-badge"]')))).toEqual([false, true]);
-    expect(chips[1]!.textContent).toContain("Octo");
-
-    await act(async () => root.render(strip()));
-    expect(container.querySelector('[data-testid="browser-agent-tab-badge"]')).toBeNull();
-  });
-
-  it("labels a tab the agent opened in the page strip and the row as its prompts do", async () => {
+  it("labels a tab the agent opened in the row as its prompts do", async () => {
     const opened = page("gamma", { openedBy: "agent", agentTabNumber: 3 });
-    await act(async () => root.render(
-      <BrowserSessionPageStrip
-        pages={[page("alpha", { isActive: true }), opened]}
-        agentTabIds={new Set(["alpha", "gamma"])}
-        agentName="Octo"
-        onSelectPage={vi.fn()}
-        onToggleBrowser={vi.fn()}
-        onClearPendingNewBrowser={vi.fn()}
-        browserHidden
-        browserOpen={false}
-        pendingNewBrowser={false}
-      />,
-    ));
-    const badges = [...container.querySelectorAll('[data-testid="browser-agent-tab-badge"]')].map((badge) => badge.textContent);
-    // The tab its run is bound to carries the agent's name; the tab it opened, its label.
-    expect(badges).toEqual(["Octo", "Octo's tab 3"]);
-
     await act(async () => root.render(<BrowserReadingRow pages={[opened]} canTakeOver onTakeOver={vi.fn()} />));
     const item = container.querySelector<HTMLElement>('[data-testid="browser-reading-page"]')!;
     expect(item.title.startsWith("Octo's tab 3: ")).toBe(true);

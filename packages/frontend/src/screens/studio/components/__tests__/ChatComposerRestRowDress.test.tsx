@@ -14,10 +14,6 @@ import { deriveChatVoiceComposerViewState } from "../chatVoiceComposerViewState"
 // affordance classes. Browser providers and Lexical are irrelevant to these
 // checks; the shared controls must retain the same pointer-sized hit targets
 // when the one primary slot changes from microphone to Send.
-vi.mock("../ChatBrowserDock", () => ({
-  ChatBrowserDock: () => null,
-}));
-
 vi.mock("../ComposerInviteModal", () => ({
   ComposerInviteModal: () => null,
 }));
@@ -89,7 +85,6 @@ function createProps({
 }): SurfaceProps {
   const affordances = affordancesFor(value);
   return {
-    browserDockProps: {} as never,
     composerOverlayRef: { current: null },
     composerAutoHidden: false,
     compactBrowserViewport,

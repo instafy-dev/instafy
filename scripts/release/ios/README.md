@@ -32,10 +32,19 @@ the commit that triggered it. `authorize` therefore requires the release tag to 
   points at the current `main` head;
 - dispatch of an existing tag at an older commit: run the workflow **on the tag itself**,
   `gh workflow run ios-release.yml --ref <tag> -f tag=<tag> ...`. Any other combination fails
-  closed in `authorize` before a secret job starts.
+  closed in `authorize` before a secret job starts. Use this for dry runs and `reconcile_only`;
+  a tag that still needs publishing is recovered by re-running its own push run (see below).
 
 ## Dry run and recovery
 
+- Live updates: the internal OTA lane accepts a native build only through the receipt of
+  that build's own **tag-push run** (event `push`, `instafy-bot` as actor and triggering
+  actor, run commit equal to the tag commit, a successful run, `digestSource: local`).
+  Recover a tag run by re-running that same run (`gh run rerun <run-id>` keeps event `push`),
+  never with a new `dry_run=false` dispatch: the dispatch still publishes to TestFlight, but
+  its receipt fails that check and stops live updates on both platforms until the next
+  native build. A `reconcile_only` receipt is never accepted, so that build number gets no
+  live updates; when they matter, ship the next build number instead.
 - Dry run: `gh workflow run ios-release.yml --ref main -f tag=ios-v1.0-82 -f dry_run=true`.
   The tag may not exist yet (source = `main` head); for an existing tag use `--ref <tag>`. Archive, export, signing and IPA checks
   run, App Store Connect is only observed, and the IPA is kept as an Actions artifact for
@@ -47,11 +56,21 @@ the commit that triggered it. `authorize` therefore requires the release tag to 
   person fails before any secret step. Recover as the bot, for example
   `gh run rerun <run-id> --failed` with the bot token.
 - Failure before the upload: re-run the failed jobs as the bot (the IPA artifact is
-  overwritten on a `build` re-run).
+  overwritten on a `build` re-run). That includes `[ios-asc] … request got no response (…)`:
+  an App Store Connect read that got no answer in three attempts, each bounded to 60 s. Reads
+  are also retried on HTTP 500/502/503/504.
+- After the upload: in the reconcile step (its first lookup of the app and beta group, then
+  every poll), a read that still fails after its retries costs one polling interval, logged
+  as `… polling again in 30 s`, until the step's one deadline. Its only write, the TestFlight
+  group assignment, is never retried; when it gets no response or an HTTP 5xx, the failure
+  says that App Store Connect may or may not have applied it. Any other failure ends the run,
+  and the job cannot simply be re-run after the upload (its App Store Connect gate then finds
+  the build), so it continues as described below.
 - Queued runs: runs share a concurrency group per kind (`publish` or `dry-run`). GitHub keeps
   only one *pending* run per group and cancels the older pending one. A tag push run that was
-  cancelled while queued never published anything; dispatch it again with
-  `--ref <tag> -f tag=<tag> -f dry_run=false`.
+  cancelled while queued never published anything; once the group is idle, re-run that run
+  as the bot (`gh run rerun <run-id>`). GitHub allows a re-run only within 30 days of the
+  original run; after that, use the next build number.
 - `altool` can exit 0 on some delivery failures; the lane treats `product-errors` in its XML
   as a failure. In either case check App Store Connect and use `reconcile_only` if the build
   arrived.
@@ -62,7 +81,8 @@ the commit that triggered it. `authorize` therefore requires the release tag to 
   Connect state for that build number: nothing binds the App Store Connect build to the tag's
   source, and `ota.trustKeySha256` comes from the current repository variable, not from the
   shipped IPA. While the private `ios-app.yml` lane still exists, never dispatch it by hand
-  for the same build number, or a reconciled receipt could certify its upload.
+  for the same build number, or a reconciled receipt could certify its upload. The build gets
+  no live updates (see the first item).
 - Anything else that already reached App Store Connect needs a new build number and tag.
 
 ## Setup order (security precondition)

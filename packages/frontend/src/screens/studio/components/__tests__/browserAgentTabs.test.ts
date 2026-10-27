@@ -6,7 +6,6 @@ import {
   personalBrowserTabPages,
   resolveAgentReadingPages,
   resolveAgentTabIds,
-  resolveSharedPageStripAgentTabIds,
   sharedBrowserAgentTabLabel,
 } from "../browserAgentTabs";
 import type { BrowserSessionPage } from "../browserSessionPages";
@@ -49,22 +48,6 @@ describe("resolveAgentTabIds", () => {
     const withEarlier = [...pages, page("earlier", { openedBy: "agent", leftover: true })];
     expect([...resolveAgentTabIds({ pages: withEarlier, agentControlActive: true, agentPageIds: ["bound"] })])
       .toEqual(["opened", "bound"]);
-  });
-});
-
-describe("resolveSharedPageStripAgentTabIds", () => {
-  it("badges every tab the browser says the agent opened, whichever conversation's run it is", () => {
-    const pages = [page("mine"), page("opened", { openedBy: "agent" }), page("bound")];
-    // Another conversation's run on this machine: this conversation has no
-    // running browser turn, and the agent's tab still carries its badge.
-    expect([...resolveSharedPageStripAgentTabIds({ pages })]).toEqual(["opened"]);
-    expect([...resolveSharedPageStripAgentTabIds({ pages, agentPageIds: ["bound"] })]).toEqual(["opened", "bound"]);
-    expect(resolveSharedPageStripAgentTabIds({ pages: [page("mine"), page("person", { openedBy: "person" })] }).size).toBe(0);
-  });
-
-  it("badges a tab an earlier run left open as the agent's too", () => {
-    const pages = [page("mine"), page("earlier", { openedBy: "agent", leftover: true })];
-    expect([...resolveSharedPageStripAgentTabIds({ pages })]).toEqual(["earlier"]);
   });
 });
 

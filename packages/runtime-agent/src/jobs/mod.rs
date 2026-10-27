@@ -32552,6 +32552,113 @@ mod tests {
         );
     }
 
+    /// The room's activity log and the run log keep a web search's query and count, never its results:
+    /// the providers' terms allow storing results only while the search needs them.
+    #[test]
+    fn a_stored_web_search_row_has_no_result_text() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::{
+            Event, EventMsg, ExecCommandBeginEvent, ExecCommandEndEvent, ExecCommandSource,
+            ExecCommandStatus,
+        };
+        use codex_utils_absolute_path::AbsolutePathBuf;
+
+        // What `instafy web search --json` prints: results in untrusted wrappers, and one top-level
+        // `activity` line.
+        let output = r#"{
+ "ok": true,
+ "status": "ok",
+ "activity": "web search \"ramen shinjuku\" · 2 results",
+ "query": "ramen shinjuku",
+ "results": [
+  {
+   "rank": 1,
+   "url": "https://www.ramen-guide.example.jp/shinjuku",
+   "site": "www.ramen-guide.example.jp",
+   "text": "<untrusted_page_content url=\"https://www.ramen-guide.example.jp/shinjuku\" read_at=\"2026-10-27T09:00:00.000Z\" viewer=\"search result\">\ntitle: Best ramen near Shinjuku Station\n</untrusted_page_content>"
+  },
+  {
+   "rank": 2,
+   "url": "https://www.booking.com/hotel/jp/shinjuku-ramen-inn.html",
+   "site": "www.booking.com",
+   "linkOnly": { "site": "Booking.com", "reason": "terms bar AI agents" }
+  }
+ ],
+ "tell": "These are leads, not facts."
+}"#;
+        let script = "instafy web search \"ramen shinjuku\" --json";
+        let argv = vec![
+            "/bin/bash".to_string(),
+            "-lc".to_string(),
+            script.to_string(),
+        ];
+        let cwd = AbsolutePathBuf::from_absolute_path(std::path::Path::new("/tmp")).unwrap();
+        let mut adapter = CodexEventStreamAdapter::default();
+        let mut events = adapter.collect(&Event {
+            id: "begin".into(),
+            msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+                call_id: "search".into(),
+                process_id: None,
+                turn_id: "turn".into(),
+                started_at_ms: 0,
+                command: argv.clone(),
+                cwd: cwd.clone().into(),
+                parsed_cmd: Vec::new(),
+                source: ExecCommandSource::Agent,
+                interaction_input: None,
+                plugin_id: None,
+                script_path: None,
+            }),
+        });
+        events.extend(adapter.collect(&Event {
+            id: "end".into(),
+            msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+                call_id: "search".into(),
+                process_id: None,
+                turn_id: "turn".into(),
+                completed_at_ms: 0,
+                command: argv,
+                cwd: cwd.into(),
+                parsed_cmd: Vec::new(),
+                source: ExecCommandSource::Agent,
+                interaction_input: None,
+                stdout: output.into(),
+                stderr: String::new(),
+                aggregated_output: output.into(),
+                exit_code: 0,
+                duration: std::time::Duration::from_millis(5),
+                formatted_output: output.into(),
+                status: ExecCommandStatus::Completed,
+                plugin_id: None,
+                script_path: None,
+            }),
+        }));
+
+        let messages = extract_codex_messages(&events);
+        let stored = messages
+            .iter()
+            .rev()
+            .find(|message| message.message_type.as_deref() == Some("command_execution"))
+            .expect("the command's row");
+        let row = json!({ "content": stored.content, "metadata": stored.metadata }).to_string();
+        let run_log = serde_json::to_string(&build_codex_run_log_artifact(&events, None)).unwrap();
+        for stored in [&row, &run_log] {
+            assert!(
+                stored.contains(r#"web search \"ramen shinjuku\" · 2 results"#),
+                "{stored}"
+            );
+            for result_text in [
+                "ramen-guide.example.jp",
+                "Best ramen near Shinjuku Station",
+                "booking.com",
+                "untrusted_page_content",
+                "These are leads",
+            ] {
+                assert!(!stored.contains(result_text), "{result_text} in {stored}");
+            }
+        }
+    }
+
     #[test]
     fn extract_codex_messages_attaches_activity_to_commands() {
         let read = json!([

@@ -5,8 +5,6 @@ import {
   shouldForceDockedBrowserFullscreen,
   shouldPinChatMessagesToBottom,
   shouldRenderBrowserSessionFullscreen,
-  shouldShowBrowserSessionPageStrip,
-  shouldShowBrowserSessionPageStripInComposer,
   shouldUseCompactBrowserChrome,
 } from "../browserSessionLayout";
 
@@ -107,72 +105,11 @@ describe("browserSessionLayout", () => {
     ).toBe(true);
   });
 
-  it("keeps the page strip visible for hidden mobile browser sessions", () => {
-    expect(
-      shouldShowBrowserSessionPageStrip({
-        browserHidden: true,
-        browserOpen: false,
-        hasPages: false,
-        pendingNewBrowser: false,
-        smallViewport: true,
-      }),
-    ).toBe(true);
-  });
-
-  it("hides the page strip while the mobile browser card is open", () => {
-    expect(
-      shouldShowBrowserSessionPageStrip({
-        browserHidden: false,
-        browserOpen: true,
-        hasPages: true,
-        pendingNewBrowser: false,
-        smallViewport: true,
-      }),
-    ).toBe(false);
-  });
-
-  it("keeps pending new-site context visible in an open mobile browser", () => {
-    expect(
-      shouldShowBrowserSessionPageStrip({
-        browserHidden: false,
-        browserOpen: true,
-        hasPages: false,
-        pendingNewBrowser: true,
-        smallViewport: true,
-      }),
-    ).toBe(true);
-  });
-
-  it("keeps the page strip visible for open desktop browser sessions with live pages", () => {
-    expect(
-      shouldShowBrowserSessionPageStrip({
-        browserHidden: false,
-        browserOpen: true,
-        hasPages: true,
-        pendingNewBrowser: false,
-        smallViewport: false,
-      }),
-    ).toBe(true);
-  });
-
-  it("removes the redundant page strip while the Browser tab is active", () => {
-    expect(
-      shouldShowBrowserSessionPageStripInComposer({
-        browserModeActive: true,
-        pendingNewBrowser: false,
-        showPageStrip: true,
-      }),
-    ).toBe(false);
-  });
-
-  it("keeps pending-new-page context visible until the browser has a target", () => {
-    expect(
-      shouldShowBrowserSessionPageStripInComposer({
-        browserModeActive: true,
-        pendingNewBrowser: true,
-        showPageStrip: true,
-      }),
-    ).toBe(true);
+  it("never shows a page strip in a conversation layout", async () => {
+    // The view selector's Browser tab and the browser pane's own tab picker
+    // already list the browser's pages, so the chat has no strip to place.
+    const layout = await import("../browserSessionLayout");
+    expect(Object.keys(layout).filter((name) => /PageStrip/.test(name))).toEqual([]);
   });
 
   it("keeps bottom-pinning short chats on mobile when history is fully loaded", () => {
