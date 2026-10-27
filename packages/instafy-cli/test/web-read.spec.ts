@@ -440,6 +440,20 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
     expect(report.warnings.join("\n")).toMatch(/broken.*ignored; the bundled list still applies/);
   });
 
+  it.skipIf(process.platform === "win32")("leaves out a copy too large to read, or one that is a pipe, without waiting on it", () => {
+    writeLinkOnly(skillsDir, "instafy-web-research", { ...spaceList([EXAMPLE_SHOP]), about: "x".repeat(300 * 1024) });
+    const pipe = path.join(skillsDir, "pipe-pack", "references", LINK_ONLY_FILE);
+    fs.mkdirSync(path.dirname(pipe), { recursive: true });
+    expect(spawnSync("mkfifo", [pipe]).status).toBe(0);
+    const guard = loadLinkOnlyGuard([skillsDir]);
+    const warnings = guard.warnings.join("\n");
+    expect(warnings).toMatch(/instafy-web-research.*is larger than 262144 bytes and was ignored; the bundled list still applies/);
+    expect(warnings).toMatch(/pipe-pack.*is not a file and was ignored; the bundled list still applies/);
+    expect(guard.sources).toEqual(["bundled"]);
+    expect(linkOnlySite("https://www.shop.example/", guard)).toBeNull();
+    expect(linkOnlySite("https://www.booking.com/", guard)?.name).toBe("Booking.com");
+  });
+
   it("fails closed: when the bundled list cannot be loaded, nothing is read", async () => {
     routes["news.example.org/a"] = { body: ARTICLE };
     for (const bundled of [null, "not a list", { schema: "something@2", sites: SKILL_LIST.sites }, spaceList([]), spaceList([{ name: "x", match: ["*"] }])]) {

@@ -69,8 +69,9 @@
   // space), and the name is then spelled the way the parser spells it.
   // Linear: no backtracking.
   const HOST_BREAK = /[\u0000-\u002c\u002f\u003a-\u0040\u005b-\u0060\u007b-\u007f\p{Z}\p{Cc}]+/u;
-  // Within a run the parser does not take as a host, the parts made of
-  // letters, digits, marks, format characters and dots are tried one by one.
+  // Within a run, the parts made of letters, digits, marks, format
+  // characters and dots are tried one by one too, so a symbol next to a name
+  // ("»", "™"), which the parser would keep in the host, never hides it.
   const NOT_NAME_CHARACTER = /[^\p{L}\p{N}\p{M}\p{Cf}.\-。．｡]+/u;
   const OTHER_DOTS = /[。．｡]/g;
 
@@ -374,10 +375,7 @@
       if (names.size > MAX_EMBEDDED_NAMES) break;
       if (!run) continue;
       const whole = embeddedName(run);
-      if (whole) {
-        names.add(whole);
-        continue;
-      }
+      if (whole) names.add(whole);
       for (const piece of run.split(NOT_NAME_CHARACTER)) {
         const name = piece && piece !== run ? embeddedName(piece) : null;
         if (name) names.add(name);

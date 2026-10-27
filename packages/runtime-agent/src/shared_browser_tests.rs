@@ -6969,3 +6969,59 @@ fn octos_step_never_loads_a_page_that_says_it_is_a_copy_of_a_link_only_site() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_space_copy_too_large_to_read_or_that_is_a_pipe_is_left_out_and_the_bundled_list_still_applies()
+{
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let navigate = |url: &str| {
+        fixture.call(
+            "safe",
+            "POST",
+            "/v1/navigate",
+            Some(&json!({ "url": url }).to_string()),
+        )
+    };
+    let space_copy = |about: String| {
+        json!({
+            "schema": "instafy.link-only-sites@1",
+            "about": about,
+            "sites": [{ "name": "Example Shop", "match": ["shop.example"], "why": "terms bar AI agents" }],
+        })
+        .to_string()
+    };
+    // Within the bound, the copy's site counts.
+    fixture.write_space_link_only(&space_copy("a space's additions".to_string()));
+    assert!(
+        failure_of(&navigate("https://www.shop.example/item"))
+            .contains("Example Shop is link-only")
+    );
+
+    // Over 256 KiB, the copy is left out and the bundled list still applies.
+    fixture.write_space_link_only(&space_copy("x".repeat(300 * 1024)));
+    // A named pipe in its place is not waited on: no writer ever opens it.
+    let pipe = fixture.hostile_cwd.join("link-only-pipe");
+    let c_path = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).expect("pipe path");
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    for case in ["too large", "pipe"] {
+        if case == "pipe" {
+            std::fs::remove_file(&fixture.space_link_only).expect("remove the large copy");
+            std::fs::rename(&pipe, &fixture.space_link_only).expect("put the pipe in its place");
+        }
+        let error = failure_of(&navigate("https://www.booking.com/hotel/fixture.html"));
+        assert!(
+            error.contains("Booking.com is link-only"),
+            "{case}: {error}"
+        );
+        payload_of(&navigate("https://www.shop.example/item"));
+        let status = payload_of(&fixture.call("safe", "GET", "/v1/status", None));
+        let warnings = status["linkOnlyListWarnings"].to_string();
+        assert!(
+            warnings.contains("is not a file of at most 256 KiB")
+                && warnings.contains("the bundled list still applies"),
+            "{case}: {status}"
+        );
+    }
+}
