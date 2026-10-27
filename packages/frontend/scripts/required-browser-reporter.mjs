@@ -5,7 +5,7 @@ import path from "node:path";
 // test must not turn the required lane green while omitting its main proof.
 export const REQUIRED_BROWSER_LANES = Object.freeze({
   personal: {
-    minimumTests: 5,
+    minimumTests: 6,
     files: ["electron-personal-browser.spec.ts"],
     titles: [
       "is enabled by default and rejects opening behind the explicit kill switch",
@@ -13,6 +13,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "keeps real login cookies per user across projects and restarts, then clears only that user",
       "revokes ownership and control when the Studio renderer reloads",
       "stops agent-driven page loads on a link-only site or a private address, also by the address actually connected to",
+      "judges and takes form steps by the submission the browser makes, the default button's formaction, formmethod and formtarget included",
     ],
   },
   "browser-ui": {

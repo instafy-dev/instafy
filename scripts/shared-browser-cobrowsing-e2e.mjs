@@ -25,7 +25,7 @@ const resultDirectory = path.join(repositoryRoot, "packages/frontend/test-result
 const policyScript = (name) => `(function (module, require) {\n${
   fs.readFileSync(path.join(repositoryRoot, "packages/browser-action-policy", name), "utf8")
 }\n})(undefined, undefined);`;
-export const policyScriptNames = ["redaction.js", "actionPolicy.js", "pageCapture.js", "linkOnly.js"];
+export const policyScriptNames = ["redaction.js", "actionPolicy.js", "pageCapture.js", "formSubmission.js", "linkOnly.js"];
 // The web-research skill's link-only list, embedded the way runtime-agent's
 // embedded_link_only_sites() embeds it: without it the controller refuses
 // every step, on the page the person chose too.
@@ -861,6 +861,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     // fixture (scripts/shared-browser-agent-tabs-e2e.mjs).
     const { runSharedBrowserAgentTabsFixture } = await import("./shared-browser-agent-tabs-e2e.mjs");
     console.log(JSON.stringify(await runSharedBrowserAgentTabsFixture(), null, 2));
+    // And that a form step is judged by the submission the browser makes
+    // (scripts/shared-browser-form-submission-e2e.mjs).
+    const { runSharedBrowserFormSubmissionFixture } = await import("./shared-browser-form-submission-e2e.mjs");
+    console.log(JSON.stringify(await runSharedBrowserFormSubmissionFixture(), null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
     fs.writeFileSync(path.join(resultDirectory, "result.json"), `${JSON.stringify({ status: "failed", fixtureVersion: 1 })}\n`);
