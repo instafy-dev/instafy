@@ -68,6 +68,22 @@ describe("sharedBrowserTakeoverJob on the agent's own tabs", () => {
     expect(sharedBrowserTakeoverJob([run()], "runtime-1", "persons-tab", { agentHoldsBrowser: false })).toBeNull();
   });
 
+  it("never stops a queued run from a tab it is not bound to: another conversation's run holds the browser", () => {
+    const queued = run({
+      id: "queued-run", status: "queued",
+      metadata: { ...run().metadata, browserPageId: "page-2", jobId: "00000000-0000-4000-8000-000000000009" },
+    });
+    for (const options of [{ agentHoldsBrowser: true }, { openedByAgent: true }]) {
+      expect(sharedBrowserTakeoverJob([queued], "runtime-1", "persons-tab", options)).toBeNull();
+      // The run of this conversation that has started is the one stopped.
+      expect(sharedBrowserTakeoverJob([queued, run()], "runtime-1", "persons-tab", options))
+        .toEqual({ jobId: JOB_ID, runId: RUN_ID });
+    }
+    // On the tab a queued run is bound to, that run is still the one found.
+    expect(sharedBrowserTakeoverJob([queued], "runtime-1", "page-2", { agentHoldsBrowser: true }))
+      .toEqual({ jobId: "00000000-0000-4000-8000-000000000009", runId: "queued-run" });
+  });
+
   it("prefers the job bound to the page on screen", () => {
     const other = run({ id: "other-run", metadata: { ...run().metadata, browserPageId: "page-2", jobId: "00000000-0000-4000-8000-000000000009" } });
     expect(sharedBrowserTakeoverJob([run(), other], "runtime-1", "page-1", { openedByAgent: true }))

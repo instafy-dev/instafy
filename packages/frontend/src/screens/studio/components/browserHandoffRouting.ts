@@ -62,8 +62,9 @@ export function sharedBrowserAgentPageIds(runs: readonly RunRecord[], runtimeId:
  * itself (`openedByAgent`), or on any tab while the browser reports that the
  * agent holds it (`agentHoldsBrowser`), it is the one browser job on that
  * runtime, since the agent's control spans every tab of that browser: Take
- * over stays reachable whichever tab is on screen. Otherwise a person's own
- * tab never falls back to a runtime-wide job.
+ * over stays reachable whichever tab is on screen. That fallback takes only
+ * a run that has started, since a queued one cannot hold the browser.
+ * Otherwise a person's own tab never falls back to a runtime-wide job.
  */
 export function sharedBrowserTakeoverJob(
   runs: RunRecord[],
@@ -75,7 +76,12 @@ export function sharedBrowserTakeoverJob(
   const onRuntime = activeSharedBrowserRuns(runs, runtimeId);
   const onPage = onRuntime.filter((run) => run.metadata?.browserPageId === pageId);
   const runtimeWide = options.openedByAgent === true || options.agentHoldsBrowser === true;
-  const matches = onPage.length === 0 && runtimeWide ? onRuntime : onPage;
+  // Only a run that has started can hold the browser. A run of this
+  // conversation still queued behind another conversation's run, which holds
+  // the browser now, is never the job Take over stops from a tab it is not
+  // bound to.
+  const started = onRuntime.filter((run) => run.status !== "queued");
+  const matches = onPage.length === 0 && runtimeWide ? started : onPage;
   if (matches.length !== 1) return null;
   const run = matches[0];
   const jobId = run.metadata?.jobId;
