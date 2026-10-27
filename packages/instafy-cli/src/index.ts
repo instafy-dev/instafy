@@ -47,6 +47,7 @@ import { runBind } from "./bind.js";
 import { registerPreviewCheckCommand } from "./site-check.js";
 import { registerWebCommand } from "./web-read.js";
 import { registerWebLinkCommand } from "./web-link.js";
+import { registerWebSearchCommand } from "./web-search.js";
 import { historyConversations, historyMessages, historyRuns } from "./history.js";
 import {
   grantHardwareBinding,
@@ -2245,7 +2246,7 @@ failWithGroupHelp(previewCommand);
 // A check of a site with an open preview refreshes the picture on its card.
 registerPreviewCheckCommand(previewCommand, { hasOpenPreview: hasOpenPreviewFor, uploadThumbnail: uploadCheckThumbnail });
 
-failWithGroupHelp(registerWebLinkCommand(registerWebCommand(program)));
+failWithGroupHelp(registerWebSearchCommand(registerWebLinkCommand(registerWebCommand(program))));
 
 const previewOpenCommand = previewCommand
   .command("open")

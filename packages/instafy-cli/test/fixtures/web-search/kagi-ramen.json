@@ -1,0 +1,11 @@
+{
+  "meta": { "trace": "fixture", "node": "fixture", "ms": 12 },
+  "data": {
+    "search": [
+      { "url": "https://www.ramen-guide.example.jp/shinjuku", "title": "Best ramen near Shinjuku Station", "snippet": "Ten shops within a 5-minute walk." },
+      { "url": "https://www.booking.com/hotel/jp/shinjuku-ramen-inn.html", "title": "Shinjuku Ramen Inn – ¥12,000 a night", "snippet": "Free cancellation." },
+      { "url": "https://www.tabelog.example/shinjuku-ramen", "title": "Shinjuku ramen map", "snippet": "A map of ramen shops." }
+    ],
+    "related_search": [ { "url": "https://kagi.com/search?q=ramen+tokyo", "title": "ramen tokyo" } ]
+  }
+}

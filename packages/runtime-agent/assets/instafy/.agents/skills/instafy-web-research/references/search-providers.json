@@ -1,0 +1,53 @@
+{
+  "schema": "instafy.search-providers@1",
+  "about": "The web search providers `instafy web search` may use, and in which order (`chains`). A provider whose key is not set in the space (`key_env`, added through the secret-request card) is skipped; the first one left answers. `request` says where a search goes: an https `url` (GET with `query` values, or POST with a JSON `body`), and `auth` the header that carries the key (with `prefix`, such as \"Bearer \"). A key is only ever sent to the host of its own entry's `url`. Values may use {query}, {site} (the `site_filter` with {host} filled in, or nothing), {count}, {lang} and {country}; a value whose placeholder is not given is left out. `results` names where the result list is in the answer (`list`, a dotted path) and each result's `title`, `url` and `snippet`; `where` keeps only the items whose fields have these values. `daily_limit` is the most searches a day with one space's key. Results are never cached (`cache.allowed` is false): search only finds links, and Octo cites the pages it reads. Never add a parameter that asks for page text (`extra_snippets`, `summary`, `extract`). Changing provider is an edit here plus a fixture test, not code.",
+  "reviewed": "2026-10",
+  "providers": {
+    "brave-own-key": {
+      "protocol": "http-json-search",
+      "label": "Brave Search (your key)",
+      "request": {
+        "method": "GET",
+        "url": "https://api.search.brave.com/res/v1/web/search",
+        "query": { "q": "{site}{query}", "count": "{count}", "country": "{country}", "search_lang": "{lang}", "result_filter": "web" },
+        "auth": { "header": "X-Subscription-Token" }
+      },
+      "key_env": "BRAVE_SEARCH_API_KEY",
+      "key_request": {
+        "description": "Brave Search API key for Octo's web searches. Everyone in this space can search with this key, up to {daily} searches a day. Brave bills the key's owner."
+      },
+      "results": { "list": "web.results", "title": "title", "url": "url", "snippet": "description" },
+      "site_filter": "site:{host} ",
+      "max_count": 20,
+      "max_concurrent": 1,
+      "daily_limit": 100,
+      "cache": { "allowed": false },
+      "attribution": "Powered by Brave",
+      "terms": "https://api-dashboard.search.brave.com/terms-of-service"
+    },
+    "kagi-own-key": {
+      "protocol": "http-json-search",
+      "label": "Kagi (your key)",
+      "request": {
+        "method": "POST",
+        "url": "https://kagi.com/api/v1/search",
+        "body": { "query": "{site}{query}", "workflow": "search", "limit": "{count}", "filters": { "region": "{country}" } },
+        "auth": { "header": "Authorization", "prefix": "Bearer " }
+      },
+      "key_env": "KAGI_API_KEY",
+      "key_request": {
+        "description": "Kagi Search API key for Octo's web searches. Everyone in this space can search with this key, up to {daily} searches a day. Kagi bills the key's owner."
+      },
+      "results": { "list": "data.search", "title": "title", "url": "url", "snippet": "snippet" },
+      "site_filter": "site:{host} ",
+      "max_count": 20,
+      "max_concurrent": 1,
+      "daily_limit": 100,
+      "cache": { "allowed": false },
+      "terms": "https://kagi.com/privacy/api"
+    }
+  },
+  "chains": {
+    "web-search": ["brave-own-key", "kagi-own-key"]
+  }
+}

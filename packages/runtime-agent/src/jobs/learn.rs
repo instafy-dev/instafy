@@ -322,6 +322,8 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v1.md"),
     // From before link-only sites had kinds (no-agents, no-reuse) and a guided mode.
     include_str!("legacy/web-research-v2.md"),
+    // From before `instafy web search` was its way to search.
+    include_str!("legacy/web-research-v3.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

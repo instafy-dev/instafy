@@ -76,6 +76,17 @@ const WEB_READ: BuiltinLabel = BuiltinLabel {
     live: "Reading pages",
     done: counted("read a page", "read {n} pages", "read pages"),
 };
+// `instafy web search`: the room keeps its query and count, never its results (codex.rs).
+const WEB_SEARCH_COMMAND: BuiltinLabel = BuiltinLabel {
+    key: "instafy/web-search",
+    role: ActivityRole::Content,
+    live: "Searching the web",
+    done: counted(
+        "searched the web",
+        "searched the web {n} times",
+        "searched the web",
+    ),
+};
 // The preview card already says the preview opened.
 const PREVIEW_OPEN: BuiltinLabel = BuiltinLabel {
     key: "instafy/preview-open",
@@ -539,6 +550,7 @@ impl<'a> Matcher<'a> {
                     .count() as u64;
                 return Some(Found::builtin(&WEB_READ, (urls > 0).then_some(urls)));
             }
+            ("web", Some("search")) => &WEB_SEARCH_COMMAND,
             ("preview", Some("open")) => &PREVIEW_OPEN,
             ("preview", Some("check")) => &PREVIEW_CHECK,
             ("bind", Some("init" | "serve")) => &BIND,
@@ -1120,6 +1132,26 @@ mod tests {
         assert_eq!(looped["count"], JsonValue::Null);
         let summed = label(&[], "instafy web read https://a.example/ && instafy web read https://b.example/ https://c.example/").unwrap();
         assert_eq!(summed["count"], json!(3));
+    }
+
+    #[test]
+    fn instafy_web_search_is_searching_the_web() {
+        let activity = label(
+            &[],
+            "instafy web search \"ramen shinjuku\" --count 8 --json",
+        )
+        .expect("label");
+        assert_eq!(activity["key"], json!("instafy/web-search"));
+        assert_eq!(activity["role"], json!("content"));
+        assert_eq!(activity["live"], json!("Searching the web"));
+        assert_eq!(activity["count"], json!(1));
+        let twice = label(
+            &[],
+            "instafy web search ramen && instafy web search \"Belém Tower\" --chain reference-search",
+        )
+        .unwrap();
+        assert_eq!(twice["count"], json!(2));
+        assert_eq!(twice["done"]["other"], json!("searched the web {n} times"));
     }
 
     #[test]

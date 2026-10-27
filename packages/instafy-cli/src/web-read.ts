@@ -1137,7 +1137,7 @@ export function registerWebCommand(program: Command): Command {
     .command("web")
     .description(
       "Read public web pages as untrusted data with their source (robots.txt, link-only sites and stop rules enforced), " +
-        "and give the person links to link-only sites (guided mode)",
+        "search for links to read (Octo's turns only), and give the person links to link-only sites (guided mode)",
     );
   web
     .command("read")

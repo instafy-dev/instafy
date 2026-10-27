@@ -810,8 +810,10 @@ apart from real reads. `<folder>/fixtures.json` lists the answers:
 ```
 
 A page's body is `body`, or the file `file` names inside the folder (its type follows the extension unless `type` says
-otherwise). An address that is not listed answers 404, so a missing robots.txt means no rules; a host with no page and
-no address under `hosts` does not resolve. Every other build, the published package included, refuses
+otherwise). An entry answers a GET unless its `method` is `"POST"`; with `requestBody` it answers only a request whose
+JSON body has that content (for a search API such as Kagi's), and an address may list several entries in an array, the
+first match answering. An address that is not listed answers 404, so a missing robots.txt means no rules; a host with
+no page and no address under `hosts` does not resolve. Every other build, the published package included, refuses
 `INSTAFY_WEB_FIXTURES` (exit 70) rather than reading the live web in its place.
 
 | Exit | Meaning |
@@ -841,6 +843,88 @@ is a site that is not on the list (exit 64); without a list that loads, exit 70.
 names; a template is https on the site's own hosts, with each placeholder a whole path segment or a whole query value,
 or it is left out with a warning. The same list files apply as for `instafy web read`, so a space's copy may add a
 site's template or bar its deep links, but never allow deep links the bundled list bars.
+
+### Searching for links: `instafy web search`
+
+`instafy web search "<query>" --json` finds links for Octo to read, through the search providers the
+`instafy-web-research` skill lists (`references/search-providers.json`, built into the CLI like the link-only list).
+Search only finds links: Octo reads the pages it picks with `instafy web read` and cites those pages, never a result.
+
+```bash
+instafy web search "ramen shinjuku" --json
+instafy web search "belem tower opening hours" --site visitlisboa.com --lang pt --country PT --count 5 --json
+```
+
+The answer is `{status, code?, activity, query, queryRedacted?, chain, provider?, tried?, searchedAt, viewer, count,
+results, tell, notice, offer?, budget, warnings}`:
+
+| `status` | Meaning |
+|---|---|
+| `ok` | Results came back (`repeat: true` when the same search already ran in this turn: it is not sent again) |
+| `not_found` | The provider found nothing |
+| `unavailable` | No provider could answer: `code` is `turn_limit`, `day_limit`, `time_limit`, `rate_limited`, `key_refused`, `provider_error`, `unreachable` or `timeout`, and `tried` lists each provider that did not answer |
+| `no_provider` | No provider in the chain has its key in this space. The first time in a space, `offer` is the `request_secret` action for the first provider's key (`BRAVE_SEARCH_API_KEY`), whose card says: "Everyone in this space can search with this key, up to 100 searches a day. Brave bills the key's owner." |
+
+Each result is `{rank, url, site, text?, linkOnly?, noReuse?}`. `text` holds the title and snippet, redacted and
+wrapped in `<untrusted_page_content url=… read_at=… viewer="search result">` like page text. A result on a `no-agents`
+link-only site, or a translator's, cache's or archive's copy of one, keeps only its link and `linkOnly: {site, reason,
+via?}`: its title and snippet, which often carry prices and ratings, are dropped. Links that are not http(s), carry a
+user name or password, use a port other than 80 or 443, or point at a private address or a local name are dropped, and
+the same page twice (by address, without its fragment) is one result.
+
+**The provider list is data.** The code knows one kind of provider, `http-json-search`: an https `url`, `GET` with
+`query` values or `POST` with a JSON `body`, the key in the header `auth.header` names (with `auth.prefix`, such as
+`"Bearer "`), read from the environment variable `key_env`. Values may use `{query}`, `{site}` (the entry's
+`site_filter` with `{host}` filled in, or nothing), `{count}`, `{lang}` and `{country}`; a value whose placeholder is
+not given is left out. `results` names the result list (`list`, a dotted path) and each result's `title`, `url` and
+`snippet`. `chains` orders the providers (`web-search`: `brave-own-key`, then `kagi-own-key`); a provider whose key is
+not set is skipped. An entry is refused, with a warning, when its address is not plain https on a public host, when it
+asks for page text (`extra_snippets`, `summary` or `extract`, anywhere), when it would set a reserved header, or when
+it allows caching. If the file itself does not load, nothing is searched (exit 70).
+
+**Rules no option turns off.**
+
+- **Octo's turns only.** It runs only inside the runtime's live turn (`INSTAFY_TURN_STARTED_AT` to
+  `INSTAFY_TURN_DEADLINE`), so a published app, a person's own code, a terminal command or a process left over from an
+  earlier turn cannot search (exit 64).
+- **Keys.** A key goes only, over https, to the host of its own entry's `url`, in its own header. It is never printed
+  (the output is scrubbed of every provider key as well), never written to the state folder, and never part of an
+  error. Redirects are not followed.
+- **Nothing stored.** No result is cached or written anywhere. The state folder (`$INSTAFY_CACHE_DIR/instafy/web-search/state`
+  on a runtime, `$XDG_STATE_HOME/instafy/web-search` or `~/.local/state` elsewhere) holds counts, provider stops and
+  hashed search keys only. The room's activity log, and the run log, keep only the command's `activity` line (the
+  query sent and the number of results), never its output; the turn's plain-language line says "Searching the web",
+  then "searched the web" ([Chat activity](Chat-Activity.md)).
+- **Queries.** At most 200 characters, from the person's request. A query that looks like a key or a password (a known
+  key format, a long random token, `password: …`, or a provider's own key) is refused (exit 64) and not sent. E-mail
+  addresses, account numbers and numbers of 9 or more digits are removed before sending, and `queryRedacted` says what
+  was removed. `--site` takes a public host; a `no-agents` link-only site is refused there (use `instafy web link`).
+- **Limits.** Per turn, at most 4 searches (apart from `instafy web read`'s 12 page loads); 8 results by default and 20
+  at most. One search at a time per provider. An HTTP 429, or a refused key (401 or 403), stops that provider for the
+  rest of the turn, and the chain's next provider with a key is tried. Every search ends 5 s before the turn's
+  deadline. A space's key makes at most its entry's `daily_limit` searches a day (100).
+
+The output ends with one line for the room's activity log: `"activity"` at the top of the JSON, or `activity: …` as
+the last line of the text. Offline fixtures apply as for `instafy web read` (`viewer` is then `fixture`).
+
+| Exit | Meaning |
+|---|---|
+| 0 | `ok` |
+| 2 | `not_found`, `unavailable` or `no_provider` |
+| 64 | Bad options, a refused query, or not in Octo's turn |
+| 70 | The command itself failed (provider or link-only list, fixtures), so nothing was searched |
+
+**Eval.** `packages/instafy-cli/test/web-search-eval.mjs` holds 15 asks on hand-written fixtures (5 trips, 5 maps, 5
+shopping), each with a search answer that lists a link-only hit, a poisoned snippet, a page behind a sign-in and a dead
+link. Its grader checks a turn's transcript (searches, reads, findings, reply, saved items and cards) by the skill's
+rules: every fact cites a page Octo read; link-only places are links only and never read; no instruction from a snippet
+or page is followed and no query has words the request does not; at most 4 searches and 12 page loads; no snippet is
+saved; and with `no_provider` Octo asks the person to search and offers the key card once. `web-search-eval.spec.ts`
+plays each ask's reference turn with the real commands on a test build and checks that each way of breaking a rule is
+caught. To grade a model's turn on the same fixtures, write them with
+`node packages/instafy-cli/test/web-search-eval.mjs fixtures <folder>`, run the turn with a test build of the CLI and
+`INSTAFY_WEB_FIXTURES=<folder>`, and grade its transcript with `node packages/instafy-cli/test/web-search-eval.mjs grade
+<case id> <transcript.json>`.
 
 ## AI-readable diagnostics
 
