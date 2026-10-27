@@ -6731,7 +6731,14 @@ fn check_link_only_case(
     fixture: &EmbeddedControllerFixture,
     case: &JsonValue,
     with_space_copy: bool,
+    authority_since: &mut std::time::Instant,
 ) {
+    // The fixture's authority lasts a minute and the table can take longer:
+    // a fresh one every half minute.
+    if authority_since.elapsed() > std::time::Duration::from_secs(30) {
+        fixture.prepare_routine_start("page-target");
+        *authority_since = std::time::Instant::now();
+    }
     let full_url = link_only_case_url(case);
     let url = case["url"].as_str().expect("case url");
     let expected = match case.get("withSpaceCopy") {
@@ -6790,6 +6797,7 @@ fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redir
     let cases: JsonValue = serde_json::from_str(LINK_ONLY_CASES).expect("cases JSON");
     let fixture = EmbeddedControllerFixture::new();
     fixture.prepare_routine_start("page-target");
+    let mut authority_since = std::time::Instant::now();
     let bundled = cases["bundled"].as_array().expect("bundled cases");
     // Both kinds are in the table: sites refused and sites that load.
     for kind in ["no-agents", "no-reuse"] {
@@ -6800,16 +6808,16 @@ fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redir
         );
     }
     for case in bundled {
-        check_link_only_case(&fixture, case, false);
+        check_link_only_case(&fixture, case, false, &mut authority_since);
     }
     // With the space's copy, its additions hold too, and the bundled list
     // still does: a copy can make a site stricter, never looser.
     fixture.write_space_link_only(&cases["spaceCopy"]["list"].to_string());
     for case in cases["spaceCopy"]["cases"].as_array().expect("space cases") {
-        check_link_only_case(&fixture, case, false);
+        check_link_only_case(&fixture, case, false, &mut authority_since);
     }
     for case in bundled {
-        check_link_only_case(&fixture, case, true);
+        check_link_only_case(&fixture, case, true, &mut authority_since);
     }
 }
 
