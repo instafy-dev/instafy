@@ -327,12 +327,27 @@ function siteApproved(rawUrl) {
   return approvalProtocol.isOriginApproved(rawUrl, inAgentTab() ? activePageId : null);
 }
 
-async function ensureSiteApproved(rawUrl, label) {
+// `destinationUrl`: the exact address the step loads, when it loads one. The
+// site's prompt is bound to it and its label names it. `label` may be a
+// function, so a label that masks an address is made only when a prompt shows.
+async function ensureSiteApproved(rawUrl, label, { destinationUrl = null } = {}) {
   return await approvalProtocol.ensureOriginApproved(
     rawUrl,
-    tabLabel(label),
+    () => tabLabel(typeof label === "function" ? label() : label),
     inAgentTab() ? activePageId : null,
+    { destinationUrl },
   );
+}
+
+// The address a prompt names, so the person approves the page the step will
+// load and not only its site: masked like a snapshot's address (it keeps its
+// host and path), and cut with "…" to fit a prompt's label.
+const MAX_LABEL_ADDRESS_CHARS = 160;
+function labelAddress(rawUrl) {
+  const address = maskedUrl(rawUrl) || "";
+  return address.length <= MAX_LABEL_ADDRESS_CHARS
+    ? address
+    : `${address.slice(0, MAX_LABEL_ADDRESS_CHARS - 1)}…`;
 }
 
 // Octo's own tabs are for reading: they take only the steps routine browsing
@@ -2590,18 +2605,10 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
     let loading = false;
     try {
       await page.bringToFront();
-      await ensureSiteApproved(url, "Allow the assistant to open this site in a new tab for this run");
-      const destination = approvalProtocol.destinationBinding(url);
-      await allowStepOnce({
-        operation: "navigate",
-        label: "Open a new tab",
-        categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
-        sourceOrigin: null,
-        ...destination,
-        snapshotId: null,
-        targetFingerprint: null,
-        payloadFingerprint: approvalProtocol.sha256("open-tab"),
-      }, { routine: true });
+      // A tab opens only a plain address (a risky one was refused above), so
+      // the site's approval in this tab covers opening it: one prompt, which
+      // names the exact address, and none once the site is approved here.
+      await ensureSiteApproved(url, () => `Open ${labelAddress(url)} in a new tab`, { destinationUrl: url });
       const opened = await resolveExpectedPage(browser);
       const documents = await guardStepDocuments(opened);
       try {
@@ -2964,21 +2971,23 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const readingStep = step.verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url);
     assertMayOpen(url);
     refuseUnlessReadingStep(readingStep);
-    await ensureSiteApproved(
-      url,
-      "Allow the assistant to access this destination for this run",
-    );
-    const destination = approvalProtocol.destinationBinding(url);
-    await allowStepOnce({
-      operation: "navigate",
-      label: "Navigate the Shared Browser",
-      categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
-      sourceOrigin,
-      ...destination,
-      snapshotId: null,
-      targetFingerprint: null,
-      payloadFingerprint: approvalProtocol.sha256("navigate"),
-    }, { routine: readingStep });
+    // A plain address (a reading step) needs only its site's approval in this
+    // tab: the site prompt names the exact address, and a site already
+    // approved here opens without one. A risky address still asks for the
+    // step itself, in every mode.
+    await ensureSiteApproved(url, () => `Open ${labelAddress(url)}`, { destinationUrl: url });
+    if (!readingStep) {
+      await allowStepOnce({
+        operation: "navigate",
+        label: `Go to ${labelAddress(url)}`,
+        categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
+        sourceOrigin,
+        ...approvalProtocol.destinationBinding(url),
+        snapshotId: null,
+        targetFingerprint: null,
+        payloadFingerprint: approvalProtocol.sha256("navigate"),
+      });
+    }
     page = await resolveExpectedPage(browser);
     if (sourceOrigin) {
       assertSameOrigin(page.url(), sourceOrigin);
@@ -3026,7 +3035,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     ) {
       await ensureSiteApproved(
         rawDestination,
-        "Allow the assistant to follow this control to another site for this run",
+        () => `Follow this control to ${labelAddress(rawDestination)}`,
+        { destinationUrl: rawDestination },
       );
     }
     await allowStepOnce({
@@ -3115,7 +3125,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ) {
         await ensureSiteApproved(
           rawDestination,
-          "Allow this form destination for this run",
+          () => `Send this form to ${labelAddress(rawDestination)}`,
+          { destinationUrl: rawDestination },
         );
       }
     }
@@ -3219,7 +3230,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ) {
         await ensureSiteApproved(
           rawDestination,
-          "Allow this activation destination for this run",
+          () => `Follow this control to ${labelAddress(rawDestination)}`,
+          { destinationUrl: rawDestination },
         );
       }
     }

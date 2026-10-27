@@ -118,6 +118,23 @@ describe("browserAutoStartPlan", () => {
     expect(plan(overrides as Partial<BrowserAutoStartPlanInput>)).toEqual({ kind: "button", reason });
   });
 
+  it.each([
+    ["is starting again", { status: "requested", health: "offline", origin: undefined }],
+    ["has a late heartbeat", { lastSeenAt: "2026-10-27T10:00:00Z", idleTtlSeconds: 300, health: "idle" }],
+    ["reports itself offline", { health: "offline" }],
+  ] as const)("says the browser session is running, never a second machine, while its machine %s", (_name, overrides) => {
+    // A press opens that machine again (the controller restarts one that
+    // stopped answering); the card says what the cards of other
+    // conversations say for the same machine.
+    const stuck = { ...browserSession, ...overrides } as ControllerRuntimeStatusEntry;
+    expect(plan({ runtimes: [stuck] })).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
+    expect(plan({ runtimes: [runtime(), stuck] }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
+    // Once it has stopped, a press starts it, as for any stopped machine.
+    expect(plan({ runtimes: [{ ...stuck, status: "stopped" }] }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.firstMachine });
+  });
+
   it("never counts Instafy's browser on the space's own machine as a running session", () => {
     // Until Studio may open it by itself, a live host is still a press, and
     // a press opens it in place: it neither restarts nor adds a machine.

@@ -10,6 +10,13 @@ import { SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS } from "./sharedBrowserHostAttach";
 import { useAdaptivePoll } from "../../../runtime/pollingGate";
 
 const BROWSER_SESSION_POLL_INTERVAL_MS = 2500;
+/**
+ * While the tabs come back exactly as they were, each such read doubles the
+ * wait up to this; any change (a navigation, a new tab, a title) brings back
+ * the 2.5 s cadence. Reads that fail or find Instafy's browser still starting
+ * keep the cadence, so an opening browser shows its tabs as soon as it can.
+ */
+export const BROWSER_SESSION_QUIET_MAX_POLL_INTERVAL_MS = 5_000;
 /** Nothing running and the browser not shown, or the person away for three minutes. */
 export const BROWSER_SESSION_QUIET_POLL_INTERVAL_MS = 15_000;
 /** A page read that has not answered by then is given up, so the next poll can ask again. */
@@ -153,6 +160,9 @@ export function useBrowserSessionPages(params: {
     scopeKey: string;
     promise: Promise<boolean>;
   } | null>(null);
+  // What the last successful read returned, to tell an unchanged list from news.
+  const pagesSignatureRef = useRef<{ scopeKey: string; signature: string } | null>(null);
+  const pagesChangedRef = useRef(true);
   const capabilitiesInFlightRef = useRef<{
     scopeKey: string;
     promise: Promise<boolean>;
@@ -299,6 +309,11 @@ export function useBrowserSessionPages(params: {
         scopeKey: requestScope,
         pageId: resolvedActivePageId,
       };
+      const signature = JSON.stringify([resolvedActivePageId, livePages]);
+      const previousSignature = pagesSignatureRef.current;
+      pagesChangedRef.current =
+        previousSignature?.scopeKey !== requestScope || previousSignature.signature !== signature;
+      pagesSignatureRef.current = { scopeKey: requestScope, signature };
       setPageState((current) => ({
         scopeKey: requestScope,
         pages: reconcileBrowserSessionPageOrder({
@@ -662,7 +677,9 @@ export function useBrowserSessionPages(params: {
       capabilitiesRetryPausedRef.current = false;
       void refreshCapabilities();
     }
+    // Nobody waits on it in a hidden tab: the next tick after the return asks.
     const intervalId = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       void refreshCapabilities();
     }, BROWSER_SESSION_POLL_INTERVAL_MS);
     return () => window.clearInterval(intervalId);
@@ -672,12 +689,16 @@ export function useBrowserSessionPages(params: {
     if (!enabled || !projectId || !pollPages) {
       setPageState({ scopeKey, pages: [], resolved: false });
       preferredActivePageIdRef.current = { scopeKey, pageId: null };
+      // The tabs read once the view opens again are news, whatever they were before.
+      pagesSignatureRef.current = null;
     }
   }, [enabled, pollPages, projectId, scopeKey]);
 
-  const pollPagesOnce = useCallback(async () => {
+  // False only for a read that succeeded and found the tabs as they were, so
+  // only an unchanged list lets the poll back off.
+  const pollPagesOnce = useCallback(async (): Promise<boolean> => {
     try {
-      await refresh();
+      return !(await refresh()) || pagesChangedRef.current;
     } catch {
       if (scopeIsCurrent(scopeKey)) {
         setPageState((current) => ({
@@ -686,6 +707,7 @@ export function useBrowserSessionPages(params: {
           resolved: false,
         }));
       }
+      return true;
     }
   }, [refresh, scopeIsCurrent, scopeKey]);
   useAdaptivePoll(pollPagesOnce, {
@@ -694,6 +716,7 @@ export function useBrowserSessionPages(params: {
     fastMs: BROWSER_SESSION_POLL_INTERVAL_MS,
     slowMs: surfaceVisible ? BROWSER_SESSION_POLL_INTERVAL_MS : BROWSER_SESSION_QUIET_POLL_INTERVAL_MS,
     slowIdleMs: BROWSER_SESSION_QUIET_POLL_INTERVAL_MS,
+    quietMaxMs: BROWSER_SESSION_QUIET_MAX_POLL_INTERVAL_MS,
   });
 
   return {

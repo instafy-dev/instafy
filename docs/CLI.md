@@ -608,7 +608,9 @@ Exit codes:
   while it is open), not whether the site answers: `check` does that. `--json` rows carry `restartable`
   when the server sends it. A preview whose machine stopped or restarted is not listed; its card reads
   Stopped, and **Open** on a restartable card starts the site again. `close` stops the local client and
-  asks the server to close the preview; the server then also revokes its open viewers.
+  asks the server to close the preview; the server then also revokes its open viewers. A closed preview
+  keeps its recorded start command: its card reads Stopped, and **Open** by someone who may change the
+  space starts the site again.
 
 ### Check a site: `check`
 

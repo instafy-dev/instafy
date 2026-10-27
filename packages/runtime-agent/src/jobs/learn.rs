@@ -300,6 +300,8 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v7.md"),
     // From before the Shared Browser read a card's pages in Octo's own tabs.
     include_str!("legacy/browser-automation-v8.md"),
+    // From before it said to take another route after a declined site.
+    include_str!("legacy/browser-automation-v9.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),

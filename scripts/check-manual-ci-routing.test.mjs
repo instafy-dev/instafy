@@ -8,6 +8,7 @@ import { MANUAL_CI_JOBS, MANUAL_CI_BASELINES, manualCiBranch, withoutManualCiRou
 import { withoutAddedBuildContractTests } from './lib/buildContractTestsBaseline.mjs';
 import { withoutMainOnlyCaches } from './lib/mainOnlyCacheTestBaseline.mjs';
 import { withoutSharedPrerequisiteTimeout } from './lib/sharedBrowserPrerequisitesTestBaseline.mjs';
+import { withoutBrowserUiJobBudget } from './lib/browserUiBudgetTestBaseline.mjs';
 import { withoutMergeQueue } from "./lib/mergeQueueTestBaseline.mjs";
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -45,7 +46,7 @@ for (const [file, { sha256: hash }] of Object.entries(MANUAL_CI_BASELINES)) test
   const source = read(file);
   for (const job of MANUAL_CI_JOBS.filter(item => item.file === file)) assert.equal(source.split(manualCiBranch(job)).length, 2);
   // The main-only cache change has its own exact inverse; the baselines predate it.
-  const queued = withoutMergeQueue(file, source);
+  const queued = withoutBrowserUiJobBudget(file, withoutMergeQueue(file, source));
   const reviewed = withoutSharedPrerequisiteTimeout(file, withoutMainOnlyCaches(file, file === 'build.yml' ? withoutAddedBuildContractTests(queued) : queued));
   assert.equal(createHash('sha256').update(withoutManualCiRouting(file, reviewed)).digest('hex'), hash);
 });

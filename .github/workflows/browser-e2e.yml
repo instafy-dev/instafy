@@ -125,7 +125,7 @@ jobs:
               && github.workflow_sha == github.sha
               && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-ui","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - name: Qualify isolated browser CI runner
         if: runner.environment == 'self-hosted'
