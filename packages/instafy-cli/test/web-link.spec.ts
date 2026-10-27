@@ -346,7 +346,8 @@ describe("the command", () => {
   it("fails closed when the bundled list does not load", async () => {
     const run = io();
     expect(await runWebLinkCli("booking.com", [], { json: true }, run.io, { skillRoots: [], bundledLinkOnly: null })).toBe(70);
-    expect(JSON.parse(run.out[0]!).error).toMatch(/link-only site list .* could not be loaded/);
+    // It names this command, not `instafy web read`, whose loader it shares.
+    expect(JSON.parse(run.out[0]!).error).toMatch(/link-only site list built into `instafy web link` could not be loaded/);
   });
 
   it("adds the space's own copy of the list", () => {

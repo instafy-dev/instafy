@@ -2,6 +2,8 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // The unit tests run the CLI's source as a test build, which answers from INSTAFY_WEB_FIXTURES (tsup.config.ts).
+  define: { __INSTAFY_TEST_BUILD__: "true" },
   resolve: {
     alias: {
       // The same single source the build bundles (tsup.config.ts).

@@ -9,13 +9,8 @@
 // keeps the link https on the site's own hosts.
 import type { Command } from "commander";
 import * as linkOnly from "@instafy/browser-action-policy/linkOnly";
-import {
-  BUNDLED_LINK_ONLY_SITES,
-  LinkOnlyListUnavailableError,
-  defaultSkillRoots,
-  loadLinkOnlyGuard,
-  type WebReadDeps,
-} from "./web-read.js";
+import { BUNDLED_LINK_ONLY_SITES, LinkOnlyListUnavailableError, defaultSkillRoots, loadLinkOnlyGuard } from "./web-shared.js";
+import type { WebReadDeps } from "./web-read.js";
 
 export const WEB_LINK_EXIT_OK = 0;
 export const WEB_LINK_EXIT_USAGE = 64;
@@ -57,7 +52,11 @@ export function parseLinkValues(raw: string[]): Record<string, string> {
 export function webLink(site: string, values: Record<string, string>, deps: Pick<WebReadDeps, "skillRoots" | "bundledLinkOnly" | "env" | "cwd"> = {}): WebLinkReport {
   const env = deps.env ?? process.env;
   const cwd = deps.cwd ?? process.cwd();
-  const guard = loadLinkOnlyGuard(deps.skillRoots ?? defaultSkillRoots(cwd, env), "bundledLinkOnly" in deps ? deps.bundledLinkOnly : BUNDLED_LINK_ONLY_SITES);
+  const guard = loadLinkOnlyGuard(
+    deps.skillRoots ?? defaultSkillRoots(cwd, env),
+    "bundledLinkOnly" in deps ? deps.bundledLinkOnly : BUNDLED_LINK_ONLY_SITES,
+    "`instafy web link`",
+  );
   const result = linkOnly.guidedLink(guard.list, site, values);
   if (result.ok === false) return result;
   return { ...result, tell: WEB_LINK_TELL[result.kind], warnings: guard.warnings };
