@@ -968,36 +968,49 @@ fn keep_leftover_agent_tab(dir: &Dir, page_id: &str) -> Result<KeepAgentTabRespo
 /// while it lives. runtime-agent takes the same lock around reading and
 /// publishing the leftover record.
 struct ApprovalDirectoryLock {
+    // A descriptor of its own, so closing it releases the lock.
     #[cfg(unix)]
-    directory: std::fs::File,
+    _directory: rustix::fd::OwnedFd,
 }
 
 impl ApprovalDirectoryLock {
     #[cfg(unix)]
     fn acquire(dir: &Dir) -> Result<Self, OriginError> {
-        let directory = dir.try_clone().map(Dir::into_std_file).map_err(|error| {
+        use rustix::fs::{flock, openat, FlockOperation, Mode, OFlags};
+
+        // The directory opened again for reading: `flock` needs a readable
+        // descriptor, and `dir` may hold an `O_PATH` one.
+        let directory = openat(
+            dir,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
             OriginError::unavailable(format!(
                 "failed to open the approval directory to lock it: {error}"
             ))
         })?;
-        fs2::FileExt::lock_exclusive(&directory).map_err(|error| {
-            OriginError::unavailable(format!("failed to lock the approval directory: {error}"))
-        })?;
-        Ok(Self { directory })
+        loop {
+            match flock(&directory, FlockOperation::LockExclusive) {
+                Ok(()) => {
+                    return Ok(Self {
+                        _directory: directory,
+                    })
+                }
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => {
+                    return Err(OriginError::unavailable(format!(
+                        "failed to lock the approval directory: {error}"
+                    )))
+                }
+            }
+        }
     }
 
     #[cfg(not(unix))]
     fn acquire(_dir: &Dir) -> Result<Self, OriginError> {
         Ok(Self {})
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ApprovalDirectoryLock {
-    fn drop(&mut self) {
-        // The descriptor is a copy of the caller's, which stays open, so the
-        // lock is released here rather than when this copy closes.
-        let _ = fs2::FileExt::unlock(&self.directory);
     }
 }
 
