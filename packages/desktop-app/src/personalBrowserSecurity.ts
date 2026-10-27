@@ -107,7 +107,10 @@ export type PersonalBrowserActionDescriptor = {
   formTarget?: string | null;
   /** The submission opens another window. */
   formNewWindow?: boolean;
-  /** "button": a click (or Enter or Space on the button) submits; "implicit": Enter submits; "": nothing. */
+  /**
+   * "button": a click (or Enter or Space on the button) submits; "implicit": Enter submits;
+   * "nested": both, possibly to different places (a field inside a submit button); "": nothing.
+   */
   formSubmission?: string | null;
   /** The browser sends the submission; false when a disabled default button or the form's fields block it. Not part of the fingerprint. */
   formSubmits?: boolean;
@@ -600,14 +603,15 @@ export function personalBrowserActivationRequiresConfirmation(
  * address it is sent to (null for a dialog, which sends nothing), its method
  * and whether it opens another window. A click, Enter or Space on a submit
  * button submits with that button; Enter in a field of a form, or typing with
- * submit, submits through the form's default button. Null for every other
- * step.
+ * submit, submits through the form's default button. `nested` marks a field
+ * inside a submit button, which a click and Enter send in different ways.
+ * Null for every other step.
  */
 export function personalBrowserStepFormSubmission(
   descriptor: PersonalBrowserActionDescriptor,
   step: "click" | "press" | "submit",
   key = "",
-): { action: string | null; method: string; newWindow: boolean } | null {
+): { action: string | null; method: string; newWindow: boolean; nested: boolean } | null {
   return stepSubmission(descriptor, step, key);
 }
 

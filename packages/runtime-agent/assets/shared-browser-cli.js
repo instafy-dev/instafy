@@ -1341,7 +1341,7 @@ function policyFactsOf(raw) {
     download: raw.download === true,
     formActionUrl: text(raw.formActionUrl, MAX_URL_CHARS),
     formNewWindow: raw.formNewWindow === true,
-    formSubmission: ["button", "implicit", ""].includes(raw.formSubmission) ? raw.formSubmission : null,
+    formSubmission: ["button", "implicit", "nested", ""].includes(raw.formSubmission) ? raw.formSubmission : null,
     formSubmits: raw.formSubmits === true,
     formName: text(raw.formName, 200),
     formSubmitLabels: text(raw.formSubmitLabels, 200),
@@ -1999,8 +1999,9 @@ function isFormSubmissionControl(description) {
     (tag === "input" && ["submit", "image"].includes(type)) ||
     (tag === "button" && type !== "button" && type !== "reset" &&
       Boolean(description.formAction || description.formMethod || description.formActionText)) ||
-    // A label of a submit button, or an element inside one, submits too.
-    description.policy?.formSubmission === "button"
+    // An element whose click reaches a submit button (its label, anything
+    // inside it, a field inside it) submits too.
+    ["button", "nested"].includes(description.policy?.formSubmission)
   );
 }
 
@@ -2014,13 +2015,36 @@ function stepFormSubmission(description, step, key = "") {
 // Octo uses no other windows: a form step whose submission opens one
 // ("_blank", or a window name that is no frame of the page) is refused
 // before it asks. A window a page opens by itself is still stopped and
-// closed by the step's guard.
-function refuseNewWindowSubmission(submission) {
+// closed by the step's guard. Nor does Octo take a form step through a field
+// inside a submit button: a click sends the form through that button and
+// Enter through the default button, which can go elsewhere.
+function refuseNewWindowOrNestedSubmission(submission) {
   if (submission && submission.newWindow) {
     throw new Error(
       "This form opens another window, which Octo never uses, so it was not submitted. Nothing was sent. Open the address with open_tab instead, or leave the form to the person.",
     );
   }
+  if (submission && submission.nested) {
+    throw new Error(
+      "This control sits inside the form's submit button, so a click and Enter send the form in different ways. Octo takes neither, so nothing was sent. Leave this form to the person.",
+    );
+  }
+}
+
+// The sites the page a step acts on may send a form to (POST) while the step
+// runs, enforced by the step's guard on the request itself, so a page that
+// moves its form between the check and the step (a keydown or click
+// handler), or a submit button the page describer cannot see (in a closed
+// shadow tree, or laid over the control), sends nothing elsewhere. A form
+// step may post to the page's own site and the site it was approved for; an
+// ordinary step (one routine browsing takes without asking) to the page's
+// own site only. A step the person approved that sends no form of its own is
+// not limited: a page may build and send one after it, as checkout pages do.
+// A page the step went on to load is not the one it acted on, so the limit
+// ends when one does.
+function stepPostOrigins(readingStep, sourceOrigin, submission, destination) {
+  if (submission) return [sourceOrigin, destination.destinationOrigin];
+  return readingStep ? [sourceOrigin] : null;
 }
 
 // Runs inside the page through Playwright, so it must not use anything from
@@ -2626,7 +2650,7 @@ async function execute(browser, browserSession, method, requestPath, body) {
   // Every step Octo takes, in any tab, is guarded the same way.
   const documents = await guardStepDocuments(page);
   try {
-    const result = await executeOnPage(browser, method, requestPath, body, page, tabs);
+    const result = await executeOnPage(browser, method, requestPath, body, page, tabs, documents);
     documents.assertNoneBlocked();
     return result;
   } catch (error) {
@@ -2646,6 +2670,10 @@ async function execute(browser, browserSession, method, requestPath, body) {
 // guarded takes no step.
 async function guardStepDocuments(page) {
   const blocked = [];
+  // Where the tab may send a form while the step runs (stepPostOrigins):
+  // null for anywhere, until the step says.
+  let postOrigins = null;
+  const strayPosts = [];
   // Another window a step opens (a target=_blank link, a script) would be a
   // tab Octo cannot see, count or close, outside this guard. While agent
   // control holds, no person opens a page, so every page that appears during
@@ -2696,15 +2724,29 @@ async function guardStepDocuments(page) {
       const url = event?.request?.url || "";
       const ownDocument = typeof event?.frameId !== "string" || event.frameId === mainFrameId;
       const site = !ownDocument ? null : LINK_ONLY_SITES === null ? "an unknown site" : linkOnlySiteOf(url);
-      const answer = site
+      // A form the tab posts to a site the step may not send to. A redirect
+      // the server answers with is the server's own, so only the browser's
+      // first request counts.
+      const strayPost = !site && ownDocument && postOrigins !== null &&
+        String(event?.request?.method || "").toUpperCase() === "POST" &&
+        !event?.redirectedRequestId &&
+        !postOrigins.has(approvalProtocol.normalizedOrigin(url));
+      const answer = site || strayPost
         ? session.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" })
         : session.send("Fetch.continueRequest", { requestId: event.requestId });
       if (site) blocked.push(site);
+      if (strayPost) strayPosts.push(approvalProtocol.normalizedOrigin(url) || "an address that is not a web site");
       answer.catch(() => {});
     });
     await session.send("Fetch.enable", {
       patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }],
     });
+    // A new document in the tab ends the limit on where forms may be sent:
+    // the page the step acted on is gone.
+    session.on("Page.frameNavigated", (event) => {
+      if (event?.frame && !event.frame.parentId) postOrigins = null;
+    });
+    await session.send("Page.enable");
   } catch (_) {
     if (session) await session.detach().catch(() => {});
     context.off("page", noteWindow);
@@ -2712,6 +2754,10 @@ async function guardStepDocuments(page) {
     throw new Error("Shared Browser could not guard the tab against link-only sites, so the step was not performed");
   }
   return {
+    // The sites the tab may send a form to from now on (stepPostOrigins).
+    limitFormPosts: (origins) => {
+      postOrigins = origins === null ? null : new Set(origins.filter(Boolean));
+    },
     release: async () => {
       await session.send("Fetch.disable").catch(() => {});
       await session.detach().catch(() => {});
@@ -2737,6 +2783,11 @@ async function guardStepDocuments(page) {
       if (blocked.length) {
         throw new Error(
           `A link or redirect that Octo's step followed led to ${blocked[0]}, which is link-only, so it was not opened. ${SEND_PAGE_HINT}`,
+        );
+      }
+      if (strayPosts.length) {
+        throw new Error(
+          `During this step the page sent a form to ${maskedDisplayText(strayPosts[0])}, which the step was not approved to send to, so it was stopped before it left the browser. Nothing was sent there. Leave this form to the person.`,
         );
       }
       if (windows.length || windowRequestStopped) {
@@ -2768,7 +2819,7 @@ async function refuseLinkOnlyTargetBeforeSitePrompt(page, body) {
   }
 }
 
-async function executeOnPage(browser, method, requestPath, body, page, tabs) {
+async function executeOnPage(browser, method, requestPath, body, page, tabs, documents = null) {
   if (method === "GET" && requestPath === "/v1/status") {
     const shared = {
       ready: true,
@@ -2930,7 +2981,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs) {
     if (rawDestination) {
       assertMayOpen(rawDestination);
     }
-    refuseNewWindowSubmission(stepFormSubmission(target.description, "click"));
+    const clickSubmission = stepFormSubmission(target.description, "click");
+    refuseNewWindowOrNestedSubmission(clickSubmission);
     refuseUnlessReadingStep(readingStep);
     if (
       destination.destinationOrigin &&
@@ -2961,6 +3013,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs) {
       destination,
     );
     const withholding = await withholdBeforeStep(page, step);
+    documents?.limitFormPosts(stepPostOrigins(readingStep, sourceOrigin, clickSubmission, destination));
     const box = target.description.box;
     const size = await viewport(page);
     emitAction({
@@ -3014,9 +3067,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs) {
     if (rawDestination) {
       assertMayOpen(rawDestination);
     }
-    if (submitting) {
-      refuseNewWindowSubmission(stepFormSubmission(target.description, "submit"));
-    }
+    const typeSubmission = submitting ? stepFormSubmission(target.description, "submit") : null;
+    refuseNewWindowOrNestedSubmission(typeSubmission);
     refuseUnlessReadingStep(readingStep);
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const destination = approvalProtocol.destinationBinding(rawDestination);
@@ -3074,6 +3126,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs) {
       submitting ? "target-or-page" : "none",
     );
     const withholding = submitting ? await withholdBeforeStep(page, step) : false;
+    documents?.limitFormPosts(stepPostOrigins(readingStep, sourceOrigin, typeSubmission, destination));
     await target.locator.fill(body.text);
     if (submitting) {
       await target.locator.press("Enter");
@@ -3119,7 +3172,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs) {
     if (rawDestination) {
       assertMayOpen(rawDestination);
     }
-    refuseNewWindowSubmission(stepFormSubmission(target.description, "press", pressKey));
+    const pressSubmission = stepFormSubmission(target.description, "press", pressKey);
+    refuseNewWindowOrNestedSubmission(pressSubmission);
     refuseUnlessReadingStep(readingStep);
     const destination = approvalProtocol.destinationBinding(rawDestination);
     if (activationKey) {
@@ -3161,6 +3215,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs) {
     );
     assertSafeTypeTarget(target.description);
     const withholding = activationKey ? await withholdBeforeStep(page, step) : false;
+    documents?.limitFormPosts(stepPostOrigins(readingStep, sourceOrigin, pressSubmission, destination));
     emitAction({
       type: "type",
       label: `Press ${pressKey}`,

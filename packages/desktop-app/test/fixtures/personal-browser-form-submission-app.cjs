@@ -24,7 +24,7 @@ let sequence = 0;
  * "step"), judges the step as the Personal Browser host does, then takes it
  * with the page bridge (a click, or Enter) and waits for what it sends.
  */
-globalThis.__instafyFormSubmissionStep = async ({ shop, name, step }) => {
+globalThis.__instafyFormSubmissionStep = async ({ shop, name, step, setup }) => {
   await app.whenReady();
   const window = new BrowserWindow({
     show: false,
@@ -45,6 +45,8 @@ globalThis.__instafyFormSubmissionStep = async ({ shop, name, step }) => {
   try {
     await window.loadURL(`${shop}/case/${encodeURIComponent(name)}`);
     const contents = window.webContents;
+    // What markup alone cannot build, the page builds after it loads.
+    if (setup) await contents.executeJavaScript(`(() => { ${setup} })()`);
     const pageUrl = contents.getURL();
     const snapshot = await bridge.snapshotPersonalBrowserPage(contents);
     const item = snapshot.interactive.find((candidate) => candidate.descriptor.id === "step");

@@ -194,6 +194,8 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     assert.match(initialized.body.result.instructions, /this step was not run because Desktop stopped a page load after your previous step, it is the previous step's/);
     // A form that would open another window is refused for good.
     assert.match(initialized.body.result.instructions, /new_window_blocked is final for that step/);
+    // So is a form step through a field inside a submit button.
+    assert.match(initialized.body.result.instructions, /form_submission_unclear is final for that control/);
 
     const listed = await requestJson(`${credentials.controlUrl}/mcp`, {
       method: "POST",

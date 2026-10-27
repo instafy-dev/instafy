@@ -161,6 +161,15 @@ const special = {
     }),
     policy: { formActionUrl: "https://other.example/collect", formSubmission: "implicit", formSubmits: true },
   },
+  // A field inside a submit button that posts to another site: a click
+  // submits through that button, Enter through the default button.
+  "field-inside-submit-button": {
+    description: control("", {
+      tag: "input", inputType: "text", ariaLabel: "Shoe size", labels: "Shoe size", formMethod: "post",
+      formAction: "https://other.example/collect", formActionText: "form post https://other.example/collect Shoe size",
+    }),
+    policy: { formActionUrl: "https://other.example/collect", formSubmission: "nested", formSubmits: true },
+  },
   "canary-label": { description: control(`Copy ${CANARY}`) },
   "click-error-canary": { description: control("Show details") },
   "no-policy": { description: control("Show details"), policy: null },
@@ -373,11 +382,17 @@ const closedPages = new Set();
 // reach the controller's guard, and its answers, kept in a file.
 const fetchLogPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_FETCH_LOG;
 const fetchSessions = new Set();
-const pauseDocument = (frameId, url) => {
+const pauseDocument = (frameId, url, request = {}, extra = {}) => {
   for (const session of fetchSessions) {
     for (const handler of session.handlers) {
-      handler({ requestId: `request-${frameId}`, frameId, resourceType: "Document", request: { url } });
+      handler({ requestId: `request-${frameId}`, frameId, resourceType: "Document", request: { url, ...request }, ...extra });
     }
+  }
+};
+// A new document commits in the tab's main frame.
+const commitMainFrame = () => {
+  for (const session of fetchSessions) {
+    for (const handler of session.navigated) handler({ frame: { id: "main", url: "https://example.test/next" } });
   }
 };
 // Tabs opened through context.newPage(), kept in a file so they last across
@@ -456,6 +471,22 @@ const makePage = (targetId, opened = null) => {
       }
       if (mode === "redirects-to-link-only") {
         pauseDocument("main", "https://www.booking.com/hotel/fixture.html");
+      }
+      // The page sends a form when the control is clicked: to another site,
+      // to its own, as a redirect the server answered with, or from a page
+      // the step loaded first.
+      if (mode === "posts-elsewhere-after-click") {
+        pauseDocument("main", "https://other.example/collect", { method: "POST" });
+      }
+      if (mode === "posts-to-own-site-after-click") {
+        pauseDocument("main", "https://example.test/collect", { method: "POST" });
+      }
+      if (mode === "redirect-posts-elsewhere-after-click") {
+        pauseDocument("main", "https://other.example/collect", { method: "POST" }, { redirectedRequestId: "request-first" });
+      }
+      if (mode === "next-page-posts-elsewhere-after-click") {
+        commitMainFrame();
+        pauseDocument("main", "https://other.example/collect", { method: "POST" });
       }
       if (mode === "click-error-canary") {
         throw new Error(`element <button data-key="${CANARY}"> is not attached to the DOM`);
@@ -569,7 +600,7 @@ context = {
     return page;
   },
   newCDPSession: async (page) => {
-    const session = { handlers: [] };
+    const session = { handlers: [], navigated: [] };
     return {
       send: async (method, params) => {
         if (method === "Fetch.enable") fetchSessions.add(session);
@@ -585,6 +616,7 @@ context = {
       },
       on: (event, handler) => {
         if (event === "Fetch.requestPaused") session.handlers.push(handler);
+        if (event === "Page.frameNavigated") session.navigated.push(handler);
       },
       detach: async () => {
         fetchSessions.delete(session);
@@ -2116,6 +2148,86 @@ fn a_form_step_that_opens_another_window_is_refused_before_any_prompt() {
         assert!(requests.is_empty(), "{path}: {requests:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("opens another window"), "{path}: {stderr}");
+    }
+}
+
+#[test]
+fn a_field_inside_a_submit_button_is_refused_before_any_prompt() {
+    for (path, extra) in [
+        ("/v1/click", json!({})),
+        ("/v1/press", json!({"key": "Enter"})),
+        ("/v1/type", json!({"text": "42", "submit": true})),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let mode = "field-inside-submit-button";
+        let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id(mode)});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            path,
+            Some(&body.to_string()),
+            &["https://example.test"],
+            &["allow_once", "allow_once"],
+        );
+        assert!(!output.status.success(), "{path} took a nested form step");
+        assert!(requests.is_empty(), "{path}: {requests:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("sits inside the form's submit button"),
+            "{path}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_form_the_page_posts_elsewhere_during_an_ordinary_step_is_stopped_before_it_leaves() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let click = |mode: &str| {
+        let snapshot_id = fixture.snapshot_id_in(mode);
+        fixture.call(
+            mode,
+            "POST",
+            "/v1/click",
+            Some(&json!({ "index": 0, "snapshotId": snapshot_id }).to_string()),
+        )
+    };
+
+    // An ordinary click whose page posts a form to another site (a submit
+    // button the describer could not see, or a handler that moved the form):
+    // stopped before the request leaves, and the step fails saying so.
+    std::fs::remove_file(&fixture.fetch_log).ok();
+    let refused = failure_of(&click("posts-elsewhere-after-click"));
+    assert!(
+        refused.contains("the page sent a form to https://other.example/, which the step was not approved to send to"),
+        "{refused}"
+    );
+    assert_eq!(
+        fixture.fetch_answers(),
+        vec![("Fetch.failRequest".to_string(), "request-main".to_string())]
+    );
+
+    // Its own site, a redirect the server answered with, and a form sent by
+    // a page the step went on to load are not the step's to judge.
+    for mode in [
+        "posts-to-own-site-after-click",
+        "redirect-posts-elsewhere-after-click",
+        "next-page-posts-elsewhere-after-click",
+    ] {
+        std::fs::remove_file(&fixture.fetch_log).ok();
+        payload_of(&click(mode));
+        assert_eq!(
+            fixture.fetch_answers(),
+            vec![(
+                "Fetch.continueRequest".to_string(),
+                "request-main".to_string()
+            )],
+            "{mode}"
+        );
     }
 }
 

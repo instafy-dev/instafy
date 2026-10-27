@@ -305,16 +305,17 @@
     return lower(target.areas).split(/\s+/).filter(Boolean);
   }
 
-  // A control whose click submits its form: a submit button, or a label or
-  // a child of one that the page describer found activates one
-  // (formSubmission "button").
+  // A control whose click submits its form: a submit button, or an element
+  // whose click the page describer found reaches one (formSubmission
+  // "button"), such as its label or something inside it, a field inside it
+  // included ("nested").
   function isSubmitControl(target) {
     const tag = lower(target.tag);
     const type = lower(target.type);
     const owned = Boolean(cleanText(target.formOwnerIdentity));
     return owned && ((tag === "button" && (type === "submit" || type === "")) ||
       (tag === "input" && (type === "submit" || type === "image")) ||
-      target.formSubmission === "button");
+      target.formSubmission === "button" || target.formSubmission === "nested");
   }
 
   // The risk of the address a form step sends to, judged like a link's. The
@@ -332,7 +333,8 @@
   // one; neither is a submission whose address is unknown or risky.
   function isSameSiteGetSubmission(target, ctx) {
     const action = cleanText(target.formActionUrl);
-    if (!action || target.formNewWindow === true || lower(target.formMethod || "get") !== "get") return false;
+    if (!action || target.formNewWindow === true || target.formSubmission === "nested" ||
+      lower(target.formMethod || "get") !== "get") return false;
     const actionSite = siteOf(action);
     const pageSite = ctx && ctx.pageUrl ? siteOf(ctx.pageUrl) : null;
     return Boolean(actionSite) && actionSite === pageSite && !classifyAddress(action);
@@ -581,7 +583,10 @@
     }
 
     // Clicking into a field only focuses it; typing is classified on its own.
-    if (isEditable(target) && !FEDERATED_SIGN_IN.test(label)) return allow("focus", "focus a field");
+    // A field inside a submit button is the exception: the click submits.
+    if (isEditable(target) && !isSubmitControl(target) && !FEDERATED_SIGN_IN.test(label)) {
+      return allow("focus", "focus a field");
+    }
 
     if (FEDERATED_SIGN_IN.test(label)) return refuse("sign_in", "sign-in with another account");
     if (isSubmitControl(target) && isSignInForm(target)) return refuse("sign_in", "sign-in form submit");

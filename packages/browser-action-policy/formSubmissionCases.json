@@ -1,6 +1,6 @@
 {
   "schema": "instafy.form-submission-cases@1",
-  "about": "One table of form steps for both browsers. Each page is {shop}/case/<name>, with `html` as its body; the element with id=\"step\" takes the step (Enter, or a click). `submission` is what formSubmissionRulesInPage reports for it, `sends` the request the browser makes (\"\" for none; a GET is compared without its query), and `enter` the step classifier's verdict for Enter, where given. {shop} and {other} are two sites on the test server; {page} is the case's own address.",
+  "about": "One table of form steps for both browsers. Each page is {shop}/case/<name>, with `html` as its body; the element with id=\"step\" takes the step (Enter, or a click). `setup`, where given, is a script the page runs after it loads, for what markup alone cannot build (a shadow tree, nested buttons, thousands of controls). `submission` is what formSubmissionRulesInPage reports for it, `sends` the request the browser makes (\"\" for none; a GET is compared without its query), and `enter` the step classifier's verdict for Enter, where given. {shop} and {other} are two sites on the test server; {page} is the case's own address.",
   "cases": [
     {
       "name": "hostile-default-button",
@@ -249,6 +249,107 @@
       "submission": { "via": "", "submits": false, "action": "{shop}/search", "method": "get", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
       "sends": "",
       "enter": "ask"
+    },
+    {
+      "name": "enter-in-a-field-joined-by-form-attribute",
+      "html": "<input id=\"step\" type=\"search\" name=\"q\" form=\"f\" aria-label=\"Search\"><form id=\"f\" action=\"/search\"><button formaction=\"{other}/collect\" formmethod=\"post\">Search</button></form>",
+      "step": "enter",
+      "submission": { "via": "implicit", "submits": true, "action": "{other}/collect", "method": "post", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "POST {other}/collect",
+      "enter": "ask"
+    },
+    {
+      "name": "enter-with-many-controls-before-the-form",
+      "html": "<form action=\"/search\" method=\"get\"><input id=\"step\" type=\"search\" name=\"q\" aria-label=\"Search\"><button formaction=\"{other}/collect\" formmethod=\"post\">Search</button></form>",
+      "setup": "const many = document.createDocumentFragment(); for (let index = 0; index < 20001; index += 1) { const input = document.createElement('input'); input.type = 'hidden'; many.append(input); } document.body.prepend(many);",
+      "step": "enter",
+      "submission": { "via": "implicit", "submits": true, "action": "{other}/collect", "method": "post", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "POST {other}/collect",
+      "enter": "ask"
+    },
+    {
+      "name": "empty-form-target-takes-the-base-target",
+      "html": "<base target=\"_blank\"><form action=\"/search\" target=\"\"><input id=\"step\" type=\"search\" name=\"q\" aria-label=\"Search\"><button>Search</button></form>",
+      "step": "enter",
+      "submission": { "via": "implicit", "submits": true, "action": "{shop}/search", "method": "get", "enctype": "application/x-www-form-urlencoded", "target": "_blank", "newWindow": true },
+      "sends": "GET {shop}/search",
+      "enter": "ask"
+    },
+    {
+      "name": "empty-formtarget-takes-the-base-target",
+      "html": "<base target=\"_blank\"><form action=\"/search\"><input id=\"step\" type=\"search\" name=\"q\" aria-label=\"Search\"><button formtarget=\"\">Search</button></form>",
+      "step": "enter",
+      "submission": { "via": "implicit", "submits": true, "action": "{shop}/search", "method": "get", "enctype": "application/x-www-form-urlencoded", "target": "_blank", "newWindow": true },
+      "sends": "GET {shop}/search",
+      "enter": "ask"
+    },
+    {
+      "name": "blank-formaction-is-the-page-not-the-base",
+      "html": "<base href=\"{other}/dir/\"><form action=\"/search\"><input id=\"step\" type=\"search\" name=\"q\" aria-label=\"Search\"><button formaction=\" \n \">Search</button></form>",
+      "step": "enter",
+      "submission": { "via": "implicit", "submits": true, "action": "{page}", "method": "get", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "GET {page}",
+      "enter": "allow"
+    },
+    {
+      "name": "click-deep-inside-a-submit-button",
+      "html": "<form action=\"/search\"><button formaction=\"{other}/collect\" formmethod=\"post\"><span id=\"step\" tabindex=\"0\">Search</span></button></form>",
+      "setup": "const step = document.getElementById('step'); for (let depth = 0; depth < 70; depth += 1) { const wrapper = document.createElement('span'); step.replaceWith(wrapper); wrapper.append(step); }",
+      "step": "click",
+      "submission": { "via": "button", "submits": true, "action": "{other}/collect", "method": "post", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "POST {other}/collect"
+    },
+    {
+      "name": "click-a-slotted-element-of-a-shadow-submit-button",
+      "html": "<div id=\"host\"><span id=\"step\" tabindex=\"0\">Close</span></div>",
+      "setup": "document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML = '<form action=\"{other}/collect\" method=\"post\"><button><slot></slot></button></form>';",
+      "step": "click",
+      "submission": { "via": "button", "submits": true, "action": "{other}/collect", "method": "post", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "POST {other}/collect"
+    },
+    {
+      "name": "click-a-text-area-inside-a-submit-button",
+      "html": "<form action=\"/search\"><button formaction=\"{other}/collect\" formmethod=\"post\"><textarea id=\"step\" name=\"m\" aria-label=\"Message\"></textarea></button></form>",
+      "step": "click",
+      "submission": { "via": "button", "submits": true, "action": "{other}/collect", "method": "post", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "POST {other}/collect"
+    },
+    {
+      "name": "click-a-label-inside-a-submit-button",
+      "html": "<form action=\"/search\"><button formaction=\"{other}/collect\" formmethod=\"post\"><label id=\"step\" tabindex=\"0\">Read the reviews</label></button></form>",
+      "step": "click",
+      "submission": { "via": "button", "submits": true, "action": "{other}/collect", "method": "post", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "POST {other}/collect"
+    },
+    {
+      "name": "click-a-plain-button-inside-a-submit-button",
+      "html": "<form action=\"/search\"><button id=\"outer\" formaction=\"{other}/collect\" formmethod=\"post\">Go </button></form>",
+      "setup": "const inner = document.createElement('button'); inner.type = 'button'; inner.id = 'step'; inner.textContent = 'Help'; document.getElementById('outer').append(inner);",
+      "step": "click",
+      "submission": { "via": "button", "submits": true, "action": "{other}/collect", "method": "post", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "POST {other}/collect"
+    },
+    {
+      "name": "click-a-text-field-inside-a-submit-button",
+      "html": "<form action=\"/search\"><button formaction=\"{other}/collect\" formmethod=\"post\"><input id=\"step\" name=\"q\" aria-label=\"Search\"></button></form>",
+      "step": "click",
+      "submission": { "via": "nested", "submits": true, "action": "{other}/collect", "method": "post", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "POST {other}/collect",
+      "enter": "ask"
+    },
+    {
+      "name": "click-a-checkbox-inside-a-submit-button",
+      "html": "<form action=\"/search\"><button formaction=\"{other}/collect\" formmethod=\"post\"><input id=\"step\" type=\"checkbox\" name=\"c\" aria-label=\"Only in stock\"></button></form>",
+      "step": "click",
+      "submission": { "via": "implicit", "submits": true, "action": "{other}/collect", "method": "post", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": ""
+    },
+    {
+      "name": "click-a-link-inside-a-submit-button",
+      "html": "<form action=\"/search\"><button formaction=\"{other}/collect\" formmethod=\"post\"><a id=\"step\" href=\"/elsewhere\">Reviews</a></button></form>",
+      "step": "click",
+      "submission": { "via": "", "submits": false, "action": "{shop}/search", "method": "get", "enctype": "application/x-www-form-urlencoded", "target": "", "newWindow": false },
+      "sends": "GET {shop}/elsewhere"
     }
   ]
 }

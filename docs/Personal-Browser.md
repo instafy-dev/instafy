@@ -230,10 +230,13 @@ ones the Shared Browser runs) and reports the submission a step makes: a submit
 button's `formaction`, `formmethod`, `formenctype` and `formtarget` over the
 form's own, Enter through the form's default button (a disabled one blocks it;
 Enter in a checkbox, radio, date field or select clicks the first enabled
-submit button, as Chromium does), a label of a submit button or an element
-inside one, addresses resolved against `<base href>`, and `method="dialog"`,
-which sends nothing. The step rules, the link-only and private-address checks,
-the site prompt and the dialog all use that submission:
+submit button, as Chromium does), a click followed up its event path to the
+submit button it reaches (a label of one, or anything inside one that passes
+the click on, through slots and however deep), addresses resolved against
+`<base href>` (an action of only spaces is the page itself), an empty target
+taking the `<base target>`, and `method="dialog"`, which sends nothing. The
+step rules, the link-only and private-address checks, the site prompt and the
+dialog all use that submission:
 
 - A form sent to another site is held to the rules of a link to it before
   anything asks, and in Ask mode that site is allowed in this tab first; the
@@ -244,6 +247,13 @@ the site prompt and the dialog all use that submission:
 - A form step whose submission opens another window is refused before any
   dialog with `new_window_blocked`; the tab's window-open handler denies any
   window a page opens by itself.
+- A field or select inside a submit button submits through that button when
+  clicked and through the default button on Enter, which can go elsewhere: its
+  form steps are refused before any dialog with `form_submission_unclear`.
+- The page's keydown handlers run before the bridge's Enter or Space does
+  anything. When they move the submission the step was judged by (another
+  default button, a new `formaction`, `formmethod` or `formtarget`), the key
+  stops there and nothing is sent; the step fails as a changed target.
 - The bridge's own Enter performs implicit submission as the browser does: it
   clicks the default button, or submits a form without one from its only text
   field, and sends nothing when that is blocked. It no longer calls

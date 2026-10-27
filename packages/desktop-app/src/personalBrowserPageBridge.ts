@@ -936,7 +936,25 @@ export async function pressPersonalBrowserTarget(
           cancelable: true,
           composed: true,
         };
+        // Where Enter or Space sends the form, as the step was judged. The
+        // page's keydown handlers run before the key's default: one that
+        // moves the submission (another default button, a new formaction,
+        // formmethod or formtarget) stops the key here, before anything is
+        // sent. One that only enables the judged default button changes none
+        // of it.
+        const submissionFacts = (item) => JSON.stringify([
+          item?.found, item?.formOwnerIdentity, item?.formSubmission, item?.formActionUrl,
+          item?.formMethod, item?.formEnctype, item?.formTarget, item?.formNewWindow,
+        ]);
+        const judgedSubmission = submissionFacts(guarded.item);
         const continueDefault = element.dispatchEvent(new KeyboardEvent("keydown", keyboardOptions));
+        if (continueDefault && (args.key === "Enter" || args.key === " ")) {
+          const current = descriptor(element);
+          if (submissionFacts(current) !== judgedSubmission) {
+            element.dispatchEvent(new KeyboardEvent("keyup", keyboardOptions));
+            return { pressed: false, targetChanged: true, descriptor: current };
+          }
+        }
         if (continueDefault) {
           const tag = guarded.item.tag;
           const role = guarded.item.role;

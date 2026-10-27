@@ -11,12 +11,16 @@
  *
  *   submissionOf(element, fallbackForm)
  *     What the step that submits through `element` sends:
- *     - a submit button, a child of one, or a label of one: clicking it (and
- *       Enter or Space on the button) submits with that button as the
- *       submitter (via "button");
+ *     - an element whose click reaches a submit button (the button, anything
+ *       inside it, a label of it): clicking it (and Enter or Space on a
+ *       button) submits with that button as the submitter (via "button");
  *     - another control of a form (a field, checkbox, radio, select): Enter
  *       submits implicitly, through the form's default button (via
  *       "implicit");
+ *     - a control of both kinds, such as a field inside a submit button: a
+ *       click submits through that button and Enter through the default
+ *       button, which can send something else (via "nested"). The other
+ *       fields describe the click's; hosts take neither step;
  *     - any other element of a form, or `fallbackForm` when it has none:
  *       nothing; the result then describes the form's own submission
  *       (via "").
@@ -35,20 +39,28 @@
  *
  * The rules, from the HTML form submission and implicit submission
  * algorithms, as Chromium runs them:
+ * - A click travels up its event path (through the slot an element is
+ *   assigned to and from a shadow root to its host) until an element takes
+ *   it. A link, a checkbox or radio, a file or colour chooser, a reset button
+ *   and a details summary take it and submit nothing; a submit button of a
+ *   form takes it and submits. Every other element passes it on: text
+ *   fields, selects, text areas, plain buttons, and labels, which click
+ *   their control as well.
  * - The submitter's formaction, formmethod, formenctype and formtarget
  *   attributes replace the form's action, method, enctype and target. One
  *   that is present but empty still replaces it.
- * - An empty action is the document's own address; any other is resolved
- *   against the document's base URL, so <base href> applies. An unknown
- *   method is GET; an unknown enctype is application/x-www-form-urlencoded.
- * - Without a target, the first <base target> applies. "_blank", or a name
- *   that is neither this window's nor a frame's on the page, opens another
- *   window. "_self", "_parent" and "_top" stay in the tab.
+ * - An action that is empty, or only spaces, is the document's own address;
+ *   any other is resolved against the document's base URL, so <base href>
+ *   applies. An unknown method is GET; an unknown enctype is
+ *   application/x-www-form-urlencoded.
+ * - An empty or missing target takes the first <base target>. "_blank", or a
+ *   name that is neither this window's nor a frame's on the page, opens
+ *   another window. "_self", "_parent" and "_top" stay in the tab.
  * - method="dialog" closes a dialog and sends nothing.
  * - Enter in a text field (text, search, email, url, tel, password, number)
  *   clicks the form's default button: its first submit button in tree order,
- *   including one outside the form that joins it with form=. A disabled
- *   default button blocks the submission.
+ *   including one outside the form that joins it with form=, however many
+ *   controls the page has. A disabled default button blocks the submission.
  * - Enter in another control (checkbox, radio, date, range, select) clicks
  *   the first submit button that is not disabled. Chromium does this; the
  *   standard would block on a disabled default button.
@@ -84,16 +96,23 @@
     const hasAttribute = accessor(Element.prototype, "hasAttribute");
     const matches = accessor(Element.prototype, "matches");
     const localNameOf = accessor(Element.prototype, "localName");
-    const parentOf = accessor(Node.prototype, "parentElement");
+    const assignedSlotOf = accessor(Element.prototype, "assignedSlot");
+    const firstElementChildOf = accessor(Element.prototype, "firstElementChild");
+    const nextElementSiblingOf = accessor(Element.prototype, "nextElementSibling");
+    const parentNodeOf = accessor(Node.prototype, "parentNode");
     const ownerDocumentOf = accessor(Node.prototype, "ownerDocument");
     const rootOf = accessor(Node.prototype, "getRootNode");
     const nodeTypeOf = accessor(Node.prototype, "nodeType");
+    const comparePosition = accessor(Node.prototype, "compareDocumentPosition");
     const baseUrlOf = accessor(Node.prototype, "baseURI");
     const documentUrlOf = accessor(Document.prototype, "URL");
     const documentQueryAll = accessor(Document.prototype, "querySelectorAll");
     const documentQuery = accessor(Document.prototype, "querySelector");
     const fragmentQueryAll = accessor(DocumentFragment.prototype, "querySelectorAll");
     const defaultViewOf = accessor(Document.prototype, "defaultView");
+    const formElementsOf = accessor(HTMLFormElement.prototype, "elements");
+    const labelControlOf = accessor(HTMLLabelElement.prototype, "control");
+    const shadowHostOf = typeof ShadowRoot === "function" ? accessor(ShadowRoot.prototype, "host") : null;
 
     const attribute = (element, name) => getAttribute.call(element, name);
     const has = (element, name) => hasAttribute.call(element, name);
@@ -138,27 +157,41 @@
     const startsImplicitSubmission = (element) =>
       (tag(element) === "input" && !NO_IMPLICIT_TYPES.has(typeOf(element))) || tag(element) === "select";
 
-    // The form's controls of one kind, in tree order: those inside it and
-    // those that join it with form= from elsewhere in the same tree.
-    const controlsOf = (form, selector, keep) => {
-      const root = rootOf.call(form);
-      let all;
+    // The form's listed controls in tree order, those that join it with
+    // form= from elsewhere in its tree included: form.elements, whatever else
+    // the page holds. It leaves out image buttons, which are looked up in the
+    // form's tree and put back in their place.
+    const listedControlsOf = (form) => {
+      const listed = [];
       try {
-        // 9 is DOCUMENT_NODE; a form in a shadow tree has its shadow root.
-        all = nodeTypeOf.call(root) === 9 ? documentQueryAll.call(root, selector) : fragmentQueryAll.call(root, selector);
+        const elements = formElementsOf.call(form);
+        for (let index = 0; index < elements.length; index += 1) listed.push(elements[index]);
       } catch (_) {
-        all = [];
+        // Not a form.
       }
-      const found = [];
-      for (let index = 0; index < all.length && index < MAX_SCANNED; index += 1) {
-        const control = all[index];
-        if (formOwnerOf(control) === form && keep(control)) found.push(control);
+      let images = [];
+      try {
+        const root = rootOf.call(form);
+        const selector = "input[type=image i]";
+        // 9 is DOCUMENT_NODE; a form in a shadow tree has its shadow root.
+        images = nodeTypeOf.call(root) === 9 ? documentQueryAll.call(root, selector) : fragmentQueryAll.call(root, selector);
+      } catch (_) {
+        images = [];
       }
-      return found;
+      const added = [];
+      for (let index = 0; index < images.length; index += 1) {
+        const image = images[index];
+        if (formOwnerOf(image) === form && !listed.includes(image)) added.push(image);
+      }
+      if (added.length === 0) return listed;
+      // 4 is DOCUMENT_POSITION_FOLLOWING: b comes after a.
+      return listed.concat(added).sort((a, b) => (a === b ? 0 : comparePosition.call(a, b) & 4 ? -1 : 1));
     };
-    const submitButtonsOf = (form) => controlsOf(form, "button, input", isSubmitButton);
+    const submitButtonsOf = (form) => listedControlsOf(form).filter(isSubmitButton);
 
-    const resolve = (element, value) => {
+    const resolve = (element, raw) => {
+      // Chromium strips HTML spaces from an action first.
+      const value = raw.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "");
       if (value === "") return bounded(documentUrlOf.call(ownerDocumentOf.call(element)));
       try {
         return bounded(new URL(value, baseUrlOf.call(element)).href);
@@ -185,6 +218,7 @@
       } catch (_) {
         // An unknown window name is not this window's.
       }
+      // A name no frame among the first MAX_SCANNED has counts as a window.
       const frames = documentQueryAll.call(doc, "iframe, frame, object");
       for (let index = 0; index < frames.length && index < MAX_SCANNED; index += 1) {
         const frame = frames[index];
@@ -198,12 +232,11 @@
       return true;
     };
     const targetOf = (form, submitter) => {
-      let target;
-      if (submitter && has(submitter, "formtarget")) {
-        target = attribute(submitter, "formtarget");
-      } else if (has(form, "target")) {
-        target = attribute(form, "target");
-      } else {
+      let target = submitter && has(submitter, "formtarget")
+        ? attribute(submitter, "formtarget")
+        : attribute(form, "target");
+      // Chromium takes <base target> for an empty target as for a missing one.
+      if (!target) {
         const base = documentQuery.call(ownerDocumentOf.call(form), "base[target]");
         target = base ? attribute(base, "target") : "";
       }
@@ -232,25 +265,83 @@
       };
     };
 
-    // The element a click on `element` activates: the element itself, or
-    // the nearest button, input, link or summary around it. A label
-    // activates its control.
-    const activatedBy = (element) => {
-      let node = element;
-      for (let depth = 0; node && depth < 64; depth += 1, node = parentOf.call(node)) {
-        const name = tag(node);
-        if (["button", "input", "select", "textarea", "summary"].includes(name)) return node;
-        if ((name === "a" || name === "area") && has(node, "href")) return node;
-        if (name === "label") return node.control || null;
+    // The next node of an event's path: the slot an element is assigned to,
+    // its parent, or a shadow root's host. A closed shadow tree keeps its
+    // slots to itself.
+    const nextOnPath = (node) => {
+      try {
+        const slot = assignedSlotOf.call(node);
+        if (slot) return slot;
+      } catch (_) {
+        // Not an element.
       }
-      return null;
+      const parent = parentNodeOf.call(node);
+      if (!parent) return null;
+      const type = nodeTypeOf.call(parent);
+      if (type === 1) return parent;
+      // 11 is DOCUMENT_FRAGMENT_NODE: a shadow root, or a fragment.
+      if (type !== 11 || !shadowHostOf) return null;
+      try {
+        return shadowHostOf.call(parent);
+      } catch (_) {
+        return null;
+      }
+    };
+    const labelControl = (label) => {
+      try {
+        return labelControlOf.call(label);
+      } catch (_) {
+        return null;
+      }
+    };
+    // A details element's first summary toggles it; another summary is text.
+    const isMainSummary = (summary) => {
+      const details = parentNodeOf.call(summary);
+      if (!details || nodeTypeOf.call(details) !== 1 || tag(details) !== "details") return false;
+      for (let child = firstElementChildOf.call(details); child; child = nextElementSiblingOf.call(child)) {
+        if (tag(child) === "summary") return child === summary;
+      }
+      return false;
+    };
+    const TAKES_CLICK_INPUT_TYPES = new Set(["checkbox", "radio", "file", "color"]);
+
+    // The submit buttons a click on `element` submits with, as Chromium
+    // dispatches it: up the event path to the element that takes the click.
+    // A label passes the click on and clicks its control too, so a label of
+    // a submit button inside another one finds both. A disabled submit button
+    // inside another passes the click on; one that is `element` itself is
+    // still the step's submitter, which the page may enable.
+    const clickedSubmitButtons = (element) => {
+      const found = [];
+      for (let node = element; node; node = nextOnPath(node)) {
+        const name = tag(node);
+        if ((name === "a" || name === "area") && has(node, "href")) break;
+        if (name === "summary" && isMainSummary(node)) break;
+        if (name === "label") {
+          const control = labelControl(node);
+          if (control && isSubmitButton(control) && formOwnerOf(control) && !found.includes(control)) found.push(control);
+          continue;
+        }
+        if (name !== "input" && name !== "button") continue;
+        const type = typeOf(node);
+        if (name === "input" && TAKES_CLICK_INPUT_TYPES.has(type)) break;
+        const owned = Boolean(formOwnerOf(node));
+        if (type === "reset" && owned && !disabled(node)) break;
+        if (isSubmitButton(node) && owned && (node === element || !disabled(node))) {
+          if (!found.includes(node)) found.push(node);
+          break;
+        }
+      }
+      return found;
     };
 
+    // The button that Enter or Space on `element` clicks: the element, or a
+    // <button> its key event reaches first. A field, a link or a summary on
+    // the way handles the key itself.
     function keyActivatedButton(element) {
       const name = tag(element);
       if (name === "input") return ["submit", "image", "reset", "button"].includes(typeOf(element)) ? element : null;
-      let node = element;
-      for (let depth = 0; node && depth < 64; depth += 1, node = parentOf.call(node)) {
+      for (let node = element; node; node = nextOnPath(node)) {
         const current = tag(node);
         if (current === "button") return node;
         if (["input", "select", "textarea", "summary"].includes(current)) return null;
@@ -271,16 +362,18 @@
         return enabled ? { form, button: enabled, blocked: false } : { form, button: defaultButton, blocked: true };
       }
       if (!isTextField(element)) return { form, button: null, blocked: true };
-      return { form, button: null, blocked: controlsOf(form, "input", isTextField).length > 1 };
+      return { form, button: null, blocked: listedControlsOf(form).filter(isTextField).length > 1 };
     }
 
     function submissionOf(element, fallbackForm) {
-      const activated = activatedBy(element);
-      if (activated && isSubmitButton(activated)) {
-        const form = formOwnerOf(activated);
-        if (form) return describe(form, activated, "button", !disabled(activated));
-      }
+      const buttons = clickedSubmitButtons(element);
       const implicit = implicitSubmission(element);
+      if (buttons.length > 0) {
+        const clicked = describe(formOwnerOf(buttons[0]), buttons[0], "button", !disabled(buttons[0]));
+        // A field inside a submit button, or a label of one inside another,
+        // submits two ways.
+        return implicit || buttons.length > 1 ? { ...clicked, via: "nested" } : clicked;
+      }
       if (implicit) return describe(implicit.form, implicit.button, "implicit", !implicit.blocked);
       const form = formOwnerOf(element) || (fallbackForm && tag(fallbackForm) === "form" ? fallbackForm : null);
       return form ? describe(form, null, "", false) : null;
@@ -307,27 +400,31 @@
 
   /**
    * The submission a step makes, from an element's reported facts (the step
-   * classifier's field names): `{ action, method, newWindow }`, or null when
-   * the step submits no form. A click, Enter or Space on a submit button
-   * submits with it; Enter in a form's control submits implicitly; typing
-   * with submit counts as a submission of the field's form whatever the
-   * field, since the page's script may send it. A dialog submission sends
-   * nothing and opens nothing, so it has no action.
+   * classifier's field names): `{ action, method, newWindow, nested }`, or
+   * null when the step submits no form. A click, Enter or Space on a submit
+   * button submits with it; Enter in a form's control submits implicitly;
+   * typing with submit counts as a submission of the field's form whatever
+   * the field, since the page's script may send it. A dialog submission
+   * sends nothing and opens nothing, so it has no action. `nested` marks a
+   * control that submits two ways (a field inside a submit button): a host
+   * takes none of its steps that submit.
    */
   function stepSubmission(facts, step, key) {
     if (!facts || typeof facts !== "object" || !String(facts.formOwnerIdentity || "").trim()) return null;
     const via = submissionKind(facts);
+    const nested = via === "nested";
     const pressed = step === "press" ? String(key || "") : "";
     const submits = step === "submit" ||
-      (via === "button" && (step === "click" || pressed === "Enter" || pressed === " " || pressed === "Space")) ||
+      ((via === "button" || nested) && (step === "click" || pressed === "Enter" || pressed === " " || pressed === "Space")) ||
       (via === "implicit" && pressed === "Enter");
     if (!submits) return null;
     const method = lower(facts.formMethod);
-    if (method === "dialog") return { action: null, method, newWindow: false };
+    if (method === "dialog") return { action: null, method, newWindow: false, nested };
     return {
       action: typeof facts.formActionUrl === "string" && facts.formActionUrl.trim() ? facts.formActionUrl.trim() : null,
       method: method || "get",
       newWindow: facts.formNewWindow === true,
+      nested,
     };
   }
 

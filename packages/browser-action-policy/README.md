@@ -35,11 +35,15 @@ publish it on `globalThis.__instafyBrowserRedaction`,
   isolated world) and computes the submission a form step makes, as the
   browser does: a submit button's `formaction`, `formmethod`, `formenctype` and
   `formtarget` over the form's own, Enter through the form's default button
-  (a disabled one blocks it), `<base href>` and `<base target>`, frame names
-  and `method="dialog"`. Both browsers report it as `formActionUrl`,
-  `formMethod`, `formEnctype`, `formTarget`, `formNewWindow`, `formSubmission`
-  and `formSubmits`, which `actionPolicy.js` judges. `stepSubmission(facts,
-  step, key)` says which steps submit and where to. Publishes
+  (a disabled one blocks it), a click along its event path to the submit
+  button it reaches (labels, plain buttons, fields and slotted elements pass it
+  on; links, checkboxes and summaries take it), `<base href>` and
+  `<base target>`, frame names and `method="dialog"`. Both browsers report it
+  as `formActionUrl`, `formMethod`, `formEnctype`, `formTarget`,
+  `formNewWindow`, `formSubmission` and `formSubmits`, which `actionPolicy.js`
+  judges. `stepSubmission(facts, step, key)` says which steps submit and where
+  to; a field inside a submit button (`nested`), which a click and Enter send
+  in different ways, is one both hosts refuse. Publishes
   `globalThis.__instafyBrowserFormSubmission`. `formSubmissionCases.json` is
   the one table of form steps both browsers' tests run.
 - `pageCapture.js`: `pageSecretSignalsInPage(sources)` runs inside a page and

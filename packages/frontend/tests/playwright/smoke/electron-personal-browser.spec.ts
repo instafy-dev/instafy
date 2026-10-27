@@ -920,7 +920,8 @@ test.describe("Electron Personal Browser", () => {
       name: string;
       html: string;
       step: "enter" | "click";
-      submission: Record<string, unknown> & { action: string; newWindow: boolean; submits: boolean };
+      setup?: string;
+      submission: Record<string, unknown> & { action: string; newWindow: boolean; submits: boolean; via: string };
       sends: string;
       enter?: "allow" | "ask";
     };
@@ -967,7 +968,7 @@ test.describe("Electron Personal Browser", () => {
       enterAsksInRoutine: boolean;
       enterAsksInAsk: boolean;
       clickAsksInRoutine: boolean;
-      submission: { action: string | null; method: string; newWindow: boolean } | null;
+      submission: { action: string | null; method: string; newWindow: boolean; nested: boolean } | null;
       performed: boolean;
       targetChanged: boolean;
       deniedWindows: string[];
@@ -978,7 +979,12 @@ test.describe("Electron Personal Browser", () => {
         async (_electron, options) => (globalThis as unknown as {
           __instafyFormSubmissionStep: (value: typeof options) => Promise<unknown>;
         }).__instafyFormSubmissionStep(options),
-        { shop: `http://shop.test:${formPort}`, name: entry.name, step: entry.step },
+        {
+          shop: `http://shop.test:${formPort}`,
+          name: entry.name,
+          step: entry.step,
+          setup: entry.setup ? fill(entry.setup, entry.name) : undefined,
+        },
       ) as StepResult;
       // The page load itself was the first request.
       return { result, sent: formRequests.slice(1) };
@@ -992,6 +998,10 @@ test.describe("Electron Personal Browser", () => {
           expect(result.enterVerdict, entry.name).toBe(entry.enter);
           expect(result.enterAsksInRoutine, entry.name).toBe(entry.enter === "ask");
         }
+        // A field inside a submit button, which a click and Enter send in
+        // different ways, is marked so that the host refuses its steps. The
+        // bridge here takes them anyway, to show what Chromium then sends.
+        expect(result.submission?.nested ?? false, entry.name).toBe(entry.submission.via === "nested");
         expect(result.performed, entry.name).toBe(true);
         expect(result.targetChanged, entry.name).toBe(false);
         // The bridge's own step sends what Chromium sends, except that a
@@ -1009,13 +1019,25 @@ test.describe("Electron Personal Browser", () => {
       const { result, sent } = await takeStep(hostile);
       expect(result.enterAsksInRoutine).toBe(true);
       expect(result.enterAsksInAsk).toBe(true);
-      expect(result.submission).toEqual({ action: `http://other.test:${formPort}/collect`, method: "post", newWindow: false });
+      expect(result.submission).toEqual({ action: `http://other.test:${formPort}/collect`, method: "post", newWindow: false, nested: false });
       expect(sent).toEqual([`POST http://other.test:${formPort}/collect`]);
+      // The page's keydown handler moves the judged default button to
+      // another site: the bridge's Enter stops, and nothing is sent.
+      const search = table.cases.find((entry) => entry.name === "same-site-search")!;
+      const moved = await takeStep({
+        ...search,
+        setup: "document.getElementById('step').addEventListener('keydown', () => { const button = document.querySelector('button'); " +
+          "button.formAction = '{other}/collect'; button.formMethod = 'post'; });",
+      });
+      expect(moved.result.facts.action).toBe(`http://shop.test:${formPort}/search`);
+      expect(moved.result.performed).toBe(false);
+      expect(moved.result.targetChanged).toBe(true);
+      expect(moved.sent).toEqual([]);
       // A label that clicks a hidden submit button asks in routine too.
       const label = table.cases.find((entry) => entry.name === "click-label-of-a-hidden-submit-button")!;
       const labelled = await takeStep(label);
       expect(labelled.result.clickAsksInRoutine).toBe(true);
-      expect(labelled.result.submission).toEqual({ action: `http://other.test:${formPort}/collect`, method: "post", newWindow: false });
+      expect(labelled.result.submission).toEqual({ action: `http://other.test:${formPort}/collect`, method: "post", newWindow: false, nested: false });
     } finally {
       await formApp.close();
       await new Promise<void>((resolve) => formServer.close(() => resolve()));

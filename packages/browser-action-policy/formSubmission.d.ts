@@ -4,6 +4,13 @@ export type FormSubmissionVia =
   | "button"
   /** Enter in a field or other control of the form (implicit submission). */
   | "implicit"
+  /**
+   * Both: a field inside a submit button (or a label of one inside another)
+   * submits through that button when clicked and implicitly on Enter, which
+   * can send something else. The facts are the click's; hosts refuse its
+   * steps that submit.
+   */
+  | "nested"
   /** The element's step submits nothing; the facts are the form's own. */
   | "";
 
@@ -50,11 +57,12 @@ export type FormSubmissionTargetFacts = {
 
 /**
  * The submission a step makes: the address (null for a dialog, which sends
- * nothing), the method and whether it opens another window. Null when the
- * step submits no form.
+ * nothing), the method, whether it opens another window and whether the
+ * control submits two ways (`nested`, which hosts refuse). Null when the step
+ * submits no form.
  */
 export declare function stepSubmission(
   facts: FormSubmissionTargetFacts,
   step: "click" | "press" | "submit",
   key?: string,
-): { action: string | null; method: string; newWindow: boolean } | null;
+): { action: string | null; method: string; newWindow: boolean; nested: boolean } | null;

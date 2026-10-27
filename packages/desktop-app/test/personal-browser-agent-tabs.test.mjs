@@ -1080,6 +1080,30 @@ test("a form step whose submission opens another window is refused before any pr
   assert.equal(personView.webContents.presses, 1);
 });
 
+test("a field inside a submit button is refused before any prompt: a click and Enter send its form in different ways", async () => {
+  const { host, dialogs, personView } = fixture();
+  await resume(host, "routine");
+  const nested = {
+    ...searchField({ formSubmission: "nested", formMethod: "post", formActionUrl: "https://example.test/collect" }),
+    type: "text",
+    ariaLabel: "Shoe size",
+  };
+  for (const [operation, payload] of [
+    ["click", { index: 0 }],
+    ["press", { index: 0, key: "Enter" }],
+    ["type", { index: 0, text: "42", submit: true }],
+  ]) {
+    personView.webContents.targetDescriptor = nested;
+    await host.handleControlOperation("snapshot", {});
+    const asked = dialogs.length;
+    await rejectsWith(host.handleControlOperation(operation, payload), "form_submission_unclear");
+    assert.equal(dialogs.length, asked, `${operation} asked nothing`);
+  }
+  assert.equal(personView.webContents.clicks ?? 0, 0);
+  assert.equal(personView.webContents.typed ?? 0, 0);
+  assert.equal(personView.webContents.presses ?? 0, 0);
+});
+
 test("Enter through a default button that posts to another site asks for that site first, then for the step, which names it", async () => {
   let denySite = true;
   const { host, dialogs, personView } = fixture({

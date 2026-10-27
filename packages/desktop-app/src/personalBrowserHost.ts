@@ -3039,7 +3039,9 @@ export class PersonalBrowserHost {
   /**
    * A form the agent submits, judged by the submission the browser makes
    * (the submitter's formaction and formtarget included). One that opens
-   * another window is refused: the agent uses no other windows. One sent to
+   * another window is refused: the agent uses no other windows. So is one
+   * through a field inside a submit button, which a click and Enter send in
+   * different ways. One sent to
    * another site opens that site: the same rules as a link to it, before
    * anything asks, and that site is allowed in this tab first. A form of the
    * page's own site is often handled by the page's script without loading
@@ -3057,6 +3059,15 @@ export class PersonalBrowserHost {
         403,
         "new_window_blocked",
         "This form opens another window, which the agent never uses, so it was not submitted. Nothing was sent.",
+      );
+    }
+    // A field inside a submit button: a click sends the form through that
+    // button and Enter through the default button, which can go elsewhere.
+    if (submission.nested) {
+      throw new PersonalBrowserControlError(
+        403,
+        "form_submission_unclear",
+        "This control sits inside the form's submit button, so a click and Enter send the form in different ways. The agent takes neither. Nothing was sent.",
       );
     }
     const action = submission.action;

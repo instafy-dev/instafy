@@ -567,11 +567,20 @@ makes, not just the form's `action` and `method`:
   with `form=` included); a disabled default button blocks it, and the step is
   then judged by what that button would send. Enter in a checkbox, radio, date
   field or select clicks the first submit button that is not disabled, as
-  Chromium does. A click on a label of a submit button, or on something inside
-  one, submits with that button.
-- Addresses are absolute and resolved against `<base href>`; an empty action is
-  the page itself. `method="dialog"` closes a dialog and sends nothing, so it
-  has no destination.
+  Chromium does. The default button is found however many controls the page
+  has.
+- A click is followed up its event path, as Chromium dispatches it, through
+  slots and shadow roots and however deep: a label of a submit button, or
+  anything inside one that passes the click on (text, a label, a plain button,
+  a text area), submits with that button; a link, checkbox, radio, file or
+  colour chooser, reset button or details summary takes the click instead. A
+  field or select inside a submit button submits through that button when
+  clicked and through the default button on Enter, which can go elsewhere, so
+  its form steps are refused before any prompt.
+- Addresses are absolute and resolved against `<base href>`; an empty action,
+  or one of only spaces, is the page itself. An empty target takes the
+  `<base target>` as a missing one does. `method="dialog"` closes a dialog and
+  sends nothing, so it has no destination.
 - The step's destination, its link-only check, the prompt for another site
   ("Allow this form destination for this run") and the approval's destination
   binding all use that submission. A same-site GET search is free only when
@@ -580,12 +589,26 @@ makes, not just the form's `action` and `method`:
 - A form step whose submission opens another window (`_blank`, a `<base
   target>`, or a name that is no frame of the page) is refused before any
   prompt.
+- The step's guard holds the page to that judgement on the request itself.
+  While a step runs on a page, a form the tab posts to another site goes out
+  only when the step is a form step approved for that site; an ordinary step
+  (one routine browsing takes without asking) posts to the page's own site
+  only. A form the page moved after the check (a keydown or click handler
+  changing the default button or its `formaction`), or one sent through a
+  submit button the describer cannot see (in a closed shadow tree, or laid
+  over the control), is stopped before it leaves the browser and the step
+  fails saying so. A step the person approved that sends no form of its own
+  is not limited, since a page may build and send one after it, and neither
+  is a page the step went on to load.
 
 `packages/browser-action-policy/formSubmissionCases.json` is one table of form
 steps both browsers run: `scripts/shared-browser-form-submission-e2e.mjs`
 checks every case against what real Chromium sends and drives the production
 controller through a hostile default button, a label of a hidden submit
-button, a form that opens a window and a `<base href>` to another site.
+button, a form that opens a window, a `<base href>` to another site, a
+keydown handler that moves the form after approval, submit buttons in a closed
+shadow tree and laid over a control, and fields and controls nested inside a
+hostile submit button.
 
 **Refused in every mode, before any prompt.** Revealing or copying a credential
 (`step_refused_secret`), sign-in submits, identity-provider sign-in buttons and

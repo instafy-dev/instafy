@@ -1493,10 +1493,13 @@ takes every case of the form-submission table both browsers share
 checks that the shared rules report what Chromium then sends (default buttons,
 `formaction`/`formmethod`/`formtarget`, `<base href>`, dialogs, new windows).
 It then drives the production controller through a hostile default button, a
-label of a hidden submit button, a form that opens another window and a
-`<base href>` to another site, and checks that no cross-site POST goes out
-without the prompts for that site. The Personal Browser lane runs the same
-table through the built page bridge in Electron.
+label of a hidden submit button, a form that opens another window, a
+`<base href>` to another site, a keydown handler that moves the form after
+approval, submit buttons in a closed shadow tree or laid over a control, and
+controls nested inside a hostile submit button, and checks that no cross-site
+POST goes out without the prompts for that site. The Personal Browser lane runs
+the same table through the built page bridge in Electron, and a keydown handler
+that moves the form there too.
 
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across

@@ -508,7 +508,8 @@ export class PersonalBrowserControlServer {
             "In every tab, open, navigate to and follow only public web pages, never a link-only site: link_only_site, link_only_list_unavailable and " +
             "private_address_blocked are final for that step: do not retry it. Give the person the plain link, or ask them to open a private address in their own tab. " +
             "When such a refusal says this step was not run because Desktop stopped a page load after your previous step, it is the previous step's: take a fresh snapshot and go on. " +
-            "new_window_blocked is final for that step: you use no other windows, so open the address with open_tab or leave the form to the person.",
+            "new_window_blocked is final for that step: you use no other windows, so open the address with open_tab or leave the form to the person. " +
+            "form_submission_unclear is final for that control: leave that form to the person.",
         },
       };
     }
