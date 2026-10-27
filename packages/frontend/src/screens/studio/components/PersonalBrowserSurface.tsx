@@ -422,14 +422,16 @@ export function PersonalBrowserSurface({
   };
   const humanInputState = useBrowserHumanInput(humanInputOptions);
   const humanInputAvailable = ready && Boolean(humanInputIdentityKey && onContinueAfterHumanInput);
-  // While a resumed turn works here, the pages it is reading: the tabs it
-  // opened and the tab on screen, which is the one it controls. Take over is
-  // the same action as the toolbar's: Pause revokes the broker, so it ends the
-  // agent's control of every tab at once.
+  // Whenever the agent holds control of this browser, the pages it is
+  // reading: the tabs it opened and the tab on screen, which is the one it
+  // controls. That is the case with or without a turn of this conversation
+  // working, since another conversation's turn, or a resumed browser between
+  // turns, holds it too. Take over is the same action as the toolbar's: Pause
+  // revokes the broker, so it ends the agent's control of every tab at once.
   const personalPages = personalBrowserTabPages(ownsNativeStatus ? model.status : null);
   const agentReadingPages = resolveAgentReadingPages({
     pages: personalPages,
-    agentControlActive: ready && ownsNativeStatus && agentWorking &&
+    agentControlActive: ready && ownsNativeStatus &&
       model.status?.agentControlEnabled === true && !model.status?.tabControlActive,
     agentPageIds: personalPages.filter((page) => page.isActive).map((page) => page.id),
   });

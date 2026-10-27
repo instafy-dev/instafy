@@ -10,6 +10,7 @@ import ts from "typescript";
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const security = require(path.join(packageRoot, "dist/personalBrowserSecurity.js"));
+const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 const pageBridge = require(path.join(packageRoot, "dist/personalBrowserPageBridge.js"));
 const humanInput = require(path.join(packageRoot, "dist/personalBrowserHumanInput.js"));
 const control = require(path.join(packageRoot, "dist/personalBrowserControlServer.js"));
@@ -45,7 +46,10 @@ async function fixture(highlight = async () => true, options = {}) {
     "./browserTabCapture": require(path.join(packageRoot, "dist/browserTabCapture.js")),
     "./browserTabInput": require(path.join(packageRoot, "dist/browserTabInput.js")),
     "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
-    "./personalBrowserSecurity": security,
+    // Agent navigation resolves its host: here every fixture name is public, and nothing reaches the network.
+    "./personalBrowserSecurity": { ...security, checkPersonalBrowserAgentTabUrl: (url) => security.checkPersonalBrowserAgentTabUrl(url, publicLookup) },
+    "./personalBrowserLinkOnly": require(path.join(packageRoot, "dist/personalBrowserLinkOnly.js")),
+    "./personalBrowserRequestGuard": require(path.join(packageRoot, "dist/personalBrowserRequestGuard.js")),
     "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
     "./personalBrowserActionPolicy": require(path.join(packageRoot, "dist/personalBrowserActionPolicy.js")),
     "./personalBrowserTeammateActivity": require(path.join(packageRoot, "dist/personalBrowserTeammateActivity.js")),

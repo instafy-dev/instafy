@@ -15,6 +15,12 @@ const desktopFeatureManifestPath = resolveDesktopFeatureManifest({
   packageRoot: desktopPackageRoot,
   configuredManifestPath: process.env[DESKTOP_FEATURE_MANIFEST_ENV],
 });
+// The web-research skill owns its link-only list; runtime-agent embeds the
+// same file. Desktop bundles it from there rather than keeping a copy.
+const linkOnlySitesPath = fileURLToPath(new URL(
+  "../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json",
+  import.meta.url,
+));
 
 export default defineConfig({
   entry: {
@@ -32,6 +38,8 @@ export default defineConfig({
     codexCredentialBridge: "src/codexCredentialBridge.ts",
     personalBrowserIdentity: "src/personalBrowserIdentity.ts",
     personalBrowserSecurity: "src/personalBrowserSecurity.ts",
+    personalBrowserLinkOnly: "src/personalBrowserLinkOnly.ts",
+    personalBrowserRequestGuard: "src/personalBrowserRequestGuard.ts",
     personalBrowserRedaction: "src/personalBrowserRedaction.ts",
     personalBrowserActionPolicy: "src/personalBrowserActionPolicy.ts",
     personalBrowserPageBridge: "src/personalBrowserPageBridge.ts",
@@ -66,6 +74,7 @@ export default defineConfig({
       "@instafy/sdk/feature-modules": sdkFeatureModulesPath,
       "virtual:instafy/desktop-feature-manifest":
         desktopFeatureManifestPath,
+      "virtual:instafy/link-only-sites": linkOnlySitesPath,
     };
   },
   sourcemap: true,

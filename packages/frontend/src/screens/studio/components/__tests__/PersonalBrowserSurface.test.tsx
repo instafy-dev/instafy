@@ -144,18 +144,17 @@ describe("PersonalBrowserSurface", () => {
     expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
   });
 
-  it("lists the pages a working turn reads and takes over every tab in one press", async () => {
+  it("lists the pages the agent reads whenever it holds the browser and takes over every tab in one press", async () => {
     const model = createModel();
     model.status = { ...model.status!, title: "Example Domain", humanControlReady: false };
     model.setAgentControlEnabled = vi.fn(async (enabled: boolean) => ({ ...model.status!, agentControlEnabled: enabled, humanControlReady: !enabled }));
     window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
 
-    // Resumed but idle: no turn is reading anything.
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
-    expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
-
+    // No turn of this conversation is working, yet the agent holds the
+    // browser (another conversation's turn, or resumed between turns): the
+    // row and its Take over are there all the same.
     const onPauseAgentControl = vi.fn();
-    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} onPauseAgentControl={onPauseAgentControl} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} onPauseAgentControl={onPauseAgentControl} transportSelector={null} />));
     const row = document.querySelector('[data-testid="browser-reading-row"]')!;
     expect([...row.querySelectorAll('[data-testid="browser-reading-page"]')].map((item) => item.textContent))
       .toEqual(["example.com· Example Domain"]);
@@ -167,7 +166,11 @@ describe("PersonalBrowserSurface", () => {
     // Like the toolbar's Pause, Octo does not reopen the browser by itself afterwards.
     expect(onPauseAgentControl).toHaveBeenCalledTimes(1);
 
-    // Once control is off, the row is gone.
+    // The same row while a turn of this conversation works.
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={{ ...model }} transportSelector={null} />));
+    expect(document.querySelectorAll('[data-testid="browser-reading-row"]')).toHaveLength(1);
+
+    // Once control is off, the row is gone, also while a turn works.
     model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
     await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={{ ...model }} transportSelector={null} />));
     expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
@@ -304,7 +307,11 @@ describe("PersonalBrowserSurface", () => {
     const viewport = document.querySelector('[data-testid="personal-browser-viewport"]')!;
     expect(chrome.compareDocumentPosition(sharing) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(chrome.contains(sharing)).toBe(true);
-    expect(chrome.parentElement?.nextElementSibling).toBe(viewport);
+    // The agent holds control here, so its Reading row sits between the toolbar and the page.
+    const readingRow = document.querySelector('[data-testid="browser-reading-row"]');
+    expect(readingRow).not.toBeNull();
+    expect(chrome.parentElement?.nextElementSibling).toBe(readingRow);
+    expect(readingRow?.nextElementSibling).toBe(viewport);
     expect(
       container
         .querySelector('[data-testid="personal-browser-agent-status"]')

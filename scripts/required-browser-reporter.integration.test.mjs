@@ -72,20 +72,20 @@ function expectRejected(run) {
   assert.ok(run.receipt.failures.length > 0);
 }
 
-test("required browser reporter permits four actual first-attempt passes in Playwright", (t) => {
+test("required browser reporter permits every required case passing on its first attempt in Playwright", (t) => {
   const run = runFixture(t);
   assert.equal(run.result.status, 0, run.diagnostic);
   assert.equal(run.receipt.status, "passed");
-  assert.equal(run.receipt.selected, 4);
-  assert.equal(run.receipt.passed, 4);
+  assert.equal(run.receipt.selected, titles.length);
+  assert.equal(run.receipt.passed, titles.length);
   assert.equal(run.receipt.skipped, 0);
 });
 
 test("required browser reporter makes an all-skipped Playwright run exit nonzero", (t) => {
   const run = runFixture(t, { scenario: "skipped" });
   expectRejected(run);
-  assert.equal(run.receipt.selected, 4);
-  assert.equal(run.receipt.skipped, 4);
+  assert.equal(run.receipt.selected, titles.length);
+  assert.equal(run.receipt.skipped, titles.length);
   assert.equal(run.receipt.passed, 0);
 });
 
@@ -106,7 +106,7 @@ test("required browser reporter overrides pass-with-no-tests for an empty select
 test("required browser reporter rejects an expected failure that Playwright accepts", (t) => {
   const run = runFixture(t, { scenario: "expected-failure" });
   expectRejected(run);
-  assert.equal(run.receipt.selected, 4);
+  assert.equal(run.receipt.selected, titles.length);
   assert.equal(run.receipt.tests[0].expectedStatus, "failed");
   assert.deepEqual(run.receipt.tests[0].attempts, [{ status: "failed", retry: 0 }]);
 });
@@ -114,7 +114,7 @@ test("required browser reporter rejects an expected failure that Playwright acce
 test("required browser reporter rejects a failed first attempt followed by a passing retry", (t) => {
   const run = runFixture(t, { scenario: "retry" });
   expectRejected(run);
-  assert.equal(run.receipt.selected, 4);
+  assert.equal(run.receipt.selected, titles.length);
   assert.deepEqual(run.receipt.tests[0].attempts, [
     { status: "failed", retry: 0 },
     { status: "passed", retry: 1 },
