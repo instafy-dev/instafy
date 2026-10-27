@@ -968,6 +968,10 @@ const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
 ));
+const WEB_RESEARCH_SEARCH_ENGINES_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/search-engines.json"
+));
 const INTERACTIVE_ARTIFACTS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
@@ -987,7 +991,7 @@ const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT
 /// Every file the runtime bundles under `assets/instafy`. In a git-canonical
 /// space with history the runtime commits none of them, so this bootstrap is
 /// what brings each one to `main`.
-const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 36] = [
+const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 37] = [
     ProjectMemoryTemplateFile {
         path: "INSTAFY.md",
         asset_relative_path: "INSTAFY.md",
@@ -1153,6 +1157,11 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 36] = [
         path: ".agents/skills/instafy-web-research/references/link-only-sites.json",
         asset_relative_path: ".agents/skills/instafy-web-research/references/link-only-sites.json",
         fallback_content: WEB_RESEARCH_LINK_ONLY_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-web-research/references/search-engines.json",
+        asset_relative_path: ".agents/skills/instafy-web-research/references/search-engines.json",
+        fallback_content: WEB_RESEARCH_SEARCH_ENGINES_TEMPLATE,
     },
     ProjectMemoryTemplateFile {
         path: ".agents/skills/instafy-interactive-artifacts/SKILL.md",
