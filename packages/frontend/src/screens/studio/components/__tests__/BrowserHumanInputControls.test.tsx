@@ -76,7 +76,7 @@ describe("BrowserHumanInputControls", () => {
     // Let AI continue also follows a take-over where the person only watched.
     expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).not.toMatch(/\bI have finished\b|\bI entered\b/);
     expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toMatch(/^Continue the previous browser task on this same page\./);
-    expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toMatch(/take a fresh snapshot before acting/);
+    expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toMatch(/Take a fresh snapshot before acting/);
     expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toMatch(/do not reuse old target indices or request, reveal, or repeat any values/);
   });
 

@@ -12,7 +12,7 @@ export type BrowserHumanInputRequest = {
 // True whether or not the person did anything while they had control: Let
 // AI continue also follows a take-over where they only watched.
 export const BROWSER_HUMAN_INPUT_CONTINUE_PROMPT =
-  "Continue the previous browser task on this same page. I may have used the browser while I had control, so take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
+  "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
 
 export type BrowserHumanInputOptions = {
   /** Include user, project, conversation, transport, runtime/page (or native owner). */
