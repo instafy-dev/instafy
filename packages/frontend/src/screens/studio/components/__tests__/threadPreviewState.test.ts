@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  isThreadPreviewUnresolved,
-  resolveCompactRailStatusText,
-  shouldRenderCompactRailStatus,
-  shouldSuppressSummaryRunningStatus,
-  shouldSweepCompactRailStatusText,
-} from "../threadPreviewState";
+import { isThreadPreviewUnresolved } from "../threadPreviewState";
 import { resolveThreadRunStatusFromMessages } from "../threadPreviewHelpers";
 
 describe("threadPreviewState", () => {
@@ -41,49 +35,6 @@ describe("threadPreviewState", () => {
         runPhase: "running",
       }),
     ).toBe(false);
-  });
-
-  it("falls back to the newest compacted event label before generic thinking text", () => {
-    expect(
-      resolveCompactRailStatusText({
-        showCompactRailCommandStatus: false,
-        commandPreview: "",
-        latestCompactEventKind: "search",
-        runningStatusLabel: null,
-      }),
-    ).toBe("Searching the web…");
-  });
-
-  it("renders compact rail status for unresolved hybrid rails and sweeps only while unresolved", () => {
-    const showCompactRailStatus = shouldRenderCompactRailStatus({
-      isHybridCompactionActive: true,
-      isCompleted: false,
-      showLiveCommandOutput: false,
-      isUnresolved: true,
-      showCompactIconRail: true,
-      showCompactRailWaitingSpinner: false,
-    });
-
-    expect(showCompactRailStatus).toBe(true);
-    expect(
-      shouldSweepCompactRailStatusText({
-        showCompactRailStatus,
-        isUnresolved: true,
-      }),
-    ).toBe(true);
-    expect(
-      shouldSweepCompactRailStatusText({
-        showCompactRailStatus,
-        isUnresolved: false,
-      }),
-    ).toBe(false);
-  });
-
-  it("lets the compact rail caption be the only running status under the rail", () => {
-    // Any running summary under the caption, a short label or a multi-line
-    // preview box alike, would come and go with each command and move the rail.
-    expect(shouldSuppressSummaryRunningStatus({ showCompactRailStatus: true })).toBe(true);
-    expect(shouldSuppressSummaryRunningStatus({ showCompactRailStatus: false })).toBe(false);
   });
 
   it("treats non-recoverable quota errors as terminal thread state", () => {

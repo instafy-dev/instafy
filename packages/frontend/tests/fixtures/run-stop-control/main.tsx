@@ -11,7 +11,7 @@ import { ChatMessageAvatar } from "../../../src/screens/studio/components/ChatMe
 import { ChatRunStopNotice, ChatRunStopNoticeProvider } from "../../../src/screens/studio/components/ChatRunStopNotice";
 import { useChatRunStopContinuation } from "../../../src/screens/studio/components/useChatRunStopContinuation";
 import { useChatRunStop, type ChatRunStopTarget } from "../../../src/screens/studio/components/useChatRunStop";
-import type { ThreadCompactEvent } from "../../../src/screens/studio/components/threadPreviewHelpers";
+import type { TurnActivity } from "../../../src/screens/studio/components/turnActivity";
 import type { ChatMessage } from "../../../src/screens/studio/types";
 import { Composer } from "./Composer";
 import "../../../src/styles/tailwind.css";
@@ -40,39 +40,40 @@ const message: ChatMessage = {
   files: null, messageType: "agent_job_thread",
   metadata: { messageType: "agent_job_thread", jobId: OCTO.jobId, agent: { handle: "octo" } },
 };
-const events: ThreadCompactEvent[] = [
-  { id: "thinking", kind: "thinking", previewText: "Reviewing the task" },
-  { id: "search", kind: "search", previewText: "Looking up the relevant files" },
-  { id: "command", kind: "command", previewText: command },
-];
+const commandStep: ChatMessage = {
+  id: "fixture-command", role: "assistant", authorId: null, content: command, timestamp: 0, files: null,
+  messageType: "command_execution",
+  metadata: {
+    source: "agent", jobId: OCTO.jobId, messageType: "command_execution",
+    details: { kind: "codex_command_execution", itemId: "fixture-command", command, status: "in_progress" },
+  },
+};
 
+// The turn's one activity line ("Running tests…"), with its steps behind Details.
 function Rail({ single, running }: { single: boolean; running: boolean }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const railRef = useRef<HTMLDivElement>(null);
-  const previewRef = useRef<HTMLDivElement>(null);
-  const visible = single ? [events[2]] : events;
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const activity: TurnActivity = {
+    live: running ? (single ? "Running tests…" : "Thinking…") : null,
+    summary: running ? null : "Ran tests",
+    stepCount: 1,
+    details: [{
+      kind: "step", id: "command:fixture-command",
+      step: { kind: "command", message: commandStep, activity: null, state: running ? "running" : "done", label: "Running tests" },
+    }],
+  };
   return <AgentJobThreadPreviewLayout
     message={message} projectId="fixture-project" branchThreads={[]} hideThreadSpine
-    showHeaderAvatar={false} showHeaderIdentity={false} assistantAvatarMotion="idle" hiddenUpdateCount={0}
-    isHybridCompactionActive={false} isThreadPreviewExpanded={false}
-    visibleCompactEvents={visible} overflowCompactCount={0} latestCompactEventId={visible.at(-1)!.id}
-    showCompactRailWaitingSpinner={!single && running} isThreadUnresolved={running}
-    singleCompactEvent={single ? events[2] : null} singleCompactEventLabel={command}
-    showSingleCompactEventStatusSweep={running} canCancelTerminalRun={false} cancelPending={false}
-    compactRailStatusText={command} shouldSweepCompactRailStatusText={running}
-    showCollapsedCompactRailStatus={!single} showLiveCommandOutput={false} showLiveCommandPlaceholder={single && running}
-    showCollapsedCommandToggle={false} showCollapsedCommandOutput={false}
-    latestCommandExecution={{ command, output: null, status: running ? "in_progress" : "completed" }}
-    latestCommandAgentHandle={null} latestCommandPreview={command} updatesForInlineRendering={[]} expandedUpdateIds={{}}
-    finalSummaryMessage={null} hasPreview={false} previewText="" showSummaryBody={false}
-    suppressSummaryRunningStatus={false} isCompleted={!running} showRunningSpinnerFallback={false}
-    shouldAnimateThreadLiveState={running} runningStatusLabel={null} useCompactRunningPreview={false}
-    runningPreviewHasOverflow={false} latestFiles={null} isRunning={running} finalSpineTone="primary"
-    threadPreviewRootRef={rootRef} threadPreviewRef={railRef} runningPreviewContainerRef={previewRef}
+    showHeaderAvatar={false} showHeaderIdentity={false} assistantAvatarMotion="idle"
+    activity={activity} detailsOpen={detailsOpen} cards={[]} isThreadUnresolved={running}
+    canCancelTerminalRun={false} cancelPending={false} expandedUpdateIds={{}}
+    finalSummaryMessage={null} hasPreview={false} previewText="" isCompleted={!running}
+    shouldAnimateThreadLiveState={running} latestFiles={null} isRunning={running} finalSpineTone="primary"
+    threadPreviewRootRef={rootRef} threadPreviewRef={railRef}
     threadPreviewRootStyle={{}} threadPreviewRailStyle={{ top: "32px", bottom: "0px" }}
-    threadSpineJunctionOffsetClass="left-0" threadSpineHeaderOffsetClass="left-0" summaryBodyPaddingTopClass="pt-1"
-    onOpenBranchThread={() => {}} onExpandThreadPreview={() => {}} onCollapseThreadPreview={() => {}}
-    onToggleThreadPreview={() => {}} onToggleCommandOutput={() => {}} onToggleUpdateExpanded={() => {}}
+    threadSpineJunctionOffsetClass="left-0" threadSpineHeaderOffsetClass="left-0"
+    onOpenBranchThread={() => {}} onToggleDetails={() => setDetailsOpen((open) => !open)} onToggleUpdateExpanded={() => {}}
     onCancelRun={() => { throw new Error("Legacy cancel must not be invoked"); }}
     MessageContent={({ content }) => <span>{content}</span>} ChatFileChangeList={() => null}
   />;

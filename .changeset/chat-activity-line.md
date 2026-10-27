@@ -1,0 +1,4 @@
+---
+---
+
+A turn in chat now shows Octo's reply and one plain-language line that says what the turn did, "Looked up 14 places, read 6 pages, built the map", or while it runs the current step ("Looking up places…", "Thinking…" between steps). The whole line opens Details, which lists every command (output collapsed until opened), tool call, web search, file edit and Octo's notes in order. The run rail and its chips, the auto-expanded command panel, the raw command status line and the "earlier updates" row are gone from the default view; cards, the reply and file changes stay. A command on its own in the conversation is one labelled row with its command and output behind a chevron. Words come only from the checked `activity` a runtime attached; a step without one counts toward "Ran 3 commands". A failed turn keeps one Details, its failure block's, which now lists the steps too. No package changes.

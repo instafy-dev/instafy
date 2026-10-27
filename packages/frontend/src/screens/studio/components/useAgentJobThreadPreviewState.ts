@@ -5,12 +5,6 @@ import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
 import type { AgentJobThreadPreviewLayoutProps } from "./AgentJobThreadPreviewLayout";
 import {
-  parseCommandExecutionOutput,
-  summarizeActiveCommandForPreview,
-  summarizeCommandExecutionUpdateForPreview,
-  truncate,
-} from "./chatContentHelpers";
-import {
   isAgentStatusMessage,
   runMatchesThreadJobId,
   shouldDisplayChatMessage,
@@ -18,21 +12,8 @@ import {
 import { getMessageType } from "./chatMessageMetadata";
 import { readChatRunStopNotice } from "./ChatRunStopNotice";
 import { getControllerConversationNoticeKind } from "./controllerConversationNotice";
-import {
-  isCompactionStatusText,
-  normalizeAssistantStatusText,
-  resolveAssistantStatusHeadline,
-} from "./assistantStatusHeuristics";
-import {
-  isThreadPreviewUnresolved,
-  resolveCompactRailStatusText,
-  resolveThreadCompactUpdateHistoryLabel,
-  resolveThreadCompactUpdateLabel,
-  shouldRenderCompactRailStatus,
-  shouldSuppressSummaryRunningStatus,
-  shouldSweepCompactRailStatusText as shouldSweepCompactRailStatusTextValue,
-} from "./threadPreviewState";
-import { resolveRetryingStatusPresentation } from "../../../conversations/runFailurePresentation";
+import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
+import { isThreadPreviewUnresolved } from "./threadPreviewState";
 import {
   isThreadPreviewRunInFlight,
   resolveThreadPreviewMessages,
@@ -42,47 +23,28 @@ import {
   coerceThreadMessages,
   isGenericProgressLabel,
   looksLikeTerminalProgressLabel,
-  resolveThreadCompactEventPreview,
-  resolveThreadCompactUpdateKind,
   resolveThreadRunStatusFromMessages,
-  shouldKeepThreadUpdateInline,
   THREAD_ACTION_CARD_TYPES,
-  THREAD_ACTIVE_STATES,
-  THREAD_COMPACT_EVENT_ICON_CAP,
-  THREAD_HYBRID_COMPACTION_MIN_WIDTH_PX,
   THREAD_RECENT_ACTIVITY_WINDOW_MS,
-  type ThreadCompactEvent,
-  windowThreadUpdates,
 } from "./threadPreviewHelpers";
 import { resolveThreadPreviewSafeInsetPx } from "./threadPreviewGeometry";
 import { resolveSpineToneFromStatus } from "./ThreadSpine";
+import { summarizeTurnActivity, type TurnActivityPhase } from "./turnActivity";
 
 const CHAT_SPINE_GUTTER_PX = 26;
-const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
+// Steps are the activity line's and Details'; they are never update rows.
+const STEP_MESSAGE_TYPES = new Set(["command_execution", "mcp_tool_call", "web_search", "file_change"]);
+// Cards ask the person for something or show what the turn made: they stay in
+// the turn's default view, never behind Details.
+const CARD_MESSAGE_TYPES = new Set([...THREAD_ACTION_CARD_TYPES, "multi_agent_plan"]);
+const CANCELLED_STATUSES = new Set(["canceled", "cancelled"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function normalizeAgentHandle(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim().replace(/^@+/, "").trim().toLowerCase();
-  return trimmed ? `@${trimmed}` : null;
-}
-
-function extractMessageAgentHandle(message: ChatMessage): string | null {
-  const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
-  if (!metadata) {
-    return null;
-  }
-  const direct = normalizeAgentHandle(metadata["agentHandle"] ?? metadata["agent_handle"]);
-  if (direct) {
-    return direct;
-  }
-  const agent = isRecord(metadata["agent"]) ? metadata["agent"] : null;
-  return normalizeAgentHandle(agent?.["handle"]);
+function messageType(message: ChatMessage): string {
+  return (getMessageType(message) ?? "").trim().toLowerCase();
 }
 
 export type AgentJobThreadPreviewState = Omit<
@@ -128,7 +90,6 @@ export function useAgentJobThreadPreviewState({
   const owningConversation = threadConversation ?? activeConversation;
   const threadPreviewRootRef = useRef<HTMLDivElement | null>(null);
   const threadPreviewRef = useRef<HTMLDivElement | null>(null);
-  const [threadPreviewWidth, setThreadPreviewWidth] = useState(0);
   const [threadPreviewRootLeftPx, setThreadPreviewRootLeftPx] = useState(Number.POSITIVE_INFINITY);
   const [threadPreviewContainerLeftPx, setThreadPreviewContainerLeftPx] = useState(0);
 
@@ -141,7 +102,7 @@ export function useAgentJobThreadPreviewState({
       if (!content) {
         return false;
       }
-      const type = (getMessageType(candidate) ?? "").trim().toLowerCase();
+      const type = messageType(candidate);
       if (!type) {
         const normalized = content.toLowerCase();
         if (normalized.startsWith("plan update:")) {
@@ -174,19 +135,19 @@ export function useAgentJobThreadPreviewState({
       ].includes(type);
     };
 
-    const resolveLast = (predicate: (candidate: ChatMessage) => boolean) => {
-      for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-        const candidate = threadMessages[index];
-        if (predicate(candidate)) {
-          return candidate;
-        }
+    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
+      const candidate = threadMessages[index];
+      if (candidate.role === "assistant" && isPreviewCandidate(candidate)) {
+        return candidate.content.trim();
       }
-      return null;
-    };
-
-    const lastAssistant = resolveLast((candidate) => candidate.role === "assistant" && isPreviewCandidate(candidate));
-    const lastAny = lastAssistant ?? resolveLast(isPreviewCandidate);
-    return lastAny?.content?.trim() ?? "";
+    }
+    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
+      const candidate = threadMessages[index];
+      if (isPreviewCandidate(candidate)) {
+        return candidate.content.trim();
+      }
+    }
+    return "";
   }, [threadMessages]);
 
   const latestFileMessage = useMemo(() => {
@@ -283,7 +244,7 @@ export function useAgentJobThreadPreviewState({
     let hasPlanUpdate = false;
     let hasNonPlanTimelineUpdate = false;
     for (const threadMessage of threadMessages) {
-      const type = (getMessageType(threadMessage) ?? "").trim().toLowerCase();
+      const type = messageType(threadMessage);
       if (!type) {
         continue;
       }
@@ -298,10 +259,18 @@ export function useAgentJobThreadPreviewState({
   }, [threadMessages]);
 
   const hasThreadCommandActivity = useMemo(
+    () => threadMessages.some((threadMessage) => messageType(threadMessage) === "command_execution"),
+    [threadMessages],
+  );
+  // The model has started on the turn: a step, a reasoning title or a plan.
+  // Until then the line says "Starting…", and from then on "Thinking…"
+  // between steps, also before the first one.
+  const hasModelWork = useMemo(
     () =>
-      threadMessages.some(
-        (threadMessage) => (getMessageType(threadMessage) ?? "").trim().toLowerCase() === "command_execution",
-      ),
+      threadMessages.some((threadMessage) => {
+        const type = messageType(threadMessage);
+        return STEP_MESSAGE_TYPES.has(type) || type === "reasoning" || type === "todo_list";
+      }),
     [threadMessages],
   );
 
@@ -345,8 +314,8 @@ export function useAgentJobThreadPreviewState({
   // `isRunning` flips back and forth inside one turn: it follows the newest
   // update's own status, so it drops each time a command finishes and returns
   // when the next one starts. Layout that must hold still for the whole turn
-  // (how many updates show, where the spine ends) follows this instead: true
-  // from the first sign of the turn until it completes or goes stale.
+  // (the live line, where the spine ends) follows this instead: true from the
+  // first sign of the turn until it completes or goes stale.
   const isThreadUnresolved = isThreadPreviewUnresolved({
     isCompleted,
     isRunning,
@@ -386,11 +355,11 @@ export function useAgentJobThreadPreviewState({
       if (!content) {
         continue;
       }
-      const type = (getMessageType(candidate) ?? "").trim().toLowerCase();
+      const type = messageType(candidate);
       // A card is not the reply. Taken for one, the newest card of a running
       // turn stayed hidden until the reply arrived and the turn ended on its
       // raw text instead of the card.
-      if (type && (excluded.has(type) || THREAD_ACTION_CARD_TYPES.has(type))) {
+      if (type && (excluded.has(type) || CARD_MESSAGE_TYPES.has(type))) {
         continue;
       }
       if (type === "status") {
@@ -416,36 +385,8 @@ export function useAgentJobThreadPreviewState({
     return null;
   }, [terminalProxyErrorMessage, threadMessages]);
 
-  const latestCommandExecutionUpdate = useMemo(() => {
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = threadMessages[index];
-      if ((getMessageType(candidate) ?? "").trim().toLowerCase() === "command_execution") {
-        return candidate;
-      }
-    }
-    return null;
-  }, [threadMessages]);
-  const latestCommandExecution = useMemo(
-    () => (latestCommandExecutionUpdate ? parseCommandExecutionOutput(latestCommandExecutionUpdate) : null),
-    [latestCommandExecutionUpdate],
-  );
-  const latestCommandAgentHandle = latestCommandExecutionUpdate
-    ? extractMessageAgentHandle(latestCommandExecutionUpdate)
-    : null;
-  const hasAnyCommandExecutionUpdate = latestCommandExecutionUpdate !== null;
-  const latestCommandPreview = useMemo(() => {
-    if (!latestCommandExecution) {
-      return "";
-    }
-    return summarizeCommandExecutionUpdateForPreview(
-      latestCommandExecution.command ?? "",
-      latestCommandExecution.output ?? null,
-    );
-  }, [latestCommandExecution]);
-
   const [expandedUpdateIds, setExpandedUpdateIds] = useState<Record<string, boolean>>({});
-  const [commandOutputExpanded, setCommandOutputExpanded] = useState(false);
-  const [isThreadPreviewExpanded, setIsThreadPreviewExpanded] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const toggleUpdateExpanded = useCallback((messageId: string) => {
     setExpandedUpdateIds((current) => ({
@@ -455,13 +396,12 @@ export function useAgentJobThreadPreviewState({
   }, []);
 
   useEffect(() => {
-    setCommandOutputExpanded(false);
-  }, [latestCommandExecutionUpdate?.id]);
-
-  useEffect(() => {
-    setIsThreadPreviewExpanded(false);
+    setDetailsOpen(false);
   }, [jobId]);
 
+  // Everything between the person's message and the reply that is not a step:
+  // cards (shown in the turn) and Octo's notes, statuses and plan updates
+  // (listed in Details).
   const intermediateUpdates = useMemo(() => {
     const excludedIds = new Set<string>();
     if (finalSummaryMessage?.id) {
@@ -477,7 +417,7 @@ export function useAgentJobThreadPreviewState({
       if (excludedIds.has(candidate.id)) {
         return false;
       }
-      const type = (getMessageType(candidate) ?? "").trim().toLowerCase();
+      const type = messageType(candidate);
       if (type === "reasoning") {
         return false;
       }
@@ -493,16 +433,56 @@ export function useAgentJobThreadPreviewState({
           return false;
         }
       }
-      return !["token_usage", "file_change", "command_execution", "runtime_switch", "web_search"].includes(type);
+      return !["token_usage", "runtime_switch", ...STEP_MESSAGE_TYPES].includes(type);
     });
   }, [finalSummaryMessage?.id, latestFileMessage?.id, threadMessages]);
+  const cards = useMemo(
+    () => intermediateUpdates.filter((update) => CARD_MESSAGE_TYPES.has(messageType(update))),
+    [intermediateUpdates],
+  );
+  const detailUpdates = useMemo(
+    () => intermediateUpdates.filter((update) => !CARD_MESSAGE_TYPES.has(messageType(update))),
+    [intermediateUpdates],
+  );
 
-  const isLiveTurn = isRunning || isThreadUnresolved;
-  const maxVisibleUpdates = isLiveTurn ? 5 : 3;
-  const { visibleUpdates, hiddenUpdateCount } = useMemo(() => {
-    const visible = windowThreadUpdates(intermediateUpdates, maxVisibleUpdates);
-    return { visibleUpdates: visible, hiddenUpdateCount: intermediateUpdates.length - visible.length };
-  }, [intermediateUpdates, maxVisibleUpdates]);
+  const activityPhase: TurnActivityPhase = shouldShowStaleThreadStatus
+    ? "stale"
+    : isThreadUnresolved
+      ? hasModelWork
+        ? "running"
+        : "starting"
+      : isCompleted &&
+          terminalProxyErrorMessage === null &&
+          (isStoppedRun || CANCELLED_STATUSES.has(runStatus.status ?? ""))
+        ? "cancelled"
+        : isCompleted && finalSpineTone === "danger"
+          ? "failed"
+          : "completed";
+  const activity = useMemo(
+    () =>
+      summarizeTurnActivity(threadMessages, {
+        jobId: jobId || null,
+        phase: activityPhase,
+        updates: detailUpdates,
+      }),
+    [activityPhase, detailUpdates, jobId, threadMessages],
+  );
+
+  useEffect(() => {
+    const allowed = new Set(detailUpdates.map((entry) => entry.id));
+    setExpandedUpdateIds((current) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const [id, expanded] of Object.entries(current)) {
+        if (allowed.has(id)) {
+          next[id] = expanded;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [detailUpdates]);
 
   useEffect(() => {
     const element = threadPreviewRef.current;
@@ -513,8 +493,6 @@ export function useAgentJobThreadPreviewState({
     const scrollContainer = rootElement.closest('[data-testid="chat-message-scroll"]');
 
     const syncLayout = () => {
-      const nextWidth = Math.round(element.clientWidth);
-      setThreadPreviewWidth((current) => (current === nextWidth ? current : nextWidth));
       const nextLeft = rootElement.getBoundingClientRect().left;
       setThreadPreviewRootLeftPx((current) => (current === nextLeft ? current : nextLeft));
       const nextContainerLeft =
@@ -535,240 +513,9 @@ export function useAgentJobThreadPreviewState({
     return () => observer.disconnect();
   }, []);
 
-  const hasUpdates = visibleUpdates.length > 0 || hiddenUpdateCount > 0;
-  const hasCommandOutput = Boolean(latestCommandExecution?.output);
-  const hasCommandInvocation = Boolean(latestCommandExecution?.command);
-  // The live command rows follow the turn, not isRunning: between two
-  // commands isRunning drops, and keyed to it the rows swapped for the
-  // collapsed toggle plus a summary running line, then back, at every command.
-  const showLiveCommandPlaceholder = isLiveTurn && hasCommandInvocation && !hasCommandOutput;
-  const showLiveCommandOutputRaw = isLiveTurn && hasCommandOutput;
-  const showCollapsedCommandToggle = !isLiveTurn && hasCommandOutput;
-  const showCollapsedCommandOutput = !isLiveTurn && hasCommandOutput && commandOutputExpanded;
-
-  // A wide row compacts once a live turn fills its update window. The reply
-  // shrinks that window (5 to 3), so a turn that compacted stays compacted;
-  // otherwise the reply turned its rail back into a list of rows.
-  const compactsForUpdateCount = Math.min(intermediateUpdates.length, maxVisibleUpdates) >= 5;
-  const hybridLatchKey = jobId || threadLocalId || message.id;
-  const [hybridLatchedKey, setHybridLatchedKey] = useState<string | null>(null);
-  const isHybridLatched = hybridLatchedKey === hybridLatchKey;
-  useEffect(() => {
-    if (compactsForUpdateCount && !isHybridLatched) {
-      setHybridLatchedKey(hybridLatchKey);
-    }
-  }, [compactsForUpdateCount, hybridLatchKey, isHybridLatched]);
-  const shouldUseHybridThreadCompaction = useMemo(() => {
-    if (threadPreviewWidth <= 0) {
-      return false;
-    }
-    if (threadPreviewWidth < THREAD_HYBRID_COMPACTION_MIN_WIDTH_PX) {
-      return true;
-    }
-    return compactsForUpdateCount || isHybridLatched;
-  }, [compactsForUpdateCount, isHybridLatched, threadPreviewWidth]);
-
-  // In the compacted row a status, plan or tool step is a rail chip and only
-  // the rest render as rows, so only those take places in the window. Counted
-  // with the chips, three statuses after two cards pushed both cards out of
-  // the window the moment the reply shrank it.
-  const hybridInlineWindow = useMemo(
-    () =>
-      shouldUseHybridThreadCompaction
-        ? windowThreadUpdates(
-            intermediateUpdates.filter(
-              (update) => shouldKeepThreadUpdateInline(update) || resolveThreadCompactUpdateKind(update) === null,
-            ),
-            maxVisibleUpdates,
-          )
-        : [],
-    [intermediateUpdates, maxVisibleUpdates, shouldUseHybridThreadCompaction],
-  );
-
-  const isHybridCompactionActive = shouldUseHybridThreadCompaction && !isThreadPreviewExpanded;
-  const hybridThreadCompaction = useMemo(() => {
-    if (!shouldUseHybridThreadCompaction) {
-      return null;
-    }
-    const inlineUpdates: ChatMessage[] = [];
-    const compactEvents: ThreadCompactEvent[] = [];
-    const inlineWindowIds = new Set(hybridInlineWindow.map((entry) => entry.id));
-    const inlineUpdateIds = new Set<string>();
-    const excludedIds = new Set<string>();
-    if (finalSummaryMessage?.id) {
-      excludedIds.add(finalSummaryMessage.id);
-    }
-    if (latestFileMessage?.id) {
-      excludedIds.add(latestFileMessage.id);
-    }
-
-    for (const update of threadMessages) {
-      if (!update.content?.trim()) {
-        continue;
-      }
-      if (excludedIds.has(update.id)) {
-        continue;
-      }
-      if (shouldKeepThreadUpdateInline(update)) {
-        if (inlineWindowIds.has(update.id) && !inlineUpdateIds.has(update.id)) {
-          inlineUpdates.push(update);
-          inlineUpdateIds.add(update.id);
-        }
-        continue;
-      }
-      const kind = resolveThreadCompactUpdateKind(update);
-      if (kind) {
-        // Enriched at assembly time with a short excerpt so the chip's hover
-        // card can show what the step did without resolving the message again.
-        const eventPreview = resolveThreadCompactEventPreview(update, kind);
-        const actorHandle = extractMessageAgentHandle(update);
-        // A streak of one kind from one actor is one chip that counts its
-        // updates. A chip per update filled the rail with "Thinking" chips
-        // and, once it was full, slid the whole rail one slot left on every
-        // update. The chip keeps its first update's id, so it stays mounted
-        // and keeps the live ring while the streak grows.
-        const previous = compactEvents[compactEvents.length - 1];
-        if (previous && previous.kind === kind && previous.actorHandle === actorHandle) {
-          compactEvents[compactEvents.length - 1] = {
-            ...previous,
-            count: (previous.count ?? 1) + 1,
-            previewText: eventPreview?.text ?? previous.previewText,
-            previewMono: eventPreview ? eventPreview.mono : previous.previewMono,
-          };
-          continue;
-        }
-        compactEvents.push({
-          id: update.id,
-          kind,
-          actorHandle,
-          count: 1,
-          previewText: eventPreview?.text ?? null,
-          previewMono: eventPreview?.mono ?? false,
-        });
-        continue;
-      }
-      if (inlineWindowIds.has(update.id) && !inlineUpdateIds.has(update.id)) {
-        inlineUpdates.push(update);
-        inlineUpdateIds.add(update.id);
-      }
-    }
-
-    const safeIconSlots = Math.max(1, THREAD_COMPACT_EVENT_ICON_CAP);
-    let overflowCount = 0;
-    let nextVisibleCompactEvents: ThreadCompactEvent[] = compactEvents;
-    let nextOverflowCompactEvents: ThreadCompactEvent[] = [];
-    if (compactEvents.length > safeIconSlots) {
-      const tailSlots = Math.max(1, safeIconSlots - 1);
-      nextVisibleCompactEvents = compactEvents.slice(-tailSlots);
-      // The elided head of the rail: the "+N" chip's hover card lists these
-      // steps' history labels so the overflow is inspectable without expanding.
-      nextOverflowCompactEvents = compactEvents.slice(0, compactEvents.length - tailSlots);
-      // The cap counts chips, but "+N earlier run updates" counts the updates
-      // behind them, the same updates the expanded thread lists. It changes
-      // only when a chip folds in, never while the newest streak grows.
-      overflowCount = nextOverflowCompactEvents.reduce((total, event) => total + (event.count ?? 1), 0);
-    } else {
-      nextVisibleCompactEvents = compactEvents.slice(-safeIconSlots);
-    }
-
-    for (const update of hybridInlineWindow) {
-      if (!inlineUpdateIds.has(update.id)) {
-        const kind = resolveThreadCompactUpdateKind(update);
-        if (!kind) {
-          inlineUpdates.push(update);
-          inlineUpdateIds.add(update.id);
-        }
-      }
-    }
-
-    return {
-      inlineUpdates,
-      visibleCompactEvents: nextVisibleCompactEvents,
-      overflowCompactCount: overflowCount,
-      overflowCompactEvents: nextOverflowCompactEvents,
-    };
-  }, [
-    finalSummaryMessage?.id,
-    hybridInlineWindow,
-    latestFileMessage?.id,
-    shouldUseHybridThreadCompaction,
-    threadMessages,
-  ]);
-
-  useEffect(() => {
-    const allowed = new Set(
-      [...visibleUpdates, ...(hybridThreadCompaction?.inlineUpdates ?? [])].map((entry) => entry.id),
-    );
-    setExpandedUpdateIds((current) => {
-      const next: Record<string, boolean> = {};
-      let changed = false;
-      for (const [id, expanded] of Object.entries(current)) {
-        if (allowed.has(id)) {
-          next[id] = expanded;
-        } else {
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [hybridThreadCompaction, visibleUpdates]);
-
-  const updatesForInlineRendering = isThreadPreviewExpanded
-    ? intermediateUpdates
-    : (hybridThreadCompaction?.inlineUpdates ?? visibleUpdates);
-  const visibleCompactEvents = hybridThreadCompaction?.visibleCompactEvents ?? [];
-  const overflowCompactCount = hybridThreadCompaction?.overflowCompactCount ?? 0;
-  const overflowCompactEvents = hybridThreadCompaction?.overflowCompactEvents ?? [];
-  const latestCompactEvent = visibleCompactEvents[visibleCompactEvents.length - 1] ?? null;
-  const showLiveCommandOutput = showLiveCommandOutputRaw && !isHybridCompactionActive;
-  const showCompactIconRail =
-    shouldUseHybridThreadCompaction &&
-    (visibleCompactEvents.length > 0 || overflowCompactCount > 0 || isThreadPreviewExpanded);
-  const showCompactRailWaitingSpinner =
-    isHybridCompactionActive && !isRunning && !isCompleted && isThreadRunInFlight;
-
   const shouldAnimateThreadLiveState =
     isThreadUnresolved && !shouldShowStaleThreadStatus && !hasSupersedingConversationMessage;
 
-  const runningStatusLabel = useMemo(() => {
-    if (!isRunning) {
-      return null;
-    }
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = threadMessages[index];
-      if (candidate.role !== "assistant") {
-        continue;
-      }
-      const type = (getMessageType(candidate) ?? "").trim().toLowerCase();
-      if (type !== "status" && type !== "reasoning") {
-        continue;
-      }
-      // Only the headline goes in the one-line status row. A reasoning summary
-      // body stays behind "Agent thinking" instead of leaking in here.
-      const normalized = resolveAssistantStatusHeadline(candidate.content);
-      if (!normalized) {
-        continue;
-      }
-      const retryingPresentation = resolveRetryingStatusPresentation({
-        metadata: candidate.metadata,
-        content: normalized,
-      });
-      if (retryingPresentation) {
-        return retryingPresentation.displayText;
-      }
-      if (isCompactionStatusText(normalized)) {
-        return COMPACTION_STATUS_LABEL;
-      }
-      if (normalized.toLowerCase() === "completed") {
-        continue;
-      }
-      if (isGenericProgressLabel(normalized) || looksLikeTerminalProgressLabel(normalized)) {
-        continue;
-      }
-      return truncate(normalized, 120);
-    }
-    return showLiveCommandOutput || hasUpdates ? "Running tasks…" : "Starting run…";
-  }, [hasUpdates, isRunning, showLiveCommandOutput, threadMessages]);
   const assistantAvatarMotion = useMemo<"idle" | "thinking">(() => {
     if (!shouldAnimateThreadLiveState || !isRunning) {
       return "idle";
@@ -801,114 +548,10 @@ export function useAgentJobThreadPreviewState({
     if (!matchingRun || matchingRun.status !== "in_progress") {
       return "idle";
     }
-
-    const normalizedStatus = normalizeAssistantStatusText(runningStatusLabel ?? "").toLowerCase();
-    const statusKeepsOctoStill =
-      isCompactionStatusText(runningStatusLabel ?? "") ||
-      normalizedStatus === COMPACTION_STATUS_LABEL.toLowerCase() ||
-      normalizedStatus.includes("drafting response") ||
-      normalizedStatus.includes("response summary") ||
-      normalizedStatus.includes("finaliz") ||
-      normalizedStatus.includes("waiting for approval");
-    return statusKeepsOctoStill ? "idle" : "thinking";
-  }, [
-    isRunning,
-    jobId,
-    owningConversation?.controllerId,
-    runningStatusLabel,
-    runs,
-    shouldAnimateThreadLiveState,
-  ]);
-
-  const latestCommandStatus = (latestCommandExecution?.status ?? "").trim().toLowerCase();
-  const latestCommandIsActive = latestCommandStatus ? THREAD_ACTIVE_STATES.has(latestCommandStatus) : false;
-  const latestCommandLooksRunning =
-    isActiveForPreview &&
-    !shouldShowStaleThreadStatus &&
-    hasCommandInvocation &&
-    !hasCommandOutput &&
-    (latestCommandIsActive || !latestCommandStatus);
-  const activeCommandPreview = summarizeActiveCommandForPreview(latestCommandExecution?.command ?? "", 120);
-  const compactRailStatusText = resolveCompactRailStatusText({
-    showCompactRailCommandStatus: latestCommandLooksRunning,
-    commandPreview: activeCommandPreview,
-    latestCompactEventKind: shouldShowStaleThreadStatus ? null : (latestCompactEvent?.kind ?? null),
-    runningStatusLabel: shouldShowStaleThreadStatus ? "Status unavailable" : runningStatusLabel,
-  });
-  const showCompactRailStatus = shouldRenderCompactRailStatus({
-    isHybridCompactionActive,
-    isCompleted,
-    showLiveCommandOutput,
-    isUnresolved: isThreadUnresolved,
-    showCompactIconRail,
-    showCompactRailWaitingSpinner,
-  });
-  // One update is one row, waiting spinner or not: the spinner comes and goes
-  // with every command, and swapping the row for a rail each time moved the
-  // turn. The row's own sweep carries the live state. A chip that stands for
-  // a streak stays on the rail: the row names one update (a command row is
-  // that command's panel), so it cannot carry several.
-  const shouldCollapseSingleCompactEvent =
-    showCompactIconRail &&
-    visibleCompactEvents.length === 1 &&
-    (visibleCompactEvents[0]?.count ?? 1) === 1 &&
-    overflowCompactCount === 0;
-  const singleCompactEvent = shouldCollapseSingleCompactEvent ? visibleCompactEvents[0] ?? null : null;
-  const singleCompactEventLabel = useMemo(() => {
-    if (!singleCompactEvent) {
-      return "";
-    }
-    if (singleCompactEvent.kind === "command") {
-      const commandPreview = activeCommandPreview.trim();
-      if (commandPreview) {
-        return commandPreview;
-      }
-    }
-    if (shouldAnimateThreadLiveState) {
-      const liveLabel = compactRailStatusText.trim();
-      if (liveLabel) {
-        return liveLabel;
-      }
-    }
-    return shouldAnimateThreadLiveState
-      ? resolveThreadCompactUpdateLabel(singleCompactEvent.kind)
-      : resolveThreadCompactUpdateHistoryLabel(singleCompactEvent.kind);
-  }, [activeCommandPreview, compactRailStatusText, shouldAnimateThreadLiveState, singleCompactEvent]);
-
-  const showSingleCompactEventStatusSweep = Boolean(singleCompactEvent) && shouldAnimateThreadLiveState;
-  const showCollapsedCompactRailStatus = showCompactRailStatus && !shouldCollapseSingleCompactEvent;
-  const shouldSweepCompactRailStatusText = shouldSweepCompactRailStatusTextValue({
-    showCompactRailStatus: showCollapsedCompactRailStatus,
-    isUnresolved: shouldAnimateThreadLiveState,
-  });
-
-  const previewText =
-    preview ||
-    (isCompleted
-      ? isStoppedRun && terminalProxyErrorMessage === null ? "Stopped." : "Completed."
-      : shouldShowStaleThreadStatus
-        ? "Status unavailable"
-        : showLiveCommandOutput || hasUpdates
-          ? "Running tasks…"
-          : "Starting run…");
-  const showRunningPlaceholder =
-    shouldAnimateThreadLiveState &&
-    !showLiveCommandOutput &&
-    !showLiveCommandPlaceholder &&
-    !hasUpdates;
-  const showSummaryBody = isCompleted || showRunningPlaceholder;
-  const showRunningSpinnerFallback = showRunningPlaceholder && !preview;
-  const useCompactRunningPreview =
-    showRunningPlaceholder && previewText.length > 0 && previewText.length <= 80 && !previewText.includes("\n");
-  const suppressSummaryRunningStatus = shouldSuppressSummaryRunningStatus({
-    showCompactRailStatus: showCollapsedCompactRailStatus,
-  });
-  const summaryBodyPaddingTopClass =
-    showCompactIconRail || showCollapsedCompactRailStatus
-      ? "pt-0"
-      : hasUpdates
-        ? "pt-2"
-        : "pt-1";
+    // Octo holds still while it waits for the person or saves the turn.
+    const live = activity.live ?? "";
+    return live === "Waiting for you" || live === "Saving your changes…" ? "idle" : "thinking";
+  }, [activity.live, isRunning, jobId, owningConversation?.controllerId, runs, shouldAnimateThreadLiveState]);
 
   const threadPreviewSafeInsetPx = useMemo(
     () =>
@@ -919,36 +562,8 @@ export function useAgentJobThreadPreviewState({
     [threadPreviewContainerLeftPx, threadPreviewRootLeftPx],
   );
 
-  const runningPreviewContainerRef = useRef<HTMLDivElement | null>(null);
-  const [runningPreviewHasOverflow, setRunningPreviewHasOverflow] = useState(false);
-
-  useEffect(() => {
-    if (isCompleted) {
-      setRunningPreviewHasOverflow(false);
-      return;
-    }
-    const element = runningPreviewContainerRef.current;
-    if (!element) {
-      return;
-    }
-
-    const checkOverflow = () => {
-      setRunningPreviewHasOverflow(element.scrollHeight > element.clientHeight + 1);
-    };
-
-    checkOverflow();
-
-    if (typeof ResizeObserver === "undefined") {
-      return;
-    }
-
-    const observer = new ResizeObserver(() => checkOverflow());
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [isCompleted, previewText]);
-
   const [cancelPending, setCancelPending] = useState(false);
-  const canCancelTerminalRun = Boolean(onCancelTerminalCommand) && isRunning && hasAnyCommandExecutionUpdate;
+  const canCancelTerminalRun = Boolean(onCancelTerminalCommand) && isRunning && hasThreadCommandActivity;
 
   const handleCancelRun = useCallback(async () => {
     if (!onCancelTerminalCommand || cancelPending) {
@@ -966,6 +581,7 @@ export function useAgentJobThreadPreviewState({
     return null;
   }
 
+  const isLiveTurn = isRunning || isThreadUnresolved;
   const threadPreviewBodyInsetPx = Math.max(4, threadPreviewSafeInsetPx - 24);
   const threadPreviewHeaderInsetPx = CHAT_SPINE_GUTTER_PX + threadPreviewBodyInsetPx + 16;
   const threadSpineJunctionOffsetClass = "left-[var(--thread-spine-left)]";
@@ -985,43 +601,18 @@ export function useAgentJobThreadPreviewState({
     hideThreadSpine,
     showHeaderAvatar,
     assistantAvatarMotion,
-    hiddenUpdateCount,
-    isHybridCompactionActive,
-    isThreadPreviewExpanded,
-    visibleCompactEvents,
-    overflowCompactCount,
-    overflowCompactEvents,
-    latestCompactEventId: latestCompactEvent?.id ?? null,
-    showCompactRailWaitingSpinner,
+    activity,
+    detailsOpen,
+    cards,
     isThreadUnresolved,
-    singleCompactEvent,
-    singleCompactEventLabel,
-    showSingleCompactEventStatusSweep,
     canCancelTerminalRun,
     cancelPending,
-    compactRailStatusText,
-    shouldSweepCompactRailStatusText,
-    showCollapsedCompactRailStatus,
-    showLiveCommandOutput,
-    showLiveCommandPlaceholder,
-    showCollapsedCommandToggle,
-    showCollapsedCommandOutput,
-    latestCommandExecution,
-    latestCommandAgentHandle,
-    latestCommandPreview,
-    updatesForInlineRendering,
     expandedUpdateIds,
     finalSummaryMessage,
     hasPreview: Boolean(preview),
-    previewText,
-    showSummaryBody,
-    suppressSummaryRunningStatus,
+    previewText: preview || (isCompleted ? (isStoppedRun && terminalProxyErrorMessage === null ? "Stopped." : "Completed.") : ""),
     isCompleted,
-    showRunningSpinnerFallback,
     shouldAnimateThreadLiveState,
-    runningStatusLabel,
-    useCompactRunningPreview,
-    runningPreviewHasOverflow,
     latestFiles,
     latestCommitRange,
     latestUnsavedReason,
@@ -1031,16 +622,11 @@ export function useAgentJobThreadPreviewState({
     finalSpineTone,
     threadPreviewRootRef,
     threadPreviewRef,
-    runningPreviewContainerRef,
     threadPreviewRootStyle,
     threadPreviewRailStyle,
     threadSpineJunctionOffsetClass,
     threadSpineHeaderOffsetClass,
-    summaryBodyPaddingTopClass,
-    onExpandThreadPreview: () => setIsThreadPreviewExpanded(true),
-    onCollapseThreadPreview: () => setIsThreadPreviewExpanded(false),
-    onToggleThreadPreview: () => setIsThreadPreviewExpanded((current) => !current),
-    onToggleCommandOutput: () => setCommandOutputExpanded((current) => !current),
+    onToggleDetails: () => setDetailsOpen((current) => !current),
     onToggleUpdateExpanded: toggleUpdateExpanded,
     onCancelRun: () => {
       void handleCancelRun();

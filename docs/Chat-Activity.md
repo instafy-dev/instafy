@@ -11,6 +11,43 @@ says "Thinking…" between steps. Details holds everything else: each command an
 calls, Octo's notes and plan updates. This page describes where the words come from and why they
 can be trusted.
 
+## In Studio
+
+The line sits in the turn under Octo's name, above the reply (`TurnActivityLine.tsx`). Its words
+come from `turnActivity.ts`, a pure module that reads the turn's steps:
+
+| Turn | Line |
+|---|---|
+| Queued or starting, before the model has begun | `Starting…` |
+| Running a labelled step | its running label, for example `Looking up places…` (the newest running step wins) |
+| Running an unlabelled command or tool | `Working…`; a file edit says `Editing files…` |
+| A runtime status is the newest thing | `Saving your changes…`, `Retrying…` |
+| The model is working, before or between steps | `Thinking…` (never its reasoning titles or notes) |
+| A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer (`turnActivity.ts` takes it as `viewerCanAnswer`; nothing feeds it yet, the inline browser approvals will) |
+| Done | up to two "what it did" groups, biggest first and in the order they happened, then the latest "what it made": `Looked up 14 places, read 6 pages, built the map` |
+| Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files` |
+| Stopped by the person | `Stopped · looked up 9 places`, or `Stopped` |
+| No news for 45 seconds while not in flight | `Status unavailable` |
+
+- Once the turn has a step, the whole line is one button that opens Details (`aria-expanded`,
+  `aria-controls`); it reads "Details ›", then "Hide details", and opens and closes as often as it
+  is pressed. Opening Details never moves the line or changes the turn's chrome. A failed turn has
+  one Details, its failure block's, which lists the steps after the error text, and its line is
+  plain text.
+- Details (`TurnActivityDetails.tsx`) lists the turn in order: each command with its label, the
+  command without its shell wrapper (the full line is its title), its state and its output behind
+  a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes, plan
+  updates and statuses. It shows the newest 60 rows, with "Show earlier steps" above them.
+- Cards (secrets, connections, action and preview cards, team plans) stay in the turn's default
+  view, and the file changes stay under the reply. Run traces keep their full view.
+- A command on its own in the conversation is one row: its label (or "Ran a command"), its state
+  and a chevron that shows the command and its output.
+- The running line is the turn's one polite live region; it announces a new label at most every
+  5 seconds. Reduced motion turns the sweep off. On coarse pointers the line and the rows are at
+  least 44 px tall.
+- A message without a valid `activity` (an older runtime, history, a label that breaks a rule)
+  counts as an unlabelled step, so mixed versions read the same.
+
 ## Where labels come from
 
 Every step a runtime streams (a command, a tool call, a web search, a file edit, a status the

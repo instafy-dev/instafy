@@ -43,7 +43,6 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "mobile-thumb-navigation.spec.ts",
   "notification-preferences.spec.ts",
   "organization-rail-reorder.spec.ts",
-  "run-icon-rail.spec.ts",
   "run-stop-control.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
   "shared-browser-expanded-safe-area.spec.ts",
@@ -54,6 +53,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "segmented-control-responsive.spec.ts",
   "studio-history-controls.spec.ts",
   "thread-spine-surface.spec.ts",
+  "turn-activity-line.spec.ts",
   "typing-agent-stack.spec.ts",
 ];
 
