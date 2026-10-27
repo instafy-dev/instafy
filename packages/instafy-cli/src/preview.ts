@@ -17,6 +17,13 @@ import {
   type LocalSiteProbe,
 } from "./local-site.js";
 import {
+  captureSiteThumbnail,
+  readThumbnailFile,
+  sniffImage,
+  type Thumbnail,
+  type ThumbnailAttempt,
+} from "./preview-thumbnail.js";
+import {
   buildRatholeConfig,
   cleanUrl,
   isRatholeClientFor,
@@ -30,8 +37,9 @@ import {
 } from "./tunnel.js";
 
 // `instafy preview` shows a site running in this space inside Studio. Unlike `instafy tunnel`,
-// the tunnel is private: the controller records a "Ready to preview" card in the conversation and
-// only space members can open it. The CLI never learns or prints a URL for it.
+// the tunnel is private: the controller records a preview card in the conversation and only space
+// members can open it. The CLI never learns or prints a URL for it. Once the site is live, the card
+// gets a picture of it (preview-thumbnail.ts), uploaded to the controller like the rest.
 
 export { PREVIEW_EXIT_NOT_LISTENING, PREVIEW_EXIT_PORT_NOT_ALLOWED, PreviewCommandError };
 export const PREVIEW_EXIT_UNAVAILABLE = 5;
@@ -58,6 +66,11 @@ export type PreviewOpenOptions = {
   start?: boolean;
   // How long `start` waits for the port (default 60 s, as a wake does).
   startTimeoutMs?: number;
+  // One short line of facts for the card (`--summary`), e.g. "Trip · 3 days · 14 places".
+  summary?: string;
+  // `--no-thumbnail` (false): no picture on the card. `thumbnailFile`: a picture a skill made itself.
+  thumbnail?: boolean;
+  thumbnailFile?: string;
 };
 
 export type PreviewListOptions = {
@@ -98,7 +111,12 @@ export type PreviewOpenResult = PreviewSummary & {
   // nothing was started; and that site's log file (null when nothing was started).
   startedPid?: number | null;
   logFile?: string | null;
+  // The card's picture: uploaded, skipped (and why), or failed (and why). It never changes the exit code.
+  thumbnail: ThumbnailOutcome["status"];
+  thumbnailReason?: string;
 };
+
+export type ThumbnailOutcome = { status: "uploaded" | "skipped" | "failed"; reason?: string };
 
 // How the site was started, as the controller records it: argv (never a shell) and the directory relative to the
 // space's workspace. A wake runs exactly this on the runtime, without a model turn.
@@ -134,7 +152,10 @@ type PreviewStateFile = {
 const RATHOLE_LOCAL_HOSTS = ["127.0.0.1"] as const;
 // Same limits as the server's.
 const MAX_TITLE_LENGTH = 120;
+const MAX_SUMMARY_LENGTH = 80;
 const MAX_PATH_LENGTH = 512;
+// An upload of the card's picture waits at most this long; the preview is open either way.
+const THUMBNAIL_UPLOAD_TIMEOUT_MS = 15_000;
 // How long `open` waits for another `instafy preview` command on this machine before giving up, and when a lock left
 // by a command that died is taken over.
 const STATE_LOCK_WAIT_MS = 120_000;
@@ -199,6 +220,22 @@ export function parsePreviewTitle(raw: string | undefined): string {
     throw new Error("Title must not contain control characters.");
   }
   return title;
+}
+
+// Characters that change the direction of text around them.
+const BIDI_CHARS_RE = /[\u202A-\u202E\u2066-\u2069]/;
+
+/** `--summary` as the server will accept it: one line, 1 to 80 characters, no control or direction characters. */
+export function parsePreviewSummary(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const summary = raw.replace(/\s+/g, " ").trim();
+  if (!summary || [...summary].length > MAX_SUMMARY_LENGTH) {
+    throw new Error(`--summary must be 1 to ${MAX_SUMMARY_LENGTH} characters.`);
+  }
+  if (CONTROL_CHARS_RE.test(summary) || BIDI_CHARS_RE.test(summary)) {
+    throw new Error("--summary must not contain control or direction characters.");
+  }
+  return summary;
 }
 
 /**
@@ -364,12 +401,13 @@ function previewsUnavailable(): PreviewCommandError {
 async function controllerRequest(params: {
   controllerUrl: string;
   auth: ResolvedTunnelToken;
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PUT";
   route: string;
   body?: unknown;
   retryCommand: string;
   // A 404 on the previews collection means the server has no previews API at all (an older server).
   notFoundMeansUnavailable?: boolean;
+  timeoutMs?: number;
 }): Promise<{ status: number; body: Record<string, unknown> | unknown[] | null }> {
   const { response } = await fetchWithControllerAuth({
     url: `${cleanUrl(params.controllerUrl)}${params.route}`,
@@ -380,6 +418,7 @@ async function controllerRequest(params: {
         ...(params.body === undefined ? {} : { "content-type": "application/json" }),
       },
       body: params.body === undefined ? undefined : JSON.stringify(params.body),
+      ...(params.timeoutMs ? { signal: AbortSignal.timeout(params.timeoutMs) } : {}),
     },
     accessToken: params.auth.token,
     tokenSource: params.auth.source,
@@ -943,6 +982,7 @@ async function createAndStartClient(params: {
       port,
       path: sitePath,
       title,
+      ...(opts.summary ? { summary: opts.summary } : {}),
       metadata: { source: "instafy-cli" },
       ...(serve ? { serve } : {}),
     },
@@ -1046,6 +1086,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   const port = parsePreviewPort(opts.port);
   const title = parsePreviewTitle(opts.title);
   const sitePath = parsePreviewPath(opts.path);
+  const summary = parsePreviewSummary(opts.summary);
   // A malformed --serve-cmd, or one carrying a secret, is refused before anything is probed or asked for.
   if (opts.serveCmd?.trim()) parseExplicitServeCommand(opts.serveCmd);
   const projectId = resolveProject({ project: opts.project });
@@ -1089,7 +1130,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
 
   // From the create call to the state write, one `instafy preview` command at a time on this machine.
   const { grant, previewId, entry } = await withStateLock(() =>
-    createAndStartClient({ opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve }),
+    createAndStartClient({ opts: { ...opts, summary }, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve }),
   );
 
   // The client stays up if this fails: a re-run reuses it and only repeats the ready call.
@@ -1116,20 +1157,125 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   const readyBody = (ready.body && !Array.isArray(ready.body) ? ready.body : {}) as Record<string, unknown>;
   // The server decides: an older controller ignores `serve` and answers without `restartable`.
   const restartable = serve !== null && grant["restartable"] === true;
+  const status = previewStatusFromHealth(readyBody);
+
+  // The card's picture, once the site is live. Whatever happens here, the preview is open: the exit code stays.
+  let thumbnail: ThumbnailOutcome;
+  if (opts.thumbnail === false) {
+    thumbnail = { status: "skipped", reason: "--no-thumbnail" };
+  } else if (status !== "live") {
+    thumbnail = { status: "skipped", reason: "the site is not live through the preview yet" };
+  } else {
+    if (!opts.thumbnailFile) log("Taking a picture of the site for its card…");
+    const attempt: ThumbnailAttempt = opts.thumbnailFile
+      ? readThumbnailFile(opts.thumbnailFile)
+      : await captureSiteThumbnail({ port, path: sitePath, host: "127.0.0.1" });
+    thumbnail =
+      "thumbnail" in attempt
+        ? await uploadPreviewThumbnail({ controllerUrl, auth, projectId, previewId, thumbnail: attempt.thumbnail, retryCommand })
+        : { status: attempt.status, reason: attempt.reason };
+  }
 
   return {
     previewId,
     title,
     port,
     path: sitePath,
-    status: previewStatusFromHealth(readyBody),
+    status,
     httpStatus: previewHttpStatusFromHealth(readyBody),
     messageId: stringField(readyBody, "messageId"),
     viewerHostSuffix: parseViewerHostSuffix(grant["viewerHostSuffix"]) ?? null,
     restartable,
     ...(restartable ? {} : { restartNote: restartNote ?? "the server did not record a start command" }),
     ...(opts.start ? { startedPid: started?.pid ?? null, logFile: started?.logFile ?? null } : {}),
+    thumbnail: thumbnail.status,
+    ...(thumbnail.reason ? { thumbnailReason: thumbnail.reason } : {}),
   };
+}
+
+/**
+ * Uploads a preview's picture (`PUT …/thumbnail`). The controller checks the format from the bytes, removes metadata
+ * and keeps it for space members who may open the preview. Never throws: a failure is reported, the preview stays open.
+ */
+export async function uploadPreviewThumbnail(params: {
+  controllerUrl: string;
+  auth: ResolvedTunnelToken;
+  projectId: string;
+  previewId: string;
+  thumbnail: Thumbnail;
+  retryCommand: string;
+}): Promise<ThumbnailOutcome> {
+  const { thumbnail } = params;
+  // Only what the bytes say goes out, whatever the caller claimed.
+  const facts = sniffImage(thumbnail.image);
+  if (!facts) return { status: "skipped", reason: "the picture is not a JPEG, PNG or WebP" };
+  try {
+    await controllerRequest({
+      controllerUrl: params.controllerUrl,
+      auth: params.auth,
+      method: "PUT",
+      route: previewsRoute(params.projectId, params.previewId, "thumbnail"),
+      body: {
+        image: thumbnail.image.toString("base64"),
+        contentType: facts.contentType,
+        source: thumbnail.source,
+        ...(thumbnail.description ? { description: thumbnail.description } : {}),
+      },
+      retryCommand: params.retryCommand,
+      timeoutMs: THUMBNAIL_UPLOAD_TIMEOUT_MS,
+    });
+    return { status: "uploaded" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message.split("\n")[0]! : String(error);
+    // An older server has no picture route: it answers 404 with no body of its own.
+    if (/\(404\)/.test(message)) return { status: "failed", reason: "this server does not keep preview pictures" };
+    return { status: "failed", reason: message.slice(0, 300) };
+  }
+}
+
+/** The preview this machine has open on a port and path (`instafy preview open` recorded it), or null. */
+function openPreviewFor(port: number, sitePath: string): PreviewStateEntry | null {
+  return readStateFile().previews.find((entry) => entry.localPort === port && entry.path === sitePath && entry.pid > 0) ?? null;
+}
+
+/** Whether `instafy preview check` should take a picture for a card: a preview is open on this port and path. */
+export function hasOpenPreviewFor(port: number, sitePath: string): boolean {
+  return openPreviewFor(port, sitePath) !== null;
+}
+
+/**
+ * `instafy preview check` refreshes the picture of the preview open on its port and path. Null when none is open.
+ */
+export async function uploadCheckThumbnail(input: {
+  port: number;
+  path: string;
+  image: Buffer;
+  description: string | null;
+}): Promise<ThumbnailOutcome | null> {
+  const entry = openPreviewFor(input.port, input.path);
+  if (!entry) return null;
+  const retryCommand = `instafy preview check --port ${input.port}`;
+  let auth: ResolvedTunnelToken;
+  let controllerUrl: string;
+  try {
+    ({ auth, controllerUrl } = resolveAuth({ controllerUrl: entry.controllerUrl }, retryCommand));
+  } catch (error) {
+    return { status: "skipped", reason: `no Instafy token here: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}` };
+  }
+  // A token is only ever sent to the server the preview was opened on.
+  if (cleanUrl(controllerUrl) !== cleanUrl(entry.controllerUrl)) {
+    return { status: "skipped", reason: "the preview was opened on another server" };
+  }
+  const facts = sniffImage(input.image);
+  if (!facts) return { status: "skipped", reason: "the picture is not a JPEG" };
+  return uploadPreviewThumbnail({
+    controllerUrl,
+    auth,
+    projectId: entry.projectId,
+    previewId: entry.previewId,
+    thumbnail: { image: input.image, ...facts, source: "capture", description: input.description },
+    retryCommand,
+  });
 }
 
 function toPreviewSummary(raw: unknown): PreviewSummary | null {
@@ -1206,6 +1352,11 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
         ? kleur.yellow("Not responding yet")
         : kleur.yellow("Preview opened (the server did not report whether the site answers)");
   console.log(`${label}: ${result.title} (port ${result.port}). Open it from the card in the conversation.`);
+  if (result.thumbnail === "uploaded") {
+    console.log(kleur.gray("The card shows a picture of the site; `instafy preview check` takes a new one after a change."));
+  } else {
+    console.log(kleur.gray(`No picture on the card (${result.thumbnailReason ?? result.thumbnail}).`));
+  }
   if (result.startedPid) {
     console.log(kleur.gray(`Started the site in the background (pid ${result.startedPid}); log: ${displayPath(result.logFile ?? "")}`));
   } else if (result.startedPid === null) {

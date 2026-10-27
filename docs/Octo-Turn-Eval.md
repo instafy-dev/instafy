@@ -21,7 +21,7 @@ and after changing a skill, the routing preflight or the reply rules, or nightly
 
 - The local stack is up from this checkout: Supabase, the controller on `:8788`, Studio, the runtime image. A probe
   that answers "You've hit your usage limit" means the managed model's account is spent, not that a case failed.
-- Page cases need site previews (`instafy preview open` and the "Ready to preview" card), which are off unless the
+- Page cases need site previews (`instafy preview open` and its preview card), which are off unless the
   controller and tunnel broker are configured for them. Without previews the eval still runs: chat cases grade as
   usual, `card_posted` is n/a ("this server offers no site previews"), and page cases fail `site_opens` because
   there is no page to open.
@@ -90,7 +90,7 @@ and after changing a skill, the routing preflight or the reply rules, or nightly
 
 The way a person finds it:
 
-1. The newest "Ready to preview" card in the conversation (`preview-ready-card`). The spec presses Open and measures
+1. The newest preview card in the conversation (`preview-ready-card`). The spec presses the card and measures
    the page in the side pane's frame (`site-preview-frame`).
 2. No card, or one that will not open: the space's previews as the controller lists them
    (`GET /projects/:id/previews`). The newest active one is opened in a tab of its own, the way "Open in new tab"
@@ -143,7 +143,7 @@ when no must fails. Its score is the share of graded checks that passed.
 | `job_succeeded` | must | Every job terminal, root `completed/succeeded`, none failed, no timeout (a run the controller continued in a new turn or retried after a short rate limit counts by the run that replaced it) |
 | `route` | must | As expected; a team also passes on worker jobs, `direct` fails when workers ran |
 | `skill:*`, `skill_any_of`, `not_skill:*` | must | Against the skills seen; n/a when the space does not have the skill |
-| `card_posted` | must | A "Ready to preview" card; n/a on a server without site previews |
+| `card_posted` | must | A preview card; n/a on a server without site previews |
 | `site_opens` | must | A page was found (card or previews) and opened with text and no HTTP error |
 | `site_shape:*` | must | The page has at least the case's counts (a table, a ranking, checkboxes, dated steps) |
 | `team_items_on_site` | must | A team's page names every item it planned a lane for (each lane's label; a lane over several stops counts as each). A line that says what is missing ("Not found yet: …") does not count. When the plan message did not survive in the run log, the lanes' handles stand in |

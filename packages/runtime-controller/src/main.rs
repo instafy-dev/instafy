@@ -28,6 +28,7 @@ mod browser_profile;
 mod browser_shares;
 mod browser_turn;
 mod bug_reports;
+mod chat_activity;
 mod chat_attachments;
 mod config;
 mod connection_limit;

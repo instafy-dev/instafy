@@ -6,6 +6,11 @@
 // a desktop and a phone screenshot the agent can open. `--framed` loads the site inside a frame on another origin
 // instead, for a caller that will show it that way. It is local only: it calls no Instafy server.
 //
+// What the page may load is Instafy's decision, not the page's: the site's own origin directly; every other public
+// address through the runtime image's egress proxy (public addresses on ports 80 and 443 only, connected to the address
+// it checked); never another local port, a private or reserved address, or a site the link-only list names. Without the
+// proxy nothing off the site's origin is loaded. Blocked requests are listed as `blocked`, not as page errors.
+//
 // The browser is the one the runtime image already ships: its trusted Playwright (the path the Shared Browser uses, or
 // a global install) and its Chromium (the Playwright base image's, or the distro's). Nothing is downloaded, and a
 // project's own node_modules is used only with --workspace-playwright. The Shared Browser's CDP port is deliberately
@@ -13,15 +18,17 @@
 //
 // Exit codes: 0 no problems, 1 problems found (listed), 2 nothing answers on the port (in time), 3 the port is not allowed,
 // 4 no browser available (nothing was checked), 64 bad options, 70 the check itself failed (nothing was checked).
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import type { Command } from "commander";
+import { isLocalHostName, isPrivateAddress } from "@instafy/bind/net";
+import { defaultSkillRoots, listedSite, loadLinkOnlyGuard, type LinkOnlyGuard } from "./web-read.js";
 import {
   PREVIEW_EXIT_NOT_LISTENING,
   PreviewCommandError,
@@ -251,6 +258,390 @@ function firstLine(error: unknown): string {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// What the headless browser may load
+
+/**
+ * The rules for one page load. `direct` origins load without the proxy: the site's own (and with --framed the frame
+ * page's). `offSite` says whether anything else may go out at all: through the egress proxy, or nowhere when this
+ * machine has none. `linkOnly` is the link-only list; null when it did not load, which blocks every request off the site.
+ */
+export type RequestRules = {
+  direct: string[];
+  offSite: "proxy" | "blocked";
+  linkOnly: LinkOnlyGuard | null;
+};
+
+export type RequestVerdict = { kind: "direct" } | { kind: "proxy" } | { kind: "blocked"; reason: string };
+
+const blocked = (reason: string): RequestVerdict => ({ kind: "blocked", reason });
+
+function isLoopbackAddress(ip: string): boolean {
+  return net.isIPv4(ip) ? ip.startsWith("127.") : /^(?:0*:)*:?0*1$/.test(ip) || ip === "::ffff:127.0.0.1";
+}
+
+/** Where one request may go. Nothing a page says changes it. */
+export function classifyRequest(raw: string, rules: RequestRules): RequestVerdict {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return blocked("not a valid address");
+  }
+  // In-page data, never a request.
+  if (url.protocol === "data:" || url.protocol === "blob:" || url.protocol === "about:") return { kind: "direct" };
+  const scheme = url.protocol === "ws:" ? "http:" : url.protocol === "wss:" ? "https:" : url.protocol;
+  if (scheme !== "http:" && scheme !== "https:") return blocked(`${url.protocol.replace(/:$/, "")} addresses are not loaded`);
+  if (rules.direct.includes(`${scheme}//${url.host}`)) return { kind: "direct" };
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (net.isIP(host)) {
+    if (isLoopbackAddress(host)) return blocked("another local server: only the site's own port is loaded");
+    if (isPrivateAddress(host)) return blocked("a private or reserved address");
+  } else if (isLocalHostName(host) || host.endsWith(".localhost")) {
+    return blocked("a local host name");
+  }
+  if (url.username || url.password) return blocked("an address with a user name or password");
+  if (url.port && url.port !== "80" && url.port !== "443") return blocked(`port ${url.port}: only the web ports 80 and 443 are loaded`);
+  if (rules.offSite === "blocked") return blocked("this machine has no egress proxy, so nothing off the site is loaded");
+  if (!rules.linkOnly) return blocked("the link-only site list could not be loaded");
+  const web = new URL(url.href);
+  web.protocol = scheme;
+  // Either kind: a "no-agents" site is never fetched, and a "no-reuse" one's content must not end up in a picture that
+  // Instafy keeps and shows (a check's desktop picture becomes the card's).
+  const listed = listedSite(web, rules.linkOnly);
+  if (listed) {
+    return blocked(
+      listed.kind === "no-reuse"
+        ? `${listed.name} bars reusing its content (${listed.reason})`
+        : `${listed.name} is link-only (${listed.reason})`,
+    );
+  }
+  return { kind: "proxy" };
+}
+
+/** The link-only list the capture enforces: the bundled one plus any a skill in reach adds (as `instafy web read`). */
+export function loadCaptureLinkOnly(cwd: string, env: NodeJS.ProcessEnv): LinkOnlyGuard | null {
+  try {
+    return loadLinkOnlyGuard(defaultSkillRoots(cwd, env));
+  } catch {
+    return null;
+  }
+}
+
+/** Where requests off the site go for one run: the image's egress proxy, or a local stand-in that refuses them all. */
+export type OffSiteRoute = { server: string; kind: "proxy" | "blocked"; stop: () => Promise<void> };
+
+/** The runtime image's egress proxy: only its fixed install locations, never one found in the workspace. */
+export const EGRESS_PROXY_LOCATIONS = ["/usr/local/bin/browser-egress-proxy", "/usr/bin/browser-egress-proxy"];
+const EGRESS_PROXY_READY_MS = 3_000;
+
+async function freeLoopbackPort(): Promise<number> {
+  const server = net.createServer();
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address() as AddressInfo;
+  await new Promise((resolve) => server.close(resolve));
+  return port;
+}
+
+function proxyAnswers(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const request = http.get({ host: "127.0.0.1", port, path: "/healthz", timeout: 500 }, (response) => {
+      response.resume();
+      resolve(response.statusCode === 200);
+    });
+    request.on("timeout", () => request.destroy());
+    request.on("error", () => resolve(false));
+  });
+}
+
+async function startEgressProxy(binary: string): Promise<OffSiteRoute | null> {
+  const port = await freeLoopbackPort();
+  // Its own instance on a free loopback port, with nothing of this process's environment.
+  const child = spawn(binary, [], {
+    env: { PATH: "/usr/local/bin:/usr/bin:/bin", INSTAFY_BROWSER_EGRESS_PROXY_BIND: `127.0.0.1:${port}` },
+    stdio: "ignore",
+  });
+  let exited = false;
+  child.on("exit", () => {
+    exited = true;
+  });
+  child.on("error", () => {
+    exited = true;
+  });
+  const stop = async () => {
+    if (exited) return;
+    child.kill("SIGTERM");
+    await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 1_000))]);
+  };
+  const deadline = Date.now() + EGRESS_PROXY_READY_MS;
+  while (!exited && Date.now() < deadline) {
+    if (await proxyAnswers(port)) return { server: `http://127.0.0.1:${port}`, kind: "proxy", stop };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await stop();
+  return null;
+}
+
+/** A proxy that refuses every request, so a page cannot reach anything off the site even past the request rules. */
+async function startRefusingProxy(): Promise<OffSiteRoute> {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(403, { "content-type": "text/plain" });
+    res.end("blocked: only the site itself is loaded here");
+  });
+  server.on("connect", (_req, socket: net.Socket) => {
+    socket.on("error", () => {});
+    socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address() as AddressInfo;
+  return { server: `http://127.0.0.1:${port}`, kind: "blocked", stop: () => new Promise((resolve) => server.close(() => resolve())) };
+}
+
+/**
+ * Where this run sends requests off the site. `proxyServer` is a test hook: a proxy the caller runs itself.
+ */
+export async function startOffSiteRoute(options: { proxyServer?: string; locations?: string[] } = {}): Promise<OffSiteRoute> {
+  if (options.proxyServer) return { server: options.proxyServer, kind: "proxy", stop: async () => {} };
+  for (const binary of options.locations ?? EGRESS_PROXY_LOCATIONS) {
+    let usable = false;
+    try {
+      usable = fs.statSync(binary).isFile();
+    } catch {
+      usable = false;
+    }
+    if (!usable) continue;
+    const route = await startEgressProxy(binary).catch(() => null);
+    if (route) return route;
+  }
+  return startRefusingProxy();
+}
+
+/**
+ * What Instafy's gate sees of a request: the whole address of a plain-HTTP one, only the host of a TLS one or a
+ * WebSocket (the browser tunnels those with CONNECT). Null for anything else.
+ */
+export function gateView(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.username || url.password) return null;
+  if (url.protocol === "http:") return url.href;
+  if (url.protocol === "https:" || url.protocol === "wss:") return `https://${url.host}/`;
+  if (url.protocol === "ws:") return `http://${url.host}/`;
+  return null;
+}
+
+/** A CONNECT's `host:port` as the address the gate checks: http on port 80, https otherwise. */
+function connectView(authority: string): string | null {
+  const match = /^(\[[0-9a-fA-F:.]+\]|[^:/@\s\[\]]+):(\d{1,5})$/.exec(authority.trim());
+  if (!match) return null;
+  const port = Number(match[2]);
+  if (!port || port > 65535) return null;
+  return gateView(`${port === 80 ? "http" : "https"}://${match[1]}:${port}/`);
+}
+
+/**
+ * Instafy's own gate between the browser and the egress proxy. The request rules (applyRequestRules) see only a
+ * request's first address: Playwright follows a redirect without asking them. So every connection the browser makes
+ * off the site comes here as well, each redirect hop and every frame's and worker's included, and is checked again by
+ * what the gate can see of it (gateView). What passes goes on to `upstream`; what does not is refused (403), and its
+ * reason is kept for the report (`refusal`).
+ */
+export type RequestGate = OffSiteRoute & { refusal: (url: string) => string | null };
+
+const MAX_GATE_NOTES = 500;
+
+export async function startRequestGate(upstream: OffSiteRoute, rules: RequestRules): Promise<RequestGate> {
+  // Nothing reaches the gate directly: the site's own origin bypasses the proxy, so here it is just another local port.
+  const offSite: RequestRules = { ...rules, direct: [] };
+  const refused = new Map<string, string>();
+  const verdictFor = (seen: string | null): RequestVerdict => {
+    const verdict = seen ? classifyRequest(seen, offSite) : blocked("not a web address");
+    if (verdict.kind === "blocked" && seen && !refused.has(seen) && refused.size < MAX_GATE_NOTES) refused.set(seen, verdict.reason);
+    return verdict;
+  };
+  const target = new URL(upstream.server);
+  const upstreamAt = { host: target.hostname.replace(/^\[|\]$/g, ""), port: Number(target.port) || 80 };
+  const sockets = new Set<net.Socket>();
+  const server = http.createServer((req, res) => {
+    // A plain-HTTP request names its whole address (absolute form), so all of it is checked.
+    const address = req.url ?? "";
+    if (verdictFor(/^http:\/\//i.test(address) ? gateView(address) : null).kind === "blocked") {
+      res.writeHead(403, { "content-type": "text/plain", "cache-control": "no-store" });
+      res.end("blocked by Instafy: not loaded for a check or a preview's picture");
+      return;
+    }
+    const forward = http.request({ ...upstreamAt, method: req.method, path: address, headers: req.headers }, (answer) => {
+      res.writeHead(answer.statusCode ?? 502, answer.headers);
+      answer.pipe(res);
+    });
+    forward.on("error", () => {
+      if (!res.headersSent) res.writeHead(502);
+      res.end();
+    });
+    req.pipe(forward);
+  });
+  server.on("connect", (req: http.IncomingMessage, client: net.Socket, head: Buffer) => {
+    client.on("error", () => {});
+    const authority = req.url ?? "";
+    if (verdictFor(connectView(authority)).kind === "blocked") {
+      client.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
+      return;
+    }
+    const tunnel = net.connect(upstreamAt, () => {
+      tunnel.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
+      if (head.length) tunnel.write(head);
+      tunnel.pipe(client);
+      client.pipe(tunnel);
+    });
+    tunnel.on("error", () => client.destroy());
+    tunnel.on("close", () => client.destroy());
+    client.on("close", () => tunnel.destroy());
+  });
+  server.on("connection", (socket: net.Socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address() as AddressInfo;
+  return {
+    server: `http://127.0.0.1:${port}`,
+    kind: upstream.kind,
+    refusal: (url) => {
+      const seen = gateView(url);
+      return seen ? (refused.get(seen) ?? null) : null;
+    },
+    stop: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await upstream.stop();
+    },
+  };
+}
+
+/**
+ * A redirect hop whose address the rules block but the gate cannot refuse, because it sees only the host: an https
+ * copy of a link-only site that a wrapper (an archive, a cache) writes into its path or query. The page may have
+ * loaded it, so a picture taken now is never kept. Null for every other hop.
+ */
+export function unstoppedRedirect(url: string, rules: RequestRules): { reason: string } | null {
+  const verdict = classifyRequest(url, rules);
+  if (verdict.kind !== "blocked") return null;
+  const seen = gateView(url);
+  if (seen && classifyRequest(seen, { ...rules, direct: [] }).kind === "blocked") return null;
+  return { reason: verdict.reason };
+}
+
+/**
+ * The proxy settings for a context: everything goes through the gate, the direct origins excepted. Chromium would
+ * otherwise send local and link-local addresses around any proxy, a redirect hop to one included; `<-loopback>` sends
+ * them to the gate too, whatever the Playwright in use does by default.
+ */
+export function contextProxy(route: OffSiteRoute, direct: string[]): { server: string; bypass: string } {
+  return { server: route.server, bypass: ["<-loopback>", ...direct.map((origin) => new URL(origin).host)].join(",") };
+}
+
+/**
+ * Applies `rules` to every request and WebSocket of a context. A blocked one is aborted and passed to `onBlocked`
+ * with its reason.
+ */
+export async function applyRequestRules(context: any, rules: RequestRules, onBlocked: (url: string, reason: string) => void) {
+  await context.route("**/*", async (route: any) => {
+    const url = String(route.request().url());
+    const verdict = classifyRequest(url, rules);
+    if (verdict.kind === "blocked") {
+      onBlocked(url, verdict.reason);
+      await route.abort("blockedbyclient").catch(() => {});
+      return;
+    }
+    await route.continue().catch(() => {});
+  });
+  if (typeof context.routeWebSocket === "function") {
+    await context.routeWebSocket(
+      (url: URL) => classifyRequest(url.href, rules).kind === "blocked",
+      (socket: any) => {
+        const url = String(socket.url());
+        const verdict = classifyRequest(url, rules);
+        onBlocked(url, verdict.kind === "blocked" ? verdict.reason : "blocked");
+        void Promise.resolve(socket.close({ code: 1008, reason: "blocked" })).catch(() => {});
+      },
+    );
+  }
+}
+
+/** Windows the site opens are closed at once. */
+export function closePopups(page: any) {
+  page.on("popup", (popup: any) => void popup.close().catch(() => {}));
+}
+
+/** A request the egress proxy refused (it answers CONNECT for a private address or another port with 403). */
+const PROXY_REFUSED = /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED/;
+
+// ---------------------------------------------------------------------------------------------------------------
+// The card's picture
+
+/** The card's picture: 640×400, half the desktop size. */
+export const THUMBNAIL_WIDTH = 640;
+export const THUMBNAIL_HEIGHT = 400;
+/** Over this at quality 70 it is taken again at 50, and skipped when still over. */
+export const MAX_CAPTURE_BYTES = 256 * 1024;
+const PAGE_DESCRIPTION_MAX = 300;
+
+/** One plain line, no control or direction characters, at most 300 characters; null when nothing is left. */
+export function cleanDescription(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const text = raw
+    .replace(/[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? [...text].slice(0, PAGE_DESCRIPTION_MAX).join("").trim() : null;
+}
+
+/** The page's own `<meta name="description">`, cleaned. */
+export async function readPageDescription(frame: any): Promise<string | null> {
+  const raw = await frame
+    .evaluate(() => document.querySelector('meta[name="description" i]')?.getAttribute("content") ?? null)
+    .catch(() => null);
+  return cleanDescription(raw);
+}
+
+/**
+ * What the page shows now as a 640×400 JPEG: the viewport at half size, quality 70, or 50 when that is over 256 KiB.
+ * `skipped` says why there is none.
+ */
+export async function pageThumbnail(page: any, context: any): Promise<{ image: Buffer } | { skipped: string }> {
+  const cdp = await context.newCDPSession(page);
+  try {
+    const metrics = await cdp.send("Page.getLayoutMetrics");
+    const view = metrics.cssVisualViewport ?? metrics.visualViewport ?? {};
+    const clip = {
+      x: Number(view.pageX) || 0,
+      y: Number(view.pageY) || 0,
+      width: THUMBNAIL_WIDTH * 2,
+      height: THUMBNAIL_HEIGHT * 2,
+      scale: 0.5,
+    };
+    for (const quality of [70, 50]) {
+      const { data } = await cdp.send("Page.captureScreenshot", { format: "jpeg", quality, clip, captureBeyondViewport: false });
+      const image = Buffer.from(String(data), "base64");
+      if (image.length <= MAX_CAPTURE_BYTES) return { image };
+    }
+    return { skipped: `the picture was over ${MAX_CAPTURE_BYTES / 1024} KiB even at quality 50` };
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+}
+
+/** The desktop page's picture from a check, for the card of the preview on that port. */
+export type CheckThumbnail = { image: Buffer; description: string | null } | { skipped: string };
+
+// ---------------------------------------------------------------------------------------------------------------
 // The check
 
 
@@ -265,6 +656,8 @@ export type ViewportReport = {
   blank: { blank: boolean; reason: string | null };
   errors: string[];
   warnings: string[];
+  /** requests Instafy did not let the page make, with the reason; never page errors */
+  blocked: string[];
 };
 
 export type SiteCheckReport = {
@@ -275,6 +668,11 @@ export type SiteCheckReport = {
   engine: { playwright: string; chromium: string };
   viewports: ViewportReport[];
   problems: number;
+  /** where requests off the site went: through the egress proxy, or nowhere (this machine has none) */
+  offSite: "proxy" | "blocked";
+  /** the card's picture: uploaded for the open preview on this port and path, or why not */
+  thumbnail?: "uploaded" | "skipped" | "failed";
+  thumbnailReason?: string;
 };
 
 export type SiteCheckOptions = {
@@ -292,6 +690,10 @@ export type SiteCheckOptions = {
   workspacePlaywright?: boolean;
   /** test hook: where to look for a global Playwright */
   globalRoots?: string[];
+  /** take a picture of the desktop page for the card (`instafy preview check` does when a preview is open on the port) */
+  thumbnail?: boolean;
+  /** test hook: send requests off the site to this proxy instead of the image's egress proxy */
+  proxyServer?: string;
 };
 
 export function parseCheckPath(raw: string | undefined): string {
@@ -444,6 +846,8 @@ const DOMINANT_COLOUR = async (b64: string) => {
   return max / (w * h);
 };
 
+type ViewportNetwork = { rules: RequestRules; gate: RequestGate };
+
 async function checkViewport(
   browser: any,
   target: { pageUrl: string; framed: boolean },
@@ -452,9 +856,18 @@ async function checkViewport(
   outDir: string,
   timeoutMs: number,
   waitMs: number,
-): Promise<ViewportReport> {
+  network: ViewportNetwork,
+  takeThumbnail: boolean,
+): Promise<ViewportReport & { thumbnail?: CheckThumbnail }> {
   const errors: string[] = [];
   const warnings: string[] = [];
+  const blockedRequests = new Map<string, string>();
+  const noteBlocked = (url: string, reason: string) => {
+    if (!blockedRequests.has(url)) blockedRequests.set(url, reason);
+  };
+  const blockedList = () => [...blockedRequests].map(([url, reason]) => `${url.slice(0, 200)} (${reason})`).slice(0, MAX_LIST);
+  // A fresh, anonymous context per size: no person's session, cookies, location or browser profile, no service
+  // workers, no downloads, no permissions.
   const context = await browser.newContext({
     viewport: { width: vp.width, height: vp.height },
     deviceScaleFactor: vp.mobile ? 2 : 1,
@@ -464,11 +877,22 @@ async function checkViewport(
     reducedMotion: "reduce",
     serviceWorkers: "block",
     acceptDownloads: false,
+    proxy: contextProxy(network.gate, network.rules.direct),
   });
   const t0 = Date.now();
   let status: number | null = null;
+  // Redirect hops the gate could not refuse (see unstoppedRedirect): said out loud, and no picture is kept.
+  const unstopped = new Map<string, string>();
   try {
+    await applyRequestRules(context, network.rules, noteBlocked);
+    context.on("request", (request: any) => {
+      if (!request.redirectedFrom()) return;
+      const url = String(request.url());
+      const hop = unstoppedRedirect(url, network.rules);
+      if (hop && !unstopped.has(url)) unstopped.set(url, hop.reason);
+    });
     const page = await context.newPage();
+    closePopups(page);
     const ours = (u: string) => isSiteUrl(u, siteOrigin);
     const shortUrl = (u: string) => (ours(u) ? u.slice(siteOrigin.length) || "/" : u).slice(0, 200);
     page.on("console", (m: any) => {
@@ -483,7 +907,13 @@ async function checkViewport(
     page.on("requestfailed", (r: any) => {
       const u = String(r.url());
       if (/\/favicon\.ico(\?|$)/.test(u)) return;
+      // Instafy stopped it: listed as blocked, not as the page's failure.
+      if (blockedRequests.has(u)) return;
       const why = r.failure()?.errorText ?? "failed";
+      if (!ours(u) && PROXY_REFUSED.test(why)) {
+        noteBlocked(u, network.gate.refusal(u) ?? "the egress proxy refused it: not a public address, or not a web port");
+        return;
+      }
       // X-Frame-Options or CSP frame-ancestors: reported once, as the reason the frame stays empty
       if (target.framed && ours(u) && r.isNavigationRequest() && /ERR_BLOCKED_BY_RESPONSE/.test(why)) {
         refused = true;
@@ -497,6 +927,12 @@ async function checkViewport(
       const s = Number(r.status());
       if (r.request().isNavigationRequest() && ours(u) && status === null) status = s;
       if (s < 400 || /\/favicon\.ico(\?|$)/.test(u)) return;
+      // The gate's own answer to a plain-HTTP request it refused (a redirect hop): blocked, not the site's error.
+      const refusal = s === 403 && !ours(u) ? network.gate.refusal(u) : null;
+      if (refusal) {
+        noteBlocked(u, refusal);
+        return;
+      }
       (ours(u) ? errors : warnings).push(`HTTP ${s}: ${shortUrl(u)}`);
     });
 
@@ -533,6 +969,20 @@ async function checkViewport(
       const incomplete = incompleteBlankCheck(dominant, snap.text);
       if (incomplete) (incomplete.error ? errors : warnings).push(incomplete.message);
     }
+    for (const [url, reason] of unstopped) {
+      warnings.push(`a redirect led to ${url.slice(0, 200)} (${reason}), which this check could not stop`);
+    }
+    let thumbnail: CheckThumbnail | undefined;
+    if (takeThumbnail) {
+      const [firstUnstopped] = unstopped;
+      thumbnail = firstUnstopped
+        ? { skipped: `a redirect led to ${firstUnstopped[0].slice(0, 200)} (${firstUnstopped[1]}), which a picture never shows` }
+        : blank.blank
+        ? { skipped: "the page looked blank" }
+        : await pageThumbnail(page, context)
+            .then(async (shot) => ("image" in shot ? { image: shot.image, description: await readPageDescription(page.mainFrame()) } : shot))
+            .catch((error: unknown) => ({ skipped: `the picture could not be taken: ${firstLine(error)}` }));
+    }
     return {
       name: vp.name,
       width: vp.width,
@@ -544,6 +994,8 @@ async function checkViewport(
       blank,
       errors: [...new Set(errors)].slice(0, MAX_LIST),
       warnings: [...new Set(warnings)].slice(0, MAX_LIST),
+      blocked: blockedList(),
+      ...(thumbnail ? { thumbnail } : {}),
     };
   } catch (error) {
     errors.push(`the page did not load: ${firstLine(error)}`);
@@ -558,13 +1010,17 @@ async function checkViewport(
       blank: { blank: true, reason: "the page did not load" },
       errors: [...new Set(errors)].slice(0, MAX_LIST),
       warnings: [...new Set(warnings)].slice(0, MAX_LIST),
+      blocked: blockedList(),
+      ...(takeThumbnail ? { thumbnail: { skipped: "the page did not load" } } : {}),
     };
   } finally {
     await context.close().catch(() => {});
   }
 }
 
-export async function runSiteCheck(opts: SiteCheckOptions): Promise<{ code: number; report: SiteCheckReport | null; message?: string }> {
+export async function runSiteCheck(
+  opts: SiteCheckOptions,
+): Promise<{ code: number; report: SiteCheckReport | null; message?: string; thumbnail?: CheckThumbnail }> {
   const env = opts.env ?? process.env;
   const port = parsePreviewPort(opts.port, env);
   const sitePath = parseCheckPath(opts.path);
@@ -606,16 +1062,35 @@ export async function runSiteCheck(opts: SiteCheckOptions): Promise<{ code: numb
   }
   const reports: ViewportReport[] = [];
   let host: { url: string; close: () => void } | null = null;
+  let route: OffSiteRoute | null = null;
+  let thumbnail: CheckThumbnail | undefined;
   try {
     const shots = outDir ?? makeDefaultOutDir(port);
     host = opts.framed ? await startFrameHost(url) : null;
+    const upstream = await startOffSiteRoute({ proxyServer: opts.proxyServer });
+    route = upstream;
+    const rules: RequestRules = {
+      direct: host ? [siteOrigin, new URL(host.url).origin] : [siteOrigin],
+      offSite: upstream.kind,
+      linkOnly: loadCaptureLinkOnly(opts.cwd ?? process.cwd(), env),
+    };
+    // Stopping the gate stops the egress proxy behind it.
+    const gate = await startRequestGate(upstream, rules);
+    route = gate;
     const target = { pageUrl: host?.url ?? url, framed: Boolean(opts.framed) };
     for (const vp of viewports) {
-      reports.push(await checkViewport(launched.browser, target, vp, siteOrigin, shots, timeoutMs, opts.waitMs ?? 600));
+      // The card shows the site as a page of its own, so only the plain desktop load is pictured.
+      const takeThumbnail = Boolean(opts.thumbnail) && vp.name === "desktop" && !opts.framed;
+      const { thumbnail: shot, ...report } = await checkViewport(
+        launched.browser, target, vp, siteOrigin, shots, timeoutMs, opts.waitMs ?? 600, { rules, gate }, takeThumbnail,
+      );
+      if (shot) thumbnail = shot;
+      reports.push(report);
     }
   } finally {
     await launched.browser.close().catch(() => {});
     host?.close();
+    await route?.stop().catch(() => {});
   }
   const problems = reports.reduce((n, r) => n + r.errors.length, 0);
   const report: SiteCheckReport = {
@@ -626,8 +1101,9 @@ export async function runSiteCheck(opts: SiteCheckOptions): Promise<{ code: numb
     engine: { playwright: engine.playwright, chromium: launched.executable },
     viewports: reports,
     problems,
+    offSite: route?.kind ?? "blocked",
   };
-  return { code: problems ? CHECK_EXIT_PROBLEMS : CHECK_EXIT_OK, report };
+  return { code: problems ? CHECK_EXIT_PROBLEMS : CHECK_EXIT_OK, report, ...(thumbnail ? { thumbnail } : {}) };
 }
 
 export function formatSiteCheck(report: SiteCheckReport): string {
@@ -638,7 +1114,13 @@ export function formatSiteCheck(report: SiteCheckReport): string {
     lines.push(`${r.errors.length ? "✗" : "✓"} ${r.name} ${r.width}×${r.height}: ${r.screenshot ?? "no screenshot"} (${timing})`);
     for (const e of r.errors) lines.push(`    error: ${e}`);
     for (const w of r.warnings.slice(0, 8)) lines.push(`    warn:  ${w}`);
+    for (const b of r.blocked.slice(0, 8)) lines.push(`    blocked: ${b}`);
   }
+  if (report.viewports.some((r) => r.blocked.length)) {
+    lines.push("Blocked requests are Instafy's rule for this check, not the site's errors: people opening the preview reach only the site itself and public addresses.");
+  }
+  if (report.thumbnail === "uploaded") lines.push("The preview card's picture was updated.");
+  else if (report.thumbnail) lines.push(`The preview card's picture was not updated (${report.thumbnailReason ?? report.thumbnail}).`);
   lines.push(
     report.ok
       ? "No problems found. Open the screenshots and check layout, legibility and overlap on both sizes."
@@ -659,7 +1141,27 @@ export type PreviewCheckCliOptions = {
   json?: boolean;
 };
 
-export type PreviewCheckIo = { out: (s: string) => void; err: (s: string) => void; env?: NodeJS.ProcessEnv };
+/**
+ * Gives the check's desktop picture to the card of the preview open on that port and path, when there is one: `null`
+ * when no preview is open there (nothing is uploaded and nothing is said).
+ */
+export type CheckThumbnailUploader = (input: {
+  port: number;
+  path: string;
+  image: Buffer;
+  description: string | null;
+}) => Promise<{ status: "uploaded" | "skipped" | "failed"; reason?: string } | null>;
+
+export type PreviewCheckIo = {
+  out: (s: string) => void;
+  err: (s: string) => void;
+  env?: NodeJS.ProcessEnv;
+  /** whether a preview is open on this port and path, so a picture is worth taking */
+  hasOpenPreview?: (port: number, path: string) => boolean;
+  uploadThumbnail?: CheckThumbnailUploader;
+  /** test hook: see SiteCheckOptions.proxyServer */
+  proxyServer?: string;
+};
 
 /** The CLI action; returns the exit code. */
 export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: PreviewCheckIo = { out: console.log, err: console.error }): Promise<number> {
@@ -672,9 +1174,14 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
   };
   try {
     if (opts.port === undefined) throw new PreviewCommandError("--port <port> is required.", CHECK_EXIT_USAGE);
+    const port = parsePreviewPort(opts.port, env);
+    const sitePath = parseCheckPath(opts.path);
+    const wantsThumbnail = Boolean(io.uploadThumbnail && io.hasOpenPreview?.(port, sitePath));
     const result = await runSiteCheck({
-      port: parsePreviewPort(opts.port, env),
+      port,
       path: opts.path,
+      thumbnail: wantsThumbnail,
+      proxyServer: io.proxyServer,
       phone: opts.phone,
       framed: opts.framed,
       workspacePlaywright: opts.workspacePlaywright,
@@ -687,6 +1194,20 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
       if (opts.json) io.out(JSON.stringify({ ok: false, exitCode: result.code, error: result.message, skipped: result.code === CHECK_EXIT_NO_BROWSER }));
       else io.err(result.message ?? "check failed");
       return result.code;
+    }
+    if (wantsThumbnail && result.thumbnail && io.uploadThumbnail) {
+      // The picture never changes the check's exit code.
+      const shot = result.thumbnail;
+      const outcome =
+        "skipped" in shot
+          ? { status: "skipped" as const, reason: shot.skipped }
+          : await io
+              .uploadThumbnail({ port, path: sitePath, image: shot.image, description: shot.description })
+              .catch((error: unknown) => ({ status: "failed" as const, reason: firstLine(error) }));
+      if (outcome) {
+        result.report.thumbnail = outcome.status;
+        if (outcome.reason) result.report.thumbnailReason = outcome.reason;
+      }
     }
     io.out(opts.json ? JSON.stringify(result.report) : formatSiteCheck(result.report));
     return result.code;
@@ -702,12 +1223,15 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
 }
 
 /** `instafy preview check`, registered under the `preview` command group. */
-export function registerPreviewCheckCommand(preview: Command): Command {
+export function registerPreviewCheckCommand(
+  preview: Command,
+  card: Pick<PreviewCheckIo, "hasOpenPreview" | "uploadThumbnail"> = {},
+): Command {
   return preview
     .command("check")
     .description(
       "Load a local site in a headless browser and report its title, errors, failed requests and a blank page; " +
-        "writes desktop and phone screenshots " +
+        "writes desktop and phone screenshots, and refreshes the picture on the card of a preview open on that port " +
         "(exit 1: problems, 2: nothing answering, 3: port not allowed, 4: no browser, 64: bad options, " +
         "70: the check itself failed)",
     )
@@ -721,6 +1245,6 @@ export function registerPreviewCheckCommand(preview: Command): Command {
     .option("--wait <ms>", "Extra settle time after load in ms (default 600)")
     .option("--json", "Output JSON")
     .action(async (opts: PreviewCheckCliOptions) => {
-      process.exitCode = await runPreviewCheckCli(opts);
+      process.exitCode = await runPreviewCheckCli(opts, { out: console.log, err: console.error, ...card });
     });
 }

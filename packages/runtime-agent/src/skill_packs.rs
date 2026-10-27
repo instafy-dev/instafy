@@ -39,6 +39,8 @@
 //!   ([`skill_pack_cache_dir`]): a pack keeps its caches, rate-limit holds and health state there
 //!   instead of in a tool turn's HOME or TMPDIR, which may be new every turn.
 
+pub mod activity;
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};

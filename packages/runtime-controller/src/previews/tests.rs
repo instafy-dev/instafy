@@ -476,7 +476,7 @@ fn a_preview_says_who_may_open_it_only_as_recorded() {
 /// A broker that, like the real one, hands back the same tunnel for a
 /// repeated idempotency key, and records what it was asked.
 #[derive(Default)]
-struct PreviewStubBroker {
+pub(super) struct PreviewStubBroker {
     tunnels: StdMutex<HashMap<String, Uuid>>,
     requests: StdMutex<Vec<TunnelRequestContext>>,
     /// How many probes still find nothing listening, as right after the CLI
@@ -589,7 +589,7 @@ impl TunnelBroker for PreviewStubBroker {
 impl PreviewStubBroker {
     /// Give `key` a new tunnel id, as the real broker does when it retires the
     /// key's tunnel (its hostname is under a domain it no longer serves).
-    fn remint(&self, key: &str) -> Uuid {
+    pub(super) fn remint(&self, key: &str) -> Uuid {
         let tunnel_id = Uuid::new_v4();
         self.tunnels
             .lock()
@@ -612,7 +612,7 @@ pub(super) struct Job {
 pub(super) struct Fixture {
     pub(super) state: AppState,
     pub(super) app: Router,
-    broker: Arc<PreviewStubBroker>,
+    pub(super) broker: Arc<PreviewStubBroker>,
     pub(super) org: Uuid,
     pub(super) project: Uuid,
     pub(super) conversation: Uuid,

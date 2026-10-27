@@ -734,6 +734,7 @@ pub(crate) async fn checkpoint_lane_files_with_report(
             metadata: Some(json!({
                 "kind": "workspace_commit",
                 "status": "started",
+                "activity": super::activity_labels::runtime_status_activity("workspace_commit"),
             })),
         });
     }

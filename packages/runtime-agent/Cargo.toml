@@ -33,6 +33,8 @@ codex-protocol = { path = "../../codex/codex-rs/protocol" }
 codex-process-hardening = { path = "../../codex/codex-rs/process-hardening" }
 codex-rmcp-client = { path = "../../codex/codex-rs/rmcp-client" }
 codex-shell-command = { path = "../../codex/codex-rs/shell-command" }
+# Walks the bash tree codex-shell-command parses, to label a turn's commands (jobs::activity_labels).
+tree-sitter = "0.25.10"
 codex-utils-absolute-path = { path = "../../codex/codex-rs/utils/absolute-path" }
 codex-utils-path-uri = { path = "../../codex/codex-rs/utils/path-uri" }
 parking_lot = "0.12"

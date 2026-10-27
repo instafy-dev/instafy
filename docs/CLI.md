@@ -515,9 +515,9 @@ The runtime origin serves space files over HTTP. When the origin is reachable fr
 
 ### Show a site in Studio: `open`, `list`, `close`
 
-`instafy preview` shows a site that runs in the space inside Studio. The conversation gets a
-"Ready to preview" card with an **Open** button, and only space members can open it. Unlike
-`instafy tunnel`, nothing becomes public and the CLI never prints a URL.
+`instafy preview` shows a site that runs in the space inside Studio. The conversation gets a preview
+card with a picture of the site, which opens it beside the chat, and only space members can open it.
+Unlike `instafy tunnel`, nothing becomes public and the CLI never prints a URL.
 
 ```bash
 instafy preview open --port 4173 --title "Site preview" --json
@@ -534,10 +534,12 @@ gives exit `5` and nothing else happens.
 2. Asks the server for a private preview tunnel, then starts a detached rathole client for it
    (logs: `~/.instafy/cli-preview-logs/*`). If anything fails before the client runs, the preview is
    closed on the server again.
-3. Once the client has stayed up for 250 ms, asks the server to post the card, and prints the result:
+3. Once the client has stayed up for 250 ms, asks the server to post the card.
+4. When the site is live, takes a picture of the page for the card and uploads it (see below), then prints
+   the result:
 
 ```json
-{"previewId":"<uuid>","title":"Site preview","port":4173,"path":"/","status":"live","httpStatus":200,"messageId":"<uuid>","viewerHostSuffix":"<preview domain>","restartable":true}
+{"previewId":"<uuid>","title":"Site preview","port":4173,"path":"/","status":"live","httpStatus":200,"messageId":"<uuid>","viewerHostSuffix":"<preview domain>","restartable":true,"thumbnail":"uploaded"}
 ```
 
 `viewerHostSuffix` is the part of the host name viewers reach the site under after its first label. A dev
@@ -558,8 +560,19 @@ request.
 `--conversation <id>` picks the conversation for the card; it is needed only without a job
 token, for example in an end-to-end test.
 
+The card's picture and facts: `--summary "<text>"` is one line under the card's title (1 to 80
+characters, no control or direction characters), for example `Trip · 3 days · 14 places`; without it the
+card shows the page's own `<meta name="description">`. Once the site is live, `open` loads the page in the
+same headless Chromium `check` uses, under the same request rules, and uploads a 640×400 JPEG of it
+within 15 s (`INSTAFY_PREVIEW_THUMBNAIL_BUDGET_MS`, 1000 to 120000, gives a slow machine longer). Without a
+browser it uses the page's `og:image` when that is on the site itself. Each `open` replaces the card's
+picture, since a later site on the same port is the same preview. The JSON's `thumbnail` is `uploaded`,
+`skipped` or `failed`, with `thumbnailReason` when it is not uploaded; the exit code never changes. `--thumbnail <file>` uploads a picture you made instead (JPEG, PNG or WebP, at most
+512 KiB and 2000×2000) and `--no-thumbnail` uploads none. See
+[Site previews](Previews.md#the-cards-picture-and-facts).
+
 Starting the site again after the space sleeps: `open` also records how the site was started, so a
-member's **Open** on the card can start it again without an Octo turn (see [Site previews](Previews.md#waking-a-stopped-site)).
+member's press on the card can start it again without an Octo turn (see [Site previews](Previews.md#waking-a-stopped-site)).
 On a Linux space it reads the argv and working directory of the process listening on the port from
 `/proc`. `--serve-cmd "<command>"` gives the command instead, run from the current directory: one command
 and its arguments, split as a shell would split one simple command but never run through a shell, so
@@ -607,16 +620,18 @@ Exit codes:
 - `list` shows the space's open previews from the server. Its `status` is the preview's (`active`
   while it is open), not whether the site answers: `check` does that. `--json` rows carry `restartable`
   when the server sends it. A preview whose machine stopped or restarted is not listed; its card reads
-  Stopped, and **Open** on a restartable card starts the site again. `close` stops the local client and
-  asks the server to close the preview; the server then also revokes its open viewers. A closed preview
-  keeps its recorded start command: its card reads Stopped, and **Open** by someone who may change the
-  space starts the site again.
+  Stopped, and pressing a restartable card starts the site again. `close` stops the local client and
+  asks the server to close the preview; the server then also revokes its open viewers and forgets the
+  card's picture. A closed preview keeps its recorded start command: its card reads "Stopped · opening
+  restarts it", and a press by someone who may change the space starts the site again.
 
 ### Check a site: `check`
 
 `instafy preview check --port <port>` looks at a site served on this machine before anyone sees it. It is meant
-for agents that build sites, and works for any site or framework. It is local only: it calls no Instafy server
-and needs no login.
+for agents that build sites, and works for any site or framework. It calls no Instafy server and needs no login,
+except to refresh a card: when this machine has a preview open on that port and path (`open` recorded it), it
+uploads a 640×400 picture of the desktop page for the card, and the report says `thumbnail` (`uploaded`,
+`skipped` or `failed`). That never changes the exit code.
 
 ```bash
 instafy preview check --port 4173
@@ -631,6 +646,17 @@ screenshot cannot be read, the report says the blank check is incomplete; on a p
 for each run, readable only by you; the report names the files).
 `--framed` loads the site inside a frame on another origin instead, and then also reports a site that refuses to be
 framed (`X-Frame-Options` or CSP `frame-ancestors`).
+
+What the page may load is Instafy's rule, not the page's: the site's own origin directly, every other public
+address through the runtime image's egress proxy (public addresses on ports 80 and 443 only), and nothing else.
+Another local port, `localhost` names, private and reserved addresses and every site on the link-only list (a
+`no-reuse` one too, since the check's picture can become the card's) are blocked, and listed under `blocked` with
+the reason rather than as errors. Redirect hops follow the same rules: every connection off the site passes
+Instafy's own gate in front of the egress proxy, which refuses by the whole address of a plain-HTTP request and by the
+host of a TLS one; a redirect it cannot read (an https archive's copy of a link-only site) is a warning, and the card's
+picture is not updated from that check. People opening the preview cannot reach another local port or a private address
+either, so a page that needs one should serve it from the site itself. Without the egress proxy (a machine outside
+the runtime image) nothing off the site's origin loads (`offSite: "blocked"`).
 
 | Exit | Meaning |
 |---|---|
@@ -867,7 +893,8 @@ it allows caching. If the file itself does not load, nothing is searched (exit 7
 - **Nothing stored.** No result is cached or written anywhere. The state folder (`$INSTAFY_CACHE_DIR/instafy/web-search/state`
   on a runtime, `$XDG_STATE_HOME/instafy/web-search` or `~/.local/state` elsewhere) holds counts, provider stops and
   hashed search keys only. The room's activity log, and the run log, keep only the command's `activity` line (the
-  query sent and the number of results), never its output.
+  query sent and the number of results), never its output; the turn's plain-language line says "Searching the web",
+  then "searched the web" ([Chat activity](Chat-Activity.md)).
 - **Queries.** At most 200 characters, from the person's request. A query that looks like a key or a password (a known
   key format, a long random token, `password: …`, or a provider's own key) is refused (exit 64) and not sent. E-mail
   addresses, account numbers and numbers of 9 or more digits are removed before sending, and `queryRedacted` says what
