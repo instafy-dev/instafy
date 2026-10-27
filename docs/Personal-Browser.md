@@ -10,7 +10,11 @@ the WebContentsView and its input shield without changing the page's dimensions
 or logical visibility. On the transition into occlusion, the existing bounds IPC
 can return a bounded page preview to the same owner renderer. It rechecks owner
 and native-page identity after capture; late, oversized and failed previews are
-discarded. The renderer keeps the image only while the menu is open. Sharing remains scoped to the same active owner/page;
+discarded. The renderer keeps this in-memory image while the menu is open and through the
+native bounds-restoration reply, so closing the menu does not uncover the
+renderer background first. Owner, tab and URL changes invalidate it. Visibility
+changes are reported immediately; resizing remains animation-frame batched.
+Sharing remains scoped to the same active owner/page;
 switching away still invalidates it. This presentation flag grants no new input,
 account or agent authority.
 

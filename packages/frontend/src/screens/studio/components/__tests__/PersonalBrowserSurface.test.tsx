@@ -10,6 +10,19 @@ import {
 import type { usePersonalBrowserBridge } from "../usePersonalBrowserBridge";
 
 type PersonalBrowserModel = ReturnType<typeof usePersonalBrowserBridge>;
+type BoundsReply = InstafyDesktopPersonalBrowserStatus & { previewDataUrl?: string };
+
+function deferredBoundsBridge() {
+  const requests: Array<{
+    bounds: InstafyDesktopPersonalBrowserBounds;
+    resolve: (reply: BoundsReply) => void;
+  }> = [];
+  const setBounds = vi.fn((bounds: InstafyDesktopPersonalBrowserBounds) =>
+    new Promise<BoundsReply>((resolve) => requests.push({ bounds, resolve })),
+  );
+  window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
+  return { setBounds, requests, latest: () => requests.at(-1)! };
+}
 
 function setInputValue(input: HTMLInputElement, value: string) {
   const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -142,6 +155,193 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
     expect(model.close).not.toHaveBeenCalled();
     expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+  });
+
+  it("hands visibility over immediately, preserving hidden bounds and avoiding a hide during return or fullscreen", async () => {
+    const model = createModel();
+    const setBounds = vi.fn(async (bounds: InstafyDesktopPersonalBrowserBounds) => {
+      void bounds;
+      return model.status!;
+    });
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
+    // A real animation frame runs later. Visibility must not wait for it.
+    window.requestAnimationFrame = vi.fn(() => 1);
+    const visibleRect = HTMLElement.prototype.getBoundingClientRect();
+    let hidden = false;
+    HTMLElement.prototype.getBoundingClientRect = () => hidden
+      ? { ...visibleRect, x: 0, y: 0, left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
+      : visibleRect;
+    const render = (active: boolean) => root.render(<PersonalBrowserSurface active={active} model={model} transportSelector={null} />);
+
+    await act(async () => render(true));
+    expect(setBounds).toHaveBeenCalledWith(expect.objectContaining({ visible: true, width: 400, height: 300 }));
+    setBounds.mockClear();
+    hidden = true;
+    await act(async () => render(false));
+    expect(setBounds).toHaveBeenCalledWith(expect.objectContaining({ visible: false, x: 10, y: 20, width: 400, height: 300 }));
+
+    hidden = false;
+    setBounds.mockClear();
+    await act(async () => render(true));
+    expect(setBounds).toHaveBeenCalled();
+    expect(setBounds.mock.calls.every(([bounds]) => bounds.visible === true)).toBe(true);
+    for (const expanded of [true, false]) {
+      setBounds.mockClear();
+      await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="personal-browser-fullscreen-toggle"]')!.click());
+      expect(Boolean(document.querySelector('[data-testid="personal-browser-expanded"]'))).toBe(expanded);
+      expect(setBounds).toHaveBeenCalled();
+      expect(setBounds.mock.calls.every(([bounds]) => bounds.visible === true)).toBe(true);
+    }
+    expect(model.close).not.toHaveBeenCalled();
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+  });
+
+  it("retains the menu preview until deferred native restoration completes", async () => {
+    const model = createModel();
+    const bridge = deferredBoundsBridge();
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => bridge.latest().resolve(model.status!));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(bridge.latest().bounds.occluded).toBe(true);
+    await act(async () => bridge.latest().resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,AQID" }));
+    const preview = document.querySelector('[data-testid="personal-browser-overlay-preview"]')!;
+    expect(preview.getAttribute("src")).toBe("data:image/jpeg;base64,AQID");
+
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(document.querySelector('[role="dialog"][aria-label="Browser settings"]')).toBeNull();
+    expect(bridge.latest().bounds).toMatchObject({ visible: true, occluded: false });
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBe(preview);
+    await act(async () => bridge.latest().resolve(model.status!));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+  });
+
+  it("accepts the sole native preview after later geometry reports in the same open menu", async () => {
+    const model = createModel();
+    const bridge = deferredBoundsBridge();
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => bridge.latest().resolve(model.status!));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const openingCapture = bridge.latest();
+    expect(openingCapture.bounds.occluded).toBe(true);
+
+    // Desktop captures only false -> true occlusion. Resize and agent status
+    // reports while already occluded return status without another image.
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    const resize = bridge.latest();
+    expect(resize).not.toBe(openingCapture);
+    expect(resize.bounds.occluded).toBe(true);
+    await act(async () => resize.resolve(model.status!));
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} transportSelector={null} />));
+    await act(async () => bridge.latest().resolve(model.status!));
+    await act(async () => openingCapture.resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,AQID" }));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')?.getAttribute("src")).toBe("data:image/jpeg;base64,AQID");
+  });
+
+  it("rejects an old opening capture after the menu closes and reopens before either capture completes", async () => {
+    const model = createModel();
+    const bridge = deferredBoundsBridge();
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => bridge.latest().resolve(model.status!));
+    const toggle = () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click();
+    await act(async () => toggle());
+    const oldCapture = bridge.latest();
+    await act(async () => toggle());
+    const oldRestore = bridge.latest();
+    await act(async () => toggle());
+    const currentCapture = bridge.latest();
+
+    await act(async () => oldCapture.resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,AQID" }));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+    await act(async () => currentCapture.resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,BAUG" }));
+    await act(async () => oldRestore.resolve(model.status!));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')?.getAttribute("src")).toBe("data:image/jpeg;base64,BAUG");
+  });
+
+  it("retains a matching preview across hiding and returning to Personal while native restoration is pending", async () => {
+    const model = createModel();
+    const bridge = deferredBoundsBridge();
+    const render = (active: boolean) => root.render(<PersonalBrowserSurface active={active} model={model} transportSelector={null} />);
+    await act(async () => render(true));
+    await act(async () => bridge.latest().resolve(model.status!));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    await act(async () => bridge.latest().resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,AQID" }));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const previousRestore = bridge.latest();
+    await act(async () => render(false));
+    const hide = bridge.latest();
+    expect(hide.bounds.visible).toBe(false);
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+    await act(async () => render(true));
+    const restore = bridge.latest();
+    expect(restore.bounds).toMatchObject({ visible: true, occluded: false });
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')?.getAttribute("src")).toBe("data:image/jpeg;base64,AQID");
+    await act(async () => {
+      previousRestore.resolve(model.status!);
+      hide.resolve({ ...model.status!, visible: false });
+    });
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).not.toBeNull();
+    await act(async () => restore.resolve(model.status!));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+  });
+
+  it("ignores late capture and restoration replies after a newer menu snapshot arrives", async () => {
+    const model = createModel();
+    const bridge = deferredBoundsBridge();
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => bridge.latest().resolve(model.status!));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const oldCapture = bridge.latest();
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    const oldRestore = bridge.latest();
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    await act(async () => bridge.latest().resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,BAUG" }));
+    await act(async () => oldCapture.resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,AQID" }));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')?.getAttribute("src")).toBe("data:image/jpeg;base64,BAUG");
+    await act(async () => oldRestore.resolve(model.status!));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')?.getAttribute("src")).toBe("data:image/jpeg;base64,BAUG");
+  });
+
+  it("rejects a native snapshot from a different tab before frontend status catches up", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, activeTabId: "tab-1" };
+    const bridge = deferredBoundsBridge();
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => bridge.latest().resolve(model.status!));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(bridge.latest().bounds.occluded).toBe(true);
+
+    // Native tab selection can precede its status event reaching the renderer.
+    await act(async () => bridge.latest().resolve({
+      ...model.status!, activeTabId: "tab-2", previewDataUrl: "data:image/jpeg;base64,AQID",
+    }));
+    expect(model.status.activeTabId).toBe("tab-1");
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+  });
+
+  it.each(["owner", "tab", "url"] as const)("clears retained previews and ignores old captures when the %s changes", async (change) => {
+    const model = createModel();
+    const bridge = deferredBoundsBridge();
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => bridge.latest().resolve(model.status!));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    await act(async () => bridge.latest().resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,AQID" }));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).not.toBeNull();
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    const oldCapture = bridge.latest();
+    const next = {
+      ...model,
+      ownerId: change === "owner" ? "owner-2" : model.ownerId,
+      status: {
+        ...model.status!,
+        ...(change === "owner" ? { ownerId: "owner-2" } : {}),
+        ...(change === "tab" ? { activeTabId: "tab-2" } : {}),
+        ...(change === "url" ? { url: "https://another.example/" } : {}),
+      },
+    };
+    await act(async () => root.render(<PersonalBrowserSurface active model={next} transportSelector={null} />));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+    await act(async () => oldCapture.resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,BAUG" }));
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
   });
 
   it("lists the pages the agent reads whenever it holds the browser and takes over every tab in one press", async () => {
