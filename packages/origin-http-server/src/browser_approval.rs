@@ -232,7 +232,8 @@ const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
 /// Octo's tabs from an earlier run that could not be closed yet, written by
 /// runtime-agent (`leftover-tabs.json`). The one record that outlives a run:
 /// it grants nothing, and its tabs keep Octo's badge until runtime-agent
-/// closes them or a person keeps one.
+/// closes them or a person keeps one. runtime-agent and the origin both
+/// rewrite it, each under the approval directory's lock.
 const LEFTOVER_AGENT_TABS_FILE: &str = "leftover-tabs.json";
 const AGENT_TABS_MAX_BYTES: u64 = 8 * 1024;
 const KEPT_AGENT_TABS_MAX_BYTES: usize = 4 * 1024;
@@ -276,12 +277,12 @@ struct LeftoverAgentTabsRecord {
     tabs: Vec<LeftoverAgentTab>,
 }
 
+/// A tab in the leftover record, by its id only: the number it had belonged
+/// to its run, which has ended.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LeftoverAgentTab {
     tab_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    number: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -302,8 +303,13 @@ struct KeptAgentTabsRecord {
 pub(crate) struct AgentTabs {
     pub(crate) tab_ids: Vec<String>,
     pub(crate) kept: Vec<String>,
-    /// The number each tab was opened with ("Octo's tab 2"), when it has one.
+    /// The number each tab of the running turn was opened with ("Octo's tab
+    /// 2").
     pub(crate) numbers: Vec<(String, u64)>,
+    /// The tabs an earlier run left open. They have no number, since the run
+    /// that numbered them has ended and the next one numbers its own tabs
+    /// from 1 again, and Octo is not reading them.
+    pub(crate) leftover: Vec<String>,
 }
 
 impl AgentTabs {
@@ -314,15 +320,17 @@ impl AgentTabs {
             .map(|(_, number)| *number)
     }
 
+    pub(crate) fn is_leftover(&self, tab_id: &str) -> bool {
+        self.leftover.iter().any(|id| id == tab_id)
+    }
+
     /// These tabs, then `leftovers` they do not name yet.
     fn with_leftovers(mut self, leftovers: Vec<LeftoverAgentTab>) -> Self {
         for tab in leftovers {
             if self.tab_ids.contains(&tab.tab_id) {
                 continue;
             }
-            if let Some(number) = tab.number {
-                self.numbers.push((tab.tab_id.clone(), number));
-            }
+            self.leftover.push(tab.tab_id.clone());
             self.tab_ids.push(tab.tab_id);
         }
         self
@@ -887,6 +895,7 @@ fn read_agent_tabs(dir: &Dir, marker: &AgentControlMarker) -> Result<AgentTabs, 
         tab_ids,
         kept,
         numbers,
+        leftover: Vec::new(),
     })
 }
 
@@ -911,9 +920,6 @@ fn read_leftover_agent_tabs(dir: &Dir) -> Result<Vec<LeftoverAgentTab>, String> 
         if record.tabs[..index]
             .iter()
             .any(|earlier| earlier.tab_id == tab.tab_id)
-            || tab
-                .number
-                .is_some_and(|number| number == 0 || number > MAX_AGENT_TAB_NUMBER)
         {
             return Err("leftover-tabs.json is out of bounds".to_string());
         }
@@ -924,6 +930,9 @@ fn read_leftover_agent_tabs(dir: &Dir) -> Result<Vec<LeftoverAgentTab>, String> 
 /// Keep tab on a tab an earlier run left open: it leaves the leftover
 /// record, so it is an ordinary tab now and runtime-agent never closes it.
 fn keep_leftover_agent_tab(dir: &Dir, page_id: &str) -> Result<KeepAgentTabResponse, OriginError> {
+    // runtime-agent rewrites the record too, when a run ends or the browser
+    // starts, under the same lock: neither undoes the other's change.
+    let _lock = ApprovalDirectoryLock::acquire(dir)?;
     let leftovers = read_leftover_agent_tabs(dir).map_err(|error| {
         OriginError::unavailable(format!("Octo's earlier tabs could not be read: {error}"))
     })?;
@@ -953,6 +962,43 @@ fn keep_leftover_agent_tab(dir: &Dir, page_id: &str) -> Result<KeepAgentTabRespo
         kept: true,
         page_id: page_id.to_string(),
     })
+}
+
+/// The approval directory's lock (`flock` on the directory itself), held
+/// while it lives. runtime-agent takes the same lock around reading and
+/// publishing the leftover record.
+struct ApprovalDirectoryLock {
+    #[cfg(unix)]
+    directory: std::fs::File,
+}
+
+impl ApprovalDirectoryLock {
+    #[cfg(unix)]
+    fn acquire(dir: &Dir) -> Result<Self, OriginError> {
+        let directory = dir.try_clone().map(Dir::into_std_file).map_err(|error| {
+            OriginError::unavailable(format!(
+                "failed to open the approval directory to lock it: {error}"
+            ))
+        })?;
+        fs2::FileExt::lock_exclusive(&directory).map_err(|error| {
+            OriginError::unavailable(format!("failed to lock the approval directory: {error}"))
+        })?;
+        Ok(Self { directory })
+    }
+
+    #[cfg(not(unix))]
+    fn acquire(_dir: &Dir) -> Result<Self, OriginError> {
+        Ok(Self {})
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ApprovalDirectoryLock {
+    fn drop(&mut self) {
+        // The descriptor is a copy of the caller's, which stays open, so the
+        // lock is released here rather than when this copy closes.
+        let _ = fs2::FileExt::unlock(&self.directory);
+    }
 }
 
 fn write_kept_agent_tabs(dir: &Dir, record: &KeptAgentTabsRecord) -> Result<(), OriginError> {

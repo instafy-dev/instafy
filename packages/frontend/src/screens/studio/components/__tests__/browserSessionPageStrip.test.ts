@@ -31,6 +31,7 @@ function runtimePage(
     canGoForward: overrides.canGoForward ?? false,
     ...(overrides.openedBy ? { openedBy: overrides.openedBy } : {}),
     ...(overrides.agentTabNumber ? { agentTabNumber: overrides.agentTabNumber } : {}),
+    ...(overrides.leftover ? { leftover: true } : {}),
   };
 }
 
@@ -79,12 +80,14 @@ describe("browser session page ordering", () => {
       livePages: [
         runtimePage({ id: "agent", label: "Agent", openedBy: "agent", agentTabNumber: 3 }),
         runtimePage({ id: "person", label: "Person" }),
+        runtimePage({ id: "earlier", label: "Earlier", openedBy: "agent", leftover: true }),
       ],
       activePageId: null,
     });
-    expect(pages.map((page) => [page.id, page.agentTabNumber ?? null])).toEqual([
-      ["agent", 3],
-      ["person", null],
+    expect(pages.map((page) => [page.id, page.agentTabNumber ?? null, page.leftover ?? false])).toEqual([
+      ["agent", 3, false],
+      ["person", null, false],
+      ["earlier", null, true],
     ]);
   });
 

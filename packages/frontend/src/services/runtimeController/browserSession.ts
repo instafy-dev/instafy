@@ -21,6 +21,11 @@ export type RuntimeBrowserSessionPage = {
    * open: prompts, Octo and Studio all call it "Octo's tab <number>".
    */
   agentTabNumber?: number;
+  /**
+   * One of Octo's tabs that an earlier run left open: badged as Octo's, with
+   * no number, and not one Octo is reading.
+   */
+  leftover?: boolean;
 };
 
 /** The highest number a Shared Browser run gives one of Octo's tabs. */
@@ -304,6 +309,7 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
         ...(openedBy ? { openedBy } : {}),
         ...(openedBy === "agent" && record.kept === true ? { kept: true } : {}),
         ...(agentTabNumber ? { agentTabNumber } : {}),
+        ...(openedBy === "agent" && record.leftover === true ? { leftover: true } : {}),
       } satisfies RuntimeBrowserSessionPage;
     })
     .filter((page): page is RuntimeBrowserSessionPage => Boolean(page));

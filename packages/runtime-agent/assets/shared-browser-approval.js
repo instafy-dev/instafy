@@ -57,6 +57,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     // agent writes it; it gives this run nothing, and this script never reads it.
     "leftover-tabs.json",
   ]);
+  // Every writer of the approval directory publishes through a temporary
+  // file with this prefix (runtime-agent's cleanup accepts the same prefix).
+  const TEMPORARY_FILE_PREFIX = ".instafy-approval-";
 
   function fail(code, message) {
     throw new Error(`${message} [${code}_non_retryable]`);
@@ -173,7 +176,12 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       "Shared Browser approval directory could not be listed",
       () => fs.readdirSync(directory),
     );
-    if (entries.length > 16 || entries.some((entry) => !FIXED_FILES.has(entry))) {
+    // A record being published right now: this script, the origin (Keep tab)
+    // and runtime-agent (the leftover record) each write a temporary file
+    // with this prefix and rename it into place. It is never read, and
+    // runtime-agent clears one a write left behind with the run.
+    const inFlight = (entry) => entry.startsWith(TEMPORARY_FILE_PREFIX);
+    if (entries.length > 16 || entries.some((entry) => !FIXED_FILES.has(entry) && !inFlight(entry))) {
       fail("approval_storage_invalid", "Shared Browser approval directory is outside its fixed bounds");
     }
   }
@@ -259,7 +267,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     }
     const tempPath = path.join(
       path.dirname(filePath),
-      `.instafy-approval-${process.pid}-${crypto.randomBytes(8).toString("hex")}`,
+      `${TEMPORARY_FILE_PREFIX}${process.pid}-${crypto.randomBytes(8).toString("hex")}`,
     );
     const noFollow = fs.constants.O_NOFOLLOW || 0;
     const fd = storageCall(

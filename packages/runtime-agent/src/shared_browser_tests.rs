@@ -1615,6 +1615,40 @@ fn runtime_approval_storage_rejects_directory_and_file_symlinks() {
 }
 
 #[test]
+fn a_step_runs_while_another_process_is_publishing_a_record_in_the_approval_directory() {
+    // The origin (Keep tab) and runtime-agent (the leftover record) publish
+    // their records through a temporary file they then rename into place. A
+    // step that starts in that moment finds the temporary file, runs, and
+    // leaves the file alone.
+    let fixture = EmbeddedControllerFixture::new();
+    let in_flight = fixture
+        .approval_dir
+        .join(format!(".instafy-approval-origin-{}", Uuid::new_v4()));
+    std::fs::write(&in_flight, b"{\"version\":1,").expect("in-flight record");
+    #[cfg(unix)]
+    std::fs::set_permissions(&in_flight, std::fs::Permissions::from_mode(0o600))
+        .expect("protect in-flight record");
+    let output = fixture.run("safe", "GET", "/v1/status", None);
+    assert!(
+        output.status.success(),
+        "a step failed beside an in-flight record: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(payload_of(&output)["ready"], true);
+    assert!(in_flight.exists());
+
+    // Any other entry still fails the step closed.
+    std::fs::remove_file(&in_flight).expect("the record is published");
+    let unexpected = fixture.approval_dir.join("unexpected.json");
+    std::fs::write(&unexpected, b"{}").expect("unexpected entry");
+    #[cfg(unix)]
+    std::fs::set_permissions(&unexpected, std::fs::Permissions::from_mode(0o600))
+        .expect("protect unexpected entry");
+    let refused = fixture.run("safe", "GET", "/v1/status", None);
+    assert!(failure_of(&refused).contains("approval_storage_invalid"));
+}
+
+#[test]
 fn agent_control_display_name_is_utf8_safe_and_bounded() {
     assert_eq!(
         normalized_agent_control_display_name("  Octo   Agent  "),
@@ -6200,7 +6234,7 @@ fn octos_tabs_left_open_by_a_run_that_did_not_end_cleanly_stay_badged_and_close_
 
     // The process ended while a run held the browser. At the next start the
     // browser does not answer yet: the run's records are revoked, but its
-    // unkept tabs stay recorded, with their numbers, so they stay badged.
+    // unkept tabs stay recorded, so they stay badged.
     leave_unconfirmed_run();
     clear_stale_agent_control_marker_at_startup(
         true,
@@ -6216,7 +6250,7 @@ fn octos_tabs_left_open_by_a_run_that_did_not_end_cleanly_stay_badged_and_close_
         leftover_record(&approval_dir),
         Some(json!({
             "version": 1,
-            "tabs": [{ "tabId": "TAB-A", "number": 1 }, { "tabId": "TAB-C", "number": 3 }]
+            "tabs": [{ "tabId": "TAB-A" }, { "tabId": "TAB-C" }]
         }))
     );
     #[cfg(unix)]
@@ -6286,14 +6320,7 @@ async fn the_next_confirmed_end_closes_leftover_tabs_and_keeps_those_it_cannot_c
     let directory = tempfile::tempdir().expect("marker tempdir");
     let approval_dir = directory.path().join("approvals");
     std::fs::create_dir_all(&approval_dir).expect("approvals");
-    write_leftover_agent_tabs(
-        &approval_dir,
-        &[AgentTab {
-            tab_id: "EARLIER-TAB".to_string(),
-            number: Some(2),
-        }],
-    )
-    .expect("leftover");
+    write_leftover_agent_tabs(&approval_dir, &["EARLIER-TAB".to_string()]).expect("leftover");
     let acquire = || {
         let cancel_signal = JobCancelSignal::new();
         let guard = SharedBrowserAgentControlGuard::acquire_with_path(
@@ -6334,7 +6361,7 @@ async fn the_next_confirmed_end_closes_leftover_tabs_and_keeps_those_it_cannot_c
         leftover_record(&approval_dir),
         Some(json!({
             "version": 1,
-            "tabs": [{ "tabId": "EARLIER-TAB", "number": 2 }, { "tabId": "TAB-A", "number": 1 }]
+            "tabs": [{ "tabId": "EARLIER-TAB" }, { "tabId": "TAB-A" }]
         }))
     );
     assert!(!approval_dir.join("tabs.json").exists());
@@ -6352,6 +6379,97 @@ async fn the_next_confirmed_end_closes_leftover_tabs_and_keeps_those_it_cannot_c
         ]
     );
     assert_eq!(leftover_record(&approval_dir), None);
+}
+
+/// A browser whose DevTools endpoint answers `/json/close/<id>` with the
+/// status `answer` gives for that id, after running it.
+fn scripted_devtools(answer: impl Fn(&str) -> &'static str + Send + 'static) -> u16 {
+    use std::io::{BufRead, BufReader};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("scripted devtools");
+    let port = listener
+        .local_addr()
+        .expect("scripted devtools address")
+        .port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut line = String::new();
+            let mut reader = BufReader::new(stream.try_clone().expect("stream"));
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let tab_id = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|path| path.strip_prefix("/json/close/"))
+                .unwrap_or_default()
+                .to_string();
+            let status = answer(&tab_id);
+            let _ = stream
+                .write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n").as_bytes());
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn a_leftover_tab_a_person_keeps_while_the_run_ends_stays_theirs() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    std::fs::create_dir_all(&approval_dir).expect("approvals");
+    write_leftover_agent_tabs(
+        &approval_dir,
+        &["EARLIER-A".to_string(), "EARLIER-B".to_string()],
+    )
+    .expect("leftover");
+    let cancel_signal = JobCancelSignal::new();
+    let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        directory.path().join("agent-control.json"),
+        approval_dir.clone(),
+        ApprovalStart::Routine,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire run");
+    write_run_record(
+        &approval_dir,
+        "tabs.json",
+        &guard,
+        json!({
+            "version": 2,
+            "currentTabId": null,
+            "lastTabNumber": 1,
+            "tabs": [{ "tabId": "TAB-A", "number": 1, "approvedOrigins": [] }]
+        }),
+    );
+    // While the run's end closes the tabs, a person keeps EARLIER-B: the
+    // origin takes it off the leftover record. The browser then does not
+    // close EARLIER-B, nor the run's TAB-A.
+    let record = approval_dir.join(LEFTOVER_AGENT_TABS_FILE);
+    let port = scripted_devtools(move |tab_id| {
+        if tab_id != "EARLIER-A" {
+            return "500 Internal Server Error";
+        }
+        std::fs::write(
+            &record,
+            json!({ "version": 1, "tabs": [{ "tabId": "EARLIER-A" }] }).to_string(),
+        )
+        .expect("keep EARLIER-B");
+        "200 OK"
+    });
+    guard.cdp_base = Some(("127.0.0.1".to_string(), port));
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+    // The kept tab stays an ordinary tab; the run's tab that is still open
+    // joins the record.
+    assert_eq!(
+        leftover_record(&approval_dir),
+        Some(json!({ "version": 1, "tabs": [{ "tabId": "TAB-A" }] }))
+    );
 }
 
 impl EmbeddedControllerFixture {

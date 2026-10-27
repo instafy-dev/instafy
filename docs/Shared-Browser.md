@@ -109,12 +109,14 @@ bound to (`browserPageId`) and every tab the page list reports with
 `openedBy: "agent"`; `openedBy` is optional, only `agent` and `person` are
 kept, and an absent value is the person's tab. A compact **Octo is reading**
 row under the toolbar lists those tabs as host and title text (page titles are
-shown as text only, never followed) with one **Take over** button. It is the
-same action as the toolbar's take-over, without a confirmation: it cancels the
-run, and ending its runtime-wide agent marker returns every tab to people. On a
-tab the agent opened itself, take-over finds the runtime's one browser run; a
-person's own tab never falls back to a runtime-wide run. Once control is gone,
-no tab carries the agent's name.
+shown as text only, never followed) with one **Take over** button. A tab an
+earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
+earlier tab" in the tab picker and keeps its badge in the page strip. Take over
+is the same action as the toolbar's take-over, without a confirmation: it
+cancels the run, and ending its runtime-wide agent marker returns every tab to
+people. On a tab the agent opened itself, take-over finds the runtime's one
+browser run; a person's own tab never falls back to a runtime-wide run. Once
+control is gone, no tab carries the agent's name.
 
 Personal and Shared Browser use one `BrowserAddressField` and the common Instafy
 `Input`, `Button`, `IconButton` and `Checkbox` primitives for their address, actions
@@ -471,7 +473,10 @@ Browser has tabs of its own (see Personal-Browser.md).
   run's page, else another of its tabs) comes to the front instead of whatever
   neighbour Chromium shows, which may be a person's tab. While Octo holds the
   browser, Studio offers **Take over** in the Reading row and the toolbar
-  whichever tab is on screen.
+  whichever tab is on screen. Stopping a run needs its job, so Take over is
+  offered for a run of the conversation on screen; a run another conversation
+  started is stopped from that conversation, and its tabs are badged
+  everywhere.
 - **Control.** Agent control stays runtime-wide: while a run holds the marker
   the origin refuses human input on every tab, and Pause, Escape or taking over
   ends the run and with it every tab's agent control. A tab the person closes
@@ -487,10 +492,24 @@ Browser has tabs of its own (see Personal-Browser.md).
   records are revoked (the run ended without a confirmed shutdown, so the
   runtime restarted, or the browser did not answer the close) is carried into
   `leftover-tabs.json`, the one file in the approval directory that outlives a
-  run. It grants nothing: the origin keeps badging those tabs `openedBy:
-  "agent"` with their numbers, Octo cannot use them, and runtime-agent closes
-  them at the next confirmed shutdown, runtime start or browser start. **Keep
-  tab** on one makes it an ordinary tab at once.
+  run. It grants nothing and Octo cannot use those tabs. The origin keeps
+  badging them `openedBy: "agent"` with `leftover: true` and no number, since
+  the next run numbers its own tabs from 1 again: Studio calls each one
+  "Octo's earlier tab", and the Reading row and the count of the tabs Octo
+  holds leave them out. runtime-agent closes them at the next confirmed
+  shutdown, runtime start or browser start, and **Keep tab** on one makes it
+  an ordinary tab at once. Both rewrite the record under a lock on the
+  approval directory (`flock` on the directory itself), and runtime-agent
+  applies only what its own closing pass changed, so a tab a person keeps
+  while the tabs close is never put back, and a tab still open is never
+  dropped. A browser that starts again has new tab ids, so the record's tabs
+  are then settled as gone; a tab Chromium's session restore reopens is an
+  ordinary tab.
+- **Records being written.** Every writer of the approval directory (the
+  controller, the origin and runtime-agent) publishes a record through a
+  temporary `.instafy-approval-*` file that it then renames. A step that
+  starts while one exists runs as usual; any other unexpected entry still
+  fails the step closed.
 
 ### Redaction, step categories and downloads
 

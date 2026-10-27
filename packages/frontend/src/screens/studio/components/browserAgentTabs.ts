@@ -18,15 +18,26 @@ export type BrowserAgentTabsInput = {
   agentPageIds?: readonly string[];
 };
 
+function agentOpenedOrBoundTabIds(
+  pages: readonly BrowserSessionPage[],
+  agentPageIds: readonly string[],
+  includeLeftovers: boolean,
+): ReadonlySet<string> {
+  const bound = new Set(agentPageIds.map((id) => id.trim()).filter(Boolean));
+  return new Set(pages
+    .filter((page) => (page.openedBy === "agent" && (includeLeftovers || !page.leftover)) || bound.has(page.id))
+    .map((page) => page.id));
+}
+
 /**
  * The tabs the agent holds now: the tabs it opened and the tab its run is
  * bound to. Empty while the agent has no control, so a badge never outlives
- * the control it stands for.
+ * the control it stands for. A tab an earlier run left open is not one of
+ * them: no run holds it any more.
  */
 export function resolveAgentTabIds({ pages, agentControlActive, agentPageIds = [] }: BrowserAgentTabsInput): ReadonlySet<string> {
   if (!agentControlActive) return new Set();
-  const bound = new Set(agentPageIds.map((id) => id.trim()).filter(Boolean));
-  return new Set(pages.filter((page) => page.openedBy === "agent" || bound.has(page.id)).map((page) => page.id));
+  return agentOpenedOrBoundTabIds(pages, agentPageIds, false);
 }
 
 /**
@@ -40,15 +51,17 @@ export function resolveSharedPageStripAgentTabIds({ pages, agentPageIds = [] }: 
   pages: readonly BrowserSessionPage[];
   agentPageIds?: readonly string[];
 }): ReadonlySet<string> {
-  return resolveAgentTabIds({ pages, agentControlActive: true, agentPageIds });
+  return agentOpenedOrBoundTabIds(pages, agentPageIds, true);
 }
 
 /**
  * The label of a tab the agent opened in the Shared Browser, the one its
  * approval prompts and Octo's list_tabs use: "Octo's tab 2". It keeps its
- * number while it is open.
+ * number while it is open. A tab an earlier run left open has no number, so
+ * it never shares a label with one of the running turn's tabs.
  */
-export function sharedBrowserAgentTabLabel(page: Pick<BrowserSessionPage, "agentTabNumber">): string {
+export function sharedBrowserAgentTabLabel(page: Pick<BrowserSessionPage, "agentTabNumber" | "leftover">): string {
+  if (page.leftover) return `${BROWSER_AGENT_DEFAULT_NAME}'s earlier tab`;
   return page.agentTabNumber ? `${BROWSER_AGENT_DEFAULT_NAME}'s tab ${page.agentTabNumber}` : `${BROWSER_AGENT_DEFAULT_NAME}'s tab`;
 }
 

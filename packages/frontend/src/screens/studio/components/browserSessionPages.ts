@@ -17,6 +17,8 @@ export type BrowserSessionPage = {
   kept?: boolean;
   /** The number one of Octo's tabs keeps while it is open ("Octo's tab 2"). */
   agentTabNumber?: number;
+  /** One of Octo's tabs that an earlier run left open ("Octo's earlier tab"). */
+  leftover?: boolean;
 };
 
 export type BrowserSessionPageTarget = Pick<BrowserSessionPage, "id" | "url" | "host" | "label">;

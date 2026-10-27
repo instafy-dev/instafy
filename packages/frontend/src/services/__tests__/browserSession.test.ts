@@ -91,6 +91,24 @@ describe("mapRuntimeBrowserSessionPagesPayload", () => {
     ]);
   });
 
+  it("keeps which of Octo's tabs an earlier run left open", () => {
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { id: "tab-1", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent", leftover: true },
+        { id: "tab-2", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent", agentTabNumber: 1 },
+        // "leftover" means nothing on a tab that is not Octo's, or unless it is true.
+        { id: "page-1", url: "https://example.com/", host: "example.com", label: "Example", leftover: true },
+        { id: "tab-3", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent", leftover: "yes" },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.leftover ?? false])).toEqual([
+      ["tab-1", true],
+      ["tab-2", false],
+      ["page-1", false],
+      ["tab-3", false],
+    ]);
+  });
+
   it("maps valid runtime browser pages and drops malformed entries", () => {
     expect(
       mapRuntimeBrowserSessionPagesPayload({
