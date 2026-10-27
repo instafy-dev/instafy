@@ -9,6 +9,7 @@ import {
   OverlayTriggerStateContext,
   type PopoverProps,
 } from "react-aria-components";
+import { AiTag, formatAiAccessibleName } from "../../../components/AiTag";
 import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
@@ -201,14 +202,19 @@ export function AgentProfileCardContent({
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <Text
-                as="div"
-                variant="bodyStrong"
-                tone="inherit"
-                className="truncate text-sm"
-              >
-                {displayName}
-              </Text>
+              {/* Profile cards open from lists that mix people and AI, so an
+                  AI's name carries the word. */}
+              <div className="flex min-w-0 items-center gap-1.5">
+                <Text
+                  as="div"
+                  variant="bodyStrong"
+                  tone="inherit"
+                  className="truncate text-sm"
+                >
+                  {displayName}
+                </Text>
+                <AiTag />
+              </div>
               <Text
                 as="div"
                 variant="caption"
@@ -353,8 +359,10 @@ export function AssistantAvatarPopover({
         type="button"
         variant="ghost"
         size="icon"
-        radius="full"
-        aria-label={`Agent info: ${cardProps.displayName}`}
+        // The button is the face's own box with the face's own corners, so
+        // its offset focus ring runs 2px out around the tile.
+        radius="aiTile"
+        aria-label={formatAiAccessibleName(`Agent info: ${cardProps.displayName}`)}
         className="relative z-10 h-8 w-8 bg-transparent p-0 shadow-none hover:bg-transparent data-[hovered]:bg-transparent"
       >
         <ChatMessageAvatar

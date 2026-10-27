@@ -19,7 +19,7 @@ display surfaces.
 | Dark canvas | `studio-dark-canvas` (`colors.canvasDark`) | `#141414` | The dark product canvas; the dark `theme-color`, the reverse native splash and its system bars |
 | Marketing paper | `--marketing-canvas` | `#F8F8F6` (dark `#141414`) | Canvas of the landing and login pages |
 | Marketing dot grid | `--marketing-grid` | `#DCDAD2` (dark `#2E2E2B`) | The 24px dot grid drawn on marketing paper |
-| Crew colors | `--crew-1` … `--crew-4` | See [Crew colors](#crew-colors) | The crew mark's nodes (the hero's ink, participant coins and pills take the same values from `landingCrew.ts`) |
+| Crew colors | `--crew-1` … `--crew-4` | See [Crew colors](#crew-colors) | The crew mark's nodes (the hero's ink, participant faces and pills take the same values from `landingCrew.ts`) |
 
 Brand ink is Instafy's identity color. It is not the generic dark-mode canvas
 and it is not the interaction primary. The legacy `midnight` token is only a
@@ -65,22 +65,24 @@ Four crew colors, in slot order, left to right:
 
 Slots follow roster order with Octo skipped: on the landing, Ada is pink, Kim is
 green, the scenario's own agent is flame, and violet is the fourth crew slot.
-Octo is ink, never a crew color: its coin holds the one-ink mark (brand ink
-on a white coin edged by the shared avatar coin shadow in light, brand paper on
-a dark neutral coin in dark; see the Octo agent avatar/chip row below); its glyphs
-use brand ink, or brand paper on dark, and its cursor in the Shared Browser is the
-studio's white arrow with a brand-ink stroke (the page under it is light in both themes). An agent other than Octo wears its slot
-as a rounded square coin with its initial in the slot's label color, never as
-the Octo mark in a crew color. Participant coins, pills and cursors keep the
-light set in both themes, each with the label color above; only the crew mark's
-nodes and the hero's ink use the dark lift. The crew mark's nodes read the theme-aware
-`--crew-1` … `--crew-4` (`packages/frontend/src/styles/tailwind.css`). The
-hero's ink, which Cub draws on his own canvas, reads
-`packages/frontend/src/screens/landing/landingCrew.ts` instead (`CREW_SLOTS`,
-and `CREW_DARK_LIFT` in dark), the same file that holds the fixed fill and
-label pairs; a unit test keeps the file, the variables and the engine's own
-defaults equal. The product's own avatars keep their separate, ID-hashed
-palettes.
+Octo is ink, never a crew color: its tile holds the one-ink mark (brand ink
+on a white tile in light, brand paper on a dark neutral tile in dark; see
+[One rule for faces](#one-rule-for-faces) and the Octo agent avatar/chip row
+below); its glyphs use brand ink, or brand paper on dark, and its cursor in the
+Shared Browser is the studio's white arrow with a brand-ink stroke (the page
+under it is light in both themes). Every AI, Octo included, wears a rounded
+square tile and every person a round coin. An agent other than Octo that takes
+a crew slot fills its tile with the slot and its initial in the slot's label
+color, never with the Octo mark in a crew color. Participant faces, pills and
+cursors keep the light set in both themes, each with the label color above;
+only the crew mark's nodes and the hero's ink use the dark lift. The crew
+mark's nodes read the theme-aware `--crew-1` … `--crew-4`
+(`packages/frontend/src/styles/tailwind.css`). The hero's ink, which Cub draws
+on his own canvas, reads `packages/frontend/src/screens/landing/landingCrew.ts`
+instead (`CREW_SLOTS`, and `CREW_DARK_LIFT` in dark), the same file that holds
+the fixed fill and label pairs; a unit test keeps the file, the variables and
+the engine's own defaults equal. The product's own avatars keep their separate,
+ID-hashed palettes.
 
 ## Logo variants and surfaces
 
@@ -116,7 +118,7 @@ contrast choice. The normal responsive treatment is
   1.5 device pixels per CSS pixel and up; one ink at 1x, where a node would be a
   3 px speck.
 
-Octo's coin, agent coins and every mark under 28 CSS px stay one ink. The nodes
+Octo's tile, agent tiles and every mark under 28 CSS px stay one ink. The nodes
 are never omitted, reordered or recolored outside the crew slots, and there is
 no dotless variant. The logo is faceless: no eyes or expression. Eyes and
 expressions belong only to Cub, the landing hero's character, who has no blush.
@@ -125,8 +127,8 @@ expressions belong only to Cub, the landing hero's character, who has no blush.
 | --- | --- |
 | Light web/product UI | Positive; brand-ink on paper or transparent |
 | Dark web/product UI | Reverse; brand-paper on the neutral dark surface |
-| Octo agent avatar/chip | Light: positive brand-ink mark on a white circular coin edged only by the soft avatar coin shadow (`shadow-avatar-coin`) that every avatar coin shares; no ring and no border. Dark: reverse brand-paper mark on a `#262626` coin (`--color-octo-coin-dark`) with a faint 1px ring of 22% white (`--color-octo-coin-ring-dark`) and no shadow. Always one ink. See [Octo's coin](#octos-coin) |
-| Avatar coins (people, other agents) | Light: the same soft avatar coin shadow as Octo's coin, and no grey border, ring or other shadow. Dark: unchanged; each keeps its own hairline border or small shadow. See [Every avatar coin's edge](#every-avatar-coins-edge) |
+| Octo agent avatar/chip | Light: positive brand-ink mark on a white rounded square tile (a 30% radius at the full slot) edged by the soft avatar coin shadow (`shadow-avatar-coin`) that every face shares and the 1px hairline every AI tile draws just inside its edge, ink at 14% (`--color-ai-tile-edge`); no ring and no border. Dark: reverse brand-paper mark on a `#262626` tile (`--color-octo-coin-dark`) whose hairline is 22% white (`--color-octo-coin-ring-dark`), and no shadow. Always one ink. See [One rule for faces](#one-rule-for-faces) and [Octo's tile](#octos-tile) |
+| Other faces (people round, every other AI a tile) | Light: the same soft avatar coin shadow as Octo's tile, and no grey border, ring or other shadow; every AI tile adds the same inside hairline as Octo's. Dark: an AI tile's hairline is 22% white; a person's coin keeps its own hairline border or small shadow. See [Every face's edge](#every-faces-edge) |
 | Landing header lockup (30px, 28px on phones) | `crew-hidpi` on the flat marketing paper; Install and News headers stay one ink |
 | Login card mark (48px) | `crew` on the opaque card (plain paper on phones and in extension embeds) |
 | iOS and Android launcher icons | Crew tile: a brand-paper body with the dark crew set on a brand-ink tile (every Android density, from mdpi's 48 px, and the iOS 1024 px icon that Xcode derives the other iOS sizes from). The round launcher and the adaptive foreground carry the same crew mark. The one iOS size under 48 px, the 20 pt@2x (40 px) notification slot, has its own one-ink tile (`AppIcon-20@2x.png`, main cut at 0.85, since iOS masks it like every other size) |
@@ -157,57 +159,125 @@ Android themed icon and the iOS Tinted icon. Crew on a tile, on the dark canvas
 always uses the dark set; crew on paper (the positive splash) uses the light
 set.
 
-### Octo's coin
+### One rule for faces
 
-The coin is Octo's face wherever Octo appears as a participant in themed UI:
+Every AI is a rounded square and every person is a circle. Octo is included,
+with no exception and no hybrid, so a face says what it is even where no name
+is printed: the 20px thread stack, the conversation roster, a phone's header.
+
+- **An AI's face is a tile:** a rounded square with a 30% corner radius
+  (`rounded-[30%]`) that fills its whole slot at every size, with no inset.
+  The corners are a plain `border-radius`, never `corner-shape`, whose
+  squircle WebKit draws as a circle. The tile keeps the shared avatar coin
+  shadow (`shadow-avatar-coin`) and adds a 1px hairline drawn just inside its
+  edge as an outline (`outline-1 -outline-offset-1`): ink at 14%
+  (`--color-ai-tile-edge`) in light, the 22% white ring
+  (`--color-octo-coin-ring-dark`) in dark. Being an outline, it paints over an
+  uploaded picture and never fights a stack's separator ring. An outline
+  follows `border-radius` from Safari 16.4, the floor Tailwind v4 already sets
+  for the app; older WebKit would draw it square. The shape and the edge are
+  `AI_TILE_SHAPE_CLASS` and `AI_TILE_EDGE_CLASS` (together `AI_TILE_CLASS`)
+  in `packages/frontend/src/components/OctoCoin.tsx`; a surface reuses them
+  rather than spelling its own radius.
+- **Octo** is a white tile (`#262626` in dark) holding the one-ink mark at
+  75%, the mark unchanged (see [Octo's tile](#octos-tile)).
+- **Octo's helpers and saved agents** wear the same tile with the fills they
+  already have: the ID-hashed gradient with an initial, or an uploaded picture
+  clipped to the tile.
+- **People** stay round. `HumanAvatar`, a photo or initials on a muted
+  ID-derived color, is a circle at every size.
+- **Team and space identities** keep their own rounded squares (`OrgIdentity`,
+  `SpaceIdentity`). They are places, not faces, and never sit in a face slot,
+  so a square in a face slot always means an AI.
+- **The word:** where a list mixes people and AI (the mention picker's rows,
+  the participants drawer and agent profile cards), a quiet AI chip follows an
+  AI's name: `AiTag` (`packages/frontend/src/components/AiTag.tsx`), 10px,
+  medium weight, slate on a faint fill, with a small radius: the studio's
+  quiet tag (`QUIET_TAG_CLASS`), the one the drawer already uses for a
+  runtime's kind. The drawer's section for agents is headed AI (Runtimes & AI
+  while it groups them by runtime). The chip never appears in thread rows or
+  inside a sentence. The chip's comma is for screen readers only, so a row reads
+  "Pia, AI", and an AI face or control that has an accessible name of its own
+  adds ", AI" to it (`formatAiAccessibleName`: "View profile for @pia, AI").
+- **What hugs a face follows it:** an AI's speaker pill and a Machines agent
+  chip round their corners to the tile's, the tile's corner plus the gap
+  beside it (12px beside the speaker pill's 28 and 32px faces, 9.2px around
+  the chip's 24px face), instead of a person's stadium. A button that wraps an
+  AI face alone, the transcript gutter's and a bot's picture button included,
+  takes the tile's own corners (`Button` `radius="aiTile"`,
+  `IdentityPhotoButton` `shape="aiTile"`), so its hover fill and focus ring
+  never show past them; it is never a person's circle.
+- **Stacks:** where faces overlap, the 1px separator is a ring on each face,
+  so it follows each face's own shape (see
+  [Every face's edge](#every-faces-edge)).
+
+### Octo's tile
+
+The tile is Octo's face wherever Octo appears as a participant in themed UI:
 chat and transcript avatars, the thinking and typing rows, speaker pills, the
 conversation roster, agent chips, the participants drawer, the mention picker,
 thread participant stacks, the AI settings rows, and the landing's roster and
 transcript. Every one of them renders the same component,
 `packages/frontend/src/components/OctoCoin.tsx`, which is the only place the
-coin is styled; a surface never copies its classes. In light the coin is
-white and its only edge is the shared avatar coin shadow (below), so it reads
-as a coin on a white bar, the slate-50 panel and the `#F8F8F6` paper without an
-outline; there is no ring and no border. In dark the coin is `#262626` with a
-faint inset ring of 22% white and no shadow. The coin has no border, is not
-positioned and draws no `::after`, so an overlapping stack keeps its tree
-order, and the mark fills 75% of the coin so no arm reaches the edge at any
+tile is styled; a surface never copies its classes. The component keeps its
+earlier name, `OctoCoin`, and its `data-octo-coin` hook. In light the tile is
+white, edged by the shared avatar coin shadow and the AI tile's ink hairline
+(below), so its corners read on a white bar, the slate-50 panel and the
+`#F8F8F6` paper; there is no ring and no border. In dark the tile is `#262626`
+with the faint hairline of 22% white and no shadow. The tile has no border, is
+not positioned and draws no `::after`, so an overlapping stack keeps its tree
+order, and the mark fills 75% of the tile so no arm reaches the edge at any
 size used (20 to 64 CSS px) or anywhere in the thinking stroke. Where a thread
-spine runs up into the coin, the coin sits above it. A surface that overlaps
-coins (the roster, a participant stack) adds its own separator outside the
-coin. Other agents' faces, the landing's scenario agent and human avatars are
-not Octo's coin and keep their own fills, but they share its light edge.
+spine runs up into the tile, the tile sits above it. A surface that overlaps
+faces (the conversation roster, a participant stack) adds its own separator
+ring on the tile, which follows its corners. Other agents' faces and the
+landing's scenario agent are tiles with their own fills, and human avatars are
+round coins with theirs; all of them share its light shadow.
 
-#### Every avatar coin's edge
+#### Every face's edge
 
-In light mode every avatar coin, Octo's, a person's (`HumanAvatar`, photo or
-initials) and another agent's (round in the studio, the landing's rounded
-square), has one edge: `shadow-avatar-coin`, a whisper of an all-round hairline
-and a soft, short drop (`--avatar-coin-shadow`: `0 0 0 1px` at 6%, `0 1px 2px`
-at 12% and `0 2px 6px -1px` at 10% of slate ink, in
-`packages/frontend/src/styles/tailwind.css`). It is a shadow, never an
-outline: no grey border, ring or `shadow-sm` on a coin in light, so a white
-coin reads on white by default and the coloured coins sit in the same family.
-The token is empty in dark, where each coin keeps the edge it had (Octo's faint
-ring; a hairline border or the small shadow on other faces); no shadow is added
-in dark.
+In light mode every face, a person's (`HumanAvatar`, photo or initials),
+Octo's and another AI's, carries one shadow: `shadow-avatar-coin`, a whisper
+of an all-round hairline and a soft, short drop (`--avatar-coin-shadow`:
+`0 0 0 1px` at 6%, `0 1px 2px` at 12% and `0 2px 6px -1px` at 10% of slate
+ink, in `packages/frontend/src/styles/tailwind.css`), which follows the face's
+shape. It is a shadow, never a border or ring: no grey border, ring or
+`shadow-sm` on a face in light, so a white face reads on white by default and
+the coloured faces sit in the same family. A person's coin has nothing else.
+Every AI tile adds exactly one line, the inside hairline above (14% ink,
+`--color-ai-tile-edge`), an outline drawn just inside the tile that keeps a
+white tile's corners on white, where the shadow alone fades out at 20px; it is
+the only outline a face carries. The shadow token is empty in dark, so the
+shared shadow adds nothing there: an AI tile's edge is its hairline in 22%
+white, and a person's coin keeps the edge it had (a hairline border or the
+small shadow).
 
-Where coins overlap (the conversation roster, a thread's participant stack),
-the white separator between faces stays, because without it the faces merge,
-and it sits above each face's shadow: a ring on the face itself in the roster
-and on Octo's coin in a participant stack, the face's own white border
-elsewhere. Each face's soft shadow then falls outside a clean white edge, the
-face after covers the one before (tree order, nothing positioned). A wrapper
-that clips (`overflow-hidden`) never sits tight around a coin unless it is the
-coin's own shell and carries the shadow itself, as the mention picker's face
-does.
+Where faces overlap in the studio (the conversation roster, a thread's
+participant stack, the typing row's stack of agents), the separator between
+faces stays, because without it the faces merge. It is a 1px ring on each face
+itself, so it follows each face's shape (a circle around a person, the tile's
+corners around an AI); the face still fills its slot, and the ring falls just
+outside it. The ring is white in light; in dark it is the chat panel's color in
+the roster and the typing row, and slate-950 in a thread's participant stack.
+It sits above the face's shadow and outside an AI tile's inside hairline, so
+the two never meet. Each face's soft shadow then falls outside a clean edge,
+and the face after covers the one before (tree order, nothing positioned). The
+landing's roster, whose faces sit apart, puts its ring on each face's slot
+instead, under the face's shadow (see
+[Marketing surfaces](#marketing-surfaces)). A wrapper that clips
+(`overflow-hidden`) never sits tight around a face unless it is the face's own
+shell, in the face's own shape, and carries the shadow itself, as the mention
+picker's face does.
 
-Static exports keep their own artwork: the favicons, `public/` icons, native
-and store art, and `packages/frontend/src/assets/octo-avatar.svg` (the
-generated white avatar file, still the identity the product resolves for
-Octo, `OCTO_AVATAR_SRC`) are unchanged by the coin. No themed product surface
-draws that file as an image any more; each one that sees it draws `OctoCoin`
-instead.
+Static exports keep their own artwork: the favicons, `public/` icons, and
+native and store art are unchanged by the rule for faces.
+`packages/frontend/src/assets/octo-avatar.svg`, the generated avatar file and
+still the identity the product resolves for Octo (`OCTO_AVATAR_SRC`), is a
+white rounded square with the one-ink mark, like Octo's tile: the generator
+draws it with the tile's 30% corners (`rx` 19.2 of 64), and
+`pnpm check:app-icons` requires those corners to match `AI_TILE_SHAPE_CLASS`
+and rejects the retired circle. No themed product surface draws that file as
+an image any more; each one that sees it draws `OctoCoin` instead.
 
 The reverse native splash is generated with its positive twin and configured
 for both platforms, status and navigation bars included (see the splash rows
@@ -249,7 +319,7 @@ native/store artwork, headers, login forms, and inactive or historical
 transcript avatars remain static. The current live-run speaker avatar and the
 thinking row may animate. Custom agent avatars are never given Octo's motion.
 The motion must disappear under `prefers-reduced-motion: reduce`, and compact
-chat layouts show the same animated avatar, coin included, beside the
+chat layouts show the same animated avatar, tile included, beside the
 thinking status because the avatar gutter is intentionally hidden on phones.
 
 Full-screen route and authentication loading may reuse the canonical swimming
@@ -266,7 +336,7 @@ their static label or icon remains visible. Loading text must remain legible in 
 
 Cub is the landing hero's pen-drawn octopus, an illustration tier like the
 glossy tentacle artwork it replaces: he is not the logo, he never stands in for
-Octo, and the faceless logo and Octo's coin are unchanged by him (the hero's
+Octo, and the faceless logo and Octo's tile are unchanged by him (the hero's
 surfaces are under [Marketing surfaces](#marketing-surfaces)). He perches on
 the example window: on its top-right corner from 1000px, along its top edge
 on narrower desktop windows, and on its top edge beside the scenario chips on
@@ -280,22 +350,23 @@ sees him notice them before anything else moves; it never waits long for him
 all when he cannot draw. He never greets the visitor while he lends Octo an
 arm: if a turn is already running, the greeting waits until the arm is home
 and his eyes have rested. While Octo works he lends Octo an arm: it runs along
-the ledge and hooks onto Octo's roster coin, just under the ledge beside him,
+the ledge and hooks onto Octo's roster tile, just under the ledge beside him,
 as the prompt is sent, taps once per step, pats twice when Octo is done and
 lets go before the teammate replies, all inside Octo's workspace run (every
 scenario's run keeps the same beats, so the arm lines up with each), which
-pops Octo's coin for the run and gives under each tap; every tap and pat lands
-on the coin as drawn. A click or tap on Cub squirts four splats of crew ink
-onto the window's ledge, in logo order (pink, green, flame, violet, with the
-dark set's green and violet lifts); the ink lands only on paper and the ledge,
-never on text, the entries, the chips, the coins or the window's controls, and
-in light mode it soaks into the paper (multiplied, the dot grid showing
+pops Octo's tile for the run and gives under each tap; every tap and pat lands
+on the tile as drawn, level on its flat top and lower round a corner. A click
+or tap on Cub squirts four splats of crew ink onto the window's ledge, in logo
+order (pink, green, flame, violet, with the dark set's green and violet
+lifts); the ink lands only on paper and the ledge, never on text, the entries,
+the chips, the faces or the window's controls, and in light mode it soaks into
+the paper (multiplied, the dot grid showing
 through). A set holds for about two seconds and fades, or fades early when the
 next squirt lands; a scenario change leaves it on the wall. His body takes the
 exact page and panel colors behind it, so he never shows as a blob. His idle
-arms never rest on the headline, the copy, the entries, the chips, the coins or
+arms never rest on the headline, the copy, the entries, the chips, the faces or
 the window's chrome actions; the one sanctioned contact is the lent arm's taps
-and pats on Octo's coin while Octo works. He never blocks a link or a button.
+and pats on Octo's tile while Octo works. He never blocks a link or a button.
 
 Reduced motion keeps Cub on one calm frame with no turn, no pop and no ink in
 flight; a click shows the splats for a second, still. He renders with WebGL2 in
@@ -411,7 +482,7 @@ headline, the sub copy on two lines, less room between the parts) and the
 window may shrink to 19rem, so the whole window, the browser's stage down to
 its ticker included, fits the first view down to about 650px tall. Two departures from the studio stage it for
 Cub, as in the approved hero: the conversation's roster sits in the window's
-top bar, right-aligned and level with the ledge (28px coins, 10px apart; 24px
+top bar, right-aligned and level with the ledge (28px faces, 10px apart; 24px
 on phones, where the bar drops its sidebar toggle, bell and new-chat buttons so
 the chat's title reads whole beside them), stopping short of the corner on
 windows of 1000px and up to leave Cub room; and the expanded rail names each
@@ -446,11 +517,22 @@ ledge Cub sits on reads as a slab against the page.
 
 The tentacle artwork and its presence cursors are retired. The landing's
 participants wear the crew colors in roster order (Ada pink, Kim green, the
-scenario agent flame), and Octo stays ink: its roster and transcript coins are
-the studio's own [coin](#octos-coin) (`OctoCoin`), white with the shared avatar
-coin shadow on light and reversed on dark, never a copy of it. Ada's, Kim's and
-the scenario agent's coins, in the roster, the transcript and the rail's
-profile, take the same light shadow and no grey border.
+scenario agent flame), and Octo stays ink: its roster and transcript tiles are
+the studio's own [tile](#octos-tile) (`OctoCoin`), white with the shared avatar
+coin shadow and the inside hairline on light and reversed on dark, never a copy
+of it. The faces follow the [one rule](#one-rule-for-faces): Ada and Kim are
+people, so theirs are round coins (`AVATAR_SHELL` in
+`packages/frontend/src/screens/landing/landingStudioChrome.ts`), and the
+scenario agent is an AI, so its face is the AI tile in its crew fill
+(`AVATAR_SHELL_AGENT`, built on `AI_TILE_CLASS`). In the roster each face's
+separator ring takes its shape: `ROSTER_RING` is round for Ada and Kim, and
+`ROSTER_RING_AGENT` follows the tile for Octo and the scenario agent. The faces
+sit apart, so the ring sits on each face's slot, under the face's shadow, and
+keeps a sliver of bar between a face and Cub's arm passing behind it. Ada's,
+Kim's and the scenario agent's faces, in the roster, the transcript and the
+rail's profile, take the same light shadow and no grey border. In dark, Ada and
+Kim keep a hairline border and small shadow, and the scenario agent's only edge
+is its tile's hairline, as Octo's is.
 
 The login page uses the same marketing paper, with the dot grid full-bleed
 behind its card from the `sm` breakpoint up; phones and extension embeds keep

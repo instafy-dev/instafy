@@ -7,8 +7,11 @@ import { ChatMessageAvatar } from "../ChatMessageAvatar";
 import { resolveHumanAvatarColors } from "../../../../utils/humanAvatar";
 import { resolveHumanChatIdentity } from "../chatHumanIdentity";
 import {
+  AI_TILE_EDGE_TOKENS,
+  expectAiTile,
   expectAvatarCoinLightEdge,
   expectCanonicalOctoCoin,
+  expectPersonCircle,
 } from "../../../../components/__tests__/octoCoinExpectations";
 
 describe("ChatMessageAvatar", () => {
@@ -67,7 +70,7 @@ describe("ChatMessageAvatar", () => {
   );
 
   it.each(["2xs", "xs", "sm", "lg"] as const)(
-    "edges other agents' faces with the shared coin shadow in light and their hairline in dark at %s",
+    "draws other agents as the AI tile, edged like Octo's, at %s",
     async (size) => {
       await act(async () => {
         root.render(<ChatMessageAvatar kind="assistant" agent={{ handle: "reviewer", avatarSeed: "reviewer" }} size={size} />);
@@ -76,14 +79,33 @@ describe("ChatMessageAvatar", () => {
       expect(face?.hasAttribute("data-octo-coin")).toBe(false);
       expect(face?.querySelector(".octo-mark")).toBeNull();
       expect(face?.textContent).toBe("R");
-      const tokens = expectAvatarCoinLightEdge(face);
-      expect(tokens).toEqual(expect.arrayContaining(["dark:border", "dark:border-slate-800", "dark:shadow-sm"]));
+      // One rule for faces: the rounded square with its inside hairline and
+      // the shared coin shadow in light; in dark the hairline is its only
+      // edge, as it is Octo's (no border, no small shadow).
+      const tokens = expectAiTile(face);
+      expectAvatarCoinLightEdge(face);
+      expect(tokens.filter((token) => /^dark:(border|shadow)/.test(token))).toEqual([]);
+      expect(tokens.filter((token) => token.startsWith("dark:outline"))).toEqual(
+        AI_TILE_EDGE_TOKENS.filter((token) => token.startsWith("dark:")),
+      );
     },
   );
 
-  it("edges a person's face with the shared coin shadow in light and its small shadow in dark", async () => {
+  it("clips an uploaded agent picture to the AI tile", async () => {
+    await act(async () => {
+      root.render(
+        <ChatMessageAvatar kind="assistant" agent={{ handle: "pia", avatarSeed: "https://images.example/pia.png" }} />,
+      );
+    });
+    const face = container.querySelector('[data-testid="chat-avatar-assistant"]');
+    expect(face?.querySelector("img")?.getAttribute("src")).toBe("https://images.example/pia.png");
+    expect(expectAiTile(face)).toEqual(expect.arrayContaining(["overflow-hidden", "bg-white", "dark:bg-slate-900"]));
+  });
+
+  it("keeps a person's face round, edged by the shared coin shadow in light and its small shadow in dark", async () => {
     await act(async () => root.render(<ChatMessageAvatar kind="human" seed="person-id" label="Alex Person" />));
     const face = container.querySelector('[data-testid="chat-avatar-human"]');
+    expectPersonCircle(face);
     const tokens = expectAvatarCoinLightEdge(face);
     expect(tokens).toContain("dark:shadow-sm");
   });

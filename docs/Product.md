@@ -101,8 +101,8 @@ The hero sits on warm paper with a dot grid: the headline, the entries and the s
 on the left, and Cub, a pen-drawn octopus, perches on the example window's top-right corner (on its
 top edge on narrow windows and phones). He loads after the page has painted, notices the visitor
 before the example's first turn starts, lends Octo an arm while Octo works (a short hook from the
-window's ledge onto Octo's coin in the roster beside him), squirts crew ink onto the window's ledge
-when clicked or tapped, and, apart from the lent arm's taps on Octo's coin, never rests on the
+window's ledge onto Octo's tile in the roster beside him), squirts crew ink onto the window's ledge
+when clicked or tapped, and, apart from the lent arm's taps on Octo's tile, never rests on the
 copy, the entries, the chips, the roster or the window's controls. Under reduced motion he stays on one calm frame, and without WebGL a still of him takes
 his place. The header sits plainly on the paper. The landing workspace is an example that never
 creates a real session and carries no control of its own: the chips in the hero name the three
@@ -691,11 +691,18 @@ field continues to influence responses; About never enters runtime prompts. Agen
 cards fetch public fields by exact agent ID and space, with current access required for both
 the viewer and the agent owner. A cleared bio disappears from the card.
 
+Lists that mix people and AI mark each AI's name with a quiet **AI** word: the mention picker's
+rows, the participants list (which heads its agents **AI**, or **Runtimes & AI** when it groups them
+by runtime) and agent profile cards. Thread rows and sentences never carry it; there the rounded
+square face says it. AI faces and controls with an accessible name add ", AI" to it, so a screen
+reader hears "Pia, AI".
+
 The Studio corner-radius scale uses 6px for compact search scope chips, 8px for menu rows,
-12px for form controls and profile actions, and 16px for cards and dialogs. Avatars remain
-circular and settings category tabs retain their flat underline. Default selects match input
-heights: 44px for narrow/touch layouts and 38px for wider fine-pointer layouts; explicit
-compact selects keep their existing size.
+12px for form controls and profile actions, and 16px for cards and dialogs. People's avatars
+remain circular, every AI's face (Octo's included) is a rounded square tile
+([One rule for faces](Brand.md#one-rule-for-faces)), and settings category tabs retain their
+flat underline. Default selects match input heights: 44px for narrow/touch layouts and 38px
+for wider fine-pointer layouts; explicit compact selects keep their existing size.
 
 On mobile, installed skill titles open the skill file directly, the enable toggle remains
 visible, and other actions live in the row menu. Skills uses a flat installed list on the

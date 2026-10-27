@@ -14,7 +14,7 @@ export function OrgAvatarEditor({ orgName, accentColor, canEdit, disabled, avata
   const picture = <span data-testid="org-avatar-preview"><OrgIdentity name={orgName}
     avatarUrl={avatarUrl} accentColor={accentColor} className="h-16 w-16 text-base" /></span>;
   return <div data-testid="org-avatar-editor">
-    {canEdit ? <IdentityPhotoButton square disabled={disabled} accept={IDENTITY_IMAGE_ACCEPT}
+    {canEdit ? <IdentityPhotoButton shape="square" disabled={disabled} accept={IDENTITY_IMAGE_ACCEPT}
       label={avatarUrl ? "Change team picture" : "Upload team picture"}
       onSelect={onSelect} testId="org-avatar-change" inputTestId="org-avatar-file-input">
       {picture}

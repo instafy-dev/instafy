@@ -12,7 +12,8 @@ import {
 } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
-import { OctoCoin } from "../../../components/OctoCoin";
+import { formatAiAccessibleName } from "../../../components/AiTag";
+import { AI_TILE_CLASS, AI_TILE_SHAPE_CLASS, OctoCoin } from "../../../components/OctoCoin";
 import { Spinner } from "../../../components/Spinner";
 import {
   OCTO_AVATAR_SRC,
@@ -120,36 +121,40 @@ function normalizeInlineUpdateDedupeKey(content: string, updateType: string): st
   return `${updateType}:${normalizedContent}`;
 }
 
+// Every face in the stack fills the same 20px slot, no inset (docs/Brand.md,
+// "One rule for faces"), and the stack's 1px separator is a ring on the face
+// itself, as in the conversation roster. So it follows the face's own shape
+// (the AI tile's corners), sits outside the tile's inside hairline and draws
+// above the face's avatar coin shadow: a clean edge with the soft shadow
+// outside it. Nothing is positioned, so tree order decides which face covers
+// which.
+const BRANCH_PARTICIPANT_SLOT_CLASS = `inline-flex h-5 w-5 shrink-0 first:ml-0 -ml-1.5 ${AI_TILE_SHAPE_CLASS} *:ring-1 *:ring-white dark:*:ring-slate-950`;
+
 function BranchParticipantAvatar({ participant }: { participant: AgentThreadBranchParticipant }) {
   const avatarImageSrc = resolveAgentAvatarImageSrc(participant);
   const avatarText = resolveAgentAvatarText({ handle: participant.handle });
   const title = `@${participant.handle}`;
-  if (avatarImageSrc === OCTO_AVATAR_SRC) {
-    // Octo is its coin (OctoCoin, docs/Brand.md). The stack's 1px separator
-    // is a ring on the coin itself, in the room the padding leaves, so it
-    // draws above the coin's own avatar coin shadow: a clean white edge with
-    // the soft shadow outside it, like the other faces' white border.
-    return (
-      <span
-        className="inline-flex h-5 w-5 rounded-full p-px first:ml-0 -ml-1.5 *:ring-1 *:ring-white dark:*:ring-slate-950"
-        title={title}
-        aria-label={title}
-      >
-        <OctoCoin className="h-full w-full" />
-      </span>
-    );
-  }
+  // Each slot is one image named for its AI ("@ben, AI"); the tooltip keeps
+  // the handle alone.
   return (
-    <span
-      className="inline-flex h-5 w-5 items-center justify-center overflow-hidden rounded-full border border-white bg-slate-100 text-3xs font-semibold text-white shadow-avatar-coin first:ml-0 -ml-1.5 dark:border-slate-950 dark:bg-slate-800 dark:shadow-sm"
-      style={avatarImageSrc ? undefined : { backgroundImage: resolveAgentAvatarGradient(participant.avatarSeed ?? participant.handle) }}
-      title={title}
-      aria-label={title}
-    >
-      {avatarImageSrc ? (
-        <img src={avatarImageSrc} alt="" className="h-full w-full object-cover" decoding="async" draggable={false} />
+    <span role="img" className={BRANCH_PARTICIPANT_SLOT_CLASS} title={title} aria-label={formatAiAccessibleName(title)}>
+      {avatarImageSrc === OCTO_AVATAR_SRC ? (
+        // Octo is its tile (OctoCoin, docs/Brand.md).
+        <OctoCoin className="h-full w-full" />
       ) : (
-        avatarText
+        // Every other agent is the same AI tile around its own gradient and
+        // initial or its uploaded picture.
+        <span
+          aria-hidden="true"
+          className={`flex h-full w-full items-center justify-center overflow-hidden ${AI_TILE_CLASS} bg-slate-100 text-3xs font-semibold text-white shadow-avatar-coin dark:bg-slate-800`}
+          style={avatarImageSrc ? undefined : { backgroundImage: resolveAgentAvatarGradient(participant.avatarSeed ?? participant.handle) }}
+        >
+          {avatarImageSrc ? (
+            <img src={avatarImageSrc} alt="" className="h-full w-full object-cover" decoding="async" draggable={false} />
+          ) : (
+            avatarText
+          )}
+        </span>
       )}
     </span>
   );
@@ -177,7 +182,7 @@ function AgentThreadBranchRowEntry({
         {title}
       </span>
       {participants.length > 1 ? (
-        <span className="flex flex-none items-center" aria-label={`Participants: ${participants.map((entry) => `@${entry.handle}`).join(", ")}`}>
+        <span role="group" className="flex flex-none items-center" aria-label={`Participants: ${participants.map((entry) => `@${entry.handle}`).join(", ")}`}>
           {participants.map((participant) => (
             <BranchParticipantAvatar key={participant.handle} participant={participant} />
           ))}

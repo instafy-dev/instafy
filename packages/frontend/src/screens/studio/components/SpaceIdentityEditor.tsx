@@ -102,7 +102,7 @@ function SpaceIdentityForm({ projectId, name, canWrite, enabled }: SpaceIdentity
   return <SettingsSection title="Space appearance" description="Choose a picture, icon and color to recognize this space in your team." data-testid="space-identity-editor">
     <div className="space-y-4">
       <div className="flex items-center gap-4">
-        {canWrite ? <IdentityPhotoButton square accept={IDENTITY_IMAGE_ACCEPT} disabled={disabled}
+        {canWrite ? <IdentityPhotoButton shape="square" accept={IDENTITY_IMAGE_ACCEPT} disabled={disabled}
           label={previewUrl || avatarUrl ? "Change space picture" : "Upload space picture"}
           testId="space-avatar-change" inputTestId="space-avatar-file-input"
           onSelect={file => {
