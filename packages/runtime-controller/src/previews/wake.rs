@@ -734,6 +734,9 @@ async fn prepare_restart(
     };
     // The port comes from stored metadata: check it as opening a preview does.
     super::validate_preview_port(i64::from(grant.port()), &state.config.previews.deny_ports)?;
+    // So is the runtime's bound: a closed preview gave up its place, and
+    // other opens may have filled it since.
+    super::ensure_preview_room(&state.pool, project_id, runtime_id, tunnel_key).await?;
     if !grant.is_live() {
         // An expired grant never revoked its sessions; a reconnect must not
         // bring a capability minted before it stopped back to life.

@@ -108,7 +108,8 @@ after 180 s (well past the agent's longest restart: 60 s for the port, 30 s for 
 agent that sees a re-claim of a preview it is still restarting reports that restart's outcome for it. Each runtime
 agent asks for claims every 3 s: one indexed update of `runtime_preview_wakes` plus the agent token's runtime check
 (`ensure_runtime_can_heartbeat`), whether or not it has previews. A preview whose tunnel a newer one replaced never
-wakes (`409 not_restartable`). Without
+wakes (`409 not_restartable`), even one someone had closed before the newer one opened on its port: its wake would get
+the newer preview's tunnel and write over that preview's record. Without
 previews configured, the wake route answers 503 like the others and the claim route 404, which the agent reads as "not
 offered here" and then asks only every 5 minutes. `runtime_preview_wakes` keeps who asked and how each wake ended.
 
@@ -236,7 +237,8 @@ skips itself when the broker does not report private previews, so it skips in CI
 
 - **Create.** The live job of the space's machine, a machine token, or a writer. The job token is bound on the server to
   its job, run, machine and lease; copies of those fields from the client are ignored. Ports used by the machine's own
-  services are denied, plus `PREVIEW_DENY_PORTS`. At most 16 open previews and 30 creates a minute per machine.
+  services are denied, plus `PREVIEW_DENY_PORTS`. At most 16 open previews and 30 creates a minute per machine; a wake
+  that would reconnect a stopped or closed preview past the 16 fails with the same "Close one first".
 - **View.** Space members with read access who pass the private-runtime check. This is checked when a session is
   minted, again through the broker hook at least every 30 s, and on every pane heartbeat (about once a minute).
 - **Capability.** Each Open mints a 130-bit label, bound to one person and one preview and stored only as a hash. At

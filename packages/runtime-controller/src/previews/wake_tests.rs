@@ -899,6 +899,65 @@ async fn a_closed_preview_that_a_newer_one_replaced_does_not_wake_over_it() -> a
     .await
 }
 
+/// Closing a preview frees its place among the runtime's
+/// `PREVIEWS_PER_RUNTIME` ("Close one first"), and another open may take it.
+/// Open on the closed preview's card must not then bring it back past the
+/// bound: its wake fails at the claim with the open route's own words, and
+/// the runtime keeps the previews it has.
+#[tokio::test]
+async fn a_wake_does_not_bring_a_preview_back_past_the_runtime_bound() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let closed = f.open_restartable(&job).await?;
+            let (status, _) = f
+                .request(
+                    &job.token,
+                    "POST",
+                    &f.path(&format!("/{closed}/close")),
+                    json!({}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            for index in 0..PREVIEWS_PER_RUNTIME {
+                let (status, body) = f
+                    .request(
+                        &job.token,
+                        "POST",
+                        &f.path(""),
+                        f.open_body(&job, 5000 + index),
+                    )
+                    .await?;
+                assert_eq!(status, StatusCode::CREATED, "{body}");
+            }
+            let live_previews = "select count(*) from runtime_tunnel_grants
+                 where project_id = $1
+                   and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+                   and lower(btrim(status)) not in ('revoked', 'expired', 'failed')";
+            assert_eq!(f.count(live_previews).await?, PREVIEWS_PER_RUNTIME);
+
+            let (status, woken) = f.wake(1, &closed).await?;
+            assert_eq!(status, StatusCode::ACCEPTED, "{woken}");
+            let agent = f.agent_token(job.runtime_id, job.lease_id)?;
+            let (status, claimed) = f.claim(&agent).await?;
+            assert_eq!(status, StatusCode::OK, "{claimed}");
+            assert_eq!(claimed["restarts"], json!([]), "{claimed}");
+            let preview = f.get_preview(&closed).await?;
+            assert_eq!(preview["status"], "revoked");
+            assert_eq!(preview["wake"]["state"], "failed", "{preview}");
+            assert!(
+                preview["wake"]["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("Close one first")),
+                "{preview}"
+            );
+            assert_eq!(f.count(live_previews).await?, PREVIEWS_PER_RUNTIME);
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[tokio::test]
 async fn wake_outcomes_reach_get_failed_runs_time_out_and_foreign_reports_are_refused(
 ) -> anyhow::Result<()> {

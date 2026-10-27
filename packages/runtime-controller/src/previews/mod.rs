@@ -1031,8 +1031,19 @@ async fn ensure_preview_capacity(
                 "Too many previews opened on this runtime. Try again in {seconds}s."
             ))
         })?;
-    let connection = state
-        .pool
+    ensure_preview_room(&state.pool, project_id, runtime_id, tunnel_key).await
+}
+
+/// Refuse a preview past [`PREVIEWS_PER_RUNTIME`] other live previews on its
+/// runtime: an open, and a wake that reconnects a stopped one (a preview
+/// someone closed frees its place, which another open may have taken since).
+pub(super) async fn ensure_preview_room(
+    pool: &PgPool,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+    tunnel_key: &str,
+) -> ApiResult<()> {
+    let connection = pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
