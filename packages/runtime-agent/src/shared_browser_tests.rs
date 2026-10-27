@@ -67,12 +67,17 @@ const siteSearch = {
     formName: "Search", formSubmitLabels: "Search", formFieldCount: 1,
   },
 };
-// The values the form sends besides the field's new text, as the page's
-// form-values helper reports them.
-const formValuesFor = () => ({
-  kind: "form-values",
+// The entries the form sends, as the page's form-entries helper reports
+// them: the field's own (its text left out for a type step), then the rest.
+const formEntriesFor = (arg) => ({
+  kind: "form-entries",
   complete: true,
-  values: mode === "site-search-key" ? ["en", ["sk", "live", "SEARCHKEY0123456789abcdef"].join("_")] : ["en"],
+  entries: [
+    ["q", arg.keepOwn === false ? null : "Belém Tower"],
+    ["lang", "en"],
+    ...(mode === "site-search-key" ? [["k", ["sk", "live", "SEARCHKEY0123456789abcdef"].join("_")]] : []),
+  ],
+  own: 0,
 });
 const special = {
   "invite-button": { description: control("Invite member") },
@@ -567,7 +572,7 @@ const makePage = (targetId, opened = null) => {
   };
   const handleAt = (ordinal) => ({
     ...handle,
-    evaluate: async (_fn, arg) => arg && arg.kind === "form-values" ? formValuesFor() : controlsFor(targetId)[ordinal],
+    evaluate: async (_fn, arg) => arg && arg.kind === "form-entries" ? formEntriesFor(arg) : controlsFor(targetId)[ordinal],
     click: async () => {
       if (clickLogPath) fs.appendFileSync(clickLogPath, `${ordinal}\n`);
       return handle.click();

@@ -372,15 +372,23 @@ box, or typing into it with submit, when all of these hold
   not a field inside a submit button, and not a search box without a form
   (which page script handles, so it still asks);
 - its address has the page's own origin (scheme, host and port: another
-  subdomain asks), is public (no loopback, private or local address) and is not
-  a risky address (sign-out, export, an action address), and it is not on the
-  link-only list (refused before any prompt, as always);
+  subdomain asks), is public (no loopback, private or local address), and it
+  is not on the link-only list (refused before any prompt, as always);
+- the address it sends is not a risky address (sign-out, export or file
+  format, a one-time link, an action address). That is the action with the
+  form's entries as its query, as the browser builds it, so a hidden
+  `format=csv` makes the search an export that asks, as a navigation to the
+  same address would;
 - nothing it sends looks like a key: the field is not a password, code or
   payment field (refused anyway), and the redaction rules mask none of the
-  typed text and none of the form's other values, hidden fields and the default
-  button included (read from the controls, never with `new FormData()`, which
-  would run the page's handlers; tested and kept nowhere). A form with a file
-  chooser, a form-associated custom element or more than 64 values asks;
+  entries it sends, alone or as `name=value` (so a hidden `code=482910`
+  asks): the field with the typed text and the form's other controls, hidden
+  fields and the default button included. They are read from the controls
+  and through the form's own list of them, which a control named `elements`
+  cannot hide, never with `new FormData()`, which would run the page's
+  handlers; they are tested and kept nowhere. A form with a file chooser, a
+  form-associated custom element or more than 64 entries asks, and so does a
+  field with no name, which sends nothing typed and is the page script's box;
 - the run is under routine browsing, which covers the run's page and Octo's
   own tabs alike. In Ask mode it asks like every other step.
 

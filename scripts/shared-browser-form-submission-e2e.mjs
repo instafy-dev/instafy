@@ -113,6 +113,10 @@ const SEARCH_CHECKS = `<h1>Searches</h1>
 <form action="/account/logout"><input type="search" name="q" aria-label="Search, then sign out"><button>Search</button></form>
 <form action="https://www.booking.com/searchresults.html"><input type="search" name="ss" aria-label="Search hotels"><button>Search</button></form>
 <form action="/search"><input type="search" name="q" aria-label="Search with a key"><input type="hidden" name="k" value="{key}"><button>Search</button></form>
+<form action="/search"><input type="search" name="q" aria-label="Search as a table"><input type="hidden" name="format" value="csv"><button>Search</button></form>
+<form action="/search"><input type="search" name="q" aria-label="Search with a hidden number"><input type="hidden" name="code" value="482910"><button>Search</button></form>
+<form action="/search"><input type="search" name="q" aria-label="Search with a shadowed list"><input type="hidden" name="elements" value="1"><input type="hidden" name="k" value="{key}"><button>Search</button></form>
+<form action="/search"><input type="search" aria-label="Search, unnamed"><button>Search</button></form>
 <form action="/search" method="get"><input type="search" name="q" aria-label="Search, then posted" id="flip"><button>Search</button></form>
 <script>
 document.getElementById("formless").addEventListener("keydown", (event) => {
@@ -534,6 +538,18 @@ export async function runSharedBrowserFormSubmissionFixture() {
       ["Search without a form", sites().mall],
       ["Search, then sign out", sites().mall],
       ["Search with a key", sites().mall],
+      // The browser sends the form's entries as the address's query, so a
+      // hidden file format makes the search an export, which a navigation
+      // to the same address asks for too.
+      ["Search as a table", sites().mall],
+      // A one-time code next to its name ("code=482910") looks secret.
+      ["Search with a hidden number", sites().mall],
+      // A control named "elements" hides the form's list from a page script
+      // that reads form.elements; the hidden key is still found.
+      ["Search with a shadowed list", sites().mall],
+      // A field with no name sends nothing typed, so the box is the page
+      // script's, like a search box with no form.
+      ["Search, unnamed", sites().mall],
     ];
     for (const [label, destination] of asks) {
       await runPage.goto(checksPage);
@@ -591,7 +607,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "a field inside a submit button is refused before any prompt; a control nested deep inside one asks for the button's site",
         "in Ask mode a site's own GET search asks, typed or by Enter",
         "under routine browsing a GET search of the page's own origin goes without a prompt, sends exactly the form's GET and says approval free, in the run's page and in Octo's own tab",
-        "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address and a hidden key-like value still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
+        "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
       ],
       limitations: [

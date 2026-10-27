@@ -96,14 +96,16 @@ export declare function isSearchField(target: PersonalBrowserStepTarget): boolea
 /**
  * Enter in a site's own search box (or typing into it with submit) that a
  * host may let go without a prompt under routine browsing: a known GET
- * submission of the page's own origin in the same tab, to a public address
- * that is not risky, through a search field the classifier allows, sending
- * at most 64 values none of which the redaction rules would mask.
- * `submittedValues` are the typed text and the form's other values, hidden
- * ones included; a host tests them and keeps none of them.
+ * submission of the page's own origin in the same tab, to a public address,
+ * through a search field the classifier allows, sending at most 64 entries
+ * none of which the redaction rules would mask (alone or as "name=value"),
+ * to an address that is not risky once those entries are its query.
+ * `submittedEntries` are the [name, value] pairs the submission sends: the
+ * field with the typed text and the form's other controls, hidden ones and
+ * the default button included; a host tests them and keeps none of them.
  */
 export declare function isFreeSiteSearch(
   target: PersonalBrowserStepTarget,
   pageUrl: string,
-  submittedValues: readonly string[],
+  submittedEntries: readonly (readonly [name: string, value: string])[],
 ): boolean;

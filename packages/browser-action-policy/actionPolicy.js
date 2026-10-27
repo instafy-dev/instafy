@@ -24,10 +24,11 @@
  * own hints (tooltip attribute, image text, icon name, position), so a
  * prompt never reads "button 5". Hosts mask it like any other control name.
  *
- * isFreeSiteSearch(target, pageUrl, submittedValues) is the stricter test a
+ * isFreeSiteSearch(target, pageUrl, submittedEntries) is the stricter test a
  * host applies before it lets Enter in a site's own search box go without a
  * prompt under routine browsing: a GET of the page's own origin, in the same
- * tab, to a public address that is not risky, sending nothing key-like.
+ * tab, to a public address that is not risky once the form's entries are its
+ * query, sending nothing key-like.
  *
  * Plain script: it uses the redaction module's credential words and nothing
  * else. Evaluated where `module` is undefined, it reads
@@ -552,10 +553,10 @@
     return null;
   }
 
-  // At most this many values, of at most this many characters each, may go
-  // with a free search; a form that sends more asks.
-  const FREE_SEARCH_MAX_VALUES = 64;
-  const FREE_SEARCH_MAX_VALUE_CHARS = 4096;
+  // At most this many entries, with names and values of at most this many
+  // characters each, may go with a free search; a form that sends more asks.
+  const FREE_SEARCH_MAX_ENTRIES = 64;
+  const FREE_SEARCH_MAX_CHARS = 4096;
   const LOCAL_HOST_NAME = /(?:^|\.)(?:localhost|local|internal|lan|home|intranet|localdomain|home\.arpa)$/i;
   const PRIVATE_IPV4_BLOCKS = [
     [0x00000000, 8], [0x0a000000, 8], [0x64400000, 10], [0x7f000000, 8], [0xa9fe0000, 16],
@@ -601,6 +602,27 @@
     return redaction.redactText(value, { strict: true }).masked > 0;
   }
 
+  // The address a GET form sends: the browser replaces the action's query
+  // with the form's entries, so a hidden "format=csv" is part of it and the
+  // action's own query is not. Null for entries that are not name-value
+  // strings within the limits, or that look like a key on their own or next
+  // to their name ("code=482910").
+  function getSubmissionAddress(action, submittedEntries) {
+    if (!Array.isArray(submittedEntries) || submittedEntries.length > FREE_SEARCH_MAX_ENTRIES) return null;
+    const entries = [];
+    for (const entry of submittedEntries) {
+      if (!Array.isArray(entry) || entry.length !== 2) return null;
+      const [name, value] = entry;
+      if (typeof name !== "string" || typeof value !== "string" ||
+        name.length > FREE_SEARCH_MAX_CHARS || value.length > FREE_SEARCH_MAX_CHARS) return null;
+      if (looksKeyLike(value) || looksKeyLike(`${name}=${value}`)) return null;
+      entries.push([name, value]);
+    }
+    const sent = new URL(action.href);
+    sent.search = new URLSearchParams(entries).toString();
+    return sent.href;
+  }
+
   /**
    * Enter in a site's own search box, or typing into it with submit, that a
    * host may let go without a prompt under routine browsing. All of these
@@ -612,16 +634,19 @@
    *   browser does submit it: not a field inside a submit button, not a
    *   blocked submission, not a search box that has no form;
    * - the submission is a GET in the same tab, not a dialog;
-   * - its address has the page's own origin (scheme, host and port), is
-   *   public and is not a risky address (sign-out, export, an action
-   *   address);
-   * - every value it sends, the typed text and the form's other values,
-   *   hidden ones included, is a string the redaction rules leave alone,
-   *   and there are at most 64 of them.
+   * - its address has the page's own origin (scheme, host and port) and is
+   *   public;
+   * - `submittedEntries` are the [name, value] pairs it sends, the field
+   *   with the typed text and the form's other controls, hidden ones and
+   *   the default button included: at most 64, each a pair of strings the
+   *   redaction rules leave alone, alone and as "name=value";
+   * - the address it sends, the action with those entries as its query, is
+   *   not a risky address (sign-out, export or file format, a one-time
+   *   link, an action address), as a navigation there would not be.
    * The host keeps its own checks: the link-only list, routine browsing
    * itself and a guard that lets no form post leave the tab during the step.
    */
-  function isFreeSiteSearch(target, pageUrl, submittedValues) {
+  function isFreeSiteSearch(target, pageUrl, submittedEntries) {
     const facts = target && typeof target === "object" ? target : {};
     if (!cleanText(facts.formOwnerIdentity) || facts.formSubmission !== "implicit" || facts.formSubmits !== true) {
       return false;
@@ -633,9 +658,8 @@
     const page = httpUrl(pageUrl);
     if (!action || !page || action.origin !== page.origin) return false;
     if (!isPublicHost(action.hostname) || classifyAddress(action.href)) return false;
-    if (!Array.isArray(submittedValues) || submittedValues.length > FREE_SEARCH_MAX_VALUES) return false;
-    return submittedValues.every((value) =>
-      typeof value === "string" && value.length <= FREE_SEARCH_MAX_VALUE_CHARS && !looksKeyLike(value));
+    const sent = getSubmissionAddress(action, submittedEntries);
+    return sent !== null && !classifyAddress(sent);
   }
 
   function isSamePageAnchor(href, pageUrl) {

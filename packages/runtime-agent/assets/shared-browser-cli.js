@@ -2102,82 +2102,110 @@ function stepPostOrigins(readingStep, sourceOrigin, submission, destination) {
 }
 
 // Runs inside the page with the form submission rules joined in front
-// (FORM_VALUES_IN_PAGE), so it must not use anything from this file's scope.
-// The values Enter in `element` sends besides the text a type step puts
-// there: every other control of the form the browser would include, hidden
-// fields and the default button's value too, and the field's own value when
-// the step keeps it (`keepOwn`, a press). Read from the controls themselves,
-// never with new FormData(), which would run the page's formdata handlers. A
-// form the rules cannot read in full (a file chooser, a form-associated
-// custom element, too many values) is reported incomplete, and the step
-// asks.
-function formValuesInPage(forms, element, request) {
-  const MAX_VALUES = 64;
-  const MAX_VALUE_CHARS = 4_097;
-  const incomplete = { kind: "form-values", complete: false, values: [] };
+// (FORM_ENTRIES_IN_PAGE), so it must not use anything from this file's scope.
+// The [name, value] entries Enter in `element` sends: every control of the
+// form the browser would include, hidden fields and the default button's
+// value too. The field's own entry is at `own`; a type step replaces its
+// value, so the page is never given the text (`keepOwn: false` reports it as
+// null). Read from the controls themselves, never with new FormData(), which
+// would run the page's formdata handlers, and through HTMLFormElement's own
+// `elements`, which a control named "elements" shadows on the form. A form
+// the rules cannot read in full (a file chooser, a form-associated custom
+// element, too many entries), or a field that sends nothing of its own (no
+// name), is reported incomplete, and the step asks.
+function formEntriesInPage(forms, element, request) {
+  const MAX_ENTRIES = 64;
+  const MAX_CHARS = 4_097;
+  const incomplete = { kind: "form-entries", complete: false, entries: [], own: -1 };
   let implicit = null;
+  let controls = [];
   try {
     implicit = forms.implicitSubmission(element);
+    if (!implicit || implicit.blocked || !(implicit.form instanceof HTMLFormElement)) return incomplete;
+    controls = Array.from(Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, "elements").get.call(implicit.form));
   } catch (_) {
     return incomplete;
   }
-  if (!implicit || implicit.blocked || !(implicit.form instanceof HTMLFormElement)) return incomplete;
-  const values = [];
-  for (const control of Array.from(implicit.form.elements)) {
-    if (values.length > MAX_VALUES) return incomplete;
+  const bounded = (value) => String(value).slice(0, MAX_CHARS);
+  const entries = [];
+  let own = -1;
+  // The values one control sends, as the browser builds the form's entries.
+  const valuesOf = (control, tag, type) => {
+    if (tag === "BUTTON" || (tag === "INPUT" && ["submit", "image", "reset", "button"].includes(type))) {
+      return control === implicit.button && type !== "image" ? [control.value] : [];
+    }
+    if (tag === "INPUT" && (type === "checkbox" || type === "radio")) return control.checked ? [control.value] : [];
+    if (tag === "SELECT") return Array.from(control.selectedOptions || [], (option) => option.value);
+    return tag === "INPUT" || tag === "TEXTAREA" ? [control.value] : [];
+  };
+  for (const control of controls) {
+    if (entries.length > MAX_ENTRIES) return incomplete;
     const tag = String(control.tagName || "").toUpperCase();
     if (tag.includes("-")) return incomplete;
     if (!control.name || control.matches(":disabled")) continue;
-    if (control === element && request && request.keepOwn === false) continue;
     const type = String(control.type || "").toLowerCase();
-    if (tag === "BUTTON" || (tag === "INPUT" && ["submit", "image", "reset", "button"].includes(type))) {
-      if (control === implicit.button && type !== "image") values.push(String(control.value));
-      continue;
-    }
     if (tag === "INPUT" && type === "file") return incomplete;
-    if (tag === "INPUT" && (type === "checkbox" || type === "radio")) {
-      if (control.checked) values.push(String(control.value));
-      continue;
+    const name = bounded(control.name);
+    const values = valuesOf(control, tag, type);
+    if (control === element && values.length > 0) {
+      own = entries.length;
+      if (request && request.keepOwn === false) {
+        entries.push([name, null]);
+        continue;
+      }
     }
-    if (tag === "SELECT") {
-      for (const option of Array.from(control.selectedOptions || [])) values.push(String(option.value));
-      continue;
-    }
-    if (tag === "INPUT" || tag === "TEXTAREA") values.push(String(control.value));
+    for (const value of values) entries.push([name, bounded(value)]);
   }
-  if (values.length > MAX_VALUES) return incomplete;
-  return { kind: "form-values", complete: true, values: values.map((value) => value.slice(0, MAX_VALUE_CHARS)) };
+  if (entries.length > MAX_ENTRIES || own < 0) return incomplete;
+  return { kind: "form-entries", complete: true, entries, own };
 }
 
-const FORM_VALUES_IN_PAGE = new Function(
+const FORM_ENTRIES_IN_PAGE = new Function(
   "...args",
-  `return (${formValuesInPage})((${formSubmission.formSubmissionRulesInPage})(), ...args);`,
+  `return (${formEntriesInPage})((${formSubmission.formSubmissionRulesInPage})(), ...args);`,
 );
+
+// The entries a page reported for a free site search, with the typed text in
+// the field's own entry, or null when the answer is not exactly that shape.
+function freeSearchEntries(answer, typed) {
+  if (
+    !answer || answer.kind !== "form-entries" || answer.complete !== true ||
+    !Array.isArray(answer.entries) || !Number.isInteger(answer.own) ||
+    answer.own < 0 || answer.own >= answer.entries.length
+  ) {
+    return null;
+  }
+  const entries = [];
+  for (const [index, entry] of answer.entries.entries()) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") return null;
+    const typedHere = index === answer.own && typed !== null;
+    if (typedHere ? entry[1] !== null : typeof entry[1] !== "string") return null;
+    entries.push([entry[0], typedHere ? typed : entry[1]]);
+  }
+  return entries;
+}
 
 // Enter in the page's own search box, or typing into it with submit, that
 // goes without a prompt (actionPolicy.isFreeSiteSearch): only under routine
-// browsing, and only when every value the form sends was read and none looks
-// like a key. `typed` is the text a type step puts in the field, or null for
-// a press. The values are tested here and kept nowhere. The step's guard then
-// lets no form post leave the tab (FREE_SEARCH_POST_ORIGINS). In one of
+// browsing, and only when every entry the form sends was read, the field's
+// own included, none looks like a key and the address they make is not a
+// risky one. `typed` is the text a type step puts in the field, or null for
+// a press. The entries are tested here and kept nowhere. The step's guard
+// then lets no form post leave the tab (FREE_SEARCH_POST_ORIGINS). In one of
 // Octo's own tabs the page was opened in this run, and routine browsing
 // covers the run's tabs alike.
 async function freeSiteSearch(page, target, typed) {
   if (!target.description.policy || !approvalProtocol.routineBrowsingAllowed()) return false;
   const facts = policyTarget(target.description);
   const pageUrl = page.url();
-  const typedValues = typed === null ? [] : [typed];
-  if (!actionPolicy.isFreeSiteSearch(facts, pageUrl, typedValues)) return false;
+  // The submission itself first, so a step that is no site search reads
+  // nothing more from the page.
+  if (!actionPolicy.isFreeSiteSearch(facts, pageUrl, [])) return false;
   const answer = await target.locator
-    .evaluate(FORM_VALUES_IN_PAGE, { kind: "form-values", keepOwn: typed === null })
+    .evaluate(FORM_ENTRIES_IN_PAGE, { kind: "form-entries", keepOwn: typed === null })
     .catch(() => null);
-  if (
-    !answer || answer.kind !== "form-values" || answer.complete !== true ||
-    !Array.isArray(answer.values) || answer.values.some((value) => typeof value !== "string")
-  ) {
-    return false;
-  }
-  return actionPolicy.isFreeSiteSearch(facts, pageUrl, [...typedValues, ...answer.values]);
+  const entries = freeSearchEntries(answer, typed);
+  return entries !== null && actionPolicy.isFreeSiteSearch(facts, pageUrl, entries);
 }
 
 // A free site search sends a GET of the page's own origin, so while it runs
