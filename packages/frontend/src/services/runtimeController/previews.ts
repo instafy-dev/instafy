@@ -41,7 +41,27 @@ export type ControllerSitePreview = {
    * up (restarting only the site costs nothing). Null when the controller did not say.
    */
   canStart?: boolean | null;
+  /** One line of facts for the card, as `instafy preview open --summary` gave it. Plain text. */
+  summary?: string | null;
+  /** The page's own `<meta name="description">`, read when its picture was taken. Plain text. */
+  pageDescription?: string | null;
+  /** The site's picture, fetched by preview and version (`getSitePreviewThumbnail`); null when it has none. */
+  thumbnail?: SitePreviewThumbnail | null;
 };
+
+/** What the controller says about a preview's picture. The bytes come from `getSitePreviewThumbnail`. */
+export type SitePreviewThumbnail = { version: string; width: number; height: number; capturedAt: string | null };
+
+/** `preview.thumbnail_updated`: a preview has a new picture. Ids and the version only. */
+export const SITE_PREVIEW_THUMBNAIL_EVENT = "instafy:preview-thumbnail-updated";
+export type SitePreviewThumbnailEventDetail = { previewId: string; version: string };
+
+export function mapSitePreviewThumbnailEvent(value: unknown): SitePreviewThumbnailEventDetail | null {
+  if (!isRecord(value)) return null;
+  const previewId = readString(value.previewId);
+  const version = readString(value.version);
+  return previewId && version && THUMBNAIL_VERSION.test(version) ? { previewId, version } : null;
+}
 
 /** A member-only capability address. Keep it in memory only: never store, log or show it. */
 export type SitePreviewViewer = {
@@ -102,6 +122,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const readString = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 const readNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
+const THUMBNAIL_VERSION = /^[0-9a-f]{8,64}$/;
+// Characters that change the direction of the text around them.
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g;
+const FACTS_MAX_CHARS = 80;
+
+/**
+ * A line of facts as the card shows it: one line, no control or direction characters, at most 80 characters (an
+ * ellipsis when cut). Shown as plain text, never Markdown or a link. Null when nothing is left.
+ */
+export function sitePreviewFactsText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = Array.from(value.replace(BIDI_CONTROLS, ""), (char) => {
+    const code = char.charCodeAt(0);
+    return code < 0x20 || (code >= 0x7f && code <= 0x9f) ? " " : char;
+  })
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return null;
+  const chars = [...text];
+  return chars.length > FACTS_MAX_CHARS ? `${chars.slice(0, FACTS_MAX_CHARS - 1).join("").trimEnd()}…` : text;
+}
+
+/** The card's facts line: the skill's summary, else the page's own description. */
+export function sitePreviewFacts(preview: Pick<ControllerSitePreview, "summary" | "pageDescription"> | null): string | null {
+  return sitePreviewFactsText(preview?.summary) ?? sitePreviewFactsText(preview?.pageDescription);
+}
+
+export function mapSitePreviewThumbnail(value: unknown): SitePreviewThumbnail | null {
+  if (!isRecord(value)) return null;
+  const version = readString(value.version);
+  const width = readNumber(value.width);
+  const height = readNumber(value.height);
+  if (!version || !THUMBNAIL_VERSION.test(version) || !width || !height || width <= 0 || height <= 0) return null;
+  return { version, width, height, capturedAt: readString(value.capturedAt) };
+}
 
 function previewPath(projectId: string, previewId: string, suffix = "") {
   return `/projects/${encodeURIComponent(projectId)}/previews/${encodeURIComponent(previewId)}${suffix}`;
@@ -168,7 +224,44 @@ export function mapControllerSitePreview(value: unknown): ControllerSitePreview 
     restartable: value.restartable === true,
     wake: mapSitePreviewWake(value.wake),
     canStart: typeof value.canStart === "boolean" ? value.canStart : null,
+    summary: sitePreviewFactsText(value.summary),
+    pageDescription: sitePreviewFactsText(value.pageDescription),
+    thumbnail: mapSitePreviewThumbnail(value.thumbnail),
   };
+}
+
+const THUMBNAIL_TYPES: ReadonlySet<string> = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+/**
+ * The picture of a preview, with this person's own session: the controller reads it out only to members who may open
+ * the preview, never cached on disk. `refused` when this person may not read it or it is gone, `transient` when it
+ * could not be fetched now.
+ */
+export async function getSitePreviewThumbnail(
+  projectId: string,
+  previewId: string,
+  version: string,
+  signal?: AbortSignal,
+): Promise<{ ok: true; blob: Blob } | { ok: false; reason: "refused" | "transient" }> {
+  if (!runtimeControllerEnabled) return { ok: false, reason: "refused" };
+  try {
+    const context = await resolveControllerRequestContext(null);
+    if (!context.baseUrl || !context.accessToken) return { ok: false, reason: "transient" };
+    const response = await fetch(`${context.baseUrl}${previewPath(projectId, previewId, `/thumbnail?v=${encodeURIComponent(version)}`)}`, {
+      headers: { authorization: `Bearer ${context.accessToken}`, accept: "image/jpeg,image/png,image/webp" },
+      cache: "no-store",
+      credentials: "omit",
+      signal,
+    });
+    if (response.status === 403 || response.status === 404 || response.status === 410) return { ok: false, reason: "refused" };
+    if (!response.ok) return { ok: false, reason: "transient" };
+    const type = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    if (!THUMBNAIL_TYPES.has(type)) return { ok: false, reason: "refused" };
+    const blob = await response.blob();
+    return { ok: true, blob: blob.type === type ? blob : new Blob([blob], { type }) };
+  } catch {
+    return { ok: false, reason: "transient" };
+  }
 }
 
 /**

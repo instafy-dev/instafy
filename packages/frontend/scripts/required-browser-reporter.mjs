@@ -36,6 +36,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "mobile-thumb-navigation.spec.ts",
       "notification-preferences.spec.ts",
       "organization-rail-reorder.spec.ts",
+      "preview-card-responsive.spec.ts",
       "run-icon-rail.spec.ts",
       "run-stop-control.spec.ts",
       "studio-history-navigation.spec.ts",
@@ -86,6 +87,8 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "thread spine notches erase to the surface behind them in light at 1280px",
       "thread spine notches erase to the surface behind them in dark at 390px",
       "thread spine notches erase to the surface behind them in dark at 1280px",
+      "names the card, the lock and the status for screen readers",
+      "opens on a press anywhere on the card and from the keyboard, rings the whole card on focus",
     ],
   },
   "shared-studio": {

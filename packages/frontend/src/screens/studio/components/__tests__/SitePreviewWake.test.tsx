@@ -79,6 +79,8 @@ describe("the card wakes a stopped site on Open", () => {
     await flush();
   }
   const open = () => container.querySelector<HTMLButtonElement>("[data-testid=preview-ready-open]")!;
+  // The whole card is its button; one that can do nothing is aria-disabled, never removed from the tab order.
+  const disabled = () => open().getAttribute("aria-disabled") === "true";
   beforeEach(() => { opener = { openPreview: vi.fn(), visiblePreviewId: null }; });
 
   it("starts a stopped site it knows how to start, says so, and opens it once it answers", async () => {
@@ -86,26 +88,31 @@ describe("the card wakes a stopped site on Open", () => {
       .mockResolvedValue(record());
     mocks.wakeSitePreview.mockResolvedValue({ state: "waking" });
     await render();
-    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped");
-    expect(open().disabled).toBe(false);
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · opening restarts it");
+    expect(disabled()).toBe(false);
     await press("[data-testid=preview-ready-open]");
     expect(mocks.wakeSitePreview).toHaveBeenCalledWith("project-1", PREVIEW_ID, expect.anything());
     expect(text("[data-testid=preview-ready-status]")).toBe("Starting…");
-    expect(open().textContent).toContain("Starting…");
+    expect(open().getAttribute("aria-busy")).toBe("true");
+    expect(disabled()).toBe(true);
     expect(opener.openPreview).not.toHaveBeenCalled();
     await advance(2_000); // still waking
     expect(opener.openPreview).not.toHaveBeenCalled();
     await advance(2_000); // answers
     expect(opener.openPreview).toHaveBeenCalledExactlyOnceWith({ previewId: PREVIEW_ID, title: "Site preview" });
-    expect(text("[data-testid=preview-ready-status]")).toBe("Live");
+    // Live is the normal state: nothing is said.
+    expect(container.querySelector<HTMLElement>("[data-testid=preview-ready-status]")!.dataset.state).toBe("live");
+    expect(text("[data-testid=preview-ready-status]")).toBe("");
   });
 
-  it("offers no dead Open for a stopped site nobody recorded how to start, and says to ask Octo", async () => {
+  it("reads Stopped, and is not pressable, for a stopped site nobody recorded how to start", async () => {
     mocks.getSitePreview.mockResolvedValue(stopped({ restartable: false }));
     await render();
-    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · ask Octo to start it again");
-    expect(container.querySelector("[data-testid=preview-ready-open]")).toBeNull();
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped");
+    expect(disabled()).toBe(true);
+    await act(async () => open().click());
     expect(mocks.wakeSitePreview).not.toHaveBeenCalled();
+    expect(opener.openPreview).not.toHaveBeenCalled();
   });
 
   // Live test, Oct 27: "stop the preview server" stopped the site and closed
@@ -115,8 +122,8 @@ describe("the card wakes a stopped site on Open", () => {
       .mockResolvedValue(record());
     mocks.wakeSitePreview.mockResolvedValue({ state: "live" });
     await render();
-    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped");
-    expect(open().disabled).toBe(false);
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · opening restarts it");
+    expect(disabled()).toBe(false);
     await press("[data-testid=preview-ready-open]");
     expect(mocks.wakeSitePreview).toHaveBeenCalledOnce();
     expect(opener.openPreview).toHaveBeenCalledExactlyOnceWith({ previewId: PREVIEW_ID, title: "Site preview" });
@@ -124,12 +131,20 @@ describe("the card wakes a stopped site on Open", () => {
 
   // A preview is keyed by its machine and port: the Lisbon map's card named
   // the same preview as the hello page Octo later served on that port.
-  it("does not open or start another site that took this card's port", async () => {
-    mocks.getSitePreview.mockResolvedValue(record({ title: "Tiny Hello" }));
+  it("does not open or start another site that took this card's port, nor show its picture or facts", async () => {
+    mocks.getSitePreview.mockResolvedValue(record({
+      title: "Tiny Hello", summary: "A hello page", pageDescription: "Hello",
+      thumbnail: { version: "0123456789abcdef", width: 640, height: 400, capturedAt: null },
+    }));
     mocks.wakeSitePreview.mockResolvedValue({ state: "live" });
     await render();
-    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · ask Octo to start it again");
-    expect(container.querySelector("[data-testid=preview-ready-open]")).toBeNull();
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped");
+    expect(disabled()).toBe(true);
+    // The record is the newer site's now: its picture and facts are not this card's.
+    expect(container.querySelector("[data-testid=preview-card-picture]")).toBeNull();
+    expect(container.querySelector("[data-testid=preview-card-facts]")).toBeNull();
+    await act(async () => open().click());
+    await flush();
     expect(mocks.wakeSitePreview).not.toHaveBeenCalled();
     expect(opener.openPreview).not.toHaveBeenCalled();
   });
@@ -139,16 +154,18 @@ describe("the card wakes a stopped site on Open", () => {
     mocks.wakeSitePreview.mockRejectedValue(apiError(403, "start_needs_builder"));
     await render();
     await press("[data-testid=preview-ready-open]");
-    expect(text("[data-testid=preview-ready-status]")).toBe("Only people who can edit this space can start it. Ask one of them to open it.");
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · only people who can edit this space can start it");
     expect(opener.openPreview).not.toHaveBeenCalled();
-    expect(open().disabled).toBe(false); // Open is the retry
+    // Pressing again cannot help this person.
+    expect(disabled()).toBe(true);
   });
 
   it("tells a member who may not start the machine why, before they press Open", async () => {
     mocks.getSitePreview.mockResolvedValue(stopped({ canStart: false }));
     await render();
-    expect(text("[data-testid=preview-ready-status]")).toBe("Only people who can edit this space can start it. Ask one of them to open it.");
-    expect(open().disabled).toBe(true);
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · only people who can edit this space can start it");
+    expect(disabled()).toBe(true);
+    expect(container.querySelector("[data-testid=preview-ready-card]")!.className).not.toContain("hover:shadow-md");
     await act(async () => open().click());
     await flush();
     expect(mocks.wakeSitePreview).not.toHaveBeenCalled();
@@ -160,8 +177,10 @@ describe("the card wakes a stopped site on Open", () => {
     mocks.wakeSitePreview.mockRejectedValue(apiError(409, "runtime_offline"));
     await render();
     await press("[data-testid=preview-ready-open]");
-    expect(text("[data-testid=preview-ready-status]")).toBe("The computer this space runs on is offline.");
+    expect(text("[data-testid=preview-ready-status]")).toBe("Couldn't start · The computer this space runs on is offline");
     expect(opener.openPreview).not.toHaveBeenCalled();
+    // A press wakes it again.
+    expect(disabled()).toBe(false);
   });
 
   it("follows a wake someone else started, and offers Start again for a site that stopped answering", async () => {
@@ -171,10 +190,11 @@ describe("the card wakes a stopped site on Open", () => {
     mocks.wakeSitePreview.mockResolvedValue({ state: "live" });
     await render();
     expect(text("[data-testid=preview-ready-status]")).toBe("Starting…");
-    expect(open().disabled).toBe(true);
+    expect(disabled()).toBe(true);
     await advance(3_000);
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
-    expect(text("[data-testid=preview-ready-status]")).toBe("Not responding on port 4173");
+    expect(text("[data-testid=preview-ready-status]")).toBe("Not responding");
+    expect(container.querySelector("[data-testid=preview-ready-status]")!.getAttribute("title")).toBe("Nothing answers on port 4173");
     await press("[data-testid=preview-ready-restart]");
     expect(mocks.wakeSitePreview).toHaveBeenCalledOnce();
     // Start again does not pull the person into the site.
@@ -201,7 +221,7 @@ describe("a card beside its open pane", () => {
     await advance(60_000);
     // The pane's four checks a minute, and nothing more from the card.
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(4);
-    expect(text("[data-testid=preview-ready-status]")).toBe("Not responding on port 4173");
+    expect(text("[data-testid=preview-ready-status]")).toBe("Not responding");
   });
 });
 

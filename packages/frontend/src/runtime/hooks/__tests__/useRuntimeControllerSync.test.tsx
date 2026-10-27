@@ -70,6 +70,7 @@ import {
 } from "../../../projects/projectAccessEvents";
 import { CREDITS_UPDATED_EVENT } from "../../../credits/creditsEvents";
 import { PREVIEW_FOLLOW_EVENT } from "../../../services/runtimeController/previewFollow";
+import { SITE_PREVIEW_THUMBNAIL_EVENT } from "../../../services/runtimeController/previews";
 import { getStudioWorkspaceOwnerKey } from "../../../screens/studio/useStudioKnownFiles";
 
 function deferred<T>() {
@@ -747,6 +748,34 @@ describe("useRuntimeControllerSync controller access results", () => {
     });
     expect(unsubscribe).toHaveBeenCalledOnce();
     expect(dependencies.markControllerUnavailable).not.toHaveBeenCalled();
+  });
+
+  it("forwards a preview card's new picture (preview.thumbnail_updated) as ids and a version only", async () => {
+    const dependencies = createHookDependencies();
+    let subscription: SubscribeControllerRunsParams | null = null;
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockImplementation(
+      (params: SubscribeControllerRunsParams) => {
+        subscription = params;
+        return vi.fn();
+      },
+    );
+    const pictureEvent = vi.fn<(event: Event) => void>();
+    window.addEventListener(SITE_PREVIEW_THUMBNAIL_EVENT, pictureEvent);
+    try {
+      await act(async () => {
+        root.render(<Harness projectId="project-current" dependencies={dependencies} />);
+      });
+      await vi.waitFor(() => expect(subscription).not.toBeNull());
+      await act(async () => {
+        subscription?.onEvent?.({ kind: "preview.thumbnail_updated", project_id: "project-current", data: { previewId: "preview-1", version: "0123456789abcdef", runtimeId: "runtime-1", extra: "x" } });
+        subscription?.onEvent?.({ kind: "preview.thumbnail_updated", project_id: "project-current", data: { previewId: "preview-1" } });
+      });
+      expect(pictureEvent).toHaveBeenCalledOnce();
+      expect((pictureEvent.mock.calls[0][0] as CustomEvent).detail).toEqual({ previewId: "preview-1", version: "0123456789abcdef" });
+    } finally {
+      window.removeEventListener(SITE_PREVIEW_THUMBNAIL_EVENT, pictureEvent);
+    }
   });
 
   it("forwards follow-mode presence (preview.follow) as a window event for the follow store", async () => {
