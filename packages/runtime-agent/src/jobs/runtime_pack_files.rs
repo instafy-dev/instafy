@@ -81,17 +81,37 @@ pub(crate) fn pack_runs_with(pack: &InstalledPack, node: Option<NodeVersion>) ->
 }
 
 /// The pack's skill with the space note after its frontmatter, or `None` when it cannot be read
-/// or the result is over [`MAX_SPACE_SKILL_BYTES`].
+/// or the result is over [`MAX_SPACE_SKILL_BYTES`]. The note names the pack's commands a shell
+/// finds on PATH ([`crate::skill_packs::linked_pack_bins`]).
 pub(crate) fn space_skill(pack: &InstalledPack) -> Option<String> {
+    space_skill_with_commands(pack, &crate::skill_packs::linked_pack_bins(&pack.name))
+}
+
+/// [`space_skill`] for a pack whose commands on PATH are `commands`.
+pub(crate) fn space_skill_with_commands(
+    pack: &InstalledPack,
+    commands: &[String],
+) -> Option<String> {
     let skill = std::fs::read_to_string(pack.dir.join(&pack.skill)).ok()?;
     let launcher = pack
         .cli
         .as_ref()
         .map(|cli| format!(" and its launcher `{}`", cli.space_path))
         .unwrap_or_default();
+    let named = commands
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let commands = match commands.len() {
+        0 => String::new(),
+        1 => format!(" Its command {named} is on PATH in every shell."),
+        _ => format!(" Its commands ({named}) are on PATH in every shell."),
+    };
     let note = SPACE_NOTE_TEMPLATE
         .replace("{{name}}", &pack.name)
-        .replace("{{launcher}}", &launcher);
+        .replace("{{launcher}}", &launcher)
+        .replace("{{commands}}", &commands);
     let note = note.trim_end();
     let assemble = |note: &str| match frontmatter_end(&skill) {
         Some(end) => format!("{}\n{note}\n{}", &skill[..end], &skill[end..]),
@@ -669,6 +689,7 @@ mod tests {
             }),
             node: NodeRequirement::parse(">=22"),
             env: Vec::new(),
+            bin: Vec::new(),
         }
     }
 
@@ -1219,6 +1240,44 @@ mod tests {
             written.len() - skill.len()
         );
         const { assert!(MAX_SPACE_SKILL_BYTES - 512 >= 11_400) };
+        // With the most commands a pack may have, each with the longest name.
+        let commands: Vec<String> = (0..crate::skill_packs::MAX_PACK_BINS)
+            .map(|index| format!("{index}{}", "c".repeat(31)))
+            .collect();
+        let written = space_skill_with_commands(&demo, &commands).unwrap();
+        assert!(
+            written.len() - skill.len() <= 1024,
+            "{}",
+            written.len() - skill.len()
+        );
+    }
+
+    #[test]
+    fn space_note_names_the_commands_on_path() {
+        let packs_root = tempfile::tempdir().unwrap();
+        let demo = pack(packs_root.path(), "demo", true);
+        let note = |commands: &[&str]| -> String {
+            let commands: Vec<String> = commands.iter().map(|name| name.to_string()).collect();
+            let written = space_skill_with_commands(&demo, &commands).unwrap();
+            written
+                .lines()
+                .find(|line| line.starts_with("> "))
+                .unwrap()
+                .to_string()
+        };
+        assert!(note(&["demo"]).contains(
+            "read them there. Its command `demo` is on PATH in every shell. Run commands exactly as written below."
+        ));
+        assert!(
+            note(&["demo", "demo-check"])
+                .contains(" Its commands (`demo`, `demo-check`) are on PATH in every shell. ")
+        );
+        // No command on PATH: the note is the one runtimes wrote before commands existed.
+        assert_eq!(
+            note(&[]),
+            "> Installed by Instafy with the runtime: only this file and its launcher `scripts/run.mjs` is in this space. The pack's other files (references, scripts, templates) are in `$INSTAFY_SKILL_PACKS_DIR/demo/`; read them there. Run commands exactly as written below."
+        );
+        assert_eq!(space_skill(&demo), space_skill_with_commands(&demo, &[]));
     }
 
     #[test]

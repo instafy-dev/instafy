@@ -139,6 +139,10 @@ struct ApprovalState {
     // Additive policy grant; old state means the strict ask-every-action mode.
     #[serde(default, rename = "routineBrowsingAllowed")]
     _routine_browsing_allowed: bool,
+    // The sites the person declined in this run, which stay closed to it
+    // without another prompt. Additive: old state has none.
+    #[serde(default, rename = "declinedOrigins")]
+    _declined_origins: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -10,8 +10,10 @@ import {
   pollingCadence,
   pollingGateState,
   POLLING_WAKE_MIN_GAP_MS,
+  quietPollDelay,
   startGatedInterval,
   subscribePollingGate,
+  useAdaptivePoll,
   useGatedInterval,
 } from "../pollingGate";
 
@@ -249,6 +251,44 @@ describe("polling gate", () => {
       root = createRoot(container);
       await advance(60_000);
       expect(callback).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("quiet backoff", () => {
+    it("doubles the delay after each read that found nothing, up to the cap, and never past a longer cadence", () => {
+      expect([0, 1, 2, 3, 4].map((reads) => quietPollDelay(1_000, reads, 4_000))).toEqual([1_000, 2_000, 4_000, 4_000, 4_000]);
+      expect(quietPollDelay(10_000, 5, 4_000)).toBe(10_000);
+      expect(quietPollDelay(1_000, 5, undefined)).toBe(1_000);
+    });
+
+    it("backs off while reads find nothing and returns to the fast cadence when one finds something", async () => {
+      const container = document.createElement("div");
+      const root = createRoot(container);
+      let news = false;
+      const callback = vi.fn(async () => news);
+      function Harness() {
+        useAdaptivePoll(callback, { enabled: true, fast: true, fastMs: 1_000, slowMs: 10_000, quietMaxMs: 4_000 });
+        return null;
+      }
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      try {
+        await act(async () => root.render(createElement(Harness)));
+        const readsIn = async (ms: number) => {
+          callback.mockClear();
+          for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+            await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+          }
+          return callback.mock.calls.length;
+        };
+        // Reads at 0, then 2, 6, 10, 14, 18 s: 2, 4, 4 … s apart.
+        expect(await readsIn(20_000)).toBe(5);
+        news = true;
+        await readsIn(4_000);
+        expect(await readsIn(5_000)).toBe(5);
+      } finally {
+        await act(async () => root.unmount());
+        delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+      }
     });
   });
 

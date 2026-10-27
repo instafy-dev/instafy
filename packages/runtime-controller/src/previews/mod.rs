@@ -302,8 +302,9 @@ struct PreviewResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     visibility: Option<String>,
     created_at: String,
-    /// A wake can start the site again: a `serve` command is recorded and
-    /// nobody closed the preview on purpose.
+    /// A wake can start the site again: a `serve` command is recorded and no
+    /// newer tunnel replaced the preview's. A preview someone closed on
+    /// purpose stays restartable for people who may change the space.
     restartable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     wake: Option<wake::WakeView>,
@@ -451,16 +452,29 @@ impl PreviewGrant {
             .and_then(|serve| PreviewServe::from_json(serve).ok())
     }
 
-    /// Closed on purpose (`instafy preview close`, the close route): it never
-    /// wakes. A runtime stop revokes the grant too, but does not close it.
+    /// Closed on purpose (`instafy preview close`, the close route) or
+    /// superseded. A runtime stop revokes the grant too, but does not close
+    /// it. Starting a closed preview again changes the space, so only people
+    /// who may change it can (see `wake::caller_may_start`).
     fn is_closed(&self) -> bool {
         self.preview_metadata()
             .is_some_and(|metadata| metadata.contains_key("closedAt"))
     }
 
+    /// Closed because the broker replaced its tunnel
+    /// ([`retire_superseded_previews`]): the successor is the preview now, and
+    /// a wake would only get the successor's tunnel.
+    fn is_superseded(&self) -> bool {
+        self.preview_metadata()
+            .is_some_and(|metadata| metadata.contains_key("supersededBy"))
+    }
+
+    /// A wake can start the site again: its start command is recorded and its
+    /// tunnel is still its own. Closing it on purpose keeps the command, so
+    /// Open on its card brings back a site someone stopped.
     fn restartable(&self) -> bool {
         self.is_private_preview()
-            && !self.is_closed()
+            && !self.is_superseded()
             && self.serve().is_some()
             && self.tunnel_key().is_some()
     }
@@ -526,6 +540,48 @@ impl PreviewGrant {
             can_start: None,
         }
     }
+}
+
+/// Whether a newer preview holds this stopped preview's tunnel key, so a wake
+/// may not reconnect it: the broker answers the key with the newer tunnel,
+/// and the reconnect would write this preview's command and title over the
+/// newer preview's. [`retire_superseded_previews`] marks a preview that was
+/// still open as `supersededBy`, but skips one someone had closed, so for
+/// that one a later grant of the same key is the record. A live preview's
+/// tunnel is its key's current one.
+pub(super) async fn preview_replaced(pool: &PgPool, grant: &PreviewGrant) -> ApiResult<bool> {
+    if grant.is_superseded() {
+        return Ok(true);
+    }
+    if grant.is_live() {
+        return Ok(false);
+    }
+    let Some(tunnel_key) = grant.tunnel_key() else {
+        return Ok(false);
+    };
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let newer = connection
+        .query_opt(
+            "select 1 from runtime_tunnel_grants
+             where project_id = $1
+               and tunnel_id <> $2
+               and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+               and metadata->'_instafyPreview'->>'tunnelKey' = $3
+               and created_at > $4
+             limit 1",
+            &[
+                &grant.record.project_id,
+                &grant.record.tunnel_id,
+                &tunnel_key,
+                &grant.created_at,
+            ],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to check for a newer preview: {error}")))?;
+    Ok(newer.is_some())
 }
 
 /// Whether grant metadata belongs to a preview: it holds the previews
@@ -975,8 +1031,19 @@ async fn ensure_preview_capacity(
                 "Too many previews opened on this runtime. Try again in {seconds}s."
             ))
         })?;
-    let connection = state
-        .pool
+    ensure_preview_room(&state.pool, project_id, runtime_id, tunnel_key).await
+}
+
+/// Refuse a preview past [`PREVIEWS_PER_RUNTIME`] other live previews on its
+/// runtime: an open, and a wake that reconnects a stopped one (a preview
+/// someone closed frees its place, which another open may have taken since).
+pub(super) async fn ensure_preview_room(
+    pool: &PgPool,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+    tunnel_key: &str,
+) -> ApiResult<()> {
+    let connection = pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
@@ -1528,6 +1595,9 @@ async fn get_preview(
     record_preview_serving(&state, &mut grant, health.as_ref()).await;
     let listening = health.as_ref().map(|probe| probe.listening);
     let mut response = grant.response(Some(health));
+    if response.restartable && preview_replaced(&state.pool, &grant).await? {
+        response.restartable = false;
+    }
     response.wake = Some(wake::load_wake_view(&state, &project_id, &grant, listening).await?);
     if let PreviewReader::Context(context) = &reader {
         response.can_start =
@@ -1573,7 +1643,8 @@ async fn post_preview_close(
     }
     if !tunnel_status_is_active(&grant.record.status) {
         // Already stopped (a runtime stop, say); make sure no viewer outlived
-        // it, that it no longer wakes, and that nobody still presents it.
+        // it, that only someone who may change the space starts it again,
+        // and that nobody still presents it.
         revoke_preview_sessions_for_tunnel(&state.pool, &grant.record.tunnel_id).await;
         mark_preview_closed(&state.pool, &grant.record.id).await?;
         state
@@ -1808,10 +1879,11 @@ fn forget_preview_cards(metadata: Option<&mut JsonValue>, cards: &[String]) -> b
     changed
 }
 
-/// A closed preview stays closed: `closedAt` (in the controller-owned preview
-/// object, so only this module sets it) keeps a wake from starting it again.
-/// A later `instafy preview open` of the same port writes fresh metadata
-/// without it.
+/// A closed preview stays down until someone who may change the space starts
+/// it again: `closedAt` (in the controller-owned preview object, so only this
+/// module sets it) keeps viewers' wakes and a viewer's Open from bringing it
+/// back. A wake by a builder, or a later `instafy preview open` of the same
+/// port, writes fresh metadata without it.
 async fn mark_preview_closed(pool: &PgPool, grant_row_id: &Uuid) -> ApiResult<()> {
     let connection = pool
         .get()

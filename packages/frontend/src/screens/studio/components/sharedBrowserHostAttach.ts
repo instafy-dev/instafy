@@ -44,6 +44,19 @@ export const SHARED_BROWSER_HOST_COPY = {
 
 export const SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS = 120_000;
 export const SHARED_BROWSER_HOST_POLL_MS = 500;
+/**
+ * The wait reads every 500 ms at first, then less often while the browser
+ * keeps starting: two reads at each step, doubling up to this. Instafy's
+ * browser takes tens of seconds to start, and a wait that read every 500 ms
+ * for its whole two minutes made 240 requests for each press of Try again.
+ */
+export const SHARED_BROWSER_HOST_MAX_POLL_MS = 2_000;
+
+/** The pause after the `reads`-th read of one wait (from 1): 500, 500, 1000, 1000, 2000 ms… */
+export function sharedBrowserHostPollDelay(reads: number, pollMs = SHARED_BROWSER_HOST_POLL_MS): number {
+  const doublings = Math.max(0, Math.floor((reads - 1) / 2));
+  return Math.min(Math.max(pollMs, SHARED_BROWSER_HOST_MAX_POLL_MS), pollMs * 2 ** Math.min(doublings, 16));
+}
 export const SHARED_BROWSER_HOST_STOPPING_RETRY_MS = 1_000;
 /**
  * How long a press waits for the space's machine to start, from the press.
@@ -241,6 +254,12 @@ export async function waitForSharedBrowserHostReady(params: {
       Math.min(requestTimeoutMs, Math.max(0, deadline - now())),
     );
   let startRequests = 0;
+  // Reads since the wait began or last asked the browser to start.
+  let reads = 0;
+  const nextPollMs = () => {
+    reads += 1;
+    return sharedBrowserHostPollDelay(reads, pollMs);
+  };
   const cancelled = () => params.signal?.aborted === true;
   const pause = async (ms: number): Promise<boolean> => {
     const remaining = deadline - now();
@@ -269,7 +288,7 @@ export async function waitForSharedBrowserHostReady(params: {
       const notFound = notFoundOutcome(error);
       if (notFound && notFound !== "poll") return notFound;
       if (notFound === "poll" || params.client.isUnavailableError(error) || isTokenError(error) || isRequestTimeout(error)) {
-        if (!(await pause(pollMs))) break;
+        if (!(await pause(nextPollMs()))) break;
         continue;
       }
       return hostWaitError("failed", error instanceof Error ? error.message : String(error));
@@ -301,6 +320,8 @@ export async function waitForSharedBrowserHostReady(params: {
         return hostWaitError("failed", "browser host start budget used");
       }
       startRequests += 1;
+      // A browser just asked to start is read quickly again.
+      reads = 0;
       try {
         const started = await bounded((value) => params.client.startHost(value));
         if (cancelled()) break;
@@ -330,7 +351,7 @@ export async function waitForSharedBrowserHostReady(params: {
       }
     }
     // starting, stopping, unknown, or a start just asked for.
-    if (!(await pause(pollMs))) break;
+    if (!(await pause(nextPollMs()))) break;
   }
   if (cancelled()) {
     return { kind: "cancelled" };

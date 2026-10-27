@@ -1527,6 +1527,9 @@ export function BrowserSessionModal({
       let runtimeId: string | null = null;
       let originId: string | null = null;
       let originEndpoint: string | null = null;
+      // A press's ensure, asked again once while the wait below finds the
+      // machine silent past its idle time.
+      let ensureAgain: (() => Promise<unknown>) | null = null;
       const statusSnapshot = await controllerClient.runtimes.fetchStatus({
         projectId,
         signal: startupAbortController.signal,
@@ -1833,6 +1836,12 @@ export function BrowserSessionModal({
             return;
           }
           runtimeId = ensured?.runtimeId ?? null;
+          // Only the person's own open asks again; an automatic reconnect
+          // or Studio by itself never does.
+          if (runtimeId && !automaticAttempt && !startedByStudio) {
+            const ensuredMachineId = runtimeId;
+            ensureAgain = () => ensureBrowserRuntime(ensuredMachineId, false);
+          }
           runtimeDebugLog("browser-session:ensure-runtime", {
             projectId,
             runtimeId,
@@ -1858,12 +1867,19 @@ export function BrowserSessionModal({
       }
 
       if (!originId) {
+        // The machine may be starting again (a relaunch, or a runtime that
+        // restarted itself): wait until it answers, as the cold path does.
         const awaitedOrigin = await waitForBrowserRuntimeOrigin({
           projectId,
           runtimeId,
           fetchStatus: controllerClient.runtimes.fetchStatus,
           signal: startupAbortController.signal,
+          onSlow: () => {
+            if (!connectionCancelled()) setMachineStartSlow(true);
+          },
+          ...(ensureAgain ? { ensureAgain } : {}),
         });
+        if (!connectionCancelled()) setMachineStartSlow(false);
         originId = awaitedOrigin.originId;
         originEndpoint = awaitedOrigin.endpoint;
         runtimeDebugLog("browser-session:wait-origin", {

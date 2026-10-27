@@ -27,40 +27,10 @@ use runtime_contracts::chat_activity::{is_done_form, is_live_label};
 use serde_json::Value;
 use tracing::warn;
 
-use super::{
-    InstalledPack, PACK_MANIFEST, installed_packs, is_plain_relative_path, is_regular_file,
-};
+use super::{InstalledPack, PACK_MANIFEST, installed_packs};
 
 /// At most this many labelled subcommands per command.
 pub const MAX_SUBCOMMANDS: usize = 64;
-/// At most this many commands per pack.
-pub const MAX_BINS: usize = 8;
-/// Names a pack command may never take: they would shadow the tools every turn relies on.
-pub const RESERVED_BIN_NAMES: &[&str] = &[
-    "instafy",
-    "node",
-    "npm",
-    "npx",
-    "pnpm",
-    "pnpx",
-    "yarn",
-    "corepack",
-    "git",
-    "sh",
-    "bash",
-    "zsh",
-    "dash",
-    "env",
-    "python",
-    "python3",
-    "pip",
-    "codex",
-    "runtime-agent",
-    "curl",
-    "wget",
-    "sudo",
-    "make",
-];
 
 /// How a step counts in the turn's summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,17 +107,6 @@ pub struct PackActivity {
     pub launcher: Option<(String, String)>,
     /// Command name to subcommand (or `*`) to label.
     pub labels: BTreeMap<String, BTreeMap<String, ActivityLabel>>,
-}
-
-/// A command name a pack may declare: `^[a-z][a-z0-9-]{1,31}$`, not reserved.
-pub fn is_pack_bin_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    (2..=32).contains(&bytes.len())
-        && bytes[0].is_ascii_lowercase()
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-        && !RESERVED_BIN_NAMES.contains(&name)
 }
 
 fn is_subcommand_key(key: &str) -> bool {
@@ -245,27 +204,15 @@ pub fn read_pack_activity(pack: &InstalledPack) -> Result<Option<PackActivity>, 
         return Ok(None);
     };
     let activity = activity.as_object().ok_or("activity is not an object")?;
-    let bin = manifest
-        .get("bin")
-        .and_then(Value::as_object)
-        .ok_or("activity labels only commands declared in `bin`")?;
-    if bin.len() > MAX_BINS {
-        return Err(format!("bin declares more than {MAX_BINS} commands"));
-    }
-    let mut bins = BTreeMap::new();
-    for (name, entry) in bin {
-        let entry = entry.as_str().unwrap_or_default();
-        if !is_pack_bin_name(name) {
-            return Err(format!(
-                "bin {name:?} is not a command name a pack may declare"
-            ));
-        }
-        if !is_plain_relative_path(entry) || !is_regular_file(&pack.dir.join(entry)) {
-            return Err(format!(
-                "bin {name:?}: {entry:?} is not a file inside the pack"
-            ));
-        }
-        bins.insert(name.clone(), entry.to_string());
+    // `bin` was checked when the pack loaded (`load_pack`): at most 8 plain names that are not
+    // reserved, each a file inside the pack. A pack that breaks one of those rules never loads.
+    let bins: BTreeMap<String, String> = pack
+        .bin
+        .iter()
+        .map(|bin| (bin.name.clone(), bin.entry.clone()))
+        .collect();
+    if bins.is_empty() {
+        return Err("activity labels only commands declared in `bin`".into());
     }
     let mut labels = BTreeMap::new();
     for (name, subcommands) in activity {
@@ -449,10 +396,10 @@ pub(crate) mod tests {
     fn labels_need_a_declared_command_that_is_a_file_and_not_reserved() {
         let root = tempfile::tempdir().expect("tmp");
         let labels = json!({ "*": { "live": "Working", "role": "quiet" } });
-        for bin in ["git", "node", "instafy", "u", "Uw", "uw/x"] {
+        // The loader refuses a pack whose `bin` breaks a rule, so such a pack never supplies labels.
+        for bin in ["git", "node", "instafy", "instafy-x", "u", "Uw", "uw/x"] {
             let dir = make_labelled_pack(root.path(), "maps", bin, json!({ bin: labels.clone() }));
-            let pack = load_pack(&dir).expect("pack");
-            assert!(read_pack_activity(&pack).is_err(), "{bin}");
+            assert!(load_pack(&dir).is_err(), "{bin}");
             fs::remove_dir_all(&dir).expect("cleanup");
         }
         let dir = make_labelled_pack(root.path(), "maps", "uw", json!({ "uw": labels }));
@@ -461,10 +408,14 @@ pub(crate) mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         manifest["bin"] = json!({ "uw": "scripts/missing.mjs" });
         fs::write(&path, manifest.to_string()).unwrap();
-        assert!(read_pack_activity(&load_pack(&dir).unwrap()).is_err());
+        assert!(load_pack(&dir).is_err());
         manifest["bin"] = json!({ "uw": "../../etc/passwd" });
         fs::write(&path, manifest.to_string()).unwrap();
-        assert!(read_pack_activity(&load_pack(&dir).unwrap()).is_err());
+        assert!(load_pack(&dir).is_err());
+        // Labels with no `bin` at all label nothing.
+        manifest.as_object_mut().unwrap().remove("bin");
+        fs::write(&path, manifest.to_string()).unwrap();
+        assert!(read_pack_activity(&load_pack(&dir).expect("pack")).is_err());
     }
 
     #[test]

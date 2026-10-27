@@ -562,6 +562,30 @@ describe("useBrowserSessionPages", () => {
     }
   });
 
+  it("does not ask a failed capability read again while the tab is hidden", async () => {
+    vi.useFakeTimers();
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    try {
+      fetchCapabilitiesMock.mockReset().mockResolvedValue(null);
+      await renderHook();
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(1);
+      visibility = "hidden";
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+      });
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(1);
+      visibility = "visible";
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(fetchCapabilitiesMock).toHaveBeenCalledTimes(2);
+    } finally {
+      delete (document as { visibilityState?: unknown }).visibilityState;
+      vi.useRealTimers();
+    }
+  });
+
   it("resumes polling when a hidden unavailable session is reopened", async () => {
     hookSuspendOnUnavailable = true;
     fetchPagesMock.mockRejectedValueOnce(

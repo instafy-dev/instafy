@@ -7,7 +7,14 @@ import {
 
 // Poll a little faster than the page list (2500ms): the action ticker and the
 // AI cursor want to feel live, and the payload is tiny.
-const BROWSER_ACTIONS_POLL_INTERVAL_MS = 1000;
+export const BROWSER_ACTIONS_POLL_INTERVAL_MS = 1000;
+/**
+ * While a run is active but the log has nothing new (the agent is thinking,
+ * not acting), each empty read doubles the wait up to this; the first new
+ * action brings back the 1 s tail. A turn spends most of its time between
+ * actions, so a tail that never slowed down read the empty log every second.
+ */
+export const BROWSER_ACTIONS_QUIET_MAX_POLL_INTERVAL_MS = 4_000;
 // Only the agent writes the log, so with no run and no agent in control it
 // only needs a slow safety read.
 export const BROWSER_ACTIONS_QUIET_POLL_INTERVAL_MS = 10_000;
@@ -153,11 +160,15 @@ export function useBrowserSessionActions(params: {
     }
   }, [pollingEnabled, projectId]);
 
-  const poll = useCallback(async () => {
+  // Whether the read found anything: the log moved (new actions, or a new
+  // session truncated it). An empty or failed read lets the poll back off.
+  const poll = useCallback(async (): Promise<boolean> => {
+    const before = cursorRef.current;
     try {
-      await refresh();
+      return (await refresh()) && cursorRef.current !== before;
     } catch {
       // Transient poll failures are ignored; the next tick retries.
+      return false;
     }
   }, [refresh]);
   useAdaptivePoll(poll, {
@@ -166,6 +177,7 @@ export function useBrowserSessionActions(params: {
     fastMs: BROWSER_ACTIONS_POLL_INTERVAL_MS,
     slowMs: BROWSER_ACTIONS_QUIET_POLL_INTERVAL_MS,
     slowIdleMs: BROWSER_ACTIONS_QUIET_IDLE_POLL_INTERVAL_MS,
+    quietMaxMs: BROWSER_ACTIONS_QUIET_MAX_POLL_INTERVAL_MS,
   });
 
   // The log is runtime-wide, but pixels are page-scoped. Filter at render time

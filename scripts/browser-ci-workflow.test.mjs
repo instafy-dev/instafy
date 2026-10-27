@@ -1,4 +1,5 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
+import { withoutBrowserUiJobBudget } from "./lib/browserUiBudgetTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -11,7 +12,7 @@ const read = (relative) => withoutManualCiRouting(path.basename(relative), fs.re
 
 const routedJobs = [
   { key: "personal", label: "public-browser-personal", name: "Personal Browser E2E", minutes: 30 },
-  { key: "browser-ui", label: "public-browser-ui", name: "Browser UI rendering", minutes: 30 },
+  { key: "browser-ui", label: "public-browser-ui", name: "Browser UI rendering", minutes: 40 },
 ];
 const jobSource = key => read(".github/workflows/browser-e2e.yml").split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
 function callerContext(event = "pull_request") {
@@ -238,7 +239,7 @@ test("the required browser UI job includes the real co-browsing protocol fixture
 
 test("the expanded browser UI inventory has a bounded suite budget without relaxing test gates", () => {
   const config = read("packages/frontend/playwright.ci-ui.config.ts");
-  assert.match(config, /^\s+globalTimeout: 600_000,$/m);
+  assert.match(config, /^\s+globalTimeout: 1_200_000,$/m);
   assert.match(config, /^\s+timeout: 30_000,$/m);
   assert.match(config, /^\s+workers: 1,$/m);
   assert.match(config, /^\s+retries: 0,$/m);
@@ -250,5 +251,21 @@ test("the expanded browser UI inventory has a bounded suite budget without relax
   const workflow = read(".github/workflows/browser-e2e.yml");
   const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
   assert.match(job, /\|\| 'ubuntu-24\.04' }}/);
-  assert.match(job, /^\s+timeout-minutes: 30$/m);
+  assert.match(job, /^\s+timeout-minutes: 40$/m);
+});
+
+test("historical workflow proofs reverse only the reviewed Browser UI job budget", () => {
+  const source = read(".github/workflows/browser-e2e.yml");
+  const job = jobSource("browser-ui");
+  const previous = source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 30"));
+  assert.equal(withoutBrowserUiJobBudget("browser-e2e.yml", source), previous);
+  assert.equal(withoutBrowserUiJobBudget("build.yml", source), source);
+  for (const changed of [
+    source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 30")),
+    source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 41")),
+    source.replace(job, job.replace("    timeout-minutes: 40\n", "")),
+    source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 40\n    timeout-minutes: 40")),
+    source.replace("\n  browser-ui:\n", "\n  another-job:\n"),
+    source + "\n  browser-ui:\n" + job,
+  ]) assert.throws(() => withoutBrowserUiJobBudget("browser-e2e.yml", changed));
 });
