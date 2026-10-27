@@ -9,9 +9,12 @@
  *   redactPageObservation). The Shared Browser's agent snapshots use it too.
  * - captureSentPage(redaction, options) runs inside the page, in an isolated
  *   world where redaction.js has been loaded as well. It reads the page's
- *   address, title and rendered text once, masks them with the same rules as
- *   an agent snapshot, and returns only the masked result. A secret screen,
- *   a failed check or a failed mask returns no text at all.
+ *   address, title, rendered text and up to 200 links once, masks them with
+ *   the same rules as an agent snapshot, and returns only the masked result.
+ *   A secret screen, a failed check or a failed mask returns no text and no
+ *   links at all.
+ * - pageLinksInPage(limit) runs inside the page and lists its web links (text
+ *   and target) in document order, for a host that reads the page another way.
  *
  * Nothing here keeps state, registers a listener or reads the page again
  * later: one call reads one page once.
@@ -34,6 +37,10 @@
   const SENT_PAGE_MASK_MARGIN_CHARS = 2_048;
   const MAX_SENT_PAGE_TITLE_CHARS = 1_000;
   const MAX_SENT_PAGE_URL_CHARS = 8_192;
+  /** The most links one sent page carries. */
+  const MAX_SENT_PAGE_LINKS = 200;
+  const MAX_SENT_PAGE_LINK_TEXT_CHARS = 200;
+  const MAX_SENT_PAGE_LINK_URL_CHARS = 2_048;
 
   /** The regular-expression sources pageSecretSignalsInPage needs. */
   function pagePolicySources(redaction) {
@@ -175,17 +182,97 @@
     }
   }
 
+  // Runs inside the page. Its links that lead to a web page (http and https
+  // only, so javascript:, data: and other schemes are dropped), in document
+  // order and open shadow roots included, each with its visible text (or its
+  // label, title or image text), the same target and text only once. Returns
+  // raw values: maskSentPage masks them. Self-contained, so a host can run its
+  // source on its own.
+  function pageLinksInPage(limit) {
+    try {
+      const max = Math.max(0, Math.min(Number(limit) || 0, 1_000));
+      const links = [];
+      const seen = new Set();
+      const roots = [document];
+      let scanned = 0;
+      const clean = (value) => (typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 500) : "");
+      while (roots.length > 0 && links.length < max && scanned < 20_000) {
+        const root = roots.shift();
+        const elements = typeof root?.querySelectorAll === "function" ? Array.from(root.querySelectorAll("*")) : [];
+        for (const element of elements) {
+          scanned += 1;
+          if (element && element.shadowRoot && typeof element.shadowRoot.querySelectorAll === "function") {
+            roots.push(element.shadowRoot);
+          }
+          const tag = typeof element?.tagName === "string" ? element.tagName.toUpperCase() : "";
+          if ((tag === "A" || tag === "AREA") && typeof element.getAttribute === "function" && element.getAttribute("href") !== null) {
+            let href = "";
+            try {
+              // An SVG link's href is an object, not the address: read its attribute.
+              const raw = typeof element.href === "string" ? element.href : element.getAttribute("href");
+              const url = new URL(String(raw || ""), document.baseURI);
+              if (url.protocol === "http:" || url.protocol === "https:") href = url.href;
+            } catch (_) {
+              href = "";
+            }
+            if (href) {
+              const image = typeof element.querySelector === "function" ? element.querySelector("img[alt]") : null;
+              const text =
+                clean(element.innerText) || clean(element.textContent) || clean(element.getAttribute("aria-label")) ||
+                clean(element.getAttribute("title")) || clean(element.getAttribute("alt")) ||
+                clean(image ? image.getAttribute("alt") : "");
+              const key = `${href}\n${text}`;
+              if (!seen.has(key)) {
+                seen.add(key);
+                links.push({ text, href });
+              }
+            }
+          }
+          if (links.length >= max || scanned >= 20_000) break;
+        }
+      }
+      return links;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /**
+   * The links a sent page may carry: web links only (javascript:, data: and
+   * other schemes dropped), at most MAX_SENT_PAGE_LINKS. Without a way to tell
+   * link-only sites apart (`linkOnlySite`), none: a link Octo cannot be told
+   * to leave alone is not sent.
+   */
+  function sendableLinks(rawLinks, linkOnlySite) {
+    if (typeof linkOnlySite !== "function" || !Array.isArray(rawLinks)) return [];
+    const links = [];
+    for (const link of rawLinks) {
+      if (links.length >= MAX_SENT_PAGE_LINKS) break;
+      const href = typeof link?.href === "string" ? link.href.trim() : "";
+      let url;
+      try {
+        url = new URL(href);
+      } catch (_) {
+        continue;
+      }
+      if ((url.protocol !== "http:" && url.protocol !== "https:") || url.href.length > MAX_SENT_PAGE_LINK_URL_CHARS) continue;
+      links.push({ text: typeof link.text === "string" ? link.text.slice(0, MAX_SENT_PAGE_LINK_TEXT_CHARS) : "", href: url.href });
+    }
+    return links;
+  }
+
   function withheldResult(url) {
-    return { url, title: "", text: "", secretScreen: true, truncated: false };
+    return { url, title: "", text: "", secretScreen: true, truncated: false, links: [] };
   }
 
   /**
    * Masks one page a person chose to send. `page` holds what was read:
-   * `{ url, title, text, signals }`, where `signals` is null when the page's
-   * secret checks failed. `withhold` keeps a page withheld that the browser
-   * already withholds from the agent. Returns
-   * `{ url, title, text, secretScreen, truncated }`, all masked; a secret
-   * screen carries no title or text.
+   * `{ url, title, text, signals, links }`, where `signals` is null when the
+   * page's secret checks failed and `links` is what pageLinksInPage listed.
+   * `withhold` keeps a page withheld that the browser already withholds from
+   * the agent; `linkOnlySite(address)` names the link-only site an address is
+   * on, or null. Returns `{ url, title, text, secretScreen, truncated, links }`,
+   * all masked; a secret screen carries no title, text or links.
    */
   function maskSentPage(redaction, page, options) {
     const withhold = Boolean(options && options.withhold) || !page || !page.signals;
@@ -200,11 +287,15 @@
     let maskedUrl = "";
     try {
       maskedUrl = redaction.redactUrl(String(page?.url || "")).text.slice(0, MAX_SENT_PAGE_URL_CHARS);
+      const linkOnlySite = options && options.linkOnlySite;
+      const links = sendableLinks(page?.links, linkOnlySite);
+      // Link texts are masked as the page's control names are, in the page's
+      // own credential context.
       const view = redaction.redactPageObservation({
         url: String(page?.url || ""),
         title: String(page?.title || "").slice(0, MAX_SENT_PAGE_TITLE_CHARS),
         text: rawText.slice(0, limit + SENT_PAGE_MASK_MARGIN_CHARS),
-        names: [],
+        names: links.map((link) => link.text),
         signals: page?.signals || null,
         withhold,
       });
@@ -219,6 +310,14 @@
         text: view.text.slice(0, keep),
         secretScreen: false,
         truncated: rawText.length > limit || view.text.length > keep,
+        links: links.map((link, index) => {
+          const site = linkOnlySite(link.href);
+          return {
+            text: typeof view.names[index] === "string" ? view.names[index] : "",
+            href: redaction.redactUrl(link.href).text.slice(0, MAX_SENT_PAGE_LINK_URL_CHARS),
+            ...(typeof site === "string" && site ? { linkOnly: site } : {}),
+          };
+        }),
       };
     } catch (_) {
       // A page that could not be masked is never sent.
@@ -229,7 +328,10 @@
   /**
    * Runs inside the page, in an isolated world that also holds redaction.js.
    * Only http and https pages are read; anything else answers
-   * `{ unsupported: true }`.
+   * `{ unsupported: true }`. `options.linkOnly`, `{ api, sites }`, is
+   * linkOnly.js's API and the web-research skill's list, which mark the links
+   * to link-only ("no-agents") sites; without a list that compiles the page
+   * goes without its links.
    */
   function captureSentPage(redaction, options) {
     const location = globalThis.location;
@@ -253,18 +355,37 @@
       .replace(/[ \t]+\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
+    let linkOnlySite = null;
+    try {
+      const linkOnly = options && options.linkOnly;
+      const list = linkOnly && linkOnly.api && linkOnly.sites ? linkOnly.api.linkOnlyListFrom(linkOnly.sites).list : null;
+      if (list) {
+        // Only a site whose terms bar agents is link-only. A "no-reuse" site
+        // may be opened and read (its content is not reused), so its links go
+        // unmarked, as on the Personal Browser.
+        linkOnlySite = (address) => {
+          const hit = linkOnly.api.linkOnlyMatch(list, address);
+          return hit && linkOnly.api.barsAgents(hit) ? hit.site : null;
+        };
+      }
+    } catch (_) {
+      linkOnlySite = null;
+    }
+    const links = linkOnlySite ? pageLinksInPage(MAX_SENT_PAGE_LINKS) : [];
     return maskSentPage(
       redaction,
-      { url: String(location.href || ""), title: String(globalThis.document?.title || ""), text, signals },
-      options,
+      { url: String(location.href || ""), title: String(globalThis.document?.title || ""), text, signals, links },
+      { withhold: Boolean(options && options.withhold), linkOnlySite },
     );
   }
 
   return Object.freeze({
     MAX_SENT_PAGE_TEXT_CHARS,
+    MAX_SENT_PAGE_LINKS,
     SENT_PAGE_MASK_MARGIN_CHARS,
     pagePolicySources,
     pageSecretSignalsInPage,
+    pageLinksInPage,
     maskSentPage,
     captureSentPage,
   });

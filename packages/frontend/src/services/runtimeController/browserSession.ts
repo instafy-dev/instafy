@@ -841,8 +841,27 @@ export type RuntimeBrowserSessionPageCapture = {
   text: string;
   secretScreen: boolean;
   truncated: boolean;
+  /** Its web links, each to a link-only site marked as one (an older workspace browser sends none). */
+  links?: Array<{ text: string; href: string; linkOnly?: string }>;
   readAt: string;
 };
+
+/** The most links one captured page carries (the workspace browser cuts there too). */
+const BROWSER_PAGE_CAPTURE_MAX_LINKS = 200;
+
+/** The captured page's links as the origin sent them, or none when they are not that shape. */
+function capturedPageLinks(value: unknown): NonNullable<RuntimeBrowserSessionPageCapture["links"]> {
+  if (!Array.isArray(value) || value.length > BROWSER_PAGE_CAPTURE_MAX_LINKS) return [];
+  const links: NonNullable<RuntimeBrowserSessionPageCapture["links"]> = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const { text, href, linkOnly } = entry as Record<string, unknown>;
+    if (typeof text !== "string" || text.length > 4_000 || typeof href !== "string" || href.length > 8_192) return [];
+    if (linkOnly !== undefined && (typeof linkOnly !== "string" || linkOnly.length > 400)) return [];
+    links.push({ text, href, ...(typeof linkOnly === "string" ? { linkOnly } : {}) });
+  }
+  return links;
+}
 
 /** Why the workspace browser did not hand over a page. */
 export class BrowserSessionPageCaptureError extends Error {
@@ -893,7 +912,8 @@ export function mapRuntimeBrowserSessionPageCapturePayload(
   ) {
     return null;
   }
-  // A withheld page never carries text, whatever answered.
+  // A withheld page never carries text or links, whatever answered.
+  const links = row.secretScreen ? [] : capturedPageLinks(row.links);
   return {
     pageId,
     url: row.url,
@@ -901,6 +921,7 @@ export function mapRuntimeBrowserSessionPageCapturePayload(
     text: row.secretScreen ? "" : row.text,
     secretScreen: row.secretScreen,
     truncated: row.truncated,
+    ...(links.length ? { links } : {}),
     readAt: row.readAt,
   };
 }

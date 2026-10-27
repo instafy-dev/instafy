@@ -2636,13 +2636,17 @@ fn embedded_link_only_sites() -> String {
 }
 
 /// What the origin evaluates, in an isolated world of the page, to read a page
-/// a person sends to the chat: the redaction and page-capture scripts. The
-/// origin adds the call itself (see `origin_http_server::browser_page_capture`).
+/// a person sends to the chat: the redaction and page-capture scripts, and the
+/// link-only matcher with the skill's list, which mark the page's links to
+/// link-only sites. The origin adds the call itself (see
+/// `origin_http_server::browser_page_capture`).
 pub fn sent_page_capture_script() -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}\n{}",
         embedded_plain_script(BROWSER_REDACTION_SCRIPT),
         embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
+        embedded_plain_script(BROWSER_LINK_ONLY_SCRIPT),
+        embedded_link_only_sites(),
     )
 }
 

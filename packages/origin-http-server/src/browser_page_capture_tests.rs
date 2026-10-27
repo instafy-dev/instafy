@@ -10,17 +10,31 @@ use tokio_tungstenite::tungstenite::Message as TungMessage;
 
 use super::*;
 
-/// The page reader runtime-agent installs: both policy scripts, each wrapped
-/// so it publishes its API on `globalThis` (see
-/// `runtime_agent::shared_browser::sent_page_capture_script`).
+fn wrap(source: &str) -> String {
+    format!("(function (module, require) {{\n{source}\n}})(undefined, undefined);")
+}
+
+/// The redaction and page-reading policy scripts, each wrapped so it
+/// publishes its API on `globalThis`.
 fn policy_script() -> String {
-    let wrap = |source: &str| {
-        format!("(function (module, require) {{\n{source}\n}})(undefined, undefined);")
-    };
     format!(
         "{}\n{}",
         wrap(include_str!("../../browser-action-policy/redaction.js")),
         wrap(include_str!("../../browser-action-policy/pageCapture.js")),
+    )
+}
+
+/// The page reader runtime-agent installs: the policy scripts plus the
+/// link-only matcher and the web-research skill's list (see
+/// `runtime_agent::shared_browser::sent_page_capture_script`).
+fn reader_with_link_only_list() -> String {
+    format!(
+        "{}\n{}\nglobalThis.__instafyLinkOnlySites = {};",
+        policy_script(),
+        wrap(include_str!("../../browser-action-policy/linkOnly.js")),
+        include_str!(
+            "../../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
+        ),
     )
 }
 
@@ -107,9 +121,34 @@ async fn serve_fake_page(page: FakePage) -> (String, Arc<Mutex<Vec<JsonValue>>>)
 /// Runs `expression` in Node against a minimal page: an address, a title and
 /// rendered body text, with no elements to scan.
 fn run_in_page(expression: &str, url: &str, title: &str, text: &str) -> JsonValue {
+    run_in_page_with_links(expression, url, title, text, &[])
+}
+
+/// As [`run_in_page`], with `links` (text, `href` attribute) as the page's
+/// `<a>` elements.
+fn run_in_page_with_links(
+    expression: &str,
+    url: &str,
+    title: &str,
+    text: &str,
+    links: &[(&str, &str)],
+) -> JsonValue {
+    let anchors = links
+        .iter()
+        .map(|(text, href)| {
+            format!(
+                "{{ tagName: \"A\", innerText: {text}, href: new URL({href}, {url}).href, getAttribute: (name) => name === \"href\" ? {href} : null }}",
+                text = serde_json::to_string(text).unwrap(),
+                href = serde_json::to_string(href).unwrap(),
+                url = serde_json::to_string(url).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let page = format!(
         "globalThis.location = {{ protocol: new URL({url}).protocol, href: {url} }};\n\
-         globalThis.document = {{ title: {title}, body: {{ innerText: {text} }}, querySelectorAll: () => [] }};\n",
+         const anchors = [{anchors}];\n\
+         globalThis.document = {{ title: {title}, baseURI: {url}, body: {{ innerText: {text} }}, querySelectorAll: (selector) => selector === \"*\" ? anchors : [] }};\n",
         url = serde_json::to_string(url).unwrap(),
         title = serde_json::to_string(title).unwrap(),
         text = serde_json::to_string(text).unwrap(),
@@ -251,7 +290,7 @@ async fn a_secret_screen_or_a_withheld_page_sends_no_text() {
             .unwrap()
             .to_string();
         assert!(
-            expression.ends_with("withhold: true });\n})()"),
+            expression.ends_with("withhold: true, linkOnly });\n})()"),
             "{withheld:?}"
         );
     }
@@ -355,5 +394,117 @@ fn the_reader_names_both_policy_modules() {
     assert!(expression.starts_with("/* reader */\n;"));
     assert!(expression.contains("globalThis.__instafyBrowserPageCapture"));
     assert!(expression.contains("globalThis.__instafyBrowserRedaction"));
-    assert!(expression.contains("captureSentPage(redaction, { withhold: false })"));
+    assert!(expression.contains("globalThis.__instafyLinkOnly"));
+    assert!(expression.contains("captureSentPage(redaction, { withhold: false, linkOnly })"));
+}
+
+/// A results page, hand-written: two ordinary results, a hotel on a link-only
+/// site, script and data links, and a relative link.
+const RESULTS_PAGE_LINKS: &[(&str, &str)] = &[
+    ("City Museum: opening hours", "https://museum.example/hours"),
+    (
+        "Hotels near the museum",
+        "https://www.booking.com/hotel/se/city-museum-inn.html",
+    ),
+    ("Run this", "javascript:alert(1)"),
+    ("Inline page", "data:text/html,<p>x</p>"),
+    ("Next page", "/search?q=museum&page=2"),
+    ("City Museum: opening hours", "https://museum.example/hours"),
+];
+
+#[tokio::test]
+async fn a_sent_page_keeps_its_links_with_link_only_sites_marked() {
+    let (url, _) = serve_fake_page(FakePage {
+        withheld: Some(false),
+        loader_after: "LOADER1",
+        evaluate: Arc::new(|expression| {
+            run_in_page_with_links(
+                expression,
+                "https://search.example/?q=museum",
+                "museum - Search",
+                "Results for museum",
+                RESULTS_PAGE_LINKS,
+            )
+        }),
+    })
+    .await;
+    let page = capture_page(&url, &reader_with_link_only_list(), nothing_carried)
+        .await
+        .expect("capture");
+    let links = serde_json::to_value(&page.links).unwrap();
+    assert_eq!(
+        links,
+        json!([
+            { "text": "City Museum: opening hours", "href": "https://museum.example/hours" },
+            {
+                "text": "Hotels near the museum",
+                "href": "https://www.booking.com/hotel/se/city-museum-inn.html",
+                "linkOnly": "Booking.com"
+            },
+            { "text": "Next page", "href": "https://search.example/search?q=museum&page=2" }
+        ])
+    );
+
+    // Without the link-only list, no links go: none could be marked.
+    let (url, _) = serve_fake_page(FakePage {
+        withheld: Some(false),
+        loader_after: "LOADER1",
+        evaluate: Arc::new(|expression| {
+            run_in_page_with_links(
+                expression,
+                "https://search.example/?q=museum",
+                "museum - Search",
+                "Results for museum",
+                RESULTS_PAGE_LINKS,
+            )
+        }),
+    })
+    .await;
+    let page = capture_page(&url, &policy_script(), nothing_carried)
+        .await
+        .expect("capture");
+    assert!(page.links.is_empty(), "{:?}", page.links);
+    assert_eq!(page.text, "Results for museum");
+}
+
+#[tokio::test]
+async fn a_page_cannot_send_links_the_reader_would_not() {
+    let base = json!({ "url": "https://example.test/", "title": "", "text": "", "secretScreen": false, "truncated": false });
+    let with_links = |links: JsonValue| {
+        let mut answer = base.clone();
+        answer["links"] = links;
+        answer
+    };
+    let answers = [
+        with_links(json!([{ "text": "x", "href": "javascript:alert(1)" }])),
+        with_links(json!([{ "text": "x", "href": "https://example.test/", "raw": "y" }])),
+        with_links(
+            json!([{ "text": "x".repeat(MAX_LINK_TEXT_BYTES + 1), "href": "https://example.test/" }]),
+        ),
+        with_links(json!((0..=MAX_LINKS)
+            .map(|_| json!({ "text": "", "href": "https://example.test/" }))
+            .collect::<Vec<_>>())),
+        {
+            let mut withheld =
+                with_links(json!([{ "text": "x", "href": "https://example.test/" }]));
+            withheld["secretScreen"] = json!(true);
+            withheld
+        },
+    ];
+    for answer in answers {
+        let fixed = answer.clone();
+        let (url, _) = serve_fake_page(FakePage {
+            withheld: Some(false),
+            loader_after: "LOADER1",
+            evaluate: Arc::new(move |_| fixed.clone()),
+        })
+        .await;
+        let error = capture_page(&url, "/* reader */", nothing_carried)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, OriginError::Unavailable(_)),
+            "{answer}: {error:?}"
+        );
+    }
 }

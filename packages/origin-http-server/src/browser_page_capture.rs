@@ -5,7 +5,10 @@
 //! this machine, inside an isolated world of the page that page scripts cannot
 //! reach, with the same redaction rules as an agent snapshot
 //! (`@instafy/browser-action-policy`, `pageCapture.js` and `redaction.js`).
-//! Only the masked address, title and text leave the host. A secret screen,
+//! Only the masked address, title, text and up to 200 web links leave the
+//! host; a link to a link-only site is marked with the site's name, from the
+//! web-research skill's list (`linkOnly.js`), and without that list the page
+//! goes without its links. A secret screen,
 //! a page the browser already withholds from the agent (marked on the page, or
 //! opened by a credential step the agent's run recorded), or a page that could
 //! not be checked answers without any text.
@@ -42,6 +45,12 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TEXT_BYTES: usize = 50_000 * 4;
 const MAX_TITLE_BYTES: usize = 1_000 * 4;
 const MAX_URL_BYTES: usize = 8_192 * 4;
+/// `pageCapture.js` sends at most 200 links, each text at most 200 characters
+/// and each address at most 2,048.
+const MAX_LINKS: usize = 200;
+const MAX_LINK_TEXT_BYTES: usize = 200 * 4;
+const MAX_LINK_URL_BYTES: usize = 2_048 * 4;
+const MAX_LINK_SITE_BYTES: usize = 100 * 4;
 /// The name of the isolated world. Each capture creates a fresh one.
 const CAPTURE_WORLD_NAME: &str = "instafy-sent-page";
 
@@ -60,7 +69,9 @@ const WITHHELD_DOCUMENT_EXPRESSION: &str = r#"(() => {
 })()"#;
 
 /// The page reader the hosting process supplies: `redaction.js` and
-/// `pageCapture.js`, each wrapped so it publishes its API on `globalThis`.
+/// `pageCapture.js`, each wrapped so it publishes its API on `globalThis`,
+/// and `linkOnly.js` with the link-only list (`globalThis.__instafyLinkOnly`
+/// and `globalThis.__instafyLinkOnlySites`) so the page's links can be sent.
 /// Without it the route answers 404, like a runtime that predates it.
 pub type BrowserPageCaptureScript = Arc<str>;
 
@@ -72,6 +83,20 @@ struct CapturedPage {
     text: String,
     secret_screen: bool,
     truncated: bool,
+    /// Absent from a reader that predates links.
+    #[serde(default)]
+    links: Vec<CapturedLink>,
+}
+
+/// One web link of a sent page, masked in the page's isolated world.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CapturedLink {
+    text: String,
+    href: String,
+    /// The link-only site it leads to, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    link_only: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,14 +108,27 @@ pub(crate) struct BrowserPageCaptureResponse {
     text: String,
     secret_screen: bool,
     truncated: bool,
+    links: Vec<CapturedLink>,
     /// When this host read the page (RFC 3339, UTC).
     read_at: String,
 }
 
 fn capture_expression(script: &str, withhold: bool) -> String {
     format!(
-        "{script}\n;(() => {{\n  const capture = globalThis.__instafyBrowserPageCapture;\n  const redaction = globalThis.__instafyBrowserRedaction;\n  if (!capture || !redaction) return null;\n  return capture.captureSentPage(redaction, {{ withhold: {withhold} }});\n}})()"
+        "{script}\n;(() => {{\n  const capture = globalThis.__instafyBrowserPageCapture;\n  const redaction = globalThis.__instafyBrowserRedaction;\n  if (!capture || !redaction) return null;\n  const linkOnly = globalThis.__instafyLinkOnly && globalThis.__instafyLinkOnlySites\n    ? {{ api: globalThis.__instafyLinkOnly, sites: globalThis.__instafyLinkOnlySites }}\n    : null;\n  return capture.captureSentPage(redaction, {{ withhold: {withhold}, linkOnly }});\n}})()"
     )
+}
+
+/// Whether a sent link is one the reader could have produced: a web address
+/// and texts within its bounds.
+fn link_is_well_formed(link: &CapturedLink) -> bool {
+    link.text.len() <= MAX_LINK_TEXT_BYTES
+        && link.href.len() <= MAX_LINK_URL_BYTES
+        && link
+            .link_only
+            .as_ref()
+            .is_none_or(|site| !site.is_empty() && site.len() <= MAX_LINK_SITE_BYTES)
+        && reqwest::Url::parse(&link.href).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
 /// One CDP connection to a page target, for a short series of commands.
@@ -201,7 +239,10 @@ fn parse_captured_page(value: &JsonValue) -> Result<CapturedPage, OriginError> {
     if page.url.len() > MAX_URL_BYTES
         || page.title.len() > MAX_TITLE_BYTES
         || page.text.len() > MAX_TEXT_BYTES
-        || (page.secret_screen && (!page.text.is_empty() || !page.title.is_empty()))
+        || page.links.len() > MAX_LINKS
+        || !page.links.iter().all(link_is_well_formed)
+        || (page.secret_screen
+            && (!page.text.is_empty() || !page.title.is_empty() || !page.links.is_empty()))
     {
         return Err(OriginError::unavailable("the page could not be read"));
     }
@@ -292,6 +333,7 @@ async fn capture_page(
                 text: String::new(),
                 secret_screen: true,
                 truncated: false,
+                links: Vec::new(),
             });
         }
         Ok(page)
@@ -345,6 +387,7 @@ pub(crate) async fn handle_browser_page_capture(
         text: page.text,
         secret_screen: page.secret_screen,
         truncated: page.truncated,
+        links: page.links,
         read_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     };
     // Page text is never cached on the way to the person.
