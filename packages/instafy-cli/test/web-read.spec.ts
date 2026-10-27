@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  BUNDLED_LINK_ONLY_SITES,
   LIMITS,
   LINK_ONLY_FILE,
   LINK_ONLY_SCHEMA,
@@ -21,9 +22,10 @@ import {
   WEB_READ_EXIT_OK,
   WEB_READ_EXIT_USAGE,
   checkAddress,
-  domainMatches,
   formatWebRead,
+  linkOnlySite,
   loadLinkOnlyGuard,
+  mementoOriginals,
   registerWebCommand,
   runWebReadCli,
   turnScope,
@@ -36,6 +38,20 @@ import { findPassages, findTerms, pageLines, pageLinks, pageStructured } from ".
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cliBin = path.resolve(here, "..", "bin", "instafy.js");
+const cliBundle = path.resolve(here, "..", "dist", "cli.js");
+// The web-research skill's own list (the single source the CLI bundles) and the matching cases every reader runs.
+const SKILL_LIST_PATH = path.resolve(here, "../../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json");
+const SKILL_LIST = JSON.parse(fs.readFileSync(SKILL_LIST_PATH, "utf8")) as {
+  sites: Array<{ name: string; match: string[] }>;
+  wrappers: Array<{ name: string; match: string[] }>;
+};
+type LinkOnlyCase = { url: string; site: string | null; via?: string[]; pad?: { text: string; times: number } };
+/** A case's address, with a long case's `{pad}` written out. */
+const caseUrl = (kase: LinkOnlyCase) => (kase.pad ? kase.url.replace("{pad}", kase.pad.text.repeat(kase.pad.times)) : kase.url);
+const CASES = JSON.parse(fs.readFileSync(path.resolve(here, "../../browser-action-policy/test/link-only-cases.json"), "utf8")) as {
+  bundled: LinkOnlyCase[];
+  spaceCopy: { list: unknown; cases: LinkOnlyCase[] };
+};
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-web-read-"));
 
 type Route = { status?: number; type?: string; body?: string | Buffer; headers?: Record<string, string> };
@@ -101,16 +117,18 @@ beforeEach(() => {
   stateDir = path.join(base, "state");
   cacheDir = path.join(base, "cache");
   turn = `2026-10-26T10:00:${String(caseNo % 60).padStart(2, "0")}Z`;
-  writeLinkOnly(skillsDir, "instafy-web-research", [
-    { name: "Booking.com", domains: ["booking.com"], reason: "terms ban AI agents" },
-    { name: "Amazon", domains: ["amazon.*", "a.co"], reason: "terms ban AI agents" },
-  ]);
 });
 
-function writeLinkOnly(root: string, skill: string, sites: unknown[], schema = LINK_ONLY_SCHEMA) {
-  fs.mkdirSync(path.join(root, skill), { recursive: true });
-  fs.writeFileSync(path.join(root, skill, LINK_ONLY_FILE), JSON.stringify({ schema, sites }));
+/** A skill's copy of the list, where the web-research skill keeps it (`references/`), or at `place` in the skill folder. */
+function writeLinkOnly(root: string, skill: string, data: unknown, place = path.join("references", LINK_ONLY_FILE)): string {
+  const file = path.join(root, skill, place);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, typeof data === "string" ? data : JSON.stringify(data));
+  return file;
 }
+
+const spaceList = (sites: unknown[], wrappers?: unknown[]) => ({ schema: LINK_ONLY_SCHEMA, sites, ...(wrappers ? { wrappers } : {}) });
+const EXAMPLE_SHOP = { name: "Example Shop", match: ["shop.example"], why: "terms bar AI agents" };
 
 function deps(over: Partial<WebReadDeps> = {}): WebReadDeps {
   return {
@@ -193,6 +211,7 @@ describe("reading a page", () => {
       "https://www.booking.com/hotel/x.html",
     ]);
     expect(result.links![2]).toMatchObject({ linkOnly: true });
+    expect(result.links![1]).not.toHaveProperty("linkOnly");
     expect(result.structured).toEqual(
       expect.arrayContaining([
         { kind: "json-ld", data: { "@type": "Museum", name: "City Museum", geo: { latitude: 59.3, longitude: 18.1 } } },
@@ -200,7 +219,7 @@ describe("reading a page", () => {
       ]),
     );
     expect(report.notice).toMatch(/untrusted data/);
-    expect(report.guards.linkOnly.sites).toBe(2);
+    expect(report.guards.linkOnly).toMatchObject({ sites: SKILL_LIST.sites.length, wrappers: SKILL_LIST.wrappers.length, sources: ["bundled"] });
     expect(report.budget).toMatchObject({ loadsUsed: 1, loadsLeft: 11, scope: "this turn" });
   });
 
@@ -333,13 +352,19 @@ describe("robots.txt for this agent and the AI agents", () => {
   });
 });
 
-describe("link-only guard from skill-owned data", () => {
-  it("never fetches a link-only site, its subdomains or an any-ending pattern", async () => {
+describe("link-only sites: the skill's list, bundled, plus what the space adds", () => {
+  const hitOf = (hit: ReturnType<typeof linkOnlySite>) => (hit ? { site: hit.name, via: hit.via } : null);
+  const expected = (kase: LinkOnlyCase) => (kase.site ? { site: kase.site, via: kase.via ?? [] } : null);
+
+  it("bundles the web-research skill's own list, so a link-only site is never fetched with no skill installed anywhere", async () => {
+    expect(BUNDLED_LINK_ONLY_SITES).toEqual(SKILL_LIST);
     dns["www.booking.com"] = [PUBLIC_A];
     dns["www.amazon.co.uk"] = [PUBLIC_A];
-    const report = await read(["https://www.booking.com/hotel/x.html", "https://www.amazon.co.uk/dp/1"]);
+    routes["www.booking.com/hotel/x.html"] = { body: ARTICLE };
+    const report = await read(["https://www.booking.com/hotel/x.html", "https://www.amazon.co.uk/dp/1"], {}, { skillRoots: [] });
     expect(report.pages.map((p) => p.code)).toEqual(["link_only", "link_only"]);
-    expect(report.pages[0]!.message).toMatch(/Booking\.com is link-only \(terms ban AI agents\)/);
+    expect(report.pages[0]!.message).toMatch(/^Booking\.com is link-only \(terms bar AI agents\)/);
+    expect(report.guards.linkOnly.sources).toEqual(["bundled"]);
     expect(hits).toEqual([]);
     expect(resolved).toEqual([]);
   });
@@ -350,36 +375,190 @@ describe("link-only guard from skill-owned data", () => {
     const result = await one("http://news.example.org/deal");
     expect(result).toMatchObject({ status: "stopped", code: "link_only", redirects: ["https://a.co/d/123"] });
     expect(hits.filter((hit) => hit.startsWith("a.co"))).toEqual([]);
+    expect(resolved).not.toContain("a.co");
   });
 
-  it("matches domains and endings exactly", () => {
-    expect(domainMatches("booking.com", "booking.com")).toBe(true);
-    expect(domainMatches("secure.booking.com.", "booking.com")).toBe(true);
-    expect(domainMatches("notbooking.com", "booking.com")).toBe(false);
-    expect(domainMatches("amazon.de", "amazon.*")).toBe(true);
-    expect(domainMatches("smile.amazon.co.uk", "*.amazon.*")).toBe(true);
-    expect(domainMatches("amazon", "amazon.*")).toBe(false);
-    expect(domainMatches("myamazon.de", "amazon.*")).toBe(false);
+  it("matches every case in the readers' shared table, with and without the space's additions", () => {
+    const bundled = loadLinkOnlyGuard([]);
+    for (const kase of CASES.bundled) expect(hitOf(linkOnlySite(caseUrl(kase), bundled)), kase.url).toEqual(expected(kase));
+    writeLinkOnly(skillsDir, "instafy-web-research", CASES.spaceCopy.list);
+    const withSpace = loadLinkOnlyGuard([skillsDir]);
+    expect(withSpace.warnings).toEqual([]);
+    for (const kase of [...CASES.spaceCopy.cases, ...CASES.bundled]) {
+      expect(hitOf(linkOnlySite(caseUrl(kase), withSpace)), kase.url).toEqual(expected(kase));
+    }
   });
 
-  it("merges every skill's file, skips bad files with a warning, and warns when there is none", () => {
-    writeLinkOnly(skillsDir, "map-pack", [{ name: "Example Maps", domains: ["maps.example"], reason: "no automated access" }]);
-    writeLinkOnly(skillsDir, "old", [{ domains: ["x.example"] }], "something@2");
-    fs.mkdirSync(path.join(skillsDir, "broken"));
-    fs.writeFileSync(path.join(skillsDir, "broken", LINK_ONLY_FILE), "{ not json");
-    writeLinkOnly(skillsDir, "partly", [{ name: "Bad", domains: ["not a domain!"] }, { name: "Good", domains: ["good.example"] }]);
+  it("adds the sites in the space's copy, where the web-research skill keeps it", async () => {
+    const file = writeLinkOnly(skillsDir, "instafy-web-research", spaceList([EXAMPLE_SHOP]));
+    dns["www.shop.example"] = [PUBLIC_A];
+    routes["www.shop.example/item"] = { body: ARTICLE };
+    const report = await read("https://www.shop.example/item");
+    expect(report.pages[0]).toMatchObject({ status: "stopped", code: "link_only" });
+    expect(report.pages[0]!.message).toMatch(/^Example Shop is link-only \(terms bar AI agents\)/);
+    expect(report.guards.linkOnly.sources).toEqual(["bundled", file]);
+    expect(resolved).toEqual([]);
+  });
+
+  it("lets a space's copy only add: a copy without a bundled site does not unlist it", async () => {
+    const copy = { ...SKILL_LIST, sites: SKILL_LIST.sites.filter((site) => site.name !== "Booking.com"), wrappers: [] };
+    writeLinkOnly(skillsDir, "instafy-web-research", copy);
+    writeLinkOnly(skillsDir, "empty-pack", spaceList([]));
+    dns["www.booking.com"] = [PUBLIC_A];
+    for (const url of ["https://www.booking.com/hotel/x.html", "https://web.archive.org/web/2024/https://www.booking.com/"]) {
+      expect(await one(url), url).toMatchObject({ status: "stopped", code: "link_only" });
+    }
+    expect(resolved).toEqual([]);
+  });
+
+  it("ignores a malformed space copy with a warning, and the bundled list still applies", async () => {
+    writeLinkOnly(skillsDir, "broken", "{ not json");
+    writeLinkOnly(skillsDir, "other-schema", { schema: "something@2", sites: [EXAMPLE_SHOP] });
+    writeLinkOnly(skillsDir, "no-sites", { schema: LINK_ONLY_SCHEMA, sites: "booking.com" });
+    writeLinkOnly(skillsDir, "bad-wrappers", { schema: LINK_ONLY_SCHEMA, sites: [EXAMPLE_SHOP], wrappers: "archive.org" });
+    writeLinkOnly(skillsDir, "partly", spaceList([{ name: "Bad", match: ["not a domain!"] }, { name: "Good", match: ["good.example"] }]));
+    // A pack that keeps the file in its skill folder itself is read too.
+    writeLinkOnly(skillsDir, "map-pack", spaceList([{ name: "Example Maps", match: ["maps.example"], why: "no automated access" }]), LINK_ONLY_FILE);
     const guard = loadLinkOnlyGuard([skillsDir, path.join(tmp, "missing")]);
-    expect(guard.sites.map((site) => site.name).sort()).toEqual(["Amazon", "Booking.com", "Example Maps", "Good"]);
-    expect(guard.warnings.join("\n")).toMatch(/old.*schema/);
-    expect(guard.warnings.join("\n")).toMatch(/broken.*skipped/);
-    expect(guard.warnings.join("\n")).toMatch(/without a valid domain/);
+    const warnings = guard.warnings.join("\n");
+    expect(warnings).toMatch(/broken.*is not valid JSON.*ignored; the bundled list still applies/);
+    expect(warnings).toMatch(/other-schema.*schema is not instafy\.link-only-sites@1/);
+    expect(warnings).toMatch(/no-sites.*sites is not a list/);
+    expect(warnings).toMatch(/bad-wrappers.*wrappers is not a list/);
+    expect(warnings).toMatch(/partly.*\(Bad\) without a valid pattern was skipped/);
+    expect(warnings).not.toMatch(/\{ not json/);
+    expect(guard.sources[0]).toBe("bundled");
+    expect(guard.sources.some((source) => source.includes(`${path.sep}partly${path.sep}`))).toBe(true);
+    const named = (url: string) => linkOnlySite(url, guard)?.name ?? null;
+    expect(named("https://www.booking.com/")).toBe("Booking.com");
+    expect(named("https://good.example/")).toBe("Good");
+    expect(named("https://maps.example/")).toBe("Example Maps");
+    expect(named("https://www.shop.example/")).toBe(null);
+
+    dns["www.booking.com"] = [PUBLIC_A];
+    const report = await read("https://www.booking.com/hotel/x.html");
+    expect(report.pages[0]).toMatchObject({ status: "stopped", code: "link_only" });
+    expect(report.warnings.join("\n")).toMatch(/broken.*ignored; the bundled list still applies/);
   });
 
-  it("reports when no skill provides link-only data", async () => {
+  it.skipIf(process.platform === "win32")("leaves out a copy too large to read, or one that is a pipe, without waiting on it", () => {
+    writeLinkOnly(skillsDir, "instafy-web-research", { ...spaceList([EXAMPLE_SHOP]), about: "x".repeat(300 * 1024) });
+    const pipe = path.join(skillsDir, "pipe-pack", "references", LINK_ONLY_FILE);
+    fs.mkdirSync(path.dirname(pipe), { recursive: true });
+    expect(spawnSync("mkfifo", [pipe]).status).toBe(0);
+    const guard = loadLinkOnlyGuard([skillsDir]);
+    const warnings = guard.warnings.join("\n");
+    expect(warnings).toMatch(/instafy-web-research.*is larger than 262144 bytes and was ignored; the bundled list still applies/);
+    expect(warnings).toMatch(/pipe-pack.*is not a file and was ignored; the bundled list still applies/);
+    expect(guard.sources).toEqual(["bundled"]);
+    expect(linkOnlySite("https://www.shop.example/", guard)).toBeNull();
+    expect(linkOnlySite("https://www.booking.com/", guard)?.name).toBe("Booking.com");
+  });
+
+  it("fails closed: when the bundled list cannot be loaded, nothing is read", async () => {
     routes["news.example.org/a"] = { body: ARTICLE };
-    const report = await read("http://news.example.org/a", {}, { skillRoots: [path.join(tmp, "nothing-here")] });
-    expect(report.guards.linkOnly.sites).toBe(0);
-    expect(report.warnings.join(" ")).toMatch(/No link-only site data/);
+    for (const bundled of [null, "not a list", { schema: "something@2", sites: SKILL_LIST.sites }, spaceList([]), spaceList([{ name: "x", match: ["*"] }])]) {
+      const out: string[] = [];
+      const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
+      const code = await runWebReadCli(["http://news.example.org/a"], { json: true }, io, deps({ bundledLinkOnly: bundled }));
+      expect(code, JSON.stringify(bundled)).toBe(70);
+      expect(JSON.parse(out[0]!)).toMatchObject({ ok: false, exitCode: 70 });
+      expect(JSON.parse(out[0]!).error).toMatch(/link-only site list .* could not be loaded, so nothing was read/);
+    }
+    expect(hits).toEqual([]);
+    expect(resolved).toEqual([]);
+  });
+
+  it("never fetches a translator's, cache's or archive's copy of a link-only site, directly or by a redirect", async () => {
+    for (const host of ["www-booking-com.translate.goog", "web.archive.org", "archive.ph", "webcache.googleusercontent.com", "r.jina.ai"]) dns[host] = [PUBLIC_A];
+    const report = await read([
+      "https://www-booking-com.translate.goog/hotel/x.html?_x_tr_sl=auto&_x_tr_tl=en",
+      "https://web.archive.org/web/20240101000000/https://www.booking.com/hotel/x.html",
+      "https://archive.ph/newest/https://www.amazon.de/dp/1",
+      "https://webcache.googleusercontent.com/search?q=cache:www.airbnb.com/rooms/1",
+      "https://r.jina.ai/https://www.tripadvisor.com/x",
+    ]);
+    expect(report.pages.map((p) => p.code)).toEqual(["link_only", "link_only", "link_only", "link_only", "link_only"]);
+    expect(report.pages[0]!.message).toMatch(/^Booking\.com is link-only \(terms bar AI agents\); this address is its copy on Google Translate's page proxy/);
+    expect(report.pages[1]!.message).toMatch(/its copy on the Wayback Machine/);
+    expect(hits).toEqual([]);
+    expect(resolved).toEqual([]);
+
+    routes["news.example.org/cached"] = { status: 302, headers: { location: "https://web.archive.org/web/2024/https%3A%2F%2Fwww.booking.com%2F" } };
+    const redirected = await one("http://news.example.org/cached");
+    expect(redirected).toMatchObject({ status: "stopped", code: "link_only" });
+    expect(redirected.message).toMatch(/^redirected to https:\/\/web\.archive\.org\/.*: Booking\.com is link-only/);
+    expect(hits).toEqual(["news.example.org/robots.txt", "news.example.org/cached"]);
+    expect(resolved).not.toContain("web.archive.org");
+  });
+
+  it("reads a wrapper's copy of a site that is not link-only", async () => {
+    dns["web.archive.org"] = [PUBLIC_A];
+    routes["web.archive.org/web/2024/https://example.org/"] = { body: ARTICLE };
+    const result = await one("http://web.archive.org/web/2024/https://example.org/");
+    expect(result.status).toBe("read");
+  });
+
+  it("marks links to a wrapper's copy of a link-only site as link-only", async () => {
+    routes["news.example.org/links"] = {
+      body: page(
+        '<p>Some text for the page.</p><a href="https://www-booking-com.translate.goog/hotel">Translated</a>' +
+          '<a href="https://web.archive.org/web/2024/https://www.amazon.de/dp/1">Archived</a>' +
+          '<a href="https://web.archive.org/web/2024/https://example.org/">Archived other</a>',
+      ),
+    };
+    const result = await one("http://news.example.org/links");
+    expect(result.links!.map((link) => Boolean(link.linkOnly))).toEqual([true, true, false]);
+  });
+
+  it("reads a page whose links name hosts the URL parser rejects, inside a wrapper's address or not", async () => {
+    routes["news.example.org/odd-links"] = {
+      body: page(
+        '<p>Some text for the page.</p><a href="https://web.archive.org/web/2024/https://xn--a.example/">Archived odd</a>' +
+          '<a href="https://web.archive.org/web/2024/https://xn--a.booking.com/">Archived listed</a>' +
+          '<a href="https://r.jina.ai/https://book%C2%ADing.com/">Reader copy</a>',
+      ),
+    };
+    const result = await one("http://news.example.org/odd-links");
+    expect(result.status).toBe("read");
+    expect(result.links!.map((link) => Boolean(link.linkOnly))).toEqual([false, true, true]);
+  });
+
+  it("never follows a robots.txt redirect into a link-only site", async () => {
+    dns["www.booking.com"] = [PUBLIC_A];
+    routes["news.example.org/robots.txt"] = { status: 301, headers: { location: "https://www.booking.com/robots.txt" } };
+    routes["www.booking.com/robots.txt"] = { type: "text/plain", body: "User-agent: *\nAllow: /\n" };
+    routes["news.example.org/a"] = { body: ARTICLE };
+    const result = await one("http://news.example.org/a");
+    expect(result).toMatchObject({ status: "stopped", code: "robots" });
+    expect(result.message).toMatch(/robots\.txt for http:\/\/news\.example\.org redirects to Booking\.com, which is link-only/);
+    expect(hits).toEqual(["news.example.org/robots.txt"]);
+    expect(resolved).not.toContain("www.booking.com");
+  });
+
+  it("reads a hostile Memento header in linear time", () => {
+    const base = new URL("https://archive.ph/AbCdE");
+    for (const link of ["<" + "<=".repeat(100_000), "<".repeat(200_000)]) {
+      const started = performance.now();
+      expect(mementoOriginals(link, base)).toEqual([]);
+      expect(performance.now() - started, `${link.length} characters`).toBeLessThan(1_000);
+    }
+    expect(mementoOriginals(`<${"<=".repeat(1_000)}, <https://www.booking.com/>; rel="original"`, base)).toEqual(["https://www.booking.com/"]);
+  });
+
+  it("withholds a page that says it is a copy of a link-only site (Memento rel=original)", async () => {
+    dns["archive.ph"] = [PUBLIC_A];
+    routes["archive.ph/AbCdE"] = {
+      body: ARTICLE,
+      headers: { link: '<https://www.booking.com/hotel/x.html>; rel="original", <https://archive.ph/timegate/https://www.booking.com/hotel/x.html>; rel="timegate"' },
+    };
+    routes["archive.ph/FgHiJ"] = { body: ARTICLE, headers: { link: '<https://example.org/>; rel="original memento"' } };
+    const [copy, other] = (await read(["http://archive.ph/AbCdE", "http://archive.ph/FgHiJ"])).pages;
+    expect(copy).toMatchObject({ status: "stopped", code: "link_only" });
+    expect(copy!.message).toMatch(/^the page is a copy of https:\/\/www\.booking\.com\/hotel\/x\.html: Booking\.com is link-only/);
+    expect(copy!.text).toBeUndefined();
+    expect(JSON.stringify(copy)).not.toMatch(/closes at 18:00/);
+    expect(other!.status).toBe("read");
   });
 });
 
@@ -713,8 +892,19 @@ describe("page-written data stays bounded and marked", () => {
     dns["www.newly.example.com"] = [PUBLIC_A];
     routes["www.newly.example.com/x"] = { body: ARTICLE };
     expect((await one("http://www.newly.example.com/x")).status).toBe("read");
-    writeLinkOnly(skillsDir, "another-skill", [{ name: "Newly", domains: ["newly.example.com"], reason: "terms ban AI agents" }]);
+    writeLinkOnly(skillsDir, "another-skill", spaceList([{ name: "Newly", match: ["newly.example.com"], why: "terms bar AI agents" }]));
     expect(await one("http://www.newly.example.com/x")).toMatchObject({ status: "stopped", code: "link_only", fromCache: false });
+  });
+
+  it("does not serve a cached archive copy of a site listed as link-only since (Memento rel=original)", async () => {
+    dns["archive.ph"] = [PUBLIC_A];
+    routes["archive.ph/KlMnO"] = { body: ARTICLE, headers: { link: '<https://www.newly.example.com/x>; rel="original"' } };
+    expect((await one("http://archive.ph/KlMnO")).status).toBe("read");
+    writeLinkOnly(skillsDir, "another-skill", spaceList([{ name: "Newly", match: ["newly.example.com"], why: "terms bar AI agents" }]));
+    const again = await one("http://archive.ph/KlMnO");
+    expect(again).toMatchObject({ status: "stopped", code: "link_only", fromCache: false });
+    expect(again.message).toMatch(/copy of https:\/\/www\.newly\.example\.com\/x: Newly is link-only/);
+    expect(JSON.stringify(again)).not.toMatch(/closes at 18:00/);
   });
 
   it("puts the page's title and link texts inside the untrusted wrapper in the text output", async () => {
@@ -774,21 +964,47 @@ describe("the command", () => {
     expect(read.options.map((o) => o.long)).toEqual(["--find", "--max-chars", "--links", "--fresh", "--json"]);
   });
 
-  it("runs from the built CLI: link-only data from the space's skills, private addresses refused, no network", () => {
-    const home = fs.mkdtempSync(path.join(tmp, "home-"));
-    const space = fs.mkdtempSync(path.join(tmp, "space-"));
-    writeLinkOnly(path.join(space, ".agents", "skills"), "instafy-web-research", [
-      { name: "Booking.com", domains: ["booking.com"], reason: "terms ban AI agents" },
-    ]);
-    const run = spawnSync(process.execPath, [cliBin, "web", "read", "https://www.booking.com/x", "http://[::1]/", "--json"], {
+  const runBuilt = (space: string, home: string, urls: string[]) =>
+    spawnSync(process.execPath, [cliBin, "web", "read", ...urls, "--json"], {
       cwd: space,
-      env: { ...process.env, HOME: home, USERPROFILE: home, XDG_STATE_HOME: "", XDG_CACHE_HOME: "", INSTAFY_TURN_STARTED_AT: "" },
+      env: { ...process.env, HOME: home, USERPROFILE: home, XDG_STATE_HOME: "", XDG_CACHE_HOME: "", INSTAFY_TURN_STARTED_AT: "", INSTAFY_SKILL_PACKS_DIR: "" },
       encoding: "utf8",
     });
-    expect(run.status).toBe(WEB_READ_EXIT_NONE_READ);
+
+  it("carries the web-research skill's own list in the built CLI, so it applies with no skill installed, and no network", () => {
+    const bundle = fs.readFileSync(cliBundle, "utf8");
+    for (const entry of [...SKILL_LIST.sites, ...SKILL_LIST.wrappers]) {
+      expect(bundle, entry.name).toContain(JSON.stringify(entry.name));
+      for (const pattern of entry.match) expect(bundle, pattern).toContain(JSON.stringify(pattern));
+    }
+    const home = fs.mkdtempSync(path.join(tmp, "home-"));
+    const space = fs.mkdtempSync(path.join(tmp, "space-"));
+    // The shared matcher is bundled too: a translator's copy of an archive's copy is found as the archived site.
+    const run = runBuilt(space, home, [
+      "https://www.booking.com/x",
+      "https://www-amazon-de.translate.goog/dp/1",
+      "https://web-archive-org.translate.goog/web/2024/https://www.airbnb.de/rooms/1",
+      "http://[::1]/",
+    ]);
+    expect(run.status, run.stderr).toBe(WEB_READ_EXIT_NONE_READ);
     const report = JSON.parse(run.stdout);
-    expect(report.pages.map((p: PageResult) => p.code)).toEqual(["link_only", "blocked_address"]);
-    expect(report.guards.linkOnly.sources[0]).toMatch(/instafy-web-research/);
+    expect(report.pages.map((p: PageResult) => p.code)).toEqual(["link_only", "link_only", "link_only", "blocked_address"]);
+    expect(report.guards.linkOnly).toMatchObject({ sites: SKILL_LIST.sites.length, wrappers: SKILL_LIST.wrappers.length, sources: ["bundled"] });
     expect(fs.existsSync(path.join(home, ".local", "state", "instafy", "web-read"))).toBe(true);
+  });
+
+  it("adds the space's own copy from the built CLI, found from the space's folder", () => {
+    const home = fs.mkdtempSync(path.join(tmp, "home-"));
+    const space = fs.mkdtempSync(path.join(tmp, "space-"));
+    writeLinkOnly(path.join(space, ".agents", "skills"), "instafy-web-research", spaceList([EXAMPLE_SHOP]));
+    const nested = path.join(space, "site", "src");
+    fs.mkdirSync(nested, { recursive: true });
+    const run = runBuilt(nested, home, ["https://www.shop.example/item", "https://www.booking.com/x"]);
+    expect(run.status, run.stderr).toBe(WEB_READ_EXIT_NONE_READ);
+    const report = JSON.parse(run.stdout);
+    expect(report.pages.map((p: PageResult) => p.code)).toEqual(["link_only", "link_only"]);
+    expect(report.pages[0].message).toMatch(/^Example Shop is link-only/);
+    expect(report.guards.linkOnly.sources[0]).toBe("bundled");
+    expect(report.guards.linkOnly.sources[1]).toMatch(/instafy-web-research[\\/]references[\\/]link-only-sites\.json$/);
   });
 });

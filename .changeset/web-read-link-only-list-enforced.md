@@ -1,0 +1,5 @@
+---
+"@instafy/cli": patch
+---
+
+`instafy web read` now always applies the web-research skill's link-only list. The CLI is built with the skill's own `references/link-only-sites.json`, so a link-only site is never fetched wherever the command runs, at the first request and at every redirect hop, robots.txt redirects included; if the list cannot be loaded, nothing is read and the command exits 70 with a clear error. The space's own copy of the list (and any skill's copy, in `references/` or the skill folder) adds sites; a copy can never remove a bundled site, and a malformed copy is ignored with a warning. A translator's, cache's or archive's copy of a link-only site (the list's new `wrappers`, such as `www-example-com.translate.goog`, `web.archive.org/web/…/<address>`, archive.today and Google's cache) is refused as that site, and a page that declares itself a copy of one (Memento `rel="original"`) is withheld. Hosts match however an address spells them: case, trailing dots, port, user info and international names. `guards.linkOnly` now reports `wrappers` and the sources in force (`bundled` first).

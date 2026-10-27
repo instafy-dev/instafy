@@ -682,7 +682,7 @@ Each page comes back with:
 | `code`, `message`, `tell` | Why it stopped, was skipped or failed, and what to do instead |
 | `provenance` | `{requestedUrl, finalUrl, title, readAt, viewer: "server fetch"}`, to cite the page |
 | `text` | The page text, at most `--max-chars` (default 4,000, at most 12,000), or with `--find` only the passages that mention the terms, wrapped in `<untrusted_page_content url=… read_at=… viewer=…>` |
-| `links` | Plain `<a href>` links (`--links`, default 30, at most 200), each marked `linkOnly` when a skill lists its site as link-only |
+| `links` | Plain `<a href>` links (`--links`, default 30, at most 200), each marked `linkOnly` when it leads to a link-only site or a wrapper's copy of one |
 | `structured` | The page's own JSON-LD, microdata and descriptive meta tags, raw and bounded (8,000 characters in all; items that do not fit are left out and counted in `structuredDropped`); skills map the fields they need |
 | `redirects`, `httpStatus`, `contentHash`, `fromCache` | How the page was reached, and whether it came from this workspace's cache |
 
@@ -698,17 +698,32 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   anthropic-ai, PerplexityBot, Perplexity-User, CCBot, Google-Extended, Applebot-Extended, meta-externalagent,
   meta-externalfetcher, Bytespider, Amazonbot, cohere-ai, MistralAI-User, DuckAssistBot) is not read. A robots.txt
   that answers 5xx counts as "disallow everything".
-- **Link-only sites.** Sites whose terms ban AI agents or copying are never fetched. The list is skill-owned data:
-  every `link-only-sites.json` in a skill folder (`.agents/skills/<skill>/` in the space and its parents,
-  `~/.agents/skills/<skill>/`, and the skill packs under `INSTAFY_SKILL_PACKS_DIR`). Files only add sites:
+- **Link-only sites.** Sites whose terms ban AI agents or copying are never fetched, nor a translator's, cache's or
+  archive's copy of one, and no request goes to one at any redirect hop (robots.txt redirects included). The list is
+  the `instafy-web-research` skill's own data (`references/link-only-sites.json`). The CLI is built with that file, so
+  the list applies wherever the command runs; if it cannot be loaded, nothing is read (exit 70). A skill folder's own
+  copy (`<skill>/references/link-only-sites.json` or `<skill>/link-only-sites.json` under `.agents/skills/` in the
+  space and its parents, `~/.agents/skills/`, and the skill packs under `INSTAFY_SKILL_PACKS_DIR`), such as the
+  space's copy of the list, only adds sites and wrappers:
 
   ```json
   { "schema": "instafy.link-only-sites@1",
-    "sites": [{ "name": "Example Travel", "domains": ["example-travel.com", "exampletravel.*"], "reason": "terms ban AI agents" }] }
+    "sites": [{ "name": "Example Travel", "match": ["example-travel.com", "exampletravel.*"], "why": "terms ban AI agents" }],
+    "wrappers": [{ "name": "Example Proxy", "match": ["proxy.example"], "embeds": ["subdomain"], "why": "serves sites at <host>.proxy.example" }] }
   ```
 
-  A domain covers its subdomains; `name.*` covers any ending (`name.de`, `name.co.uk`). A file that does not parse or
-  has another schema is skipped with a warning, and the report says when no data was found.
+  A pattern covers its subdomains; `name.*` covers `name` followed by one or two 2-3 letter labels (`name.de`,
+  `name.co.uk`). Hosts match however the address spells them (case, trailing dots, port, user info, international
+  names). A wrapper is a service that serves other sites' pages at its own address; `embeds` says where its address
+  writes the site (`subdomain`, `subdomain-dashes` as in `www-example-com.translate.goog`, `path` as in
+  `web.archive.org/web/2024/https://example.com/`, or `query`). Wrappers nest (a translator's copy of an archive's copy is
+  the archived site), every host written in a wrapper's path or query counts, and an address of any length is checked; a
+  copy the check cannot see through (nested more than 32 wrappers deep, or naming more than 4,096 hosts) is refused. A
+  page that says it is a copy of another address (the Memento `Link: <…>; rel="original"` header archives send) is
+  checked as that address too, also when it is served from the cache. A copy that does not
+  parse, has another schema or is not a list is ignored with a warning, and the bundled list still applies.
+  `guards.linkOnly` reports the sites, wrappers and sources (`bundled` and each copy) in force. The matching is
+  `@instafy/browser-action-policy`'s `linkOnly.js`, which the Shared and Personal Browser run too.
 - **Private networks.** Every hop's host is resolved and every address checked. Loopback, private, link-local,
   CGNAT, multicast, documentation, metadata (`169.254.169.254`) and other reserved addresses, their IPv6, IPv4-mapped,
   IPv4-translated, NAT64 (including local-use `64:ff9b:1::/48`) and 6to4 forms, and local names (`localhost`,

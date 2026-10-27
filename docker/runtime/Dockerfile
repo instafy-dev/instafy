@@ -108,10 +108,14 @@ COPY packages/instafy-bind/src packages/instafy-bind/src
 COPY packages/instafy-bind/client packages/instafy-bind/client
 COPY packages/instafy-sdk/package.json packages/instafy-sdk/package.json
 COPY packages/instafy-sdk/src packages/instafy-sdk/src
-# `instafy web read` bundles the zero-dependency secret redaction.
+# `instafy web read` bundles the zero-dependency secret redaction, the link-only
+# matcher and the web-research skill's link-only list (its one source).
 COPY packages/browser-action-policy/package.json packages/browser-action-policy/package.json
 COPY packages/browser-action-policy/redaction.js packages/browser-action-policy/redaction.js
 COPY packages/browser-action-policy/redaction.d.ts packages/browser-action-policy/redaction.d.ts
+COPY packages/browser-action-policy/linkOnly.js packages/browser-action-policy/linkOnly.js
+COPY packages/browser-action-policy/linkOnly.d.ts packages/browser-action-policy/linkOnly.d.ts
+COPY packages/runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json packages/runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json
 COPY packages/provider-client/package.json packages/provider-client/package.json
 COPY packages/provider-client/index.js packages/provider-client/index.js
 COPY packages/provider-client/index.d.ts packages/provider-client/index.d.ts

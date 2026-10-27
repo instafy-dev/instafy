@@ -25,7 +25,7 @@ const resultDirectory = path.join(repositoryRoot, "packages/frontend/test-result
 const policyScript = (name) => `(function (module, require) {\n${
   fs.readFileSync(path.join(repositoryRoot, "packages/browser-action-policy", name), "utf8")
 }\n})(undefined, undefined);`;
-export const policyScriptNames = ["redaction.js", "actionPolicy.js", "pageCapture.js"];
+export const policyScriptNames = ["redaction.js", "actionPolicy.js", "pageCapture.js", "linkOnly.js"];
 // The web-research skill's link-only list, embedded the way runtime-agent's
 // embedded_link_only_sites() embeds it: without it the controller refuses
 // every step, on the page the person chose too.
