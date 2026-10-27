@@ -112,6 +112,32 @@ updated controller so idle recovery uses the partial early-checkpoint index rath
 scanning ordinary job history. The recovery query still checks historical early checkpoints
 for a final result; it is not a constant-cost queue.
 
+A group with no early checkpoint has its own idle recovery. The final lead is queued after the
+last worker's end commits, so a controller restart or a dispatch error, which is only logged,
+can lose it. Two minutes after the last worker ends, recovery queues that lead from a fresh
+group snapshot, with the last worker as its trigger. It skips groups that end without a lead
+on purpose:
+
+- a deleted space;
+- a Stop;
+- a refused lead;
+- a question that is still waiting for a person;
+- a last worker that expired after a person stopped its runtime;
+- a last worker that planned again.
+
+If the conversation moved on after the workers ended, because a person wrote or another turn
+started, a late lead would answer out of turn. In that case the conversation instead shows one
+error notice: "@octo could not continue the plan after its agents finished. Their results are
+in the plan." Recovery also gives up with that notice when retries keep failing:
+
+- after 10 minutes, if the dispatch refuses the lead;
+- after an hour, if the failure may pass, such as a pool or database error.
+
+No later checkpoint starts the lead after the notice. Groups whose workers ended more than two
+hours ago are not revived. Apply
+`20261028120004_agent_jobs_lost_final_checkpoint_recovery_idx.sql` before enabling the updated
+controller, so this recovery reads only recently ended plan workers.
+
 Profile selection and settings propagation are separate checks. A planner can still create an
 ephemeral worker when a request names a saved profile. Verify the controller-stamped profile ID
 before attributing a run to that profile, then inspect the effective worker settings. Correct

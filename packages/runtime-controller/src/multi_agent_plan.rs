@@ -803,7 +803,9 @@ async fn checkpoint_plan_group(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
     lock_plan_group_checkpoint(&transaction, group_id).await?;
-    if plan_group_was_stopped(&transaction, project_id, conversation_id, group_id).await? {
+    if plan_group_was_stopped(&transaction, project_id, conversation_id, group_id).await?
+        || plan_group_lead_was_given_up(&transaction, conversation_id, group_id).await?
+    {
         return Ok(false);
     }
 
@@ -839,7 +841,9 @@ async fn checkpoint_plan_group(
             .await
             .map_err(|e| internal_error(format!("checkpoint transaction: {e}")))?;
         lock_plan_group_checkpoint(&transaction, group_id).await?;
-        if plan_group_was_stopped(&transaction, project_id, conversation_id, group_id).await? {
+        if plan_group_was_stopped(&transaction, project_id, conversation_id, group_id).await?
+            || plan_group_lead_was_given_up(&transaction, conversation_id, group_id).await?
+        {
             return Ok(false);
         }
     }
@@ -996,6 +1000,27 @@ pub(crate) async fn plan_group_was_stopped(
         .map_err(|error| internal_error(format!("failed to inspect plan Stop intent: {error}")))
 }
 
+/// The lost-handoff recovery told the person the group's final lead could not
+/// start (`give_up_lost_final_checkpoint`). Like a Stop, that is final: no
+/// later checkpoint of the group may start the lead after all.
+async fn plan_group_lead_was_given_up(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: Uuid,
+    group_id: &str,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select exists(select 1 from conversation_messages
+          where conversation_id = $1 and created_by is null
+            and metadata->>'source' = 'controller' and metadata->>'kind' = $2
+            and metadata #>> '{multiAgentPlan,groupId}' = $3)",
+            &[&conversation_id, &LEAD_CHECKPOINT_FAILED_CODE, &group_id],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| internal_error(format!("failed to inspect a given-up plan lead: {error}")))
+}
+
 /// Cancellation is terminal too: canceling the last running lane must still
 /// fire the final lead checkpoint the plan promised. Called (best-effort) by
 /// the cancel endpoints after their transaction commits.
@@ -1100,6 +1125,174 @@ pub(crate) async fn checkpoint_plan_groups_for_jobs(
         }
     }
     Ok(())
+}
+
+/// A plan's last worker to end, loaded for the lost-handoff recovery: its
+/// project, conversation, session, payload and plan group.
+struct LastPlanWorker {
+    project_id: Uuid,
+    conversation_id: Uuid,
+    session_id: Option<Uuid>,
+    payload: JsonValue,
+    group_id: String,
+}
+
+async fn load_last_plan_worker(
+    state: &AppState,
+    job_id: Uuid,
+) -> Result<Option<LastPlanWorker>, (StatusCode, Json<ApiError>)> {
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let row = connection
+        .query_opt(
+            "select project_id, conversation_id, session_id, payload from agent_jobs where id = $1",
+            &[&job_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to load the plan's last worker: {error}"))
+        })?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
+    let Some(group_id) = plan_worker_metadata(&payload)
+        .and_then(|plan| plan.get("groupId"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    let Some(conversation_id) = row.get::<_, Option<Uuid>>("conversation_id") else {
+        return Ok(None);
+    };
+    Ok(Some(LastPlanWorker {
+        project_id: row.get("project_id"),
+        conversation_id,
+        session_id: row
+            .get::<_, Option<Uuid>>("session_id")
+            .or_else(|| extract_uuid(&payload, &["session_id"])),
+        payload,
+        group_id,
+    }))
+}
+
+/// Run the final checkpoint whose handoff was lost: `trigger_job_id` is the
+/// last worker of its group to end, and that end's settlement (or the
+/// checkpoint a cancellation or sweep starts after its commit) never queued
+/// the final lead, because the controller restarted or the dispatch failed
+/// and was only logged. A send queued behind the workers has usually gone
+/// already (that settlement and the send-queue recovery drain it), so the
+/// drain after a dispatch only releases what was queued since. An error is
+/// returned for the caller to retry or give up.
+pub(crate) async fn recover_lost_final_checkpoint(
+    state: &AppState,
+    trigger_job_id: Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let Some(worker) = load_last_plan_worker(state, trigger_job_id).await? else {
+        return Ok(false);
+    };
+    let Some(plan_meta) = plan_worker_metadata(&worker.payload) else {
+        return Ok(false);
+    };
+    let dispatched = checkpoint_plan_group(
+        state,
+        worker.project_id,
+        worker.conversation_id,
+        &worker.group_id,
+        trigger_job_id,
+        &worker.payload,
+        plan_meta,
+        false,
+    )
+    .await?;
+    if dispatched {
+        crate::send_queue::spawn_send_queue_drain(state.clone(), worker.conversation_id);
+    }
+    Ok(dispatched)
+}
+
+/// Tell the person once that the final lead of `trigger_job_id`'s group will
+/// not start: its recovery kept failing, or the conversation moved on since
+/// the workers ended, so a late lead would answer out of turn. Under the group
+/// lock it rechecks that the group still has no lead, no live worker or early
+/// lead, and no Stop; the notice is then final for every later checkpoint
+/// (`plan_group_lead_was_given_up`). Returns whether it told the person.
+pub(crate) async fn give_up_lost_final_checkpoint(
+    state: &AppState,
+    trigger_job_id: Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let Some(worker) = load_last_plan_worker(state, trigger_job_id).await? else {
+        return Ok(false);
+    };
+    let Some(plan_meta) = plan_worker_metadata(&worker.payload) else {
+        return Ok(false);
+    };
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let mut transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    lock_plan_group_checkpoint(&transaction, &worker.group_id).await?;
+    if plan_group_was_stopped(
+        &transaction,
+        worker.project_id,
+        worker.conversation_id,
+        &worker.group_id,
+    )
+    .await?
+        || plan_group_lead_was_given_up(&transaction, worker.conversation_id, &worker.group_id)
+            .await?
+    {
+        return Ok(false);
+    }
+    let snapshot = load_plan_group_snapshot(
+        &mut transaction,
+        worker.project_id,
+        Some(worker.conversation_id),
+        &worker.group_id,
+    )
+    .await?;
+    if snapshot.has_lead_continuation
+        || snapshot.has_active_early_checkpoint
+        || snapshot.workers.is_empty()
+        || !snapshot
+            .workers
+            .iter()
+            .all(|sibling| is_terminal_job_status(sibling.status.as_str()))
+    {
+        return Ok(false);
+    }
+    let lead = parse_lead_from_plan_meta(plan_meta);
+    record_lead_checkpoint_notice(
+        state,
+        worker.project_id,
+        worker.conversation_id,
+        worker.session_id,
+        &worker.group_id,
+        trigger_job_id,
+        None,
+        LEAD_CHECKPOINT_FAILED_CODE,
+        &format!(
+            "@{} could not continue the plan after its agents finished. Their results are in the plan.",
+            lead.lead_handle
+        ),
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(format!("failed to release checkpoint lock: {error}")))?;
+    Ok(true)
 }
 
 pub(crate) struct PlanGroupSnapshot {
@@ -1375,6 +1568,10 @@ pub(crate) fn plan_group_snapshot_to_json(
 }
 
 const EARLY_FAILURE_CHECKPOINT_KIND: &str = "early_failure";
+/// The `kind` of the notice the lost-handoff recovery
+/// (`runtime::recover_lost_final_plan_checkpoints`) writes when it gives up a
+/// group's final lead: its agents ended, and the lead could not be started.
+pub(crate) const LEAD_CHECKPOINT_FAILED_CODE: &str = "multi_agent_lead_checkpoint_failed";
 
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_lead_checkpoint(
@@ -1458,7 +1655,7 @@ async fn dispatch_lead_checkpoint(
                 checkpoint_kind = checkpoint_kind.unwrap_or("final"),
                 "refused skill-authored multi-agent lead checkpoint pinned to a private runtime"
             );
-            record_lead_checkpoint_refusal(
+            record_lead_checkpoint_notice(
                 state,
                 project_id,
                 conversation_id,
@@ -1466,6 +1663,7 @@ async fn dispatch_lead_checkpoint(
                 group_id,
                 completed_job_id,
                 checkpoint_kind,
+                MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE,
                 &reason,
             )
             .await?;
@@ -1486,12 +1684,14 @@ async fn dispatch_lead_checkpoint(
     Ok(true)
 }
 
-/// Write a refused lead checkpoint to the conversation as a controller error,
-/// once per plan group: an early checkpoint and the final one would otherwise
-/// both say it. The caller holds the group's checkpoint lock
-/// (`checkpoint_plan_group`), so two refusals of one group cannot race.
+/// Write a lead checkpoint that could not start (`kind`: refused, or given up
+/// by the lost-handoff recovery) to the conversation as a controller error,
+/// once per plan group and kind: an early checkpoint and the final one would
+/// otherwise both say it. The caller holds the group's checkpoint lock
+/// (`checkpoint_plan_group`, or `give_up_lost_final_checkpoint`), so two
+/// notices of one group cannot race.
 #[allow(clippy::too_many_arguments)]
-async fn record_lead_checkpoint_refusal(
+async fn record_lead_checkpoint_notice(
     state: &AppState,
     project_id: Uuid,
     conversation_id: Uuid,
@@ -1499,6 +1699,7 @@ async fn record_lead_checkpoint_refusal(
     group_id: &str,
     trigger_job_id: Uuid,
     checkpoint_kind: Option<&str>,
+    kind: &str,
     reason: &str,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let mut connection = state
@@ -1520,16 +1721,12 @@ async fn record_lead_checkpoint_refusal(
                    and metadata #>> '{multiAgentPlan,groupId}' = $3
                    and metadata #>> '{multiAgentPlan,role}' = 'lead_continuation'
              )",
-            &[
-                &conversation_id,
-                &MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE,
-                &group_id,
-            ],
+            &[&conversation_id, &kind, &group_id],
         )
         .await
         .map_err(|error| {
             internal_error(format!(
-                "failed to look up a refused lead checkpoint message: {error}"
+                "failed to look up a lead checkpoint notice: {error}"
             ))
         })?
         .get(0);
@@ -1546,7 +1743,7 @@ async fn record_lead_checkpoint_refusal(
         reason,
         &json!({
             "source": "controller",
-            "kind": MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE,
+            "kind": kind,
             "outcome": "failed",
             "messageType": "error",
             "errorMessage": reason,
@@ -1561,7 +1758,7 @@ async fn record_lead_checkpoint_refusal(
     .await?;
     transaction.commit().await.map_err(|error| {
         internal_error(format!(
-            "failed to commit the refused lead checkpoint message: {error}"
+            "failed to commit a lead checkpoint notice: {error}"
         ))
     })?;
     crate::conversations::publish_conversation_message_event(&state.events, &message);
