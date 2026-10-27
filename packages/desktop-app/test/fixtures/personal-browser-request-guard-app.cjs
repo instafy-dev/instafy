@@ -74,6 +74,19 @@ globalThis.__instafyRequestGuardScenario = async ({ origin, proxy }) => {
     }
     return "no answer";
   };
+  // A page already open that opens a WebSocket: the message it gets, or "error".
+  const socket = async (window, url) => {
+    const script = `const socket = new WebSocket(${JSON.stringify(url)});` +
+      "socket.onmessage = (event) => { document.body.dataset.socket = `got: ${event.data}`; };" +
+      "socket.onerror = () => { document.body.dataset.socket ||= 'error'; };";
+    await load(window, `data:text/html,${encodeURIComponent(`<!doctype html><body><script>${script}</script></body>`)}`);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const value = await window.webContents.executeJavaScript("document.body.dataset.socket || ''");
+      if (value) return value;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return "no answer";
+  };
 
   const direct = await guarded(null);
   const viaProxy = await guarded(`http=${new URL(proxy).host}`);
@@ -88,6 +101,10 @@ globalThis.__instafyRequestGuardScenario = async ({ origin, proxy }) => {
     person: await outcome(personTab, `http://rebound.guard.test:${port}/guard/page`),
     fetched: await fetched(agentTab, `http://rebound.guard.test:${port}/guard/data`),
     personFetched: await fetched(personTab, `http://rebound.guard.test:${port}/guard/data`),
+    fetchedLiteral: await fetched(agentTab, `http://127.0.0.1:${port}/guard/data`),
+    socket: await socket(agentTab, `ws://127.0.0.1:${port}/guard/socket`),
+    personFetchedLiteral: await fetched(personTab, `http://127.0.0.1:${port}/guard/data`),
+    personSocket: await socket(personTab, `ws://127.0.0.1:${port}/guard/socket`),
     stopped,
   };
   for (const window of BrowserWindow.getAllWindows()) window.destroy();

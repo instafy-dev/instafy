@@ -291,13 +291,22 @@ export async function checkPersonalBrowserAgentTabUrl(
  * local one.
  */
 export function personalBrowserAgentTabHopIsPublic(value: string): boolean {
+  return /^https?:/i.test(value.trim()) && personalBrowserRequestHostIsPublic(value);
+}
+
+/**
+ * The same literal check for any request a page makes (http, https, ws,
+ * wss), decided without a lookup: an address literal must be public and a
+ * host name must not be a local one.
+ */
+export function personalBrowserRequestHostIsPublic(value: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
     return false;
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  if (!["http:", "https:", "ws:", "wss:"].includes(parsed.protocol)) return false;
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   if (!host) return false;
   if (isIP(host)) return !isPrivateAddress(host);

@@ -506,7 +506,8 @@ export class PersonalBrowserControlServer {
             "Every tool acts on the tab on screen. open_tab opens a public page in a new visible tab (at most three of yours); " +
             "select_tab shows another tab and close_tab closes one you opened. Pause or Escape ends control of every tab. " +
             "In every tab, open, navigate to and follow only public web pages, never a link-only site: link_only_site, link_only_list_unavailable and " +
-            "private_address_blocked are final for that step: do not retry it. Give the person the plain link, or ask them to open a private address in their own tab.",
+            "private_address_blocked are final for that step: do not retry it. Give the person the plain link, or ask them to open a private address in their own tab. " +
+            "When such a refusal says this step was not run because Desktop stopped a page load after your previous step, it is the previous step's: take a fresh snapshot and go on.",
         },
       };
     }

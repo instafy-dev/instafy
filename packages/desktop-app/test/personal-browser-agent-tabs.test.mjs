@@ -143,10 +143,14 @@ function fixture({ choose = async () => ({ response: 1 }), linkOnlyData } = {}) 
   }
   const documentOf = (contents) => `document-${views.findIndex((view) => view.webContents === contents)}`;
   // The one link on each page: "More", or the address a test gave it.
-  const linkOf = (contents) => ({
-    found: true, disabled: false, tag: "a", identity: `${documentOf(contents)}:0`, text: "More",
-    ...(contents.linkHref ? { href: contents.linkHref, linkSelf: true } : {}),
-  });
+  // The one target on each page: the link "More", the address a test gave
+  // it, or the whole target a test describes (a form's field or button).
+  const linkOf = (contents) => contents.targetDescriptor
+    ? { found: true, disabled: false, identity: `${documentOf(contents)}:0`, ...contents.targetDescriptor }
+    : {
+      found: true, disabled: false, tag: "a", identity: `${documentOf(contents)}:0`, text: "More",
+      ...(contents.linkHref ? { href: contents.linkHref, linkSelf: true } : {}),
+    };
   const module = { exports: {} };
   const dependencies = {
     electron: {
@@ -187,6 +191,14 @@ function fixture({ choose = async () => ({ response: 1 }), linkOnlyData } = {}) 
       clickPersonalBrowserTarget: async (contents) => {
         contents.clicks = (contents.clicks ?? 0) + 1;
         return { clicked: true, targetChanged: false };
+      },
+      typeIntoPersonalBrowserTarget: async (contents) => {
+        contents.typed = (contents.typed ?? 0) + 1;
+        return { typed: true, targetChanged: false, blockedSensitive: false, descriptor: linkOf(contents) };
+      },
+      pressPersonalBrowserTarget: async (contents) => {
+        contents.presses = (contents.presses ?? 0) + 1;
+        return { pressed: true, targetChanged: false };
       },
     },
     "./personalBrowserHumanInput": {},
@@ -341,13 +353,14 @@ test("every page request of an agent tab, each redirect hop included, resolves i
   await resume(host, "routine");
   await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
   const agentContents = views[1].webContents;
-  assert.deepEqual(plain(agentContents.session.beforeRequestFilter.types), ["mainFrame", "subFrame"]);
+  // Every request goes through the filter, WebSocket handshakes included.
+  assert.equal(agentContents.session.beforeRequestFilter.types, undefined);
   // A link the agent clicks, or a redirect, to a public name that resolves to the local network.
   assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "https://rebind.example.test/admin" })), { cancel: true });
   assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "subFrame", url: "https://rebind.example.test/" })), { cancel: true });
   assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "https://unknown.example.test/" })), { cancel: true });
   assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "https://news.example.test/" })), { cancel: false });
-  // The page's own resources are not filtered here.
+  // A page's own request to a name is not resolved first: its response is checked when it arrives.
   assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "image", url: "https://rebind.example.test/a.png" })), {});
   // The person's tab was on screen when the agent took control, so the agent drives it too.
   assert.deepEqual(
@@ -820,4 +833,227 @@ test("a page the person opened keeps working while the agent reads it; a page th
   await host.navigate("http://localhost:5173/");
   await resume(host, "routine");
   assert.deepEqual(plain(await headersReceived(personView.webContents, { resourceType: "xhr", url: "http://localhost:5173/api", ip: "127.0.0.1" })), {});
+});
+
+// Review hardening: what the person browses stays theirs, a page the agent
+// opened stays the agent's, and every request and form follows the rules.
+
+// A navigation the page itself starts (a script or a link in it): the
+// navigation guard first, then the same request filter a load goes through.
+async function pageNavigates(contents, url) {
+  let prevented = false;
+  contents.emit("will-navigate", { preventDefault() { prevented = true; } }, url);
+  if (prevented) return "prevented";
+  try {
+    await contents.loadURL(url);
+    return "loaded";
+  } catch {
+    return "stopped";
+  }
+}
+
+test("status and list_tabs never tell the agent which link-only site the person has open in a tab it does not drive", async () => {
+  const { host, personView } = fixture();
+  personView.webContents.url = "https://www.booking.com/hotel/x.html";
+  personView.webContents.title = "Hotel X, prices and reviews";
+  // Paused: the agent learns nothing about the person's page, as for any other site.
+  const paused = (await host.handleControlOperation("status", {})).status;
+  assert.equal(paused.url, "");
+  assert.equal(paused.title, undefined);
+  assert.equal(paused.linkOnlySite, undefined);
+  assert.deepEqual(plain(paused.tabs.map((tab) => [tab.url, tab.linkOnlySite ?? null])), [["", null]]);
+
+  // Resumed with the agent's own tab on screen: the person's tab behind it is not the agent's.
+  personView.webContents.url = "https://example.test/";
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  host.pauseAgentControl();
+  host.selectTab("owner-fixture", "tab-2");
+  personView.webContents.url = "https://www.booking.com/hotel/x.html";
+  await resume(host, "routine");
+  const { tabs } = await host.handleControlOperation("list_tabs", {});
+  assert.deepEqual(plain(tabs.map((tab) => [tab.tabId, tab.url, tab.linkOnlySite ?? null])), [
+    ["tab-1", "", null],
+    ["tab-2", "https://docs.example.test/", null],
+  ]);
+  const { status } = await host.handleControlOperation("status", {});
+  assert.equal(status.tabs[0].linkOnlySite, undefined);
+  // Once the agent shows that tab, it drives it, and is told only the site's name.
+  await host.handleControlOperation("select_tab", { tabId: "tab-1" });
+  const shown = (await host.handleControlOperation("status", {})).status;
+  assert.equal(shown.url, "");
+  assert.equal(shown.linkOnlySite, "Booking.com");
+  assert.equal(shown.tabs[0].linkOnlySite, "Booking.com");
+});
+
+test("a page the agent opened reaches no private address with its own requests, a WebSocket included, before they leave the browser", async () => {
+  const { host, views, session, personView } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  const agentContents = views[1].webContents;
+  // WebSocket handshakes go through the filter too: Chromium matches them by their own scheme.
+  for (const pattern of ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"]) {
+    assert.ok(session.beforeRequestFilter.urls.includes(pattern), pattern);
+  }
+  lookups.length = 0;
+  for (const [resourceType, url] of [
+    ["xhr", "http://127.0.0.1:8080/api/delete"],
+    ["image", "http://192.168.1.1/logo.png"],
+    ["script", "http://localhost:3000/app.js"],
+    ["other", "http://[::1]:9000/"],
+    ["webSocket", "ws://127.0.0.1:5173/"],
+    ["webSocket", "ws://router.local/socket"],
+    // A WebSocket reports no connected address, so its name is resolved before it connects.
+    ["webSocket", "wss://rebind.example.test/socket"],
+  ]) {
+    assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType, url })), { cancel: true }, `${resourceType} ${url}`);
+  }
+  // Public ones go ahead; a page's own request to a name is not resolved first.
+  assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "webSocket", url: "wss://news.example.test/socket" })), { cancel: false });
+  assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "xhr", url: "https://news.example.test/api" })), {});
+  assert.deepEqual(lookups, ["rebind.example.test", "news.example.test"]);
+  // A page the person opened is theirs: its local socket and requests go on.
+  host.pauseAgentControl();
+  personView.webContents.url = "http://localhost:5173/";
+  host.selectTab("owner-fixture", "tab-1");
+  await host.navigate("http://localhost:5173/");
+  await resume(host, "routine");
+  assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "webSocket", url: "ws://localhost:5173/" })), {});
+  assert.deepEqual(plain(await beforeRequest(personView.webContents, { resourceType: "xhr", url: "http://localhost:5173/api" })), {});
+});
+
+test("a page the agent opened stays the agent's while the person has control: what it reaches on a private address then is never read", async () => {
+  for (const reach of [
+    // Its script fetches a rebinding name: the answer came from 10.0.0.5.
+    (contents) => headersReceived(contents, { resourceType: "xhr", url: "https://rebound.example.test/data", ip: "10.0.0.5" }),
+    (contents) => beforeRequest(contents, { resourceType: "xhr", url: "http://192.168.1.1/status" }),
+    (contents) => beforeRequest(contents, { resourceType: "subFrame", url: "http://router.local/" }),
+    (contents) => beforeRequest(contents, { resourceType: "webSocket", url: "ws://127.0.0.1:9229/" }),
+    // A WebSocket's name is resolved: no connected address is reported for it.
+    (contents) => beforeRequest(contents, { resourceType: "webSocket", url: "wss://rebind.example.test/socket" }),
+  ]) {
+    const { host, views, dialogs } = fixture();
+    await resume(host, "routine");
+    await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+    const agentContents = views[1].webContents;
+    host.pauseAgentControl();
+    // Paused, nothing is held back.
+    assert.deepEqual(plain(await reach(agentContents)), {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await resume(host, "routine");
+    const asked = dialogs.length;
+    for (const [operation, payload] of PAGE_STEPS) {
+      await rejectsWith(host.handleControlOperation(operation, payload), "private_address_blocked");
+    }
+    assert.equal(dialogs.length, asked, "nothing asked");
+    const { tabs } = await host.handleControlOperation("list_tabs", {});
+    assert.equal(tabs[1].url, "", "its address is not shown");
+    // The agent may take the tab somewhere else, and reads that page as usual.
+    await host.handleControlOperation("navigate", { url: "https://news.example.test/" });
+    await host.handleControlOperation("snapshot", {});
+  }
+  // A public answer marks nothing.
+  const { host, views } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  host.pauseAgentControl();
+  await headersReceived(views[1].webContents, { resourceType: "xhr", url: "https://news.example.test/api", ip: "93.184.216.36" });
+  await beforeRequest(views[1].webContents, { resourceType: "webSocket", url: "wss://news.example.test/socket" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await resume(host, "routine");
+  await host.handleControlOperation("snapshot", {});
+});
+
+test("while the person has control, a page load the agent's page starts is judged by the page it ends on", async () => {
+  const { host, views } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+  const agentContents = views[1].webContents;
+  host.pauseAgentControl();
+  // A hop through a private address that ends on a public page leaves that page readable.
+  assert.deepEqual(plain(await beforeRequest(agentContents, { resourceType: "mainFrame", url: "http://10.0.0.9/sso" })), {});
+  assert.equal(await pageNavigates(agentContents, "https://shop.example.test/"), "loaded");
+  await resume(host, "routine");
+  await host.handleControlOperation("snapshot", {});
+});
+
+test("a page the agent opened that takes its tab to a private address while the person has control is not read after Resume", async () => {
+  for (const url of ["http://192.168.1.1/", "https://rebound.example.test/admin"]) {
+    const { host, views } = fixture();
+    await resume(host, "routine");
+    await host.handleControlOperation("open_tab", { url: "https://docs.example.test/" });
+    const agentContents = views[1].webContents;
+    host.pauseAgentControl();
+    // The person's control: the page's own navigation goes ahead, unfiltered.
+    assert.equal(await pageNavigates(agentContents, url), "loaded", url);
+    // And so does every page that one opens in turn.
+    assert.equal(await pageNavigates(agentContents, "https://shop.example.test/"), "loaded");
+    assert.equal(await pageNavigates(agentContents, url), "loaded", url);
+    await resume(host, "routine");
+    await rejectsWith(host.handleControlOperation("snapshot", {}), "private_address_blocked");
+    const { status } = await host.handleControlOperation("status", {});
+    assert.equal(status.url, "", "its address is not shown either");
+    assert.equal(status.title, undefined);
+    // A page the person opens there from the address bar is theirs.
+    host.pauseAgentControl();
+    await host.navigate(url);
+    await resume(host, "routine");
+    await host.handleControlOperation("snapshot", {});
+  }
+});
+
+test("a form the agent submits to a link-only site or a private address is refused before any prompt", async () => {
+  const { host, dialogs, personView } = fixture();
+  await resume(host, "ask");
+  await host.handleControlOperation("snapshot", {});
+  const button = (formActionUrl) => ({
+    tag: "button", type: "submit", text: "Search", formOwnerIdentity: "document-0:form", formActionText: "Search",
+    formActionUrl, formMethod: "get",
+  });
+  const field = (formActionUrl) => ({
+    tag: "input", type: "text", name: "destination", formOwnerIdentity: "document-0:form", formActionText: "Search",
+    formActionUrl, formMethod: "get",
+  });
+  for (const [action, code] of [
+    ["https://www.booking.com/searchresults.html", "link_only_site"],
+    ["http://192.168.1.1/login", "private_address_blocked"],
+    ["https://rebind.example.test/post", "private_address_blocked"],
+  ]) {
+    for (const [descriptor, operation, payload] of [
+      [button(action), "click", { index: 0 }],
+      [button(action), "press", { index: 0, key: "Enter" }],
+      [field(action), "press", { index: 0, key: "Enter" }],
+      [field(action), "type", { index: 0, text: "Lisbon", submit: true }],
+    ]) {
+      personView.webContents.targetDescriptor = descriptor;
+      await host.handleControlOperation("snapshot", {});
+      const asked = dialogs.length;
+      await rejectsWith(host.handleControlOperation(operation, payload), code);
+      assert.equal(dialogs.length, asked, `${operation} to ${action} asked nothing`);
+    }
+  }
+  assert.equal(personView.webContents.clicks ?? 0, 0);
+  assert.equal(personView.webContents.typed ?? 0, 0);
+  assert.equal(personView.webContents.presses ?? 0, 0);
+  // A form of the page's own site asks as before.
+  personView.webContents.targetDescriptor = button("https://example.test/search");
+  await host.handleControlOperation("snapshot", {});
+  const asked = dialogs.length;
+  await host.handleControlOperation("click", { index: 0 });
+  assert.equal(dialogs.length, asked + 1);
+  assert.equal(personView.webContents.clicks, 1);
+});
+
+test("a stopped page load is reported to the next step as its previous step's, so that step is not taken as refused", async () => {
+  const { host, personView } = fixture();
+  await resume(host, "routine");
+  await host.handleControlOperation("snapshot", {});
+  assert.equal(await pageNavigates(personView.webContents, "https://www.booking.com/"), "prevented");
+  await assert.rejects(host.handleControlOperation("snapshot", {}), (error) => {
+    assert.equal(error.code, "link_only_site");
+    assert.match(error.message, /previous step/);
+    assert.match(error.message, /this step was not run/i);
+    return true;
+  });
+  await host.handleControlOperation("snapshot", {});
 });

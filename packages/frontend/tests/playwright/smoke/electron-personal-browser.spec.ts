@@ -1,4 +1,5 @@
 import { _electron as electron, expect, test } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -82,6 +83,22 @@ type PersonalBrowserFixtureWindow = typeof window & {
 // Host names and paths the fixture server saw for the request guard's pages.
 const guardRequestHosts: string[] = [];
 const guardRequests: string[] = [];
+
+// A WebSocket on the fixture server: it answers one text message.
+function fixtureUpgrade(request: import("node:http").IncomingMessage, socket: import("node:stream").Duplex) {
+  if (request.url !== "/guard/socket") {
+    socket.destroy();
+    return;
+  }
+  const [hostName = ""] = String(request.headers.host ?? "").split(":");
+  guardRequests.push(`${hostName}${request.url}`);
+  const accept = createHash("sha1")
+    .update(`${request.headers["sec-websocket-key"] ?? ""}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest("base64");
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  const payload = Buffer.from("private socket data");
+  socket.end(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));
+}
 
 function fixtureHandler(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) {
   response.setHeader("Cache-Control", "no-store");
@@ -233,6 +250,7 @@ test.describe("Electron Personal Browser", () => {
 
   test.beforeAll(async () => {
     fixtureServer = createServer(fixtureHandler);
+    fixtureServer.on("upgrade", fixtureUpgrade);
     fixtureOrigin = `http://127.0.0.1:${await listen(fixtureServer)}`;
   });
 
@@ -835,6 +853,10 @@ test.describe("Electron Personal Browser", () => {
       ) as Record<"rebound" | "linkOnly" | "viaProxy" | "viaProxyToLinkOnly" | "person", Outcome> & {
         fetched: string;
         personFetched: string;
+        fetchedLiteral: string;
+        socket: string;
+        personFetchedLiteral: string;
+        personSocket: string;
         stopped: Array<{ resourceType: string; code: string }>;
       };
       // DNS rebinding: the name passed the check made before the request and
@@ -854,11 +876,19 @@ test.describe("Electron Personal Browser", () => {
       // the person's tab gets the answer as before.
       expect(results.fetched).toBe("blocked");
       expect(results.personFetched).toBe("private data");
+      // A request of that page to a private address literal, a WebSocket
+      // included, never leaves the browser; the person's tab connects as before.
+      expect(results.fetchedLiteral).toBe("blocked");
+      expect(results.socket).toBe("error");
+      expect(results.personFetchedLiteral).toBe("private data");
+      expect(results.personSocket).toBe("got: private socket data");
       expect(results.stopped).toEqual([
         { resourceType: "mainFrame", code: "private_address_blocked" },
         { resourceType: "mainFrame", code: "link_only_site" },
         { resourceType: "mainFrame", code: "link_only_site" },
         { resourceType: "xhr", code: "private_address_blocked" },
+        { resourceType: "xhr", code: "private_address_blocked" },
+        { resourceType: "webSocket", code: "private_address_blocked" },
       ]);
       expect(guardRequestHosts).not.toContain("www.booking.com");
       expect(proxiedHosts).not.toContain("www.booking.com");
@@ -869,6 +899,11 @@ test.describe("Electron Personal Browser", () => {
         "rebound.guard.test/guard/page",
         "rebound.guard.test/guard/data",
         "rebound.guard.test/guard/data",
+      ]);
+      // Only the person's tab reached the literal address.
+      expect(guardRequests.filter((entry) => entry.startsWith("127.0.0.1/guard/"))).toEqual([
+        "127.0.0.1/guard/data",
+        "127.0.0.1/guard/socket",
       ]);
     } finally {
       await guardApp.close();

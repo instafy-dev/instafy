@@ -241,9 +241,15 @@ type PersonalBrowserTab = {
   // control, every page load here stays public and off link-only sites.
   agentDriven: boolean;
   // The page in this tab is one the agent opened (a page load while it drove
-  // the tab), not one the person opened: its frames and its own requests are
-  // held to the agent's rules too.
+  // the tab), or one such a page opened in turn while the person had control,
+  // not one the person opened: its frames and its own requests are held to
+  // the agent's rules too. A page the person opens from the toolbar is theirs.
   agentDocument: boolean;
+  // That page, while the person had control, loaded from or sent a request
+  // to a private or local address: the agent does not read or use it.
+  agentDocumentPrivate: boolean;
+  // The same, for the page load under way, until it commits.
+  pendingAgentDocumentPrivate: boolean;
   // A page load Desktop stopped in this tab while the agent drove it; the
   // agent's next page step in that control epoch reports it once.
   blockedPageLoad: { epoch: number; code: string; message: string } | null;
@@ -265,6 +271,8 @@ function createPersonalBrowserTab(id: string, openedBy: PersonalBrowserTab["open
     withholdNextDocumentAfter: null,
     agentDriven: openedBy === "agent",
     agentDocument: openedBy === "agent",
+    agentDocumentPrivate: false,
+    pendingAgentDocumentPrivate: false,
     blockedPageLoad: null,
   };
 }
@@ -398,6 +406,28 @@ function sameDocument(href: string, pageUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The address a step sends a form to, when the step submits one: a click or
+ * Space on its submit control, Enter there or in one of its fields, or typing
+ * with submit. Null for every other step.
+ */
+function submittedFormAction(
+  descriptor: PersonalBrowserTargetDescriptor,
+  step: "click" | "press" | "submit",
+  key = "",
+): string | null {
+  if (!descriptor.formOwnerIdentity?.trim() || (descriptor.formMethod ?? "").trim().toLowerCase() === "dialog") return null;
+  const tag = descriptor.tag?.trim().toLowerCase() ?? "";
+  const type = descriptor.type?.trim().toLowerCase() ?? "";
+  const submitControl = (tag === "button" && (type === "submit" || type === "")) ||
+    (tag === "input" && (type === "submit" || type === "image"));
+  const implicitField = tag === "input" && !["button", "reset", "file", "hidden"].includes(type);
+  const submits = step === "submit" ||
+    (step === "click" && submitControl) ||
+    (step === "press" && ((key === "Enter" && (submitControl || implicitField)) || (key === " " && submitControl)));
+  return submits ? descriptor.formActionUrl?.trim() || null : null;
 }
 
 function siteName(value: string): string | null {
@@ -1341,14 +1371,22 @@ export class PersonalBrowserHost {
         event.preventDefault();
       }
     });
+    view.webContents.on("did-start-navigation", (details) => {
+      // A new page load starts unmarked; its redirect hops share one mark.
+      if (details?.isMainFrame && !details.isSameDocument) tab.pendingAgentDocumentPrivate = false;
+    });
     view.webContents.on("will-navigate", (event, url) => this.guardTabNavigation(tab, event, url));
     view.webContents.on("will-redirect", (event, url) => this.guardTabNavigation(tab, event, url));
     view.webContents.on("did-navigate", (_event, url) => {
       if (isActive() && this.tabCapture.controlActive) {
         this.markTeammateActivity(this.currentPartition, url);
       }
-      // A page that loaded while the agent did not drive the tab is the person's.
-      if (!this.drivesTab(tab)) tab.agentDocument = false;
+      // A page the person opened from the toolbar while the agent did not
+      // drive the tab is theirs. One that a page the agent opened went on to
+      // open by itself (a script or a link in it) is still the agent's.
+      if (!this.drivesTab(tab) && isActive() && this.humanNavigationInFlight) tab.agentDocument = false;
+      tab.agentDocumentPrivate = tab.pendingAgentDocumentPrivate;
+      tab.pendingAgentDocumentPrivate = false;
       // An approval for a navigation that never happened ends with the page.
       tab.approvedNavigations.clear();
       if (isActive()) this.humanInputRequest = null;
@@ -1431,6 +1469,21 @@ export class PersonalBrowserHost {
         // A stopped page (not a frame) is reported by the agent's next step.
         if (resourceType === "mainFrame") tab.blockedPageLoad = { epoch: this.controlEpoch, ...stopped };
       },
+      watchedTab: (webContentsId) => this.watchedTabForRequest(webContentsId),
+      onWatched: (tab, { resourceType, url, phase, privateAddress }) => {
+        if (resourceType !== "mainFrame") {
+          if (privateAddress) tab.agentDocumentPrivate = true;
+          return;
+        }
+        // The page a load commits takes the mark of its own answer: each hop
+        // starts afresh, and a late answer for a page already committed
+        // marks that page.
+        if (phase === "request") tab.pendingAgentDocumentPrivate = privateAddress;
+        else if (privateAddress) tab.pendingAgentDocumentPrivate = true;
+        if (privateAddress && tab.view && !tab.view.webContents.isDestroyed() && tab.view.webContents.getURL() === url) {
+          tab.agentDocumentPrivate = true;
+        }
+      },
       linkOnly: PERSONAL_BROWSER_LINK_ONLY_GUARD,
       checkUrl: (url) => checkPersonalBrowserAgentTabUrl(url),
     });
@@ -1461,6 +1514,27 @@ export class PersonalBrowserHost {
       return tab;
     }
     return tab.agentDocument ? tab : null;
+  }
+
+  /**
+   * The tab whose requests are watched without being stopped: one holding a
+   * page the agent opened while the agent does not drive it.
+   */
+  private watchedTabForRequest(webContentsId: number | undefined): PersonalBrowserTab | null {
+    if (webContentsId === undefined) return null;
+    const tab = this.tabs.find((entry) =>
+      entry.view !== null && !entry.view.webContents.isDestroyed() && entry.view.webContents.id === webContentsId) ?? null;
+    return tab && tab.agentDocument && !this.drivesTab(tab) ? tab : null;
+  }
+
+  /** The agent holds control and drives this tab: it opened it, or showed it since Resume. */
+  private agentHoldsTab(tab: PersonalBrowserTab): boolean {
+    return this.agentControlEnabled && tab.agentDriven;
+  }
+
+  /** A page the agent opened that reached a private address while the person had control. */
+  private agentPageReachedPrivate(tab: PersonalBrowserTab): boolean {
+    return tab.agentDocument && tab.agentDocumentPrivate;
   }
 
   private linkOnlyError(refusal: PersonalBrowserLinkOnlyRefusal, action: string): PersonalBrowserControlError {
@@ -2091,13 +2165,18 @@ export class PersonalBrowserHost {
 
   private getPageBrokerStatus(): PersonalBrowserStatus & { linkOnlySite?: string } {
     const status = this.getStatus();
-    // A page on a link-only site shows the agent its site's name only.
+    // A page on a link-only site shows the agent its site's name only, and
+    // only while it holds control in that tab: what the person browses
+    // otherwise stays theirs, as for every other site.
     const linkOnly = PERSONAL_BROWSER_LINK_ONLY_GUARD.refusal(status.url || "about:blank");
     if (linkOnly) {
       return {
         ...sanitizePersonalBrowserBrokerStatus(status, false),
-        ...(linkOnly.code === "link_only_site" ? { linkOnlySite: linkOnly.site } : {}),
+        ...(linkOnly.code === "link_only_site" && this.agentHoldsTab(this.activeTab) ? { linkOnlySite: linkOnly.site } : {}),
       };
+    }
+    if (this.agentPageReachedPrivate(this.activeTab)) {
+      return sanitizePersonalBrowserBrokerStatus(status, false);
     }
     let originApproved = false;
     if (this.agentControlEnabled) {
@@ -2483,9 +2562,17 @@ export class PersonalBrowserHost {
     const blocked = this.activeTab.blockedPageLoad;
     if (blocked) {
       // A page the agent's previous step opened, or that its page started,
-      // was stopped. Report that once instead of failing silently.
+      // was stopped. Report that once instead of failing silently, as that
+      // earlier load's refusal: this step itself did nothing.
       this.activeTab.blockedPageLoad = null;
-      if (blocked.epoch === operationEpoch) throw new PersonalBrowserControlError(403, blocked.code, blocked.message);
+      if (blocked.epoch === operationEpoch) {
+        throw new PersonalBrowserControlError(
+          403,
+          blocked.code,
+          `This step was not run: Desktop stopped a page load in this tab after your previous step. ${blocked.message} ` +
+            "Take a fresh snapshot before your next step.",
+        );
+      }
     }
 
     if (operation === "navigate") {
@@ -2499,8 +2586,10 @@ export class PersonalBrowserHost {
     }
 
     // A page on a link-only site is never read or used, in any tab, and
-    // nothing asks about it.
+    // nothing asks about it. Nor is a page the agent opened that reached a
+    // private address while the person had control.
     this.assertCurrentPageNotLinkOnly();
+    this.assertCurrentAgentPagePublic();
     await this.requireCurrentOriginApproval();
 
     if (operation === "snapshot") {
@@ -2594,6 +2683,8 @@ export class PersonalBrowserHost {
         this.assertControlEpoch(operationEpoch);
         resolvedTarget = await this.revalidateControlTarget(contents, target, resolvedTarget);
       }
+      // A form it submits to another site is a navigation it starts too.
+      await this.requireFormActionAllowed(submittedFormAction(resolvedTarget.descriptor, "click"), pageUrl, operationEpoch);
       const activationApproved = personalBrowserActivationRequiresConfirmation(
         resolvedTarget.descriptor,
         this.approvalMode,
@@ -2664,6 +2755,7 @@ export class PersonalBrowserHost {
       if (payload.submit === true) {
         plannedSubmit = classifyPersonalBrowserStep("submit", resolvedTarget.descriptor, { pageUrl });
         this.assertStepNotRefused(plannedSubmit);
+        await this.requireFormActionAllowed(submittedFormAction(resolvedTarget.descriptor, "submit"), pageUrl, operationEpoch);
       }
       const plannedSubmitNeedsApproval = plannedSubmit !== null && (this.approvalMode === "ask" ||
         personalBrowserKeyRequiresConfirmation("Enter", resolvedTarget.descriptor, this.approvalMode, { pageUrl }));
@@ -2786,6 +2878,8 @@ export class PersonalBrowserHost {
       }
       if (pressedHrefOrigin) await this.requireAgentNavigationAllowed(pressedHref, operationEpoch);
     }
+    // So does Enter or Space that submits a form to another site.
+    await this.requireFormActionAllowed(submittedFormAction(resolvedTarget.descriptor, "press", key), pressPageUrl, operationEpoch);
     // Space, Backspace and Delete in a field are typing: they share the
     // form's typing approval. So do arrow keys in an editable combobox, which
     // pick an autocomplete option.
@@ -2921,6 +3015,41 @@ export class PersonalBrowserHost {
     }
   }
 
+  /**
+   * A form the agent submits to another site opens that site: the same
+   * rules as a link to it, before anything asks. A form of the page's own
+   * site is often handled by the page's script without loading anything; a
+   * page it does load is still held to the rules by the navigation guard.
+   */
+  private async requireFormActionAllowed(action: string | null, pageUrl: string, operationEpoch: number) {
+    if (!action) return;
+    let actionOrigin: string | null;
+    let pageOrigin: string | null;
+    try {
+      actionOrigin = getPersonalBrowserOrigin(action);
+    } catch {
+      return;
+    }
+    try {
+      pageOrigin = getPersonalBrowserOrigin(pageUrl);
+    } catch {
+      pageOrigin = null;
+    }
+    if (actionOrigin && actionOrigin !== pageOrigin) await this.requireAgentNavigationAllowed(action, operationEpoch);
+  }
+
+  private assertCurrentAgentPagePublic() {
+    if (!this.agentPageReachedPrivate(this.activeTab)) return;
+    throw new PersonalBrowserControlError(
+      403,
+      "private_address_blocked",
+      personalBrowserPrivateAddressMessage(
+        "this page, opened from a page the agent opened, loaded from or sent a request to a private or local address while the person had control",
+        "Nothing on this page was read or done. Navigate this tab to a public page, or close it if you opened it.",
+      ),
+    );
+  }
+
   private assertCurrentPageNotLinkOnly() {
     const linkOnly = PERSONAL_BROWSER_LINK_ONLY_GUARD.refusal(this.requireWebContents().getURL() || "about:blank");
     if (linkOnly) {
@@ -3002,9 +3131,14 @@ export class PersonalBrowserHost {
     return this.tabs.map((tab) => {
       const { id, url, title, ...state } = this.tabStatus(tab);
       const rest = { tabId: id, ...state };
-      // A tab on a link-only site shows its site's name only.
+      // A tab on a link-only site shows its site's name only, and only in a
+      // tab the agent holds; a page the agent opened that reached a private
+      // address shows nothing.
       const linkOnly = PERSONAL_BROWSER_LINK_ONLY_GUARD.refusal(url);
-      if (linkOnly) return { ...rest, url: "", ...(linkOnly.code === "link_only_site" ? { linkOnlySite: linkOnly.site } : {}) };
+      if (linkOnly) {
+        return { ...rest, url: "", ...(linkOnly.code === "link_only_site" && this.agentHoldsTab(tab) ? { linkOnlySite: linkOnly.site } : {}) };
+      }
+      if (this.agentPageReachedPrivate(tab)) return { ...rest, url: "" };
       try {
         const origin = getPersonalBrowserOrigin(url);
         const allowed = origin !== null && this.agentControlEnabled &&

@@ -190,6 +190,8 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
       initialized.body.result.instructions,
       /never a link-only site: link_only_site, link_only_list_unavailable and private_address_blocked are final for that step/,
     );
+    // A page load stopped after the previous step is reported as that step's, not as a refusal of this one.
+    assert.match(initialized.body.result.instructions, /this step was not run because Desktop stopped a page load after your previous step, it is the previous step's/);
 
     const listed = await requestJson(`${credentials.controlUrl}/mcp`, {
       method: "POST",
