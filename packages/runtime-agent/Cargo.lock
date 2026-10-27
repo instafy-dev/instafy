@@ -10085,6 +10085,7 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tracing",
  "tracing-subscriber",
+ "tree-sitter",
  "unicode-normalization",
  "uuid",
  "windows-sys 0.61.2",

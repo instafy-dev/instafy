@@ -84,3 +84,35 @@ workspace, so nothing in it is ever saved or published, and it is kept across tu
 caches, rate-limit holds and service health there, not in HOME or TMPDIR, which an isolated worker gets
 fresh every turn. An isolated worker may write the folder only when the runtime names it in the job's
 request, never when the job's environment does. A folder that cannot be created leaves the variable unset.
+
+## Activity labels
+
+A pack may give its commands plain words for a chat turn's activity line
+([Chat activity line](Chat-Activity.md)): "Looking up places" while a step runs, "looked up 14
+places" once the turn is done. It names its commands in `bin` and labels their subcommands in
+`activity`:
+
+```json
+{"bin": {"uw": "scripts/uw.mjs"},
+ "activity": {"uw": {
+   "add-point": {"live": "Looking up places",
+                 "done": {"one": "looked up a place", "other": "looked up {n} places", "some": "looked up places"}},
+   "validate":  {"live": "Checking the map", "done": "built the map", "role": "outcome", "when": "success"},
+   "fit":       {"live": "Framing the map", "role": "quiet"},
+   "*":         {"live": "Working on the map", "role": "quiet"}}}}
+```
+
+- Keys under `activity` must be commands declared in `bin` (a plain name, not one of the tools a
+  turn relies on such as `git`, `node` or `instafy`), each with at most 64 subcommands; `*` labels
+  the rest.
+- `live` starts with an upper-case letter and is at most 40 characters. Each `done` form starts
+  with a lower-case letter and is at most 48 characters with `{n}` as 999. `{n}` is the only
+  placeholder and is allowed only in `other`; `some` (the count is not known, as in a loop) is
+  required with `other`. A single string is used for any count.
+- Plain words only: no links, addresses, markup, brackets, control or bidi characters.
+- `role` is `content` (the default), `outcome` or `quiet`; `when: "success"` counts the step only
+  when the command exits 0.
+
+A pack whose `activity` breaks a rule still loads; the runtime drops its labels with a warning, and
+the installer warns too. Only packs installed with the runtime supply labels: a pack a space
+imports itself never does.

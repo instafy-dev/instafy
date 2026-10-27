@@ -1,0 +1,196 @@
+{
+  "_comment": "The words of a chat turn's activity line, pinned once. runtime-contracts (chat_activity.rs) checks is_live_label, is_done_form and check_activity against these lists; Studio's copy (packages/frontend/src/screens/studio/components/turnActivity.ts) is tested against the same file. liveInvalid, doneInvalid and doneCountInvalid say why in the string itself where it can.",
+  "liveValid": [
+    "Looking up places",
+    "Reading pages",
+    "Saving your changes",
+    "Working on the map",
+    "Judging calm and lively areas",
+    "Couldn't start",
+    "Läser sidor",
+    "Retrying",
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  ],
+  "liveInvalid": [
+    "",
+    "looking up places",
+    " Looking up places",
+    "Looking up places ",
+    "Looking  up places",
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "Visit https://example.com",
+    "Visit www now",
+    "Open example.com",
+    "Mail me@example.com",
+    "<b>Looking</b>",
+    "[Looking](up)",
+    "Looking up {n} places",
+    "Opening {host}",
+    "Look {thing}",
+    "Reading\u0007pages",
+    "Reading ‮pages",
+    "Reading ⁦pages",
+    "Reading\npages",
+    "Reading\tpages",
+    "100 places",
+    "Paying $5",
+    "Reading #tags",
+    "Reading a/b",
+    "Running `rm`",
+    "Looking_up",
+    "Look \"here\""
+  ],
+  "doneValid": [
+    "looked up a place",
+    "built the map",
+    "read the research notes",
+    "ran tests",
+    "öppnade kartan",
+    "you said no"
+  ],
+  "doneInvalid": [
+    "",
+    "Looked up a place",
+    "looked up {n} places",
+    "visit example.com",
+    "see https://example.com",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "read a page‏",
+    "read <b>a page</b>",
+    "opened {host}",
+    "1 place"
+  ],
+  "doneCountValid": [
+    "looked up {n} places",
+    "read {n} pages",
+    "searched the web {n} times",
+    "edited {n} files",
+    "looked up {n} places in the old town of lisbon"
+  ],
+  "doneCountInvalid": [
+    "looked up places",
+    "{n} places",
+    "read {n} of {n} pages",
+    "looked up {n} places in the old town of lisbon xx",
+    "read {n} {m} pages",
+    "read {N} pages"
+  ],
+  "activityValid": [
+    {
+      "activity": {
+        "v": 1,
+        "key": "pack/interactive-map/uw/add-point",
+        "role": "content",
+        "live": "Looking up places",
+        "done": { "one": "looked up a place", "other": "looked up {n} places", "some": "looked up places" },
+        "count": 14,
+        "also": []
+      },
+      "checked": {
+        "v": 1,
+        "key": "pack/interactive-map/uw/add-point",
+        "role": "content",
+        "live": "Looking up places",
+        "done": { "one": "looked up a place", "other": "looked up {n} places", "some": "looked up places" },
+        "count": 14,
+        "also": []
+      }
+    },
+    {
+      "activity": {
+        "v": 1,
+        "key": "pack/interactive-map/uw/fit",
+        "role": "quiet",
+        "live": "Framing the map",
+        "count": null,
+        "also": [
+          { "key": "pack/interactive-map/uw/validate", "role": "outcome", "live": "Checking the map", "done": "built the map", "when": "success", "count": 1 }
+        ]
+      },
+      "checked": {
+        "v": 1,
+        "key": "pack/interactive-map/uw/fit",
+        "role": "quiet",
+        "live": "Framing the map",
+        "count": null,
+        "also": [
+          { "key": "pack/interactive-map/uw/validate", "role": "outcome", "live": "Checking the map", "done": "built the map", "when": "success", "count": 1 }
+        ]
+      }
+    },
+    {
+      "activity": { "v": 1, "key": "builtin/web-search", "role": "content", "done": { "one": "searched the web" } },
+      "checked": { "v": 1, "key": "builtin/web-search", "role": "content", "done": { "one": "searched the web" }, "count": 1, "also": [] }
+    },
+    {
+      "activity": {
+        "v": 1,
+        "key": "browser/search",
+        "role": "content",
+        "host": "visitlisboa.com",
+        "live": "Searching {host}",
+        "done": { "one": "searched {host}", "other": "searched {host} {n} times", "some": "searched {host}" },
+        "count": 1,
+        "step": "search",
+        "pageKey": "0123456789abcdef",
+        "approval": "free"
+      },
+      "checked": {
+        "v": 1,
+        "key": "browser/search",
+        "role": "content",
+        "host": "visitlisboa.com",
+        "live": "Searching {host}",
+        "done": { "one": "searched {host}", "other": "searched {host} {n} times", "some": "searched {host}" },
+        "count": 1,
+        "step": "search",
+        "pageKey": "0123456789abcdef",
+        "approval": "free",
+        "also": []
+      }
+    }
+  ],
+  "activityInvalid": [
+    { "why": "not an object", "activity": "Looking up places" },
+    { "why": "no version", "activity": { "key": "a", "role": "quiet", "live": "Working" } },
+    { "why": "another version", "activity": { "v": 2, "key": "a", "role": "quiet", "live": "Working" } },
+    { "why": "an unknown field", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "html": "<b>" } },
+    { "why": "an unknown role", "activity": { "v": 1, "key": "a", "role": "loud", "live": "Working" } },
+    { "why": "no key", "activity": { "v": 1, "role": "quiet", "live": "Working" } },
+    { "why": "a key with spaces", "activity": { "v": 1, "key": "pack/a b", "role": "quiet", "live": "Working" } },
+    { "why": "a key with capitals", "activity": { "v": 1, "key": "Pack/A", "role": "quiet", "live": "Working" } },
+    { "why": "content without done words", "activity": { "v": 1, "key": "a", "role": "content", "live": "Working" } },
+    { "why": "a live label with an address", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Open example.com" } },
+    { "why": "a live label that is not a string", "activity": { "v": 1, "key": "a", "role": "quiet", "live": 3 } },
+    { "why": "other without {n}", "activity": { "v": 1, "key": "a", "role": "content", "done": { "one": "read a page", "other": "read pages", "some": "read pages" } } },
+    { "why": "other without some", "activity": { "v": 1, "key": "a", "role": "content", "done": { "one": "read a page", "other": "read {n} pages" } } },
+    { "why": "done forms without one", "activity": { "v": 1, "key": "a", "role": "content", "done": { "some": "read pages" } } },
+    { "why": "an unknown done form", "activity": { "v": 1, "key": "a", "role": "content", "done": { "one": "read a page", "many": "read lots" } } },
+    { "why": "a done form over the limit", "activity": { "v": 1, "key": "a", "role": "content", "done": "read a page and then another page and one more page" } },
+    { "why": "count zero", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "count": 0 } },
+    { "why": "a negative count", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "count": -1 } },
+    { "why": "a fractional count", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "count": 1.5 } },
+    { "why": "a count as text", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "count": "3" } },
+    { "why": "a count over the limit", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "count": 100001 } },
+    { "why": "an unknown when", "activity": { "v": 1, "key": "a", "role": "outcome", "done": "built the map", "when": "always" } },
+    { "why": "four more labels", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "also": [
+      { "key": "b", "role": "quiet", "live": "Working" },
+      { "key": "c", "role": "quiet", "live": "Working" },
+      { "key": "d", "role": "quiet", "live": "Working" },
+      { "key": "e", "role": "quiet", "live": "Working" }
+    ] } },
+    { "why": "a further label that breaks a rule", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "also": [
+      { "key": "b", "role": "content", "live": "Working", "done": "visit www now" }
+    ] } },
+    { "why": "a further label with its own also", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "also": [
+      { "key": "b", "role": "quiet", "live": "Working", "also": [] }
+    ] } },
+    { "why": "also that is not a list", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "also": {} } },
+    { "why": "a host placeholder without a host", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Opening {host}" } },
+    { "why": "a host with www", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Opening {host}", "host": "www.visitlisboa.com" } },
+    { "why": "a host with a path", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Opening {host}", "host": "visitlisboa.com/x" } },
+    { "why": "a page key that is not hex", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "pageKey": "https://example.c" } },
+    { "why": "an unknown approval", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "approval": "maybe" } },
+    { "why": "a step that is not a plain name", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "step": "Search here" } }
+  ]
+}

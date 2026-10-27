@@ -11,8 +11,11 @@ import zlib from "node:zlib";
 import {
   DEFAULT_PIN,
   MANIFEST,
+  checkPackActivity,
   installFromFolder,
   installPinned,
+  isDoneForm,
+  isLiveLabel,
   treeDigest,
   validatePin,
 } from "./install-skill-packs.mjs";
@@ -253,4 +256,59 @@ test("--require-pinned refuses a local pack folder, which is installed unpinned 
   assert.deepEqual(installed.packs.map(({ name, pinned }) => ({ name, pinned })), [{ name: "demo", pinned: false }]);
   fs.symlinkSync("/etc/passwd", path.join(source, "link"));
   assert.throws(() => installFromFolder({ from: source, out: tempOut() }), /links are not allowed/u);
+});
+
+const MAP_ACTIVITY = {
+  run: {
+    "add-point": { live: "Looking up places", done: { one: "looked up a place", other: "looked up {n} places", some: "looked up places" } },
+    validate: { live: "Checking the map", done: "built the map", role: "outcome", when: "success" },
+    "*": { live: "Working on the map", role: "quiet" },
+  },
+};
+
+test("activity labels follow the same rules as the runtime and Studio", () => {
+  const fixtures = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, "..", "packages", "runtime-contracts", "src", "chat_activity_fixtures.json"), "utf8"));
+  for (const label of fixtures.liveValid) assert.ok(isLiveLabel(label), label);
+  for (const label of fixtures.liveInvalid) assert.ok(!isLiveLabel(label), label);
+  for (const label of fixtures.doneValid) assert.ok(isDoneForm(label, false), label);
+  for (const label of fixtures.doneInvalid) assert.ok(!isDoneForm(label, false), label);
+  for (const label of fixtures.doneCountValid) assert.ok(isDoneForm(label, true), label);
+  for (const label of fixtures.doneCountInvalid) assert.ok(!isDoneForm(label, true), label);
+});
+
+test("a pack's activity labels name its bin commands and break no rule", () => {
+  const files = new Map([["scripts/run.mjs", Buffer.from("")]]);
+  const manifest = (overrides) => ({ bin: { run: "scripts/run.mjs" }, activity: MAP_ACTIVITY, ...overrides });
+  assert.equal(checkPackActivity(manifest({}), files), null);
+  assert.equal(checkPackActivity({}, files), null, "a pack without labels");
+  for (const [overrides, pattern] of [
+    [{ bin: undefined }, /only commands declared in `bin`/u],
+    [{ bin: { git: "scripts/run.mjs" }, activity: { git: MAP_ACTIVITY.run } }, /not a command name/u],
+    [{ bin: { run: "scripts/missing.mjs" } }, /not a file inside the pack/u],
+    [{ activity: { other: MAP_ACTIVITY.run } }, /not a command in `bin`/u],
+    [{ activity: { run: { "add-point": { live: "Visit example.com", done: "looked up a place" } } } }, /live breaks/u],
+    [{ activity: { run: { "add-point": { live: "Looking up places", done: "see https://example.com" } } } }, /done breaks/u],
+    [{ activity: { run: { "add-point": { live: "Looking up places", done: { one: "looked up a place", other: "looked up {n} places" } } } } }, /`some` form/u],
+    [{ activity: { run: { "add-point": { live: "Looking up places", done: { one: "a", other: "looked up places", some: "b" } } } } }, /done.other/u],
+    [{ activity: { run: { "add-point": { live: "Looking up places" } } } }, /needs done words/u],
+    [{ activity: { run: { "Add Point": { live: "Working", role: "quiet" } } } }, /not a subcommand name/u],
+  ]) {
+    assert.match(checkPackActivity(manifest(overrides), files) ?? "", pattern, JSON.stringify(overrides));
+  }
+});
+
+test("a pack whose activity labels break a rule still installs, with a warning", () => {
+  for (const [activity, warned] of [[MAP_ACTIVITY, false], [{ run: { "*": { live: "Open example.com", role: "quiet" } } }, true]]) {
+    const source = tempOut();
+    const { files } = packFiles("demo", { manifest: { bin: { run: "scripts/run.mjs" }, activity } });
+    for (const [rel, data] of files) {
+      fs.mkdirSync(path.dirname(path.join(source, rel)), { recursive: true });
+      fs.writeFileSync(path.join(source, rel), data);
+    }
+    const lines = [];
+    const out = tempOut();
+    assert.deepEqual(installFromFolder({ from: source, out, log: (line) => lines.push(line) }).map(({ status }) => status), ["installed"]);
+    assert.ok(fs.existsSync(path.join(out, "demo", MANIFEST)));
+    assert.equal(lines.some((line) => /activity labels break the label rules/u.test(line)), warned, lines.join("\n"));
+  }
 });
