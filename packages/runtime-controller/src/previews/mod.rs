@@ -302,8 +302,9 @@ struct PreviewResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     visibility: Option<String>,
     created_at: String,
-    /// A wake can start the site again: a `serve` command is recorded and
-    /// nobody closed the preview on purpose.
+    /// A wake can start the site again: a `serve` command is recorded and no
+    /// newer tunnel replaced the preview's. A preview someone closed on
+    /// purpose stays restartable for people who may change the space.
     restartable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     wake: Option<wake::WakeView>,
@@ -451,16 +452,29 @@ impl PreviewGrant {
             .and_then(|serve| PreviewServe::from_json(serve).ok())
     }
 
-    /// Closed on purpose (`instafy preview close`, the close route): it never
-    /// wakes. A runtime stop revokes the grant too, but does not close it.
+    /// Closed on purpose (`instafy preview close`, the close route) or
+    /// superseded. A runtime stop revokes the grant too, but does not close
+    /// it. Starting a closed preview again changes the space, so only people
+    /// who may change it can (see `wake::caller_may_start`).
     fn is_closed(&self) -> bool {
         self.preview_metadata()
             .is_some_and(|metadata| metadata.contains_key("closedAt"))
     }
 
+    /// Closed because the broker replaced its tunnel
+    /// ([`retire_superseded_previews`]): the successor is the preview now, and
+    /// a wake would only get the successor's tunnel.
+    fn is_superseded(&self) -> bool {
+        self.preview_metadata()
+            .is_some_and(|metadata| metadata.contains_key("supersededBy"))
+    }
+
+    /// A wake can start the site again: its start command is recorded and its
+    /// tunnel is still its own. Closing it on purpose keeps the command, so
+    /// Open on its card brings back a site someone stopped.
     fn restartable(&self) -> bool {
         self.is_private_preview()
-            && !self.is_closed()
+            && !self.is_superseded()
             && self.serve().is_some()
             && self.tunnel_key().is_some()
     }
@@ -1573,7 +1587,8 @@ async fn post_preview_close(
     }
     if !tunnel_status_is_active(&grant.record.status) {
         // Already stopped (a runtime stop, say); make sure no viewer outlived
-        // it, that it no longer wakes, and that nobody still presents it.
+        // it, that only someone who may change the space starts it again,
+        // and that nobody still presents it.
         revoke_preview_sessions_for_tunnel(&state.pool, &grant.record.tunnel_id).await;
         mark_preview_closed(&state.pool, &grant.record.id).await?;
         state
@@ -1808,10 +1823,11 @@ fn forget_preview_cards(metadata: Option<&mut JsonValue>, cards: &[String]) -> b
     changed
 }
 
-/// A closed preview stays closed: `closedAt` (in the controller-owned preview
-/// object, so only this module sets it) keeps a wake from starting it again.
-/// A later `instafy preview open` of the same port writes fresh metadata
-/// without it.
+/// A closed preview stays down until someone who may change the space starts
+/// it again: `closedAt` (in the controller-owned preview object, so only this
+/// module sets it) keeps viewers' wakes and a viewer's Open from bringing it
+/// back. A wake by a builder, or a later `instafy preview open` of the same
+/// port, writes fresh metadata without it.
 async fn mark_preview_closed(pool: &PgPool, grant_row_id: &Uuid) -> ApiResult<()> {
     let connection = pool
         .get()

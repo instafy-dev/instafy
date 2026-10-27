@@ -293,7 +293,9 @@ async fn load_wake_runtime(
 
 /// Whether a wake by `context` can go ahead for this preview: they may change
 /// the space, or its machine is already up (restarting only the site costs
-/// nothing). `GET` reports it so Studio can disable Open with the reason.
+/// nothing) and nobody closed the preview on purpose (starting it again then
+/// undoes a change to the space). `GET` reports it so Studio can disable Open
+/// with the reason.
 pub(super) async fn caller_may_start(
     state: &AppState,
     project_id: &Uuid,
@@ -305,6 +307,9 @@ pub(super) async fn caller_may_start(
         .is_ok()
     {
         return true;
+    }
+    if grant.is_closed() {
+        return false;
     }
     match grant.record.runtime_id {
         Some(runtime_id) => load_wake_runtime(state, project_id, &runtime_id)
@@ -484,8 +489,12 @@ pub(super) async fn post_preview_wake(
     if !grant.is_private_preview() {
         return Err(forbidden("only private previews open in Studio"));
     }
-    if grant.is_closed() {
-        return Err(wake_conflict("this preview was closed", "preview_closed"));
+    if grant.is_superseded() {
+        // Its tunnel was replaced: a wake would get the newer preview's.
+        return Err(wake_conflict(
+            "a newer preview replaced this one",
+            "not_restartable",
+        ));
     }
     let runtime_id = grant
         .record
@@ -518,9 +527,10 @@ pub(super) async fn post_preview_wake(
         return Ok(waking(open.created_at));
     }
     // Starting a stopped runtime costs the space credits: as with Studio's own
-    // start, only members who may change the space do it. Anyone who may view
-    // joins a wake under way (above) and restarts a site on a runtime that is up.
-    if !runtime.live
+    // start, only members who may change the space do it. So does starting a
+    // site someone closed on purpose. Anyone who may view joins a wake under
+    // way (above) and restarts a site on a runtime that is up.
+    if (!runtime.live || grant.is_closed())
         && ensure_project_write_authorized(&state, &project_id, &context)
             .await
             .is_err()

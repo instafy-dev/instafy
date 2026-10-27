@@ -28,7 +28,10 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    the conversation's side pane, next to Chat, Browser and files, under the same browser bar (title, Reload, Open in
    new tab). The card never opens by itself, and cards in history never open anything.
 5. The tab's × closes the pane and revokes its session. If the server stops answering, the card and the pane say
-   "Not responding on port N". If the preview is closed or the machine stops, they say "Stopped".
+   "Not responding on port N". If the preview is closed or the machine stops, they say "Stopped". While the pane
+   is on screen it checks the site every 15 s and the cards of that preview read its answers, so they ask nothing
+   themselves. A pane whose session the controller refuses because the site stopped asks for a new one only once a
+   later check says the site answers again.
 6. While the pane shows the site, its heartbeat (about once a minute) counts as activity in the space, so the idle
    sweep does not stop a machine someone is looking at. This counts only for members who may change the space, the
    same rule as Studio's own activity ping and as starting a stopped machine: the space pays for the machine, so a
@@ -42,7 +45,8 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    value except `CONTROLLER_BASE_URL`, no `SUPABASE_*` value, no credential-like name). It waits up to 60 s for the
    port, the same as a wake, and exits 2 with the log's path when the command exits first or the port stays silent
    (then the command is stopped). `--json` adds `startedPid` (null when the port already answered and nothing was
-   started) and `logFile`.
+   started) and `logFile`. The log is Instafy's, not the person's work: a turn's file list never counts it, as it
+   counts nothing else under `.instafy/`.
 
 ```
 runtime   instafy preview open --port N --title T
@@ -67,7 +71,9 @@ the port (read from `/proc` on a Linux space), or `--serve-cmd "<command>"`. A c
 secret is never recorded: the CLI leaves it out (from `/proc`) or refuses it (`--serve-cmd`), and the controller refuses
 it too (`400`), whichever client sends it. The controller keeps it in the preview's
 controller-owned metadata, where no tunnel route can change it and no listing shows it. The preview record says
-`restartable: true` only when such a command is recorded and nobody closed the preview on purpose.
+`restartable: true` when such a command is recorded and no newer tunnel replaced the preview's (below). Closing a
+preview on purpose (`instafy preview close`, the close route) keeps the command: the card reads Stopped, and Open
+starts the site again for someone who may change the space.
 
 When a member presses **Open** on a stopped, restartable site (or **Start again** on the card or the pane when it
 stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
@@ -76,9 +82,11 @@ stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
 - Otherwise the controller records one wake (one open wake per preview; asking again joins it) and answers
   `202 {state: "waking"}`. If the machine is stopped, it starts it the way a chat message would. Only members who may
   change the space may start a stopped machine (`403 start_needs_builder`); anyone who may view the preview may restart
-  its site while the machine is up, or join a wake under way. A person's `GET` of the preview says `canStart: false`
-  when their wake could not go ahead (they may not change the space and the machine is not up), so Studio disables
-  **Open** with that reason before anyone presses it. A self-hosted machine that is offline fails with
+  its site while the machine is up, or join a wake under way. Starting a preview someone closed on purpose also takes
+  someone who may change the space, machine up or not. A person's `GET` of the preview says `canStart: false` when
+  their wake could not go ahead (they may not change the space, and the machine is not up or the preview was closed),
+  so Studio disables **Open** with that reason before anyone presses it. A stopped preview that cannot be woken (no
+  recorded command, or replaced by a newer one) offers no Open: its card says to ask Octo to start it again. A self-hosted machine that is offline fails with
   `409 runtime_offline` ("The computer this space runs on is offline.").
 - The runtime agent polls `POST /agent/preview-restarts/claim` with its agent token. A claim reconnects the same
   preview tunnel on the machine's current lease and hands the agent the recorded command and the tunnel client
@@ -99,7 +107,8 @@ person per space per hour (`429`); a wake not claimed within 10 minutes fails, a
 after 180 s (well past the agent's longest restart: 60 s for the port, 30 s for the CLI's lock), at most 3 times. An
 agent that sees a re-claim of a preview it is still restarting reports that restart's outcome for it. Each runtime
 agent asks for claims every 3 s: one indexed update of `runtime_preview_wakes` plus the agent token's runtime check
-(`ensure_runtime_can_heartbeat`), whether or not it has previews. A preview closed with `instafy preview close` or the close route never wakes. Without
+(`ensure_runtime_can_heartbeat`), whether or not it has previews. A preview whose tunnel a newer one replaced never
+wakes (`409 not_restartable`). Without
 previews configured, the wake route answers 503 like the others and the claim route 404, which the agent reads as "not
 offered here" and then asks only every 5 minutes. `runtime_preview_wakes` keeps who asked and how each wake ended.
 
