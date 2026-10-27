@@ -1720,9 +1720,8 @@ describe("AgentJobThreadPreviewLayout", () => {
     await render();
     const status = container.querySelector<HTMLElement>('[data-testid="preview-ready-status"]');
     expect(status?.dataset.state).toBe("live");
-    expect(status?.textContent).toBe("Live");
-    expect(container.querySelector('[data-testid="preview-ready-card"]')?.textContent).toContain("Only space members");
-    expect(container.querySelector('[data-testid="preview-ready-open"]')?.textContent).toBe("Open");
+    expect(container.querySelector('[data-testid="preview-card-private"]')?.getAttribute("aria-label")).toBe("Only space members can open this");
+    expect(container.querySelector('[data-testid="preview-ready-open"]')?.getAttribute("aria-label")).toBe("Open Site preview");
     // Drawn once, as the card: never also as the thread's summary text.
     expect(container.querySelectorAll('[data-testid="preview-ready-card"]')).toHaveLength(1);
     expect(container.textContent).not.toContain("is ready to preview.");
@@ -1732,7 +1731,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     opener.visiblePreviewId = previewId;
     await render();
-    expect(container.querySelector('[data-testid="preview-ready-open"]')?.textContent).toBe("Showing");
+    expect(container.querySelector('[data-testid="preview-ready-open"]')?.getAttribute("aria-disabled")).toBeNull();
   });
 
   it("renders generic multi-agent plan metadata as team progress", async () => {

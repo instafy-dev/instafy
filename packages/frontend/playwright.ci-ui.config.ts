@@ -43,6 +43,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "mobile-thumb-navigation.spec.ts",
   "notification-preferences.spec.ts",
   "organization-rail-reorder.spec.ts",
+  "preview-card-responsive.spec.ts",
   "run-stop-control.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
   "shared-browser-expanded-safe-area.spec.ts",
@@ -65,7 +66,7 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 30_000,
-  // The 157 required cases run serially; hosted timings project about
+  // The 163 required cases run serially; hosted timings project about
   // fifteen minutes in total. Leave room for startup and teardown while
   // bounding the complete lane without extending any individual test.
   globalTimeout: 1_200_000,

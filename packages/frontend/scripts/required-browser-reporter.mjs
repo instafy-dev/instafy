@@ -36,6 +36,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "mobile-thumb-navigation.spec.ts",
       "notification-preferences.spec.ts",
       "organization-rail-reorder.spec.ts",
+      "preview-card-responsive.spec.ts",
       "run-stop-control.spec.ts",
       "studio-history-navigation.spec.ts",
       "settings-history-scroll.spec.ts",
@@ -89,6 +90,8 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "one plain line opens Details by keyboard at 1280px (light)",
       "one plain line opens Details by keyboard at 390px (dark)",
       "gives the line and the step rows a 44px target on a coarse pointer",
+      "names the card, the lock and the status for screen readers",
+      "opens on a press anywhere on the card and from the keyboard, rings the whole card on focus",
     ],
   },
   "shared-studio": {

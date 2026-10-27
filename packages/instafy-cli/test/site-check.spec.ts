@@ -419,15 +419,58 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
     expect(errors).toMatch(/HTTP 404: \/missing\.js/);
   });
 
-  it("another server whose port starts with the site's (3000 vs 30001) is another origin: a warning, not an error", { timeout: 90_000 }, async () => {
+  it("another server whose port starts with the site's (3000 vs 30001) is another origin: blocked and listed as such, not an error", { timeout: 180_000 }, async () => {
     const siteRoutes: Record<string, Route> = {};
-    const [port, otherPort] = await servePrefixPair(siteRoutes, {});
+    // Records every path the other server is asked for.
+    const otherSeen: string[] = [];
+    const other = new Proxy({} as Record<string, Route>, { get: (_t, key) => { otherSeen.push(String(key)); return undefined; } });
+    const [port, otherPort] = await servePrefixPair(siteRoutes, other);
     expect(String(otherPort).startsWith(String(port))).toBe(true);
-    // the other server 404s the image; the routes are read per request, so the page can name its port now
+    // the routes are read per request, so the page can name the other port now
     siteRoutes["/"] = { body: GOOD.replace("</body>", `<img src="http://127.0.0.1:${otherPort}/gone.png" alt=""></body>`) };
     const result = await check({ port, outDir: path.join(tmp, "prefix"), phone: true });
     expect(result.code, JSON.stringify(result.report?.viewports.map((v) => v.errors))).toBe(CHECK_EXIT_OK);
-    expect(result.report!.viewports[0]!.warnings.join("\n")).toContain(`HTTP 404: http://127.0.0.1:${otherPort}/gone.png`);
+    const v = result.report!.viewports[0]!;
+    expect(v.blocked.join("\n")).toContain(`http://127.0.0.1:${otherPort}/gone.png (another local server`);
+    expect([...v.errors, ...v.warnings].join("\n")).not.toContain(String(otherPort));
+    expect(formatSiteCheck(result.report!)).toMatch(/blocked: http:\/\/127\.0\.0\.1:\d+\/gone\.png/);
+    expect(otherSeen).toEqual([]);
+  });
+
+  it("a redirect hop to a link-only site is blocked and listed, never sent on to the egress proxy", { timeout: 180_000 }, async () => {
+    // A stand-in for the egress proxy that records what it is sent; public.example/to-booking redirects to Booking.
+    const proxied: string[] = [];
+    const proxy = http.createServer((req, res) => {
+      proxied.push(`${req.method} ${req.url}`);
+      if (req.url === "http://public.example/to-booking") {
+        res.writeHead(302, { location: "https://www.booking.com/hotel/pt/x.html" });
+        res.end();
+        return;
+      }
+      res.writeHead(403);
+      res.end();
+    });
+    proxy.on("connect", (req, socket: net.Socket) => {
+      proxied.push(`CONNECT ${req.url}`);
+      socket.on("error", () => {});
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+    });
+    proxy.listen(0, "127.0.0.1");
+    await once(proxy, "listening");
+    servers.push(proxy);
+    const port = await serve({
+      "/": { body: GOOD.replace("</body>", `<img src="/to-booking.png" alt=""><iframe src="http://public.example/to-booking"></iframe></body>`) },
+      "/to-booking.png": { status: 302, body: "", headers: { location: "http://www.booking.com/logo.png" } },
+    });
+    const proxyServer = `http://127.0.0.1:${(proxy.address() as { port: number }).port}`;
+    const result = await check({ port, outDir: path.join(tmp, "redirect-hops"), phone: true, proxyServer });
+    expect(result.code, JSON.stringify(result.report?.viewports.map((v) => v.errors))).toBe(CHECK_EXIT_OK);
+    const v = result.report!.viewports[0]!;
+    expect(v.blocked.join("\n")).toMatch(/https?:\/\/www\.booking\.com\/logo\.png \(Booking\.com is link-only/);
+    expect(v.blocked.join("\n")).toMatch(/https:\/\/www\.booking\.com\/hotel\/pt\/x\.html \(Booking\.com is link-only/);
+    expect([...v.errors, ...v.warnings].join("\n")).not.toMatch(/booking/);
+    expect(proxied).toContain("GET http://public.example/to-booking");
+    expect(proxied.join("\n")).not.toMatch(/booking\.com/);
   });
 
   it("a minimal page (one heading on a plain background) passes", { timeout: 90_000 }, async () => {
