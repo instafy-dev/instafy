@@ -99,14 +99,15 @@ export async function runSharedBrowserAgentTabsFixture() {
       "/": { title: "Trip notes", body: "<p>The person's own page.</p>" },
     });
     servers.push(research.server);
-    // A link-only site that really answers (www.runrepeat.com is mapped to
-    // loopback below), so a load that slips through is seen by its server.
+    // A link-only ("no-agents") site that really answers (www.nike.com is
+    // mapped to loopback below), so a load that slips through is seen by its
+    // server.
     const linkOnly = await listenSite("link-only", {
       "/review": { title: "Link-only review", body: "<p>Text Octo must never read.</p>" },
       "/map": { title: "Link-only map", body: "<p>Map tiles Octo must never read.</p>" },
     });
     servers.push(linkOnly.server);
-    const linkOnlyReview = `http://www.runrepeat.com:${linkOnly.server.address().port}/review`;
+    const linkOnlyReview = `http://www.nike.com:${linkOnly.server.address().port}/review`;
     const sources = await listenSite("sources", {
       "/timetable": { title: "Timetable", body: "<p>Trains leave every 20 minutes.</p><form method=\"post\" action=\"/order\"><button>Place order</button></form>" },
       "/hours": { title: "Opening hours", body: "<p>Open daily 9 to 17.</p>" },
@@ -142,7 +143,7 @@ export async function runSharedBrowserAgentTabsFixture() {
       args: [
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
-        "--host-resolver-rules=MAP www.runrepeat.com 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+        "--host-resolver-rules=MAP www.nike.com 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
       ],
     });
     const runPage = context.pages()[0];
@@ -419,12 +420,12 @@ export async function runSharedBrowserAgentTabsFixture() {
     for (let attempt = 0; attempt < 100 && runPage.url() !== linkOnlyReview; attempt += 1) await delay(50);
     assert.equal(runPage.url(), linkOnlyReview, "The run's page moved on by itself");
     const promptsOnLinkOnly = prompts.length;
-    await refused(/The page the person chose is now on RunRepeat, which is link-only[^]*Send page to Octo/, "GET", "/v1/snapshot", null, ["allow_origin"]);
+    await refused(/The page the person chose is now on Nike, which is link-only[^]*Send page to Octo/, "GET", "/v1/snapshot", null, ["allow_origin"]);
     await refused(/link-only/, "GET", "/v1/status", null, ["allow_origin"]);
     await refused(/link-only/, "POST", "/v1/scroll", { y: 400 }, ["allow_origin"]);
     assert.equal(prompts.length, promptsOnLinkOnly, "Nothing on the link-only page asked or ran");
     const runPageListed = await ok("GET", "/v1/tabs");
-    assert.deepEqual([runPageListed.tabs[0].linkOnlySite, runPageListed.tabs[0].title], ["RunRepeat", null]);
+    assert.deepEqual([runPageListed.tabs[0].linkOnlySite, runPageListed.tabs[0].title], ["Nike", null]);
     await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, ["allow_origin"]);
     assert.equal(runPage.url(), `${research.origin}/`, "Octo took the person's page back to where it was");
 

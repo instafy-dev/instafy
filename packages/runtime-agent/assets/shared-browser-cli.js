@@ -11,10 +11,12 @@ const pageCapture = globalThis.__instafyBrowserPageCapture;
 const formSubmission = globalThis.__instafyBrowserFormSubmission;
 // The web-research skill's link-only list, embedded by the runtime agent ahead
 // of this script, plus what the space's own copy adds. Octo never opens, reads
-// or acts on a site on it, nor on a translator's, cache's or archive's copy of
-// one, in any tab: its own tabs and the page the person chose alike. Matching
-// is @instafy/browser-action-policy's linkOnly.js, embedded ahead of this
-// script too and shared with `instafy web read` and the Personal Browser.
+// or acts on a "no-agents" site on it, nor on a translator's, cache's or
+// archive's copy of one, in any tab: its own tabs and the page the person
+// chose alike. A "no-reuse" site (its terms bar copying, not reading) is not
+// refused. Matching is @instafy/browser-action-policy's linkOnly.js, embedded
+// ahead of this script too and shared with `instafy web read` and the Personal
+// Browser.
 const LINK_ONLY = linkOnlyListForRun();
 const LINK_ONLY_SITES = LINK_ONLY.list;
 if (
@@ -154,7 +156,12 @@ function tabField() {
 // anything in any tab.
 function linkOnlyListForRun() {
   const api = globalThis.__instafyLinkOnly;
-  if (!api || typeof api.linkOnlyListFrom !== "function" || typeof api.linkOnlyMatch !== "function") {
+  if (
+    !api ||
+    typeof api.linkOnlyListFrom !== "function" ||
+    typeof api.linkOnlyMatch !== "function" ||
+    typeof api.barsAgents !== "function"
+  ) {
     return { api: null, list: null, warnings: [] };
   }
   const file = String(process.env.INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE || "").trim();
@@ -185,16 +192,16 @@ function readSpaceLinkOnlyCopy(file) {
   }
 }
 
-// The link-only site an address is on, or null. A wrapper's copy is named as
+// The "no-agents" site an address is on, or null. A wrapper's copy is named as
 // the site with the wrapper: "Booking.com (its copy on the Wayback Machine)".
 function linkOnlySiteOf(rawUrl) {
   if (LINK_ONLY_SITES === null) return null;
   const hit = LINK_ONLY.api.linkOnlyMatch(LINK_ONLY_SITES, String(rawUrl || ""));
-  if (!hit) return null;
+  if (!LINK_ONLY.api.barsAgents(hit)) return null;
   return hit.via.length ? `${hit.site} (its copy on ${hit.via.join(", then ")})` : hit.site;
 }
 
-// The link-only site a document's answer says it is a copy of, or null: an
+// The "no-agents" site a document's answer says it is a copy of, or null: an
 // archive's Memento `Link: <…>; rel="original"` header names the page it
 // copies even at a short address (archive.ph/AbCdE) that names no site.
 // `headers` are CDP's [{ name, value }].
@@ -204,7 +211,7 @@ function linkOnlyCopyOf(headers, rawUrl) {
     .filter((header) => String(header?.name || "").toLowerCase() === "link")
     .map((header) => String(header?.value || ""));
   const hit = link.length ? LINK_ONLY.api.linkOnlyCopyOf(LINK_ONLY_SITES, link, String(rawUrl || "")) : null;
-  return hit ? `${hit.site} (a page that says it is a copy of it)` : null;
+  return LINK_ONLY.api.barsAgents(hit) ? `${hit.site} (a page that says it is a copy of it)` : null;
 }
 
 const LIST_UNAVAILABLE_MESSAGE =

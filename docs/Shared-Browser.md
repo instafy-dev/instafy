@@ -456,8 +456,10 @@ Browser has tabs of its own (see Personal-Browser.md).
   a named risky step (purchase, message, download, sign-out and the others), an
   activation key, a risky address, a step that may show a secret and a manual
   field handoff are refused there in every mode, before any prompt.
-- **Never a link-only site, in any tab.** A site on the web-research skill's
-  link-only list (runtime-agent embeds the skill's `link-only-sites.json` into
+- **Never a link-only site, in any tab.** A `no-agents` site on the
+  web-research skill's link-only list (its terms bar AI agents or automated
+  access; a site with no kind, or an unknown one, counts; runtime-agent embeds
+  the skill's `link-only-sites.json` into
   the controller, with `@instafy/browser-action-policy`'s `linkOnly.js`, the
   matcher `instafy web read` and the Personal Browser use too), or a
   translator's, cache's or archive's copy of one (the list's `wrappers`, such as
@@ -466,9 +468,12 @@ Browser has tabs of its own (see Personal-Browser.md).
   page the person chose alike. Sites and wrappers the space's own copy of the
   list adds (`.agents/skills/instafy-web-research/references/link-only-sites.json`,
   passed to the controller as `INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE`)
-  count too; that copy can only add, and a copy that is not a plain JSON file
-  of the list is left out (`status` reports it in `linkOnlyListWarnings`) while
-  the bundled list still applies. `open_tab`, `navigate` and a link, form or
+  count too; that copy can only add or make a site stricter (the strictest
+  kind of every entry that matches wins), and a copy that is not a plain JSON
+  file of the list is left out (`status` reports it in `linkOnlyListWarnings`)
+  while the bundled list still applies. A `no-reuse` site (its terms bar
+  copying its content, not reading it) is not refused; the web-research skill
+  says how its content may be used. `open_tab`, `navigate` and a link, form or
   activation key that leads there are refused before any prompt, and a
   redirect one of Octo's steps causes is stopped by the step's request guard
   before the request leaves the browser. A copy nested in another wrapper (a

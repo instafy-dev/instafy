@@ -46,6 +46,7 @@ import { runInstafyGit, runInstafyGitSync } from "./git-wrapper.js";
 import { runBind } from "./bind.js";
 import { registerPreviewCheckCommand } from "./site-check.js";
 import { registerWebCommand } from "./web-read.js";
+import { registerWebLinkCommand } from "./web-link.js";
 import { historyConversations, historyMessages, historyRuns } from "./history.js";
 import {
   grantHardwareBinding,
@@ -2244,7 +2245,7 @@ failWithGroupHelp(previewCommand);
 // A check of a site with an open preview refreshes the picture on its card.
 registerPreviewCheckCommand(previewCommand, { hasOpenPreview: hasOpenPreviewFor, uploadThumbnail: uploadCheckThumbnail });
 
-failWithGroupHelp(registerWebCommand(program));
+failWithGroupHelp(registerWebLinkCommand(registerWebCommand(program)));
 
 const previewOpenCommand = previewCommand
   .command("open")

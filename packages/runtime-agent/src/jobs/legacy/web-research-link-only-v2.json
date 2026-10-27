@@ -1,0 +1,28 @@
+{
+  "schema": "instafy.link-only-sites@1",
+  "about": "Sites Octo links to and never reads, in any reader or browser, because their terms or robots.txt bar AI agents or automated copying (instafy-web-research, Link-only sites). A reader that enforces this list treats it as a safety guard: it refuses the URL and every redirect hop that lands on one. The bundled copy is the floor: a space's copy may add sites and wrappers, never remove one; readers that can see the space enforce both. Matching: \"example.com\" matches that host and any subdomain; \"example.*\" matches the label followed by one or two public-suffix labels of 2 or 3 letters (example.de, example.co.uk, www.example.com.au). Hosts are compared as a browser connects to them: any case, trailing dots, ports and user info ignored, international names in punycode. Wrappers are services that serve another site's pages at an address of their own (translators, caches, archives, reader and fetch proxies). A wrapper is never refused itself, but its copy of a listed site is that site. \"embeds\" says where its address writes the site: \"subdomain\" (example.com.proxy.test), \"subdomain-dashes\" (www-example-com.translate.goog, with \".\" written \"-\" and \"-\" written \"--\"), \"path\" (web.archive.org/web/2024/https://www.example.com/) or \"query\" (.../search?q=cache:www.example.com). Add a site when its terms bar AI agents or automated copying, with the reason; robots.txt is checked on every read anyway, so a robots-only block needs no entry. Add a wrapper when a service serves other sites' pages under its own address.",
+  "reviewed": "2026-10",
+  "sites": [
+    { "name": "Booking.com", "match": ["booking.com"], "why": "terms bar AI agents" },
+    { "name": "Agoda", "match": ["agoda.com", "agoda.net"], "why": "terms bar AI agents and deep links" },
+    { "name": "Airbnb", "match": ["airbnb.*"], "why": "terms bar AI agents" },
+    { "name": "Amazon", "match": ["amazon.*", "amzn.*", "amzn.asia", "a.co"], "why": "terms and robots.txt bar AI agents" },
+    { "name": "Nike", "match": ["nike.com"], "why": "terms bar AI agents" },
+    { "name": "Expedia group", "match": ["expedia.*", "hotels.*", "vrbo.*"], "why": "terms bar automated copying" },
+    { "name": "Trip.com", "match": ["trip.com", "ctrip.com"], "why": "terms allow private use only" },
+    { "name": "Tripadvisor", "match": ["tripadvisor.*"], "why": "terms bar content reuse" },
+    { "name": "Google search, Maps, Travel and Hotels", "match": ["google.*", "goo.gl"], "why": "terms bar automated access; Maps links are fine as links" },
+    { "name": "RunRepeat", "match": ["runrepeat.com"], "why": "content not licensed for reuse" }
+  ],
+  "wrappers": [
+    { "name": "Google Translate's page proxy", "match": ["translate.goog"], "embeds": ["subdomain-dashes"], "why": "serves a site's pages at www-example-com.translate.goog" },
+    { "name": "the AMP cache", "match": ["cdn.ampproject.org"], "embeds": ["subdomain-dashes", "path"], "why": "serves a site's pages at www-example-com.cdn.ampproject.org/c/s/www.example.com/" },
+    { "name": "Google's page cache", "match": ["webcache.googleusercontent.com"], "embeds": ["path", "query"], "why": "serves copies at /search?q=cache:www.example.com/" },
+    { "name": "the Wayback Machine", "match": ["archive.org"], "embeds": ["path", "query"], "why": "serves copies at web.archive.org/web/<time>/<address>" },
+    { "name": "archive.today", "match": ["archive.today", "archive.ph", "archive.is", "archive.li", "archive.vn", "archive.fo", "archive.md"], "embeds": ["path", "query"], "why": "serves copies at archive.ph/<time>/<address> and archive.ph/newest/<address>" },
+    { "name": "the Jina reader proxy", "match": ["r.jina.ai"], "embeds": ["path"], "why": "serves a site's text at r.jina.ai/<address>" },
+    { "name": "Yandex's page translator", "match": ["translated.turbopages.org"], "embeds": ["path"], "why": "serves a site's pages at translated.turbopages.org/proxy_u/<languages>/https/<host>/<path>" },
+    { "name": "12ft.io", "match": ["12ft.io"], "embeds": ["path", "query"], "why": "serves a site's pages at 12ft.io/<address> and 12ft.io/proxy?q=<address>" },
+    { "name": "an open fetch proxy", "match": ["corsproxy.io", "api.allorigins.win", "cors-anywhere.herokuapp.com", "thingproxy.freeboard.io", "api.codetabs.com"], "embeds": ["path", "query"], "why": "fetches any page and serves it at its own address, such as corsproxy.io/?url=<address> or api.allorigins.win/raw?url=<address>" }
+  ]
+}
