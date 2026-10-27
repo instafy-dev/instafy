@@ -4,6 +4,7 @@ import {
   clearPendingNativeAuthAttempt,
   createPendingNativeAuthAttempt,
   nativeAuthAttemptProvider,
+  nativeAuthCallbackErrorMessage,
   parseNativeAuthCallbackUrl,
   readNativeAuthCallbackAttemptId,
   readPendingNativeAuthAttempt,
@@ -109,6 +110,13 @@ describe("native auth attempt provider", () => {
 
     expect(nativeAuthAttemptProvider(null)).toBe("github");
     expect(nativeAuthAttemptProvider({ provider: "unknown" })).toBe("github");
+  });
+});
+
+describe("native auth callback error message", () => {
+  it("names the provider and never carries the callback's error text", () => {
+    expect(nativeAuthCallbackErrorMessage("google")).toBe("Google sign-in was cancelled or refused. Try again.");
+    expect(nativeAuthCallbackErrorMessage("github")).toBe("GitHub sign-in was cancelled or refused. Try again.");
   });
 });
 

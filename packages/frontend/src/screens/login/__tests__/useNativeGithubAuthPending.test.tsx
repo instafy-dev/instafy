@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NATIVE_AUTH_ERROR_EVENT } from "../../../auth/nativeAuth";
+import { NATIVE_AUTH_ERROR_EVENT, NATIVE_AUTH_ERROR_STORAGE_KEY } from "../../../auth/nativeAuth";
 
 const supabaseMock = vi.hoisted(() => ({
   signInWithOAuth: vi.fn(),
@@ -225,7 +225,15 @@ describe("useNativeGithubAuth pending status", () => {
     await act(async () => platform.desktopListener?.("instafy://auth?error_description=access_denied"));
 
     expect(setAwaitingBrowser).toHaveBeenLastCalledWith(null);
-    expect(setError).toHaveBeenLastCalledWith("access_denied");
+    // The callback is a deep link any app can open: the screen and the stored
+    // error show a fixed message, and only telemetry records the URL's text.
+    expect(setError).toHaveBeenLastCalledWith("GitHub sign-in was cancelled or refused. Try again.");
+    expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBe(
+      "GitHub sign-in was cancelled or refused. Try again.",
+    );
+    expect(telemetry.post).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "auth.login.github.callback_error", message: "access_denied" }),
+    );
     expect(setPendingProvider).toHaveBeenLastCalledWith(null);
   });
 

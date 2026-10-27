@@ -40,6 +40,15 @@ export function nativeAuthAttemptProvider(
   return attempt?.provider === "google" ? "google" : "github";
 }
 
+/**
+ * What sign-in says when the callback reports a provider error. The callback
+ * is a deep link that any app can open, so the screen and the stored error
+ * never repeat the URL's error text; only telemetry records it.
+ */
+export function nativeAuthCallbackErrorMessage(provider: NativeAuthProvider): string {
+  return `${NATIVE_AUTH_PROVIDER_LABELS[provider]} sign-in was cancelled or refused. Try again.`;
+}
+
 function normalizeCallbackPathname(pathname: string): string {
   const trimmed = pathname.trim();
   if (!trimmed) {

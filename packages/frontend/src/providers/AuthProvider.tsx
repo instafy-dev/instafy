@@ -16,6 +16,7 @@ import {
   NATIVE_AUTH_PROVIDER_LABELS,
   NATIVE_AUTH_SUCCESS_EVENT,
   nativeAuthAttemptProvider,
+  nativeAuthCallbackErrorMessage,
   parseNativeAuthCallbackUrl,
   readPendingNativeAuthAttempt,
   writeNativeAuthCallbackAttemptId,
@@ -377,8 +378,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       level: "warning" | "error",
       message: string,
       metadata: Record<string, unknown> = {},
+      telemetryMessage: string = message,
     ) => {
-      postNativeAuthTelemetry(kind, level, message, metadata);
+      postNativeAuthTelemetry(kind, level, telemetryMessage, metadata);
       clearNativeAuthCallbackAttemptId();
       clearPendingNativeAuthAttempt();
       writeNativeAuthError(message);
@@ -447,9 +449,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
 
         if (oauthError) {
-          await failNativeAuthAttempt(kind("callback_error"), "warning", oauthError, {
-            phase: "callback",
-          });
+          await failNativeAuthAttempt(
+            kind("callback_error"),
+            "warning",
+            nativeAuthCallbackErrorMessage(provider),
+            { phase: "callback" },
+            oauthError,
+          );
           return;
         }
 

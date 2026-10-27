@@ -15,6 +15,7 @@ import {
   NATIVE_AUTH_PROVIDER_LABELS,
   NATIVE_AUTH_SUCCESS_EVENT,
   nativeAuthAttemptProvider,
+  nativeAuthCallbackErrorMessage,
   type NativeAuthProvider,
   parseNativeAuthCallbackUrl,
   readNativeAuthCallbackAttemptId,
@@ -130,6 +131,7 @@ export function useNativeGithubAuth({
       kind: string,
       nextMessage: string,
       metadata: Record<string, unknown> = {},
+      telemetryMessage: string = nextMessage,
     ) => {
       const pendingAttempt = readPendingNativeAuthAttempt();
       clearNativeAuthCallbackAttemptId();
@@ -139,7 +141,7 @@ export function useNativeGithubAuth({
       setAwaitingBrowser(null);
       setError(nextMessage);
       setPendingProvider(null);
-      postGithubAuthTelemetry(kind, "warning", nextMessage, pendingAttempt, metadata);
+      postGithubAuthTelemetry(kind, "warning", telemetryMessage, pendingAttempt, metadata);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -398,10 +400,15 @@ export function useNativeGithubAuth({
         });
 
         if (oauthError) {
-          failPendingGithubLoginAttempt(kind("callback_error"), oauthError, {
-            phase: "callback",
-            source: "login_page_direct_plugins",
-          });
+          failPendingGithubLoginAttempt(
+            kind("callback_error"),
+            nativeAuthCallbackErrorMessage(provider),
+            {
+              phase: "callback",
+              source: "login_page_direct_plugins",
+            },
+            oauthError,
+          );
           return;
         }
 
