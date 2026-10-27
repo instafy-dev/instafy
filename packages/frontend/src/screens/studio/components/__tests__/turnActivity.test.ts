@@ -368,23 +368,27 @@ describe("summarizeTurnActivity", () => {
 });
 
 // Browser steps, from the runtime's browser table (activity_labels.rs).
+// Opening, reading and searching count only for a step that succeeded.
 const BROWSER_OPEN = {
   key: "browser/open",
   role: "content",
   live: "Opening {host}",
   done: { one: "opened {host}", other: "opened {n} pages on {host}", some: "opened pages on {host}" },
+  when: "success",
 };
 const BROWSER_READ = {
   key: "browser/read",
   role: "content",
   live: "Reading {host}",
   done: { one: "read a page on {host}", other: "read {n} pages on {host}", some: "read pages on {host}" },
+  when: "success",
 };
 const BROWSER_SEARCH = {
   key: "browser/search",
   role: "content",
   live: "Searching {host}",
   done: { one: "searched {host}", other: "searched {host} {n} times", some: "searched {host}" },
+  when: "success",
 };
 const BROWSER_BROWSE = { key: "browser/browse", role: "quiet", live: "Browsing {host}" };
 
@@ -475,6 +479,21 @@ describe("answered browser prompts", () => {
     expect(summarize([opened, site]).summary).toBe("Opened carris.pt, read a page · you allowed the site");
     const google = browserStep({ key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" }, { step: "navigate", approval: "denied" }, "failed");
     expect(summarize([google]).summary).toBe("Used the browser · you said no to opening a page");
+  });
+
+  it("never say a step the person said no to, or left, was done", () => {
+    // Octo asked to open google.com and the person said no: nothing was opened.
+    const google = browserStep(BROWSER_OPEN, { host: "google.com", step: "navigate", approval: "denied" }, "failed");
+    expect(summarize([google]).summary).toBe("Used a tool · you said no to opening google.com");
+    const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
+    expect(summarize([opened, google]).summary).toBe("Opened carris.pt · you said no to opening google.com");
+    const unanswered = browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", step: "search", approval: "expired" }, "failed");
+    expect(summarize([opened, unanswered]).summary).toBe(
+      "Opened carris.pt · skipped a search on visitlisboa.com: no answer in time",
+    );
+    // A page that failed to load was not read either.
+    const failedRead = browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot" }, "failed");
+    expect(summarize([opened, failedRead]).summary).toBe("Opened carris.pt");
   });
 
   it("count the answers when there are several, and never count a step's routine or free approval", () => {

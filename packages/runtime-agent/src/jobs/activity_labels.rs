@@ -1009,9 +1009,14 @@ pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
         ("search", Some(_)) => &BROWSER_SEARCH,
         (_, Some(_)) => &BROWSER_BROWSE,
     };
+    let mut found = Found::builtin(label, Some(1));
+    // A step that did not happen (refused, said no to, left unanswered, failed) opened, read and
+    // searched nothing, so it counts only once it ended without an error.
+    found.success_only =
+        [BROWSER_OPEN.key, BROWSER_READ.key, BROWSER_SEARCH.key].contains(&label.key);
     let mut activity = serde_json::Map::new();
     activity.insert("v".into(), JsonValue::from(ACTIVITY_VERSION));
-    activity.extend(Found::builtin(label, Some(1)).entry_json());
+    activity.extend(found.entry_json());
     for field in ["host", "pageKey", "step", "approval"] {
         if let Some(value) = facts.get(field) {
             activity.insert(field.into(), value.clone());
@@ -1460,6 +1465,27 @@ mod tests {
         ] {
             assert_eq!(browser_step_activity(&facts), None, "{facts}");
         }
+    }
+
+    // A browser step that did not happen (the person said no, no answer came, a link-only site,
+    // an error) never reads as done: "Opened google.com · you said no to opening google.com"
+    // would contradict itself. Opening, reading and searching count only once the step ended
+    // without an error, like a command's `when: "success"`.
+    #[test]
+    fn a_browser_step_counts_as_opened_read_or_searched_only_when_it_succeeded() {
+        for kind in ["navigate", "open_tab", "snapshot", "search"] {
+            let activity = browser_step_activity(&json!({
+                "step": kind, "host": "google.com", "approval": "denied",
+            }))
+            .expect("labelled");
+            assert_eq!(activity["role"], json!("content"), "{kind}");
+            assert_eq!(activity["when"], json!("success"), "{kind}");
+        }
+        // Quiet steps are never shown as done, and a step with no site keeps the generic label.
+        let click = browser_step_activity(&json!({"step": "click", "host": "google.com"})).unwrap();
+        assert!(click.get("when").is_none());
+        let unnamed = browser_step_activity(&json!({"step": "navigate"})).unwrap();
+        assert!(unnamed.get("when").is_none());
     }
 
     #[test]

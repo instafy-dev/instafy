@@ -156,6 +156,12 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   | `submit`, `click`, `type`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | – | quiet |
   | no host known yet | Using the browser | used the browser | content |
 
+  Opening, reading and searching carry `when: "success"`: a step the person said no to, left
+  unanswered, or that failed (a link-only site, an error) opened, read and searched nothing, so
+  the done line never counts it. "Opened google.com · you said no to opening google.com" cannot
+  happen; a turn whose only step was refused reads "Used a tool · you said no to opening
+  google.com".
+
 - **Studio** groups browser steps by key and host. Pages opened and read count by distinct
   `pageKey`, so reading a page twice is "read a page"; searches count each time. After a group on
   the same site, a group's trailing " on {host}" goes: "Searched visitlisboa.com, read 2 pages".
