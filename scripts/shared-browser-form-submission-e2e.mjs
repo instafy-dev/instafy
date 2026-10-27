@@ -20,6 +20,11 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    button, a form that opens another window and a <base href> to another
 //    site: none of them sends a cross-site POST without the confirmation for
 //    that site.
+// 3. Under routine browsing, Enter in a site's own search box, or typing into
+//    it with submit, goes without a prompt when it is a GET of the page's own
+//    origin that sends nothing key-like, in the run's page and in Octo's own
+//    tabs, and lets no form post leave the tab; every other form step still
+//    asks or is refused, and Ask mode asks for each.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -50,6 +55,9 @@ const { formSubmissionRulesInPage } = createRequire(import.meta.url)(path.join(p
 const table = JSON.parse(fs.readFileSync(path.join(policyDirectory, "formSubmissionCases.json"), "utf8"));
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// A random-looking value the redaction rules mask, assembled at run time so
+// the source holds no key-shaped literal.
+const KEY_LIKE = ["a8Fk2LmQ", "9zXw7Rt4", "Yb6Nc1Vd"].join("");
 
 function writeProtectedJson(destination, value) {
   const temporary = `${destination}.${randomUUID()}.tmp`;
@@ -90,6 +98,34 @@ document.getElementById("moving").addEventListener("keydown", (event) => {
 <form action="/search"><button formaction="{other}/collect" formmethod="post"><input name="size" aria-label="Shoe size"></button></form>
 <form action="/search"><button formaction="{other}/collect" formmethod="post" aria-label="Search">${"<span>".repeat(70)}<span tabindex="0">Deep reviews</span>${"</span>".repeat(70)}</button></form>`;
 
+// A site's own search box: a GET of the page's own origin.
+const SEARCH = `<h1>Places</h1>
+<form action="/search" method="get" role="search"><input type="search" name="q" aria-label="Search places"><input type="hidden" name="lang" value="en"><button>Search</button></form>`;
+// Search boxes that still ask, or are refused, under routine browsing, and one
+// whose page turns the search into a post when Enter is pressed.
+const SEARCH_CHECKS = `<h1>Searches</h1>
+<form action="/search" method="get"><input type="search" name="q" aria-label="Search, posted"><button formmethod="post">Search</button></form>
+<form action="{other}/search"><input type="search" name="q" aria-label="Search another site"><button>Search</button></form>
+<form action="{sub}/search"><input type="search" name="q" aria-label="Search a subdomain"><button>Search</button></form>
+<form action="/search"><input type="search" name="q" aria-label="Search in a new window"><button formtarget="_blank">Search</button></form>
+<form action="/search"><button aria-label="Search"><input name="q" aria-label="Search inside the button"></button></form>
+<input type="search" aria-label="Search without a form" id="formless">
+<form action="/account/logout"><input type="search" name="q" aria-label="Search, then sign out"><button>Search</button></form>
+<form action="https://www.booking.com/searchresults.html"><input type="search" name="ss" aria-label="Search hotels"><button>Search</button></form>
+<form action="/search"><input type="search" name="q" aria-label="Search with a key"><input type="hidden" name="k" value="{key}"><button>Search</button></form>
+<form action="/search" method="get"><input type="search" name="q" aria-label="Search, then posted" id="flip"><button>Search</button></form>
+<script>
+document.getElementById("formless").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") location.assign("/search?q=" + encodeURIComponent(event.target.value));
+});
+document.getElementById("flip").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  const button = event.target.form.querySelector("button");
+  button.formMethod = "post";
+  button.formAction = "/collect";
+});
+</script>`;
+
 export async function runSharedBrowserFormSubmissionFixture() {
   assert.ok(fs.existsSync(executablePath), "Locked Playwright Chromium is missing; run pnpm --filter @instafy/frontend exec playwright install chromium");
   fs.mkdirSync(resultDirectory, { recursive: true });
@@ -109,14 +145,20 @@ export async function runSharedBrowserFormSubmissionFixture() {
     // "<METHOD> <origin><path>", so a step that sends nothing is seen to.
     const requests = [];
     let port = 0;
+    // The same requests with their queries, for the searches that must send
+    // exactly what was typed.
+    const searches = [];
     const sites = () => ({
       shop: `http://shop.test:${port}`,
       mall: `http://mall.test:${port}`,
+      sub: `http://www.mall.test:${port}`,
       other: `http://other.test:${port}`,
     });
     const fill = (html, name = "") => html
       .replaceAll("{shop}", sites().shop)
       .replaceAll("{other}", sites().other)
+      .replaceAll("{sub}", sites().sub)
+      .replaceAll("{key}", KEY_LIKE)
       .replaceAll("{page}", `${sites().shop}/case/${name}`);
     server = createServer((request, response) => {
       const url = new URL(request.url, `http://${request.headers.host}`);
@@ -125,6 +167,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         return;
       }
       requests.push(`${request.method} ${url.origin}${url.pathname}`);
+      searches.push(`${request.method} ${url.origin}${url.pathname}${url.search}`);
       request.resume();
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       const name = url.pathname.startsWith("/case/") ? decodeURIComponent(url.pathname.slice("/case/".length)) : "";
@@ -137,6 +180,10 @@ export async function runSharedBrowserFormSubmissionFixture() {
         response.end(page("Notes", fill(BASED)));
       } else if (url.pathname === "/scenario/stray") {
         response.end(page("Mall", fill(STRAY)));
+      } else if (url.pathname === "/scenario/search") {
+        response.end(page("Places", fill(SEARCH)));
+      } else if (url.pathname === "/scenario/search-checks") {
+        response.end(page("Searches", fill(SEARCH_CHECKS)));
       } else {
         response.end(page("Fixture", `<p>${request.method} ${url.pathname}</p>`));
       }
@@ -156,7 +203,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
       args: [
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
-        "--host-resolver-rules=MAP shop.test 127.0.0.1, MAP mall.test 127.0.0.1, MAP other.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+        "--host-resolver-rules=MAP shop.test 127.0.0.1, MAP mall.test 127.0.0.1, MAP www.mall.test 127.0.0.1, MAP other.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
       ],
     });
     const runPage = context.pages()[0];
@@ -354,6 +401,18 @@ export async function runSharedBrowserFormSubmissionFixture() {
     assert.deepEqual(promptsSince(start), [["action", "form-submit", sites().other]]);
     assert.deepEqual(requests, [], "Nothing was sent");
 
+    // Ask mode: the person asked to review every step, so a site's own GET
+    // search asks too, for the typed search and for Enter alike.
+    await runPage.goto(`${sites().shop}/scenario/search`);
+    snapshot = await ok("GET", "/v1/snapshot");
+    let places = control(snapshot, "Search places");
+    start = prompts.length;
+    requests.length = 0;
+    await refused(/approval_denied|denied/i, "POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: "Belém Tower", submit: true }, ["deny"]);
+    await refused(/approval_denied|denied/i, "POST", "/v1/press", { index: places.index, snapshotId: snapshot.snapshotId, key: "Enter" }, ["deny"]);
+    assert.deepEqual(promptsSince(start), [["action", "form-submit", sites().shop], ["action", "press-enter", sites().shop]]);
+    assert.deepEqual(requests, [], "Nothing was sent in Ask mode");
+
     // d. Routine browsing (allowed on a third site): a click on a label that
     // clicks a hidden submit button, and Enter in the hostile search field,
     // still ask, bound to the other site, and send nothing when denied.
@@ -377,14 +436,14 @@ export async function runSharedBrowserFormSubmissionFixture() {
     // was not approved for, whatever sent it.
     const strayPage = `${sites().mall}/scenario/stray`;
     // A keydown handler moves the default button to another site after the
-    // person allowed Enter for the page's own search.
+    // step was judged a free search of the page's own site.
     await runPage.goto(strayPage);
     snapshot = await ok("GET", "/v1/snapshot");
     field = control(snapshot, "Find a product");
     start = prompts.length;
     requests.length = 0;
-    await refused(/sent a form to http:\/\/other\.test:\d+\/?, which the step was not approved to send to/, "POST", "/v1/press", { index: field.index, snapshotId: snapshot.snapshotId, key: "Enter" }, ["allow_once"]);
-    assert.deepEqual(promptsSince(start), [["action", "press-enter", sites().mall]]);
+    await refused(/sent a form to http:\/\/other\.test:\d+\/?, which the step was not approved to send to/, "POST", "/v1/press", { index: field.index, snapshotId: snapshot.snapshotId, key: "Enter" });
+    assert.deepEqual(promptsSince(start), [], "A free search of the page's own site asks nothing");
     await delay(300);
     assert.deepEqual(sentTo(collect), [], "The moved form was stopped");
     // A routine click on a control whose click reaches a submit button the
@@ -419,9 +478,105 @@ export async function runSharedBrowserFormSubmissionFixture() {
     await delay(300);
     assert.deepEqual(sentTo(collect), [], "No cross-site POST without its confirmation");
 
+    // 3. Free same-site GET search under routine browsing (still on).
+    const searchPage = `${sites().mall}/scenario/search`;
+    const sentSearch = (query) => `GET ${sites().mall}/search?${query}`;
+    // a. Typing with submit on the run's page sends exactly the GET the form
+    // makes, with no prompt, and the result says it went free.
+    await runPage.goto(searchPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    places = control(snapshot, "Search places");
+    start = prompts.length;
+    searches.length = 0;
+    let searched = await ok("POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: "Belém Tower", submit: true });
+    assert.deepEqual(promptsSince(start), [], "A site's own GET search asks nothing under routine browsing");
+    assert.deepEqual(searches, [sentSearch("q=Bel%C3%A9m+Tower&lang=en")], "It sent exactly the form's GET");
+    assert.deepEqual(searched.activity, { step: "search", approval: "free" });
+    // b. Enter in the field, with text typed first, goes the same way.
+    await runPage.goto(searchPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    places = control(snapshot, "Search places");
+    snapshot = await ok("POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: "Jerónimos" });
+    places = control(snapshot, "Search places");
+    start = prompts.length;
+    searches.length = 0;
+    searched = await ok("POST", "/v1/press", { index: places.index, snapshotId: snapshot.snapshotId, key: "Enter" });
+    assert.deepEqual(promptsSince(start), []);
+    assert.deepEqual(searches, [sentSearch("q=Jer%C3%B3nimos&lang=en")]);
+    assert.deepEqual(searched.activity, { step: "search", approval: "free" });
+    // c. In one of Octo's own tabs, which refuse every other submission.
+    const octoTab = await ok("POST", "/v1/tabs/open", { url: searchPage });
+    snapshot = await ok("GET", "/v1/snapshot", { tabId: octoTab.tabId });
+    places = control(snapshot, "Search places");
+    start = prompts.length;
+    searches.length = 0;
+    searched = await ok("POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: "Pastéis de Belém", submit: true });
+    assert.deepEqual(promptsSince(start), []);
+    assert.deepEqual(searches, [sentSearch("q=Past%C3%A9is+de+Bel%C3%A9m&lang=en")]);
+    assert.deepEqual(searched.activity, { step: "search", approval: "free" });
+    await ok("POST", "/v1/tabs/close", { tabId: octoTab.tabId });
+    // d. A typed value that looks like a key asks, on the same search box.
+    await runPage.goto(searchPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    places = control(snapshot, "Search places");
+    start = prompts.length;
+    requests.length = 0;
+    await refused(/approval_denied|denied/i, "POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: KEY_LIKE, submit: true }, ["deny"]);
+    assert.deepEqual(promptsSince(start), [["action", "form-submit", sites().mall]]);
+    assert.deepEqual(requests, [], "A key-like search was not sent");
+    // e. Every other search box still asks, or is refused before any prompt,
+    // and sends nothing when the person says no.
+    const checksPage = `${sites().mall}/scenario/search-checks`;
+    const asks = [
+      ["Search, posted", sites().mall],
+      ["Search another site", sites().other],
+      ["Search a subdomain", sites().sub],
+      ["Search without a form", sites().mall],
+      ["Search, then sign out", sites().mall],
+      ["Search with a key", sites().mall],
+    ];
+    for (const [label, destination] of asks) {
+      await runPage.goto(checksPage);
+      snapshot = await ok("GET", "/v1/snapshot");
+      const box = control(snapshot, label);
+      start = prompts.length;
+      requests.length = 0;
+      await refused(/approval_denied|denied/i, "POST", "/v1/type", { index: box.index, snapshotId: snapshot.snapshotId, text: "tower", submit: true }, ["deny"]);
+      assert.deepEqual(promptsSince(start), [["action", "form-submit", destination]], `${label}: asks`);
+      await delay(200);
+      assert.deepEqual(requests, [], `${label}: nothing was sent`);
+    }
+    const refusals = [
+      ["Search in a new window", /opens another window/],
+      ["Search inside the button", /sits inside the form's submit button/],
+      ["Search hotels", /Booking\.com is link-only/],
+    ];
+    for (const [label, reason] of refusals) {
+      await runPage.goto(checksPage);
+      snapshot = await ok("GET", "/v1/snapshot");
+      const box = control(snapshot, label);
+      start = prompts.length;
+      requests.length = 0;
+      await refused(reason, "POST", "/v1/type", { index: box.index, snapshotId: snapshot.snapshotId, text: "tower", submit: true });
+      assert.deepEqual(promptsSince(start), [], `${label}: refused before any prompt`);
+      await delay(200);
+      assert.deepEqual(requests, [], `${label}: nothing was sent`);
+    }
+    // f. A page script that turns the free search into a post, even to the
+    // page's own site, is stopped by the step's guard, and the step says so.
+    await runPage.goto(checksPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    const flipped = control(snapshot, "Search, then posted");
+    start = prompts.length;
+    requests.length = 0;
+    await refused(/sent a form to http:\/\/mall\.test:\d+\/?, which the step was not approved to send to/, "POST", "/v1/type", { index: flipped.index, snapshotId: snapshot.snapshotId, text: "tower", submit: true });
+    assert.deepEqual(promptsSince(start), [], "Judged a free search before the page changed it");
+    await delay(300);
+    assert.deepEqual(sentTo(`POST ${sites().mall}/collect`), [], "The post was stopped before it left the browser");
+
     const result = {
       status: "passed",
-      fixtureVersion: 2,
+      fixtureVersion: 3,
       cases: table.cases.length,
       prompts: prompts.length,
       checks: [
@@ -434,6 +589,10 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "a form a keydown handler moves to another site after approval is stopped before it is sent",
         "a routine click that reaches a submit button in a closed shadow tree, or one laid over the control, sends nothing elsewhere",
         "a field inside a submit button is refused before any prompt; a control nested deep inside one asks for the button's site",
+        "in Ask mode a site's own GET search asks, typed or by Enter",
+        "under routine browsing a GET search of the page's own origin goes without a prompt, sends exactly the form's GET and says approval free, in the run's page and in Octo's own tab",
+        "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address and a hidden key-like value still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
+        "a page script that turns a free search into a post to its own site is stopped by the step's guard",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",
@@ -455,7 +614,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 2 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 3 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });

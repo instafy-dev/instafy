@@ -1425,6 +1425,7 @@ function policyTarget(description) {
     formActionUrl: facts.formActionUrl || "",
     formNewWindow: facts.formNewWindow === true,
     formSubmission: typeof facts.formSubmission === "string" ? facts.formSubmission : null,
+    formSubmits: facts.formSubmits === true,
     formActionText: facts.formName || "",
     formSubmitLabels: facts.formSubmitLabels || "",
     formHasPassword: facts.formHasPassword === true,
@@ -2083,6 +2084,93 @@ function stepPostOrigins(readingStep, sourceOrigin, submission, destination) {
   if (submission) return [sourceOrigin, destination.destinationOrigin];
   return readingStep ? [sourceOrigin] : null;
 }
+
+// Runs inside the page with the form submission rules joined in front
+// (FORM_VALUES_IN_PAGE), so it must not use anything from this file's scope.
+// The values Enter in `element` sends besides the text a type step puts
+// there: every other control of the form the browser would include, hidden
+// fields and the default button's value too, and the field's own value when
+// the step keeps it (`keepOwn`, a press). Read from the controls themselves,
+// never with new FormData(), which would run the page's formdata handlers. A
+// form the rules cannot read in full (a file chooser, a form-associated
+// custom element, too many values) is reported incomplete, and the step
+// asks.
+function formValuesInPage(forms, element, request) {
+  const MAX_VALUES = 64;
+  const MAX_VALUE_CHARS = 4_097;
+  const incomplete = { kind: "form-values", complete: false, values: [] };
+  let implicit = null;
+  try {
+    implicit = forms.implicitSubmission(element);
+  } catch (_) {
+    return incomplete;
+  }
+  if (!implicit || implicit.blocked || !(implicit.form instanceof HTMLFormElement)) return incomplete;
+  const values = [];
+  for (const control of Array.from(implicit.form.elements)) {
+    if (values.length > MAX_VALUES) return incomplete;
+    const tag = String(control.tagName || "").toUpperCase();
+    if (tag.includes("-")) return incomplete;
+    if (!control.name || control.matches(":disabled")) continue;
+    if (control === element && request && request.keepOwn === false) continue;
+    const type = String(control.type || "").toLowerCase();
+    if (tag === "BUTTON" || (tag === "INPUT" && ["submit", "image", "reset", "button"].includes(type))) {
+      if (control === implicit.button && type !== "image") values.push(String(control.value));
+      continue;
+    }
+    if (tag === "INPUT" && type === "file") return incomplete;
+    if (tag === "INPUT" && (type === "checkbox" || type === "radio")) {
+      if (control.checked) values.push(String(control.value));
+      continue;
+    }
+    if (tag === "SELECT") {
+      for (const option of Array.from(control.selectedOptions || [])) values.push(String(option.value));
+      continue;
+    }
+    if (tag === "INPUT" || tag === "TEXTAREA") values.push(String(control.value));
+  }
+  if (values.length > MAX_VALUES) return incomplete;
+  return { kind: "form-values", complete: true, values: values.map((value) => value.slice(0, MAX_VALUE_CHARS)) };
+}
+
+const FORM_VALUES_IN_PAGE = new Function(
+  "...args",
+  `return (${formValuesInPage})((${formSubmission.formSubmissionRulesInPage})(), ...args);`,
+);
+
+// Enter in the page's own search box, or typing into it with submit, that
+// goes without a prompt (actionPolicy.isFreeSiteSearch): only under routine
+// browsing, and only when every value the form sends was read and none looks
+// like a key. `typed` is the text a type step puts in the field, or null for
+// a press. The values are tested here and kept nowhere. The step's guard then
+// lets no form post leave the tab (FREE_SEARCH_POST_ORIGINS). In one of
+// Octo's own tabs the page was opened in this run, and routine browsing
+// covers the run's tabs alike.
+async function freeSiteSearch(page, target, typed) {
+  if (!target.description.policy || !approvalProtocol.routineBrowsingAllowed()) return false;
+  const facts = policyTarget(target.description);
+  const pageUrl = page.url();
+  const typedValues = typed === null ? [] : [typed];
+  if (!actionPolicy.isFreeSiteSearch(facts, pageUrl, typedValues)) return false;
+  const answer = await target.locator
+    .evaluate(FORM_VALUES_IN_PAGE, { kind: "form-values", keepOwn: typed === null })
+    .catch(() => null);
+  if (
+    !answer || answer.kind !== "form-values" || answer.complete !== true ||
+    !Array.isArray(answer.values) || answer.values.some((value) => typeof value !== "string")
+  ) {
+    return false;
+  }
+  return actionPolicy.isFreeSiteSearch(facts, pageUrl, [...typedValues, ...answer.values]);
+}
+
+// A free site search sends a GET of the page's own origin, so while it runs
+// the tab may post a form nowhere: a page script that turns the search into
+// a post is stopped before it leaves the browser.
+const FREE_SEARCH_POST_ORIGINS = Object.freeze([]);
+
+// What a free site search's result says it was, for the runtime and Studio.
+const FREE_SEARCH_ACTIVITY = Object.freeze({ step: "search", approval: "free" });
 
 // Runs inside the page through Playwright, so it must not use anything from
 // this file's scope. Waits, at most `timeoutMs`, for the running animations
@@ -3106,7 +3194,6 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       refuseUserStep(submitStep);
     }
     const step = submitStep || typingStep;
-    const readingStep = !submitting && routineCovers(step, target.description, { consequential: false });
     const rawDestination = submitting
       ? resolvedTargetDestination(target.description, page.url()) || page.url()
       : null;
@@ -3115,6 +3202,11 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }
     const typeSubmission = submitting ? stepFormSubmission(target.description, "submit") : null;
     refuseNewWindowOrNestedSubmission(typeSubmission);
+    // Typing into the page's own search box with submit goes without a
+    // prompt under routine browsing; every other submission asks.
+    const freeSearch = submitting && documents !== null && (await freeSiteSearch(page, target, body.text));
+    const readingStep = freeSearch ||
+      (!submitting && routineCovers(step, target.description, { consequential: false }));
     refuseUnlessReadingStep(readingStep);
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const destination = approvalProtocol.destinationBinding(rawDestination);
@@ -3173,7 +3265,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       submitting ? "target-or-page" : "none",
     );
     const withholding = submitting ? await withholdBeforeStep(page, step) : false;
-    documents?.limitFormPosts(stepPostOrigins(readingStep, sourceOrigin, typeSubmission, destination));
+    documents?.limitFormPosts(freeSearch
+      ? FREE_SEARCH_POST_ORIGINS
+      : stepPostOrigins(readingStep, sourceOrigin, typeSubmission, destination));
     await target.locator.fill(body.text);
     if (submitting) {
       await target.locator.press("Enter");
@@ -3182,7 +3276,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       await emitNavigationResult(page);
     }
     page = await resolveExpectedPage(browser);
-    return await snapshotAfterStep(page, withholding);
+    const typed = await snapshotAfterStep(page, withholding);
+    return freeSearch ? { ...typed, activity: FREE_SEARCH_ACTIVITY } : typed;
   }
 
   if (method === "POST" && requestPath === "/v1/press") {
@@ -3212,7 +3307,6 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const pressKey = body.key === " " ? "Space" : body.key;
     const activationKey = ["Enter", "Space"].includes(pressKey);
-    const readingStep = !activationKey && routineCovers(step, target.description);
     const rawDestination = activationKey
       ? resolvedTargetDestination(target.description, page.url()) || page.url()
       : null;
@@ -3221,6 +3315,10 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }
     const pressSubmission = stepFormSubmission(target.description, "press", pressKey);
     refuseNewWindowOrNestedSubmission(pressSubmission);
+    // Enter in the page's own search box goes without a prompt under routine
+    // browsing; every other activation key asks.
+    const freeSearch = pressKey === "Enter" && documents !== null && (await freeSiteSearch(page, target, null));
+    const readingStep = freeSearch || (!activationKey && routineCovers(step, target.description));
     refuseUnlessReadingStep(readingStep);
     const destination = approvalProtocol.destinationBinding(rawDestination);
     if (activationKey) {
@@ -3263,7 +3361,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     );
     assertSafeTypeTarget(target.description);
     const withholding = activationKey ? await withholdBeforeStep(page, step) : false;
-    documents?.limitFormPosts(stepPostOrigins(readingStep, sourceOrigin, pressSubmission, destination));
+    documents?.limitFormPosts(freeSearch
+      ? FREE_SEARCH_POST_ORIGINS
+      : stepPostOrigins(readingStep, sourceOrigin, pressSubmission, destination));
     emitAction({
       type: "type",
       label: `Press ${pressKey}`,
@@ -3272,7 +3372,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     await target.locator.press(pressKey);
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
-    return await snapshotAfterStep(page, withholding);
+    const pressed = await snapshotAfterStep(page, withholding);
+    return freeSearch ? { ...pressed, activity: FREE_SEARCH_ACTIVITY } : pressed;
   }
 
   if (method === "POST" && requestPath === "/v1/scroll") {
