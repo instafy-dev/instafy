@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { SubmitConversationRuntimeOverride } from "../../../conversations/useConversation";
 import { runtimeEntryIsDispatchable } from "../../../runtime/utils/runtimeEntry";
 import { controllerClient } from "../../../sdk/instafy";
-import { normalizeBrowserAddress } from "./browserAddress";
+import { normalizeBrowserAddress, personalBrowserAddressInput } from "./browserAddress";
 import type { SentPageRead } from "./sentPageAttachment";
 import {
   personalBrowserRoutineAvailable,
@@ -730,8 +730,55 @@ export function usePersonalBrowserBridge({
     [updateStatus],
   );
 
+  // Address-bar search: the engines the Desktop offers (the web-research
+  // skill's list) and the one in use. An older Desktop offers none, and words
+  // then go to the address bar as before.
+  const [searchChoice, setSearchChoice] = useState<InstafyDesktopPersonalBrowserSearchChoice | null>(null);
+  useEffect(() => {
+    const listEngines = browserBridge()?.personalBrowserSearchEngines;
+    if (typeof listEngines !== "function") {
+      return;
+    }
+    let cancelled = false;
+    listEngines().then(
+      (choice) => {
+        if (!cancelled) setSearchChoice(choice?.selected ? choice : null);
+      },
+      () => {
+        if (!cancelled) setSearchChoice(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const setSearchEngine = useCallback(async (engineId: string) => {
+    const choose = browserBridge()?.personalBrowserSetSearchEngine;
+    if (typeof choose !== "function") {
+      return;
+    }
+    try {
+      const choice = await choose({ engineId });
+      if (mountedRef.current && choice?.selected) setSearchChoice(choice);
+    } catch {
+      // The choice stays as it was.
+    }
+  }, []);
+  const canSearch = Boolean(searchChoice?.selected);
+
   const navigate = useCallback(
     async (rawUrl: string) => {
+      const input = personalBrowserAddressInput(rawUrl);
+      if (input.kind === "search" && canSearch) {
+        setNavigationError(null);
+        const result = await invoke((bridge, ownerId) =>
+          bridge.personalBrowserSearch?.({ query: input.query, ownerId }),
+        );
+        if (!result) {
+          setNavigationError("That search could not be opened. Try again.");
+        }
+        return result;
+      }
       const url = normalizePersonalBrowserUrl(rawUrl);
       if (!url) {
         setNavigationError(
@@ -750,7 +797,7 @@ export function usePersonalBrowserBridge({
       }
       return result;
     },
-    [invoke],
+    [canSearch, invoke],
   );
   const clearNavigationError = useCallback(() => setNavigationError(null), []);
   const goBack = useCallback(
@@ -1016,6 +1063,9 @@ export function usePersonalBrowserBridge({
      */
     pendingHandoff: ownedPendingHandoff,
     reload,
+    /** The engines the address bar can search with, and the one in use; null when it cannot search. */
+    searchChoice,
+    setSearchEngine,
     selectTab,
     recovering,
     retryAgentControl,

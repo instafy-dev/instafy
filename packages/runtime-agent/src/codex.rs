@@ -30,7 +30,7 @@ use codex_login::AuthManager;
 use codex_login::default_client::set_default_originator;
 use codex_model_provider_info::WireApi;
 use codex_protocol::config_types::{
-    EnvironmentVariablePattern, SandboxMode, ShellEnvironmentPolicy, TrustLevel, WebSearchMode,
+    EnvironmentVariablePattern, SandboxMode, ShellEnvironmentPolicy, TrustLevel,
 };
 use codex_protocol::error::{CodexErr, CodexErrorDetails, Result as CodexResult};
 use codex_protocol::items::{AgentMessageContent, AgentMessageDelivery, TurnItem};
@@ -1685,7 +1685,8 @@ impl CodexClient {
             base_instructions,
             developer_instructions: mode_developer_instructions,
             show_raw_agent_reasoning: Some(show_raw_reasoning),
-            tools_web_search_request: bool_from_env("CODEX_ENABLE_WEB_SEARCH"),
+            // Web search stays off on every lane (`codex_policy`), whatever
+            // CODEX_ENABLE_WEB_SEARCH says.
             ..Default::default()
         };
 
@@ -4099,16 +4100,13 @@ fn append_local_browser_developer_instructions(base: String, enabled: bool) -> S
     format!("{base}\n\n{LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS}")
 }
 
-/// The non-feature half of the bounded browser lane; `codex_policy` turns its features off.
+/// The non-feature half of the bounded browser lane; `codex_policy` turns its features off,
+/// and web search, as on every lane.
 fn apply_bounded_browser_security_overrides(config: &mut Config, enabled: bool) -> Result<()> {
     if !enabled {
         return Ok(());
     }
 
-    config
-        .web_search_mode
-        .set(WebSearchMode::Disabled)
-        .context("failed to disable web search for bounded browser turn")?;
     config.experimental_request_user_input_enabled = false;
     config.include_skill_instructions = false;
     config.include_apps_instructions = false;

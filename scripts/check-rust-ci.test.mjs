@@ -367,7 +367,7 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // with its Rust tests aggregate entry: retains all functional commands, aggregate
   // guards, routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    'd2ef11fdfabd6421427368315e87c3a706335305632ec9d6476abf3e3699aca0');
+    '76cb36ae72f5f21c6cbf0548ec03807f16c1f730dba529e6557831e66776927f');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

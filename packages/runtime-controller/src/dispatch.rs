@@ -2068,10 +2068,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
             Utc::now() - ChronoDuration::hours(24),
         )
         .await?;
+        // Every target of this branch runs without a credential, so the
+        // person has no default connection here.
         let managed_ai = credentials::build_managed_ai_access_response(
             &state.config,
             &proxy_requirements,
-            default_credential_id.is_some(),
             daily_prompts_used,
         );
 

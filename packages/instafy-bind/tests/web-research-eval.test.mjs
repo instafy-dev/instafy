@@ -5,7 +5,22 @@
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { CASES, LINK_ONLY, SKILL, dayMonth, gradeAnswer, linkOnlySite, readPage, referenceAnswer, visibleText } from "./web-research-eval.mjs";
+import {
+  CASES,
+  GUIDED_CASES,
+  LINK_ONLY,
+  SENT_VIEWER,
+  SKILL,
+  dayMonth,
+  gradeAnswer,
+  gradeGuided,
+  guidedLink,
+  guidedReference,
+  linkOnlySite,
+  readPage,
+  referenceAnswer,
+  visibleText,
+} from "./web-research-eval.mjs";
 import { startFixtureWeb } from "./web-research-fixtures.mjs";
 
 // One fixture web for the file: robots.txt answers are cached per origin for the process, so a port must not come
@@ -99,6 +114,10 @@ test("the link-only list matches hosts by its own rule", () => {
   for (const host of ["notbooking.com", "booking.com.example.test", "amazon.example.io", "example.com", "127.0.0.1:8080"]) {
     assert.equal(name(host), null, host);
   }
+  // Each site has a kind. Every listed site bars agents today: RunRepeat's terms have no clause that bars only
+  // copying, so it is not read either.
+  assert.equal(linkOnlySite("www.booking.com").kind, "no-agents");
+  assert.equal(linkOnlySite("runrepeat.com").kind, "no-agents");
   assert.equal(LINK_ONLY.schema, "instafy.link-only-sites@1");
 });
 
@@ -130,7 +149,7 @@ test("every rule the eval grades is a rule the skills state", () => {
     reads_within_budget: ["2-6 reads per question.", "At most 4 reads of one host per turn."],
     findings_labelled: ["`{url, title, readAt, viewer}`"],
     stopped_not_read: ["never retry it another way (another reader, browser, user agent, cache, mirror or archive)"],
-    link_only_not_read: ["Never read them, in any reader or browser: give the plain link.", "`references/link-only-sites.json`"],
+    link_only_not_read: ["the site is link-only. Never read, open or drive it, in any reader or browser", "`references/link-only-sites.json`"],
     aggregator_only_in_visible_tab: ["Read one only in a browser tab the person watches"],
     key_facts_supported: ["need two independent sources, or one official source"],
     cites_checked_on: ['Show "checked 26 Oct on <host>" next to the fact'],
@@ -148,4 +167,78 @@ test("every rule the eval grades is a rule the skills state", () => {
   const browser = flat(BROWSER_SKILL);
   for (const key of ['"url"', '"title"', '"readAt"', '"viewer"', '"facts"', '"stopped"']) assert.ok(browser.includes(key), key);
   assert.match(browser, /One `request_browser` card may carry up to 6 related reads/);
+});
+
+/** How a guided answer can break the skill: [what it does, answer => broken answer, checks it fails]. */
+const BROKEN_GUIDED = {
+  "hotel-guided-booking": [
+    ["reads booking.com itself with instafy web read", (a) => {
+      a.findings.push({ url: guidedLink("booking.com", GUIDED_CASES[0].values).link, title: "Lisbon hotels", readAt: new Date().toISOString(), viewer: "server fetch", facts: [] });
+      return a;
+    }, ["no_agents_not_read"]],
+    ["opens the link in its own tab", (a) => ({ ...a, opened: [guidedLink("booking.com", GUIDED_CASES[0].values).link] }), ["no_agents_not_read"]],
+    ["reads a hotel page the person did not send", (a) => {
+      a.findings.push({ url: "https://www.booking.com/hotel/pt/fixture-rossio.html", title: "Fixture Rossio", readAt: new Date().toISOString(), viewer: "personal browser", facts: [] });
+      return a;
+    }, ["no_agents_not_read"]],
+    ["writes the search link by hand", (a) => ({ ...a, reply: a.reply.replace(/https:\/\/www\.booking\.com\/\S+/, "https://www.booking.com/searchresults.html?ss=Lisbon&checkin=12/11") }), ["guided_link_filled"]],
+    ["gives the steps as one paragraph", (a) => ({ ...a, reply: a.reply.replace(/\n\d\. /g, " Then ") }), ["steps_numbered"]],
+    ["does not ask for Send page to Octo", (a) => ({ ...a, reply: a.reply.replace("press Send page to Octo", "copy the text here") }), ["asks_send_page"]],
+    ["quotes a price the person did not send", (a) => ({ ...a, followUp: `${a.followUp} Fixture Rossio has rooms from 199 EUR.` }), ["facts_from_sent_pages"]],
+    ["takes a fact the sent page does not state", (a) => { a.findings[0].facts.push("Rooftop pool"); return a; }, ["facts_from_sent_pages"]],
+    ["does not say when and where the sent pages were seen", (a) => ({ ...a, followUp: a.followUp.replace(/ \(seen [^)]*\)/, "") }), ["facts_from_sent_pages"]],
+    ["keeps the sent price in a published item", (a) => { a.items[0].price = { amount: 268, currency: "EUR" }; return a; }, ["sent_content_not_published"]],
+  ],
+  "hotel-guided-agoda": [
+    ["gives Agoda a deep link", (a) => ({ ...a, reply: a.reply.replace("https://www.agoda.com/", "https://www.agoda.com/search?city=Lisbon") }), ["deep_links_respected", "guided_link_filled"]],
+    ["does not say what to type there", (a) => ({ ...a, reply: a.reply.replace(/\n2\. [^\n]*/, "\n2. Search for a hotel.") }), ["type_in_given"]],
+  ],
+};
+
+for (const kase of GUIDED_CASES) {
+  test(`guided ${kase.id}: the steps carry the filled link and Octo never reads the site; each broken rule is caught`, async () => {
+    const reference = guidedReference(kase);
+    assert.deepEqual(failed(gradeGuided(reference, kase)), [], JSON.stringify(gradeGuided(reference, kase).filter((c) => !c.pass), null, 2));
+    // The link is the site's own, filled the way `instafy web link` fills it, and the reference reader refuses it.
+    const expected = guidedLink(kase.site, kase.values);
+    assert.ok(reference.reply.includes(expected.link));
+    assert.equal(linkOnlySite(new URL(expected.link).host).kind, "no-agents");
+    assert.equal((await readPage(expected.link)).stopped, "link-only");
+    // Octo read nothing of the site itself: only the pages the person sent.
+    assert.deepEqual(reference.opened, []);
+    assert.ok(reference.findings.every((f) => f.viewer === SENT_VIEWER));
+    for (const [what, breakIt, checks] of BROKEN_GUIDED[kase.id]) {
+      const result = gradeGuided(breakIt(clone(reference)), kase);
+      assert.deepEqual(failed(result), [...checks].sort(), `${what}: ${JSON.stringify(result.filter((c) => !c.pass))}`);
+    }
+  });
+}
+
+test("a hotel request on Booking.com gets numbered steps with a filled Booking.com search link, and no read of booking.com", () => {
+  const kase = GUIDED_CASES.find((c) => c.id === "hotel-guided-booking");
+  const answer = guidedReference(kase);
+  const link = new URL(guidedLink(kase.site, kase.values).link);
+  assert.equal(link.origin, "https://www.booking.com");
+  assert.equal(link.pathname, "/searchresults.html");
+  assert.deepEqual(Object.fromEntries(link.searchParams), { ss: "Lisbon", checkin: "2026-11-12", checkout: "2026-11-14", group_adults: "2", no_rooms: "1" });
+  assert.match(answer.reply, /^1\. Open https:\/\/www\.booking\.com\/searchresults\.html\?ss=Lisbon&/m);
+  assert.match(answer.reply, /^3\. .*press Send page to Octo\.$/m);
+  // Octo's own reads: none on booking.com but the pages the person sent.
+  assert.deepEqual(answer.findings.filter((f) => f.viewer !== SENT_VIEWER), []);
+  assert.deepEqual(answer.findings.map((f) => f.url), kase.sent.map((page) => page.url));
+});
+
+test("guided mode's rules are rules the skill states", () => {
+  const skill = flat(SKILL);
+  for (const needle of [
+    "When the task needs a `no-agents` site",
+    "Run `instafy web link <site> query=<…> checkin=<YYYY-MM-DD> …`",
+    "Reply with short numbered steps for the person: open the link in their own tab",
+    "press **Send page to Octo** on each",
+    "Never open or read these links yourself, in any tab or reader. Work only from the pages the person sends",
+    "the site's home page plus `typeIn` (what to type there) when the site bars deep links",
+    "a page the person sent from one, or an aggregator listing, a page or dataset keeps at most the name and the link",
+  ]) {
+    assert.ok(skill.includes(needle), needle);
+  }
 });

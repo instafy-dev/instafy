@@ -61,3 +61,58 @@ export function describeManagedAiNextAvailable(
   const day = at.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   return `More are available on ${day} at ${time}.`;
 }
+
+export type ManagedAiAvailability = ManagedAiAllowance & {
+  /** Why it is unavailable, from controllers that say; null otherwise. */
+  unavailableReason?: string | null;
+};
+
+/**
+ * Why Instafy AI cannot run this person's turns, in plain words, or null when
+ * it can. The controller reports `available` regardless of which connection
+ * is the default, with a reason when it is false. An older controller also
+ * reported it unavailable merely because the person's default is their own
+ * AI, without a reason; with such a default the answer is unknown, so this
+ * says nothing rather than "unavailable" next to a full allowance.
+ */
+export function describeManagedAiUnavailable(
+  managedAi: ManagedAiAvailability | null | undefined,
+  { hasOwnDefault, now }: { hasOwnDefault: boolean; now?: Date },
+): string | null {
+  if (!managedAi || !managedAi.enabled || managedAi.available) {
+    return null;
+  }
+  const usedUp = managedAi.unavailableReason === "daily_limit_reached" ||
+    (!managedAi.unavailableReason && isManagedAiAllowanceUsedUp(managedAi));
+  if (usedUp) {
+    const used = managedAi.dailyPromptLimit > 0
+      ? `Today's ${managedAi.dailyPromptLimit} prompts are used.`
+      : "Today's prompts are used.";
+    return `${used} ${describeManagedAiNextAvailable(managedAi.nextAvailableAt, now)}`;
+  }
+  switch (managedAi.unavailableReason) {
+    case "proxy_unreachable":
+      return "Can't be reached right now. Try again in a minute.";
+    case "no_proxy":
+    case "proxy_needs_credential":
+      return "This server isn't set up to run it yet.";
+    case "disabled":
+      return "Turned off on this server.";
+    default:
+      return hasOwnDefault ? null : "Currently unavailable.";
+  }
+}
+
+/**
+ * Whether a person can make Instafy AI their default now: it can run their
+ * turns, or only today's allowance is used (it comes back by itself). An
+ * older controller gives no reason, so the choice stays offered as before.
+ */
+export function canChooseManagedAi(managedAi: ManagedAiAvailability | null | undefined): boolean {
+  if (!managedAi?.enabled) {
+    return false;
+  }
+  return managedAi.available ||
+    !managedAi.unavailableReason ||
+    managedAi.unavailableReason === "daily_limit_reached";
+}

@@ -1,0 +1,12 @@
+{
+  "schema": "instafy.search-engines@1",
+  "about": "Search engines a person can pick for the address bar of their own browser (the desktop app's Personal Browser). Words typed there that are not an address open a search on the engine they picked, in their own browser, as in any browser. These are the person's own searches: Octo never opens these links or searches through them, and an engine's own pages may be link-only for Octo (link-only-sites.json). `search` is an https link with exactly one {query}, where the typed words go, URL-encoded. `default` is the engine a person starts with. Keep the list short; add an engine only with a stable public search link.",
+  "reviewed": "2026-10",
+  "default": "duckduckgo",
+  "engines": [
+    { "id": "duckduckgo", "name": "DuckDuckGo", "search": "https://duckduckgo.com/?q={query}" },
+    { "id": "google", "name": "Google", "search": "https://www.google.com/search?q={query}" },
+    { "id": "bing", "name": "Bing", "search": "https://www.bing.com/search?q={query}" },
+    { "id": "brave", "name": "Brave Search", "search": "https://search.brave.com/search?q={query}" }
+  ]
+}
