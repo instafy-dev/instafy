@@ -173,10 +173,16 @@ function linkOnlySitesFrom(data) {
 function linkOnlySiteOf(rawUrl) {
   let host;
   try {
-    host = new URL(String(rawUrl)).hostname.toLowerCase().replace(/\.$/, "");
+    host = new URL(String(rawUrl)).hostname.toLowerCase();
   } catch (_) {
     return null;
   }
+  // Every trailing dot goes ("booking.com.." names the same site to a
+  // lenient resolver), with a loop rather than /\.+$/, which backtracks on
+  // a long run of dots.
+  let end = host.length;
+  while (end > 0 && host.charCodeAt(end - 1) === 0x2e) end -= 1;
+  host = host.slice(0, end);
   if (!host) return null;
   for (const site of LINK_ONLY_SITES || []) {
     if (site.matchers.some((matcher) => matcher.test(host))) return site.name;
@@ -1648,7 +1654,25 @@ async function withholdDocument(page) {
 // in every approval mode; a secret screen withholds the text and stays
 // withheld until a new page loads. Whether a page is a secret screen is still
 // judged on all of its rendered text and every control's name, seen or not.
+// A page is read in several steps, and it can change documents in between: a
+// timed redirect that commits while the text is read, or a load the step's
+// document guard does not see (a page restored from the back/forward cache,
+// an activated prerender, a navigation a service worker answers). So the page
+// is checked against the link-only list when the read starts and again once
+// everything is read, and a read that ended on another site than it started
+// on reports nothing.
+function assertReadStayedOnOneSite(page, startUrl) {
+  refuseLinkOnlyPage(page);
+  if (approvalProtocol.normalizedOrigin(page.url()) !== approvalProtocol.normalizedOrigin(startUrl)) {
+    throw new Error(
+      "The page moved on to another site while Octo read it, so nothing was read. Take a fresh snapshot.",
+    );
+  }
+}
+
 async function snapshot(page, { withhold = false } = {}) {
+  const startUrl = page.url();
+  refuseLinkOnlyPage(page);
   const hiddenNames = [];
   const interactive = await collectInteractiveElements(page, hiddenNames);
   const rawUrl = page.url();
@@ -1672,6 +1696,7 @@ async function snapshot(page, { withhold = false } = {}) {
   // one these answers describe.
   const carried = await carriedWithholding(page);
   const marked = await documentWithheld(page);
+  assertReadStayedOnOneSite(page, startUrl);
   const checkFailed = signals === null;
   const shownNames = interactive.map(({ description }) => description.label);
   const observeText = (text, names, forceWithhold) =>
@@ -1783,6 +1808,16 @@ async function snapshotForResult(page, options = {}) {
 }
 
 async function emitNavigationResult(page) {
+  // A link-only page's title and address are not read into the feed either.
+  const linkOnlySite = linkOnlySiteForPage(page);
+  if (linkOnlySite) {
+    emitAction({
+      type: "nav_result",
+      label: `Page changed to ${linkOnlySite}, which is link-only`,
+      url: null,
+    });
+    return;
+  }
   if (!siteApproved(page.url())) {
     emitAction({
       type: "nav_result",
@@ -2548,9 +2583,11 @@ async function execute(browser, browserSession, method, requestPath, body) {
 }
 
 // While a step of Octo's runs, in any tab (its own tabs and the page the
-// person chose alike), the tab loads no document from a link-only site: a
-// link, form or redirect that would land on one is stopped before its request
-// leaves the browser. Fails closed: a tab that cannot be guarded takes no step.
+// person chose alike), the tab itself loads no document from a link-only
+// site: a link, form or redirect that would take it there is stopped before
+// its request leaves the browser. Frames inside the page are not the tab
+// going there and load as the page asks. Fails closed: a tab that cannot be
+// guarded takes no step.
 async function guardStepDocuments(page) {
   const blocked = [];
   // Another window a step opens (a target=_blank link, a script) would be a
@@ -2589,9 +2626,20 @@ async function guardStepDocuments(page) {
     context.on("page", noteWindow);
     await context.route("**/*", stopWindowRequests);
     session = await page.context().newCDPSession(page);
+    // The tab's own document is what is guarded. A page may frame a
+    // link-only site (a map, a sign-in button, a captcha), which Octo neither
+    // reads nor drives: stopping that frame would only break the page and
+    // fail the step as if Octo had gone there. A paused request that names no
+    // frame counts as the tab's own.
+    const { frameTree } = await session.send("Page.getFrameTree");
+    const mainFrameId = frameTree?.frame?.id;
+    if (typeof mainFrameId !== "string" || !mainFrameId) {
+      throw new Error("The tab's main frame is unknown");
+    }
     session.on("Fetch.requestPaused", (event) => {
       const url = event?.request?.url || "";
-      const site = LINK_ONLY_SITES === null ? "an unknown site" : linkOnlySiteOf(url);
+      const ownDocument = typeof event?.frameId !== "string" || event.frameId === mainFrameId;
+      const site = !ownDocument ? null : LINK_ONLY_SITES === null ? "an unknown site" : linkOnlySiteOf(url);
       const answer = site
         ? session.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" })
         : session.send("Fetch.continueRequest", { requestId: event.requestId });

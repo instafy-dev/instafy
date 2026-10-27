@@ -319,6 +319,7 @@ const signalsFor = () => mode === "secret-screen"
       : { credentialContext: false, secretField: false, secretCode: false, maskedNearReveal: false };
 const bodyTextFor = (currentUrl, targetId) => {
   if (currentUrl.includes("unapproved-secret")) return "Secret destination contents";
+  if (currentUrl.includes("booking.com")) return "Link-only hotel page text";
   if (targetId === "decoy-target" && !decoyLooksIdentical) return "Decoy page";
   // An about:blank document can hold script-written content; none of it may
   // reach an observation.
@@ -340,6 +341,17 @@ const shownTextFor = (currentUrl, targetId) =>
 let context;
 let browserConnected = true;
 const closedPages = new Set();
+// The page CDP sessions that enabled Fetch, so a step's document requests
+// reach the controller's guard, and its answers, kept in a file.
+const fetchLogPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_FETCH_LOG;
+const fetchSessions = new Set();
+const pauseDocument = (frameId, url) => {
+  for (const session of fetchSessions) {
+    for (const handler of session.handlers) {
+      handler({ requestId: `request-${frameId}`, frameId, resourceType: "Document", request: { url } });
+    }
+  }
+};
 // Tabs opened through context.newPage(), kept in a file so they last across
 // controller processes the way Chromium's tabs do: [{ targetId, url }].
 const openedTabsPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_TABS;
@@ -402,6 +414,20 @@ const makePage = (targetId, opened = null) => {
     click: async () => {
       if (mode === "new-origin-after-click") {
         currentUrl = "https://unapproved-secret.example/hidden?token=must-not-leak";
+      }
+      // The tab reaches a link-only site without a document request the
+      // step's guard sees (a back/forward cache restore, an activated
+      // prerender, a service worker's answer).
+      if (mode === "link-only-after-click") {
+        currentUrl = "https://www.booking.com/hotel/fixture.html";
+      }
+      // The page loads a frame from a link-only site (a map), or its own
+      // document is redirected to one; the guard is asked about each.
+      if (mode === "loads-link-only-frame") {
+        pauseDocument("child-frame", "https://www.google.com/maps/embed?pb=fixture");
+      }
+      if (mode === "redirects-to-link-only") {
+        pauseDocument("main", "https://www.booking.com/hotel/fixture.html");
       }
       if (mode === "click-error-canary") {
         throw new Error(`element <button data-key="${CANARY}"> is not attached to the DOM`);
@@ -474,7 +500,16 @@ const makePage = (targetId, opened = null) => {
     waitForTimeout: async () => {},
     viewportSize: () => ({ width: 800, height: 600 }),
     locator: (selector) => selector === "body"
-      ? { innerText: async () => bodyTextFor(currentUrl, targetId) }
+      ? {
+          innerText: async () => {
+            // A timed redirect to a link-only site commits while the page
+            // is read.
+            if (mode === "moves-to-link-only-while-read") {
+              currentUrl = "https://www.booking.com/hotel/fixture.html";
+            }
+            return bodyTextFor(currentUrl, targetId);
+          },
+        }
       : {
           count: async () => controlsFor(targetId).length,
           nth: (ordinal) => ({ elementHandle: async () => handleAt(ordinal) }),
@@ -505,15 +540,29 @@ context = {
     pages.push(page);
     return page;
   },
-  newCDPSession: async (page) => ({
-    send: async (method) => method === "Target.getTargetInfo"
-      ? { targetInfo: { targetId: page.targetId, type: "page" } }
-      : method === "Page.getFrameTree"
-        ? { frameTree: { frame: { id: "main", loaderId: currentDocument() } } }
-        : {},
-    on: () => {},
-    detach: async () => {},
-  }),
+  newCDPSession: async (page) => {
+    const session = { handlers: [] };
+    return {
+      send: async (method, params) => {
+        if (method === "Fetch.enable") fetchSessions.add(session);
+        if (method === "Fetch.disable") fetchSessions.delete(session);
+        if (fetchLogPath && (method === "Fetch.failRequest" || method === "Fetch.continueRequest")) {
+          fs.appendFileSync(fetchLogPath, `${JSON.stringify({ method, requestId: params.requestId })}\n`);
+        }
+        return method === "Target.getTargetInfo"
+          ? { targetInfo: { targetId: page.targetId, type: "page" } }
+          : method === "Page.getFrameTree"
+            ? { frameTree: { frame: { id: "main", loaderId: currentDocument() } } }
+            : {};
+      },
+      on: (event, handler) => {
+        if (event === "Fetch.requestPaused") session.handlers.push(handler);
+      },
+      detach: async () => {
+        fetchSessions.delete(session);
+      },
+    };
+  },
 };
 const browser = {
   contexts: () => [context],
@@ -606,6 +655,7 @@ struct EmbeddedControllerFixture {
     opened_tabs: PathBuf,
     front_tab: PathBuf,
     open_windows: PathBuf,
+    fetch_log: PathBuf,
     owner_id: Uuid,
     run_id: Uuid,
     initiator_user_id: Uuid,
@@ -639,6 +689,7 @@ impl EmbeddedControllerFixture {
         let opened_tabs = tempdir.path().join("opened-tabs.json");
         let front_tab = tempdir.path().join("front-tab");
         let open_windows = tempdir.path().join("open-windows.json");
+        let fetch_log = tempdir.path().join("fetch-answers.jsonl");
         std::fs::create_dir_all(&approval_dir).expect("approval fixture directory");
 
         Self {
@@ -657,6 +708,7 @@ impl EmbeddedControllerFixture {
             opened_tabs,
             front_tab,
             open_windows,
+            fetch_log,
             owner_id: Uuid::new_v4(),
             run_id: Uuid::new_v4(),
             initiator_user_id: Uuid::new_v4(),
@@ -756,6 +808,7 @@ impl EmbeddedControllerFixture {
             .env("INSTAFY_SHARED_BROWSER_FAKE_TABS", &self.opened_tabs)
             .env("INSTAFY_SHARED_BROWSER_FAKE_FRONT", &self.front_tab)
             .env("INSTAFY_SHARED_BROWSER_FAKE_WINDOWS", &self.open_windows)
+            .env("INSTAFY_SHARED_BROWSER_FAKE_FETCH_LOG", &self.fetch_log)
             .env("HOSTILE_MARKER", &self.hostile_marker);
         if let Some(body) = body {
             command.arg(body);
@@ -6299,4 +6352,159 @@ async fn the_next_confirmed_end_closes_leftover_tabs_and_keeps_those_it_cannot_c
         ]
     );
     assert_eq!(leftover_record(&approval_dir), None);
+}
+
+impl EmbeddedControllerFixture {
+    fn fetch_answers(&self) -> Vec<(String, String)> {
+        std::fs::read_to_string(&self.fetch_log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let answer: JsonValue = serde_json::from_str(line).expect("fetch answer");
+                (
+                    answer["method"].as_str().expect("method").to_string(),
+                    answer["requestId"].as_str().expect("request").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn snapshot_id_in(&self, mode: &str) -> String {
+        payload_of(&self.call(mode, "GET", "/v1/snapshot", None))["snapshotId"]
+            .as_str()
+            .expect("snapshot id")
+            .to_string()
+    }
+}
+
+#[test]
+fn octo_reads_nothing_of_a_page_that_reached_a_link_only_site_while_or_before_it_was_read() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+
+    // A timed redirect to a link-only site commits while the snapshot reads
+    // the page the person chose: nothing of it is reported, not under the
+    // earlier page's address either.
+    let output = fixture.call("moves-to-link-only-while-read", "GET", "/v1/snapshot", None);
+    let raced = failure_of(&output);
+    assert!(
+        raced.contains("The page the person chose is now on Booking.com, which is link-only, so nothing there was read"),
+        "{raced}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Link-only hotel page"));
+
+    // A step's tab reaches a link-only site by a load the step's document
+    // guard did not see: the page after the step is not read, and the feed
+    // does not carry its address or title.
+    let snapshot_id = fixture.snapshot_id_in("link-only-after-click");
+    let output = fixture.call(
+        "link-only-after-click",
+        "POST",
+        "/v1/click",
+        Some(&json!({ "index": 0, "snapshotId": snapshot_id }).to_string()),
+    );
+    let stepped = failure_of(&output);
+    assert!(
+        stepped.contains("is now on Booking.com, which is link-only, so nothing there was read"),
+        "{stepped}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Link-only hotel page"));
+    let feed = fixture.action_log();
+    assert!(!feed.contains("booking.com"), "{feed}");
+    assert!(
+        feed.contains("Page changed to Booking.com, which is link-only"),
+        "{feed}"
+    );
+
+    // The same in one of Octo's tabs.
+    fixture.open_tab("https://example.test/report");
+    let snapshot_id = fixture.snapshot_id_in("link-only-after-click");
+    let output = fixture.call(
+        "link-only-after-click",
+        "POST",
+        "/v1/click",
+        Some(&json!({ "index": 0, "snapshotId": snapshot_id }).to_string()),
+    );
+    let in_tab = failure_of(&output);
+    assert!(
+        in_tab.contains(
+            "Octo's tab 1 is now on Booking.com, which is link-only, so nothing there was read"
+        ),
+        "{in_tab}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Link-only hotel page"));
+}
+
+#[test]
+fn a_frame_from_a_link_only_site_inside_an_ordinary_page_does_not_fail_octos_step() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let click = |mode: &str| {
+        let snapshot_id = fixture.snapshot_id_in(mode);
+        fixture.call(
+            mode,
+            "POST",
+            "/v1/click",
+            Some(&json!({ "index": 0, "snapshotId": snapshot_id }).to_string()),
+        )
+    };
+
+    // A step loads an ordinary page that frames a map from a link-only site,
+    // on the page the person chose and in one of Octo's tabs: the frame is
+    // not the tab going there, so it loads and the step succeeds.
+    for in_tab in [false, true] {
+        if in_tab {
+            fixture.open_tab("https://example.test/hotel");
+        }
+        std::fs::remove_file(&fixture.fetch_log).ok();
+        let clicked = payload_of(&click("loads-link-only-frame"));
+        assert_eq!(clicked["visibleText"], "Fixture page", "in a tab: {in_tab}");
+        assert_eq!(
+            fixture.fetch_answers(),
+            vec![(
+                "Fetch.continueRequest".to_string(),
+                "request-child-frame".to_string()
+            )],
+            "in a tab: {in_tab}"
+        );
+    }
+
+    // The tab's own document is still stopped before it reaches one.
+    std::fs::remove_file(&fixture.fetch_log).ok();
+    let refused = failure_of(&click("redirects-to-link-only"));
+    assert!(
+        refused.contains("led to Booking.com, which is link-only, so it was not opened"),
+        "{refused}"
+    );
+    assert_eq!(
+        fixture.fetch_answers(),
+        vec![("Fetch.failRequest".to_string(), "request-main".to_string())]
+    );
+}
+
+#[test]
+fn a_link_only_site_is_refused_however_its_address_writes_the_host() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    for url in [
+        "https://WWW.BOOKING.COM./hotel",
+        "https://www.booking.com../hotel",
+        "https://www.booking.com...:443/hotel",
+        "https://booking%2ecom/hotel",
+        "https://\u{ff42}\u{ff4f}\u{ff4f}\u{ff4b}\u{ff49}\u{ff4e}\u{ff47}.com/hotel",
+        "https://booking\u{3002}com/hotel",
+        "http://m.booking.com:8080/hotel",
+    ] {
+        for (path, body) in [
+            ("/v1/navigate", json!({ "url": url })),
+            ("/v1/tabs/open", json!({ "url": url })),
+        ] {
+            let error = failure_of(&fixture.call("safe", "POST", path, Some(&body.to_string())));
+            assert!(
+                error.contains("Booking.com is link-only: Octo never opens it, in any tab"),
+                "{path} {url}: {error}"
+            );
+        }
+    }
+    assert!(fixture.browser_tabs().is_empty());
 }

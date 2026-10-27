@@ -48,10 +48,11 @@ function writeProtectedJson(destination, value) {
 }
 
 // A route's `script` runs in the page (and only then is inline script
-// allowed); no fixture page loads anything else.
-const page = (title, body, script = "") => `<!doctype html><html lang="en"><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'${script ? "; script-src 'unsafe-inline'" : ""}">
-<title>${title}</title><body><h1>${title}</h1>${body}${script ? `<script>${script}</script>` : ""}</body></html>`;
+// allowed), and its `frame` is the one address it may frame; no fixture page
+// loads anything else.
+const page = (title, body, script = "", frame = "") => `<!doctype html><html lang="en"><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'${script ? "; script-src 'unsafe-inline'" : ""}${frame ? `; frame-src ${new URL(frame).origin}` : ""}">
+<title>${title}</title><body><h1>${title}</h1>${body}${frame ? `<iframe src="${frame}"></iframe>` : ""}${script ? `<script>${script}</script>` : ""}</body></html>`;
 
 // One fixture site. It records every request, so a refused step can be shown
 // to have sent nothing.
@@ -69,7 +70,7 @@ async function listenSite(name, routes) {
       return;
     }
     response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    response.end(page(route.title, route.body, route.script));
+    response.end(page(route.title, route.body, route.script, route.frame));
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -102,6 +103,7 @@ export async function runSharedBrowserAgentTabsFixture() {
     // loopback below), so a load that slips through is seen by its server.
     const linkOnly = await listenSite("link-only", {
       "/review": { title: "Link-only review", body: "<p>Text Octo must never read.</p>" },
+      "/map": { title: "Link-only map", body: "<p>Map tiles Octo must never read.</p>" },
     });
     servers.push(linkOnly.server);
     const linkOnlyReview = `http://www.runrepeat.com:${linkOnly.server.address().port}/review`;
@@ -112,6 +114,9 @@ export async function runSharedBrowserAgentTabsFixture() {
       "/to-link-only": { redirect: "https://www.booking.com/hotel/fixture.html" },
       "/to-review": { redirect: linkOnlyReview },
       "/new-window": { title: "Reviews", body: "<p><a href=\"/to-review\" target=\"_blank\">Read the review</a></p>" },
+      // An ordinary page that frames the link-only site, as a hotel page
+      // frames a map.
+      "/hotel": { title: "Hotel", body: "<p>Rooms from 80 EUR.</p>", frame: linkOnlyReview.replace("/review", "/map") },
       "/later": { title: "Moving", body: `<meta http-equiv="refresh" content="2;url=${linkOnlyReview}"><p>This page moves on by itself.</p>` },
       // Opens two windows by itself once Octo's step is over: one that can
       // reach its opener and one that cannot (noopener).
@@ -410,6 +415,15 @@ export async function runSharedBrowserAgentTabsFixture() {
     await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, ["allow_origin", "allow_once"]);
     assert.equal(runPage.url(), `${research.origin}/`, "Octo took the person's page back to where it was");
 
+    // A page that frames a link-only site (a map) is an ordinary page: Octo's
+    // step loads it and succeeds, the frame loads as the page asks, and
+    // nothing of the frame is read.
+    const framed = await ok("POST", "/v1/navigate", { url: `${sources.origin}/hotel` }, ["allow_once"]);
+    assert.match(framed.visibleText, /Rooms from 80 EUR/);
+    assert.doesNotMatch(JSON.stringify(framed), /Map tiles/);
+    assert.equal(runPage.url(), `${sources.origin}/hotel`);
+    assert.ok(linkOnly.requests.includes("GET /map"), "The page's own frame loaded");
+
     const actionLog = fs.readFileSync(actionsPath, "utf8");
     assert.ok(!actionLog.includes("booking.com/hotel"), "The link-only address never reached the action feed as a step");
     const result = {
@@ -430,6 +444,7 @@ export async function runSharedBrowserAgentTabsFixture() {
         "closing Octo's tab, and its last tab, brings the run's page to the front",
         "turn-end close through the DevTools HTTP endpoint",
         "the person's page: link-only refused before any prompt, through a redirect, and once the page is on one",
+        "a page that frames a link-only site loads and Octo's step succeeds, reading nothing of the frame",
       ],
       limitations: [
         "No model, Studio UI, origin keep endpoint or runtime shutdown guard; those are unit-tested.",

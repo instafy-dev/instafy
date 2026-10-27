@@ -442,13 +442,20 @@ Browser has tabs of its own (see Personal-Browser.md).
   page the person chose alike: `open_tab`, `navigate` and a link, form or
   activation key that leads there are refused before any prompt, and a
   redirect one of Octo's steps causes is stopped by the step's request guard
-  before the request leaves the browser. A page that is on a link-only site,
-  because the person went there or the page moved there by itself, is neither
-  read nor used: every step there is refused before any prompt, and the
-  refusal tells Octo to ask the person to use **Send page to Octo** or to do
-  it themselves. Octo can only take the tab elsewhere, or close one of its
-  own. Without the list, Octo opens, reads and does nothing in any tab. The
-  person's own browsing is unchanged.
+  before the request leaves the browser. The guard watches the tab's own
+  document: a frame an ordinary page embeds from a link-only site (a map, a
+  sign-in button, a captcha) loads as the page asks, since Octo neither reads
+  nor drives frames, and does not fail the step. A page that is on a
+  link-only site, because the person went there or the page moved there by
+  itself, is neither read nor used: every step there is refused before any
+  prompt, and the refusal tells Octo to ask the person to use **Send page to
+  Octo** or to do it themselves. A snapshot checks the page again once it has
+  read it, so a page that moved on to a link-only site, or to any other site,
+  while it was read (a timed redirect, or a load the guard does not see, such
+  as a back/forward cache restore) reports nothing, and the action feed names
+  only the site of a link-only page. Octo can only take the tab elsewhere, or
+  close one of its own. Without the list, Octo opens, reads and does nothing
+  in any tab. The person's own browsing is unchanged.
 - **No other windows.** A step of Octo's, in any tab, that opens another window
   (a `target="_blank"` link, a script) has that window's requests stopped
   before they leave the browser, the window closed, and the step reported as
