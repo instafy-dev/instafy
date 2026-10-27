@@ -3,13 +3,34 @@ import type {
   FetchRuntimeStatusParams,
   FetchRuntimeStatusResult,
 } from "../../../services/runtimeController";
-import { runtimeEntryIsDispatchable } from "../../../runtime/utils/runtimeEntry";
+import { runtimeEntryIsDispatchable, runtimeEntryIsExpired } from "../../../runtime/utils/runtimeEntry";
 
 const BROWSER_RUNTIME_ENSURE_GRACE_MS = 15_000;
 const GENERIC_HOSTED_RUNTIME_DISPLAY_NAME = "hosted runtime";
 const BROWSER_RUNTIME_ORIGIN_POLL_INITIAL_MS = 500;
 const BROWSER_RUNTIME_ORIGIN_POLL_MAX_MS = 4_000;
-const BROWSER_RUNTIME_ORIGIN_TIMEOUT_MS = 120_000;
+/**
+ * How long a press waits for the browser session machine it ensured to
+ * answer: as long as the cold path waits for the space's own machine
+ * (SPACE_MACHINE_COLD_START_TIMEOUT_MS), because a relaunch of either can
+ * take minutes.
+ */
+export const BROWSER_RUNTIME_ORIGIN_TIMEOUT_MS = 10 * 60_000;
+/** After this long the wait says the machine is still starting, and reads less often. */
+export const BROWSER_RUNTIME_ORIGIN_SLOW_AFTER_MS = 60_000;
+const BROWSER_RUNTIME_ORIGIN_SLOW_POLL_MS = 10_000;
+/** Statuses of a machine that has stopped, or is stopping, with nothing starting it. */
+const ENDED_BROWSER_RUNTIME_STATUSES = new Set([
+  "stopped",
+  "stopping",
+  "offline",
+  "error",
+  "failed",
+  "terminated",
+  "expired",
+  "deleted",
+  "removed",
+]);
 
 function normalizedProviderKey(value: string | null | undefined): string {
   return (value ?? "")
@@ -247,6 +268,15 @@ export interface WaitForBrowserRuntimeOriginParams {
   timeoutMs?: number;
   initialPollIntervalMs?: number;
   maxPollIntervalMs?: number;
+  /** Called once when the machine has not answered within the first minute. */
+  onSlow?: () => void;
+  /**
+   * Asks the controller for the machine again. Called at most once, when the
+   * machine has been silent past its idle time: the controller replaces such
+   * a generation (a stale heartbeat alone is not enough for it, so a press
+   * that came earlier was given the silent one back).
+   */
+  ensureAgain?: () => Promise<unknown>;
 }
 
 export interface BrowserRuntimeOriginResult {
@@ -287,6 +317,21 @@ function waitForPollDelay(ms: number, signal?: AbortSignal): Promise<boolean> {
   });
 }
 
+/**
+ * Waits, after a press ensured a browser session machine, until that machine
+ * answers: it is dispatchable (a fresh heartbeat) and lists its origin. An
+ * origin listed for a machine that does not answer (its runtime started
+ * again, or the controller has not replaced a silent generation yet) is
+ * never used: connecting to it can only fail. The wait lasts while the
+ * machine may still come up, up to BROWSER_RUNTIME_ORIGIN_TIMEOUT_MS:
+ *
+ * - two reads in a row that show it stopped or gone, with nothing starting
+ *   it, end the wait at once;
+ * - once it has been silent past its idle time, the controller is asked for
+ *   it again (`ensureAgain`, once), which replaces that generation;
+ * - after the first minute `onSlow` is called once and status is read every
+ *   10 s.
+ */
 export async function waitForBrowserRuntimeOrigin(
   params: WaitForBrowserRuntimeOriginParams,
 ): Promise<BrowserRuntimeOriginResult> {
@@ -299,8 +344,12 @@ export async function waitForBrowserRuntimeOrigin(
     initialPollIntervalMs,
     params.maxPollIntervalMs ?? BROWSER_RUNTIME_ORIGIN_POLL_MAX_MS,
   );
-  const deadline = Date.now() + timeoutMs;
+  const startedAtMs = Date.now();
+  const deadline = startedAtMs + timeoutMs;
   let pollIntervalMs = initialPollIntervalMs;
+  let endedReads = 0;
+  let ensuredAgain = false;
+  let slowReported = false;
 
   while (Date.now() < deadline && !params.signal?.aborted) {
     const status = await params.fetchStatus({
@@ -319,19 +368,36 @@ export async function waitForBrowserRuntimeOrigin(
       typeof entry?.origin?.originId === "string"
         ? entry.origin.originId.trim()
         : "";
-    if (originId) {
+    if (originId && runtimeEntryIsDispatchable(entry)) {
       return {
         originId,
         endpoint: runtimeOriginEndpoint(entry),
       };
     }
+    if (Array.isArray(status?.runtimes)) {
+      const ended = !entry || ENDED_BROWSER_RUNTIME_STATUSES.has((entry.status ?? "").trim().toLowerCase());
+      endedReads = ended ? endedReads + 1 : 0;
+      if (endedReads >= 2) {
+        break;
+      }
+    }
+    if (entry && !ensuredAgain && params.ensureAgain && runtimeEntryIsExpired(entry)) {
+      ensuredAgain = true;
+      // Its answer does not matter: the reads that follow show the new launch.
+      void params.ensureAgain().catch(() => undefined);
+    }
 
+    const slow = Date.now() - startedAtMs >= BROWSER_RUNTIME_ORIGIN_SLOW_AFTER_MS;
+    if (slow && !slowReported) {
+      slowReported = true;
+      params.onSlow?.();
+    }
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
       break;
     }
     const completedDelay = await waitForPollDelay(
-      Math.min(pollIntervalMs, remainingMs),
+      Math.min(slow ? Math.max(pollIntervalMs, BROWSER_RUNTIME_ORIGIN_SLOW_POLL_MS) : pollIntervalMs, remainingMs),
       params.signal,
     );
     if (!completedDelay) {

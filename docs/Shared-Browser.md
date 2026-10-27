@@ -325,9 +325,20 @@ In Ask, Shared Browser defaults to confirmation, rather than a site denylist,
 as its sensitive-site policy. Before the agent can observe a page, the user who
 started the run must approve that exact normalized origin for the current run.
 Cross-origin navigation or controls require a separate origin approval before
-the destination can be read. Origin approval does not authorize an action.
+the destination can be read. Origin approval does not authorize an action,
+with one exception: opening a plain address on that site in the same tab.
 
-In the default **Ask** mode, every navigation, click, type, form submission, and key press receives a
+A site prompt raised by a step that loads a page (`navigate`, `open_tab`, or a
+link, form or key that leads to another site) names the exact address the step
+will load, host and path, masked like a snapshot's address and cut with "…"
+when long, and is bound to that address. Studio shows that page instead of
+only the site. A site already approved in that tab opens its pages without
+another prompt, and the prompt that approves it also covers the navigation it
+was raised for: a plain navigation asks at most once. A risky address
+(sign-out, unsubscribe, exports and files, one-time links, action addresses)
+still asks for the step itself, in every mode.
+
+In the default **Ask** mode, every other navigation, click, type, form submission, and key press receives a
 separate one-shot action prompt bound to the run, runtime generation, page,
 fresh snapshot/target where applicable, destination, and payload fingerprint.
 The default-focused action is **Deny**. Only the initiating user with live
@@ -341,7 +352,8 @@ In Ask, the first site prompt also offers **Always allow routine browsing for th
 when the runtime advertises `approvalModes: ["ask", "routine"]`. This is an
 explicit grant across HTTP(S) sites for the exact current run, initiating user,
 runtime generation and selected page—not permanent site trust, a project-wide
-default, or permission inherited by the next turn. A run on the space's own
+default, or permission inherited by the next turn (only a run that continues it
+with **Let AI continue** keeps it, see "Manual input handoff"). A run on the space's own
 machine starts with the same grant, scoped the same way. Under routine browsing,
 ordinary navigation, clicks, non-sensitive field filling and non-activation keys
 proceed without another site/action prompt, including an address typed for a
@@ -399,8 +411,12 @@ A plain link whose address has side effects but is not on the risky-address list
 a control with neither a risky nor a commit word in its label, or a menu item,
 tab or navigation item whose only risky word is a commit word outside the
 consequential list (such as "Neu", "Weiter", "Erfassen" or "Abgleichen" in a
-menu), can still act without a prompt. **Ask** reviews every state-changing interaction; a run on the
-space's own machine cannot be switched to it yet (see "Remaining work").
+menu), can still act without a prompt. **Ask** reviews every click, typing,
+form submission and key press. Its one relaxation is the plain address: on a
+site already approved in that tab, an address that is not on the risky-address
+list opens without a prompt, so such an address with side effects can act
+without one, as under routine browsing. A run on the space's own machine cannot
+be switched to Ask yet (see "Remaining work").
 
 ### Octo's own tabs
 
@@ -428,7 +444,9 @@ Browser has tabs of its own (see Personal-Browser.md).
   close only its own tabs.
 - **Approvals bind to the tab.** A site approved in one of Octo's tabs is
   approved in that tab only (the run's page and the other tabs ask again), and
-  prompts name the tab by its label. Step approvals carry the tab in
+  prompts name the tab by its label. `open_tab` asks once, for the site in the
+  new tab, with the address it opens; the site's approval in that tab covers
+  opening it and later plain navigations on that site there. Step approvals carry the tab in
   their payload fingerprint, and snapshot ids and targets are bound to the
   tab, so a snapshot of one tab is never a target in another. Routine browsing,
   where the run has it, covers the run's tabs alike.
@@ -684,7 +702,9 @@ own machine it starts in routine browsing, as every run there does (see "Human
 approval policy" above); elsewhere it starts in **Ask**, with the per-run origin
 approval, and **Allow routine browsing** stays the person's own choice. Studio
 never answers a site or action prompt for the person, and neither Studio nor the
-job metadata chooses the starting mode. Under routine browsing, steps in a named
+job metadata chooses the starting mode (Let AI continue only names the run it
+continues; runtime-agent decides what carries, see "Manual input handoff").
+Under routine browsing, steps in a named
 risk category still ask, because the browser runtime enforces them.
 
 This is an additive runtime-origin policy choice, not caller-authored job metadata.
@@ -707,14 +727,19 @@ that follow the last answer (180 seconds by default), well inside the
 600-second turn cap. `INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS` overrides the
 window for tests, from 100 ms to 300 seconds; production never sets it.
 
-A denial, an unanswered prompt, a stale request, revocation, storage failure, or
-malformed approval protocol is terminal for that browser run. The runtime latches
-the failure, rejects later mutations without opening another prompt, and reports
-machine-readable terminal-consent state so the job layer does not invoke its
-normal missing-action retry. The user starts a new turn if they want to try
-again. This keeps “Deny” from becoming a sequence of repeated consent prompts,
-and an unanswered prompt from becoming a chain of prompts while the person is
-away. What the person reads tells the two apart, with no code: an unanswered
+A declined site is the one denial a run survives, once. The site stays closed
+for the rest of the run without another prompt (the run's state lists it in
+`declinedOrigins`), and the tool tells Octo to take another route that fits the
+person's request, such as opening the site they named directly, or to end the
+turn and ask. Declining a second site, or declining a step, ends the run. A
+denial of a step, an unanswered prompt, a stale request, revocation, storage
+failure, or malformed approval protocol is terminal for that browser run. The
+runtime latches the failure, rejects later mutations without opening another
+prompt, and reports machine-readable terminal-consent state so the job layer
+does not invoke its normal missing-action retry. The user starts a new turn if
+they want to try again. This keeps “Deny” from becoming a sequence of repeated
+consent prompts, and an unanswered prompt from becoming a chain of prompts
+while the person is away. What the person reads tells the two apart, with no code: an unanswered
 prompt reads "I'm waiting for your OK to continue in Instafy's browser. I
 haven't done that step yet.", a denial reads "You declined, so I stopped before
 that step.", and every other terminal code reads one plain message. Each speaks
@@ -744,7 +769,8 @@ the origin's one-use fingerprint and replay checks remain authoritative.
 
 Studio also shows a pending prompt as a card in the run's own conversation, for
 the person who started the run only (the run's controller-set `initiatingUserId`).
-The card names the step and the site, counts down to the prompt's expiry and
+The card names the step and the page it loads (the site, for a prompt that
+names no page), counts down to the prompt's expiry and
 offers **Deny** and **Allow once** (**Allow site** for a site prompt); routine
 browsing stays a choice of the browser view's sheet. Its poll uses the running
 job's own machine and page (the run's `browserRuntimeId` and `browserPageId`, which
@@ -915,8 +941,23 @@ remove the agent-control marker: manual input remains locked until the existing
 confirmed-shutdown path restores the human driver. A canceled controller run alone
 is not release proof. **Let AI continue** explicitly starts a new turn on the same
 runtime/page with a fresh observation. It sends only a fixed continuation message,
-never the user's entered values. Account, conversation, runtime or page changes
-invalidate the continuation. Manual navigation drops stale field guidance but
+never the user's entered values, and says only what is true whether or not the
+person used the browser meanwhile. Account, conversation, runtime or page changes
+invalidate the continuation.
+
+The continuation keeps the run's approvals. Studio names the run it continues
+(`browserContinuesRunId`, the newest ended Shared Browser run of the
+conversation on that runtime and page that the person started). runtime-agent
+keeps, in its own memory, what the last run to hold the browser left once its
+tools were confirmed gone: the sites approved on the page the person chose,
+and routine browsing if they allowed it. The new run starts with them only when
+the run it names is that last run, for the same person on the same page, and
+ended less than ten minutes ago. Any other run uses the record up, so a run in
+between, another person, another page, a restarted runtime or browser (new
+page ids), or a run that ended without a confirmed shutdown starts with
+nothing, as every other run does. Octo's own tabs close with the run, and the
+sites approved in them go with them. Job metadata can only name the run; the
+runtime decides what carries. Manual navigation drops stale field guidance but
 keeps the manual-step controls, so login redirects can finish before continuation starts
 a fresh turn. A target change during asynchronous continuation aborts it; no
 hidden or stale completion may send it automatically.
@@ -1274,6 +1315,22 @@ unless the policy is `"covered"`.
   sentence again, so it cannot repeat. It reads nothing by itself, and it does
   nothing while the view is off, cannot open, is closed, or shows the browser
   on this device.
+- **A browser session machine that stopped answering.** On the legacy path,
+  after an open ensures the space's browser session machine, Studio waits until
+  that machine can take work (a fresh heartbeat) and lists its origin. An
+  origin listed for a machine that does not answer (its runtime started again,
+  or the controller has not replaced a silent generation yet) is never used:
+  connecting to it could only fail. It reads status every 0.5 to 4 s for the
+  first minute, then every 10 s, for at most ten minutes, as the cold press
+  does, and after a minute says "Still starting this space's machine…". Two
+  reads in a row that show the machine stopped or gone end the wait at once
+  with "Instafy's browser did not open. Try again." The controller hands a
+  silent generation back to an ensure until the machine's idle time (300 s for
+  a browser session) has passed since its last heartbeat, and while a job is
+  still active on it; once that time has passed, Studio asks for that machine
+  again, once and by its id, which replaces the generation when no job holds
+  it, and keeps waiting for the new launch. Only the person's own open
+  asks again, never an automatic reconnect or Studio by itself.
 - **Press on a card.** A press never waits silently. Once the browser view
   shows an error, the card says so at once, in the sentence the view shows
   when it is one of the view's own (such as "Instafy's browser is off."),
