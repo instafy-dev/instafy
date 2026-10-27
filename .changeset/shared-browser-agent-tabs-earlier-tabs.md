@@ -1,4 +1,0 @@
----
----
-
-Octo's tabs that an earlier run left open in the Shared Browser are told apart from the running turn's. The browser's page list marks them `leftover: true` with no number, Studio calls each one "Octo's earlier tab", and the Reading row and the count of the tabs Octo holds leave them out, so no label repeats one of the new run's tabs and no page is listed as read when Octo is not reading it. runtime-agent and the origin both rewrite the leftover record under a lock on the approval directory, and runtime-agent applies only what its own closing pass changed, so a **Keep tab** press while the tabs close is never undone and a tab still open is never dropped. A step that starts while another process is publishing a record in the approval directory runs instead of failing as if the directory held an unknown file. No package changes.
