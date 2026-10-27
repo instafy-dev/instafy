@@ -16,6 +16,8 @@ import {
   shouldDisplayChatMessage,
 } from "./chatMessagePresentation";
 import { getMessageType } from "./chatMessageMetadata";
+import { readChatRunStopNotice } from "./ChatRunStopNotice";
+import { getControllerConversationNoticeKind } from "./controllerConversationNotice";
 import {
   isCompactionStatusText,
   normalizeAssistantStatusText,
@@ -310,8 +312,27 @@ export function useAgentJobThreadPreviewState({
     () => resolveTerminalProxyErrorMessage(threadMessages, runStatus),
     [runStatus, threadMessages],
   );
+  // Someone stopped this run (Take over, Stop): its record says canceled, or
+  // the conversation's stop notice names its job. Its updates just end, so
+  // without this it read "Status unavailable" once they went quiet.
+  const isStoppedRun = useMemo(() => {
+    if (!jobId || runStatus.phase === "completed") {
+      return false;
+    }
+    if (Object.values(runs ?? {}).some((run) => run.status === "canceled" && runMatchesThreadJobId(run, jobId))) {
+      return true;
+    }
+    const conversationsToRead = threadConversation && threadConversation !== activeConversation
+      ? [activeConversation, threadConversation]
+      : [activeConversation];
+    return conversationsToRead.some((conversation) =>
+      (conversation?.messages ?? []).some((candidate) =>
+        getControllerConversationNoticeKind(candidate) === "run_cancellation" &&
+        readChatRunStopNotice(candidate).jobIds.includes(jobId)));
+  }, [activeConversation, jobId, runStatus.phase, runs, threadConversation]);
   const isStaleRunningStatus = runStatus.phase === "running" && !isThreadRunInFlight && !hasRecentThreadActivity;
-  const isCompleted = runStatus.phase === "completed" || isPlanOnlyThread || terminalProxyErrorMessage !== null;
+  const isCompleted =
+    runStatus.phase === "completed" || isPlanOnlyThread || terminalProxyErrorMessage !== null || isStoppedRun;
   const isRunning =
     !isCompleted && runStatus.phase === "running" && (isThreadRunInFlight || hasRecentThreadActivity);
   const isStaleCommandOnlyStatus =
@@ -864,7 +885,7 @@ export function useAgentJobThreadPreviewState({
   const previewText =
     preview ||
     (isCompleted
-      ? "Completed."
+      ? isStoppedRun && terminalProxyErrorMessage === null ? "Stopped." : "Completed."
       : shouldShowStaleThreadStatus
         ? "Status unavailable"
         : showLiveCommandOutput || hasUpdates
