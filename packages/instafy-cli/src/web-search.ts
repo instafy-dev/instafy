@@ -535,17 +535,30 @@ function firstText(item: unknown, fields: FieldPath[]): string {
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'" };
 
-/** A title or snippet as plain, redacted, bounded text on one line. */
+/** Markup removed until none is left, so a tag split by another (`<scr<b>ipt>`) cannot come together. */
+function withoutTags(text: string): string {
+  let out = text.length > 20_000 ? text.slice(0, 20_000) : text;
+  for (let previous = ""; previous !== out; ) {
+    previous = out;
+    out = out.replace(/<[^<>]*>/g, "");
+  }
+  return out;
+}
+
+/**
+ * A title or snippet as plain, redacted, bounded text on one line. It is never markup: tags are removed, and a `<` left
+ * over or written as an entity becomes `‹`, so nothing in it can open a tag (or close the untrusted wrapper).
+ */
 function cleanText(raw: string, max: number): string {
-  const text = raw
-    .replace(/<[^>]*>/g, "")
+  const text = withoutTags(raw)
     .replace(/&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z]{2,6}|#39);/gi, (whole, name: string) => {
       if (ENTITIES[name.toLowerCase()]) return ENTITIES[name.toLowerCase()]!;
       const code = name[0] === "#" ? (name[1]?.toLowerCase() === "x" ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10)) : NaN;
       return Number.isFinite(code) && code > 31 && code < 0x110000 ? String.fromCodePoint(code) : whole;
     })
+    .replace(/</g, "‹")
     // Control and bidirectional-override characters, which could hide or reorder text.
-    .replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   const redacted = redaction.redactText(text).text;
@@ -655,7 +668,10 @@ export function prepareQuery(raw: string, keys: string[] = []): { query: string;
 }
 
 function siteHost(raw: string): string {
-  const value = raw.trim().toLowerCase().replace(/\.+$/, "");
+  if (raw.length > 300) throw new WebSearchUsageError(`--site needs a public host name, such as visitlisboa.com.`);
+  // Trailing dots trimmed with a loop, not /\.+$/, which backtracks on a long run of dots.
+  let value = raw.trim().toLowerCase();
+  while (value.endsWith(".")) value = value.slice(0, -1);
   let host = value;
   if (/^[a-z][a-z0-9+.-]*:\/\//.test(value)) {
     try {
