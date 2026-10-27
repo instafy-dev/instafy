@@ -3476,6 +3476,53 @@ impl EmbeddedControllerFixture {
 }
 
 #[test]
+fn the_sent_page_reader_carries_the_link_only_list_and_marks_links_with_it() {
+    use std::process::Stdio;
+    // What the origin evaluates for Send page to Octo, run against a results
+    // page with a link to a link-only site, a script link and an ordinary one.
+    let page = r#"
+globalThis.location = { protocol: "https:", href: "https://search.example/?q=museum" };
+const anchors = [
+  ["City Museum", "https://museum.example/hours"],
+  ["Hotels nearby", "https://www.booking.com/hotel/x.html"],
+  ["Run", "javascript:alert(1)"],
+].map(([innerText, href]) => ({ tagName: "A", innerText, href, getAttribute: (name) => name === "href" ? href : null }));
+globalThis.document = { title: "museum", baseURI: "https://search.example/", body: { innerText: "Results" }, querySelectorAll: (s) => s === "*" ? anchors : [] };
+"#;
+    let script = format!(
+        "{page}\n{}\nconst linkOnly = {{ api: globalThis.__instafyLinkOnly, sites: globalThis.__instafyLinkOnlySites }};\nprocess.stdout.write(JSON.stringify(globalThis.__instafyBrowserPageCapture.captureSentPage(globalThis.__instafyBrowserRedaction, {{ withhold: false, linkOnly }}).links));",
+        sent_page_capture_script(),
+    );
+    let mut child = StdCommand::new("node")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn node");
+    child
+        .stdin
+        .take()
+        .expect("node stdin")
+        .write_all(script.as_bytes())
+        .expect("write script");
+    let output = child.wait_with_output().expect("node output");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let links: serde_json::Value = serde_json::from_slice(&output.stdout).expect("links");
+    assert_eq!(
+        links,
+        serde_json::json!([
+            { "text": "City Museum", "href": "https://museum.example/hours" },
+            { "text": "Hotels nearby", "href": "https://www.booking.com/hotel/x.html", "linkOnly": "Booking.com" }
+        ])
+    );
+}
+
+#[test]
 fn embedded_policy_modules_publish_their_api_without_commonjs() {
     use std::process::Stdio;
     let script = format!(
@@ -7286,15 +7333,37 @@ fn link_only_case_url(case: &JsonValue) -> String {
     }
 }
 
-fn check_link_only_case(fixture: &EmbeddedControllerFixture, case: &JsonValue) {
+/// A case is refused when its site is "no-agents" (its kind when left out);
+/// a "no-reuse" site, whose terms bar copying and not reading, loads. With
+/// the space's copy, a bundled case expects its `withSpaceCopy` where it has
+/// one.
+fn check_link_only_case(
+    fixture: &EmbeddedControllerFixture,
+    case: &JsonValue,
+    with_space_copy: bool,
+    authority_since: &mut std::time::Instant,
+) {
+    // The fixture's authority lasts a minute and the table can take longer:
+    // a fresh one every half minute.
+    if authority_since.elapsed() > std::time::Duration::from_secs(30) {
+        fixture.prepare_routine_start("page-target");
+        *authority_since = std::time::Instant::now();
+    }
     let full_url = link_only_case_url(case);
     let url = case["url"].as_str().expect("case url");
+    let expected = match case.get("withSpaceCopy") {
+        Some(override_case) if with_space_copy => override_case,
+        _ => case,
+    };
+    let refused_site = expected["site"]
+        .as_str()
+        .filter(|_| expected["kind"].as_str() != Some("no-reuse"));
     std::fs::remove_file(&fixture.fetch_log).ok();
     let output = fixture.click_redirected_to(&full_url);
-    match case["site"].as_str() {
+    match refused_site {
         Some(site) => {
             let refused = failure_of(&output);
-            let via: Vec<&str> = case["via"]
+            let via: Vec<&str> = expected["via"]
                 .as_array()
                 .map(|via| via.iter().filter_map(JsonValue::as_str).collect())
                 .unwrap_or_default();
@@ -7338,19 +7407,33 @@ fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redir
     let cases: JsonValue = serde_json::from_str(LINK_ONLY_CASES).expect("cases JSON");
     let fixture = EmbeddedControllerFixture::new();
     fixture.prepare_routine_start("page-target");
-    for case in cases["bundled"].as_array().expect("bundled cases") {
-        check_link_only_case(&fixture, case);
+    let mut authority_since = std::time::Instant::now();
+    let bundled = cases["bundled"].as_array().expect("bundled cases");
+    let space_cases = cases["spaceCopy"]["cases"].as_array().expect("space cases");
+    // Both kinds are in the table: sites refused and sites that load (the
+    // bundled list bars agents on every site, so a "no-reuse" one comes from
+    // the space's copy).
+    for kind in ["no-agents", "no-reuse"] {
+        assert!(
+            space_cases
+                .iter()
+                .chain(bundled.iter().filter_map(|case| case.get("withSpaceCopy")))
+                .any(|case| case["site"].is_string()
+                    && case["kind"].as_str().unwrap_or("no-agents") == kind),
+            "{kind}"
+        );
+    }
+    for case in bundled {
+        check_link_only_case(&fixture, case, false, &mut authority_since);
     }
     // With the space's copy, its additions hold too, and the bundled list
-    // still does.
+    // still does: a copy can make a site stricter, never looser.
     fixture.write_space_link_only(&cases["spaceCopy"]["list"].to_string());
-    for case in cases["spaceCopy"]["cases"]
-        .as_array()
-        .expect("space cases")
-        .iter()
-        .chain(cases["bundled"].as_array().expect("bundled cases"))
-    {
-        check_link_only_case(&fixture, case);
+    for case in space_cases {
+        check_link_only_case(&fixture, case, false, &mut authority_since);
+    }
+    for case in bundled {
+        check_link_only_case(&fixture, case, true, &mut authority_since);
     }
 }
 

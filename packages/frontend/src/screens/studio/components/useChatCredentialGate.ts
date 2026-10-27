@@ -718,6 +718,17 @@ export function useChatCredentialGate({
     return () => window.clearInterval(intervalId);
   }, [credentialsReady, inputRequiresAi, refreshCredentials, runtimeControllerEnabled]);
 
+  // The chat's own connect steps are the person choosing their own AI to
+  // answer, so a new connection becomes the default over Instafy AI. With an
+  // own default already set, the controller's rules apply as before.
+  const ownAiChoiceDefault = useMemo(
+    () =>
+      credentialRequirements.hasDefaultCredential || defaultAiCredential
+        ? {}
+        : { makeDefault: true as const },
+    [credentialRequirements.hasDefaultCredential, defaultAiCredential],
+  );
+
   const connectFromDesktop = useCallback(async () => {
     stashDraftForCredentials({ autoSubmit: true });
     if (!canUseDesktopConnect) {
@@ -731,6 +742,7 @@ export function useChatCredentialGate({
     try {
       const result = await connectDesktopCodexAuthJson({
         label: "Codex on this computer",
+        ...ownAiChoiceDefault,
       });
       if (!result.success) {
         throw new Error(result.error ?? "Unable to save credentials.");
@@ -742,7 +754,14 @@ export function useChatCredentialGate({
     } finally {
       setCredentialsBusy(false);
     }
-  }, [canUseDesktopConnect, credentialsBusy, refreshCredentials, showStatus, stashDraftForCredentials]);
+  }, [
+    canUseDesktopConnect,
+    credentialsBusy,
+    ownAiChoiceDefault,
+    refreshCredentials,
+    showStatus,
+    stashDraftForCredentials,
+  ]);
 
   const uploadAuthJsonFile = useCallback(async (file: File) => {
     stashDraftForCredentials({ autoSubmit: true });
@@ -756,6 +775,7 @@ export function useChatCredentialGate({
       const result = await createCodexCredential({
         authJson: parsed,
         label: "auth.json",
+        ...ownAiChoiceDefault,
       });
       if (!result.success) {
         throw new Error(result.error ?? "Unable to save credentials.");
@@ -767,7 +787,7 @@ export function useChatCredentialGate({
     } finally {
       setCredentialsBusy(false);
     }
-  }, [credentialsBusy, refreshCredentials, showStatus, stashDraftForCredentials]);
+  }, [credentialsBusy, ownAiChoiceDefault, refreshCredentials, showStatus, stashDraftForCredentials]);
 
   const saveApiKey = useCallback(async (apiKey: string, provider: "openai" | "deepseek" | "zai" | "gemini") => {
     stashDraftForCredentials({ autoSubmit: true });
@@ -790,6 +810,7 @@ export function useChatCredentialGate({
         },
         label,
         provider,
+        ...ownAiChoiceDefault,
       });
       if (!result.success) {
         return { success: false, error: result.error ?? "Unable to save credentials." };
@@ -802,7 +823,7 @@ export function useChatCredentialGate({
     } finally {
       setCredentialsBusy(false);
     }
-  }, [credentialsBusy, refreshCredentials, stashDraftForCredentials]);
+  }, [credentialsBusy, ownAiChoiceDefault, refreshCredentials, stashDraftForCredentials]);
 
   const handleSetDefaultCredentialFromChat = useCallback(async (credentialId: string) => {
     if (!credentialId || credentialsBusy) {

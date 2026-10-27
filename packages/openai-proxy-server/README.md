@@ -144,14 +144,22 @@ any tool that names its own `model`, and a namespace holding either, and logs
 `credential lease drops client tools` with a count per tool type and reason. Hosted tools, which
 OpenAI runs and bills per call, are off on a pinned lease: `web_search`, which codex sends, and
 a tool search with any other `execution` are dropped with reason `hosted`, and a drift test fails
-when codex adds a tool type that is neither allowed nor dropped on purpose. The filter runs
-again on the tools the request finally carries, so the default tools the proxy gives a ChatGPT
-login's request that keeps none of its own lose `web_search` too, whatever
-`CODEX_ENABLE_WEB_SEARCH` says. The pin, not the lane, decides all of this. Only the platform
-lane is ever pinned, by the controller's managed lease or by `PROXY_PINNED_MODEL` below, but a
-platform lane without a pin is not filtered. Leases without `pinnedModel` (bring-your-own API
-keys, ChatGPT logins, and leases from a controller that predates the field) keep the rules above
-and forward client tools unchanged, hosted ones included.
+when codex adds a tool type that is neither allowed nor dropped on purpose. The pin, not the
+lane, decides all of this. Only the platform lane is ever pinned, by the controller's managed
+lease or by `PROXY_PINNED_MODEL` below, but a platform lane without a pin is not filtered by it.
+Leases without `pinnedModel` (bring-your-own API keys, ChatGPT logins, and leases from a
+controller that predates the field) forward client tools unchanged, hosted ones included, with
+one exception below.
+
+**No lease forwards OpenAI's hosted web search**, pinned or not: a tool of type `web_search`,
+`web_search_preview` or one of their dated forms, on its own or inside a namespace, in `tools` or
+in a tool-carrying input item, is dropped with reason `hosted`. Web search is off for every kind of
+AI (Lite, own keys and ChatGPT logins) because Octo searches only through Instafy's own commands,
+which keep the web-research skill's link-only sites link-only and cap searches per turn; OpenAI's
+search can do neither. The runtime also sets Codex's web search to disabled on every lane. The
+default tools the proxy gives a ChatGPT login's request that keeps none of its own no longer
+include web search (`CODEX_ENABLE_WEB_SEARCH` is ignored), and the filter runs again on the tools
+the request finally carries.
 
 With controller integration, static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve
 the platform lane: managed runs, whose controller-signed job tokens carry a `run_id` and no

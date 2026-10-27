@@ -456,8 +456,10 @@ Browser has tabs of its own (see Personal-Browser.md).
   a named risky step (purchase, message, download, sign-out and the others), an
   activation key, a risky address, a step that may show a secret and a manual
   field handoff are refused there in every mode, before any prompt.
-- **Never a link-only site, in any tab.** A site on the web-research skill's
-  link-only list (runtime-agent embeds the skill's `link-only-sites.json` into
+- **Never a link-only site, in any tab.** A `no-agents` site on the
+  web-research skill's link-only list (its terms bar AI agents or automated
+  access; a site with no kind, or an unknown one, counts; runtime-agent embeds
+  the skill's `link-only-sites.json` into
   the controller, with `@instafy/browser-action-policy`'s `linkOnly.js`, the
   matcher `instafy web read` and the Personal Browser use too), or a
   translator's, cache's or archive's copy of one (the list's `wrappers`, such as
@@ -466,9 +468,12 @@ Browser has tabs of its own (see Personal-Browser.md).
   page the person chose alike. Sites and wrappers the space's own copy of the
   list adds (`.agents/skills/instafy-web-research/references/link-only-sites.json`,
   passed to the controller as `INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE`)
-  count too; that copy can only add, and a copy that is not a plain JSON file
-  of the list is left out (`status` reports it in `linkOnlyListWarnings`) while
-  the bundled list still applies. `open_tab`, `navigate` and a link, form or
+  count too; that copy can only add or make a site stricter (the strictest
+  kind of every entry that matches wins), and a copy that is not a plain JSON
+  file of the list is left out (`status` reports it in `linkOnlyListWarnings`)
+  while the bundled list still applies. A `no-reuse` site (its terms bar
+  copying its content, not reading it) is not refused; the web-research skill
+  says how its content may be used. `open_tab`, `navigate` and a link, form or
   activation key that leads there are refused before any prompt, and a
   redirect one of Octo's steps causes is stopped by the step's request guard
   before the request leaves the browser. A copy nested in another wrapper (a
@@ -1613,8 +1618,12 @@ reads that page once for the person who pressed it:
 - The origin creates a fresh isolated world in the page's main frame and runs
   `redaction.js` and `pageCapture.js` there, so page scripts cannot reach the
   reader or the masking. Only the masked address, title and text (at most 50,000
-  characters, cut after masking) leave the machine, with `readAt` and
-  `Cache-Control: no-store`.
+  characters, cut after masking) and up to 200 masked web links leave the
+  machine, with `readAt` and `Cache-Control: no-store`. runtime-agent's reader
+  carries `linkOnly.js` and the skill's link-only list, so a link to a
+  link-only site carries the site's name; without the list no links are sent,
+  and `javascript:`, `data:` and other non-web links never are. The origin
+  refuses an answer whose links the reader could not have produced.
 - A secret screen, a page the agent's controller marked withheld (read in the
   page's own world, failing closed), the page a credential step of the agent's
   run opened before the controller marked it (`withhold-next.json` in the
@@ -1851,9 +1860,10 @@ An opt-in local agent-turn proof may connect the machine's existing `~/.codex/au
 visible Desktop credential flow. Electron main keeps only the supported ChatGPT subscription fields,
 removes API-key and unknown fields, and sends the sanitized credential directly to the configured
 controller. Renderer and preload code receive only availability and created-credential metadata,
-never the path or contents. Disable traces, video, and automatic screenshots before exercising this
-flow, use disposable local accounts and projects, and verify that the turn is recorded as BYOC with
-no managed-credit debit. Hosted canary accounts and orchestration are deployment-private.
+never the path or contents. Connecting from the Your AI panel keeps an available Instafy AI the
+default, so the proof then presses Make default on the new connection before its turn. Disable
+traces, video, and automatic screenshots before exercising this flow, use disposable local accounts
+and projects, and verify that the turn is recorded as BYOC with no managed-credit debit. Hosted canary accounts and orchestration are deployment-private.
 
 The runtime entrypoint gives a newly launched headed Chromium up to 30 seconds to answer on its CDP
 port, and stops waiting as soon as that process exits. The first launch on a cold machine is the

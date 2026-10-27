@@ -1011,3 +1011,103 @@ describe("usePersonalBrowserBridge sign-in handoff", () => {
     expect(resultRef.current?.pendingHandoff).toBeNull();
   });
 });
+
+describe("usePersonalBrowserBridge address-bar search", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let current: InstafyDesktopPersonalBrowserStatus;
+  let resultRef: MutableRefObject<HookResult | null>;
+  type DesktopBridge = NonNullable<Window["instafyDesktop"]>;
+  let navigateTo: ReturnType<typeof vi.fn<NonNullable<DesktopBridge["personalBrowserNavigate"]>>>;
+  let search: ReturnType<typeof vi.fn<NonNullable<DesktopBridge["personalBrowserSearch"]>>>;
+
+  async function mount(withSearch: boolean) {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    controllerMocks.fetchStatus.mockReset();
+    controllerMocks.resolveRequestContext.mockReset();
+    controllerMocks.resolveRequestContext.mockResolvedValue(controllerRequestContext());
+    current = personalBrowserStatus();
+    navigateTo = vi.fn<NonNullable<DesktopBridge["personalBrowserNavigate"]>>(async ({ url }) => (current = { ...current, url }));
+    search = vi.fn<NonNullable<DesktopBridge["personalBrowserSearch"]>>(
+      async ({ query }) => (current = { ...current, url: `https://search.example/?q=${encodeURIComponent(query)}` }),
+    );
+    let choice = { engines: [{ id: "duckduckgo", name: "DuckDuckGo" }, { id: "brave", name: "Brave Search" }], selected: "duckduckgo" };
+    window.instafyDesktop = {
+      notify: vi.fn(async () => undefined),
+      onPersonalBrowserStatus: vi.fn(() => () => undefined),
+      personalBrowserClose: vi.fn(async () => (current = personalBrowserStatus())),
+      personalBrowserOpen: vi.fn(async (options) => {
+        current = personalBrowserStatus({ state: "ready", ownerId: options.ownerId, projectId: "project-1", url: "https://app.example.test/" });
+        return current;
+      }),
+      personalBrowserNavigate: navigateTo,
+      personalBrowserSetBounds: vi.fn(async () => current),
+      personalBrowserStatus: vi.fn(async () => current),
+      ...(withSearch
+        ? {
+            personalBrowserSearch: search,
+            personalBrowserSearchEngines: vi.fn(async () => choice),
+            personalBrowserSetSearchEngine: vi.fn(async ({ engineId }: { engineId: string }) => (choice = { ...choice, selected: engineId })),
+          }
+        : {}),
+    };
+    resultRef = { current: null };
+    await act(async () => {
+      root.render(<Harness resultRef={resultRef} />);
+    });
+    await waitUntil(() => resultRef.current?.status?.state === "ready");
+  }
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    delete window.instafyDesktop;
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+    vi.restoreAllMocks();
+  });
+
+  it("searches words that are not an address and opens addresses as addresses", async () => {
+    await mount(true);
+    await waitUntil(() => resultRef.current?.searchChoice?.selected === "duckduckgo");
+    for (const typed of ["best ramen tokyo", "ramen"]) {
+      await act(async () => {
+        await resultRef.current?.navigate(typed);
+      });
+    }
+    const ownerId = resultRef.current?.ownerId;
+    expect(search.mock.calls.map(([options]) => options)).toEqual([
+      { query: "best ramen tokyo", ownerId },
+      { query: "ramen", ownerId },
+    ]);
+    for (const typed of ["example.com", "localhost:3000", "192.168.1.1"]) {
+      await act(async () => {
+        await resultRef.current?.navigate(typed);
+      });
+    }
+    expect(navigateTo.mock.calls.map(([options]) => options.url)).toEqual([
+      "https://example.com/",
+      "https://localhost:3000/",
+      "https://192.168.1.1/",
+    ]);
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(resultRef.current?.navigationError).toBeNull();
+
+    await act(async () => {
+      await resultRef.current?.setSearchEngine("brave");
+    });
+    expect(resultRef.current?.searchChoice?.selected).toBe("brave");
+  });
+
+  it("keeps the old address bar on a Desktop that cannot search", async () => {
+    await mount(false);
+    expect(resultRef.current?.searchChoice).toBeNull();
+    await act(async () => {
+      await resultRef.current?.navigate("ramen");
+    });
+    expect(navigateTo.mock.calls.map(([options]) => options.url)).toEqual(["https://ramen/"]);
+    expect(search).not.toHaveBeenCalled();
+  });
+});

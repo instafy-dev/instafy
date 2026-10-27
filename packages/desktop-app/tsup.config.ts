@@ -21,6 +21,11 @@ const linkOnlySitesPath = fileURLToPath(new URL(
   "../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json",
   import.meta.url,
 ));
+// The same skill's address-bar search engines, for the Personal Browser.
+const searchEnginesPath = fileURLToPath(new URL(
+  "../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/search-engines.json",
+  import.meta.url,
+));
 
 export default defineConfig({
   entry: {
@@ -39,6 +44,7 @@ export default defineConfig({
     personalBrowserIdentity: "src/personalBrowserIdentity.ts",
     personalBrowserSecurity: "src/personalBrowserSecurity.ts",
     personalBrowserLinkOnly: "src/personalBrowserLinkOnly.ts",
+    personalBrowserSearch: "src/personalBrowserSearch.ts",
     personalBrowserRequestGuard: "src/personalBrowserRequestGuard.ts",
     personalBrowserRedaction: "src/personalBrowserRedaction.ts",
     personalBrowserActionPolicy: "src/personalBrowserActionPolicy.ts",
@@ -75,6 +81,7 @@ export default defineConfig({
       "virtual:instafy/desktop-feature-manifest":
         desktopFeatureManifestPath,
       "virtual:instafy/link-only-sites": linkOnlySitesPath,
+      "virtual:instafy/search-engines": searchEnginesPath,
     };
   },
   sourcemap: true,

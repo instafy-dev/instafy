@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   createCodexCredential: vi.fn(),
   createAgent: vi.fn(),
   agentProfileProps: null as ComponentProps<typeof AgentProfileModal> | null,
+  connectFlowOptions: null as { newConnectionDefault?: () => boolean | undefined } | null,
   deleteAgent: vi.fn(),
   getCredentialRequirements: vi.fn(),
   listAgents: vi.fn(),
@@ -84,13 +85,16 @@ vi.mock("../AgentProfileModal", () => ({
 }));
 
 vi.mock("../useCredentialsConnectFlow", () => ({
-  useCredentialsConnectFlow: () => ({
-    canManageAiConnections: true,
-    openConnectModal: vi.fn(),
-    openConnectModalAtStep: mocks.openConnectModalAtStep,
-    openConnectModalToReplace: mocks.openConnectModalToReplace,
-    connectModalProps: {},
-  }),
+  useCredentialsConnectFlow: (options: { newConnectionDefault?: () => boolean | undefined }) => {
+    mocks.connectFlowOptions = options;
+    return {
+      canManageAiConnections: true,
+      openConnectModal: vi.fn(),
+      openConnectModalAtStep: mocks.openConnectModalAtStep,
+      openConnectModalToReplace: mocks.openConnectModalToReplace,
+      connectModalProps: {},
+    };
+  },
 }));
 
 const oldCredential = {
@@ -257,6 +261,70 @@ describe("CredentialsSettingsCard", () => {
     expect(mocks.showStatus).toHaveBeenCalledWith("Try again", "error", 4500);
   });
 
+  it("does not call Instafy AI unavailable because the default is the person's own AI", async () => {
+    // Production showed "20 of 20 prompts left today. Currently unavailable":
+    // the controller reported available: false for anyone whose default was
+    // their own AI, and the panel read that as Instafy AI being down.
+    mocks.getCredentialRequirements.mockResolvedValue({
+      ...managedRequirements,
+      hasDefaultCredential: true,
+      managedAi: { ...managedRequirements.managedAi, available: false, dailyPromptsUsed: 0, remainingPrompts: 20 },
+    });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    const row = container.querySelector('[data-testid="credentials-connection-row-managed-ai"]');
+    expect(row?.textContent).toContain("20 of 20 prompts left today");
+    expect(row?.textContent).not.toMatch(/unavailable/i);
+    expect(container.querySelector('[data-testid="credentials-managed-ai-unavailable"]')).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="credentials-use-managed-ai"]')?.disabled).toBe(false);
+    expect(container.querySelector('[data-testid="credentials-connection-row-cred-old"]')?.textContent).toContain("Default");
+  });
+
+  it.each([
+    ["no_proxy", "This server isn't set up to run it yet.", true],
+    ["proxy_needs_credential", "This server isn't set up to run it yet.", true],
+    ["proxy_unreachable", "Can't be reached right now. Try again in a minute.", true],
+    ["daily_limit_reached", "Today's 20 prompts are used.", false],
+  ])("says why Instafy AI can't run turns (%s)", async (reason, message, chooseDisabled) => {
+    mocks.getCredentialRequirements.mockResolvedValue({
+      ...managedRequirements,
+      hasDefaultCredential: true,
+      managedAi: {
+        ...managedRequirements.managedAi,
+        available: false,
+        unavailableReason: reason,
+        remainingPrompts: reason === "daily_limit_reached" ? 0 : 20,
+      },
+    });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    expect(container.querySelector('[data-testid="credentials-managed-ai-unavailable"]')?.textContent).toContain(message);
+    expect(container.textContent).not.toContain("use your own connection to continue");
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="credentials-use-managed-ai"]')?.disabled).toBe(chooseDisabled);
+  });
+
+  it("adds connections without taking the default from an available Instafy AI", async () => {
+    // A new space used "Codex on this computer" because connecting it made it
+    // the default by itself. From this panel, a connection becomes the
+    // default only through its own "Make default" while Instafy AI is it.
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [] });
+    mocks.getCredentialRequirements.mockResolvedValue(managedRequirements);
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    expect(mocks.connectFlowOptions?.newConnectionDefault?.()).toBe(false);
+
+    // Instafy AI can't run turns now: the controller decides, as before.
+    mocks.getCredentialRequirements.mockResolvedValue({
+      ...managedRequirements,
+      managedAi: { ...managedRequirements.managedAi, available: false, unavailableReason: "daily_limit_reached", remainingPrompts: 0 },
+    });
+    await act(async () => { root.render(<CredentialsSettingsCard key="used-up" />); await flush(); });
+    expect(mocks.connectFlowOptions?.newConnectionDefault?.()).toBeUndefined();
+
+    // The person's own AI is the default: unchanged rules.
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [oldCredential] });
+    mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, hasDefaultCredential: true });
+    await act(async () => { root.render(<CredentialsSettingsCard key="own-default" />); await flush(); });
+    expect(mocks.connectFlowOptions?.newConnectionDefault?.()).toBeUndefined();
+  });
+
   it("explains when managed AI is disabled without offering a default action", async () => {
     mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, managedAi: { ...managedRequirements.managedAi, enabled: false, available: false } });
     await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
@@ -311,7 +379,7 @@ describe("CredentialsSettingsCard", () => {
     const row = container.querySelector('[data-testid="credentials-connection-row-managed-ai"]');
     expect(row?.textContent).toContain("Default");
     expect(row?.textContent).toContain("0 of 20 prompts left today");
-    expect(row?.textContent).toContain("Currently unavailable");
+    expect(row?.textContent).toContain("Today's 20 prompts are used.");
     expect(container.textContent).not.toContain("No AI connections yet");
     expect(container.querySelector('[data-testid="credentials-add-connection"]')).not.toBeNull();
   });

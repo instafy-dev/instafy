@@ -32,6 +32,20 @@
  * leniently rather than not at all. Merging lists only adds: a space's copy cannot
  * remove a bundled site.
  *
+ * Kinds: each site says what its terms bar. "no-agents" (AI agents, bots or
+ * any automated access) is refused by every reader, its wrappers' copies too;
+ * "no-reuse" (copying or republishing, not reading) is matched and named but
+ * not refused. A site without a kind, or with one this file does not know, is
+ * "no-agents". Where several entries match, the strictest wins, so a space's
+ * copy can make a site stricter and never looser.
+ *
+ * Guided mode: a site may name its `home` page and a `search` link template
+ * with named placeholders (`{query}`, `{checkin}`, …, defined by the list's
+ * `placeholders`) that the person opens in their own tab; `deepLinks: false`
+ * keeps it to the home page. `guidedLink` fills a template: each value is
+ * checked against its placeholder's format and URL-encoded, the link stays
+ * https on the site's own hosts, and an unknown placeholder is refused.
+ *
  * Plain script with no imports. In CommonJS it exports its API; evaluated
  * where `module` is undefined it sets `globalThis.__instafyLinkOnly`.
  */
@@ -45,6 +59,18 @@
 })(typeof globalThis === "object" ? globalThis : null, function linkOnlyFactory() {
   const LINK_ONLY_SITES_SCHEMA = "instafy.link-only-sites@1";
   const EMBEDS = Object.freeze(["subdomain", "subdomain-dashes", "path", "query"]);
+  const NO_AGENTS = "no-agents";
+  const NO_REUSE = "no-reuse";
+  const KINDS = Object.freeze([NO_AGENTS, NO_REUSE]);
+  const PLACEHOLDER_FORMATS = Object.freeze(["text", "date", "count"]);
+  const PLACEHOLDER_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+  const MAX_PLACEHOLDERS = 64;
+  const MAX_TEMPLATE_CHARS = 2_048;
+  const MAX_TEXT_VALUE_CHARS = 200;
+  const MAX_COUNT_VALUE = 99;
+  // Stands for a placeholder while a template is parsed: letters and digits
+  // only, so the URL parser keeps it as written wherever it stands.
+  const MARK = "instafyplaceholder";
   const MAX_ENTRIES = 500;
   const MAX_PATTERNS_PER_ENTRY = 50;
   // view-source:, blob: and filesystem: addresses inside one another.
@@ -262,7 +288,108 @@
     return typeof value === "string" ? value.trim().slice(0, max) : "";
   }
 
-  function compileEntries(entries, kind, where, warnings) {
+  function hostOnSite(host, patterns) {
+    return Boolean(host) && patterns.some((pattern) => prefixBefore(host, pattern) !== null);
+  }
+
+  // The list's placeholders: a name and the format its values take. A space's
+  // copy may add names; a name the bundled list defines keeps its meaning.
+  function compilePlaceholders(raw, known, where, warnings) {
+    const placeholders = { ...known };
+    if (raw === undefined) return Object.freeze(placeholders);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      warnings.push(`${where}placeholders is not an object and was left out`);
+      return Object.freeze(placeholders);
+    }
+    for (const [name, value] of Object.entries(raw).slice(0, MAX_PLACEHOLDERS)) {
+      const format = value && typeof value === "object" ? value.format : undefined;
+      if (!PLACEHOLDER_NAME.test(name) || !PLACEHOLDER_FORMATS.includes(format)) {
+        warnings.push(`${where}the placeholder ${cleanText(name, 40)} is not a lowercase name with a format of ${PLACEHOLDER_FORMATS.join(", ")} and was left out`);
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(known, name)) continue;
+      placeholders[name] = Object.freeze({ format, about: cleanText(value.about, 120) || name });
+    }
+    return Object.freeze(placeholders);
+  }
+
+  // An https address on the site's own hosts, without user info, or null.
+  function siteAddress(raw, patterns) {
+    if (typeof raw !== "string" || raw.length > MAX_TEMPLATE_CHARS) return null;
+    let url;
+    try {
+      url = new URL(raw);
+    } catch (_) {
+      return null;
+    }
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return null;
+    return hostOnSite(hostOfUrl(url), patterns) ? url : null;
+  }
+
+  /**
+   * A search link template, checked once: https on the site's own hosts, no
+   * user info, port or fragment, and each `{name}` a placeholder the list
+   * defines, written once, as a whole path segment or a whole query value.
+   * `{ template }` or `{ error }`.
+   */
+  function compileTemplate(raw, patterns, placeholders) {
+    if (typeof raw !== "string" || !raw || raw.length > MAX_TEMPLATE_CHARS || raw.includes(MARK)) {
+      return { error: `is not a link of at most ${MAX_TEMPLATE_CHARS} characters` };
+    }
+    const names = [];
+    const marked = raw.replace(/\{([^{}]*)\}/g, (_, name) => `${MARK}${names.push(name) - 1}x`);
+    if (/[{}]/.test(marked)) return { error: "has a { or } that is not a placeholder" };
+    for (const name of names) {
+      if (!PLACEHOLDER_NAME.test(name) || !Object.prototype.hasOwnProperty.call(placeholders, name)) {
+        return { error: `uses {${cleanText(name, 40)}}, which the list's placeholders do not define` };
+      }
+    }
+    if (new Set(names).size !== names.length) return { error: "uses a placeholder twice" };
+    let url;
+    try {
+      url = new URL(marked);
+    } catch (_) {
+      return { error: "is not an address" };
+    }
+    if (url.protocol !== "https:") return { error: "is not https" };
+    if (url.username || url.password || url.port || url.hash) return { error: "has user info, a port or a fragment" };
+    if (url.hostname.includes(MARK) || !hostOnSite(hostOfUrl(url), patterns)) return { error: "is not on the site's own hosts" };
+    const placeholderIn = (text) => {
+      const whole = new RegExp(`^${MARK}(\\d+)x$`).exec(text);
+      if (whole) return { name: names[Number(whole[1])] };
+      return text.includes(MARK) ? undefined : null;
+    };
+    const segments = [];
+    for (const segment of url.pathname.split("/").slice(1)) {
+      const placeholder = placeholderIn(segment);
+      if (placeholder === undefined) return { error: "has a placeholder that is not a whole path segment" };
+      segments.push(placeholder || segment);
+    }
+    const query = [];
+    for (const [key, value] of url.searchParams) {
+      const placeholder = placeholderIn(value);
+      if (key.includes(MARK) || placeholder === undefined) return { error: "has a placeholder that is not a whole query value" };
+      query.push(Object.freeze([key, placeholder || value]));
+    }
+    return {
+      template: Object.freeze({
+        text: raw,
+        origin: url.origin,
+        segments: Object.freeze(segments),
+        query: Object.freeze(query),
+        names: Object.freeze([...names]),
+      }),
+    };
+  }
+
+  function compileKind(raw, label, where, warnings) {
+    if (raw === undefined || raw === NO_AGENTS) return NO_AGENTS;
+    if (raw === NO_REUSE) return NO_REUSE;
+    warnings.push(`${where}the site ${label} has a kind other than ${KINDS.join(" or ")}, so it is ${NO_AGENTS}`);
+    return NO_AGENTS;
+  }
+
+  function compileEntries(entries, kind, where, warnings, placeholders) {
     const compiled = [];
     for (const entry of entries.slice(0, MAX_ENTRIES)) {
       const raw = entry && typeof entry === "object" ? entry : {};
@@ -276,7 +403,35 @@
       const name = label || (patterns[0].anyEnding ? `${patterns[0].name}.*` : patterns[0].name);
       const why = cleanText(raw.why, 200) || cleanText(raw.reason, 200);
       if (kind === "site") {
-        compiled.push(Object.freeze({ name, why: why || "listed as link-only", patterns: Object.freeze(patterns) }));
+        const siteKind = compileKind(raw.kind, name, where, warnings);
+        // Only an explicit true (or nothing) allows deep links; anything else keeps to the home page.
+        const deepLinks = raw.deepLinks === undefined || raw.deepLinks === true;
+        if (!deepLinks && raw.deepLinks !== false) {
+          warnings.push(`${where}the site ${name} has a deepLinks other than true or false, so it gets no deep links`);
+        }
+        const home = raw.home === undefined ? null : siteAddress(raw.home, patterns);
+        if (raw.home !== undefined && !home) {
+          warnings.push(`${where}the site ${name}'s home is not an https address on its own hosts and was left out`);
+        }
+        let search = null;
+        if (raw.search !== undefined && !deepLinks) {
+          warnings.push(`${where}the site ${name} bars deep links, so its search link was left out`);
+        } else if (raw.search !== undefined) {
+          const compiledSearch = compileTemplate(raw.search, patterns, placeholders);
+          if (compiledSearch.error) warnings.push(`${where}the site ${name}'s search link ${compiledSearch.error} and was left out`);
+          search = compiledSearch.template || null;
+        }
+        compiled.push(
+          Object.freeze({
+            name,
+            why: why || "listed as link-only",
+            kind: siteKind,
+            patterns: Object.freeze(patterns),
+            home: home ? home.href : null,
+            deepLinks,
+            search,
+          }),
+        );
         continue;
       }
       const embeds = Array.isArray(raw.embeds) ? raw.embeds.filter((value) => EMBEDS.includes(value)) : [];
@@ -296,6 +451,7 @@
    */
   function compileLinkOnlyList(data, options) {
     const source = options && typeof options.source === "string" && options.source ? options.source : "";
+    const known = options && options.placeholders && typeof options.placeholders === "object" ? options.placeholders : {};
     const where = source ? `${source}: ` : "";
     const list = data && typeof data === "object" && !Array.isArray(data) ? data : null;
     if (!list) return { list: null, warnings: [`${where}is not a link-only list`] };
@@ -305,9 +461,13 @@
       return { list: null, warnings: [`${where}wrappers is not a list`] };
     }
     const warnings = [];
-    const sites = compileEntries(list.sites, "site", where, warnings);
-    const wrappers = compileEntries(list.wrappers || [], "wrapper", where, warnings);
-    return { list: Object.freeze({ sites: Object.freeze(sites), wrappers: Object.freeze(wrappers) }), warnings };
+    const placeholders = compilePlaceholders(list.placeholders, known, where, warnings);
+    const sites = compileEntries(list.sites, "site", where, warnings, placeholders);
+    const wrappers = compileEntries(list.wrappers || [], "wrapper", where, warnings, placeholders);
+    return {
+      list: Object.freeze({ sites: Object.freeze(sites), wrappers: Object.freeze(wrappers), placeholders }),
+      warnings,
+    };
   }
 
   /**
@@ -324,21 +484,28 @@
     }
     const sites = [...base.list.sites];
     const wrappers = [...base.list.wrappers];
+    let placeholders = base.list.placeholders;
     const sources = ["bundled"];
     for (const addition of Array.isArray(additions) ? additions : []) {
       const source = addition && typeof addition.source === "string" ? addition.source : "a space copy";
-      const extra = compileLinkOnlyList(addition ? addition.data : undefined, { source });
+      const extra = compileLinkOnlyList(addition ? addition.data : undefined, { source, placeholders });
       warnings.push(...extra.warnings);
       if (!extra.list) {
         warnings.push(`${source} was ignored; the bundled list still applies`);
         continue;
       }
-      // A copy only adds: bundled entries come first and are never dropped.
+      // A copy only adds: bundled entries come first and are never dropped,
+      // and matching takes the strictest kind of every entry that matches.
       sites.push(...extra.list.sites.slice(0, Math.max(0, base.list.sites.length + MAX_ENTRIES - sites.length)));
       wrappers.push(...extra.list.wrappers.slice(0, Math.max(0, base.list.wrappers.length + MAX_ENTRIES - wrappers.length)));
+      placeholders = extra.list.placeholders;
       if (extra.list.sites.length || extra.list.wrappers.length) sources.push(source);
     }
-    return { list: Object.freeze({ sites: Object.freeze(sites), wrappers: Object.freeze(wrappers) }), warnings, sources };
+    return {
+      list: Object.freeze({ sites: Object.freeze(sites), wrappers: Object.freeze(wrappers), placeholders }),
+      warnings,
+      sources,
+    };
   }
 
   // Percent-decoding, repeated for an address encoded twice. Bytes that are
@@ -459,7 +626,25 @@
 
   // A copy this check cannot see through, which is refused rather than read.
   function unchecked(why, via) {
-    return { site: "a site this check cannot rule out", why, via };
+    return { site: "a site this check cannot rule out", why, kind: NO_AGENTS, via };
+  }
+
+  /** Whether a match keeps every agent out: any kind but "no-reuse" (an unknown kind is the strict one). */
+  function barsAgents(hit) {
+    return Boolean(hit) && hit.kind !== NO_REUSE;
+  }
+
+  // The site a host is on itself (not as a wrapper's copy): the first
+  // "no-agents" entry that matches, else the first "no-reuse" one, or null.
+  function siteOfHost(list, host) {
+    let reuse = null;
+    for (const site of list.sites) {
+      if (!hostOnSite(host, site.patterns)) continue;
+      const hit = { site: site.name, why: site.why, kind: site.kind === NO_REUSE ? NO_REUSE : NO_AGENTS, via: [] };
+      if (barsAgents(hit)) return hit;
+      reuse = reuse || hit;
+    }
+    return reuse;
   }
 
   // The sites a wrapper's address embeds, each as a host name. A site written
@@ -497,16 +682,15 @@
   }
 
   // The link-only site a host is on, directly or as the copy a wrapper on it
-  // serves. `part` is the address's path and query, or null for a host
-  // written in a wrapper's path or query. Each host is looked into once.
+  // serves: the strictest one, so a "no-reuse" match is kept only while no
+  // "no-agents" one turns up. `part` is the address's path and query, or null
+  // for a host written in a wrapper's path or query. Each host is looked into
+  // once.
   function matchHost(list, host, part, depth, state) {
-    for (const site of list.sites) {
-      if (site.patterns.some((pattern) => prefixBefore(host, pattern) !== null)) {
-        return { site: site.name, why: site.why, via: [] };
-      }
-    }
+    let found = siteOfHost(list, host);
+    if (barsAgents(found)) return found;
     const key = part ? `${host} with the path` : host;
-    if (state.seen.has(key)) return null;
+    if (state.seen.has(key)) return found;
     state.seen.add(key);
     for (const wrapper of list.wrappers) {
       let prefix = null;
@@ -515,22 +699,27 @@
         if (prefix !== null) break;
       }
       if (prefix === null) continue;
-      const { found, overflow } = embeddedOf(wrapper, prefix, part, state.scans);
-      if (overflow) return unchecked(`its address writes more than ${MAX_EMBEDDED_NAMES} host names`, [wrapper.name]);
-      if (!found.length) continue;
+      const embedded = embeddedOf(wrapper, prefix, part, state.scans);
+      if (embedded.overflow) return unchecked(`its address writes more than ${MAX_EMBEDDED_NAMES} host names`, [wrapper.name]);
+      if (!embedded.found.length) continue;
       if (depth >= MAX_DEPTH) return unchecked(`it is nested in more than ${MAX_DEPTH} wrappers`, [wrapper.name]);
-      for (const inner of found) {
+      for (const inner of embedded.found) {
         const hit = matchHost(list, inner.host, inner.part, depth + 1, state);
-        if (hit) return { ...hit, via: [wrapper.name, ...hit.via] };
+        if (!hit) continue;
+        const copy = { ...hit, via: [wrapper.name, ...hit.via] };
+        if (barsAgents(copy)) return copy;
+        found = found || copy;
       }
     }
-    return null;
+    return found;
   }
 
   /**
    * The link-only site an address is on, directly or as a wrapper's copy:
-   * `{ site, why, via }` (`via` names the wrappers, outermost first), or
-   * null. Only web pages match; a missing list matches nothing, so a caller
+   * `{ site, why, kind, via }` (`via` names the wrappers, outermost first),
+   * or null. Of several, the strictest: a "no-agents" site wins over a
+   * "no-reuse" one. Readers refuse a match only when `barsAgents(match)`.
+   * Only web pages match; a missing list matches nothing, so a caller
    * checks for the list first.
    */
   function linkOnlyMatch(list, address) {
@@ -594,23 +783,163 @@
 
   /**
    * The link-only site a response says it is a copy of (its Memento
-   * `rel="original"`): `{ site, why, via, original }`, or null.
+   * `rel="original"`): `{ site, why, kind, via, original }`, the strictest
+   * of several, or null.
    */
   function linkOnlyCopyOf(list, linkHeader, base) {
+    let found = null;
     for (const original of mementoOriginals(linkHeader, base)) {
       const hit = linkOnlyMatch(list, original);
-      if (hit) return { ...hit, original };
+      if (!hit) continue;
+      if (barsAgents(hit)) return { ...hit, original };
+      found = found || { ...hit, original };
     }
-    return null;
+    return found;
+  }
+
+  // One value for a placeholder, as its format takes it, or an error.
+  function placeholderValue(name, format, raw) {
+    const value = typeof raw === "number" && Number.isFinite(raw) ? String(raw) : raw;
+    if (typeof value !== "string") return { error: `{${name}} needs a value written as text` };
+    const text = value.normalize("NFC").trim();
+    if (format === "date") {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+      const date = match ? new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))) : null;
+      if (!date || date.toISOString().slice(0, 10) !== text) return { error: `{${name}} needs a date written YYYY-MM-DD` };
+      return { value: text };
+    }
+    if (format === "count") {
+      if (!/^\d{1,2}$/.test(text) || Number(text) > MAX_COUNT_VALUE) return { error: `{${name}} needs a whole number from 0 to ${MAX_COUNT_VALUE}` };
+      return { value: String(Number(text)) };
+    }
+    if (!text || text.length > MAX_TEXT_VALUE_CHARS || /[\p{Cc}\p{Cs}]/u.test(text) || !/[\p{L}\p{N}]/u.test(text)) {
+      return { error: `{${name}} needs ${MAX_TEXT_VALUE_CHARS} characters at most, with a letter or digit and no control characters` };
+    }
+    return { value: text };
+  }
+
+  // A template filled with checked values: each path value URL-encoded as one
+  // segment, each query value form-encoded; an unfilled query value is left
+  // out, an unfilled path segment is an error.
+  function fillTemplate(template, values) {
+    const segments = [];
+    for (const segment of template.segments) {
+      if (typeof segment === "string") {
+        segments.push(segment);
+      } else if (values[segment.name] === undefined) {
+        return { error: `the link needs {${segment.name}}` };
+      } else {
+        segments.push(encodeURIComponent(values[segment.name]));
+      }
+    }
+    const query = new URLSearchParams();
+    for (const [key, value] of template.query) {
+      if (typeof value === "string") query.append(key, value);
+      else if (values[value.name] !== undefined) query.append(key, values[value.name]);
+    }
+    const search = query.toString();
+    return { link: `${template.origin}/${segments.join("/")}${search ? `?${search}` : ""}` };
+  }
+
+  // The host a site reference names, when it is a host or an address.
+  function hostOfReference(reference) {
+    const text = reference.trim();
+    if (/^[a-z][a-z0-9+.-]*:/i.test(text)) {
+      const url = parseAddress(text);
+      return url && WEB_PROTOCOLS.has(url.protocol) ? hostOfUrl(url) : null;
+    }
+    return asciiName(text);
+  }
+
+  // Two hosts of one site that a link for one may serve for the other: the
+  // same host, or one a subdomain of the other.
+  function relatedHosts(a, b) {
+    return a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+  }
+
+  /**
+   * Guided mode for a listed site: the link the person opens in their own
+   * tab, and what to type there. `site` is the site's name, one of its hosts
+   * or an address on it; `values` maps placeholder names to values.
+   *
+   * With a search link (and deep links allowed) every value must be one of
+   * that link's placeholders, and the link is the template filled in. Without
+   * one, or when the site bars deep links, the link is the home page and
+   * `typeIn` lists the values to type there. A value for a placeholder the
+   * list does not define, or one not in its format, is refused.
+   *
+   * `{ ok: true, site, kind, deepLinks, link, home, typeIn }` or
+   * `{ ok: false, error }`. The link is https on the site's own hosts.
+   */
+  function guidedLink(list, site, values) {
+    if (!list || !Array.isArray(list.sites)) return { ok: false, error: "the link-only list is unavailable" };
+    const reference = typeof site === "string" ? site.trim().slice(0, MAX_TEMPLATE_CHARS) : "";
+    if (!reference) return { ok: false, error: "name a listed site, one of its hosts or an address on it" };
+    let host = hostOfReference(reference);
+    let entries = host ? list.sites.filter((entry) => hostOnSite(host, entry.patterns)) : [];
+    if (!entries.length) {
+      host = null;
+      const named = list.sites.filter((entry) => entry.name.toLowerCase() === reference.toLowerCase());
+      // Every entry for the named site's own hosts, so a stricter one counts too.
+      const anchor = named.map((entry) => entry.home || (entry.search && entry.search.origin)).find(Boolean);
+      const anchorHost = anchor ? hostOfUrl(new URL(anchor)) : null;
+      entries = anchorHost ? list.sites.filter((entry) => named.includes(entry) || hostOnSite(anchorHost, entry.patterns)) : named;
+      // The link stays on the hosts of the first entry by that name (the bundled one, where there is one): another
+      // entry that reuses the name for other hosts may make the site stricter but never lends it a link of its own.
+      host = anchorHost;
+    }
+    if (!entries.length) return { ok: false, error: `${cleanText(reference, 80)} is not on the link-only list` };
+    const strictest = entries.find((entry) => entry.kind !== NO_REUSE) || entries[0];
+    const kind = strictest.kind === NO_REUSE ? NO_REUSE : NO_AGENTS;
+    const deepLinks = entries.every((entry) => entry.deepLinks);
+    const patterns = entries.flatMap((entry) => entry.patterns);
+    const listedHome = entries.map((entry) => entry.home).find(Boolean) || null;
+    const home = host && !(listedHome && relatedHosts(hostOfUrl(new URL(listedHome)), host)) ? `https://${host}/` : listedHome;
+    const placeholders = list.placeholders || {};
+    const given = values && typeof values === "object" && !Array.isArray(values) ? values : {};
+    const checked = {};
+    for (const [name, raw] of Object.entries(given)) {
+      if (!Object.prototype.hasOwnProperty.call(placeholders, name)) {
+        return { ok: false, error: `{${cleanText(name, 40)}} is not a placeholder the list defines (${Object.keys(placeholders).join(", ") || "none"})` };
+      }
+      const value = placeholderValue(name, placeholders[name].format, raw);
+      if (value.error) return { ok: false, error: value.error };
+      checked[name] = value.value;
+    }
+    const template = deepLinks
+      ? entries.map((entry) => entry.search).find((search) => search && (!host || relatedHosts(hostOfUrl(new URL(search.origin)), host)))
+      : null;
+    const result = { ok: true, site: strictest.name, kind, deepLinks, link: null, home, typeIn: [] };
+    if (template) {
+      const unknown = Object.keys(checked).find((name) => !template.names.includes(name));
+      if (unknown) return { ok: false, error: `${strictest.name}'s search link has no {${unknown}}` };
+      const filled = fillTemplate(template, checked);
+      if (filled.error) return { ok: false, error: filled.error };
+      result.link = filled.link;
+    } else {
+      if (!home) return { ok: false, error: `${strictest.name} lists no home page to start from` };
+      result.link = home;
+      result.typeIn = Object.keys(placeholders)
+        .filter((name) => checked[name] !== undefined)
+        .map((name) => ({ name, about: placeholders[name].about, value: checked[name] }));
+    }
+    // The link must still be https on the site's own hosts, whatever was filled in.
+    const url = siteAddress(result.link, patterns);
+    if (!url || url.hash) return { ok: false, error: `${strictest.name}'s link did not stay on its own hosts` };
+    return result;
   }
 
   return Object.freeze({
     LINK_ONLY_SITES_SCHEMA,
     EMBEDS,
+    KINDS,
+    PLACEHOLDER_FORMATS,
     compileLinkOnlyList,
     linkOnlyListFrom,
     linkOnlyMatch,
     linkOnlyCopyOf,
+    barsAgents,
+    guidedLink,
     mementoOriginals,
     isWebAddress,
   });

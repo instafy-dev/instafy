@@ -1415,9 +1415,8 @@ fn resolve_chatgpt_tools(_model: &str) -> ChatGptToolMetadata {
         tools.push(plan_tool_spec());
     }
 
-    if truthy_env_flag("CODEX_ENABLE_WEB_SEARCH").unwrap_or(false) {
-        tools.push(web_search_tool_spec());
-    }
+    // No web search: OpenAI's hosted search is off on every lease (the proxy
+    // drops it from every request), whatever CODEX_ENABLE_WEB_SEARCH says.
 
     if truthy_env_flag("CODEX_INCLUDE_VIEW_IMAGE_TOOL").unwrap_or(true) {
         tools.push(view_image_tool_spec());
@@ -1521,12 +1520,6 @@ fn plan_tool_spec() -> Value {
             "required": ["plan"],
             "additionalProperties": false
         }
-    })
-}
-
-fn web_search_tool_spec() -> Value {
-    json!({
-        "type": "web_search"
     })
 }
 

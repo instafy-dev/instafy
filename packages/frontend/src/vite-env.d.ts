@@ -341,6 +341,12 @@ type InstafyDesktopPersonalBrowserTab = {
   openedBy?: string;
 };
 
+/** The search engines the Personal Browser's address bar can use (names only), and the one in use. */
+type InstafyDesktopPersonalBrowserSearchChoice = {
+  engines: Array<{ id: string; name: string }>;
+  selected: string | null;
+};
+
 type InstafyDesktopPersonalBrowserStatus = {
   supported: boolean;
   enabled: boolean;
@@ -484,6 +490,13 @@ interface Window {
       url: string;
       ownerId: string;
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    /** Address-bar search on the engine the person picked. Older Desktops do not have it. */
+    personalBrowserSearch?: (options: {
+      query: string;
+      ownerId: string;
+    }) => Promise<InstafyDesktopPersonalBrowserStatus>;
+    personalBrowserSearchEngines?: () => Promise<InstafyDesktopPersonalBrowserSearchChoice>;
+    personalBrowserSetSearchEngine?: (options: { engineId: string }) => Promise<InstafyDesktopPersonalBrowserSearchChoice>;
     personalBrowserSelectTab?: (options: { ownerId: string; tabId: string }) => Promise<InstafyDesktopPersonalBrowserStatus>;
     personalBrowserCloseTab?: (options: { ownerId: string; tabId: string }) => Promise<InstafyDesktopPersonalBrowserStatus>;
     /**
@@ -498,6 +511,8 @@ interface Window {
       text: string;
       secretScreen: boolean;
       truncated: boolean;
+      /** Its web links (older Desktops send none); `linkOnly` names a link-only site. */
+      links?: Array<{ text: string; href: string; linkOnly?: string }>;
       readAt: string;
     }>;
     personalBrowserGoBack?: (options: {

@@ -7,6 +7,10 @@ const linkOnlySitesPath = fileURLToPath(
   new URL("../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json", import.meta.url),
 );
 
+// `INSTAFY_TEST_BUILD=1` builds a test CLI, the only kind that answers `instafy web read` from the hand-written pages in
+// `INSTAFY_WEB_FIXTURES` (src/web-shared.ts). Every other build, the published one included, refuses that variable.
+const testBuild = process.env.INSTAFY_TEST_BUILD === "1";
+
 export default defineConfig({
   entry: {
     cli: "src/index.ts",
@@ -32,6 +36,7 @@ export default defineConfig({
     "@instafy/browser-action-policy/redaction",
     "@instafy/browser-action-policy/linkOnly",
   ],
+  define: { __INSTAFY_TEST_BUILD__: JSON.stringify(testBuild) },
   esbuildOptions(options) {
     options.alias = { ...(options.alias ?? {}), "virtual:instafy/link-only-sites": linkOnlySitesPath };
   },

@@ -552,8 +552,9 @@ only in the visible browser, so the rules are the ones a person sees:
   address, so a name that changes its answer between Desktop's lookup and
   Chromium's connection is not caught for a WebSocket.
 - **Never a link-only site.** Sites whose terms or robots.txt bar AI agents
-  (the `instafy-web-research` skill's `references/link-only-sites.json`:
-  Booking.com, Airbnb, Amazon, Google search and Maps and others), and a
+  (the `no-agents` sites in the `instafy-web-research` skill's
+  `references/link-only-sites.json`: Booking.com, Airbnb, Amazon, Google search
+  and Maps and others; a site with no kind, or an unknown one, counts), and a
   translator's, cache's or archive's copy of one (the list's `wrappers`), are
   never read or driven by the agent. Desktop bundles that same file, the one
   runtime-agent embeds, at build time, and a test fails when the bundled copy
@@ -562,7 +563,9 @@ only in the visible browser, so the rules are the ones a person sees:
   Browser and `instafy web read`. Desktop enforces the bundled list: sites a
   space adds to its own copy of the list are enforced by the readers that run in
   the space (`instafy web read`, the Shared Browser), but no Personal Browser
-  channel carries a space's files, so Desktop does not read that copy.
+  channel carries a space's files, so Desktop does not read that copy. A
+  `no-reuse` site (its terms bar copying its content, not reading it) is not
+  refused; the web-research skill says how its content may be used.
   `open_tab` and `navigate` to such a site, a link to one, and
   every page load or redirect hop of a driven tab, and every frame of a page the
   agent opened, that would land on one are refused with `link_only_site`,
@@ -664,6 +667,30 @@ Codex's own MCP transport, which carries the model's Personal Browser tool calls
 
 This is intentionally higher-level than CDP. The agent receives structured page evidence and bounded actions, not a general debugging socket into Electron.
 
+## Searching from the address bar
+
+Words typed in the Personal Browser's address bar that are not an address open a
+search on the engine the person picked, as in any browser: "best ramen tokyo"
+and "ramen" search, while "example.com", "localhost:3000", "192.168.1.1" and
+anything with `http://` or `https://` open as addresses. Privileged schemes
+(`javascript:`, `file:`, `data:` …) and anything with a user name or password
+stay refused, never searched for.
+
+- The engines and their search links are the `instafy-web-research` skill's data
+  (`references/search-engines.json`), which Desktop bundles like the link-only
+  list. Desktop checks the list (https only, one `{query}` after the host, a
+  public name, no port or credentials) and builds each search's address itself;
+  Studio sends only the words (`personalBrowserSearch({ ownerId, query })`). A
+  list that does not check out offers no search.
+- The person picks the engine under **Search with** in the browser's settings
+  menu; Desktop keeps the choice on the device (`personalBrowserSearchEngine` in
+  its config) and falls back to the list's default.
+- These are the person's own searches in their own browser. Octo never searches
+  through them, and an engine's own pages may be link-only for Octo. The Shared
+  Browser's address bar does not search.
+- A Desktop that predates search keeps the old address bar: a single word opens
+  as a host name.
+
 ## Send page to Octo
 
 **Send page to Octo** in the Browser toolbar adds a copy of the page on screen to
@@ -684,6 +711,11 @@ gives Octo no access to the browser.
   kept, and the next press reads the page again. It works whether control is
   paused or resumed, and in Ask and routine mode alike.
 - Only `http` and `https` pages are sent; a page that loads mid-read is refused.
+- Up to 200 of the page's web links go too, each its text and address, listed
+  in the page by the shared reader's `pageLinksInPage` and masked with the page.
+  `javascript:`, `data:` and other non-web links are dropped, and a link to a
+  link-only site (Desktop's bundled list) carries the site's name. Without that
+  list, and on a secret screen, no links are sent.
 
 Studio turns the copy into a Markdown chat attachment that records the address,
 title, read time and which browser it came from, with the page's text inside an

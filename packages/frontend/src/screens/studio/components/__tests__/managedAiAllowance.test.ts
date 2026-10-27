@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  canChooseManagedAi,
   describeManagedAiNextAvailable,
+  describeManagedAiUnavailable,
   isManagedAiAllowanceUsedUp,
 } from "../managedAiAllowance";
 
@@ -59,5 +61,60 @@ describe("describeManagedAiNextAvailable", () => {
       expect(sentence).toBe("More should be available in a moment.");
       expect(sentence).not.toContain("later");
     }
+  });
+});
+
+describe("describeManagedAiUnavailable", () => {
+  const full = { enabled: true, available: true, dailyPromptLimit: 20, remainingPrompts: 20 };
+
+  it("says nothing while Instafy AI can run turns, whoever is the default", () => {
+    expect(describeManagedAiUnavailable(full, { hasOwnDefault: true })).toBeNull();
+    expect(describeManagedAiUnavailable(full, { hasOwnDefault: false })).toBeNull();
+    expect(describeManagedAiUnavailable(null, { hasOwnDefault: false })).toBeNull();
+  });
+
+  it("does not guess when an older controller gives no reason and the default is the person's own AI", () => {
+    // Older controllers reported available: false for exactly that reason.
+    expect(describeManagedAiUnavailable({ ...full, available: false }, { hasOwnDefault: true })).toBeNull();
+    expect(describeManagedAiUnavailable({ ...full, available: false }, { hasOwnDefault: false })).toBe(
+      "Currently unavailable.",
+    );
+  });
+
+  it("names the reason in plain words", () => {
+    const off = (unavailableReason: string) => ({ ...full, available: false, unavailableReason });
+    expect(describeManagedAiUnavailable(off("no_proxy"), { hasOwnDefault: true })).toBe(
+      "This server isn't set up to run it yet.",
+    );
+    expect(describeManagedAiUnavailable(off("proxy_needs_credential"), { hasOwnDefault: false })).toBe(
+      "This server isn't set up to run it yet.",
+    );
+    expect(describeManagedAiUnavailable(off("proxy_unreachable"), { hasOwnDefault: true })).toBe(
+      "Can't be reached right now. Try again in a minute.",
+    );
+    expect(
+      describeManagedAiUnavailable(
+        { ...off("daily_limit_reached"), remainingPrompts: 0 },
+        { hasOwnDefault: true },
+      ),
+    ).toBe("Today's 20 prompts are used. More are available later.");
+    // An older controller's used-up allowance reads the same.
+    expect(describeManagedAiUnavailable(usedUp, { hasOwnDefault: false })).toBe(
+      "Today's 20 prompts are used. More are available later.",
+    );
+  });
+});
+
+describe("canChooseManagedAi", () => {
+  it("offers Instafy AI when it can run turns or only today's prompts are used", () => {
+    const base = { enabled: true, available: true, dailyPromptLimit: 20, remainingPrompts: 20 };
+    expect(canChooseManagedAi(base)).toBe(true);
+    expect(canChooseManagedAi({ ...base, available: false, unavailableReason: "daily_limit_reached" })).toBe(true);
+    // An older controller says nothing about why: keep offering it.
+    expect(canChooseManagedAi({ ...base, available: false })).toBe(true);
+    expect(canChooseManagedAi({ ...base, available: false, unavailableReason: "no_proxy" })).toBe(false);
+    expect(canChooseManagedAi({ ...base, available: false, unavailableReason: "proxy_unreachable" })).toBe(false);
+    expect(canChooseManagedAi({ ...base, enabled: false })).toBe(false);
+    expect(canChooseManagedAi(null)).toBe(false);
   });
 });

@@ -4067,6 +4067,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
     formatCredentialTestFailureMessage: formatCredentialConnectionFailure,
     onOpenAiManager: openAiManager,
+    // Connecting from chat ("Connect your own AI", the AI gate) is choosing
+    // that AI over Instafy AI. An existing own default keeps its old rules.
+    newConnectionDefault: () =>
+      credentialRequirements.hasDefaultCredential || defaultAiCredential ? undefined : true,
   });
   const {
     beginGithubDeviceAuth,

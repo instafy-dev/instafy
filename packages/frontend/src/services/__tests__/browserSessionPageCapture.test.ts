@@ -120,4 +120,20 @@ describe("mapRuntimeBrowserSessionPageCapturePayload", () => {
       mapRuntimeBrowserSessionPageCapturePayload({ ...capture, secretScreen: true }, "page-1"),
     ).toMatchObject({ secretScreen: true, title: "", text: "" });
   });
+
+  it("keeps the page's links as the workspace browser marked them, and only well-formed ones", () => {
+    const links = [
+      { text: "City Museum", href: "https://museum.example/hours" },
+      { text: "City Museum Inn", href: "https://www.booking.com/hotel/x.html", linkOnly: "Booking.com" },
+    ];
+    expect(mapRuntimeBrowserSessionPageCapturePayload({ ...capture, links }, "page-1")).toEqual({ ...capture, links });
+    // Links of the wrong shape are left out; the page itself still arrives.
+    for (const bad of [[{ text: 1, href: "https://x.example/" }], [{ text: "x", href: "https://x.example/", linkOnly: 3 }], "links", Array.from({ length: 201 }, () => links[0])]) {
+      expect(mapRuntimeBrowserSessionPageCapturePayload({ ...capture, links: bad }, "page-1")).toEqual(capture);
+    }
+    // A withheld page carries none.
+    expect(
+      mapRuntimeBrowserSessionPageCapturePayload({ ...capture, secretScreen: true, links }, "page-1"),
+    ).not.toHaveProperty("links");
+  });
 });

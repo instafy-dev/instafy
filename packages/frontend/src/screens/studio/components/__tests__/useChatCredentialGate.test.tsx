@@ -375,3 +375,59 @@ describe("useChatCredentialGate once today's hosted AI messages are used up", ()
     expect(controllerMocks.getRequirements).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("useChatCredentialGate connecting your own AI from chat", () => {
+  // Connecting in the chat's AI step is choosing that AI to answer. The
+  // controller no longer makes a new connection the default by itself while
+  // Instafy AI can run the person's turns, so chat asks for it.
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    captured = null;
+    controllerMocks.createCodex.mockResolvedValue({ success: true, credentialId: "credential-1" });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("makes the connection the default over Instafy AI", async () => {
+    resolvedRequirements();
+    await act(async () => root.render(<Harness options={baseOptions({ currentUserId: "user-choice" })} />));
+    await act(async () => {
+      await captured?.saveApiKey("unit-test-value", "openai");
+    });
+    expect(controllerMocks.createCodex).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "openai", makeDefault: true }),
+    );
+  });
+
+  it("keeps the old rules when the person's own AI is already the default", async () => {
+    controllerMocks.getRequirements.mockResolvedValue({
+      success: true,
+      requiresUserCredentials: false,
+      proxyBackend: "openai",
+      hasDefaultCredential: true,
+      managedAi,
+      error: null,
+    });
+    controllerMocks.list.mockResolvedValue({
+      success: true,
+      credentials: [{ id: "credential-0", kind: "codex_auth_json", isDefault: true, revokedAt: null }],
+    });
+    await act(async () => root.render(<Harness options={baseOptions({ currentUserId: "user-own" })} />));
+    await act(async () => {
+      await captured?.saveApiKey("unit-test-value", "openai");
+    });
+    expect(controllerMocks.createCodex.mock.calls[0]?.[0]).not.toHaveProperty("makeDefault");
+  });
+});

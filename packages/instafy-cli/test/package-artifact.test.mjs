@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -162,6 +164,40 @@ test("npm artifact installs and runs without workspace dependencies", () => {
       run(process.execPath, [installedCli, "bind", "doctor", "site"], installDirectory),
       /site: hello -> script handlers\/hello\.mjs/,
     );
+    // The published CLI never answers from offline fixtures (only a build made with INSTAFY_TEST_BUILD=1 does): it
+    // refuses INSTAFY_WEB_FIXTURES before anything is read, rather than reading the live web in its place.
+    const fixtures = path.join(tempRoot, "web-fixtures");
+    const fixtureHome = path.join(tempRoot, "fixture-home");
+    mkdirSync(fixtures);
+    mkdirSync(fixtureHome);
+    writeFileSync(
+      path.join(fixtures, "fixtures.json"),
+      JSON.stringify({ schema: "instafy.web-fixtures@1", pages: { "https://museum.example.org/hours": { body: "<p>open</p>" } } }),
+    );
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, [installedCli, "web", "read", "https://museum.example.org/hours", "--json"], {
+          cwd: installDirectory,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          env: {
+            ...process.env,
+            HOME: fixtureHome,
+            USERPROFILE: fixtureHome,
+            XDG_CACHE_HOME: "",
+            XDG_STATE_HOME: "",
+            INSTAFY_CACHE_DIR: "",
+            INSTAFY_WEB_FIXTURES: fixtures,
+          },
+        }),
+      (error) => {
+        assert.equal(error.status, 70, String(error.stdout));
+        assert.match(JSON.parse(String(error.stdout)).error, /only a test build of the Instafy CLI answers from fixtures/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(path.join(fixtureHome, ".cache")), false, "the refused read touched no cache");
+
     assert.match(installedHelp, /Usage: instafy/);
     assert.match(installedHelp, /diagnostics/);
     assert.match(installedHelp, /support/);

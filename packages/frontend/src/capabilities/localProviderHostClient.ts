@@ -16,6 +16,7 @@ import {
   type ProviderSummary,
   type ProviderToolAliases,
 } from "@instafy/provider-contract";
+import { isDesktopShell } from "../lib/desktopShell";
 
 export type LocalProviderToolAliases = ProviderToolAliases;
 export type LocalProviderResourceAliases = ProviderResourceAliases;
@@ -23,42 +24,80 @@ export type LocalProviderSummary = ProviderSummary;
 export type LocalProviderHealthSnapshot = ProviderHealthSnapshot;
 export { providerSupportsCapability };
 
-export const LOCAL_PROVIDER_HOST_BASE_URL =
+const CONFIGURED_LOCAL_PROVIDER_HOST_BASE_URL =
   (import.meta.env.VITE_LOCAL_PROVIDER_HOST_URL as string | undefined)?.replace(/\/$/, "") ||
   (import.meta.env.VITE_ROBOT_BRIDGE_URL as string | undefined)?.replace(/\/$/, "") ||
-  DEFAULT_PROVIDER_HOST_BASE_URL;
+  null;
+
+export const LOCAL_PROVIDER_HOST_BASE_URL =
+  CONFIGURED_LOCAL_PROVIDER_HOST_BASE_URL || DEFAULT_PROVIDER_HOST_BASE_URL;
 
 const LOCAL_PROVIDER_HOST_UNAVAILABLE_ON_THIS_CLIENT_MESSAGE =
   "Local extension discovery from the desktop provider host is unavailable on this phone.";
+const LOCAL_PROVIDER_HOST_UNAVAILABLE_IN_THIS_BROWSER_MESSAGE =
+  "Extensions on this computer are available in Instafy Desktop.";
 
 const localProviderHostClient = createProviderHostClient({
   baseUrl: LOCAL_PROVIDER_HOST_BASE_URL,
 });
+
+function isLoopbackHostname(hostname: string) {
+  const normalized = hostname.trim().toLowerCase();
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "localhost" ||
+    normalized === "[::1]" ||
+    normalized.endsWith(".localhost")
+  );
+}
+
+function localProviderHostIsLoopbackHttp() {
+  try {
+    const url = new URL(LOCAL_PROVIDER_HOST_BASE_URL);
+    return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}
 
 function localProviderHostRequiresDesktopTransport() {
   const platform = Capacitor.getPlatform();
   if (platform !== "android" && platform !== "ios") {
     return false;
   }
+  return localProviderHostIsLoopbackHttp();
+}
 
-  try {
-    const url = new URL(LOCAL_PROVIDER_HOST_BASE_URL);
-    const hostname = url.hostname.trim().toLowerCase();
-    const isLoopbackHost = hostname === "127.0.0.1" || hostname === "localhost";
-    return url.protocol === "http:" && isLoopbackHost;
-  } catch {
+/**
+ * A hosted Studio tab (an https page that is not on this computer) cannot use
+ * the default provider host on 127.0.0.1. That host answers only Instafy
+ * Desktop and local development pages (its allowed origins), and browsers
+ * gate a public page's requests to this computer, so asking from a browser
+ * tab always ended in "Failed to fetch", whether or not anything was running.
+ * A provider host URL set at build time is still asked.
+ */
+function localProviderHostUnreachableFromHostedPage() {
+  if (CONFIGURED_LOCAL_PROVIDER_HOST_BASE_URL || Capacitor.getPlatform() !== "web") {
     return false;
   }
+  if (typeof window === "undefined" || isDesktopShell()) {
+    return false;
+  }
+  const { protocol, hostname } = window.location;
+  return protocol === "https:" && !isLoopbackHostname(hostname) && localProviderHostIsLoopbackHttp();
 }
 
 function assertLocalProviderHostAvailable() {
   if (localProviderHostRequiresDesktopTransport()) {
     throw new Error(LOCAL_PROVIDER_HOST_UNAVAILABLE_ON_THIS_CLIENT_MESSAGE);
   }
+  if (localProviderHostUnreachableFromHostedPage()) {
+    throw new Error(LOCAL_PROVIDER_HOST_UNAVAILABLE_IN_THIS_BROWSER_MESSAGE);
+  }
 }
 
 export function isLocalProviderHostUnavailableOnThisClient() {
-  return localProviderHostRequiresDesktopTransport();
+  return localProviderHostRequiresDesktopTransport() || localProviderHostUnreachableFromHostedPage();
 }
 
 export async function localProviderHostJsonRequest<TResponse>(

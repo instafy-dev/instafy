@@ -58,6 +58,13 @@ type UseCredentialsConnectFlowOptions = {
    * live default and leave the workspace with none.
    */
   isCredentialDefault?: (credentialId: string) => boolean;
+  /**
+   * Whether the connection being made should become the default, read when it
+   * is saved: true when the person is choosing their own AI to answer, false
+   * to keep the current default, undefined to leave it to the controller
+   * (which keeps Instafy AI the default while it can run their turns).
+   */
+  newConnectionDefault?: () => boolean | undefined;
 };
 
 type UseCredentialsConnectFlowResult = {
@@ -83,7 +90,16 @@ export function useCredentialsConnectFlow({
   formatCredentialTestFailureMessage,
   onOpenAiManager,
   isCredentialDefault,
+  newConnectionDefault,
 }: UseCredentialsConnectFlowOptions): UseCredentialsConnectFlowResult {
+  // Read when a connection is saved, like isCredentialDefault: the default
+  // can move while the modal is open.
+  const newConnectionDefaultRef = useRef(newConnectionDefault);
+  newConnectionDefaultRef.current = newConnectionDefault;
+  const newConnectionDefaultOption = useCallback((): { makeDefault?: boolean } => {
+    const makeDefault = newConnectionDefaultRef.current?.();
+    return typeof makeDefault === "boolean" ? { makeDefault } : {};
+  }, []);
   const [connectPending, setConnectPending] = useState(false);
   const [labelDraft, setLabelDraft] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -124,6 +140,12 @@ export function useCredentialsConnectFlow({
           success: true,
           warning: CHATGPT_CONNECTION_VERIFICATION_WARNING,
         };
+      }
+
+      // The controller saved it without taking the default from Instafy AI;
+      // keep it that way unless this connect is the person's choice of AI.
+      if (newConnectionDefaultRef.current?.() === false) {
+        return { success: true };
       }
 
       const defaultResult = await setDefaultCredential(credentialId).catch(() => null);
@@ -355,6 +377,7 @@ export function useCredentialsConnectFlow({
       try {
         const result = await connectDesktopCodexAuthJson({
           label: labelDraft.trim() ? labelDraft.trim() : "Codex on this computer",
+          ...newConnectionDefaultOption(),
         });
         if (!result.success) {
           showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
@@ -381,6 +404,7 @@ export function useCredentialsConnectFlow({
     connectPending,
     labelDraft,
     loadCredentials,
+    newConnectionDefaultOption,
     notifyAiConfigChanged,
     showStatus,
     userPresent,
@@ -449,6 +473,7 @@ export function useCredentialsConnectFlow({
         const result = await createCodexCredential({
           authJson,
           label: labelDraft.trim() ? labelDraft.trim() : "Browser upload",
+          ...newConnectionDefaultOption(),
         });
         if (!result.success) {
           showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
@@ -465,7 +490,15 @@ export function useCredentialsConnectFlow({
         setConnectPending(false);
       }
     },
-    [closeConnectModal, labelDraft, loadCredentials, notifyAiConfigChanged, showStatus, userPresent],
+    [
+      closeConnectModal,
+      labelDraft,
+      loadCredentials,
+      newConnectionDefaultOption,
+      notifyAiConfigChanged,
+      showStatus,
+      userPresent,
+    ],
   );
 
   // Verification failed, so the half-created credential has to go. When that
@@ -608,11 +641,9 @@ export function useCredentialsConnectFlow({
           authJson: { OPENAI_API_KEY: apiKey },
           label,
           provider,
-          // Explicit false while replacing: the controller otherwise
-          // auto-defaults a new credential whenever the user has none, which
-          // would flip a managed-AI user into BYOC. Promotion is decided in
-          // finalizeCredentialReplacement instead.
-          ...(replacing ? { makeDefault: false } : {}),
+          // Explicit false while replacing: promotion is decided in
+          // finalizeCredentialReplacement, from the live default.
+          ...(replacing ? { makeDefault: false } : newConnectionDefaultOption()),
         });
         if (!result.success || !result.credentialId) {
           showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
@@ -684,6 +715,7 @@ export function useCredentialsConnectFlow({
       geminiApiKeyDraft,
       geminiLabelDraft,
       loadCredentials,
+      newConnectionDefaultOption,
       notifyAiConfigChanged,
       openaiApiKeyDraft,
       openaiLabelDraft,
