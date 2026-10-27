@@ -1418,7 +1418,7 @@ mod tests {
     fn browser_steps_name_their_site_and_how_they_were_allowed() {
         let step = |facts: JsonValue| browser_step_activity(&facts).expect("labelled");
         let search = step(json!({
-            "step": "search", "host": "visitlisboa.com", "pageKey": "0123456789abcdef",
+            "step": "search", "host": "visitlisboa.com", "pageKey": "aaaaaaaaaaaaaaaa",
             "approval": "free",
         }));
         assert_eq!(search["key"], json!("browser/search"));
@@ -1470,9 +1470,9 @@ mod tests {
             }))
             .expect("labelled")
         };
-        let first = read("0123456789abcdef");
-        let again = read("0123456789abcdef");
-        let other = read("fedcba9876543210");
+        let first = read("aaaaaaaaaaaaaaaa");
+        let again = read("aaaaaaaaaaaaaaaa");
+        let other = read("bbbbbbbbbbbbbbbb");
         // One step reads one page; Studio counts the distinct keys of a group.
         for activity in [&first, &again, &other] {
             assert_eq!(activity["key"], json!("browser/read"));

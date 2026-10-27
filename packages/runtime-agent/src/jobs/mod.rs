@@ -32630,7 +32630,7 @@ mod tests {
                 "id": "item_search", "type": "mcp_tool_call", "server": "instafy_shared_browser",
                 "tool": "type", "status": "completed",
                 "browserStep": {
-                    "step": "search", "host": "visitlisboa.com", "pageKey": "0123456789abcdef",
+                    "step": "search", "host": "visitlisboa.com", "pageKey": "aaaaaaaaaaaaaaaa",
                     "approval": "free"
                 }
             }}),
@@ -32657,7 +32657,7 @@ mod tests {
         assert_eq!(done["key"], json!("browser/search"));
         assert_eq!(done["live"], json!("Searching {host}"));
         assert_eq!(done["approval"], json!("free"));
-        assert_eq!(done["pageKey"], json!("0123456789abcdef"));
+        assert_eq!(done["pageKey"], json!("aaaaaaaaaaaaaaaa"));
         let other = activity(2);
         assert_eq!(other["key"], json!("tool/use"));
         assert!(other.get("host").is_none());

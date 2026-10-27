@@ -388,13 +388,13 @@ function reply(content: string, timestamp: number): ChatMessage {
 const OPENED_CARRIS = step("item-open", NOW + 1_000, "completed", {
   key: "browser/open", role: "content", live: "Opening {host}",
   done: { one: "opened {host}", other: "opened {n} pages on {host}", some: "opened pages on {host}" },
-  host: "carris.pt", pageKey: "0123456789abcdef", step: "navigate",
+  host: "carris.pt", pageKey: "aaaaaaaaaaaaaaaa", step: "navigate",
 });
 const SEARCH_LIVE = { key: "browser/browse", role: "quiet", live: "Browsing {host}", host: "visitlisboa.com", step: "submit" };
 const SEARCHED = {
   key: "browser/search", role: "content", live: "Searching {host}",
   done: { one: "searched {host}", other: "searched {host} {n} times", some: "searched {host}" },
-  host: "visitlisboa.com", pageKey: "fedcba9876543210", step: "search",
+  host: "visitlisboa.com", pageKey: "bbbbbbbbbbbbbbbb", step: "search",
 };
 
 describe("a browser prompt inside Octo's turn", () => {

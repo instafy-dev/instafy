@@ -400,8 +400,8 @@ function browserStep(
   );
 }
 
-const PAGE_A = "0123456789abcdef";
-const PAGE_B = "fedcba9876543210";
+const PAGE_A = "aaaaaaaaaaaaaaaa";
+const PAGE_B = "bbbbbbbbbbbbbbbb";
 
 describe("browser steps", () => {
   it("count the distinct pages read, not the reads", () => {
