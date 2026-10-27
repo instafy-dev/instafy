@@ -1,6 +1,6 @@
 ---
 name: instafy-web-research
-description: Find facts on the web and cite them, for an answer or a page: which sources to read for a need, searching for links with `instafy web search`, how many pages, cross-checking, "checked <date> on <host>", amounts "seen <date>", links instead of copied listings, stopping at logins and bot checks, and guided links to sites whose terms bar AI agents.
+description: Find facts on the web and cite them, for an answer or a page: which sources to read, searching with `instafy web search`, cross-checking, "checked <date> on <host>", amounts "seen <date>", links instead of copied listings, stopping at logins and bot checks, and guided links to link-only sites.
 context_kind: workflow
 context_parent: instafy-skill-router
 routing_keywords: with sources, and sources, cite, citation, fact check, search the web, web search, opening hours, opening times, timetable, last train, price of, prices for, compare prices, how much is, how much does, official site, official page, hotel prices, compare hotels, on booking.com, on airbnb, on tripadvisor, on expedia, on agoda
