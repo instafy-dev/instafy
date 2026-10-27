@@ -24,6 +24,7 @@ import {
   checkAddress,
   formatWebRead,
   linkOnlySite,
+  listedSite,
   loadLinkOnlyGuard,
   mementoOriginals,
   registerWebCommand,
@@ -42,10 +43,11 @@ const cliBundle = path.resolve(here, "..", "dist", "cli.js");
 // The web-research skill's own list (the single source the CLI bundles) and the matching cases every reader runs.
 const SKILL_LIST_PATH = path.resolve(here, "../../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json");
 const SKILL_LIST = JSON.parse(fs.readFileSync(SKILL_LIST_PATH, "utf8")) as {
-  sites: Array<{ name: string; match: string[] }>;
+  sites: Array<{ name: string; match: string[]; kind: string }>;
   wrappers: Array<{ name: string; match: string[] }>;
 };
-type LinkOnlyCase = { url: string; site: string | null; via?: string[]; pad?: { text: string; times: number } };
+type LinkOnlyExpectation = { site: string | null; kind?: "no-agents" | "no-reuse"; via?: string[] };
+type LinkOnlyCase = LinkOnlyExpectation & { url: string; pad?: { text: string; times: number }; withSpaceCopy?: LinkOnlyExpectation };
 /** A case's address, with a long case's `{pad}` written out. */
 const caseUrl = (kase: LinkOnlyCase) => (kase.pad ? kase.url.replace("{pad}", kase.pad.text.repeat(kase.pad.times)) : kase.url);
 const CASES = JSON.parse(fs.readFileSync(path.resolve(here, "../../browser-action-policy/test/link-only-cases.json"), "utf8")) as {
@@ -129,6 +131,10 @@ function writeLinkOnly(root: string, skill: string, data: unknown, place = path.
 
 const spaceList = (sites: unknown[], wrappers?: unknown[]) => ({ schema: LINK_ONLY_SCHEMA, sites, ...(wrappers ? { wrappers } : {}) });
 const EXAMPLE_SHOP = { name: "Example Shop", match: ["shop.example"], why: "terms bar AI agents" };
+// A "no-reuse" site: the skill's own list has none today (a site is loosened only on a clause that bars copying and not
+// reading), so the reader's handling of the kind runs on a list that adds one.
+const EXAMPLE_REVIEWS = { name: "Example Reviews", match: ["reviews.example"], kind: "no-reuse", why: "terms bar copying its reviews" };
+const BUNDLED_WITH_REVIEWS = { ...SKILL_LIST, sites: [...SKILL_LIST.sites, EXAMPLE_REVIEWS] };
 
 function deps(over: Partial<WebReadDeps> = {}): WebReadDeps {
   return {
@@ -353,8 +359,10 @@ describe("robots.txt for this agent and the AI agents", () => {
 });
 
 describe("link-only sites: the skill's list, bundled, plus what the space adds", () => {
-  const hitOf = (hit: ReturnType<typeof linkOnlySite>) => (hit ? { site: hit.name, via: hit.via } : null);
-  const expected = (kase: LinkOnlyCase) => (kase.site ? { site: kase.site, via: kase.via ?? [] } : null);
+  const hitOf = (hit: ReturnType<typeof listedSite>) => (hit ? { site: hit.name, kind: hit.kind, via: hit.via } : null);
+  const expected = (kase: LinkOnlyExpectation) => (kase.site ? { site: kase.site, kind: kase.kind ?? "no-agents", via: kase.via ?? [] } : null);
+  // A reader refuses only a "no-agents" site; a "no-reuse" one is read.
+  const refused = (kase: LinkOnlyExpectation) => Boolean(kase.site) && kase.kind !== "no-reuse";
 
   it("bundles the web-research skill's own list, so a link-only site is never fetched with no skill installed anywhere", async () => {
     expect(BUNDLED_LINK_ONLY_SITES).toEqual(SKILL_LIST);
@@ -365,6 +373,7 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
     expect(report.pages.map((p) => p.code)).toEqual(["link_only", "link_only"]);
     expect(report.pages[0]!.message).toMatch(/^Booking\.com is link-only \(terms bar AI agents\)/);
     expect(report.guards.linkOnly.sources).toEqual(["bundled"]);
+    expect(report.guards.linkOnly.noReuse).toBe(SKILL_LIST.sites.filter((site) => site.kind === "no-reuse").length);
     expect(hits).toEqual([]);
     expect(resolved).toEqual([]);
   });
@@ -378,15 +387,100 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
     expect(resolved).not.toContain("a.co");
   });
 
-  it("matches every case in the readers' shared table, with and without the space's additions", () => {
+  it("matches every case in the readers' shared table by kind, with and without the space's additions", () => {
+    // Both kinds are in the table: sites refused, and sites read but not reused.
+    const withSpaceCopy = [...CASES.spaceCopy.cases, ...CASES.bundled.map((kase) => kase.withSpaceCopy ?? kase)];
+    expect(CASES.bundled.some((kase) => refused(kase))).toBe(true);
+    expect(withSpaceCopy.some((kase) => kase.site && kase.kind === "no-reuse")).toBe(true);
+    // The bundled list has no "no-reuse" site: each one bars agents, so every bundled case on a site is refused.
+    expect(CASES.bundled.filter((kase) => kase.site && !refused(kase))).toEqual([]);
     const bundled = loadLinkOnlyGuard([]);
-    for (const kase of CASES.bundled) expect(hitOf(linkOnlySite(caseUrl(kase), bundled)), kase.url).toEqual(expected(kase));
+    for (const kase of CASES.bundled) {
+      expect(hitOf(listedSite(caseUrl(kase), bundled)), kase.url).toEqual(expected(kase));
+      expect(Boolean(linkOnlySite(caseUrl(kase), bundled)), kase.url).toBe(refused(kase));
+    }
     writeLinkOnly(skillsDir, "instafy-web-research", CASES.spaceCopy.list);
     const withSpace = loadLinkOnlyGuard([skillsDir]);
-    expect(withSpace.warnings).toEqual([]);
-    for (const kase of [...CASES.spaceCopy.cases, ...CASES.bundled]) {
-      expect(hitOf(linkOnlySite(caseUrl(kase), withSpace)), kase.url).toEqual(expected(kase));
+    // The one entry with a kind it does not know is the strict kind, with a warning.
+    expect(withSpace.warnings).toEqual([expect.stringMatching(/Example Odd has a kind other than no-agents or no-reuse, so it is no-agents/)]);
+    const cases: Array<[string, LinkOnlyExpectation]> = [
+      ...CASES.spaceCopy.cases.map((kase): [string, LinkOnlyExpectation] => [caseUrl(kase), kase]),
+      ...CASES.bundled.map((kase): [string, LinkOnlyExpectation] => [caseUrl(kase), kase.withSpaceCopy ?? kase]),
+    ];
+    for (const [url, kase] of cases) {
+      expect(hitOf(listedSite(url, withSpace)), url).toEqual(expected(kase));
+      expect(Boolean(linkOnlySite(url, withSpace)), url).toBe(refused(kase));
     }
+  });
+
+  it("reads a no-reuse site, says how its content may be used, and still honours its robots.txt", async () => {
+    const over = { bundledLinkOnly: BUNDLED_WITH_REVIEWS };
+    dns["reviews.example"] = [PUBLIC_A];
+    dns["web.archive.org"] = [PUBLIC_A];
+    routes["reviews.example/item/1"] = { body: ARTICLE };
+    routes["web.archive.org/web/2024/https://reviews.example/guides/x"] = { body: ARTICLE };
+    routes["news.example.org/shoes"] = { status: 302, headers: { location: "http://reviews.example/item/1" } };
+    const report = await read(["http://reviews.example/item/1", "http://web.archive.org/web/2024/https://reviews.example/guides/x", "http://news.example.org/shoes"], {}, over);
+    expect(report.guards.linkOnly.noReuse).toBe(1);
+    const [direct, archived, redirected] = report.pages;
+    for (const page of [direct, archived, redirected]) {
+      expect(page).toMatchObject({ status: "read", noReuse: { site: "Example Reviews" } });
+      expect(page!.tell).toMatch(/terms bar reusing its content\. Summarize it in your own words, cite "seen <date> on <host>" and link back/);
+      expect(page!.tell).toMatch(/never copy its reviews, photos or price lists, and keep its content out of anything published or shared by public link/);
+    }
+    expect(archived!.noReuse!.via).toEqual(["the Wayback Machine"]);
+    // A page on another site is not marked.
+    routes["news.example.org/a"] = { body: ARTICLE };
+    const other = await one("http://news.example.org/a", {}, over);
+    expect(other.noReuse).toBeUndefined();
+    expect(other.tell).toBeUndefined();
+    // robots.txt still applies to a no-reuse site.
+    dns["www.reviews.example"] = [PUBLIC_B];
+    routes["www.reviews.example/robots.txt"] = { type: "text/plain", body: "User-agent: *\nDisallow: /search\n" };
+    routes["www.reviews.example/search?q=pegasus"] = { body: ARTICLE };
+    expect(await one("http://www.reviews.example/search?q=pegasus", {}, over)).toMatchObject({ status: "stopped", code: "robots" });
+    expect(hits).not.toContain("www.reviews.example/search?q=pegasus");
+  });
+
+  it("refuses RunRepeat: its terms give no clause that lets an agent read it, so it is no-agents", async () => {
+    dns["runrepeat.com"] = [PUBLIC_A];
+    routes["runrepeat.com/nike-pegasus-41"] = { body: ARTICLE };
+    const result = await one("https://runrepeat.com/nike-pegasus-41");
+    expect(result).toMatchObject({ status: "stopped", code: "link_only" });
+    expect(result.noReuse).toBeUndefined();
+    expect(hits).toEqual([]);
+    expect(resolved).toEqual([]);
+  });
+
+  it("marks links to a no-reuse site as no-reuse, and links to a no-agents site as link-only", async () => {
+    const over = { bundledLinkOnly: BUNDLED_WITH_REVIEWS };
+    routes["news.example.org/shoe-links"] = {
+      body: page('<p>Some text for the page.</p><a href="https://reviews.example/x">Lab test</a><a href="https://www.nike.com/t/x">Shop</a><a href="https://example.org/">Other</a>'),
+    };
+    const result = await one("http://news.example.org/shoe-links", {}, over);
+    expect(result.links!.map((link) => [Boolean(link.linkOnly), Boolean(link.noReuse)])).toEqual([[false, true], [true, false], [false, false]]);
+    const text = formatWebRead(await read("http://news.example.org/shoe-links", {}, over));
+    expect(text).toMatch(/<https:\/\/reviews\.example\/x> \[no-reuse\]/);
+  });
+
+  it("lets a space's copy make a site stricter, never looser", async () => {
+    writeLinkOnly(
+      skillsDir,
+      "instafy-web-research",
+      spaceList([
+        { name: "Booking.com, read here", match: ["booking.com"], kind: "no-reuse", why: "tries to loosen" },
+        { name: "Example Reviews", match: ["reviews.example"], kind: "no-agents", why: "this space keeps it stricter" },
+      ]),
+    );
+    dns["www.booking.com"] = [PUBLIC_A];
+    dns["reviews.example"] = [PUBLIC_A];
+    routes["www.booking.com/hotel/x.html"] = { body: ARTICLE };
+    routes["reviews.example/x"] = { body: ARTICLE };
+    const report = await read(["https://www.booking.com/hotel/x.html", "https://reviews.example/x"], {}, { bundledLinkOnly: BUNDLED_WITH_REVIEWS });
+    expect(report.pages.map((p) => [p.status, p.code])).toEqual([["stopped", "link_only"], ["stopped", "link_only"]]);
+    expect(report.pages[0]!.message).toMatch(/^Booking\.com is link-only/);
+    expect(report.pages[1]!.message).toMatch(/^Example Reviews is link-only \(this space keeps it stricter\)/);
+    expect(resolved).toEqual([]);
   });
 
   it("adds the sites in the space's copy, where the web-research skill keeps it", async () => {

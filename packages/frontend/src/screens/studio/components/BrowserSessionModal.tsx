@@ -38,6 +38,7 @@ import type { StatusIntent } from "../../../status/useStatus";
 import { useBrowserSessionActions } from "./useBrowserSessionActions";
 import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
+import { observeBrowserRfbFrames } from "./browserSessionRfbFrame";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { RemoteControlSurface } from "./RemoteControlSurface";
@@ -139,6 +140,7 @@ type DockedBrowserLayoutMetrics = {
   compact: boolean;
 };
 type BrowserSessionRfbLike = {
+  _canvas?: HTMLCanvasElement;
   addEventListener?: (type: "connect" | "disconnect", listener: () => void) => void;
   clipViewport?: boolean;
   disconnect?: () => void;
@@ -598,10 +600,10 @@ export function BrowserSessionModal({
     onPresenceChange?.({ status: presenceStatus, othersPresent, remoteController: remoteControllerPresent });
   }, [onPresenceChange, othersPresent, presenceStatus, remoteControllerPresent]);
   useEffect(() => () => onPresenceChange?.(null), [onPresenceChange]);
+  const humanOwnsBrowserControl =
+    canControlBrowser && collaborationSelfOwnsControl(collaboration.client) && controlOwner.kind === "human";
   const humanInputEnabled =
-    canControlBrowser &&
-    collaborationSelfOwnsControl(collaboration.client) &&
-    sharedBrowserHumanInputEnabled({ controlOwner, transportActive });
+    humanOwnsBrowserControl && sharedBrowserHumanInputEnabled({ controlOwner, transportActive });
   const inputAuthorityKey = effectiveAgentControlOwner
     ? `agent:${effectiveAgentControlOwner.displayName}`
     : collaboration.client.state?.controlOwner?.kind === "human"
@@ -659,7 +661,10 @@ export function BrowserSessionModal({
   const [machineStartSlow, setMachineStartSlow] = useState(false);
   const [runtimeLimitDetails, setRuntimeLimitDetails] =
     useState<HostedRuntimeLimitErrorDetails | null>(null);
-  const [wsUrl, setWsUrl] = useState<string | null>(null);
+  const [resolvedViewerUrl, setResolvedViewerUrl] = useState<{
+    kind: SupportedSharedBrowserViewerKind; url: string | null;
+  } | null>(null);
+  const wsUrl = resolvedViewerUrl?.url ?? null;
   const [browserInputWsUrl, setBrowserInputWsUrl] = useState<string | null>(null);
   const [webRtcConnection, setWebRtcConnection] =
     useState<WebRtcBrowserConnection | null>(null);
@@ -711,7 +716,7 @@ export function BrowserSessionModal({
   const dropConnection = useCallback(() => {
     browserOriginConnectionRef.current = null;
     setBrowserOriginConnection(null);
-    setWsUrl(null);
+    setResolvedViewerUrl(null);
     setBrowserInputWsUrl(null);
     setCollaborationWsUrl(null);
     setCollaborationConnectionKey(null);
@@ -737,7 +742,18 @@ export function BrowserSessionModal({
     runtimeDebugLog("browser-session:failed", { kind, reason });
   }, [dropConnection]);
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
-  const [frozenFrameUrl, setFrozenFrameUrl] = useState<string | null>(null);
+  const [capturedFrameUrl, setFrozenFrameUrl] = useState<string | null>(null);
+  const capturedFrameScopeRef = useRef<string | null>(null);
+  const paintedFrameScopeRef = useRef<string | null>(null);
+  const paintedFrameSurfaceRef = useRef<HTMLCanvasElement | HTMLVideoElement | null>(null);
+  const framePaintEpochRef = useRef(0);
+  const clearRetainedBrowserFrame = useCallback(() => {
+    framePaintEpochRef.current += 1;
+    capturedFrameScopeRef.current = null;
+    paintedFrameScopeRef.current = null;
+    paintedFrameSurfaceRef.current = null;
+    setFrozenFrameUrl(null);
+  }, []);
   const [fullscreen, setFullscreen] = useState(false);
   const [smallViewport, setSmallViewport] = useState<boolean>(() =>
     isSmallBrowserViewport(),
@@ -797,6 +813,23 @@ export function BrowserSessionModal({
   }, [selectionScope]);
   const chosenRuntimeId = runtimeChoice?.scope === selectionScope ? runtimeChoice.runtimeId : null;
   const selectedSessionRuntimeId = sessionIdentity?.scope === selectionScope ? sessionIdentity.runtimeId : null;
+  const frameRuntimeId = browserOriginConnection?.runtimeId ?? selectedSessionRuntimeId;
+  const frameOriginRef = useRef<{ runtimeId: string; originId: string } | null>(null);
+  if (browserOriginConnection) frameOriginRef.current = {
+    runtimeId: browserOriginConnection.runtimeId,
+    originId: browserOriginConnection.originId,
+  };
+  const frameOriginId = frameOriginRef.current?.runtimeId === frameRuntimeId ? frameOriginRef.current.originId : null;
+  const frameScope = JSON.stringify([currentUserId, projectId, browserSessionId,
+    resumeRuntimeId, preferRuntimeId, forcedRuntimeId,
+    frameRuntimeId, frameOriginId, sharedBrowserPageId]);
+  const frameScopeRef = useRef(frameScope);
+  frameScopeRef.current = frameScope;
+  const retainFrameRef = useRef(isOpen);
+  retainFrameRef.current = isOpen && !browserDataClearInFlight;
+  const frozenFrameUrl = isOpen && capturedFrameScopeRef.current === frameScope ? capturedFrameUrl : null;
+  useEffect(clearRetainedBrowserFrame, [clearRetainedBrowserFrame, frameScope, isOpen]);
+
   // The conversation's own approval lane, keyed on its running job's machine
   // and page, stands in for this view's own poll when it is for this view's
   // machine: the sheet then keeps working while this view reconnects or
@@ -870,23 +903,36 @@ export function BrowserSessionModal({
   }, [attachMode, canControlBrowser, projectId, selectionScope, startAttempt]);
   const permittedSharedBrowserViewerKinds = useMemo(
     () =>
-      humanInputEnabled
+      humanOwnsBrowserControl
         ? sharedBrowserAvailableViewerKinds
         : sharedBrowserAvailableViewerKinds.filter((kind) => kind !== "rfb"),
-    [humanInputEnabled, sharedBrowserAvailableViewerKinds],
+    [humanOwnsBrowserControl, sharedBrowserAvailableViewerKinds],
   );
   const requestedSharedBrowserViewerKind = viewerOverride ?? sharedBrowserViewerKind;
-  const activeSharedBrowserViewerKind = resolveSharedBrowserViewerForParticipant({
+  const participantViewerKind = resolveSharedBrowserViewerForParticipant({
     requested: requestedSharedBrowserViewerKind,
     available: sharedBrowserAvailableViewerKinds,
-    humanOwnsControl: humanInputEnabled,
+    // Hiding the surface disables input; it does not change who owns the page.
+    humanOwnsControl: humanOwnsBrowserControl,
   });
+  // The collaboration roster intentionally disconnects while hidden. Its idle
+  // state must not select another renderer behind the retained view. Input and
+  // RFB admission still use fresh ownership and visibility above.
+  const retainedViewerRef = useRef({ scope: frameScope, kind: participantViewerKind });
+  if (transportActive || retainedViewerRef.current.scope !== frameScope) {
+    retainedViewerRef.current = { scope: frameScope, kind: participantViewerKind };
+  }
+  const activeSharedBrowserViewerKind = transportActive ? participantViewerKind : retainedViewerRef.current.kind;
   const sharedBrowserConnectionPageId =
     activeSharedBrowserViewerKind === "rfb" ? null : sharedBrowserPageId;
+  // URL resolution follows renderer selection in an effect. Never mount the
+  // newly selected protocol with the previous renderer's URL in between.
+  const resolvedSharedBrowserViewerKind = resolvedViewerUrl?.kind === activeSharedBrowserViewerKind
+    ? activeSharedBrowserViewerKind : null;
   // The viewer this render mounts (its kind and URL), or null when none is.
   const mountedViewerTargetRef = useRef<string | null>(null);
   mountedViewerTargetRef.current =
-    activeSharedBrowserViewerKind && wsUrl ? `${activeSharedBrowserViewerKind}\n${wsUrl}` : null;
+    resolvedSharedBrowserViewerKind && wsUrl ? `${resolvedSharedBrowserViewerKind}\n${wsUrl}` : null;
   const webRtcIceServers =
     sharedBrowserWebRtcCapabilities?.iceServers ?? EMPTY_WEBRTC_ICE_SERVERS;
   const webRtcRelayOnly = sharedBrowserWebRtcCapabilities?.relayOnly ?? false;
@@ -1100,10 +1146,13 @@ export function BrowserSessionModal({
     setFullscreen((value) => !value);
   }, [forceViewportFullscreenDocked]);
   const freezeCurrentBrowserFrame = useCallback(() => {
-    const surface = containerRef.current?.querySelector<
-      HTMLCanvasElement | HTMLVideoElement
-    >("canvas, video");
-    if (!surface) {
+    const frameScope = frameScopeRef.current;
+    if (!retainFrameRef.current ||
+        paintedFrameScopeRef.current !== frameScope || browserDataClearInFlightRef.current) return;
+    // A fallback can mount a new blank surface for the same page. Only the
+    // exact renderer that supplied pixels may replace the retained picture.
+    const surface = paintedFrameSurfaceRef.current;
+    if (!surface || !containerRef.current?.contains(surface)) {
       return;
     }
     const sourceWidth =
@@ -1124,7 +1173,9 @@ export function BrowserSessionModal({
     }
     try {
       context.drawImage(surface, 0, 0, width, height);
-      setFrozenFrameUrl(snapshot.toDataURL("image/jpeg", 0.78));
+      const url = snapshot.toDataURL("image/jpeg", 0.78);
+      capturedFrameScopeRef.current = frameScope;
+      setFrozenFrameUrl(url);
     } catch {
       // A frozen frame is a visual optimization; transport fallback still works
       // when a platform refuses to snapshot its current video surface.
@@ -1150,7 +1201,7 @@ export function BrowserSessionModal({
     if (connectedScopeKey) {
       connectedBrowserSessionScopes.delete(connectedScopeKey);
     }
-    setWsUrl(null);
+    setResolvedViewerUrl(null);
     setBrowserInputWsUrl(null);
     setWebRtcConnection(null);
     setViewerOverride(null);
@@ -1247,7 +1298,7 @@ export function BrowserSessionModal({
       autoRetryCountRef.current = 0;
       setStatus("connecting");
       setFailure(null);
-      setWsUrl(null);
+      setResolvedViewerUrl(null);
       setBrowserInputWsUrl(null);
       setWebRtcConnection(null);
       webRtcConnectionRef.current = null;
@@ -1300,7 +1351,7 @@ export function BrowserSessionModal({
     setBrowserDataClearInFlight(true);
     // A reconnect may preserve the last frame, but an explicit privacy reset
     // must not keep showing the authenticated page whose data is being erased.
-    setFrozenFrameUrl(null);
+    clearRetainedBrowserFrame();
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -1315,7 +1366,7 @@ export function BrowserSessionModal({
     setRuntimeLimitDetails(null);
     dropConnection();
     runtimeDebugLog("browser-session:reset-start", { projectId });
-  }, [connectedScopeKey, dropConnection, holdBrowserRuntimeClaim, projectId]);
+  }, [clearRetainedBrowserFrame, connectedScopeKey, dropConnection, holdBrowserRuntimeClaim, projectId]);
   const handleBrowserDataClearSettled = useCallback(
     (succeeded: boolean) => {
       browserDataClearInFlightRef.current = false;
@@ -1476,6 +1527,9 @@ export function BrowserSessionModal({
       let runtimeId: string | null = null;
       let originId: string | null = null;
       let originEndpoint: string | null = null;
+      // A press's ensure, asked again once while the wait below finds the
+      // machine silent past its idle time.
+      let ensureAgain: (() => Promise<unknown>) | null = null;
       const statusSnapshot = await controllerClient.runtimes.fetchStatus({
         projectId,
         signal: startupAbortController.signal,
@@ -1782,6 +1836,12 @@ export function BrowserSessionModal({
             return;
           }
           runtimeId = ensured?.runtimeId ?? null;
+          // Only the person's own open asks again; an automatic reconnect
+          // or Studio by itself never does.
+          if (runtimeId && !automaticAttempt && !startedByStudio) {
+            const ensuredMachineId = runtimeId;
+            ensureAgain = () => ensureBrowserRuntime(ensuredMachineId, false);
+          }
           runtimeDebugLog("browser-session:ensure-runtime", {
             projectId,
             runtimeId,
@@ -1807,12 +1867,19 @@ export function BrowserSessionModal({
       }
 
       if (!originId) {
+        // The machine may be starting again (a relaunch, or a runtime that
+        // restarted itself): wait until it answers, as the cold path does.
         const awaitedOrigin = await waitForBrowserRuntimeOrigin({
           projectId,
           runtimeId,
           fetchStatus: controllerClient.runtimes.fetchStatus,
           signal: startupAbortController.signal,
+          onSlow: () => {
+            if (!connectionCancelled()) setMachineStartSlow(true);
+          },
+          ...(ensureAgain ? { ensureAgain } : {}),
         });
+        if (!connectionCancelled()) setMachineStartSlow(false);
         originId = awaitedOrigin.originId;
         originEndpoint = awaitedOrigin.endpoint;
         runtimeDebugLog("browser-session:wait-origin", {
@@ -1835,6 +1902,7 @@ export function BrowserSessionModal({
       // using it, whatever this attempt ends with.
       const keptConnection = browserOriginConnectionRef.current;
       if (keptConnection && keptConnection.runtimeId === runtimeId && keptConnection.originId !== originId) {
+        clearRetainedBrowserFrame();
         dropConnection();
         runtimeDebugLog("browser-session:origin-replaced", { projectId, runtimeId });
       }
@@ -1877,7 +1945,7 @@ export function BrowserSessionModal({
           // pages it showed are gone, so the browser this view had is off,
           // and it stops reconnecting until a press opens the new one.
           connectedHostRef.current = null;
-          setFrozenFrameUrl(null);
+          clearRetainedBrowserFrame();
           fail("off", "Instafy's browser started again on this space's machine");
           runtimeDebugLog("browser-session:host-restarted", { projectId, runtimeId });
           return;
@@ -1984,6 +2052,7 @@ export function BrowserSessionModal({
     sharedBrowserCapabilitiesResolved,
     holdBrowserRuntimeClaim,
     releaseBrowserRuntimeClaim,
+    clearRetainedBrowserFrame,
     dropConnection,
     fail,
   ]);
@@ -1996,7 +2065,7 @@ export function BrowserSessionModal({
       !connection ||
       !activeSharedBrowserViewerKind
     ) {
-      setWsUrl(null);
+      setResolvedViewerUrl(null);
       setBrowserInputWsUrl(null);
       setWebRtcConnection(null);
       webRtcConnectionRef.current = null;
@@ -2060,7 +2129,7 @@ export function BrowserSessionModal({
       setStatus("connecting");
       setFailure(null);
     }
-    setWsUrl(url);
+    setResolvedViewerUrl({ kind: activeSharedBrowserViewerKind, url });
     setBrowserInputWsUrl(inputUrl);
 
     if (activeSharedBrowserViewerKind === "webrtc") {
@@ -2500,7 +2569,7 @@ export function BrowserSessionModal({
       return;
     }
 
-    if (activeSharedBrowserViewerKind !== "rfb") {
+    if (resolvedSharedBrowserViewerKind !== "rfb") {
       return;
     }
 
@@ -2519,6 +2588,8 @@ export function BrowserSessionModal({
 
     let cancelled = false;
     let rfb: BrowserSessionRfbLike | null = null;
+    let disposeFrameObserver: (() => void) | null = null;
+    let painted = false;
 
     void (async () => {
       try {
@@ -2529,6 +2600,19 @@ export function BrowserSessionModal({
         const RFB = resolveBrowserSessionRfbConstructor(mod);
         rfb = new RFB(container, wsUrl, {});
         rfbRef.current = rfb;
+        const markFrameConnected = () => {
+          setHasConnectedOnce(true);
+          if (connectedScopeKey) connectedBrowserSessionScopes.add(connectedScopeKey);
+          setStatus("connected");
+          setFrozenFrameUrl(null);
+        };
+        disposeFrameObserver = observeBrowserRfbFrames(rfb, () => {
+          if (cancelled || !retainFrameRef.current || browserDataClearInFlightRef.current) return;
+          painted = true;
+          paintedFrameScopeRef.current = frameScopeRef.current;
+          paintedFrameSurfaceRef.current = rfb?._canvas ?? null;
+          markFrameConnected();
+        }, () => `${framePaintEpochRef.current}:${frameScopeRef.current}`);
         applySharedBrowserRfbHumanInput(rfb, humanInputEnabledRef.current);
         const scaledResizeInstalled = installBrowserRfbScaledResize(rfb, {
           renderScale: rfbRenderScale,
@@ -2576,12 +2660,9 @@ export function BrowserSessionModal({
           }
           setFailure(null);
           setMachineStartSlow(false);
-          setHasConnectedOnce(true);
-          setFrozenFrameUrl(null);
-          if (connectedScopeKey) {
-            connectedBrowserSessionScopes.add(connectedScopeKey);
-          }
-          setStatus("connected");
+          // A protocol handshake is not a painted frame. Keep the previous
+          // picture until the new framebuffer has actually been decoded.
+          if (!disposeFrameObserver) markFrameConnected();
           runtimeDebugLog("browser-session:rfb-connected", {
             ...browserSessionWsDebugFields(wsUrl),
             viewportMode,
@@ -2634,6 +2715,10 @@ export function BrowserSessionModal({
 
     return () => {
       cancelled = true;
+      // Retain pixels before noVNC removes its canvas, but never recapture the
+      // blank surface of a connection that has not painted yet.
+      if (painted) freezeCurrentBrowserFrame();
+      disposeFrameObserver?.();
       try {
         rfb?.disconnect?.();
       } catch {
@@ -2654,13 +2739,14 @@ export function BrowserSessionModal({
     fail,
     forcedRuntimeId,
     fullscreen,
+    freezeCurrentBrowserFrame,
     humanInputEnabled,
     isOpen,
     presentation,
     rfbMaxFramebufferPixels,
     rfbRenderScale,
     scheduleReconnectAttempt,
-    activeSharedBrowserViewerKind,
+    resolvedSharedBrowserViewerKind,
     connectAttempt,
     viewportMode,
     wsUrl,
@@ -2832,6 +2918,10 @@ export function BrowserSessionModal({
     setFailure(null);
     setMachineStartSlow(false);
     setHasConnectedOnce(true);
+    paintedFrameScopeRef.current = frameScope;
+    paintedFrameSurfaceRef.current = containerRef.current?.querySelector<HTMLCanvasElement>(
+      '[data-testid="shared-browser-cdp-screencast"]',
+    ) ?? null;
     setFrozenFrameUrl(null);
     if (connectedScopeKey) {
       connectedBrowserSessionScopes.add(connectedScopeKey);
@@ -2842,7 +2932,7 @@ export function BrowserSessionModal({
       pageId: sharedBrowserPageId,
       metrics: collectBrowserViewerDebugMetrics(containerRef.current),
     });
-  }, [connectedScopeKey, sharedBrowserPageId, wsUrl]);
+  }, [connectedScopeKey, frameScope, sharedBrowserPageId, wsUrl]);
 
   const handleCdpScreencastDisconnected = useCallback(
     (detail: CdpScreencastDisconnect) => {
@@ -2915,6 +3005,10 @@ export function BrowserSessionModal({
     setFailure(null);
     setMachineStartSlow(false);
     setHasConnectedOnce(true);
+    paintedFrameScopeRef.current = frameScope;
+    paintedFrameSurfaceRef.current = containerRef.current?.querySelector<HTMLVideoElement>(
+      '[data-testid="shared-browser-webrtc"]',
+    ) ?? null;
     setFrozenFrameUrl(null);
     if (connectedScopeKey) {
       connectedBrowserSessionScopes.add(connectedScopeKey);
@@ -2924,7 +3018,7 @@ export function BrowserSessionModal({
       pageId: sharedBrowserPageId,
       metrics: collectBrowserViewerDebugMetrics(containerRef.current),
     });
-  }, [connectedScopeKey, sharedBrowserPageId]);
+  }, [connectedScopeKey, frameScope, sharedBrowserPageId]);
 
   const handleWebRtcDisconnected = useCallback(
     (detail: WebRtcBrowserDisconnect) => {
@@ -3362,7 +3456,7 @@ export function BrowserSessionModal({
           data-shared-browser-viewer={activeSharedBrowserViewerKind ?? "unsupported"}
           data-human-input-enabled={humanInputEnabled ? "true" : "false"}
         >
-          {frozenFrameUrl && status === "connecting" ? (
+          {frozenFrameUrl ? (
             <img
               alt=""
               aria-hidden="true"
@@ -3380,10 +3474,10 @@ export function BrowserSessionModal({
                 : viewportMode === "native"
                   ? "absolute inset-0 overflow-auto touch-pan-x touch-pan-y touch-pinch-zoom"
                   : "absolute inset-0 overflow-hidden",
-              frozenFrameUrl && status === "connecting" ? "opacity-0" : "",
+              frozenFrameUrl ? "opacity-0" : "",
             ].join(" ")}
           >
-            {activeSharedBrowserViewerKind === "webrtc" && webRtcConnection ? (
+            {resolvedSharedBrowserViewerKind === "webrtc" && webRtcConnection ? (
               <WebRtcBrowserViewer
                 offerUrl={webRtcConnection.offerUrl}
                 inputWsUrl={webRtcConnection.inputWsUrl}
@@ -3412,7 +3506,7 @@ export function BrowserSessionModal({
                 onTransportError={handleWebRtcError}
               />
             ) : null}
-            {activeSharedBrowserViewerKind === "cdp-screencast" && wsUrl ? (
+            {resolvedSharedBrowserViewerKind === "cdp-screencast" && wsUrl ? (
               <CdpScreencastViewer
                 wsUrl={wsUrl}
                 inputWsUrl={browserInputWsUrl}

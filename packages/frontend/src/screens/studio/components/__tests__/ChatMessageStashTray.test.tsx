@@ -63,7 +63,7 @@ describe("ChatMessageStashTray", () => {
     expect(summary?.getAttribute("aria-expanded")).toBe("true");
     const panel = container.querySelector('[aria-label="Stashed drafts"][role="region"]');
     expect(panel?.className).toContain("basis-full");
-    expect(panel?.firstElementChild?.className).toContain("sm:w-[min(24rem,100%)]");
+    expect(panel?.firstElementChild?.className).toContain("max-w-sm");
     expect(
       container.querySelector('[data-testid="chat-message-stashes-panel-header"]')?.textContent?.trim(),
     ).toBe("Stashed drafts");

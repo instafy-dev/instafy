@@ -157,6 +157,14 @@ explicit choice if it has ended; it does not silently switch browsers.
 This record is not synced across devices. Use the existing resume link for a
 Workspace session on another device.
 
+Switching locations retains the mounted browser surfaces. The Shared RFB viewer
+still disconnects its combined pixel/input socket when hidden, but can keep its
+last painted frame in memory until the replacement framebuffer has decoded. A
+connection handshake alone does not remove that preview. Closing, clearing data
+or changing the authenticated browser session invalidates it; it is never saved
+as workspace state. Native Personal visibility is restored without an extra
+animation-frame delay. These presentation choices grant no input authority.
+
 The skill carries task-relevant context, such as the site and work already done,
 into the browser turn and inspects current state before continuing. This does
 not save page snapshots or export cookies. A native app restart preserves the

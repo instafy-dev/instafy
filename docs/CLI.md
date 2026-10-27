@@ -608,7 +608,9 @@ Exit codes:
   while it is open), not whether the site answers: `check` does that. `--json` rows carry `restartable`
   when the server sends it. A preview whose machine stopped or restarted is not listed; its card reads
   Stopped, and **Open** on a restartable card starts the site again. `close` stops the local client and
-  asks the server to close the preview; the server then also revokes its open viewers.
+  asks the server to close the preview; the server then also revokes its open viewers. A closed preview
+  keeps its recorded start command: its card reads Stopped, and **Open** by someone who may change the
+  space starts the site again.
 
 ### Check a site: `check`
 
@@ -682,7 +684,8 @@ Each page comes back with:
 | `code`, `message`, `tell` | Why it stopped, was skipped or failed, and what to do instead |
 | `provenance` | `{requestedUrl, finalUrl, title, readAt, viewer: "server fetch"}`, to cite the page |
 | `text` | The page text, at most `--max-chars` (default 4,000, at most 12,000), or with `--find` only the passages that mention the terms, wrapped in `<untrusted_page_content url=… read_at=… viewer=…>` |
-| `links` | Plain `<a href>` links (`--links`, default 30, at most 200), each marked `linkOnly` when it leads to a link-only site or a wrapper's copy of one |
+| `links` | Plain `<a href>` links (`--links`, default 30, at most 200), each marked `linkOnly` when it leads to a `no-agents` link-only site or a wrapper's copy of one, and `noReuse` when it leads to a `no-reuse` site |
+| `noReuse` | `{site, reason, via?}` when the page is on a `no-reuse` site (its terms bar reusing its content, not reading it) or a copy of one; `tell` then says how its content may be used |
 | `structured` | The page's own JSON-LD, microdata and descriptive meta tags, raw and bounded (8,000 characters in all; items that do not fit are left out and counted in `structuredDropped`); skills map the fields they need |
 | `redirects`, `httpStatus`, `contentHash`, `fromCache` | How the page was reached, and whether it came from this workspace's cache |
 
@@ -698,17 +701,23 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   anthropic-ai, PerplexityBot, Perplexity-User, CCBot, Google-Extended, Applebot-Extended, meta-externalagent,
   meta-externalfetcher, Bytespider, Amazonbot, cohere-ai, MistralAI-User, DuckAssistBot) is not read. A robots.txt
   that answers 5xx counts as "disallow everything".
-- **Link-only sites.** Sites whose terms ban AI agents or copying are never fetched, nor a translator's, cache's or
-  archive's copy of one, and no request goes to one at any redirect hop (robots.txt redirects included). The list is
-  the `instafy-web-research` skill's own data (`references/link-only-sites.json`). The CLI is built with that file, so
+- **Link-only sites.** The list is the `instafy-web-research` skill's own data (`references/link-only-sites.json`), and
+  each site has a `kind`. A `no-agents` site (its terms ban AI agents, bots or automated access; also a site with no
+  kind or an unknown one) is never fetched, nor a translator's, cache's or archive's copy of one, and no request goes
+  to one at any redirect hop (robots.txt redirects included). A `no-reuse` site (its terms ban copying or republishing,
+  not reading) is read like any page, robots.txt included, and comes back with `noReuse` and a `tell`: summarize it in
+  your own words, cite "seen <date> on <host>", link back, never copy its reviews, photos or price lists, and keep its
+  content out of anything published or shared by public link. Each site also records the `terms` it rests on (`url`,
+  the day it was `checked`, a short `quote`, an optional `note`). The CLI is built with that file, so
   the list applies wherever the command runs; if it cannot be loaded, nothing is read (exit 70). A skill folder's own
   copy (`<skill>/references/link-only-sites.json` or `<skill>/link-only-sites.json` under `.agents/skills/` in the
   space and its parents, `~/.agents/skills/`, and the skill packs under `INSTAFY_SKILL_PACKS_DIR`), such as the
-  space's copy of the list, only adds sites and wrappers:
+  space's copy of the list, only adds sites and wrappers, or makes a site stricter: where several entries match an
+  address, the strictest kind wins, so a copy cannot turn a `no-agents` site into a `no-reuse` one:
 
   ```json
   { "schema": "instafy.link-only-sites@1",
-    "sites": [{ "name": "Example Travel", "match": ["example-travel.com", "exampletravel.*"], "why": "terms ban AI agents" }],
+    "sites": [{ "name": "Example Travel", "match": ["example-travel.com", "exampletravel.*"], "kind": "no-agents", "why": "terms ban AI agents" }],
     "wrappers": [{ "name": "Example Proxy", "match": ["proxy.example"], "embeds": ["subdomain"], "why": "serves sites at <host>.proxy.example" }] }
   ```
 
@@ -722,8 +731,9 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   page that says it is a copy of another address (the Memento `Link: <…>; rel="original"` header archives send) is
   checked as that address too, also when it is served from the cache. A copy that does not
   parse, has another schema or is not a list is ignored with a warning, and the bundled list still applies.
-  `guards.linkOnly` reports the sites, wrappers and sources (`bundled` and each copy) in force. The matching is
-  `@instafy/browser-action-policy`'s `linkOnly.js`, which the Shared and Personal Browser run too.
+  `guards.linkOnly` reports the sites (and how many are `noReuse`), wrappers and sources (`bundled` and each copy) in
+  force. The matching is `@instafy/browser-action-policy`'s `linkOnly.js`, which the Shared and Personal Browser run
+  too: they refuse `no-agents` sites the same way and let `no-reuse` sites through.
 - **Private networks.** Every hop's host is resolved and every address checked. Loopback, private, link-local,
   CGNAT, multicast, documentation, metadata (`169.254.169.254`) and other reserved addresses, their IPv6, IPv4-mapped,
   IPv4-translated, NAT64 (including local-use `64:ff9b:1::/48`) and 6to4 forms, and local names (`localhost`,
@@ -784,6 +794,27 @@ no address under `hosts` does not resolve. Every other build, the published pack
 | 2 | No page was read (every URL stopped, was skipped or failed) |
 | 64 | Bad options or URLs |
 | 70 | The command itself failed, so nothing was read |
+
+### Guiding the person to a link-only site: `instafy web link`
+
+`instafy web link <site> [name=value…] --json` gives the link the person opens in their own tab when a task needs a
+`no-agents` site (guided mode). It reads and fetches nothing. `<site>` is the site's name in the list, one of its hosts
+or an address on it; the values fill the placeholders of the site's `search` template.
+
+```bash
+instafy web link booking.com query=Lisbon checkin=2026-11-12 checkout=2026-11-14 adults=2 --json
+instafy web link Agoda query=Lisbon checkin=2026-11-12 --json
+```
+
+The answer is `{ok, site, kind, deepLinks, link, home, typeIn, tell, warnings}`. With a search template, `link` is the
+template filled in: each value checked against its placeholder's format (`text`, `date` as YYYY-MM-DD, or `count`
+from 0 to 99) and URL-encoded (a path value is one segment), with values not given left out of the query. A site whose
+terms bar deep links (`deepLinks: false`), or that has no template, gets its `home` page as `link`, and `typeIn` lists
+what to type there. A placeholder the list does not define, or that the site's template does not take, is refused, as
+is a site that is not on the list (exit 64); without a list that loads, exit 70. The list's `placeholders` define the
+names; a template is https on the site's own hosts, with each placeholder a whole path segment or a whole query value,
+or it is left out with a warning. The same list files apply as for `instafy web read`, so a space's copy may add a
+site's template or bar its deep links, but never allow deep links the bundled list bars.
 
 ## AI-readable diagnostics
 

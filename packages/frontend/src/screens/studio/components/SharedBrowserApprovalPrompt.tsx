@@ -25,15 +25,48 @@ export function sharedBrowserApprovalAllowDecision(
   return kind === "origin" ? "allow_origin" : "allow_once";
 }
 
+const LABEL_ADDRESS_PATTERN = /https?:\/\/[^\s\u2026]+/gi;
+
+/**
+ * The exact page a prompt's step will load, as host and path, when the
+ * runtime names it: a site prompt or a navigation names its address in its
+ * label (cut with "…" when long). Only an address on the prompt's own site
+ * counts, and a prompt from an older runtime names none, so the site is
+ * shown then.
+ */
+export function sharedBrowserApprovalTargetAddress(
+  request: Pick<SharedBrowserApprovalPromptRequest, "kind" | "operation" | "destinationOrigin" | "display">,
+): string | null {
+  if (request.kind !== "origin" && request.operation !== "navigate") return null;
+  const site = request.display.destinationOrigin?.trim() || request.destinationOrigin?.trim() || "";
+  if (!site) return null;
+  const label = request.display.label;
+  for (const match of label.matchAll(LABEL_ADDRESS_PATTERN)) {
+    let url: URL;
+    try {
+      url = new URL(match[0]);
+    } catch {
+      continue;
+    }
+    if (url.origin !== site) continue;
+    const path = url.pathname === "/" && !url.search ? "" : `${url.pathname}${url.search}`;
+    const cut = label.charAt((match.index ?? 0) + match[0].length) === "\u2026";
+    return `${url.host}${path}${cut ? "\u2026" : ""}`;
+  }
+  return null;
+}
+
 /** What the agent waits to do, as the end of "is waiting to …". */
 export function sharedBrowserApprovalActionDescription(
-  request: Pick<SharedBrowserApprovalPromptRequest, "operation" | "display">,
+  request: Pick<SharedBrowserApprovalPromptRequest, "kind" | "operation" | "destinationOrigin" | "display">,
 ): string {
   const label = request.display.label.trim();
   const target = label ? ` “${label}”` : "";
   switch (request.operation) {
-    case "navigate":
-      return "navigate to the approved destination";
+    case "navigate": {
+      const address = sharedBrowserApprovalTargetAddress(request);
+      return address ? `open ${address}` : "navigate to the approved destination";
+    }
     case "click":
       return `click${target || " the selected item"}`;
     case "type":
@@ -71,8 +104,9 @@ export function SharedBrowserApprovalPrompt({
   const [routineApprovalId, setRoutineApprovalId] = useState<string | null>(null);
   const isOriginApproval = request.kind === "origin";
   const allowRoutine = routineApprovalAvailable && isOriginApproval && routineApprovalId === request.approvalId;
+  const targetAddress = sharedBrowserApprovalTargetAddress(request);
   const destination =
-    request.display.destinationOrigin?.trim() || request.destinationOrigin?.trim() || null;
+    targetAddress || request.display.destinationOrigin?.trim() || request.destinationOrigin?.trim() || null;
 
   useEffect(() => {
     if (active) {
@@ -142,7 +176,7 @@ export function SharedBrowserApprovalPrompt({
           {destination ? (
             <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-950/70">
               <Text as="p" variant="caption" tone="muted">
-                {isOriginApproval ? "Site" : "Destination"}
+                {targetAddress ? "Page" : isOriginApproval ? "Site" : "Destination"}
               </Text>
               <p
                 className="mt-0.5 break-all font-mono text-xs font-medium text-slate-800 dark:text-slate-100"
@@ -157,7 +191,7 @@ export function SharedBrowserApprovalPrompt({
             {allowRoutine
               ? "Routine browsing applies across sites for this AI turn. You can revoke it by taking over or stopping the turn."
               : isOriginApproval
-                ? "Allow applies to this site for the current AI turn. You will still approve actions separately."
+                ? "Allow applies to this site for the current AI turn, so its pages open without asking again. Other actions still ask."
                 : "This approval is used once. Only you can approve it, and it expires automatically."}
           </Text>
 

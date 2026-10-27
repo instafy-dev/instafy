@@ -11,10 +11,13 @@ import zlib from "node:zlib";
 import {
   DEFAULT_PIN,
   MANIFEST,
+  RESERVED_BIN_NAMES,
+  RESERVED_BIN_PREFIXES,
   installFromFolder,
   installPinned,
   treeDigest,
   validatePin,
+  writeBinShims,
 } from "./install-skill-packs.mjs";
 
 const COMMIT = "1".repeat(40);
@@ -253,4 +256,93 @@ test("--require-pinned refuses a local pack folder, which is installed unpinned 
   assert.deepEqual(installed.packs.map(({ name, pinned }) => ({ name, pinned })), [{ name: "demo", pinned: false }]);
   fs.symlinkSync("/etc/passwd", path.join(source, "link"));
   assert.throws(() => installFromFolder({ from: source, out: tempOut() }), /links are not allowed/u);
+});
+
+function writeFolder(files) {
+  const source = tempOut();
+  for (const [rel, data] of files) {
+    fs.mkdirSync(path.dirname(path.join(source, rel)), { recursive: true });
+    fs.writeFileSync(path.join(source, rel), data);
+  }
+  return source;
+}
+
+test("writes one shim per bin with the install root", async () => {
+  const { files, tree } = packFiles("demo", {
+    extra: { "scripts/args.mjs": "console.log(JSON.stringify(process.argv.slice(2)));\n" },
+    manifest: { bin: { "demo-run": "scripts/args.mjs", "demo-check": "scripts/run.mjs" } },
+  });
+  const archive = tarball(packEntries("demo", files));
+  const out = tempOut();
+  await withServer({ "/demo.tar.gz": { body: archive } }, async (base) => {
+    await install(pinFor("demo", base, archive, tree), out);
+  });
+  assert.ok(!fs.existsSync(path.join(out, ".bin")), "no shims without --install-root");
+  assert.deepEqual(writeBinShims({ out, installRoot: "/opt/instafy/skill-packs" }), ["demo-check", "demo-run"]);
+  for (const [name, entry] of [["demo-run", "scripts/args.mjs"], ["demo-check", "scripts/run.mjs"]]) {
+    const shim = path.join(out, ".bin", name);
+    assert.equal(
+      fs.readFileSync(shim, "utf8"),
+      `#!/bin/sh\n# instafy:managed-pack-bin demo 0.1.0\nexec node '/opt/instafy/skill-packs/demo/${entry}' "$@"\n`,
+    );
+    assert.equal(fs.statSync(shim).mode & 0o777, 0o755);
+  }
+  assert.deepEqual(fs.readdirSync(out).filter((name) => !name.startsWith(".")).sort(), ["demo", "installed.json"]);
+
+  // The command line: a shim runs the installed pack with the arguments it was given.
+  const root = fs.realpathSync(tempOut());
+  const source = writeFolder(files);
+  const run = spawnSync(process.execPath, [script, "--from", source, "--out", root, "--install-root", root], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const ran = spawnSync("/bin/sh", [path.join(root, ".bin", "demo-run"), "a b", "c"], { encoding: "utf8" });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout, '["a b","c"]\n');
+  const refused = spawnSync(process.execPath, [script, "--from", source, "--out", tempOut(), "--install-root", "relative/root"], { encoding: "utf8" });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /--install-root must be an absolute path/u);
+});
+
+test("refuses a bin outside the pack", async () => {
+  for (const entry of ["../evil.mjs", "/bin/sh", "scripts/missing.mjs", "scripts", "scripts/it's.mjs"]) {
+    const { files, tree } = packFiles("demo", { manifest: { bin: { demo: entry } } });
+    await expectRefused(packEntries("demo", files), /not a file inside the pack|leaves its folder|is not a relative path/u, { tree });
+  }
+  const { files } = packFiles("demo", { manifest: { bin: ["scripts/run.mjs"] } });
+  assert.throws(() => installFromFolder({ from: writeFolder(files), out: tempOut() }), /bin must map command names to files/u);
+});
+
+test("refuses a reserved name", async () => {
+  for (const name of [
+    "node", "git", "instafy", "sh", "runtime-agent", "Uw", "u", "uw_x", "1uw", `u${"w".repeat(32)}`,
+    // The image's helpers and Codex's commands: an image build or a PATH check at startup may not see them yet.
+    "applypatch", "rathole", "runtime-entrypoint", "browser-egress-proxy", "browser-webrtc-sender",
+    "codex-linux-sandbox", "codex-code-mode-host", "codex-execve-wrapper", "instafy-helper",
+  ]) {
+    const { files, tree } = packFiles("demo", { manifest: { bin: { [name]: "scripts/run.mjs" } } });
+    await expectRefused(packEntries("demo", files), /is not a command a pack may declare/u, { tree });
+  }
+  const nine = Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`cmd-${index}`, "scripts/run.mjs"]));
+  const { files, tree } = packFiles("demo", { manifest: { bin: nine } });
+  await expectRefused(packEntries("demo", files), /more than 8 commands/u, { tree });
+});
+
+test("a command two packs declare gets no shim", () => {
+  const out = tempOut();
+  installFromFolder({ from: writeFolder(packFiles("one", { manifest: { bin: { shared: "scripts/run.mjs", "one-only": "scripts/run.mjs" } } }).files), out });
+  installFromFolder({ from: writeFolder(packFiles("two", { manifest: { bin: { shared: "scripts/run.mjs" } } }).files), out });
+  const lines = [];
+  assert.deepEqual(writeBinShims({ out, installRoot: "/opt/instafy/skill-packs", log: (line) => lines.push(line) }), ["one-only"]);
+  assert.deepEqual(fs.readdirSync(path.join(out, ".bin")), ["one-only"]);
+  assert.ok(lines.some((line) => /one and two all declare the command shared/u.test(line)), lines.join("\n"));
+});
+
+test("the installer and the runtime reserve the same command names", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "packages/runtime-agent/src/skill_packs.rs"), "utf8");
+  const list = (constant) => {
+    const body = source.match(new RegExp(`pub const ${constant}: &\\[&str\\] = &\\[([^\\]]*)\\];`, "u"))?.[1];
+    assert.ok(body, constant);
+    return [...body.matchAll(/"([^"]+)"/gu)].map(([, name]) => name).sort();
+  };
+  assert.deepEqual(list("RESERVED_BIN_NAMES"), [...RESERVED_BIN_NAMES].sort());
+  assert.deepEqual(list("RESERVED_BIN_PREFIXES"), [...RESERVED_BIN_PREFIXES].sort());
 });

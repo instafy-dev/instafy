@@ -464,6 +464,46 @@ async fn routine_state_is_additive_and_keeps_consequential_decisions_bound() {
     }
 }
 
+#[tokio::test]
+async fn a_run_that_declined_a_site_still_shows_and_takes_its_next_prompt() {
+    // After the person declines one site, the run goes on and asks about the
+    // next one; the state then lists the declined site.
+    for declined in [
+        None,
+        Some(json!([])),
+        Some(json!(["https://declined.example"])),
+    ] {
+        let fixture = ApprovalFixture::action();
+        let mut state = json!({
+            "version": 1,
+            "ownerId": fixture.marker.owner_id,
+            "runId": fixture.marker.run_id,
+            "initiatorUserId": fixture.marker.initiator_user_id,
+            "browserPageId": fixture.marker.browser_page_id,
+            "approvedOrigins": [],
+            "consumedApprovalIds": [],
+        });
+        if let Some(value) = declined.as_ref() {
+            state["declinedOrigins"] = value.clone();
+        }
+        write_private_json(&fixture.approval_dir.join("state.json"), &state);
+        let observed = fixture
+            .bridge
+            .observe_pending(&fixture.claims(&["browser.view"]), fixture.query())
+            .await;
+        assert!(observed.expect("the next prompt").pending.is_some());
+        let decided = fixture
+            .bridge
+            .submit_decision(
+                &fixture.claims(&["browser.control"]),
+                fixture.decision(ApprovalDecision::AllowOnce),
+            )
+            .await;
+        assert!(decided.is_ok());
+        assert_stored_decision(&fixture, "allow_once");
+    }
+}
+
 #[test]
 fn non_activating_type_and_press_key_require_exact_target_payload_and_no_destination() {
     for operation in [ApprovalOperation::Type, ApprovalOperation::PressKey] {

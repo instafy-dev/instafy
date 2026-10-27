@@ -1,7 +1,7 @@
 # @instafy/browser-action-policy
 
-Secret redaction, step classification, sent-page reading and link-only site
-matching for browsers an agent drives. The hosts use the same files:
+Secret redaction, step classification, form submissions, sent-page reading and
+link-only site matching for browsers an agent drives. The hosts use the same files:
 
 - the Desktop Personal Browser bundles them from this workspace package;
 - the hosted Shared Browser controller in runtime-agent embeds the source;
@@ -11,7 +11,8 @@ The files are plain scripts with no imports and no build step. Loaded through
 CommonJS they export their API. Evaluated where `module` is undefined, they
 publish it on `globalThis.__instafyBrowserRedaction`,
 `globalThis.__instafyBrowserActionPolicy`,
-`globalThis.__instafyBrowserPageCapture` and `globalThis.__instafyLinkOnly`;
+`globalThis.__instafyBrowserPageCapture`,
+`globalThis.__instafyBrowserFormSubmission` and `globalThis.__instafyLinkOnly`;
 load `redaction.js` first.
 
 - `redaction.js`: masks key-like values in page text, titles, addresses and
@@ -32,6 +33,21 @@ load `redaction.js` first.
   `unnamedControlName(hints)` names a control the page left unnamed from its
   tooltip attribute, image text, icon and position, so a prompt never shows an
   index such as "button 5".
+- `formSubmission.js`: `formSubmissionRulesInPage()` runs inside a page (or an
+  isolated world) and computes the submission a form step makes, as the
+  browser does: a submit button's `formaction`, `formmethod`, `formenctype` and
+  `formtarget` over the form's own, Enter through the form's default button
+  (a disabled one blocks it), a click along its event path to the submit
+  button it reaches (labels, plain buttons, fields and slotted elements pass it
+  on; links, checkboxes and summaries take it), `<base href>` and
+  `<base target>`, frame names and `method="dialog"`. Both browsers report it
+  as `formActionUrl`, `formMethod`, `formEnctype`, `formTarget`,
+  `formNewWindow`, `formSubmission` and `formSubmits`, which `actionPolicy.js`
+  judges. `stepSubmission(facts, step, key)` says which steps submit and where
+  to; a field inside a submit button (`nested`), which a click and Enter send
+  in different ways, is one both hosts refuse. Publishes
+  `globalThis.__instafyBrowserFormSubmission`. `formSubmissionCases.json` is
+  the one table of form steps both browsers' tests run.
 - `pageCapture.js`: `pageSecretSignalsInPage(sources)` runs inside a page and
   answers the four yes/no secret checks that `redactPageObservation` takes.
   `captureSentPage(redaction, options)` reads a page a person chose to send
@@ -47,8 +63,13 @@ load `redaction.js` first.
   this file only enforces it). `linkOnlyListFrom(bundled, additions)` compiles
   the bundled list plus what a space's copy adds (a copy only adds; one that is
   not a list is left out with a warning; no usable bundled list gives `null`,
-  and a host then reads nothing). `linkOnlyMatch(list, address)` returns
-  `{ site, why, via }` or `null`: hosts match however the address spells them
+  and a host then reads nothing). Each site has a `kind`: `no-agents` (its
+  terms bar AI agents or automated access; also a site with no kind or an
+  unknown one) or `no-reuse` (its terms bar copying, not reading). Where
+  several entries match, the strictest wins, so a space's copy can make a site
+  stricter and never looser. `linkOnlyMatch(list, address)` returns
+  `{ site, why, kind, via }` or `null`, and a reader refuses the address only
+  when `barsAgents(match)`: hosts match however the address spells them
   (case, trailing dots, port, user info, IDN), and an address on one of the
   list's `wrappers` (a translator, cache, archive or reader proxy) is checked
   as the site it embeds, wherever the wrapper's `embeds` says that site is
@@ -62,13 +83,21 @@ load `redaction.js` first.
   read a response's Memento `Link: <…>; rel="original"` header, so a page an
   archive serves at a short address is checked as the page it copies. The
   readers run one table of cases, `test/link-only-cases.json`, through their
-  own guards (a case's `pad` writes a long address out).
+  own guards (a case's `pad` writes a long address out; `kind` says whether it
+  is refused). `guidedLink(list, site, values)` is guided mode: it fills a
+  site's `search` template with values checked against the list's
+  `placeholders` (`text`, `date`, `count`) and URL-encoded, keeps the link
+  https on the site's own hosts, refuses an unknown placeholder, and gives the
+  site's `home` and what to type there when `deepLinks` is false
+  (`instafy web link`).
 
 The tests live with the Desktop Personal Browser
 (`packages/desktop-app/test/personal-browser-redaction.test.mjs`,
 `personal-browser-action-policy.test.mjs`, `browser-page-capture.test.mjs`,
-`personal-browser-send-page.test.mjs` and the risky-steps fixtures), with the
-Shared Browser controller (`packages/runtime-agent/src/shared_browser_tests.rs`)
+`personal-browser-send-page.test.mjs`, `browser-form-submission.test.mjs` and
+the risky-steps fixtures), with the Shared Browser controller
+(`packages/runtime-agent/src/shared_browser_tests.rs`,
+`scripts/shared-browser-form-submission-e2e.mjs`)
 and with the origin's page reader
 (`packages/origin-http-server/src/browser_page_capture_tests.rs`).
 See [Personal Browser](../../docs/Personal-Browser.md) and

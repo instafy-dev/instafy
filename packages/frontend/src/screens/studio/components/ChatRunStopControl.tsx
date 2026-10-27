@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
+import { StudioDialogBody } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
@@ -68,15 +69,18 @@ export function ChatRunStopControl({ controller, className, iconClassName = "h-[
         onOpenChange={(open) => { if (!open) controller.dismissConfirmation(); }}
         isDismissable
         dialogAriaLabel="Stop another person's turn?"
-        modalClassName="max-w-sm"
-        dialogClassName="space-y-4 p-5"
+        size="sm"
+        gutter="responsive"
+        layout="editor"
       >
-        <Text as="h2" variant="bodyStrong">Stop {confirmationNames}?</Text>
-        <Text as="p" variant="body" tone="muted">This includes a turn started by someone else, or whose owner could not be verified.</Text>
-        <div className="flex justify-end gap-3">
-          <Button autoFocus variant="text" size="sm" onPress={controller.dismissConfirmation}>Keep working</Button>
-          <Button variant="secondary" size="sm" onPress={controller.confirmStop}>Stop {confirmationNames}</Button>
-        </div>
+        <StudioDialogBody scrollable>
+          <Text as="h2" variant="subtitle" tone="primary" className="break-words">Stop {confirmationNames}?</Text>
+          <Text as="p" variant="body" tone="muted" className="mt-2">This includes a turn started by someone else, or whose owner could not be verified.</Text>
+          <div className="mt-5 flex flex-wrap justify-end gap-2">
+            <Button autoFocus variant="ghost" preset="form" onPress={controller.dismissConfirmation}>Keep working</Button>
+            <Button variant="secondary" preset="form" className="min-w-0 max-w-full [overflow-wrap:anywhere]" onPress={controller.confirmStop}>Stop {confirmationNames}</Button>
+          </div>
+        </StudioDialogBody>
       </StudioDialogModal>
     </span>
   );

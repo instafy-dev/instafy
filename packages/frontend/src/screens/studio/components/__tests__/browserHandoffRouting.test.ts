@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../../../types";
 import type { RuntimeBrowserSessionAction } from "../../../../sdk/instafy";
-import { browserPageOrigin, selectSharedBrowserHumanInput, sharedBrowserAgentPageIds, sharedBrowserConversationRunIds, sharedBrowserTakeoverJob } from "../browserHandoffRouting";
+import { browserPageOrigin, continuedSharedBrowserRunId, selectSharedBrowserHumanInput, sharedBrowserAgentPageIds, sharedBrowserConversationRunIds, sharedBrowserTakeoverJob } from "../browserHandoffRouting";
 
 const JOB_ID = "00000000-0000-4000-8000-000000000001";
 const RUN_ID = "00000000-0000-4000-8000-000000000002";
@@ -204,5 +204,37 @@ describe("sharedBrowserConversationRunIds", () => {
     for (const key of ["projectId", "conversationId", "runtimeId", "pageId"] as const) {
       expect(sharedBrowserConversationRunIds([current], { ...scope, [key]: null }).size).toBe(0);
     }
+  });
+});
+
+describe("continuedSharedBrowserRunId", () => {
+  const scope = { conversationId: "conversation-1", runtimeId: "runtime-1", pageId: "page-1", userId: USER_ID };
+  const ended = (overrides: Partial<RunRecord> = {}, metadata: Record<string, unknown> = {}) => run({
+    status: "canceled", updatedAt: "2026-10-27T10:58:45Z", ...overrides,
+    metadata: { ...run().metadata, initiatingUserId: USER_ID, ...metadata },
+  });
+
+  it("names the newest browser run the person started on this page that has ended", () => {
+    const older = ended({ id: "00000000-0000-4000-8000-000000000010", status: "success", updatedAt: "2026-10-27T10:00:00Z" });
+    expect(continuedSharedBrowserRunId([older, ended()], scope)).toBe(RUN_ID);
+    // A run that stopped for the person's input has ended too.
+    expect(continuedSharedBrowserRunId([ended({ status: "success" })], scope)).toBe(RUN_ID);
+  });
+
+  it("names no run that is still going, another person's, another page's or another conversation's", () => {
+    for (const candidate of [
+      ended({ status: "in_progress" }),
+      ended({ status: "queued" }),
+      ended({}, { initiatingUserId: "00000000-0000-4000-8000-000000000099" }),
+      ended({}, { browserPageId: "page-2" }),
+      ended({}, { browserRuntimeId: "runtime-2" }),
+      ended({}, { browserTransport: "desktop-personal" }),
+      ended({ conversationId: "conversation-2" }),
+      ended({ id: "not-a-run-id" }),
+    ]) {
+      expect(continuedSharedBrowserRunId([candidate], scope)).toBeNull();
+    }
+    expect(continuedSharedBrowserRunId([ended()], { ...scope, userId: null })).toBeNull();
+    expect(continuedSharedBrowserRunId([ended()], { ...scope, pageId: null })).toBeNull();
   });
 });

@@ -6294,6 +6294,7 @@ impl JobProcessor {
                         .as_deref()
                         .expect("Shared Browser execution must have a selected page"),
                     display_name,
+                    crate::shared_browser::continued_run_id_from_payload(&job.payload),
                     cancel_signal
                         .as_ref()
                         .expect("Shared Browser execution must have a cancellation signal")
@@ -10003,7 +10004,10 @@ async fn collect_workspace_change_receipts(
     {
         *files = normalize_codex_files(
             workspace_dir,
-            infer_codex_files_from_git_status_delta(before, &after),
+            infer_codex_files_from_git_status_delta(before, &after)
+                .into_iter()
+                .filter(|file| !is_runtime_owned_workspace_path(&file.workspace_path))
+                .collect(),
         )?;
     }
     // Retry checks weigh this attempt separately from work a stopped lease saved.
@@ -10012,6 +10016,16 @@ async fn collect_workspace_change_receipts(
         add_resumed_turn_files(files, earlier_attempt, before);
     }
     Ok(own_files_len)
+}
+
+/// A path the runtime owns (`.instafy/` at the top, any `.git` or `.bind`):
+/// what Instafy's own tools write there, such as the log `instafy preview
+/// open --start` keeps under `.instafy/agent/logs`, is never the person's
+/// work, so a turn's file receipts leave it out as its checkpoint does.
+fn is_runtime_owned_workspace_path(workspace_path: &str) -> bool {
+    sanitize_relative_workspace_path(workspace_path)
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .is_some_and(|path| origin_http_server::paths::is_reserved_path(&path))
 }
 
 fn workspace_file_changes_still_required(
@@ -24390,6 +24404,63 @@ mod tests {
         assert!(
             unchanged.is_empty(),
             "a completed no-change review has no invented file receipt"
+        );
+    }
+
+    /// Live test, Oct 27: a turn that built a page by shell and showed it with
+    /// `instafy preview open --start` listed `preview-4173.log` among the files
+    /// it created. What Instafy's own tools write under `.instafy/` is not the
+    /// person's work.
+    #[tokio::test]
+    async fn write_receipts_leave_out_the_logs_instafys_own_tools_write() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&workspace)
+            .output()
+            .expect("initialize isolated fixture repository");
+        assert!(initialized.status.success());
+        let before = collect_git_status_porcelain(&workspace).await.unwrap();
+        fs::write(workspace.join("index.html"), "<h1>Hello</h1>\n").unwrap();
+        fs::create_dir_all(workspace.join(".instafy/agent/logs")).unwrap();
+        fs::write(
+            workspace.join(".instafy/agent/logs/preview-4173.log"),
+            "Serving HTTP on 127.0.0.1 port 4173\n",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.join("site/.bind")).unwrap();
+        fs::write(workspace.join("site/.bind/binder.log"), "listening\n").unwrap();
+        let tracking = tracks_workspace_file_changes(
+            true,
+            false,
+            false,
+            RuntimeFinalOutputMode::PlainTextWrite,
+        );
+
+        let mut files = Vec::new();
+        let count = collect_workspace_change_receipts(
+            &workspace,
+            &mut files,
+            tracking,
+            Some(&before),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.workspace_path.as_str())
+                .collect::<Vec<_>>(),
+            ["index.html"]
+        );
+        assert_eq!(count, 1);
+        assert!(
+            workspace
+                .join(".instafy/agent/logs/preview-4173.log")
+                .exists()
         );
     }
 

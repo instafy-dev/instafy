@@ -4,7 +4,8 @@
 // rules live in one place:
 //
 // - the link-only guard: the web-research skill's list (skill-owned data, bundled from its one file), plus what a
-//   space's copy adds. Without a list that loads, nothing is fetched;
+//   space's copy adds or makes stricter. A "no-agents" site is never fetched; a "no-reuse" site is read and marked.
+//   Without a list that loads, nothing is fetched;
 // - the per-turn budget and stop memory, kept under a lock file so parallel calls of one turn share it;
 // - the workspace cache: in the space's own folder (`INSTAFY_CACHE_DIR`) on a runtime, so a worker whose home folder is
 //   new every turn still finds robots.txt and stop records, and in `~/.cache` on a person's own computer;
@@ -38,8 +39,12 @@ export const LINK_ONLY_PLACES: readonly string[] = [path.join("references", LINK
 /** The web-research skill's list as the build bundled it (from the skill's own file, so there is one source). */
 export const BUNDLED_LINK_ONLY_SITES: unknown = bundledLinkOnlySites;
 
-/** A link-only site an address is on: `via` names the wrappers (translator, cache, archive) it was found through. */
-export type LinkOnlySite = { name: string; reason: string; via: string[] };
+/**
+ * A listed site an address is on: `kind` is what its terms bar ("no-agents": AI agents and automated access, so it is
+ * never fetched; "no-reuse": copying, so it is read but not reused), `via` names the wrappers (translator, cache,
+ * archive) it was found through.
+ */
+export type LinkOnlySite = { name: string; reason: string; kind: linkOnly.LinkOnlyKind; via: string[] };
 export type LinkOnlyGuard = { list: linkOnly.LinkOnlyList; sources: string[]; warnings: string[] };
 
 /** The bundled list is missing or malformed: nothing is read rather than reading without it. */
@@ -147,10 +152,27 @@ export function loadLinkOnlyGuard(
   return { list: merged.list, sources: merged.sources, warnings: [...warnings, ...merged.warnings] };
 }
 
-/** The link-only site an address is on, directly or as a wrapper's copy of it, or null. */
-export function linkOnlySite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
+/** The listed site an address is on, directly or as a wrapper's copy of it, of any kind (the strictest), or null. */
+export function listedSite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
   const hit = linkOnly.linkOnlyMatch(guard.list, url);
-  return hit ? { name: hit.site, reason: hit.why, via: hit.via } : null;
+  return hit ? { name: hit.site, reason: hit.why, kind: hit.kind, via: hit.via } : null;
+}
+
+/** The "no-agents" site an address is on, directly or as a wrapper's copy of it, or null: never fetched. */
+export function linkOnlySite(url: string | URL, guard: LinkOnlyGuard): LinkOnlySite | null {
+  const hit = listedSite(url, guard);
+  return hit && linkOnly.barsAgents(hit) ? hit : null;
+}
+
+/** Whether a listed site keeps every agent out: any kind but "no-reuse". */
+export function barsAgents(site: LinkOnlySite | linkOnly.LinkOnlySite | null): boolean {
+  return linkOnly.barsAgents(site);
+}
+
+/** The "no-reuse" site a read page is on, or null, when no address of it is on a "no-agents" site. */
+export function noReuseSite(urls: string[], guard: LinkOnlyGuard): LinkOnlySite | null {
+  const hits = urls.map((url) => listedSite(url, guard)).filter((hit): hit is LinkOnlySite => hit !== null);
+  return hits.some((hit) => linkOnly.barsAgents(hit)) ? null : (hits[0] ?? null);
 }
 
 /** "Booking.com is link-only (terms bar AI agents); this address is its copy on the Wayback Machine" */

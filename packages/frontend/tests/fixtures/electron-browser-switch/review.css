@@ -1,0 +1,8 @@
+html, body, #root { margin: 0; width: 100%; height: 100%; }
+body { background: var(--color-slate-50); color: var(--color-slate-800); font-family: system-ui, sans-serif; }
+.dark body { background: var(--color-slate-950); color: var(--color-slate-100); }
+.browser-switch-review { display: flex; flex-direction: column; height: 100%; }
+.browser-switch-review > header { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; font-size: 13px; }
+.browser-switch-review > header span, .browser-switch-review > header small { opacity: .75; }
+.browser-switch-review-stage { display: flex; flex: 1; min-height: 0; overflow: hidden; border-top: 1px solid var(--color-slate-200); }
+.dark .browser-switch-review-stage { border-color: var(--color-slate-800); }

@@ -1,9 +1,9 @@
 ---
 name: instafy-web-research
-description: Find facts on the web and cite them, for an answer or a page: which sources to read for a need, how many pages, cross-checking, "checked <date> on <host>", amounts "seen <date>", links instead of copied listings, stopping at logins and bot checks.
+description: Find facts on the web and cite them, for an answer or a page: which sources to read for a need, how many pages, cross-checking, "checked <date> on <host>", amounts "seen <date>", links instead of copied listings, stopping at logins and bot checks, and guided links to sites whose terms bar AI agents.
 context_kind: workflow
 context_parent: instafy-skill-router
-routing_keywords: with sources, and sources, cite, citation, fact check, opening hours, opening times, timetable, last train, price of, prices for, compare prices, how much is, how much does, official site, official page
+routing_keywords: with sources, and sources, cite, citation, fact check, opening hours, opening times, timetable, last train, price of, prices for, compare prices, how much is, how much does, official site, official page, hotel prices, compare hotels, on booking.com, on airbnb, on tripadvisor, on expedia, on agoda
 ---
 
 # Web research
@@ -39,7 +39,18 @@ An aggregator (a site listing many businesses' offers, prices or reviews) is nev
 
 ## Link-only sites
 
-`references/link-only-sites.json` lists sites whose terms or robots.txt bar AI agents or automated copying. Never read them, in any reader or browser: give the plain link. The person may open one in their own browser; what they paste from it serves their answer only and is never stored in a published page or dataset.
+`references/link-only-sites.json` lists sites whose terms limit agents. Each site's `kind` says which rules apply; `terms` quotes the clause it rests on.
+
+- `no-agents` (terms bar AI agents, bots or automated access): the site is link-only. Never read, open or drive it, in any reader or browser, nor a translator's, cache's or archive's copy of it. Guide the person instead (below).
+- `no-reuse` (terms bar copying, not reading): read it like any page; `instafy web read` marks it `noReuse`. Summarize it in your own words, cite "seen <date> on <host>" and link back (to its `home` when `deepLinks` is false). Never copy its reviews, photos or price lists, and keep its content out of anything published or shared by public link: links only there.
+
+### Guided mode
+
+When the task needs a `no-agents` site (hotel prices on Booking.com, say):
+
+1. Run `instafy web link <site> query=<…> checkin=<YYYY-MM-DD> …` with the values the task gives (the list's `placeholders` name them). It returns the filled `link`, or the site's home page plus `typeIn` (what to type there) when the site bars deep links or has no search link.
+2. Reply with short numbered steps for the person: open the link in their own tab (or the home page, and type the `typeIn` values there), pick the pages to compare, and press **Send page to Octo** on each.
+3. Never open or read these links yourself, in any tab or reader. Work only from the pages the person sends, cite them "seen <date> on <host>", and keep their content out of anything published or shared by public link.
 
 ## Finding sources
 
@@ -93,7 +104,7 @@ Every fact keeps its finding `{url, title, readAt, viewer}`: `readAt` is when it
 - Coordinates come only from the venue's own site (its structured data or the map it publishes) or openly licensed data (OpenStreetMap, Wikidata). Never take coordinates from a map service's links or embeds. Otherwise geocode the address with an open geocoder a skill names and label the pin "approximate".
 - Prices are stored with "seen <date>", never as live prices.
 - Shopping and trip items link to the shop's or operator's page. Booking and buying happen there, by the person.
-- From a link-only site or an aggregator listing, a page or dataset keeps at most the name and the link.
+- From a listed site of either kind, a page the person sent from one, or an aggregator listing, a page or dataset keeps at most the name and the link.
 - Nothing a site shows only to a signed-in person, and no password, key, token or personal detail from a page, goes into a page or dataset.
 
 ## Reply

@@ -1386,11 +1386,12 @@ attempt per test: skips, expected failures, retries, filtered subsets, and zero
 tests fail the lane. Failure traces and a machine-readable result are retained
 under `packages/frontend/test-results/browser-ci/<lane>`.
 
-The serial `browser-ui` lane has a ten-minute total budget for hosted
-runners. Hosted timings project roughly seven to eight minutes for its 100+
-cases, so the total budget leaves room for startup and teardown. Each test still
-has a 30-second limit, with no retries or skips allowed. The containing workflow job retains
-its 30-minute limit for dependency installation and the co-browsing fixture.
+The serial `browser-ui` lane has a twenty-minute total budget for hosted
+runners. Hosted timings project roughly fifteen minutes for its 157 cases,
+so the total budget leaves room for startup and teardown. Each test still has
+a 30-second limit, with no retries or skips allowed. The containing workflow
+job has a 40-minute limit: dependency installation and the co-browsing fixture
+took another fourteen minutes in the measured hosted run.
 
 The settings component cases mount production Notifications and segmented controls.
 They cover phone and desktop switch alignment, disclosure, single-channel preference
@@ -1429,6 +1430,25 @@ be used explicitly with
 `PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome pnpm test:browser:ci browser-ui`.
 That verifies the installed channel, not the lockfile's Chromium revision;
 CI always installs and uses the locked Playwright browser.
+
+To verify Shared/Personal handoffs in the actual Desktop app without a remote
+runtime or account, run the explicit native switching lane:
+
+```bash
+pnpm --filter @instafy/desktop-app build
+pnpm --filter @instafy/frontend exec playwright test --config playwright.electron-switch.config.ts
+```
+
+This launches the built Electron app with its real preload, native Personal
+WebContentsView and a disposable profile. It mounts production browser surfaces
+with a controlled Shared pixel transport and loopback identity fixture. The four
+cases cover narrow and wide Desktop windows in both themes, repeated switches,
+returning before Shared repaints, Personal menu/resize capture ordering, and
+preserved native page, draft and scroll position. A missing Electron build fails
+the lane. It does not prove remote runtime allocation, live network transport or
+mobile native browsing. Screenshots are retained under
+`packages/frontend/test-results/electron-browser-switch`; Personal reference
+images composite the separately captured native view into the renderer.
 
 The two Shared session/status cases mount the complete production modal at
 390×844 and 844×390 with touch input and safe-area insets. They verify bounded
@@ -1526,6 +1546,20 @@ click's result shows a menu with a 900 ms opening transition fully open.
 Only fixed-schema results, timing summaries and inert-page screenshots are kept
 under `packages/frontend/test-results/browser-ci/shared-cobrowsing`; the profile
 and raw session files are removed.
+
+The same step then runs `scripts/shared-browser-form-submission-e2e.mjs`. It
+takes every case of the form-submission table both browsers share
+(`packages/browser-action-policy/formSubmissionCases.json`) in real Chromium and
+checks that the shared rules report what Chromium then sends (default buttons,
+`formaction`/`formmethod`/`formtarget`, `<base href>`, dialogs, new windows).
+It then drives the production controller through a hostile default button, a
+label of a hidden submit button, a form that opens another window, a
+`<base href>` to another site, a keydown handler that moves the form after
+approval, submit buttons in a closed shadow tree or laid over a control, and
+controls nested inside a hostile submit button, and checks that no cross-site
+POST goes out without the prompts for that site. The Personal Browser lane runs
+the same table through the built page bridge in Electron, and a keydown handler
+that moves the form there too.
 
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across

@@ -611,7 +611,7 @@ async fn a_wake_whose_runtime_cannot_start_fails_with_the_reason() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn wakes_are_refused_when_closed_unrecorded_or_too_frequent() -> anyhow::Result<()> {
+async fn wakes_are_refused_when_replaced_unrecorded_or_too_frequent() -> anyhow::Result<()> {
     run(|f| {
         Box::pin(async move {
             let job = f.job(None).await?;
@@ -635,25 +635,25 @@ async fn wakes_are_refused_when_closed_unrecorded_or_too_frequent() -> anyhow::R
             let mut body = f.open_body(&next, 4180);
             body["serve"] = serve();
             body["conversationId"] = json!(f.conversation);
-            let (status, created) = f.request(&next.token, "POST", &f.path(""), body).await?;
+            let (status, created) = f
+                .request(&next.token, "POST", &f.path(""), body.clone())
+                .await?;
             assert_eq!(status, StatusCode::CREATED, "{created}");
-            let closed = created["previewId"]
+            let replaced = created["previewId"]
                 .as_str()
                 .context("previewId")?
                 .to_string();
-            let (status, _) = f
-                .request(
-                    &f.tokens[0],
-                    "POST",
-                    &f.path(&format!("/{closed}/close")),
-                    json!({}),
-                )
-                .await?;
-            assert_eq!(status, StatusCode::NO_CONTENT);
-            let (status, body) = f.wake(0, &closed).await?;
+            // The broker replaced the port's tunnel: the newer preview is the
+            // one to wake, so the one it replaced is not restartable.
+            f.broker.remint(&preview_tunnel_key(&next.runtime_id, 4180));
+            let (status, newer) = f.request(&next.token, "POST", &f.path(""), body).await?;
+            assert_eq!(status, StatusCode::CREATED, "{newer}");
+            assert_ne!(newer["previewId"], json!(replaced));
+            assert_eq!(newer["restartable"], json!(true));
+            let (status, body) = f.wake(0, &replaced).await?;
             assert_eq!(status, StatusCode::CONFLICT, "{body}");
-            assert_eq!(body["code"], "preview_closed");
-            assert_eq!(f.get_preview(&closed).await?["restartable"], json!(false));
+            assert_eq!(body["code"], "not_restartable");
+            assert_eq!(f.get_preview(&replaced).await?["restartable"], json!(false));
 
             // Rate limit: six wakes of one preview in ten minutes.
             let mut body = f.open_body(&next, 4181);
@@ -715,6 +715,243 @@ async fn wakes_are_refused_when_closed_unrecorded_or_too_frequent() -> anyhow::R
                 StatusCode::ACCEPTED,
                 "another member still may: {body}"
             );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// "Stop the preview server": Octo stops the site and closes its preview.
+/// The card then reads Stopped, and Open by someone who may change the space
+/// starts the same site again from its recorded command, with no turn.
+#[tokio::test]
+async fn a_preview_closed_on_purpose_starts_again_on_open_by_people_who_may_change_the_space(
+) -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.open_restartable(&job).await?;
+            let card = f.ready(&job.token, &preview_id).await?["messageId"].clone();
+            let (_, old_label) = f.view(0, &preview_id).await?;
+            let (status, _) = f
+                .request(
+                    &job.token,
+                    "POST",
+                    &f.path(&format!("/{preview_id}/close")),
+                    json!({}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            assert!(
+                f.grant_metadata(&preview_id).await?[PREVIEW_TUNNEL_METADATA_KEY]["closedAt"]
+                    .is_string()
+            );
+            let footprint = f.model_footprint().await?;
+
+            // The record says Open can start it; a view-only member may not
+            // undo the close, even with the machine up, and reads why first.
+            let closed = f.get_preview(&preview_id).await?;
+            assert_eq!(closed["status"], "revoked");
+            assert_eq!(closed["restartable"], json!(true));
+            assert_eq!(closed["canStart"], json!(false));
+            let (status, builder_view) = f
+                .request(
+                    &f.tokens[1],
+                    "GET",
+                    &f.path(&format!("/{preview_id}")),
+                    Value::Null,
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{builder_view}");
+            assert_eq!(builder_view["restartable"], json!(true));
+            assert_eq!(builder_view["canStart"], json!(true));
+            let (status, refused) = f.wake(2, &preview_id).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+            assert_eq!(refused["code"], "start_needs_builder");
+            assert_eq!(
+                f.count("select count(*) from runtime_preview_wakes where project_id = $1")
+                    .await?,
+                0
+            );
+
+            // A builder's Open restarts it on the running machine.
+            let (status, woken) = f.wake(1, &preview_id).await?;
+            assert_eq!(status, StatusCode::ACCEPTED, "{woken}");
+            assert_eq!(woken["state"], "waking");
+            let agent = f.agent_token(job.runtime_id, job.lease_id)?;
+            let (status, claimed) = f.claim(&agent).await?;
+            assert_eq!(status, StatusCode::OK, "{claimed}");
+            let restarts = claimed["restarts"].as_array().context("restarts")?;
+            assert_eq!(restarts.len(), 1, "{claimed}");
+            assert_eq!(
+                restarts[0]["previewId"],
+                json!(preview_id),
+                "same preview id"
+            );
+            assert_eq!(
+                restarts[0]["serve"],
+                json!({ "argv": ["python3", "-m", "http.server", "4173"], "cwd": "site" })
+            );
+            let wake_id = restarts[0]["wakeId"]
+                .as_str()
+                .context("wakeId")?
+                .to_string();
+            // The reconnect drops the close and keeps the card.
+            let metadata = f.grant_metadata(&preview_id).await?;
+            assert!(
+                metadata[PREVIEW_TUNNEL_METADATA_KEY]
+                    .get("closedAt")
+                    .is_none(),
+                "{metadata}"
+            );
+            assert_eq!(metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageId"], card);
+            // A capability minted before the close stays dead.
+            assert!(!f.allowed(&preview_id, &old_label).await?);
+
+            let (status, result) = f.report(&agent, &wake_id, json!({ "ok": true })).await?;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            let live = f.get_preview(&preview_id).await?;
+            assert_eq!(live["status"], "active");
+            assert_eq!(live["health"]["listening"], json!(true));
+            assert_eq!(live["restartable"], json!(true));
+            // Open again: no longer closed, so a viewer may restart its site.
+            assert_eq!(live["canStart"], json!(true));
+            assert_eq!(f.model_footprint().await?, footprint);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A preview someone closed, whose port the broker later gave another tunnel
+/// when a newer site opened on it, is replaced as surely as one that was
+/// still open: the retirement skips a closed preview, so it carries no
+/// `supersededBy`. Its card must not offer Open, and a wake of it (one asked
+/// for before the newer site opened, say) must not reconnect the port's key
+/// with the old site's command and title, which the broker answers with the
+/// newer preview's tunnel and so would write over the newer preview.
+#[tokio::test]
+async fn a_closed_preview_that_a_newer_one_replaced_does_not_wake_over_it() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let closed = f.open_restartable(&job).await?;
+            f.ready(&job.token, &closed).await?;
+            let (status, _) = f
+                .request(
+                    &job.token,
+                    "POST",
+                    &f.path(&format!("/{closed}/close")),
+                    json!({}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            // A wake asked for while it was closed, before the newer site
+            // opened, still waits for the agent.
+            f.state
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "insert into runtime_preview_wakes (tunnel_id, project_id, runtime_id, requested_by)
+                     values ($1, $2, $3, $4)",
+                    &[&closed, &f.project, &job.runtime_id, &f.users[0]],
+                )
+                .await?;
+
+            f.broker.remint(&preview_tunnel_key(&job.runtime_id, 4173));
+            let mut body = f.open_body(&job, 4173);
+            body["title"] = json!("Newer site");
+            body["serve"] = json!({ "argv": ["node", "server.js"], "cwd": "newer" });
+            let (status, created) = f.request(&job.token, "POST", &f.path(""), body).await?;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            let newer = created["previewId"]
+                .as_str()
+                .context("previewId")?
+                .to_string();
+            assert_ne!(newer, closed);
+            let newer_before = f.grant_metadata(&newer).await?;
+
+            assert_eq!(f.get_preview(&closed).await?["restartable"], json!(false));
+            let (status, refused) = f.wake(0, &closed).await?;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(refused["code"], "not_restartable");
+
+            let agent = f.agent_token(job.runtime_id, job.lease_id)?;
+            let (status, claimed) = f.claim(&agent).await?;
+            assert_eq!(status, StatusCode::OK, "{claimed}");
+            assert_eq!(claimed["restarts"], json!([]), "{claimed}");
+            let newer_after = f.grant_metadata(&newer).await?;
+            assert_eq!(
+                newer_after[PREVIEW_TUNNEL_METADATA_KEY]["title"],
+                json!("Newer site")
+            );
+            assert_eq!(
+                newer_after[PREVIEW_TUNNEL_METADATA_KEY]["serve"],
+                newer_before[PREVIEW_TUNNEL_METADATA_KEY]["serve"]
+            );
+            let newer_view = f.get_preview(&newer).await?;
+            assert_eq!(newer_view["title"], "Newer site");
+            assert_eq!(newer_view["restartable"], json!(true));
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Closing a preview frees its place among the runtime's
+/// `PREVIEWS_PER_RUNTIME` ("Close one first"), and another open may take it.
+/// Open on the closed preview's card must not then bring it back past the
+/// bound: its wake fails at the claim with the open route's own words, and
+/// the runtime keeps the previews it has.
+#[tokio::test]
+async fn a_wake_does_not_bring_a_preview_back_past_the_runtime_bound() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let closed = f.open_restartable(&job).await?;
+            let (status, _) = f
+                .request(
+                    &job.token,
+                    "POST",
+                    &f.path(&format!("/{closed}/close")),
+                    json!({}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            for index in 0..PREVIEWS_PER_RUNTIME {
+                let (status, body) = f
+                    .request(
+                        &job.token,
+                        "POST",
+                        &f.path(""),
+                        f.open_body(&job, 5000 + index),
+                    )
+                    .await?;
+                assert_eq!(status, StatusCode::CREATED, "{body}");
+            }
+            let live_previews = "select count(*) from runtime_tunnel_grants
+                 where project_id = $1
+                   and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+                   and lower(btrim(status)) not in ('revoked', 'expired', 'failed')";
+            assert_eq!(f.count(live_previews).await?, PREVIEWS_PER_RUNTIME);
+
+            let (status, woken) = f.wake(1, &closed).await?;
+            assert_eq!(status, StatusCode::ACCEPTED, "{woken}");
+            let agent = f.agent_token(job.runtime_id, job.lease_id)?;
+            let (status, claimed) = f.claim(&agent).await?;
+            assert_eq!(status, StatusCode::OK, "{claimed}");
+            assert_eq!(claimed["restarts"], json!([]), "{claimed}");
+            let preview = f.get_preview(&closed).await?;
+            assert_eq!(preview["status"], "revoked");
+            assert_eq!(preview["wake"]["state"], "failed", "{preview}");
+            assert!(
+                preview["wake"]["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("Close one first")),
+                "{preview}"
+            );
+            assert_eq!(f.count(live_previews).await?, PREVIEWS_PER_RUNTIME);
             Ok(())
         })
     })
