@@ -1,5 +1,13 @@
 # @instafy/cli
 
+## 0.3.1
+
+### Patch Changes
+
+- 77d0b0b: Add --max-native-subagents and an interactive native helper setting to instafy agents settings, separate from shared tracked worker limits. Older controllers retain their existing settings and receive no unsupported updates.
+- 98a857f: In the desktop app's Personal Browser, Octo can open up to three visible tabs of its own while you have resumed control, to read several pages in one turn: `list_tabs`, `open_tab`, `select_tab` and `close_tab` join its browser tools. Every tool acts on the tab on screen, Octo's tabs are marked in a tab row, each tab asks for its own site in Ask mode, and Pause, Escape or Take over ends Octo's control of every tab at once. Agent tabs open public web pages only: every page request in them, each redirect hop included, resolves its host and is refused when it is not public. `instafy web read` and agent tabs also treat a local host name written with a final dot, such as `localhost.`, as local.
+- 04b4252: New `instafy web read <url…> --json` reads up to 6 public web pages over plain HTTP and returns their text (or, with `--find`, only the matching passages), links and the page's own structured data, with provenance (`requestedUrl`, `finalUrl`, `title`, `readAt`, `viewer: "server fetch"`) and the text wrapped as untrusted page content. It sends an honest `Instafy-Agent` user agent, honours robots.txt for itself and the AI-agent user agents on every redirect, never fetches sites a skill lists as link-only (`link-only-sites.json`), refuses private, loopback and metadata addresses at every hop and connects only to the address it checked, and stops at logins, CAPTCHAs, paywalls, HTTP 401/403/429, downloads and pages that show credentials, without ever reading a stopped URL again. Text is redacted before output. Per turn it reads at most 12 pages, 4 per site, 2 seconds apart, and caches pages per workspace. A page that needs JavaScript is reported as `needs_browser`.
+
 ## 0.3.0
 
 ### Minor Changes
