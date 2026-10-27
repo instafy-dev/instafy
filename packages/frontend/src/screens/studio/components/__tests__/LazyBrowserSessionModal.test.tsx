@@ -4,7 +4,6 @@ import { act, useLayoutEffect, type ComponentProps, type ComponentType } from "r
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserSessionModal } from "../BrowserSessionModal";
-import { ChatBrowserDock } from "../ChatBrowserDock";
 import { createLazyBrowserSessionModal } from "../LazyBrowserSessionModal";
 
 const { moduleImported } = vi.hoisted(() => ({ moduleImported: vi.fn() }));
@@ -193,32 +192,5 @@ describe("lazy shared browser code", () => {
     await act(async () => pending.resolve({ BrowserSessionModal: rendered }));
     expect(container.textContent).toBe("Selected chat");
     expect(rendered).not.toHaveBeenCalled();
-  });
-
-  it("does not import browser code when the dock disables its modal", async () => {
-    const dockProps: ComponentProps<typeof ChatBrowserDock> = {
-      browserSessionOpen: true,
-      onBrowserSessionOpenChange: vi.fn(),
-      projectId: "project-a",
-      preferredRuntimeId: "runtime-a",
-      showBrowserSessionPageStrip: false,
-      browserSessionExpandRequestToken: 0,
-      onBrowserRuntimeIdResolved: vi.fn(),
-      browserSessionPages: [],
-      onSelectBrowserSessionPage: vi.fn(),
-      onToggleBrowserSession: vi.fn(),
-      onClearPendingNewBrowserSession: vi.fn(),
-      hasHiddenBrowserSession: false,
-      pendingBrowserLaunchMode: null,
-      renderModal: false,
-    };
-    expect(moduleImported).not.toHaveBeenCalled();
-    await act(async () => root.render(<ChatBrowserDock {...dockProps} />));
-    expect(moduleImported).not.toHaveBeenCalled();
-    expect(container.querySelector('[data-testid="browser-session-code-loading"]')).toBeNull();
-
-    await act(async () => root.render(<ChatBrowserDock {...dockProps} renderModal />));
-    expect(moduleImported).toHaveBeenCalledOnce();
-    expect(container.querySelector('[data-testid="imported-browser"]')?.textContent).toBe("project-a");
   });
 });

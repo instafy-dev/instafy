@@ -10,6 +10,7 @@ import { useLocationSitesVersion } from "../screens/studio/components/previewHos
 import { previewTabLocation } from "../screens/studio/components/previewHost/PreviewLocation";
 import { useWorkspaceTabs } from "./WorkspaceTabsProvider";
 import { ConversationSurfaceTabs, type ConversationSurface } from "./ConversationSurfaceLayout";
+import { browserViewTabDetails } from "./browserViewTab";
 import { closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, selectConversationView } from "./conversationSurfaces";
 
 /** One view bar for the selected task, including routes rendered outside ChatPanel. */
@@ -50,6 +51,7 @@ export function ConversationWorkspaceViews({ placement = "header" }: { placement
   const dirty = new Set(workspace.files.filter(file => file.modified !== file.generated).map(file => file.path));
   const resources: ConversationSurface[] = [
     ...(hasBrowser ? [{ id: "browser", label: "Browser", panelId: "conversation-workspace-browser", icon: <Globe className="h-3.5 w-3.5" />,
+      ...browserViewTabDetails({ pageTitle: conversationBrowser.pageTitle ?? null, agentName: conversationBrowser.agentName ?? null }),
       attention: conversationBrowser.attention ? <span className="text-amber-600">Approve</span> : undefined }] : []),
     ...surfaces.files.map(file => ({ id: file.id, label: conversationFileLabel(file, surfaces.files), title: file.path,
       panelId: "conversation-workspace-file", icon: <Page className="h-3.5 w-3.5" />, dirty: dirty.has(file.path),

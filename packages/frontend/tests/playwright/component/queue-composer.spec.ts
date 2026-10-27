@@ -214,7 +214,7 @@ test("sending attachment status remains visible while a long preview list scroll
 });
 
 for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
-  test(`composer utilities and browser chips remain reachable in ${theme} at ${width}px`, async ({ page }) => {
+  test(`composer utilities and the new-tab token remain reachable in ${theme} at ${width}px`, async ({ page }) => {
     const { errors } = await openFixture(page, { width, theme, utilities: true });
     const goal = page.getByTestId("chat-active-goal");
     const summary = page.getByTestId("chat-active-goal-summary");
@@ -280,34 +280,52 @@ for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
     await expect(page.getByTestId("chat-image-upload-preview")).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
-    await page.goto(`/tests/fixtures/conversation-view-tabs/index.html?context=browserpages&browserpages=6&pending=1&theme=${theme}`);
-    const strip = page.getByTestId("browser-session-page-strip");
-    const chips = page.getByTestId("browser-session-page-chip");
-    await expect(chips).toHaveCount(3);
-    await expect(chips.nth(1)).toHaveAttribute("aria-pressed", "true");
-    for (const button of await strip.getByRole("button").all()) {
-      if (width < 640) expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    // A pending new tab is one removable token above the input: the chat has
+    // no page strip, as the Browser view and the pane's tab picker list the tabs.
+    await page.goto(`${fixture}&newtab=1&queue=0&theme=${theme}${width >= 1024 ? "&placement=header" : ""}`);
+    const token = page.getByTestId("composer-new-tab-token");
+    await expect(token).toHaveText("New tab for the next message");
+    await expect(page.getByTestId("browser-session-page-strip")).toHaveCount(0);
+    const cancelNewTab = token.getByRole("button", { name: "Cancel new tab" });
+    if (width < 640) expect((await cancelNewTab.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    expect((await token.boundingBox())!.y + (await token.boundingBox())!.height)
+      .toBeLessThanOrEqual((await editor(page).boundingBox())!.y);
+    await cancelNewTab.focus();
+    await expect(cancelNewTab).toBeInViewport();
+    await cancelNewTab.press("Enter");
+    await expect(page.getByTestId("review-new-tab-pending")).toHaveText("false");
+    await expect(token).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
+  test(`the Browser view tab names its active page and shows when Octo uses the browser in ${theme} at ${width}px`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    for (const [path, body] of Object.entries(RUN_STOP_FIXTURE_STUBS)) {
+      await page.route(`**${path}*`, route => route.fulfill({ contentType: "application/javascript", body }));
     }
-    const more = page.getByTestId("browser-session-page-overflow");
-    await more.focus();
-    await expect(more).toBeInViewport();
-    await more.press("Enter");
-    await expect(chips).toHaveCount(6);
-    await expect(chips).toHaveText(["Overview", "Research notes with a longer page title", "Design system", "Keyboard navigation", "Mobile layouts", "Accessibility"]);
-    const last = chips.last();
-    await last.focus();
-    await expect(last).toBeInViewport();
-    await last.press("Enter");
-    await expect(last).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("browser-page-review-state")).toHaveText("Viewing Accessibility");
-    await last.press("Enter");
-    await expect(page.getByTestId("browser-page-review-state")).toHaveText("Browser hidden");
-    const pending = page.getByRole("button", { name: "Cancel new tab request" });
-    await pending.focus();
-    await expect(pending).toBeInViewport();
-    await pending.press("Enter");
-    await expect(page.getByTestId("browser-page-review-pending")).toHaveText("false");
-    await expect(pending).toHaveCount(0);
+    await page.setViewportSize({ width, height: 700 });
+    const view = `/tests/fixtures/conversation-view-tabs/index.html?theme=${theme}&page=${encodeURIComponent("Results for Belém Tower")}${width >= 1024 ? "&placement=header" : ""}`;
+    await page.goto(`${view}&agent=1`);
+    const browser = page.getByTestId("conversation-subtab-browser");
+    await expect(browser).toHaveAccessibleName("Browser, Octo is using the browser");
+    await expect(browser).toHaveAccessibleDescription("Browser · Results for Belém Tower");
+    await expect(browser).toHaveAttribute("title", "Browser · Results for Belém Tower");
+    const dot = page.getByTestId("conversation-subtab-browser-busy");
+    await expect(dot).toBeVisible();
+    const tab = (await browser.boundingBox())!;
+    const marker = (await dot.boundingBox())!;
+    expect(marker.x).toBeGreaterThanOrEqual(tab.x);
+    expect(marker.x + marker.width).toBeLessThanOrEqual(tab.x + tab.width);
+    await browser.focus();
+    await browser.press("ArrowLeft");
+    await expect(page.getByTestId("conversation-subtab-chat")).toBeFocused();
+    await page.goto(view);
+    await expect(page.getByTestId("conversation-subtab-browser")).toHaveAccessibleName("Browser");
+    await expect(dot).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   });

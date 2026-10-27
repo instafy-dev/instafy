@@ -16,6 +16,13 @@ export type ConversationSurface = {
   attention?: ReactNode;
   /** What `attention` means to a screen reader; defaults to "approval needed". */
   attentionLabel?: string;
+  /** What the view shows now, read after its name ("Browser · Lisbon weekend"). */
+  description?: string;
+  /**
+   * An agent is working in this view: a quiet violet dot, and this text for
+   * screen readers ("Octo is using the browser").
+   */
+  busyLabel?: string;
   onClose?: () => void;
 };
 
@@ -75,7 +82,8 @@ export function ConversationSurfaceTabs({
                 ref={node => { if (node) tabs.current.set(view.id, node); else tabs.current.delete(view.id); }}
                 type="button" role="tab" aria-controls={view.panelId}
                 aria-selected={selected === view.id} tabIndex={selected === view.id ? 0 : -1}
-                aria-label={[view.label, view.dirty ? "unsaved changes" : null, view.attention ? view.attentionLabel ?? "approval needed" : null].filter(Boolean).join(", ")}
+                aria-label={[view.label, view.dirty ? "unsaved changes" : null, view.attention ? view.attentionLabel ?? "approval needed" : null, view.busyLabel ?? null].filter(Boolean).join(", ")}
+                aria-describedby={view.description ? `${view.panelId}-${view.id}-description` : undefined}
                 title={view.title ?? view.label}
                 data-testid={`conversation-subtab-${view.id}`}
                 className={tabTriggerStyles(tabPreset)}
@@ -88,7 +96,10 @@ export function ConversationSurfaceTabs({
                   onSelect(views[next].id);
                   tabs.current.get(views[next].id)?.focus();
                 }}
-              ><span className={besideComposer ? "inline-flex min-w-0 max-w-full items-center gap-1.5" : "contents"}><TabLabel label={view.label} icon={besideComposer ? undefined : view.icon} dirty={view.dirty}>{view.attention}</TabLabel></span></button>
+              ><span className={besideComposer ? "inline-flex min-w-0 max-w-full items-center gap-1.5" : "contents"}><TabLabel label={view.label} icon={besideComposer ? undefined : view.icon} dirty={view.dirty}>
+                {view.busyLabel ? <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-500 dark:bg-violet-400" data-testid={`conversation-subtab-${view.id}-busy`} /> : null}
+                {view.attention}
+              </TabLabel></span>{view.description ? <span hidden id={`${view.panelId}-${view.id}-description`}>{view.description}</span> : null}</button>
               {view.onClose ? <TabCloseButton label={`Close ${view.label} view`} onClose={() => close(view)} className="mr-1 text-inherit" /> : null}
             </div>
           ))}

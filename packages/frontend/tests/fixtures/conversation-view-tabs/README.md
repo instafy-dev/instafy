@@ -51,13 +51,14 @@ Vite's inline preview URL keeps every image local. The message fixture replaces
 account, conversation, runtime, workspace and optional feature data boundaries
 with inert adapters; no controller or model is contacted.
 
-For the production browser page strip, use
-`?context=browserpages&browserpages=6&pending=1`.
-Select another page, select the active page to hide the browser, expand the page
-deck, and cancel the pending new-tab action. `hidden=1` starts with the browser
-hidden; `browserpages=0&hidden=1` shows its restore control. The page area is a
-labelled placeholder, not a remote browser session. Review at 320, 390, 768 and
-1280px with light/dark themes and fine/coarse pointers.
+For the pending new-tab token, add `&newtab=1` to the composer context
+(`?context=composer&newtab=1`): the composer shows "New tab for the next
+message" above the input, and its Cancel new tab button removes it. The chat has
+no page strip of its own; the Browser view tab and the browser pane's tab picker
+list the browser's pages. In the view-tab context, `page=<title>` names the
+browser's active tab in the Browser tab's tooltip and description, and `agent=1`
+shows the violet dot read as "Octo is using the browser". Review at 320, 390, 768 and 1280px with light/dark
+themes and fine/coarse pointers.
 
 The required browser UI suite includes `queue-composer.spec.ts` and
 `conversation-surfaces.spec.ts`. They cover draft protection, edit/save/cancel

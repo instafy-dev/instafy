@@ -55,7 +55,6 @@ describe("useChatComposerBrowserTargeting", () => {
       browserSessionId: "browser-surface-1",
       sharedBrowserActivated: true,
       browserTransport,
-      compactBrowserViewport: false,
       focusInput,
       hasHiddenBrowserSession: false,
       messages: [],
@@ -120,6 +119,26 @@ describe("useChatComposerBrowserTargeting", () => {
       await latestResult?.handleSelectBrowserSessionPage("shared-page-1");
     });
     expect(focusPageMock).toHaveBeenCalledWith("shared-page-1");
+  });
+
+  it("targets the browser's active tab with no page strip of its own", async () => {
+    // The pane's own tab picker chooses the active tab; the chat no longer
+    // repeats the tabs in a strip above the composer.
+    useBrowserSessionPagesMock.mockReturnValue({
+      pages: [
+        { ...browserPages[0], isActive: false },
+        { ...browserPages[0], id: "shared-page-2", url: "https://example.org/", host: "example.org", label: "Other", title: "Other", isActive: true },
+      ],
+      resolved: true,
+      focusPage: focusPageMock,
+    });
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" />);
+    });
+
+    expect(latestResult?.preferredBrowserPage?.id).toBe("shared-page-2");
+    expect(latestResult?.sharedBrowserBindingPage?.id).toBe("shared-page-2");
+    expect(latestResult).not.toHaveProperty("showBrowserSessionPageStrip");
   });
 
   it("binds a task to the blank tab of a browser that just started, without targeting it", async () => {
@@ -218,7 +237,6 @@ describe("useChatComposerBrowserTargeting", () => {
     expect(latestResult?.preferredBrowserPage).toBeNull();
     expect(latestResult?.sharedBrowserBindingPage).toBeNull();
     expect(latestResult?.pendingBrowserLaunchMode).toBeNull();
-    expect(latestResult?.showBrowserSessionPageStrip).toBe(false);
 
     await act(async () => {
       latestResult?.setPendingBrowserLaunchMode("new_page");

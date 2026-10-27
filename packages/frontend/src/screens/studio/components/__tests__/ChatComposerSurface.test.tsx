@@ -15,10 +15,6 @@ import {
   type TouchSendMode,
 } from "../touchSendModePicker";
 
-vi.mock("../ChatBrowserDock", () => ({
-  ChatBrowserDock: () => null,
-}));
-
 // The mock exposes the folded actions as labelled buttons so "no action
 // lost" can be checked by accessible name alone, across inline and menu.
 vi.mock("../ComposerActionMenu", () => ({
@@ -195,7 +191,6 @@ function createProps(
   overrides: Partial<ComponentProps<typeof ChatComposerSurface>> = {},
 ): ComponentProps<typeof ChatComposerSurface> {
   return {
-    browserDockProps: {} as never,
     composerOverlayRef: { current: null },
     composerAutoHidden: false,
     compactBrowserViewport: false,
@@ -493,6 +488,50 @@ describe("ChatComposerSurface", () => {
     // 100% (CSS `translate` stacks on `transform`) and push even the peek off the screen.
     expect(overlay.className).not.toContain("translate-y-full");
     expect(overlay.style.transform).toContain("translateY(calc(100% - max(");
+  });
+
+  it("shows no browser page strip, whatever browser state its caller once passed", async () => {
+    // The chat used to repeat the browser's tabs above the composer. The
+    // view selector's Browser tab and the pane's own tab picker cover it.
+    const legacyDock = {
+      browserDockProps: {
+        renderModal: false, browserSessionOpen: true, showBrowserSessionPageStrip: true, hasHiddenBrowserSession: false,
+        browserSessionPages: [{ id: "page-1", url: "https://www.visitlisboa.com/", host: "www.visitlisboa.com",
+          label: "Results for Belém Tower", title: "Results for Belém Tower", lastReferencedAt: 1, isActive: true }],
+        pendingBrowserLaunchMode: null, onSelectBrowserSessionPage: vi.fn(), onToggleBrowserSession: vi.fn(),
+        onClearPendingNewBrowserSession: vi.fn(), onBrowserSessionOpenChange: vi.fn(), onBrowserRuntimeIdResolved: vi.fn(),
+        projectId: null, preferredRuntimeId: null, browserSessionExpandRequestToken: 0,
+      },
+    };
+    await act(async () => root.render(<ChatComposerSurface {...createProps(legacyDock as never)} />));
+    expect(container.querySelector('[data-testid="browser-session-page-strip"]')).toBeNull();
+    expect(container.querySelector('[data-testid="browser-session-page-chip"]')).toBeNull();
+    expect(container.textContent).not.toContain("Results for Belém Tower");
+  });
+
+  it("names a pending new tab as one removable token in the context row", async () => {
+    const onCancel = vi.fn();
+    const onSubmit = vi.fn((event) => event.preventDefault());
+    const props = createProps({ onSubmit, replyContext: <div data-testid="reply-context" /> });
+    await act(async () => root.render(<ChatComposerSurface {...props} pendingNewTab={{ onCancel }} />));
+    const token = container.querySelector<HTMLElement>('[data-testid="composer-new-tab-token"]')!;
+    expect(token).not.toBeNull();
+    expect(token.textContent).toBe("New tab for the next message");
+    // It sits with the reply recipient, above the input, inside the form.
+    const form = container.querySelector("form")!;
+    expect(form.contains(token)).toBe(true);
+    expect(container.querySelector('[data-testid="reply-context"]')!.compareDocumentPosition(token))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(token.compareDocumentPosition(container.querySelector('[data-testid="chat-input"]')!))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    const cancel = token.querySelector<HTMLButtonElement>('button[aria-label="Cancel new tab"]')!;
+    expect(cancel.type).toBe("button");
+    expect(cancel.className).toContain("pointer-coarse:min-h-11");
+    await act(async () => cancel.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => root.render(<ChatComposerSurface {...props} pendingNewTab={null} />));
+    expect(container.querySelector('[data-testid="composer-new-tab-token"]')).toBeNull();
   });
 
   it("hides a wide composer with the class alone, without an inline transform", async () => {

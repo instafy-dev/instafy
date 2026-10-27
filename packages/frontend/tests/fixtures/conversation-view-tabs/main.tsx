@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Globe, Page } from "iconoir-react";
 import { ConversationSurfaceTabs, type ConversationSurface } from "../../../src/workspace/ConversationSurfaceLayout";
+import { browserViewTabDetails } from "../../../src/workspace/browserViewTab";
 import { useChatRunStop } from "../../../src/screens/studio/components/useChatRunStop";
 import { Composer } from "../run-stop-control/Composer";
-import { BrowserSessionPageStrip } from "../../../src/screens/studio/components/BrowserSessionPageStrip";
 import { UserMessageBubble } from "../../../src/screens/studio/components/ChatMessageEntries";
 import { ChatImageLightboxOverlay } from "../../../src/screens/studio/components/ChatPanelOverlays";
 import reviewImageUrl from "../../../public/og-image.png?inline";
@@ -54,6 +54,7 @@ function MobileComposerReview() {
       utilityReview={utilityReview}
       attachmentCount={query.has("attachments") ? Math.max(0, Math.min(12, Number(query.get("attachments")) || 0)) : undefined}
       attachmentSending={query.has("sending")}
+      newTab={query.has("newtab")}
       queueReview={query.has("queue") || query.has("stash") || utilityReview ? { count: Math.max(0, Math.min(6, Number(query.get("queue")) || 0)), initialDraft: query.get("draft") ?? "", withStash: query.has("stash") || Boolean(utilityReview) } : undefined}
       viewNavigation={header ? undefined :
       <ConversationSurfaceTabs presentation="composer" chatPanelId="review-chat" activeId={activeId} resourceId="browser"
@@ -61,27 +62,6 @@ function MobileComposerReview() {
         split={false} wide={false} ratio={.55} onSelect={setActiveId} onSplitChange={() => {}} />
     } />
     <ChatImageLightboxOverlay imageLightbox={imageLightbox} onClose={() => setImageLightbox(null)} />
-  </main>;
-}
-
-function BrowserPagesReview() {
-  const pageCount = Math.max(0, Math.min(8, Number(query.get("browserpages") ?? 6)));
-  const [activePage, setActivePage] = useState(Math.min(1, pageCount - 1));
-  const [open, setOpen] = useState(!query.has("hidden"));
-  const [pending, setPending] = useState(query.has("pending"));
-  const labels = ["Overview", "Research notes with a longer page title", "Design system", "Keyboard navigation", "Mobile layouts", "Accessibility", "Release notes", "References"];
-  return <main className="flex min-h-dvh flex-col bg-white text-slate-900 dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-100">
-    <header className="px-5 py-4 text-sm font-medium">Browser pages <span className="block text-xs font-normal text-slate-500">Production page strip · local fixture</span></header>
-    <section className="flex min-h-48 flex-1 items-center justify-center p-5 text-sm text-slate-600 dark:text-slate-400">
-      <p aria-live="polite" data-testid="browser-page-review-state">{open ? `Viewing ${labels[activePage] ?? "Browser"}` : "Browser hidden"}</p>
-    </section>
-    <BrowserSessionPageStrip pages={Array.from({ length: pageCount }, (_, index) => ({
-      id: `page-${index}`, url: `https://example.test/review/${index}`, host: "example.test", label: labels[index],
-      title: labels[index], lastReferencedAt: index, isActive: activePage === index,
-    }))} onSelectPage={id => { setActivePage(Number(id.replace("page-", ""))); setOpen(true); }}
-      onToggleBrowser={() => setOpen(value => !value)} onClearPendingNewBrowser={() => setPending(false)}
-      browserHidden={!open} browserOpen={open} pendingNewBrowser={pending} />
-    <output hidden data-testid="browser-page-review-pending">{String(pending)}</output>
   </main>;
 }
 
@@ -93,6 +73,7 @@ function Review() {
   const [split, setSplit] = useState(false);
   const resources: ConversationSurface[] = [
     { id: "browser", label: "Browser", panelId: "review-browser", icon: <Globe className="h-3.5 w-3.5" />,
+      ...browserViewTabDetails({ pageTitle: query.get("page"), agentName: query.has("agent") ? "Octo" : null }),
       attention: query.has("approval") ? <span className="text-amber-600">Approve</span> : undefined },
     ...files.map(file => ({ ...file, panelId: "review-file", icon: <Page className="h-3.5 w-3.5" />,
       onClose: () => { setFiles(current => current.filter(item => item.id !== file.id)); if (activeId === file.id) setActiveId("browser"); } })),
@@ -110,4 +91,4 @@ function Review() {
   </main>;
 }
 
-createRoot(document.getElementById("root")!).render(query.get("context") === "composer" ? <MobileComposerReview /> : query.get("context") === "browserpages" ? <BrowserPagesReview /> : <Review />);
+createRoot(document.getElementById("root")!).render(query.get("context") === "composer" ? <MobileComposerReview /> : <Review />);

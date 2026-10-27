@@ -42,7 +42,6 @@ import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatComposerRunActions, resolveComposerRunStopPlacement } from "./ChatComposerRunActions";
 import { ChatRunStopFeedback } from "./ChatRunStopControl";
 import type { ChatRunStopController } from "./useChatRunStop";
-import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
 import { CHAT_INPUT_CONTROL_HEIGHT_CLASS } from "./chat-input/chatInputGrowth";
 import {
@@ -82,12 +81,16 @@ import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
 
 type ChatComposerSurfaceProps = {
   overlayWidth?: string;
-  browserDockProps: ComponentProps<typeof ChatBrowserDock>;
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   composerAutoHidden: boolean;
   aboveComposer?: ReactNode;
   /** Explicit reply recipient, inside the usual composer. */
   replyContext?: ReactNode;
+  /**
+   * The next message asks for a new browser tab: a token in the context row
+   * that cancels the request. Null when no new tab is pending.
+   */
+  pendingNewTab?: { onCancel: () => void } | null;
   /** Compact conversation views stay in the measured overlay above the input. */
   viewNavigation?: ReactNode;
   /**
@@ -261,13 +264,41 @@ export const COMPOSER_SEND_REST_CLASS = "[&_svg]:text-slate-400 dark:[&_svg]:tex
 // 4px above the icons on desktop.
 export const COMPOSER_EDITOR_WRAPPER_CLASS = `flex ${CHAT_INPUT_CONTROL_HEIGHT_CLASS} min-w-0 flex-1 flex-col justify-center`;
 
+/**
+ * The next message asks Octo for a new browser tab. One removable token in
+ * the composer's context row, like a reply recipient: the browser pane's own
+ * tab picker chooses every other tab a message refers to.
+ */
+function ComposerNewTabToken({ onCancel }: { onCancel: () => void }) {
+  return (
+    <div className="flex min-w-0 px-2 pt-1" data-testid="composer-new-tab-token">
+      <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full bg-slate-100 py-0.5 pl-2.5 pr-0.5 text-slate-600 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-300">
+        <Globe className="h-3.5 w-3.5 flex-none" aria-hidden="true" />
+        <Text as="span" variant="caption" tone="inherit" className="truncate">New tab for the next message</Text>
+        <IconButton
+          type="button"
+          variant="ghost"
+          size="xs"
+          radius="full"
+          onPress={onCancel}
+          aria-label="Cancel new tab"
+          title="Cancel new tab"
+          data-testid="composer-new-tab-cancel"
+        >
+          <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
+        </IconButton>
+      </span>
+    </div>
+  );
+}
+
 export function ChatComposerSurface({
   overlayWidth,
-  browserDockProps,
   composerOverlayRef,
   composerAutoHidden,
   aboveComposer,
   replyContext,
+  pendingNewTab = null,
   viewNavigation,
   touchLikeInput = false,
   compactBrowserViewport,
@@ -1106,8 +1137,6 @@ export function ChatComposerSurface({
 
   return (
     <>
-      <ChatBrowserDock {...browserDockProps} />
-
       <div
         ref={composerOverlayRef}
         className={`pointer-events-none absolute inset-x-0 bottom-0 z-20 transition-transform duration-200 ease-out ${
@@ -1153,6 +1182,7 @@ export function ChatComposerSurface({
         >
           <div className={draftExpanded ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}>
             {replyContext}
+            {pendingNewTab ? <ComposerNewTabToken onCancel={pendingNewTab.onCancel} /> : null}
             {showActiveGoal && !draftExpanded ? (
               <div
                 className={`@container/goal pointer-events-auto flex min-w-0 flex-col gap-2 rounded-2xl border border-slate-200/70 bg-white/95 px-3 py-2 text-sm shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-strong)] ${

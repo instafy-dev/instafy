@@ -177,7 +177,7 @@ describe("conversation preview tabs", () => {
     fixture.isLargeScreen = false;
     const props = { conversationWorkspaceUserId: "user-a" };
     await render(props);
-    await act(async () => api.setConversationBrowser(api.conversationWorkspaceScope, true, false));
+    await act(async () => api.setConversationBrowser(api.conversationWorkspaceScope, { available: true, attention: false }));
     const header = () => container.querySelector('[data-testid="header-view-host"]')!;
     const composer = () => container.querySelector('[data-testid="composer-view-host"]')!;
     expect(container.querySelectorAll('[role="tablist"]')).toHaveLength(1);
