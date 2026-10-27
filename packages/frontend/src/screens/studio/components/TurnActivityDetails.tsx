@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, EditPencil, NavArrowDown, NavArrowRight, Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
@@ -31,9 +31,16 @@ function StepStateGlyph({ state }: { state: StepState }) {
   return <Check role="img" aria-label="Done" className="h-3.5 w-3.5 flex-none text-slate-400 dark:text-slate-500" />;
 }
 
+// A label may be 48 characters: it truncates (whole in its title) and leaves
+// room for the command, so the row's state and output chevron stay on screen
+// at phone width.
 function StepLabel({ text }: { text: string | null }) {
   return text ? (
-    <span className="flex-none font-medium text-slate-700 dark:text-slate-100" data-testid="turn-activity-step-label">
+    <span
+      className="min-w-0 max-w-[60%] truncate font-medium text-slate-700 dark:text-slate-100"
+      title={text}
+      data-testid="turn-activity-step-label"
+    >
       {text}
     </span>
   ) : null;
@@ -198,12 +205,36 @@ export function TurnActivityDetails({ id, items, renderUpdate, footer }: TurnAct
   const [showAll, setShowAll] = useState(false);
   const hiddenCount = showAll ? 0 : Math.max(0, items.length - TURN_ACTIVITY_DETAILS_ROW_CAP);
   const visible = hiddenCount > 0 ? items.slice(hiddenCount) : items;
+  // "Show earlier steps" goes away once pressed: focus moves to the first row
+  // it revealed instead of falling back to the page.
+  const firstRowRef = useRef<HTMLDivElement | null>(null);
+  const focusFirstRow = useRef(false);
+  useEffect(() => {
+    if (showAll && focusFirstRow.current) {
+      focusFirstRow.current = false;
+      firstRowRef.current?.focus();
+    }
+  }, [showAll]);
+  const rows = visible.flatMap((item) => {
+    const content =
+      item.kind === "update" ? (
+        renderUpdate(item.message)
+      ) : item.step.kind === "command" ? (
+        <CommandStepRow step={item.step} />
+      ) : (
+        <OtherStepRow step={item.step} />
+      );
+    return content === null || content === undefined || content === false ? [] : [{ id: item.id, content }];
+  });
   return (
     <div id={id} data-testid="turn-activity-details" className="min-w-0 py-1">
       {hiddenCount > 0 ? (
         <button
           type="button"
-          onClick={() => setShowAll(true)}
+          onClick={() => {
+            focusFirstRow.current = true;
+            setShowAll(true);
+          }}
           data-testid="turn-activity-details-earlier"
           className="mb-1 text-xs text-slate-500 hover:text-slate-800 hover:underline dark:text-slate-400 dark:hover:text-slate-100 pointer-coarse:min-h-11"
         >
@@ -211,24 +242,17 @@ export function TurnActivityDetails({ id, items, renderUpdate, footer }: TurnAct
         </button>
       ) : null}
       <div role="list" aria-label="Steps" className="min-w-0 space-y-0.5">
-        {visible.map((item) => {
-          const content =
-            item.kind === "update" ? (
-              renderUpdate(item.message)
-            ) : item.step.kind === "command" ? (
-              <CommandStepRow step={item.step} />
-            ) : (
-              <OtherStepRow step={item.step} />
-            );
-          if (content === null || content === undefined || content === false) {
-            return null;
-          }
-          return (
-            <div role="listitem" key={item.id} className="min-w-0">
-              {content}
-            </div>
-          );
-        })}
+        {rows.map((row, index) => (
+          <div
+            role="listitem"
+            key={row.id}
+            ref={index === 0 ? firstRowRef : undefined}
+            tabIndex={index === 0 && showAll ? -1 : undefined}
+            className="min-w-0 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:focus-visible:ring-primary-300/80"
+          >
+            {row.content}
+          </div>
+        ))}
       </div>
       {footer}
     </div>

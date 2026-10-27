@@ -12,7 +12,9 @@ const FIXTURE_PATH = "/__turn-activity-line-fixture__";
 const LONG_SUMMARY =
   "Looked up 14 places in the old town of Lisbon, read 6 pages about Belém, built the map";
 
-type LineState = { running: boolean; long: boolean };
+type LineState = { running: boolean; long: boolean; longStep: boolean };
+// The longest a done label may be (48 characters once {n} is 999).
+const LONG_STEP_LABEL = "Looked up 999 places in the old town of Lisbon";
 
 async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {}): Promise<string[]> {
   const deps = await resolveViteReactDependencies(page);
@@ -38,22 +40,22 @@ async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {
       metadata: { source: "agent", jobId, messageType: "command_execution",
         details: { kind: "codex_command_execution", itemId: id, command: text, status, aggregatedOutput: output } },
     });
-    const steps = (running) => [
+    const steps = (running, longStep) => [
       { kind: "step", id: "a", step: { kind: "command", state: "done", activity: null, label: "Read 6 pages",
         message: command("a", "bash -lc 'instafy web read https://www.visitlisboa.com/en/places/belem-tower https://en.wikipedia.org/wiki/Bel%C3%A9m_Tower'", "completed", "Belém Tower\\n".repeat(30)) } },
       { kind: "step", id: "b", step: { kind: "command", state: running ? "running" : "done", activity: null,
-        label: running ? "Looking up places" : "Looked up 14 places",
+        label: running ? "Looking up places" : longStep ? ${JSON.stringify(LONG_STEP_LABEL)} : "Looked up 14 places",
         message: command("b", "bash -lc 'uw() { node .agents/skills/interactive-map/scripts/uw.mjs \\"$@\\"; }\\nfor spec in a b c; do uw add-point --json \\"$spec\\"; done'", running ? "in_progress" : "completed", "Serving map at http://localhost:4173/") } },
     ];
     function Fixture() {
-      const [state, setState] = React.useState({ running: true, long: false });
+      const [state, setState] = React.useState({ running: true, long: false, longStep: false });
       const [detailsOpen, setDetailsOpen] = React.useState(false);
       window.__setLineState = (update) => setState((current) => ({ ...current, ...update }));
       const activity = {
         live: state.running ? (state.long ? "Judging calm and lively areas around the river…" : "Looking up places…") : null,
         summary: state.running ? null : (state.long ? ${JSON.stringify(LONG_SUMMARY)} : "Looked up 14 places, read 6 pages, built the map"),
         stepCount: 2,
-        details: steps(state.running),
+        details: steps(state.running, state.longStep),
       };
       return h("main", { style: { padding: "16px 16px 16px 48px", maxWidth: "1000px" } },
         h(AgentJobThreadPreviewLayout, {
@@ -227,6 +229,39 @@ test.describe("touch", () => {
     const box = await toggle.boundingBox();
     expect(box?.height).toBeGreaterThanOrEqual(44);
     expect(box?.width).toBeGreaterThanOrEqual(44);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    expect(errors, errors.join("; ")).toEqual([]);
+  });
+
+  // A step label may be 48 characters. Kept at full width, it pushed the
+  // row's state and its output chevron out of the clipped turn on a phone, so
+  // the output could not be opened.
+  test("keeps a long step label's state and output chevron on screen on a phone", async ({ page }) => {
+    test.setTimeout(60_000);
+    const errors = await mountFixture(page);
+    await setLine(page, { running: false, longStep: true });
+    await page.getByTestId("turn-activity-line").tap();
+    const rows = page.getByTestId("turn-activity-command");
+    await expect(rows).toHaveCount(2);
+    const row = rows.nth(1);
+    await expect(row.getByTestId("turn-activity-step-label")).toHaveText(LONG_STEP_LABEL);
+    const geometry = await row.evaluate((element) => {
+      const line = element.firstElementChild as HTMLElement;
+      const turn = element.closest('[data-testid="chat-bubble-assistant"]')!.getBoundingClientRect();
+      const toggle = element.querySelector('[data-testid="turn-activity-command-output-toggle"]')!.getBoundingClientRect();
+      const glyph = element.querySelector('[aria-label="Done"]')!.getBoundingClientRect();
+      return {
+        overflows: line.scrollWidth > line.clientWidth,
+        toggleRight: toggle.right,
+        glyphRight: glyph.right,
+        turnRight: turn.right,
+      };
+    });
+    expect(geometry.overflows).toBe(false);
+    expect(geometry.glyphRight).toBeLessThanOrEqual(geometry.turnRight);
+    expect(geometry.toggleRight).toBeLessThanOrEqual(geometry.turnRight);
+    await row.getByTestId("turn-activity-command-output-toggle").tap();
+    await expect(page.getByTestId("chat-command-output")).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     expect(errors, errors.join("; ")).toEqual([]);
   });
