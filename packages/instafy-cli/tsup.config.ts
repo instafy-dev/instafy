@@ -6,8 +6,12 @@ import { defineConfig } from "tsup";
 const linkOnlySitesPath = fileURLToPath(
   new URL("../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json", import.meta.url),
 );
+// The skill's search providers and chains (`instafy web search`), bundled from the skill's one file the same way.
+const searchProvidersPath = fileURLToPath(
+  new URL("../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/search-providers.json", import.meta.url),
+);
 
-// `INSTAFY_TEST_BUILD=1` builds a test CLI, the only kind that answers `instafy web read` from the hand-written pages in
+// `INSTAFY_TEST_BUILD=1` builds a test CLI, the only kind that answers `instafy web read` and `instafy web search` from the hand-written pages in
 // `INSTAFY_WEB_FIXTURES` (src/web-shared.ts). Every other build, the published one included, refuses that variable.
 const testBuild = process.env.INSTAFY_TEST_BUILD === "1";
 
@@ -38,6 +42,10 @@ export default defineConfig({
   ],
   define: { __INSTAFY_TEST_BUILD__: JSON.stringify(testBuild) },
   esbuildOptions(options) {
-    options.alias = { ...(options.alias ?? {}), "virtual:instafy/link-only-sites": linkOnlySitesPath };
+    options.alias = {
+      ...(options.alias ?? {}),
+      "virtual:instafy/link-only-sites": linkOnlySitesPath,
+      "virtual:instafy/search-providers": searchProvidersPath,
+    };
   },
 });

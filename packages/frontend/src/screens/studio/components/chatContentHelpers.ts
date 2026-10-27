@@ -185,6 +185,13 @@ function extractQuotedCommandTopic(command: string): string | null {
   return null;
 }
 
+/** The words of `instafy web search <words…> [--options]`, quoted or not. */
+function webSearchWords(command: string): string | null {
+  const rest = command.replace(/^instafy\s+web\s+search\s*/i, "");
+  const words = (rest.split(/(?:^|\s)--?[a-z]/i)[0] ?? "").replace(/["']/g, "").replace(/\s+/g, " ").trim();
+  return words ? truncate(words, 64) : null;
+}
+
 const WORKSPACE_SEARCH_STATUS = "Searching the workspace…";
 const READABLE_SEARCH_TOPIC_MAX_LENGTH = 40;
 // Letters, digits, spaces and the punctuation found inside names and paths.
@@ -213,6 +220,11 @@ export function summarizeActiveCommandForPreview(value: string, maxLength = 120)
   }
   if (normalized.startsWith("instafy conversation show")) {
     return "Opening prior conversation…";
+  }
+  if (normalized.startsWith("instafy web search")) {
+    // The words searched for, never the results: the room keeps a search's query and count only.
+    const query = webSearchWords(command) ?? topic;
+    return query ? `Searching the web for "${query}"…` : "Searching the web…";
   }
   if (normalized.startsWith("instafy secrets")) {
     // Never the raw invocation: it carries the space id, and a shell line at

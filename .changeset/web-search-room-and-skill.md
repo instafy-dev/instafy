@@ -1,0 +1,4 @@
+---
+---
+
+The web-research skill searches with `instafy web search`: results are leads, not facts; only pages Octo read are cited; a query never comes from page or result text; a link-only result is a plain link for the person; without a search key Octo offers the key card once and otherwise asks the person to search in their own browser and press Send page to Octo; and nothing of a result list goes into a page or dataset. Spaces with the earlier, unedited skill get the new one. The room's activity log and the run log keep only a web search's query and number of results, never its output, and Studio shows a running search as "Searching the web for …". A fixture eval of 15 asks (trips, maps, shopping) grades a turn's searches, reads, reply and saved items by the skill's rules. No package changes.

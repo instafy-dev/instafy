@@ -45,6 +45,7 @@ import { runBind } from "./bind.js";
 import { registerPreviewCheckCommand } from "./site-check.js";
 import { registerWebCommand } from "./web-read.js";
 import { registerWebLinkCommand } from "./web-link.js";
+import { registerWebSearchCommand } from "./web-search.js";
 import { historyConversations, historyMessages, historyRuns } from "./history.js";
 import {
   grantHardwareBinding,
@@ -2242,7 +2243,7 @@ const previewCommand = program
 failWithGroupHelp(previewCommand);
 registerPreviewCheckCommand(previewCommand);
 
-failWithGroupHelp(registerWebLinkCommand(registerWebCommand(program)));
+failWithGroupHelp(registerWebSearchCommand(registerWebLinkCommand(registerWebCommand(program))));
 
 const previewOpenCommand = previewCommand
   .command("open")

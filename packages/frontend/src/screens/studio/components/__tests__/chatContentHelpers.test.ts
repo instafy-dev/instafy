@@ -2,6 +2,19 @@ import { describe, expect, it } from "vitest";
 import { summarizeActiveCommandForPreview } from "../chatContentHelpers";
 
 describe("chatContentHelpers", () => {
+  it("says what a web search looks for, from its words, never its results", () => {
+    expect(summarizeActiveCommandForPreview("bash -lc 'instafy web search \"ramen shinjuku\" --count 8 --json'")).toBe(
+      'Searching the web for "ramen shinjuku"…',
+    );
+    expect(summarizeActiveCommandForPreview("instafy web search belem tower hours --site visitlisboa.com --json")).toBe(
+      'Searching the web for "belem tower hours"…',
+    );
+    expect(summarizeActiveCommandForPreview("instafy web search --json --site visitlisboa.com 'tram 15'")).toBe(
+      'Searching the web for "tram 15"…',
+    );
+    expect(summarizeActiveCommandForPreview("instafy web search --json")).toBe("Searching the web…");
+  });
+
   it("summarizes active Instafy context recovery commands", () => {
     expect(
       summarizeActiveCommandForPreview(

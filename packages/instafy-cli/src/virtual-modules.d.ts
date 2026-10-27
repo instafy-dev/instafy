@@ -5,3 +5,9 @@ declare module "virtual:instafy/link-only-sites" {
   const data: unknown;
   export default data;
 }
+
+// The instafy-web-research skill's search-providers.json (`instafy web search`), bundled the same way.
+declare module "virtual:instafy/search-providers" {
+  const data: unknown;
+  export default data;
+}

@@ -1,0 +1,12 @@
+{
+  "schema": "instafy.web-fixtures@1",
+  "pages": {
+    "https://api.search.brave.com/res/v1/web/search?q=ramen+shinjuku&count=8&result_filter=web": { "file": "brave-ramen.json" },
+    "https://api.search.brave.com/res/v1/web/search?q=zzzz+nothing&count=8&result_filter=web": { "body": "{\"web\":{\"results\":[]}}", "type": "application/json" },
+    "https://api.search.brave.com/res/v1/web/search?q=busy+query&count=8&result_filter=web": { "status": 429, "body": "{}", "type": "application/json" },
+    "https://kagi.com/api/v1/search": [
+      { "method": "POST", "requestBody": { "query": "ramen shinjuku", "workflow": "search", "limit": 8 }, "file": "kagi-ramen.json" },
+      { "method": "POST", "requestBody": { "query": "busy query", "workflow": "search", "limit": 8 }, "file": "kagi-busy.json" }
+    ]
+  }
+}

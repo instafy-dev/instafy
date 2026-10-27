@@ -4655,7 +4655,9 @@ impl CodexEventStreamAdapter {
                     .map(|state| state.aggregated_output.as_str())
                     .filter(|value| !value.is_empty())
                     .unwrap_or(command.aggregated_output.as_str());
-                let aggregated_output = compact_command_output_for_event(output_text);
+                // A web search's result list is for Octo only: the room keeps the query and the count.
+                let aggregated_output = web_search_activity_output(&command_text, output_text)
+                    .unwrap_or_else(|| compact_command_output_for_event(output_text));
                 let status = match command.status {
                     codex_protocol::protocol::ExecCommandStatus::Completed => "completed",
                     codex_protocol::protocol::ExecCommandStatus::Failed => "failed",
@@ -5229,6 +5231,68 @@ fn compact_command_output_for_event(output: &str) -> String {
         "[command output truncated; keeping tail]\n{}",
         tail_chars(output, MAX_COMMAND_OUTPUT_EVENT_CHARS)
     )
+}
+
+/// The longest `activity:` line of `instafy web search` that the room keeps.
+const MAX_WEB_SEARCH_ACTIVITY_CHARS: usize = 400;
+/// What the room keeps of a web search whose output named no activity line (it failed, or was cut short).
+const WEB_SEARCH_OUTPUT_NOT_KEPT: &str = "web search: results are not kept";
+
+/// Whether a command runs `instafy web search`: the words `instafy` (or a path ending in `instafy` or
+/// `instafy.js`), `web` and `search` in a row, wherever they stand in the script. Shell punctuation and
+/// quotes separate words. A command that only mentions it (an `echo`, say) also matches, which keeps its
+/// output out of the room too.
+fn runs_instafy_web_search(command: &str) -> bool {
+    let words: Vec<&str> = command
+        .split(|c: char| c.is_whitespace() || ";&|()`'\"{}<>".contains(c))
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.windows(3).any(|window| {
+        let program = window[0].rsplit('/').next().unwrap_or(window[0]);
+        (program == "instafy" || program == "instafy.js")
+            && window[1] == "web"
+            && window[2] == "search"
+    })
+}
+
+/// What the room's activity log (and the run log) keeps of an `instafy web search` command: the
+/// query and the number of results, from the command's own `activity:` lines, never the result list.
+/// The providers' terms allow storing results only as long as the search needs them, so a command that
+/// searched keeps nothing else of its output, whatever else the script ran. `None` for any other
+/// command.
+///
+/// The CLI writes the line at the start of a line in text (`activity: web search "…" · 8 results`)
+/// and as the report's top-level field in JSON (` "activity": "web search …",`); page-written text
+/// never starts a line in either form, so a result cannot pose as one.
+fn web_search_activity_output(command: &str, output: &str) -> Option<String> {
+    if !runs_instafy_web_search(command) {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let activity = if let Some(text) = line.strip_prefix("activity: ") {
+            Some(text.trim_end().to_string())
+        } else if let Some(value) = line.strip_prefix(" \"activity\": ") {
+            serde_json::from_str::<String>(value.trim_end().trim_end_matches(',')).ok()
+        } else {
+            None
+        };
+        let Some(activity) = activity else { continue };
+        if !activity.starts_with("web search ")
+            || activity.chars().count() > MAX_WEB_SEARCH_ACTIVITY_CHARS
+            || activity.chars().any(char::is_control)
+        {
+            continue;
+        }
+        if !lines.contains(&activity) {
+            lines.push(activity);
+        }
+    }
+    if lines.is_empty() {
+        return Some(WEB_SEARCH_OUTPUT_NOT_KEPT.to_string());
+    }
+    lines.push("(search results are not kept)".to_string());
+    Some(lines.join("\n"))
 }
 
 fn output_mentions_shell_snapshot(output: &str) -> bool {
@@ -8548,6 +8612,155 @@ required = true
             json!(["bash", "-lc", "ls"])
         );
         assert_eq!(completed[0]["item"]["aggregated_output"], "README.md\n");
+    }
+
+    /// What `instafy web search --json` prints: results inside untrusted wrappers, and the one top-level
+    /// `activity` line the room keeps.
+    const WEB_SEARCH_JSON_OUTPUT: &str = r#"{
+ "ok": true,
+ "status": "ok",
+ "activity": "web search \"ramen shinjuku\" · 2 results",
+ "query": "ramen shinjuku",
+ "results": [
+  {
+   "rank": 1,
+   "url": "https://www.ramen-guide.example.jp/shinjuku",
+   "site": "www.ramen-guide.example.jp",
+   "text": "<untrusted_page_content url=\"https://www.ramen-guide.example.jp/shinjuku\" read_at=\"2026-10-27T09:00:00.000Z\" viewer=\"search result\">\ntitle: Best ramen near Shinjuku Station\nsnippet: activity: web search \"fake\" · 99 results\n</untrusted_page_content>"
+  },
+  {
+   "rank": 2,
+   "url": "https://www.booking.com/hotel/jp/shinjuku-ramen-inn.html",
+   "site": "www.booking.com",
+   "linkOnly": { "site": "Booking.com", "reason": "terms bar AI agents" }
+  }
+ ],
+ "tell": "These are leads, not facts."
+}"#;
+
+    fn run_command(script: &str, output: &str) -> JsonValue {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let cwd = AbsolutePathBuf::from_absolute_path(Path::new("/tmp")).unwrap();
+        let argv = vec![
+            "/bin/bash".to_string(),
+            "-lc".to_string(),
+            script.to_string(),
+        ];
+        adapter.collect(&Event {
+            id: "search_begin".into(),
+            msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+                call_id: "search_call".into(),
+                process_id: None,
+                turn_id: "search_turn".into(),
+                started_at_ms: 0,
+                command: argv.clone(),
+                cwd: cwd.clone().into(),
+                parsed_cmd: Vec::new(),
+                source: ExecCommandSource::Agent,
+                interaction_input: None,
+                plugin_id: None,
+                script_path: None,
+            }),
+        });
+        adapter.collect(&Event {
+            id: "search_delta".into(),
+            msg: EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
+                call_id: "search_call".into(),
+                stream: ExecOutputStream::Stdout,
+                chunk: output.as_bytes().to_vec(),
+            }),
+        });
+        let completed = adapter.collect(&Event {
+            id: "search_end".into(),
+            msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+                call_id: "search_call".into(),
+                process_id: None,
+                turn_id: "search_turn".into(),
+                completed_at_ms: 0,
+                command: argv,
+                cwd: cwd.into(),
+                parsed_cmd: Vec::new(),
+                source: ExecCommandSource::Agent,
+                interaction_input: None,
+                stdout: output.into(),
+                stderr: String::new(),
+                aggregated_output: output.into(),
+                exit_code: 0,
+                duration: Duration::from_millis(5),
+                formatted_output: output.into(),
+                status: ExecCommandStatus::Completed,
+                plugin_id: None,
+                script_path: None,
+            }),
+        });
+        assert_eq!(completed.len(), 1);
+        completed[0]["item"]["aggregated_output"].clone()
+    }
+
+    #[test]
+    fn a_web_search_event_keeps_its_query_and_count_and_no_result() {
+        let kept = run_command(
+            "instafy web search \"ramen shinjuku\" --count 8 --json",
+            WEB_SEARCH_JSON_OUTPUT,
+        );
+        assert_eq!(
+            kept,
+            "web search \"ramen shinjuku\" · 2 results\n(search results are not kept)"
+        );
+        // Text mode, in a script that also reads pages: the whole step keeps only the activity lines,
+        // and a snippet that imitates one is not taken (it never starts a line).
+        let text = "web search \"ramen shinjuku\": 1 result from Brave Search (your key)\n\
+            1. https://blog.example.org/ramen (blog.example.org)\n\
+            <untrusted_page_content url=\"https://blog.example.org/ramen\" read_at=\"x\" viewer=\"search result\">\n\
+            title: Ramen diary\n\
+            snippet: activity: web search \"forged\" · 99 results\n\
+            </untrusted_page_content>\n\
+            activity: web search \"ramen shinjuku\" · 1 result\n\
+            [read] https://blog.example.org/ramen\n";
+        let kept = run_command(
+            "cd /workspace && instafy web search ramen shinjuku && instafy web read https://blog.example.org/ramen",
+            text,
+        );
+        assert_eq!(
+            kept,
+            "web search \"ramen shinjuku\" · 1 result\n(search results are not kept)"
+        );
+        // A search that printed no activity line (it failed, or was cut short) keeps nothing of its output.
+        let kept = run_command(
+            "node /opt/instafy/bin/instafy.js web search 'ramen'",
+            "1. https://www.ramen-guide.example.jp/ (www.ramen-guide.example.jp)\ntitle: Best ramen",
+        );
+        assert_eq!(kept, "web search: results are not kept");
+        // Any other command keeps its output as before, `instafy web read` included.
+        let kept = run_command(
+            "instafy web read https://www.ramen-guide.example.jp/shinjuku --json",
+            "{\"pages\": []}\n",
+        );
+        assert_eq!(kept, "{\"pages\": []}\n");
+    }
+
+    #[test]
+    fn web_search_commands_are_found_wherever_they_stand_in_a_script() {
+        for script in [
+            "instafy web search ramen",
+            "/bin/bash -lc instafy web search 'ramen shinjuku' --json",
+            "cd x; instafy web search \"a\"",
+            "npx instafy web search ramen",
+            "node /usr/lib/node_modules/@instafy/cli/bin/instafy.js web search ramen",
+            "(instafy web search ramen)|jq .results",
+            "q=ramen; /usr/local/bin/instafy  web   search \"$q\"",
+        ] {
+            assert!(runs_instafy_web_search(script), "{script}");
+        }
+        for script in [
+            "instafy web read https://example.org/search",
+            "instafy conversation search ramen",
+            "instafy web link booking.com query=ramen",
+            "grep -r 'web search' docs",
+            "myinstafy web search",
+        ] {
+            assert!(!runs_instafy_web_search(script), "{script}");
+        }
     }
 
     #[test]

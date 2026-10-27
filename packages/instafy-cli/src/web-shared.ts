@@ -22,9 +22,10 @@ import * as linkOnly from "@instafy/browser-action-policy/linkOnly";
 import bundledLinkOnlySites from "virtual:instafy/link-only-sites";
 import { checkPublicUrl } from "@instafy/bind/net";
 
-/** Who read a page: this command over plain HTTP, or (test builds only) a fixture file. */
-export type WebViewer = "server fetch" | "fixture";
+/** Who read a page: this command over plain HTTP, a search provider's result list, or (test builds only) a fixture file. */
+export type WebViewer = "server fetch" | "search result" | "fixture";
 export const NETWORK_VIEWER: WebViewer = "server fetch";
+export const SEARCH_VIEWER: WebViewer = "search result";
 export const FIXTURE_VIEWER: WebViewer = "fixture";
 
 export const UNTRUSTED_TAG = "untrusted_page_content";
@@ -211,6 +212,39 @@ export function readJson<T>(file: string): T | null {
 
 export const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Runs `fn` while holding `lockFile` (created exclusively), so parallel calls of one turn take turns. A lock older than
+ * `staleMs` is from a call that died and is taken over; after `waitMs` the call gives up.
+ */
+export async function withFileLock<T>(
+  lockFile: string,
+  fn: () => T | Promise<T>,
+  { staleMs = 10_000, waitMs = 15_000 }: { staleMs?: number; waitMs?: number } = {},
+): Promise<T> {
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true, mode: 0o700 });
+  const started = Date.now();
+  for (;;) {
+    try {
+      fs.closeSync(fs.openSync(lockFile, "wx", 0o600));
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - fs.statSync(lockFile).mtimeMs > staleMs) fs.rmSync(lockFile, { force: true });
+      } catch {
+        // released meanwhile
+      }
+      if (Date.now() - started > waitMs) throw new Error(`${path.dirname(lockFile)} stayed locked`);
+      await realSleep(20);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    fs.rmSync(lockFile, { force: true });
+  }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Where the turn budget and the cache live
 
@@ -315,24 +349,7 @@ export class TurnStore<Code extends string = string> {
 
   /** Runs `fn` on the turn state under a lock file, so parallel calls cannot both spend the same budget. */
   async update<T>(fn: (state: TurnState<Code>) => T): Promise<T> {
-    fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-    const started = Date.now();
-    for (;;) {
-      try {
-        fs.closeSync(fs.openSync(this.lock, "wx", 0o600));
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        try {
-          if (Date.now() - fs.statSync(this.lock).mtimeMs > 10_000) fs.rmSync(this.lock, { force: true });
-        } catch {
-          // released meanwhile
-        }
-        if (Date.now() - started > 15_000) throw new Error(`the budget in ${this.dir} stayed locked`);
-        await realSleep(20);
-      }
-    }
-    try {
+    return withFileLock(this.lock, () => {
       const now = this.now();
       let state = readJson<TurnState<Code>>(this.file);
       if (!state || state.v !== 1 || (this.scope.idleReset && now - state.touchedAt > LOCAL_TURN_IDLE_MS)) {
@@ -342,9 +359,7 @@ export class TurnStore<Code extends string = string> {
       state.touchedAt = now;
       writeFileAtomic(this.file, state);
       return result;
-    } finally {
-      fs.rmSync(this.lock, { force: true });
-    }
+    });
   }
 
   /** Removes other turns' files older than two days. */
@@ -453,15 +468,39 @@ export class WebFixturesError extends Error {}
 /** One hand-written answer. */
 export type WebFixtureAnswer = { status: number; headers: Record<string, string>; body: Buffer };
 
+/** What a request sends, for fixtures that answer a POST (a search API) by its JSON body. */
+export type WebFixtureRequest = { method?: "GET" | "POST"; body?: unknown };
+
 export type WebFixtures = {
   folder: string;
   /** Fixture DNS: the host's listed addresses, a public stand-in for a host that has pages, otherwise "does not resolve". */
   resolve: Resolver;
-  /** The answer to a GET of this address: its page, or a plain 404 for an address the fixtures do not list. */
-  answer(url: URL): WebFixtureAnswer;
+  /** The answer to a request of this address (a GET unless `request` says otherwise): its page, or a plain 404 for an
+   * address and method the fixtures do not list. */
+  answer(url: URL, request?: WebFixtureRequest): WebFixtureAnswer;
 };
 
-type FixtureEntry = { status?: unknown; type?: unknown; headers?: unknown; body?: unknown; file?: unknown };
+type FixtureEntry = {
+  status?: unknown;
+  type?: unknown;
+  headers?: unknown;
+  body?: unknown;
+  file?: unknown;
+  method?: unknown;
+  requestBody?: unknown;
+};
+
+/** JSON with its object keys sorted, so two bodies compare by content. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
 
 const FIXTURE_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -499,11 +538,15 @@ function fixtureKey(raw: string): string {
  *       "pages": { "https://news.example/a": { "file": "a.html" },
  *                  "https://news.example/robots.txt": { "body": "User-agent: *\nDisallow: /private", "type": "text/plain" },
  *                  "https://busy.example/": { "status": 429 },
- *                  "https://old.example/": { "status": 301, "headers": { "location": "https://news.example/a" } } } }
+ *                  "https://old.example/": { "status": 301, "headers": { "location": "https://news.example/a" } },
+ *                  "https://api.search.example/v1/search": [
+ *                    { "method": "POST", "requestBody": { "query": "ramen" }, "file": "ramen.json" } ] } }
  *
  * A page's body is `body` or the file `file` names inside the folder; its type follows the file's extension unless
- * `type` says otherwise (HTML by default). An address that is not listed answers 404 (so a missing robots.txt means no
- * rules), and a host with no page and no listed address does not resolve.
+ * `type` says otherwise (HTML by default). An entry answers a GET unless its `method` is "POST"; with `requestBody` it
+ * answers only a request whose JSON body has that content. An address may list several such entries; the first that
+ * matches answers. An address or method that is not listed answers 404 (so a missing robots.txt means no rules), and a
+ * host with no page and no listed address does not resolve.
  */
 export function loadWebFixtures(folder: string): WebFixtures {
   const root = (() => {
@@ -524,17 +567,24 @@ export function loadWebFixtures(folder: string): WebFixtures {
   if (!manifest || manifest.schema !== WEB_FIXTURES_SCHEMA || typeof manifest.pages !== "object" || manifest.pages === null) {
     throw new WebFixturesError(`${manifestFile} is not a ${WEB_FIXTURES_SCHEMA} file with "pages", so nothing was read.`);
   }
-  const pages = new Map<string, FixtureEntry>();
+  const pages = new Map<string, FixtureEntry[]>();
   const pageHosts = new Set<string>();
-  for (const [address, entry] of Object.entries(manifest.pages as Record<string, unknown>)) {
+  for (const [address, value] of Object.entries(manifest.pages as Record<string, unknown>)) {
     let key: string;
     try {
       key = fixtureKey(address);
     } catch {
       throw new WebFixturesError(`${manifestFile}: "${address.slice(0, 200)}" is not an address.`);
     }
-    if (!entry || typeof entry !== "object") throw new WebFixturesError(`${manifestFile}: the page ${key} is not an object.`);
-    pages.set(key, entry as FixtureEntry);
+    const entries = Array.isArray(value) ? value : [value];
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new WebFixturesError(`${manifestFile}: the page ${key} is not an object.`);
+      const method = (entry as FixtureEntry).method;
+      if (method !== undefined && method !== "GET" && method !== "POST") {
+        throw new WebFixturesError(`${manifestFile}: the page ${key} has a method other than GET or POST.`);
+      }
+    }
+    pages.set(key, entries as FixtureEntry[]);
     pageHosts.add(new URL(key).hostname.toLowerCase());
   }
   const hosts = new Map<string, string[]>();
@@ -569,9 +619,15 @@ export function loadWebFixtures(folder: string): WebFixtures {
       if (!listed) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host} (not in the fixtures)`), { code: "ENOTFOUND" });
       return listed.map((address) => ({ address, family: net.isIP(address) }));
     },
-    answer(url) {
+    answer(url, request = {}) {
       const key = fixtureKey(url.href);
-      const entry = pages.get(key);
+      const method = request.method ?? "GET";
+      const sent = request.body === undefined ? null : canonicalJson(request.body);
+      const entry = (pages.get(key) ?? []).find(
+        (candidate) =>
+          (candidate.method ?? "GET") === method &&
+          (candidate.requestBody === undefined || (sent !== null && canonicalJson(candidate.requestBody) === sent)),
+      );
       if (!entry) return { status: 404, headers: { "content-type": "text/plain; charset=utf-8" }, body: Buffer.from("not found") };
       const headers: Record<string, string> = {};
       if (entry.headers && typeof entry.headers === "object") {

@@ -46,8 +46,9 @@ export const MANUAL_CI_BASELINES = {
   // runs the preview check suites (local-site and site-check), and the Rust
   // tests aggregate gains a tunnel broker lane (complete tunnel-broker suite),
   // and the CLI lane runs the bound-sites binder suites (packages/instafy-bind
-  // and `instafy bind`) and the `instafy web read` suites (its offline fixtures included).
-  "build.yml": { sha256: "16f5f342788e817b16262c9522316fe71eebbd593f50c62494b2be2e4ee4fdc5" },
+  // and `instafy bind`) and the `instafy web read` suites (its offline fixtures included), and the
+  // `instafy web search` (with its fixture eval) and `instafy web link` suites.
+  "build.yml": { sha256: "0d69feacda02521afb92807c31d307eea07d8178fb84244d5276911d1ea34ec5" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper

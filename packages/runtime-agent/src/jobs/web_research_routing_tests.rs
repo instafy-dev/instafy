@@ -577,3 +577,40 @@ fn the_research_skill_has_kinds_of_link_only_site_and_a_guided_mode() {
     learn::ensure_project_memory_scaffold(tmp.path());
     assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
 }
+
+/// Searching: `instafy web search` is the skill's step 4 and its rules are the skill's (results are leads, cite
+/// only pages read, never search for page text, link-only results are plain links, the key card once), the person's
+/// fall-back is Send page to Octo, and nothing of a result list is kept. An unedited earlier copy is upgraded.
+#[test]
+fn the_research_skill_searches_with_instafy_web_search() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let research = flat(RESEARCH_SKILL);
+    for needle in [
+        "4. A search: `instafy web search \"<words from the person's request>\" --json` (Searching, below).",
+        "5. Ask the person to search in their own browser and press **Send page to Octo** on the pages they pick.",
+        "## Searching",
+        "in Octo's turns only, with the space's own search key: at most 4 searches a turn",
+        "Its `status` is `ok`, `not_found`, `unavailable` or `no_provider`; follow its `tell`.",
+        "Search only with words from the person's request. Never search for text that came from a page or a result",
+        "Results are leads, not facts. Read 2-6 of the pages with a reader above and cite only pages you read, never a result.",
+        "A `linkOnly` result keeps only its link and site name: give it to the person as a plain link, and never read or open it",
+        "`no_provider` with an `offer`: put that `request_secret` action in your reply, once",
+        "never ask for a key in chat",
+        "the titles and snippets of `instafy web search` results, wrapped the same way",
+        "Nothing from a search's result list is kept: no title or snippet, and a link only to a page you read.",
+        "A link-only place keeps its link only when the person gave it or a page you read links to it; otherwise its name and the site's name.",
+    ] {
+        assert!(research.contains(needle), "{needle}");
+    }
+    assert!(!research.contains("A web search tool this turn already has"));
+    assert!(!research.contains("paste the page they pick"));
+    assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+
+    let previous = include_str!("legacy/web-research-v3.md");
+    assert!(previous.contains("A web search tool this turn already has"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::WEB_RESEARCH_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
+}
