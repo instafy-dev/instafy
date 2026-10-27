@@ -12,6 +12,7 @@ import {
   MASKED_TEXT_SOURCE,
   PLACEHOLDER_SOURCE,
 } from "./personalBrowserRedaction";
+import { formSubmissionRulesInPage } from "./personalBrowserActionPolicy";
 
 const PERSONAL_BROWSER_ISOLATED_WORLD_ID = 987;
 
@@ -197,6 +198,8 @@ const PAGE_SECRET_SIGNAL_SCRIPT = `
     };
 `;
 
+const FORM_SUBMISSION_RULES_SOURCE = formSubmissionRulesInPage.toString();
+
 function buildPageScript(argumentsValue: unknown, body: string): string {
   return `(() => {
     "use strict";
@@ -224,6 +227,17 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         && style.pointerEvents !== "none";
     };
     ${PAGE_SECRET_SIGNAL_SCRIPT}
+    // The form submission a step makes, computed as the browser computes it:
+    // the submitter's formaction, formmethod, formenctype and formtarget, the
+    // default button for Enter, <base href> and <base target>. The Shared
+    // Browser runs the same rules. Without them a step is judged by the
+    // control's tag and type, and Enter submits nothing.
+    let formRules = null;
+    try {
+      formRules = (${FORM_SUBMISSION_RULES_SOURCE})();
+    } catch {
+      formRules = null;
+    }
     const forbiddenTarget = (element) => element.matches("iframe, frame, object, embed");
     const candidates = () => Array.from(document.querySelectorAll(interactiveSelector))
       .filter((element) => element.ownerDocument === document && !forbiddenTarget(element) && visible(element));
@@ -448,7 +462,19 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
       // Native controls can belong to a non-ancestor form, or explicitly have
       // no owner despite being inside one. Use the browser's resolved owner.
       const formCandidate = "form" in element ? element.form : element.closest("form");
-      const form = formCandidate instanceof HTMLFormElement ? formCandidate : null;
+      let submission = null;
+      try {
+        submission = formRules
+          ? formRules.submissionOf(element, formCandidate instanceof HTMLFormElement ? formCandidate : null)
+          : null;
+      } catch {
+        submission = null;
+      }
+      // The form the element's step submits, when it submits one: a label or
+      // a child of a submit button submits that button's form.
+      const form = submission?.form instanceof HTMLFormElement
+        ? submission.form
+        : formCandidate instanceof HTMLFormElement ? formCandidate : null;
       const formControls = form ? Array.from(form.elements || []) : [];
       const isSubmitControl = (control) => control.form === form && (
         (control instanceof HTMLButtonElement && control.type === "submit") ||
@@ -541,8 +567,22 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
             "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete", "onclick"]
             .some((name) => typeof link.getAttribute === "function" && link.getAttribute(name) !== null),
         download: link instanceof HTMLAnchorElement && typeof link.getAttribute === "function" && link.getAttribute("download") !== null,
-        formMethod: form ? clean(form.getAttribute("method") || "get", 16).toLowerCase() : "",
-        formActionUrl: form ? clean(typeof form.action === "string" ? form.action : form.getAttribute("action"), 4096) : "",
+        // The submission the step through this element makes (its own for a
+        // submit button, the implicit one for Enter in a field), or the
+        // form's own when its step submits nothing.
+        formMethod: submission
+          ? submission.method
+          : form ? clean(form.getAttribute("method") || "get", 16).toLowerCase() : "",
+        formActionUrl: submission
+          ? clean(submission.action, 4096)
+          : form ? clean(typeof form.action === "string" ? form.action : form.getAttribute("action"), 4096) : "",
+        formEnctype: submission ? submission.enctype : "",
+        formTarget: submission ? clean(submission.target, 200) : "",
+        formNewWindow: submission?.newWindow === true,
+        // Null when the rules could not run: the step is then judged by the
+        // control's tag and type.
+        formSubmission: submission ? submission.via : null,
+        formSubmits: submission?.submits === true,
         formHasPassword,
         formPasswordCount,
         signInIdentifier,
@@ -896,7 +936,25 @@ export async function pressPersonalBrowserTarget(
           cancelable: true,
           composed: true,
         };
+        // Where Enter or Space sends the form, as the step was judged. The
+        // page's keydown handlers run before the key's default: one that
+        // moves the submission (another default button, a new formaction,
+        // formmethod or formtarget) stops the key here, before anything is
+        // sent. One that only enables the judged default button changes none
+        // of it.
+        const submissionFacts = (item) => JSON.stringify([
+          item?.found, item?.formOwnerIdentity, item?.formSubmission, item?.formActionUrl,
+          item?.formMethod, item?.formEnctype, item?.formTarget, item?.formNewWindow,
+        ]);
+        const judgedSubmission = submissionFacts(guarded.item);
         const continueDefault = element.dispatchEvent(new KeyboardEvent("keydown", keyboardOptions));
+        if (continueDefault && (args.key === "Enter" || args.key === " ")) {
+          const current = descriptor(element);
+          if (submissionFacts(current) !== judgedSubmission) {
+            element.dispatchEvent(new KeyboardEvent("keyup", keyboardOptions));
+            return { pressed: false, targetChanged: true, descriptor: current };
+          }
+        }
         if (continueDefault) {
           const tag = guarded.item.tag;
           const role = guarded.item.role;
@@ -904,13 +962,28 @@ export async function pressPersonalBrowserTarget(
           const activationTarget = tag === "button" || tag === "a"
             || role === "button" || role === "link"
             || (tag === "input" && ["button", "submit", "image"].includes(type));
+          const keyButton = formRules && (args.key === "Enter" || args.key === " ")
+            ? formRules.keyActivatedButton(element)
+            : null;
           if (applyEditableDefault()) {
             // The equivalent trusted browser default is applied in this same
             // guarded renderer turn; native input is deliberately not queued.
           } else if ((args.key === "Enter" || args.key === " ") && activationTarget) {
             element.click();
-          } else if (args.key === "Enter" && element.form instanceof HTMLFormElement) {
-            element.form.requestSubmit();
+          } else if (keyButton) {
+            // Enter or Space on something inside a button clicks the button.
+            keyButton.click();
+          } else if (args.key === "Enter") {
+            // Implicit submission, as the browser runs it: Enter clicks the
+            // form's default button, a disabled one blocks it, and a form
+            // without a submit button submits itself only from its one text
+            // field. Not form.requestSubmit(), which skips the default
+            // button and its formaction, formmethod and formtarget.
+            const implicit = formRules ? formRules.implicitSubmission(element) : null;
+            if (implicit && !implicit.blocked) {
+              if (implicit.button) implicit.button.click();
+              else HTMLFormElement.prototype.requestSubmit.call(implicit.form);
+            }
           } else if (args.key === "Escape") {
             element.blur();
           } else if (args.key === "Tab") {

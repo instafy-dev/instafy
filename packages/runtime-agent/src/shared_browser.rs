@@ -53,14 +53,16 @@ const AGENT_CONTROL_TTL: Duration = Duration::from_secs(12);
 const AGENT_CONTROL_DISPLAY_NAME_MAX_BYTES: usize = 80;
 const SHARED_BROWSER_SCRIPT: &str = include_str!("../assets/shared-browser-cli.js");
 const SHARED_BROWSER_APPROVAL_SCRIPT: &str = include_str!("../assets/shared-browser-approval.js");
-// Redaction, step classification and the page's secret checks, shared with
-// the Desktop Personal Browser. The package holds plain scripts, so the source
-// is embedded as-is.
+// Redaction, step classification, the page's secret checks and the form
+// submission a step makes, shared with the Desktop Personal Browser. The
+// package holds plain scripts, so the source is embedded as-is.
 const BROWSER_REDACTION_SCRIPT: &str = include_str!("../../browser-action-policy/redaction.js");
 const BROWSER_ACTION_POLICY_SCRIPT: &str =
     include_str!("../../browser-action-policy/actionPolicy.js");
 const BROWSER_PAGE_CAPTURE_SCRIPT: &str =
     include_str!("../../browser-action-policy/pageCapture.js");
+const BROWSER_FORM_SUBMISSION_SCRIPT: &str =
+    include_str!("../../browser-action-policy/formSubmission.js");
 // The sites the web-research skill keeps link-only. Octo never opens them in
 // any tab; the controller enforces the skill's list, it does not own it. The
 // matching (wrappers, host spelling) is the package's linkOnly.js, which
@@ -2377,10 +2379,11 @@ fn controller_failure(status: std::process::ExitStatus, stderr: &[u8]) -> anyhow
 
 fn embedded_shared_browser_script() -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{SHARED_BROWSER_APPROVAL_SCRIPT}\n{SHARED_BROWSER_SCRIPT}",
         embedded_plain_script(BROWSER_REDACTION_SCRIPT),
         embedded_plain_script(BROWSER_ACTION_POLICY_SCRIPT),
         embedded_plain_script(BROWSER_PAGE_CAPTURE_SCRIPT),
+        embedded_plain_script(BROWSER_FORM_SUBMISSION_SCRIPT),
         embedded_plain_script(BROWSER_LINK_ONLY_SCRIPT),
         embedded_link_only_sites(),
     )

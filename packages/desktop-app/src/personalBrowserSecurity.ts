@@ -9,6 +9,7 @@ import {
   classifyStep,
   isEditable as isPolicyEditable,
   isSearchField as isPolicySearchField,
+  stepSubmission,
   type PersonalBrowserStep,
   type PersonalBrowserStepClassification,
   type PersonalBrowserStepContext,
@@ -93,8 +94,26 @@ export type PersonalBrowserActionDescriptor = {
   /** The clicked element is the link itself, not a child inheriting its address. */
   linkSelf?: boolean;
   download?: boolean;
+  /**
+   * The submission the element's step makes, as the browser computes it: its
+   * own for a submit button (formaction, formmethod, formenctype, formtarget
+   * included), the implicit one through the default button for Enter in a
+   * field, or the form's own when the step submits nothing.
+   */
   formMethod?: string | null;
   formActionUrl?: string | null;
+  formEnctype?: string | null;
+  /** The target as written; "" for none. */
+  formTarget?: string | null;
+  /** The submission opens another window. */
+  formNewWindow?: boolean;
+  /**
+   * "button": a click (or Enter or Space on the button) submits; "implicit": Enter submits;
+   * "nested": both, possibly to different places (a field inside a submit button); "": nothing.
+   */
+  formSubmission?: string | null;
+  /** The browser sends the submission; false when a disabled default button or the form's fields block it. Not part of the fingerprint. */
+  formSubmits?: boolean;
   formHasPassword?: boolean;
   /** Number of password fields in the owning form. */
   formPasswordCount?: number;
@@ -150,6 +169,10 @@ export const PERSONAL_BROWSER_SECURITY_FINGERPRINT_FIELDS = [
   "download",
   "formMethod",
   "formActionUrl",
+  "formEnctype",
+  "formTarget",
+  "formNewWindow",
+  "formSubmission",
   "formHasPassword",
   "formFieldCount",
   "areas",
@@ -573,6 +596,23 @@ export function personalBrowserActivationRequiresConfirmation(
     // script-driven controls unless they are structurally free.
     classifyPersonalBrowserStep("click", value).verdict === "ask"
   );
+}
+
+/**
+ * The form submission a step makes, from the page bridge's descriptor: the
+ * address it is sent to (null for a dialog, which sends nothing), its method
+ * and whether it opens another window. A click, Enter or Space on a submit
+ * button submits with that button; Enter in a field of a form, or typing with
+ * submit, submits through the form's default button. `nested` marks a field
+ * inside a submit button, which a click and Enter send in different ways.
+ * Null for every other step.
+ */
+export function personalBrowserStepFormSubmission(
+  descriptor: PersonalBrowserActionDescriptor,
+  step: "click" | "press" | "submit",
+  key = "",
+): { action: string | null; method: string; newWindow: boolean; nested: boolean } | null {
+  return stepSubmission(descriptor, step, key);
 }
 
 export function isPersonalBrowserActivationKey(key: string): boolean {
