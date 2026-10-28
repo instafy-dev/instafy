@@ -161,6 +161,29 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(container.querySelector('[data-testid="shared-browser-approval-routine"]')).toBeNull();
   });
 
+  it.each([false, true])("wraps keyboard focus inside the prompt with routine consent available: %s", async (routineApprovalAvailable) => {
+    const onDecision = vi.fn();
+    await act(async () => root.render(
+      <SharedBrowserApprovalPrompt routineApprovalAvailable={routineApprovalAvailable} onDecision={onDecision} request={originRequest} submitting={false} />,
+    ));
+    const first = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-approval-routine"]')
+      ?? container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-deny"]')!;
+    const last = container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-allow"]')!;
+    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    await act(async () => {
+      last.focus();
+      last.dispatchEvent(tab);
+    });
+    expect(tab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+
+    const shiftTab = new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true });
+    await act(async () => first.dispatchEvent(shiftTab));
+    expect(shiftTab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(last);
+    expect(onDecision).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["type", "Search", "type into “Search”"],
     ["form-submit", "Email", "submit the form from “Email”"],
@@ -193,12 +216,14 @@ describe("SharedBrowserApprovalPrompt", () => {
   });
 
   it("keeps both decisions disabled while a decision is being written", async () => {
+    const onDecision = vi.fn();
     await act(async () => {
       root.render(
         <SharedBrowserApprovalPrompt
           error="The request changed."
-          onDecision={vi.fn()}
+          onDecision={onDecision}
           request={originRequest}
+          routineApprovalAvailable
           submitting
         />,
       );
@@ -207,6 +232,16 @@ describe("SharedBrowserApprovalPrompt", () => {
     const buttons = Array.from(container.querySelectorAll("button"));
     expect(buttons).toHaveLength(2);
     expect(buttons.every((button) => button.disabled)).toBe(true);
+    const checkbox = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-approval-routine"]')!;
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => {
+      checkbox.click();
+      buttons.forEach((button) => button.click());
+      container.querySelector('[data-testid="shared-browser-approval-scrim"]')
+        ?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(checkbox.checked).toBe(false);
+    expect(onDecision).not.toHaveBeenCalled();
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       "The request changed.",
     );
