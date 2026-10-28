@@ -1,4 +1,0 @@
----
----
-
-The pinned `interactive-map` skill pack is now `instafy-dev/maps-skill-pack` v0.1.6, with the map fixes from the 28 Oct drive. "3 days in Lisbon … what to see each day" follows the pack's trip guide: a plan with days grouped by area and places to stay, and `uw validate` fails while a stop asked for with nights has no plan. With no stay found, the area to stay in is pinned as a labelled recommendation, never as a hotel. Place cards and the Places list say "Neighbourhood" or "Area" instead of OpenStreetMap's classes, and map data reads "Map data © OpenStreetMap" instead of the search that found it. `uw add-point` and `uw set` take `--props-file` (`-` reads stdin), so a name with an apostrophe no longer breaks a command. The pack's reply rules leave out lookup services, commands and exit codes. No package changes.
