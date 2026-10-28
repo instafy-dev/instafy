@@ -56,6 +56,24 @@ describe("space launcher team creation", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("suggests the preferred team only where this person can add spaces to it", async () => {
+    mocks.list.mockResolvedValue([
+      { id: "build-team", name: "Build", slug: "build", role: "builder" },
+      { id: "watch-team", name: "Watch", slug: "watch", role: "viewer" },
+    ]);
+    const select = () => container.querySelector('[data-testid="project-launcher-org-select"]');
+    const launcher = (preferredOrgId: string) => (
+      <ProjectLauncher open preferredOrgId={preferredOrgId} onClose={vi.fn()} onCreateBlank={vi.fn()} onCreateFromGithub={vi.fn()} />
+    );
+    // A phone's New space names the team on screen, whatever this person's role in it.
+    await act(async () => root.render(launcher("watch-team")));
+    await act(async () => {});
+    expect(readSelectValue(select())).not.toBe("watch-team");
+    await act(async () => root.render(launcher("build-team")));
+    await act(async () => {});
+    expect(readSelectValue(select())).toBe("build-team");
+  });
+
   it("gives Create a new space and New team the same Cancel as Studio's other dialogs", async () => {
     await act(async () => root.render(<ProjectLauncher open onClose={vi.fn()} onCreateBlank={vi.fn()} onCreateFromGithub={vi.fn()} />));
     await chooseSelectValue(container.querySelector('[data-testid="project-launcher-org-select"]'), "new");

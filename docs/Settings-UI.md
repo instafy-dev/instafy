@@ -415,9 +415,10 @@ opening navigation keeps Home, team and space identities at the same leading pos
 The space picker uses the same compact list on desktop, mobile and inline navigation. Each row
 has a small identity icon, a name, an optional unread count and a trailing current-space checkmark.
 Recent spaces stay alphabetically ordered; **Browse all spaces** remains below the list, and
-**New space** is the last item. New team and Create a new space end in the same footer as the
-Stop and Take over confirmations (`StudioDialogFooter`): a quiet `ghost` `form`-preset Cancel
-beside the `primary` `form`-preset action, so Cancel looks the same in every dialog.
+**New space** is the last item. New team and Create a new space end in the shared
+`StudioDialogFooter` with the actions the Stop and Take over confirmations use: a quiet `ghost`
+`form`-preset Cancel beside the `primary` `form`-preset action, so Cancel looks the same in every
+dialog. Create a new space suggests the team on screen only where this person can add spaces.
 On mobile, browsing all spaces replaces the navigation sheet’s root toolbar with one Spaces
 header: Back, Search spaces, current-space settings and New space. Back restores the root
 toolbar and its chat actions; the two scopes do not show competing search/plus controls.

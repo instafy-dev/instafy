@@ -33,6 +33,11 @@ export interface ProjectLauncherProps {
   ) => Promise<{ success: boolean; error?: string | null }> | { success: boolean; error?: string | null };
 }
 
+/** Team roles that can add spaces. An unknown role is left to the server to judge. */
+function canAddSpaces(role: string | null | undefined): boolean {
+  return !role || ["owner", "admin", "builder"].includes(role);
+}
+
 export function ProjectLauncher({
   open,
   preferredOrgId = null,
@@ -112,7 +117,9 @@ export function ProjectLauncher({
       controllerClient.organizations.list()
         .then((list) => {
           setOrgs(list);
-          if (preferredOrgId && list.some((org) => org.id === preferredOrgId)) {
+          // Suggest the team on screen only where this person can add
+          // spaces; a viewer picks a team of their own instead.
+          if (preferredOrgId && list.some((org) => org.id === preferredOrgId && canAddSpaces(org.role))) {
             setSelectedOrgId(preferredOrgId);
           } else if (list.length === 1) {
             setSelectedOrgId(list[0].id);
