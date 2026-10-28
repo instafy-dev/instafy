@@ -991,9 +991,12 @@ new-tab page (`chrome://newtab/` or `chrome://new-tab-page/`). `status` and
 `snapshot` report these pages as `blank: true` with a constant, empty
 observation: nothing is read from the page, no origin is approved, no action can
 target it, and the observation is not written to the action log, so it is not
-evidence of browser work. A turn that stops on a blank page is retried once with
-the instruction to call `navigate` with the task's address, which asks for that
-site's approval as usual. Every other page without an http(s) origin (`data:`,
+evidence of browser work. The agent's policy, the blank observation itself and
+the retry all tell it to call `navigate` first: with the address the task names,
+or, when the task names none (a research or comparison card carries no address),
+with the official site of what the task is about. A turn that stops on a blank
+page is retried once with that instruction, and `navigate` asks for the site's
+approval as usual. Every other page without an http(s) origin (`data:`,
 `about:srcdoc`, a blank page with a fragment, other browser-internal pages)
 still fails closed with `[origin_not_approvable]`. That error is not a consent
 decision and does not end the run; it tells the agent to navigate first. Neither
@@ -1008,7 +1011,9 @@ event from another MCP server, a status-only narration, or prose success is not
 accepted. Missing evidence gets one browser-specific retry that again requires
 the bounded server and a fresh snapshot. If the retry still has no instrumented
 action evidence, the job fails closed instead of presenting an unverified prose
-success.
+success. The person reads one plain sentence for it ("Octo couldn't open a page
+in the browser, so this turn stopped."); the artifact beside it keeps the
+machine-readable reason.
 
 Page content is untrusted. Browser-only turns therefore have no local execution
 environment, project MCP servers, web search, plugins, image generation, child

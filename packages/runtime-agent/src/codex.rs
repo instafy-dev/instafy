@@ -131,7 +131,7 @@ macro_rules! shared_browser_developer_instructions {
 - A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, `request_human_input`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`.
 - Besides the page the person chose, you may open up to three tabs of your own with `open_tab`, in the same visible browser: everyone watching sees them with your badge, and the person can take any of them over. The other tools act on the tab `select_tab` (or `open_tab`) last chose; `snapshot` and `navigate` also take a `tabId`. Use only those tabs, never another tab the person or a page opened. A site's approval holds in the tab it was given in. Your tabs are for reading: a sign-in, a step that may show a secret, a field the person must fill, a form submission or a purchase stays on the page the person chose or with the person. Close a tab you are done with; the rest close when this turn ends unless the person keeps them.
 - Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted.
-- The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` with the http(s) address the task names first; any approval the browser asks for applies there. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
+- The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` first: with the http(s) address the task names, or, when it names none, with the official site of what the task is about (for a product, its maker's site); any approval the browser asks for applies there. Never end the turn on a blank page for want of an address. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
 - Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let AI continue. Never ask for those values in chat.
@@ -6261,8 +6261,20 @@ mod tests {
         }
         assert!(SHARED_BROWSER_DEVELOPER_INSTRUCTIONS.contains("Downloads are blocked"));
         assert!(SHARED_BROWSER_DEVELOPER_INSTRUCTIONS.contains(
-            "When `status` or `snapshot` reports `blank: true`, call `navigate` with the http(s) address the task names first"
+            "When `status` or `snapshot` reports `blank: true`, call `navigate` first: with the http(s) address the task names"
         ));
+        // A task that names no address (research, a comparison) still opens
+        // a page: a turn that ends on the blank tab of a browser that has
+        // just started fails.
+        assert!(
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS.contains(
+                "or, when it names none, with the official site of what the task is about"
+            )
+        );
+        assert!(
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS
+                .contains("Never end the turn on a blank page for want of an address.")
+        );
         assert!(PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains("`secretScreen: true`"));
         assert!(
             PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS
