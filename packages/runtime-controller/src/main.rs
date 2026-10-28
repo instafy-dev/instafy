@@ -99,6 +99,8 @@ mod tests_ai_metering_schema;
 #[cfg(test)]
 mod tests_browser_host;
 #[cfg(test)]
+mod tests_browser_view_lane;
+#[cfg(test)]
 mod tests_chat_attachment_lease;
 #[cfg(test)]
 mod tests_chat_attachment_policies;

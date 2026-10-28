@@ -1849,7 +1849,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     goBackInSharedBrowser,
     goForwardInSharedBrowser,
     reloadSharedBrowserPage,
-    keepSharedBrowserPage,
     setPendingBrowserLaunchMode,
   } = useChatComposerBrowserTargeting({
     activeConversationId,
@@ -1930,13 +1929,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       onFocusPage: (pageId) => {
         void handleSelectBrowserSessionPage(pageId);
       },
-      onKeepPage: (pageId) => {
-        void keepSharedBrowserPage(pageId);
-      },
       onClearError: clearSharedBrowserCommandError,
     };
   }, [
-    keepSharedBrowserPage,
     clearSharedBrowserCommandError,
     compactBrowserBar,
     goBackInSharedBrowser,
@@ -6635,6 +6630,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     conversationRuntimeId={effectiveRuntimeId ?? null}
                     spaceBusy={spaceRunActive}
                     runApproval={browserRunApproval}
+                    conversationId={activeConversationId ?? null}
                   />
                 </div>
               ) : null}

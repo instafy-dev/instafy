@@ -9,6 +9,7 @@ pub use browser_approval::MAX_APPROVAL_LIFETIME_MS as SHARED_BROWSER_MAX_APPROVA
 pub mod browser_collaboration;
 pub mod browser_host;
 pub mod browser_page_capture;
+mod browser_rfb_view;
 pub mod browser_screencast;
 pub mod browser_webrtc;
 mod checkout_versions;

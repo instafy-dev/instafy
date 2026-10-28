@@ -55,6 +55,11 @@ export type RuntimeBrowserSessionCapabilities = {
   rfb: {
     renderScale: number;
     maxFramebufferPixels: number;
+    /**
+     * The runtime serves a view-only RFB lane (`browser/vnc/view`): a person
+     * who does not drive still sees the page, with their input dropped.
+     */
+    viewOnly?: boolean;
   } | null;
   webrtc: {
     relayOnly: boolean;
@@ -435,7 +440,7 @@ export function mapRuntimeBrowserSessionCapabilitiesPayload(
     viewportOnly: record.viewportOnly === true,
     rfb:
       renderScale && maxFramebufferPixels
-        ? { renderScale, maxFramebufferPixels }
+        ? { renderScale, maxFramebufferPixels, ...(rawRfb?.viewOnly === true ? { viewOnly: true } : {}) }
         : null,
     webrtc: iceServers && relayOnly !== null ? { iceServers, relayOnly } : null,
     controls: {
