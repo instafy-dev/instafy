@@ -6,7 +6,9 @@
 // read's tell names the "www." address, which does. It passes every check with a search key and without one (then the
 // reviews come from a publisher's own page), and each way of breaking a rule (an invented price, a sibling model's
 // review counted, a filter that lets an unknown price through, a dash for a value, the 28 Oct drive's turn that asked
-// for a key and the browser and built nothing) fails exactly the checks for that rule.
+// for a key and the browser and built nothing) fails exactly the checks for that rule. When the maker's site never
+// answers (the third 28 Oct drive), the turn reads a review publisher's own page and lists every model it names, each
+// price unknown and never within the limit; the drive's turn (the maker's site only, then a page with no rows) fails.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,10 +41,14 @@ type Transcript = Record<string, any>;
 type Edit = (t: Transcript, change: (data: any, dir: string) => void) => Transcript;
 type Breaker = [string, (t: Transcript, k: Kase, edit: Edit) => Transcript, string[]];
 
-const { CASE, BREAKERS, NO_PROVIDER_BREAKERS, failedIds, gradeCompare, referenceAnswer, referencePage, referenceReply, reviewsAsked, writeCompareFixtures } = evalKit as {
+const { CASE, OFFICIAL_DOWN_CASE, BREAKERS, NO_PROVIDER_BREAKERS, OFFICIAL_DOWN_BREAKERS, failedIds, gradeCompare, officialDownPage, officialDownReply, referenceAnswer, referencePage, referenceReply, reviewsAsked, writeCompareFixtures } = evalKit as {
   CASE: Kase;
+  OFFICIAL_DOWN_CASE: Kase;
   BREAKERS: Breaker[];
   NO_PROVIDER_BREAKERS: Breaker[];
+  OFFICIAL_DOWN_BREAKERS: Breaker[];
+  officialDownPage: (kase: Kase, readAt: string) => Record<string, any>;
+  officialDownReply: (kase: Kase, readAt: string, o: { links: Record<string, string> }) => string;
   failedIds: (checks: Check[]) => string[];
   gradeCompare: (transcript: Transcript, kase?: Kase) => Check[];
   referenceAnswer: (kase: Kase, hostname: string) => unknown;
@@ -54,11 +60,13 @@ const { CASE, BREAKERS, NO_PROVIDER_BREAKERS, failedIds, gradeCompare, reference
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-web-compare-eval-"));
 const FIXTURES = path.join(tmp, "fixtures");
+const FIXTURES_DOWN = path.join(tmp, "fixtures-official-down");
 const START = Date.parse("2026-10-27T09:00:00Z");
 const KEY = "BSAcomparekey00fixtureonly3";
 
 beforeAll(() => {
   writeCompareFixtures(FIXTURES);
+  writeCompareFixtures(FIXTURES_DOWN, OFFICIAL_DOWN_CASE);
 });
 afterAll(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -72,24 +80,18 @@ const wikimedia: SearchTransport = async (request) => ({
 });
 
 let turnNo = 0;
-/**
- * The reference turn: reference search for the brand's official site, the maker's pages (the latest models, then each
- * model's page), with a key one search per model for its reviews and one for the S8's price, the reviews and the shop
- * page those searches found (never the link-only hit, the poisoned one, a sibling model's review or the maker's own),
- * a guided link to the link-only shop for each price that could not be read, and the page built with the compare
- * starter.
- */
-async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
+/** One turn's real readers on a fixture folder: `read` and `search` record what they did, as a transcript keeps it. */
+function startTurn(fixtures: string, { key }: { key: boolean }) {
   turnNo += 1;
-  let clock = START + turnNo * 3_600_000;
+  const time = { clock: START + turnNo * 3_600_000 };
   const env: NodeJS.ProcessEnv = {
-    INSTAFY_WEB_FIXTURES: FIXTURES,
-    INSTAFY_TURN_STARTED_AT: new Date(clock).toISOString(),
-    INSTAFY_TURN_DEADLINE: new Date(clock + 600_000).toISOString(),
+    INSTAFY_WEB_FIXTURES: fixtures,
+    INSTAFY_TURN_STARTED_AT: new Date(time.clock).toISOString(),
+    INSTAFY_TURN_DEADLINE: new Date(time.clock + 600_000).toISOString(),
     INSTAFY_PROJECT_ID: `compare-${turnNo}`,
     ...(key ? { BRAVE_SEARCH_API_KEY: KEY } : {}),
   };
-  const common = { now: () => clock, skillRoots: [] as string[], env, cwd: tmp };
+  const common = { now: () => time.clock, skillRoots: [] as string[], env, cwd: tmp };
   const searches: Transcript[] = [];
   const reads: Transcript[] = [];
   const findings: Transcript[] = [];
@@ -98,7 +100,7 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
     stateDir: path.join(tmp, "read-state", String(turnNo)),
     cacheDir: null,
     sleep: async (ms: number) => {
-      clock += ms;
+      time.clock += ms;
     },
   };
   const read = async (urls: string[], find?: string) => {
@@ -109,15 +111,30 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
     }
     return report;
   };
+  const searchState = path.join(tmp, "search-state", String(turnNo));
+  /** The official site, from the open reference search (no key; its answers come from the test transport). */
+  const officialSite = async (kase: Kase) => {
+    const { INSTAFY_WEB_FIXTURES: _fixtures, ...openEnv } = env;
+    const reference = await webSearch(
+      { query: kase.brand, chain: "reference-search" },
+      { ...common, env: openEnv, stateDir: searchState, resolve: async () => [{ address: "185.15.59.224", family: 4 }], transport: wikimedia },
+    );
+    searches.push({ query: reference.query, chain: "reference-search", status: reference.status, results: reference.results });
+    return reference.results.find((r) => r.provider === "wikidata-official-site")!.url;
+  };
+  return { env, common, searches, reads, findings, read, searchState, officialSite };
+}
 
-  // The official site, from the open reference search (no key; its answers come from the test transport).
-  const { INSTAFY_WEB_FIXTURES: _fixtures, ...openEnv } = env;
-  const reference = await webSearch(
-    { query: CASE.brand, chain: "reference-search" },
-    { ...common, env: openEnv, stateDir: path.join(tmp, "search-state", String(turnNo)), resolve: async () => [{ address: "185.15.59.224", family: 4 }], transport: wikimedia },
-  );
-  searches.push({ query: reference.query, chain: "reference-search", status: reference.status, results: reference.results });
-  const official = reference.results.find((r) => r.provider === "wikidata-official-site")!.url;
+/**
+ * The reference turn: reference search for the brand's official site, the maker's pages (the latest models, then each
+ * model's page), with a key one search per model for its reviews and one for the S8's price, the reviews and the shop
+ * page those searches found (never the link-only hit, the poisoned one, a sibling model's review or the maker's own),
+ * a guided link to the link-only shop for each price that could not be read, and the page built with the compare
+ * starter.
+ */
+async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
+  const { env, common, searches, reads, findings, read, searchState, officialSite } = startTurn(FIXTURES, { key });
+  const official = await officialSite(CASE);
   expect(official).toBe(CASE.wikidata.website);
   // Wikidata records the bare domain, which does not answer; the read's tell names the www. address, read once.
   const bare = await read([official]);
@@ -133,7 +150,7 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
   let offer: Transcript | null = null;
   const queries = key ? [...CASE.items.map((i) => `${i.name} reviews`), `${CASE.items[0]!.name} price`] : [`${CASE.items[0]!.name} reviews`];
   for (const query of queries) {
-    const search = await webSearch({ query }, { ...common, stateDir: path.join(tmp, "search-state", String(turnNo)) });
+    const search = await webSearch({ query }, { ...common, stateDir: searchState });
     searches.push({ query: search.query, status: search.status, results: search.results, tell: search.tell, ...(search.offer ? { offer: search.offer } : {}) });
     if (search.status === "no_provider") {
       offer = search.offer ?? null;
@@ -173,6 +190,45 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
   initSite(site, { starter: "compare" });
   fs.writeFileSync(path.join(site, "data.json"), JSON.stringify(referencePage(CASE, readAt, { key }), null, 2));
   return { searches, reads, findings, links: links.map(({ slug: _slug, ...l }) => l), reply, site, actions: offer ? [offer] : [] };
+}
+
+/**
+ * The maker's site never answers (the third 28 Oct drive): its address from reference search and the www. one, each
+ * tried once; the search, which has no key; then an independent source, a review publisher's own page, which names the
+ * three latest models and links a review of each; those reviews; a guided link per price; and the page built with the
+ * compare starter: a row per model, each price unknown.
+ */
+async function officialDownTurn(): Promise<Transcript> {
+  const kase = OFFICIAL_DOWN_CASE;
+  const { env, common, searches, reads, findings, read, searchState, officialSite } = startTurn(FIXTURES_DOWN, { key: false });
+  const official = await officialSite(kase);
+  const bare = await read([official]);
+  expect(bare.pages[0]).toMatchObject({ status: "failed", code: "unreachable" });
+  const www = wwwSibling(new URL(official))!.href;
+  const second = await read([www]);
+  expect(second.pages[0]).toMatchObject({ status: "failed", code: "unreachable" });
+  const search = await webSearch({ query: `${kase.brand} robot vacuums reviews` }, { ...common, stateDir: searchState });
+  searches.push({ query: search.query, status: search.status, results: search.results, tell: search.tell, ...(search.offer ? { offer: search.offer } : {}) });
+  expect(search.status).toBe("no_provider");
+  // Two failures on the official site: an independent source before building. Its links name the candidates.
+  const hub = (await read([kase.hubs[0]!.url], `"${kase.brand}"`)).pages[0]!;
+  expect(hub.status).toBe("read");
+  const pick = (hub.links ?? []).filter((l) => / review\b/i.test(l.text) && kase.items.some((i) => l.text.toLowerCase().startsWith(`${i.name.toLowerCase()} review`)));
+  expect(pick).toHaveLength(kase.items.length);
+  await read(pick.map((l) => l.href));
+  const links: Record<string, string> = {};
+  const guided: Transcript[] = [];
+  for (const item of kase.items) {
+    const g = webLink("amazon", { query: item.name }, { skillRoots: [], env, cwd: tmp });
+    if (g.ok === false) throw new Error(g.error);
+    links[item.slug] = g.link;
+    guided.push({ site: "amazon", query: item.name, link: g.link });
+  }
+  const readAt = findings[0]!.readAt;
+  const site = path.join(tmp, "sites", `compare-${turnNo}`);
+  initSite(site, { starter: "compare" });
+  fs.writeFileSync(path.join(site, "data.json"), JSON.stringify(officialDownPage(kase, readAt), null, 2));
+  return { searches, reads, findings, links: guided, reply: officialDownReply(kase, readAt, { links }), site, actions: search.offer ? [search.offer] : [] };
 }
 
 let edits = 0;
@@ -257,6 +313,30 @@ describe("the shopping comparison eval (fixtures)", () => {
     }
   });
 
+  it("the maker's site never answers: the turn reads a review publisher's pages and lists every model, prices unknown; the drive's turn fails", async () => {
+    const reference = await officialDownTurn();
+    // both of the maker's addresses failed, then an independent source and the reviews it links were read
+    expect(reference.reads.slice(0, 2)).toEqual([
+      { url: OFFICIAL_DOWN_CASE.wikidata.website, status: "failed", code: "unreachable" },
+      { url: OFFICIAL_DOWN_CASE.official.url, status: "failed", code: "unreachable" },
+    ]);
+    expect(reference.reads.slice(2).map((r: Transcript) => [new URL(r.url).host, r.status])).toEqual([
+      ["www.review-one.example", "read"],
+      ["www.review-one.example", "read"],
+      ["www.review-one.example", "read"],
+      ["www.review-one.example", "read"],
+    ]);
+    // a row per model, each price unknown and listed apart from the limit
+    const data = JSON.parse(fs.readFileSync(path.join(reference.site, "data.json"), "utf8"));
+    expect(data.items.map((row: Transcript) => row.name)).toEqual(OFFICIAL_DOWN_CASE.items.map((i) => i.name));
+    const checks = gradeCompare(reference, OFFICIAL_DOWN_CASE);
+    expect(failedIds(checks), JSON.stringify(checks.filter((c) => !c.pass))).toEqual([]);
+    for (const [what, breakIt, expected] of OFFICIAL_DOWN_BREAKERS) {
+      const result = gradeCompare(breakIt(clone(reference), OFFICIAL_DOWN_CASE, edit), OFFICIAL_DOWN_CASE);
+      expect(failedIds(result), `${what}: ${JSON.stringify(result.filter((c) => !c.pass))}`).toEqual([...expected].sort());
+    }
+  });
+
   it("grades by rules the skills and the starter state", () => {
     const flat = (s: string) => s.replace(/\s+/g, " ");
     const skills = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../runtime-agent/assets/instafy/.agents/skills");
@@ -269,7 +349,9 @@ describe("the shopping comparison eval (fixtures)", () => {
       "never a remembered or guessed price",
       "that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count)",
       "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page.",
-      "an item without a price read this turn is never listed or described as within it",
+      "an item with no price read this turn is listed as \"price unknown\", never as within it",
+      "The official site failed twice: read at least one independent source (a review, or a shop robots.txt allows) before building.",
+      "each fact not read marked unknown with why. A row per candidate found.",
       "and an item's name as its official page gives it",
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5.",
       "reviews from publishers you know review this kind of item.",
@@ -285,6 +367,7 @@ describe("the shopping comparison eval (fixtures)", () => {
       "never a blank or a dash",
       "an item whose value is unknown is listed apart (\"Price unknown\"), never as within it, on the page, in the lede and in the reply",
       "`site.byFilter`",
+      "A candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty (\"No options yet\") while a page you read named what to compare.",
     ]) {
       expect(hub, rule).toContain(rule);
     }
