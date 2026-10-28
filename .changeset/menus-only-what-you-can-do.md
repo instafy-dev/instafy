@@ -1,0 +1,4 @@
+---
+---
+
+Studio's menus list only what can be done now. The composer's **+** menu no longer shows **Queue message** and **Stash draft** as disabled rows: they appear once there is a draft they can take. The "Enter sends or steers · ⇧Enter adds a line" tip is gone; the send button already says what Enter does. **Expand draft** appears once the draft has words or pictures, and **Ask AI for a new tab** only while a browser is open, so an empty chat's menu goes from 11 entries to 6. The space switcher ends with **New space**, which opens the same "Create a new space" dialog as Browse all spaces → New space, suggesting the current team when you can add spaces to it (the rail's **+** stays **New team**). New team and Create a new space use the shared dialog footer, so their Cancel is the same quiet button as in Studio's other dialogs. No package changes.

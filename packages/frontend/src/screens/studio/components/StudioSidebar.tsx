@@ -1118,6 +1118,8 @@ export function StudioSidebar({
     onOpenOverview={openSelectedTeam}
     onOpenSettings={activeOrgKey !== "personal" && onOpenOrgSettings ? openSelectedTeamSettings : undefined}
   />;
+  const selectedTeamRole = controllerOrgs.find((org) => org.id === activeOrgKey)?.role;
+  const canCreateSelectedTeamSpace = activeOrgKey === "personal" || ["owner", "admin", "builder"].includes(selectedTeamRole ?? "");
   const spaceControl = (
     <StudioRecentSpaces
       key={JSON.stringify([activeTeamUserKey, activeOrgKey, activePanel, navigationPresentation, externalHeader])}
@@ -1133,6 +1135,13 @@ export function StudioSidebar({
         runDestination(() => performProjectSwitch(id));
       }}
       onBrowseAll={() => { onNavigationHeaderAction?.(); openWorkspaceSwitcher("spaces"); }}
+      // The same "Create a new space" dialog as Browse all spaces → New space.
+      // It suggests this team when this person can add spaces to it.
+      onNewSpace={onStartNewProject ? () => {
+        onNavigationHeaderAction?.();
+        resetWorkspaceSwitcher();
+        runDestination(() => onStartNewProject(canCreateSelectedTeamSpace && activeOrgKey !== "personal" ? activeOrgKey : null));
+      } : undefined}
       presentation={pathControls ? "path" : "inline"}
       compactPath={mobileSheet}
       collapsed={!externalHeader && !showLabels}
@@ -1151,8 +1160,6 @@ export function StudioSidebar({
     <span aria-hidden="true" className="pointer-events-none shrink-0 text-sm text-slate-400 dark:text-slate-500">/</span>
     <div className="sidebar-path-space flex min-w-0 flex-1">{spaceControl}</div>
   </div>;
-  const selectedTeamRole = controllerOrgs.find((org) => org.id === activeOrgKey)?.role;
-  const canCreateSelectedTeamSpace = activeOrgKey === "personal" || ["owner", "admin", "builder"].includes(selectedTeamRole ?? "");
 
   const externalSpaceHeader = workspaceSwitcherMode === "spaces" && (!isLargeScreen || !!workspaceSwitcherHeaderPortalTarget);
   const workspaceSwitcherSections = (

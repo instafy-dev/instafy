@@ -249,6 +249,15 @@ describe("StudioMobileContextHeader", () => {
     expect(props.onSwitchTeam).not.toHaveBeenCalled();
   });
 
+  it("ends the phone's space switcher with New space", async () => {
+    const onNewSpace = vi.fn();
+    await render({ ...props, onNewSpace });
+    await click("sidebar-space-button");
+    await click("sidebar-recent-spaces-new");
+    expect(onNewSpace).toHaveBeenCalledOnce();
+    expect(props.onBrowseSpaces).not.toHaveBeenCalled();
+  });
+
   it("opens the team chooser directly, including when settings are unavailable", async () => {
     await render();
     await click("sidebar-team-menu-trigger");

@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type RefObject } from "react";
 import { DialogTrigger, Heading } from "react-aria-components";
-import { Check, Folder } from "iconoir-react";
+import { Check, Folder, Plus } from "iconoir-react";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button } from "../../../components/Button";
 import { ControlChevron } from "../../../components/ControlChevron";
@@ -54,6 +54,8 @@ export interface StudioRecentSpacesProps {
   attentionCounts?: Readonly<Record<string, number>>;
   onSelectSpace: (id: string) => void;
   onBrowseAll: () => void;
+  /** Opens the "Create a new space" dialog; the last item of the list when given. */
+  onNewSpace?: () => void;
   collapsed: boolean;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
@@ -73,6 +75,7 @@ export function StudioRecentSpaces({
   attentionCounts,
   onSelectSpace,
   onBrowseAll,
+  onNewSpace,
   collapsed,
   expanded,
   onExpandedChange,
@@ -176,6 +179,25 @@ export function StudioRecentSpaces({
           <ControlChevron direction="right" />
         </span>
       </Button>
+      {onNewSpace ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          radius="lg"
+          fullWidth
+          data-testid="sidebar-recent-spaces-new"
+          className="min-h-9 px-2.5 text-left focus-visible:ring-offset-0"
+          onPress={() => {
+            setPopoverOpen(false);
+            onNewSpace();
+          }}
+        >
+          <span className="flex w-full min-w-0 items-center gap-2 text-sm font-normal text-slate-600 dark:text-slate-400">
+            <Plus className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="truncate">New space</span>
+          </span>
+        </Button>
+      ) : null}
     </div>
   );
 

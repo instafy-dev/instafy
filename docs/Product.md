@@ -160,7 +160,9 @@ spaces that have never been visited in this browser. The same alphabetical picke
 appears in the top navigation drawer, the composer's bottom sheet and the desktop
 header. It names the team, marks the current space and shows unread counts. More
 than six spaces adds a name filter, and long lists scroll within the popover.
-**Browse all spaces** still opens the full directory for its management actions.
+**Browse all spaces** still opens the full directory for its management actions, and
+**New space**, the picker's last item, opens the same "Create a new space" dialog as the
+directory's New space. The rail's **+** is **New team**.
 Expanded inline sidebar shortcuts retain their bounded recent-space list.
 
 Desktop conversation shortcuts have a **+** after the last tab to start a chat
@@ -221,8 +223,8 @@ Mobile browsers show **Get the app · Soon** in the profile menu, linking to the
 availability section; iOS and Android downloads are marked coming soon. Native apps hide
 these acquisition actions and retain their existing update controls.
 
-The space chip opens an anchored picker of all accessible spaces in the selected team
-and **Browse all spaces**. Spaces appear alphabetically, with the current space highlighted
+The space chip opens an anchored picker of all accessible spaces in the selected team,
+**Browse all spaces** and **New space**. Spaces appear alphabetically, with the current space highlighted
 in its alphabetical position. More than six spaces adds a name filter. Expanded inline
 sidebar shortcuts keep up to six spaces selected by recent visits, remembered per account
 on this device, and display that set alphabetically.
@@ -474,8 +476,8 @@ Forward and Reload, keeping room for the address and page picker. A message goes
 browser's active tab, which that picker chooses; the chat does not repeat the tabs in a strip of
 its own. The Browser view tab names the active tab in its tooltip and accessible description, and
 shows a violet dot ("Octo is using the browser" to screen readers) while the agent uses the
-browser. The composer's **Ask AI for a new tab** action prepares the next AI request to ask for
-another page; it does not immediately create a blank browser tab. A removable **New tab for the
+browser. While a browser is open, the composer's **Ask AI for a new tab** action prepares the
+next AI request to ask for another page; it does not immediately create a blank browser tab. A removable **New tab for the
 next message** token above the input makes that pending intent visible.
 
 The workspace tab owner remembers each conversation's selected resource, open file references,
@@ -852,7 +854,9 @@ The composer exposes three one-shot actions instead of a persistent delivery mod
   immediately rather than leave an idle queue entry behind.
 - **Stash** saves a private draft without creating a transcript message, run, or job. Use
   `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` elsewhere, or choose **Stash draft** from the
-  composer actions. Stashes never auto-send, remain private to their author, and are capped per
+  composer actions. The composer's **+** menu lists only what can be done now: **Queue message**
+  and **Stash draft** appear once there is a draft they can take, never as disabled rows, and the
+  menu carries no keyboard tip (the send button's label says what `Enter` does). Stashes never auto-send, remain private to their author, and are capped per
   author and conversation at 50 drafts and 5 MiB of serialized draft data.
 
 `Shift+Enter` always inserts a newline. When no matching agent is active, ordinary `Enter` sends a

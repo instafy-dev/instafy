@@ -3,6 +3,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectLauncher } from "../ProjectLauncher";
+import { Button } from "../../../../components/Button";
 import { chooseSelectValue, readSelectValue } from "../../../../test-utils/select";
 
 const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), upload: vi.fn(), update: vi.fn(), showStatus: vi.fn(), reset: vi.fn() }));
@@ -53,5 +54,19 @@ describe("space launcher team creation", () => {
     expect(onCreateBlank).toHaveBeenCalledExactlyOnceWith("First space", { orgId: "created-team" });
     expect(mocks.create).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives Create a new space and New team the same Cancel as Studio's other dialogs", async () => {
+    await act(async () => root.render(<ProjectLauncher open onClose={vi.fn()} onCreateBlank={vi.fn()} onCreateFromGithub={vi.fn()} />));
+    await chooseSelectValue(container.querySelector('[data-testid="project-launcher-org-select"]'), "new");
+    const cancels = [...container.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent === "Cancel");
+    expect(cancels).toHaveLength(2);
+    // The quiet form action the Stop and Take over confirmations use.
+    const reference = document.createElement("div");
+    const referenceRoot = createRoot(reference);
+    await act(async () => referenceRoot.render(<Button variant="ghost" preset="form">Cancel</Button>));
+    const quiet = reference.querySelector("button")!.className;
+    await act(async () => referenceRoot.unmount());
+    for (const cancel of cancels) expect(cancel.className).toBe(quiet);
   });
 });

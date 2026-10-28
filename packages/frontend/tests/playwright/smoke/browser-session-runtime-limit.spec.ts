@@ -856,7 +856,8 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     const menu = page.getByTestId("composer-action-menu");
     await expect(menu).toBeVisible();
     await expect(page.getByTestId("composer-action-menu-open-browser")).toBeVisible();
-    await expect(page.getByTestId("composer-action-menu-open-new-browser")).toBeVisible();
+    // "Ask AI for a new tab" adds a tab to an open browser; none is open yet.
+    await expect(page.getByTestId("composer-action-menu-open-new-browser")).toHaveCount(0);
     await expect(page.getByTestId("composer-action-menu-invite")).toBeVisible();
 
     await page.getByTestId("composer-action-menu-commands").click();

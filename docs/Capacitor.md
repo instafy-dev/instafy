@@ -280,7 +280,8 @@ Invite and AI connection forms use this surface below the small breakpoint while
 their desktop dialogs. Invite Back dismisses an open QR first; connection Back returns to
 the provider picker before closing, and pending verification blocks dismissal.
 
-The composer's **Expand draft** action fills the chat pane with the existing editor;
+The composer's **Expand draft** action, offered once the draft has words or pictures,
+fills the chat pane with the existing editor;
 **Collapse draft**, Escape, or Android Back returns to the compact composer. The
 same Lexical editor, undo history and attachments remain mounted. Open composer
 menus and dialogs handle Back before draft expansion. This changes the pane layout,

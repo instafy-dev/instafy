@@ -946,6 +946,19 @@ describe("StudioSidebar organization navigation", () => {
     expect(container.querySelector('[data-testid="sidebar-team-menu-trigger"] > span')?.className).toContain("border-primary-200");
   });
 
+  it("ends the space switcher with New space, suggesting this team only where this person can add spaces", async () => {
+    await render({ collapsed: true, activePanel: "team", selectedOrgKey: "org-b" });
+    await click("sidebar-space-button");
+    await click("sidebar-recent-spaces-new");
+    expect(fixture.onNewSpace).toHaveBeenLastCalledWith("org-b");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+
+    await render({ collapsed: true, activePanel: "team", selectedOrgKey: "unavailable-team" });
+    await click("sidebar-space-button");
+    await click("sidebar-recent-spaces-new");
+    expect(fixture.onNewSpace).toHaveBeenLastCalledWith(null);
+  });
+
   it("uses the inner rail's height for overflow without reserving the outer account footer", async () => {
     let navHeight = 500;
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
