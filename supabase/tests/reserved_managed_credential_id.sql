@@ -1,32 +1,22 @@
 -- Executed only by scripts/test-durable-notifications.py in its disposable cluster.
 -- The managed credential id is reserved for the platform lane: no user_credentials
 -- row may take it, while ordinary credential rows keep working. The check ships
--- NOT VALID; validating it is left to a later migration. Everything here runs in
--- one transaction that is rolled back.
+-- NOT VALID; validating it is left to a later migration. Only the controller
+-- writes credential rows (user_credential_client_writes.sql covers the browser
+-- roles), so every write here is made as the table owner, the way the
+-- controller's own connection makes it. Everything here runs in one transaction
+-- that is rolled back.
 begin;
 create function reserved_credential_test_assert(ok boolean, label text) returns void language plpgsql as $$
 begin if ok is not true then raise exception 'reserved credential test failed: %',label; end if; end; $$;
 insert into auth.users(id,email) values
   ('40000000-0000-0000-0000-000000000001','credential-owner@example.invalid');
--- Hosted Supabase grants these to the signed-in role and scopes rows with RLS;
--- mirror that here so the checks below run through the "user credentials self"
--- policy exactly as a signed-in client would.
-do $$ begin
-  if not has_schema_privilege('authenticated','auth','usage') then
-    grant usage on schema auth to authenticated;
-  end if;
-end $$;
-grant select, insert, update on public.user_credentials to authenticated;
 
 select reserved_credential_test_assert((select convalidated=false from pg_constraint
   where conname='user_credentials_id_not_reserved' and conrelid='public.user_credentials'::regclass),
   'the reserved id check exists and is not validated');
 
-set local role authenticated;
-set local request.jwt.claim.sub = '40000000-0000-0000-0000-000000000001';
-set local request.jwt.claims = '{"sub":"40000000-0000-0000-0000-000000000001","role":"authenticated"}';
-
--- The signed-in owner still inserts ordinary credentials, with an explicit id or the default.
+-- Ordinary credentials still insert, with an explicit id or the default.
 insert into user_credentials(id,user_id,kind,nonce_b64,ciphertext_b64,is_default) values
   ('40000000-0000-0000-0000-000000000010','40000000-0000-0000-0000-000000000001','openai_api_key','fixture','fixture',true);
 insert into user_credentials(user_id,kind,nonce_b64,ciphertext_b64) values
@@ -37,8 +27,9 @@ update user_credentials set label='renamed' where id='40000000-0000-0000-0000-00
 select reserved_credential_test_assert((select label='renamed' from user_credentials
   where id='40000000-0000-0000-0000-000000000010'),'ordinary credential updates work');
 
--- The reserved id is refused by the check itself (not by row level security),
--- on insert, on upsert and when an existing row is renumbered.
+-- The reserved id is refused by the check itself (the table owner is not
+-- subject to row level security), on insert, on upsert and when an existing
+-- row is renumbered.
 do $$ begin
   begin
     insert into user_credentials(id,user_id,kind,nonce_b64,ciphertext_b64,is_default) values
@@ -55,16 +46,6 @@ do $$ begin
     update user_credentials set id='4d414e41-4745-4441-8949-4e5354414659'
       where id='40000000-0000-0000-0000-000000000010';
     raise exception 'reserved id update accepted';
-  exception when check_violation then null; end;
-end $$;
-reset role;
-
--- Server-side tooling cannot take the id either.
-do $$ begin
-  begin
-    insert into user_credentials(id,user_id,kind,nonce_b64,ciphertext_b64) values
-      ('4d414e41-4745-4441-8949-4e5354414659','40000000-0000-0000-0000-000000000001','openai_api_key','fixture','fixture');
-    raise exception 'reserved id insert accepted for the table owner';
   exception when check_violation then null; end;
 end $$;
 select reserved_credential_test_assert((select count(*)=0 from user_credentials
