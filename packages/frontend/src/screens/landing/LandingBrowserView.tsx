@@ -1,7 +1,10 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Check, Globe, Lock, MoreHoriz, NavArrowDown, NavArrowRight } from "iconoir-react";
 import { Spinner } from "../../components/Spinner";
+import { Surface } from "../../components/Surface";
 import { Text } from "../../components/Text";
+import { StudioDialogFooter } from "../../components/aria/StudioDialogLayout";
+import { StudioDialogGutterContext } from "../../components/aria/StudioDialogSpacing";
 import { BrowserChromeShell } from "../studio/components/BrowserChromeShell";
 // The studio's own edge glow (RemoteControlSurface.tsx): its classes and CSS.
 import "../studio/components/RemoteControlSurface.css";
@@ -257,10 +260,13 @@ function useApprovalScroll(routine: boolean): {
     const inner = content?.firstElementChild as HTMLElement | null;
     if (!content || !box || !inner) return;
     const update = () => {
-      const max = Math.max(0, inner.offsetHeight - content.clientHeight);
+      const style = getComputedStyle(content);
+      const visibleHeight = content.clientHeight - parseFloat(style.paddingTop || "0") - parseFloat(style.paddingBottom || "0");
+      const max = Math.max(0, inner.offsetHeight - visibleHeight);
+      const boxTop = box.getBoundingClientRect().top - inner.getBoundingClientRect().top;
       // The whole routine box at the bottom of the content, or its top (the
       // box and its label) when the box alone is taller than the content.
-      const target = routine ? Math.min(max, Math.max(0, Math.min(box.offsetTop + box.offsetHeight - content.clientHeight, box.offsetTop - 4))) : 0;
+      const target = routine ? Math.min(max, Math.max(0, Math.min(boxTop + box.offsetHeight - visibleHeight, boxTop - 4))) : 0;
       const next = { offset: Math.round(target), cut: target < max - 1 };
       setState((current) => (current.offset === next.offset && current.cut === next.cut ? current : next));
     };
@@ -284,64 +290,64 @@ function ApprovalSheet({ origin, routine, pressed }: { origin: string; routine: 
       data-pressed={pressed ? "true" : "false"}
       data-scrolled={offset > 0 ? "true" : "false"}
     >
-      <div className={chrome.APPROVAL_SHEET}>
-        <div
-          ref={contentRef}
-          data-testid="landing-browser-approval-content"
-          className={`${chrome.APPROVAL_CONTENT}${cut ? ` ${chrome.APPROVAL_CONTENT_CUT}` : ""}`}
-        >
-          <div className={chrome.APPROVAL_CONTENT_SCROLL} style={offset ? { transform: `translateY(-${offset}px)` } : undefined}>
-            <div className="flex items-start gap-3">
-              <div className={chrome.APPROVAL_LOCK}>
-                <Lock aria-hidden="true" className="h-4 w-4" />
+      <Surface tone="floating" shadow="lg" className={chrome.APPROVAL_SHEET}>
+        <StudioDialogGutterContext.Provider value="responsive">
+          <div
+            ref={contentRef}
+            data-testid="landing-browser-approval-content"
+            className={`${chrome.APPROVAL_CONTENT}${cut ? ` ${chrome.APPROVAL_CONTENT_CUT}` : ""}`}
+          >
+            <div className={chrome.APPROVAL_CONTENT_SCROLL} style={offset ? { transform: `translateY(-${offset}px)` } : undefined}>
+              <div className="flex items-start gap-3">
+                <Lock aria-hidden="true" className={chrome.APPROVAL_LOCK} />
+                <div className="min-w-0 flex-1 space-y-1">
+                  <Text as="p" variant="subtitle" tone="primary">
+                    Allow the AI agent to use this site?
+                  </Text>
+                  <Text as="p" variant="bodyCompact" tone="secondary">
+                    Shared Browser is paused before the AI agent can read or act on a new site.
+                  </Text>
+                </div>
               </div>
-              <div className="min-w-0 flex-1 space-y-1">
-                <Text as="p" variant="bodyStrong" tone="primary">
-                  Allow the AI agent to use this site?
+              <Surface tone="raised" radius="xl" shadow="none" className={chrome.APPROVAL_SITE}>
+                <Text as="p" variant="caption" tone="muted">
+                  Site
                 </Text>
-                <Text as="p" variant="body" tone="secondary" className="leading-snug">
-                  Shared Browser is paused before the AI agent can read or act on a new site.
-                </Text>
-              </div>
-            </div>
-            <div className={chrome.APPROVAL_SITE}>
+                <Text variant="mono" tone="primary" className={chrome.APPROVAL_SITE_TEXT}>{origin}</Text>
+              </Surface>
               <Text as="p" variant="caption" tone="muted">
-                Site
+                {routine
+                  ? "Routine browsing applies across sites for this AI turn. You can revoke it by taking over or stopping the turn."
+                  : "Allow applies to this site for the current AI turn, so its pages open without asking again. Other actions still ask."}
               </Text>
-              <p className={chrome.APPROVAL_SITE_TEXT}>{origin}</p>
-            </div>
-            <Text as="p" variant="caption" tone="muted" className="mt-3 leading-snug">
-              {routine
-                ? "Routine browsing applies across sites for this AI turn. You can revoke it by taking over or stopping the turn."
-                : "Allow applies to this site for the current AI turn, so its pages open without asking again. Other actions still ask."}
-            </Text>
-            <div ref={boxRef} className={chrome.APPROVAL_ROUTINE} data-testid="landing-browser-routine-box">
-              <span
-                data-testid="landing-browser-routine-check"
-                className={`${chrome.APPROVAL_CHECKBOX} ${routine ? chrome.APPROVAL_CHECKBOX_ON : chrome.APPROVAL_CHECKBOX_OFF}`}
-              >
-                {routine ? <Check className="h-3 w-3" aria-hidden="true" /> : null}
-              </span>
-              <span>
-                <span className="block font-medium">Always allow routine browsing for this turn</span>
-                <span className="mt-1 block text-slate-500 dark:text-slate-400">
-                  Allow sites and ordinary actions without more prompts. Recognized high-impact actions and form submissions still ask;
-                  secrets stay manual. Websites can have unexpected side effects. Ends when this turn stops.
+              <div ref={boxRef} className={chrome.APPROVAL_ROUTINE} data-testid="landing-browser-routine-box">
+                <span
+                  data-testid="landing-browser-routine-check"
+                  className={`${chrome.APPROVAL_CHECKBOX} ${routine ? chrome.APPROVAL_CHECKBOX_ON : chrome.APPROVAL_CHECKBOX_OFF}`}
+                >
+                  {routine ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : null}
                 </span>
-              </span>
+                <span className="flex flex-col gap-0.5">
+                  <Text as="span" variant="bodyStrong" tone="inherit">Always allow routine browsing for this turn</Text>
+                  <Text as="span" variant="caption" tone="muted">
+                    Allow sites and ordinary actions without more prompts. Recognized high-impact actions and form submissions still ask;
+                    secrets stay manual. Websites can have unexpected side effects. Ends when this turn stops.
+                  </Text>
+                </span>
+              </div>
             </div>
           </div>
-        </div>
-        <div className={chrome.APPROVAL_ACTIONS}>
-          <span className={chrome.BUTTON_SECONDARY}>Deny</span>
-          <span
-            data-testid="landing-browser-allow"
-            className={`${chrome.BUTTON_PRIMARY} w-full min-[420px]:w-auto${pressed ? ` ${chrome.BUTTON_PRIMARY_PRESSED}` : ""}`}
-          >
-            {routine ? "Allow routine browsing" : "Allow site"}
-          </span>
-        </div>
-      </div>
+          <StudioDialogFooter padding="default" divider className={chrome.APPROVAL_ACTIONS}>
+            <span className={chrome.APPROVAL_BUTTON_SECONDARY}>Deny</span>
+            <span
+              data-testid="landing-browser-allow"
+              className={`${chrome.APPROVAL_BUTTON_PRIMARY}${pressed ? ` ${chrome.BUTTON_PRIMARY_PRESSED}` : ""}`}
+            >
+              {routine ? "Allow routine browsing" : "Allow site"}
+            </span>
+          </StudioDialogFooter>
+        </StudioDialogGutterContext.Provider>
+      </Surface>
     </div>
   );
 }
