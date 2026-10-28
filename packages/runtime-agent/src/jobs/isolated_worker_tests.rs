@@ -125,3 +125,17 @@ fn isolated_worker_evidence_is_required_unless_a_valid_human_decision_defers_it(
     malformed["actions"][0]["questions"] = json!([]);
     assert!(extract_codex_outcome(&malformed).is_err());
 }
+
+#[test]
+fn tool_required_worker_needs_a_tool_receipt_even_without_legacy_expectations() {
+    let mut job = worker();
+    job.payload["metadata"]["multiAgentPlan"]["requiresTools"] = json!(true);
+    job.payload["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("runtimeExpectations");
+    let completed =
+        extract_codex_outcome(&json!({"summary":"Found current facts", "files":[]})).unwrap();
+    assert!(isolated_worker::validate_worker_evidence(&job, &completed, false, false).is_err());
+    assert!(isolated_worker::validate_worker_evidence(&job, &completed, true, false).is_ok());
+}

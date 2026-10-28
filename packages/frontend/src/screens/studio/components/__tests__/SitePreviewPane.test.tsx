@@ -131,7 +131,36 @@ describe("SitePreviewPane", () => {
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(1);
     await post({ type: "instafy-preview", status: 502 }, origin, target);
     expect(pane().dataset.state).toBe("not_responding");
-    expect(container.querySelector("[data-testid=site-preview-problem]")?.textContent).toContain("Not responding on port 4173");
+  });
+
+  // Local drive, Oct 28: the stopped pane said "Not responding on port 4173", the broker's own error page showed
+  // through its message ("This p… …nding."), and a red Unavailable pill said it a third time.
+  it("says a site that stopped answering is stopped, once: no port, no frame behind it, no pill", async () => {
+    await render();
+    await post({ type: "instafy-preview", status: 502 }, new URL(FIRST).origin, frame()!.contentWindow);
+    expect(pane().dataset.state).toBe("not_responding");
+    expect(problemText()).toBe("This site is stopped. Ask Octo to start it again.");
+    expect(frame()).toBeNull();
+    expect(container.querySelector("[data-testid=site-preview-status]")).toBeNull();
+    expect(pane().textContent).not.toContain("4173");
+    expect(pane().textContent).not.toMatch(/not responding|unavailable/i);
+    // Its message is the status a screen reader hears.
+    expect(container.querySelector("[data-testid=site-preview-problem] [role=status]")?.textContent).toBe(problemText());
+    // The toolbar's Reload stays; the message has no second one.
+    expect(container.querySelector("[data-testid=site-preview-problem] button")).toBeNull();
+  });
+
+  it("loads the site again, in a new frame, once it answers again", async () => {
+    await render();
+    mocks.getSitePreview.mockResolvedValue(record({ health: { listening: false, status: null } }));
+    await advance(SITE_PREVIEW_HEALTH_POLL_MS);
+    expect(pane().dataset.state).toBe("not_responding");
+    expect(frame()).toBeNull();
+    mocks.getSitePreview.mockResolvedValue(record());
+    await advance(SITE_PREVIEW_HEALTH_POLL_MS);
+    expect(pane().dataset.state).toBe("live");
+    expect(frame()?.getAttribute("src")).toBe(withHostQuery(FIRST));
+    expect(problemText()).toBe("");
   });
 
   it("re-mints once on a 401 from the frame, revoking the old session, then ends on a second", async () => {

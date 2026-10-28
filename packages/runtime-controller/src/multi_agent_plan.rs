@@ -77,6 +77,7 @@ struct SkillMultiAgentPlanAgent {
     prompt: String,
     scope_summary: Option<String>,
     write_scope: Option<JsonValue>,
+    requires_tools: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1649,12 +1650,14 @@ fn parse_skill_multi_agent_plan(
             continue;
         };
         let write_scope = normalize_plan_agent_write_scope(agent_map, &handle);
+        let requires_tools = parse_worker_tool_requirement(agent_map)?;
         agents.push(SkillMultiAgentPlanAgent {
             handle,
             label: string_field(agent_map, &["label", "title", "taskLabel", "task_label"]),
             prompt,
             scope_summary: string_field(agent_map, &["scopeSummary", "scope_summary", "scope"]),
             write_scope,
+            requires_tools,
         });
     }
 
@@ -1759,6 +1762,54 @@ fn parse_skill_multi_agent_plan(
         runtime_routing,
         raw: value.clone(),
     })
+}
+
+fn parse_worker_tool_requirement(
+    agent: &JsonMap<String, JsonValue>,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    match agent.get("requiresTools") {
+        None | Some(JsonValue::Null) => Ok(false),
+        Some(JsonValue::Bool(required)) => Ok(*required),
+        Some(_) => Err(bad_request(
+            "multi_agent_plan agent requiresTools must be a boolean or null",
+        )),
+    }
+}
+
+/// Select this worker's execution requirement independently of its file ownership.
+/// Requirements constrain eligible execution; they never grant tools or permissions.
+pub(crate) fn apply_worker_tool_requirement(
+    metadata: &mut JsonValue,
+    handle: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let Some(plan) = metadata
+        .get_mut("multiAgentPlan")
+        .and_then(JsonValue::as_object_mut)
+    else {
+        return Ok(());
+    };
+    if plan.get("role").and_then(JsonValue::as_str) != Some("worker") {
+        return Ok(());
+    }
+    let selected = plan
+        .get("agents")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(JsonValue::as_object)
+        .find(|agent| {
+            agent
+                .get("handle")
+                .and_then(JsonValue::as_str)
+                .and_then(normalize_agent_handle)
+                .as_deref()
+                == Some(handle)
+        });
+    if let Some(selected) = selected {
+        let required = parse_worker_tool_requirement(selected)?;
+        plan.insert("requiresTools".to_string(), JsonValue::Bool(required));
+    }
+    Ok(())
 }
 
 fn normalize_plan_agent_write_scope(
@@ -2000,6 +2051,7 @@ fn build_worker_dispatch_metadata(
                     "label": agent.label.clone(),
                     "scopeSummary": agent.scope_summary.clone(),
                     "writeScope": agent.write_scope.clone(),
+                    "requiresTools": agent.requires_tools,
                 })
             }).collect::<Vec<_>>(),
         },
@@ -3297,7 +3349,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_metadata_preserves_prompt_segments_and_write_scopes() {
+    fn worker_metadata_preserves_prompt_segments_write_scopes_and_tool_requirements() {
         let plan = parse_skill_multi_agent_plan(&json!({
             "mode": "write_scoped",
             "agents": [
@@ -3305,6 +3357,7 @@ mod tests {
                     "handle": "api",
                     "prompt": "Edit API",
                     "scopeSummary": "API",
+                    "requiresTools": true,
                     "writeScope": {
                         "ownedPaths": ["packages/api/**"],
                         "rationale": "API ownership"
@@ -3350,6 +3403,24 @@ mod tests {
         );
         assert_eq!(metadata["writeIntent"], json!(true));
         assert_eq!(
+            metadata["multiAgentPlan"]["agents"][0]["requiresTools"],
+            true
+        );
+        assert_eq!(
+            metadata["multiAgentPlan"]["agents"][1]["requiresTools"],
+            false
+        );
+        assert!(metadata["multiAgentPlan"].get("requiresTools").is_none());
+        for (handle, required) in [("api", true), ("ui", false)] {
+            let mut worker_metadata = metadata.clone();
+            apply_worker_tool_requirement(&mut worker_metadata, handle).unwrap();
+            assert_eq!(worker_metadata["multiAgentPlan"]["requiresTools"], required);
+            assert_eq!(
+                worker_metadata["agentSelection"],
+                metadata["agentSelection"]
+            );
+        }
+        assert_eq!(
             metadata["agentSelection"]["promptSegments"]["api"],
             json!("Edit API")
         );
@@ -3382,6 +3453,39 @@ mod tests {
             metadata["multiAgentPlan"]["parentRuntimeId"],
             json!(Uuid::nil().to_string())
         );
+    }
+
+    #[test]
+    fn worker_tool_requirements_are_typed_and_legacy_plans_keep_their_default() {
+        for (value, expected) in [
+            (JsonValue::Null, false),
+            (json!(false), false),
+            (json!(true), true),
+        ] {
+            let plan = parse_skill_multi_agent_plan(&json!({
+                "agents": [{"handle":"worker", "prompt":"Do the task", "requiresTools":value}]
+            }))
+            .unwrap();
+            assert_eq!(plan.agents[0].requires_tools, expected);
+        }
+        let legacy = parse_skill_multi_agent_plan(&json!({
+            "agents": [{"handle":"worker", "prompt":"Do the task"}]
+        }))
+        .unwrap();
+        assert!(!legacy.agents[0].requires_tools);
+        for value in [json!("true"), json!(1), json!([]), json!({})] {
+            let (status, Json(error)) = parse_skill_multi_agent_plan(&json!({
+                "agents": [{"handle":"worker", "prompt":"Do the task", "requiresTools":value}]
+            }))
+            .unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error.message.contains("requiresTools"));
+        }
+        let mut lead = json!({"multiAgentPlan": {
+            "role":"lead_continuation", "agents":[{"handle":"worker", "requiresTools":true}]
+        }});
+        apply_worker_tool_requirement(&mut lead, "worker").unwrap();
+        assert!(lead["multiAgentPlan"].get("requiresTools").is_none());
     }
 
     #[test]
