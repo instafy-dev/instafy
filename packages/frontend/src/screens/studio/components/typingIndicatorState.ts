@@ -9,6 +9,7 @@ import {
   resolveAssistantStatusHeadline,
 } from "./assistantStatusHeuristics";
 import { getMessageType } from "./chatMessageMetadata";
+import { isAutomaticRetryPending } from "./automaticRetryFold";
 import {
   coerceThreadMessages,
   isFinalAgentOutcomeMessage,
@@ -175,6 +176,8 @@ function outcomeNamesRun(outcomeIds: readonly string[], run: RunRecord): boolean
  *
  * - `live`: the row is a job thread still running. It shows the run's state
  *   itself (rail and caption), so a typing row under it would say it twice.
+ *   So is a failed turn Instafy is trying again by itself whose retry has
+ *   shown nothing yet: it reads "Trying again…".
  * - `answered`: the row is the turn's reply (inside its job thread, or a plain
  *   reply when the turn used no tools), and every run still marked active is
  *   that turn's own run, whose record has not caught up yet. A typing row here
@@ -196,6 +199,9 @@ export function resolveJobThreadTypingCoverage(
     return "none";
   }
   if (isJobThreadRow(latestDisplayedMessage)) {
+    if (isAutomaticRetryPending(latestDisplayedMessage)) {
+      return "live";
+    }
     const threadMessages = readJobThreadMessages(latestDisplayedMessage);
     if (threadMessages.length === 0) {
       return "none";

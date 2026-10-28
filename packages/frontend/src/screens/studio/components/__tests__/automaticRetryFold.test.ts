@@ -135,6 +135,20 @@ describe("an automatic retry reads as one turn", () => {
     expect(isAutomaticRetryPending(rows[1])).toBe(true);
   });
 
+  it("keeps the failed turn trying again while the retry has written only what the chat hides", () => {
+    const usage = message({
+      id: "retry-usage",
+      content: "Token usage — input: 134669, cached: 132352, output: 165",
+      timestamp: 6,
+      messageType: "token_usage",
+      metadata: { jobId: RETRY_JOB, runId: RETRY_RUN, source: "agent", messageType: "token_usage" },
+    });
+    const rows = transcript([prompt, ...failedAttempt, resend({ automatic: true, runId: RETRY_RUN }), usage]);
+
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${FAILED_JOB}`]);
+    expect(isAutomaticRetryPending(rows[1])).toBe(true);
+  });
+
   it("leaves a resend the controller has not taken to the page that sent it", () => {
     // No run yet: the page that sent it shows "Trying again…" while it goes
     // out, and its failure block again if it never does.

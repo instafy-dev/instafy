@@ -434,9 +434,15 @@ export function synthesizeAgentJobThreadMessages(
   // the attempt it replaced.
   const foldedJobIds = new Set<string>();
   const foldedFailureIds = new Set<string>();
+  const pendingJobIds = new Set(retryFold.pendingJobIds);
   for (const [retryJobId, earlier] of retryFold.earlierAttemptByJobId) {
     const firstMessageId = firstVisibleMessageIdByJobId.get(retryJobId);
     if (!firstMessageId) {
+      // The retry has written only what the chat does not show (its usage):
+      // the failed turn keeps saying it is trying again.
+      if (earlier.jobId) {
+        pendingJobIds.add(earlier.jobId);
+      }
       continue;
     }
     if (!threadStartMessageIdByJobId.has(retryJobId)) {
@@ -555,7 +561,7 @@ export function synthesizeAgentJobThreadMessages(
         jobId,
         threadMessages,
         ...(earlierMessages.length > 0 ? { earlierAttempts: [earlierMessages] } : {}),
-        ...(retryFold.pendingJobIds.has(jobId) ? { autoRetryPending: true } : {}),
+        ...(pendingJobIds.has(jobId) ? { autoRetryPending: true } : {}),
       },
     });
   });
