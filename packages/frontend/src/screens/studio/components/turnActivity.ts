@@ -702,6 +702,8 @@ export type SummarizeTurnActivityOptions = {
   approvals?: readonly SessionBrowserApproval[];
   /** Non-step messages Details lists between the steps (notes, plan updates). */
   updates?: readonly ChatMessage[];
+  /** The turn is Instafy trying a failed one again by itself: it starts with "Trying again…". */
+  retry?: boolean;
 };
 
 /**
@@ -789,7 +791,7 @@ export function summarizeTurnActivity(
   let live: string | null = null;
   let summary: string | null = null;
   if (phase === "starting") {
-    live = "Starting…";
+    live = options.retry ? "Trying again…" : "Starting…";
   } else if (phase === "stale") {
     live = "Status unavailable";
   } else if (phase === "running") {

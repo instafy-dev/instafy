@@ -18,31 +18,47 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 
 | Turn | Line |
 |---|---|
-| Queued or starting, before the model has begun | `Starting…` |
+| Queued or starting, before the model has begun | `Starting…`; `Trying again…` for a turn Instafy resent by itself |
 | Running a labelled step | its running label, for example `Looking up places…` (the newest running step wins) |
 | Running an unlabelled command or tool | `Working…`; a file edit says `Editing files…` |
-| A runtime status is the newest thing | `Saving your changes…`, `Retrying…`, until anything newer arrives |
+| A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives |
 | The model is working, before or between steps | `Thinking…` (never its reasoning titles or notes) |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
 | Done | up to two "what it did" groups, biggest first and in the order they happened, then the latest "what it made": `Looked up 14 places, read 6 pages, built the map`; then, after ` · `, what the person answered to the turn's browser prompts |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files` |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
+| Done, nothing of its own after an automatic retry | `Took two tries`, so Details opens on the first try |
 | Stopped by the person | `Stopped · looked up 9 places`, or `Stopped` |
 | No news for 45 seconds while not in flight | `Status unavailable` |
 
 - Once the turn has a step, the whole line is one button that opens Details (`aria-expanded`,
   `aria-controls`); it reads "Details ›", then "Hide details", and opens and closes as often as it
-  is pressed. Opening Details never moves the line or changes the turn's chrome. A failed turn has
-  one Details, its failure block's, which lists the steps after the error text, and its line is
-  plain text.
+  is pressed. Opening Details never moves the line or changes the turn's chrome.
+- A turn reads its outcome once. A failed turn has no activity line and no "Run failed" beside
+  its author: its failure block is its one line, and that block's Details ("Details ›", then
+  "Hide details", with `aria-controls`) lists the error text and then the steps. Only a failed
+  turn with nothing to show below keeps the "Run failed" marker; "Run needs attention" stays in
+  the header.
 - Every failed turn shows the same failure block (`RunFailureMessageBody`): one plain sentence,
-  "Try again", and Details with the raw error. When the AI refused or dropped the request (the
-  Instafy proxy's `unexpected status …`, read by `proxyError.ts`), the sentence never names the
-  plumbing. On Instafy AI (`aiAccessMode: managed` on the run's final message) it reads "Instafy
-  AI isn't answering right now."; on the person's own AI it says what happened ("Your AI
-  connection needs you to sign in again.") and adds "Manage AI" when AI settings can fix it. No
-  failure sentence says "upstream", "provider", "credential", "runtime" or "switch"; the raw text
-  behind Details keeps them (`runFailurePresentation.ts`).
+  "Try again", and Details with the raw error. A turn that did not make the file changes it was
+  asked for reads "Octo didn't finish the changes." (the agent's own name when the failure names
+  one). When the AI refused or dropped the request (the Instafy proxy's `unexpected status …`,
+  read by `proxyError.ts`), the sentence never names the plumbing. On Instafy AI
+  (`aiAccessMode: managed` on the run's final message) it reads "Instafy AI isn't answering right
+  now."; on the person's own AI it says what happened ("Your AI connection needs you to sign in
+  again.") and adds "Manage AI" when AI settings can fix it. No failure sentence says "upstream",
+  "provider", "credential", "runtime", "switch", "Codex", "workspace" or "request"; an
+  unclassified failure shows its own first line only when that line uses none of these words (nor
+  JSON, a URL or an exit code), and otherwise "Something went wrong, so this turn stopped." The
+  raw text behind Details keeps them all (`runFailurePresentation.ts`).
+- While Instafy tries a failed turn again by itself (`useRunFailureAutoRetry`), the turn is one
+  quiet line, "Trying again…", with no failure sentence, no red and no actions; a countdown before
+  a rate-limited resend reads "Trying again in 20 s" with Cancel. The resent prompt is marked
+  `retryAutomatic` and the chat leaves it out, since it repeats the person's own words, and the
+  failed attempt moves into the Details of the turn that replaced it, under "First try"
+  (`automaticRetryFold.ts`). If that retry succeeds, the turn reads as a normal success; only if it
+  fails too does the failure block show. A resend the person asked for with "Try again" stays as
+  they sent it.
 - Details (`TurnActivityDetails.tsx`) lists the turn in order: each command with its label, the
   command without its shell wrapper (the full line is its title), its state and its output behind
   a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes,
@@ -54,7 +70,7 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 - A command on its own in the conversation is one row: its label (or "Ran a command"), its state
   and a chevron that shows the command and its output.
 - The typing row that shows under a newer message while a turn runs (a person wrote in the
-  meantime) says the run's phase ("Thinking…", "Retrying…"), never Octo's notes or reasoning
+  meantime) says the run's phase ("Thinking…", "Trying again…"), never Octo's notes or reasoning
   titles, for the same reason as the line.
 - The running line is the turn's one polite live region; it announces a new label at most every
   5 seconds. Reduced motion turns the sweep off. On coarse pointers the line and the rows are at

@@ -33,19 +33,20 @@ export type RunFailurePresentation = {
 };
 
 // What a person reads for a failed turn. Plain words only: never "upstream",
-// "provider", "credential", "runtime" or "switch", which name the plumbing;
-// the raw text keeps them behind Details.
+// "provider", "credential", "runtime", "switch", "Codex", "workspace" or
+// "request", which name the plumbing; the raw text keeps them behind Details.
 const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
   missing_final_message:
     "The reply didn't come through. This is usually temporary.",
-  no_workspace_changes: "The file changes didn't come through.",
-  missing_verification: "The run ended before it could verify its work.",
+  // Used when the failure names no agent; see noChangesFriendlyText.
+  no_workspace_changes: "Octo didn't finish the changes.",
+  missing_verification: "The turn ended before it could check its work.",
   needs_ai:
     "No AI is connected for this turn. Connect AI, then try again.",
   // The proxy reports a spent ChatGPT plan window with the same 429 text as a
   // short throttle, so this copy cannot promise when a retry will work.
   provider_rate_limited:
-    "The AI is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, its usage limit may have been reached.",
+    "The AI is busy right now, so this turn stopped. Wait a little, then try again. If it keeps happening, its usage limit may have been reached.",
   // Used when the run's AI access is not known; see
   // providerUsageLimitFriendlyText for Instafy AI and for the person's own.
   provider_usage_limit:
@@ -61,11 +62,38 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
     "This turn lost its machine and didn't pick up again in time. Try again to continue.",
   // Used for Instafy AI; see aiUnavailablePresentation for the person's own.
   ai_unavailable: "Instafy AI isn't answering right now.",
-  // Only used as a last-resort fallback now: an unclassified failure surfaces
-  // its real reason inline (see inlineGenericFailureText) rather than this
-  // uninformative sentence.
-  generic: "Something went wrong finishing this run.",
+  // An unclassified failure surfaces its real reason inline when that reason
+  // is plain words (see inlineGenericFailureText); otherwise this sentence.
+  generic: "Something went wrong, so this turn stopped.",
 };
+
+// Words and marks that name the plumbing. A raw failure reason that uses one
+// stays behind Details, and the failure block says the plain sentence instead.
+// (The controller's own sentences, such as a team's cloud runtimes staying
+// busy, are written for the person and still show.)
+const TECHNICAL_FAILURE_WORDS =
+  /\b(?:codex|workspace|requests?|providers?|upstream|credentials?|mcp|json|https?|url|proxy|stderr|stdout|exit (?:code|status)|status \d{3})\b|[`{}<>]|::/i;
+
+const MAX_AGENT_NAME_LENGTH = 40;
+
+/**
+ * The name of the agent whose turn failed, as the failure message's own
+ * metadata names it ({ agent: { displayName } }), or null. A name that is not
+ * a short plain one is left out.
+ */
+function failedAgentName(metadata: Record<string, unknown> | null): string | null {
+  const agent = metadata && isRecord(metadata["agent"]) ? metadata["agent"] : null;
+  const name = typeof agent?.["displayName"] === "string" ? agent["displayName"].trim() : "";
+  if (!name || name.length > MAX_AGENT_NAME_LENGTH || /[^\p{L}\p{N} .'’-]/u.test(name)) {
+    return null;
+  }
+  return name;
+}
+
+function noChangesFriendlyText(metadata: Record<string, unknown> | null): string {
+  const name = failedAgentName(metadata);
+  return name ? `${name} didn't finish the changes.` : RUN_FAILURE_FRIENDLY_TEXT.no_workspace_changes;
+}
 
 /** Longest inline failure reason before it is truncated (…) with the full text
  * kept behind the Details disclosure. */
@@ -83,7 +111,7 @@ function inlineGenericFailureText(rawText: string): string {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .find((line) => line.length > 0) ?? rawText.trim();
-  if (!firstLine) {
+  if (!firstLine || TECHNICAL_FAILURE_WORDS.test(firstLine)) {
     return RUN_FAILURE_FRIENDLY_TEXT.generic;
   }
   if (firstLine.length <= GENERIC_INLINE_FAILURE_MAX_LENGTH) {
@@ -92,7 +120,7 @@ function inlineGenericFailureText(rawText: string): string {
   return `${firstLine.slice(0, GENERIC_INLINE_FAILURE_MAX_LENGTH - 1).trimEnd()}…`;
 }
 
-export const RETRYING_STATUS_DISPLAY_TEXT = "Taking another pass…";
+export const RETRYING_STATUS_DISPLAY_TEXT = "Trying again…";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -142,6 +170,7 @@ const NO_WORKSPACE_CHANGES_PATTERNS = [
   /did not apply any workspace changes/i,
   /listed file changes, but no files were actually written/i,
   /requires workspace file changes, but the codex reply produced no files/i,
+  /reported file changes but no workspace files were written/i,
 ];
 
 const MISSING_VERIFICATION_PATTERNS = [
@@ -201,9 +230,9 @@ const RESPONSE_INCOMPLETE_PATTERN = /incomplete response returned, reason:\s*([a
 
 const INCOMPLETE_RESPONSE_FRIENDLY_TEXT: Record<string, string> = {
   max_output_tokens:
-    "The answer hit the model's length limit before it was finished, so this turn stopped. Try asking for less at once, or split the request into smaller steps.",
+    "The answer hit the model's length limit before it was finished, so this turn stopped. Try asking for less at once, or in smaller steps.",
   content_filter:
-    "The AI's content filter stopped this answer before it was finished, so this turn stopped. Try rephrasing the request.",
+    "The AI's content filter stopped this answer before it was finished, so this turn stopped. Try asking in different words.",
 };
 
 function incompleteResponseFriendlyText(rawText: string): string {
@@ -782,6 +811,8 @@ function runFailureFriendlyText(
   switch (kind) {
     case "generic":
       return inlineGenericFailureText(rawText);
+    case "no_workspace_changes":
+      return noChangesFriendlyText(metadata);
     case "response_incomplete":
       return incompleteResponseFriendlyText(rawText);
     case "provider_usage_limit":
@@ -993,10 +1024,37 @@ export function resolveRunFailureRetryPrompt(params: {
  */
 export const RUN_FAILURE_RETRY_OF_METADATA_KEY = "retryOfMessageId";
 
+/**
+ * Metadata key on a resend Instafy made by itself (the automatic retry), not
+ * one the person asked for with "Try again". Such a prompt repeats the
+ * person's own words, so the chat does not show it again, and the turn it
+ * starts carries the failed attempt in its Details.
+ */
+export const RUN_FAILURE_RETRY_AUTOMATIC_METADATA_KEY = "retryAutomatic";
+
 export function buildRunFailureRetryMetadata(
   failureMessage: Pick<ChatMessage, "id">,
+  { automatic = false }: { automatic?: boolean } = {},
 ): Record<string, unknown> {
-  return { [RUN_FAILURE_RETRY_OF_METADATA_KEY]: failureMessage.id };
+  return automatic
+    ? { [RUN_FAILURE_RETRY_OF_METADATA_KEY]: failureMessage.id, [RUN_FAILURE_RETRY_AUTOMATIC_METADATA_KEY]: true }
+    : { [RUN_FAILURE_RETRY_OF_METADATA_KEY]: failureMessage.id };
+}
+
+/**
+ * The failure an automatic resend retries, or null for any other message: a
+ * person's own prompt, or a resend they asked for with "Try again".
+ */
+export function readAutomaticRunFailureRetryOf(
+  message: Pick<ChatMessage, "role" | "metadata">,
+): string | null {
+  if (message.role !== "user") {
+    return null;
+  }
+  const automatic = promptMetadataRecords(message.metadata).some(
+    (record) => record[RUN_FAILURE_RETRY_AUTOMATIC_METADATA_KEY] === true,
+  );
+  return automatic ? readRunFailureRetryOf(message) : null;
 }
 
 /** The id of the failed message a prompt was sent to retry, or null. */

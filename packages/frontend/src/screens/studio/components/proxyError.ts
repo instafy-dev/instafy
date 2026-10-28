@@ -23,8 +23,8 @@ export interface ProxyUpstreamErrorGuidance {
 // "provider" or "credentials", which name the plumbing, not what happened.
 const SIGN_IN_SUMMARY = "Your AI connection needs you to sign in again.";
 const QUOTA_SUMMARY = "Your AI account has reached its limit.";
-const REFUSED_SUMMARY = "Your AI connection couldn't answer this request.";
-const BUSY_SUMMARY = "Your AI connection is limiting requests right now.";
+const REFUSED_SUMMARY = "Your AI connection couldn't answer this message.";
+const BUSY_SUMMARY = "Your AI connection is busy right now.";
 
 // Summaries this module wrote before. A message that is exactly one of these,
 // or of the summaries above, gets the same guidance back (a summary shown

@@ -607,7 +607,8 @@ describe("useRunFailureRetryActions", () => {
       {
         message: "Build me a landing page",
         editorState: null,
-        metadata: { retryOfMessageId: "failure-1" },
+        // Marked as Instafy's own resend, so the chat folds it into one turn.
+        metadata: { retryOfMessageId: "failure-1", retryAutomatic: true },
       },
       expect.objectContaining({ automatic: true }),
     );
@@ -795,7 +796,7 @@ describe("useRunFailureRetryActions", () => {
             {
               message: "Build the pricing page",
               editorState: null,
-              metadata: { retryOfMessageId: "f1" },
+              metadata: { retryOfMessageId: "f1", retryAutomatic: true },
             },
             expect.objectContaining({ automatic: true }),
           );
