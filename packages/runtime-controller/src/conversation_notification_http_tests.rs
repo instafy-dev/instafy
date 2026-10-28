@@ -540,3 +540,69 @@ async fn conversation_notification_http_muted_push_retains_center_and_cross_devi
     assert_eq!(f.inbox(0).await?["unreadCount"], 0);
     f.cleanup().await
 }
+
+#[tokio::test]
+async fn conversation_notification_http_rows_kept_out_of_the_transcript_never_notify(
+) -> anyhow::Result<()> {
+    // What the Studio never shows never notifies: a hidden presentation hint
+    // at either path, whoever wrote the row, and a plan helper's own message.
+    // A helper's question to a person (an id the Studio's isUUID accepts), the
+    // lead's reply and a hint that is not JSON true still notify.
+    let f = ConversationNotificationFixture::new().await?;
+    let conversation = f.create(true, &[f.users[1]]).await?;
+    let question = |id: String| {
+        json!({"messageType":"action_request","multiAgentPlan":{"role":"worker"},
+            "details":{"userInputRequestId":id}})
+    };
+    let cases = [
+        (
+            "assistant",
+            json!({"messageType":"goal_update","presentation":{"hidden":true}}),
+            false,
+        ),
+        (
+            "assistant",
+            json!({"details":{"presentation":{"hidden":true}}}),
+            false,
+        ),
+        ("user", json!({"presentation":{"hidden":true}}), false),
+        (
+            "assistant",
+            json!({"outcome":"succeeded","multiAgentPlan":{"role":"worker"}}),
+            false,
+        ),
+        (
+            "assistant",
+            question("11111111-1111-1111-1111-111111111111".into()),
+            false,
+        ),
+        ("assistant", question(Uuid::new_v4().to_string()), true),
+        (
+            "assistant",
+            json!({"multiAgentPlan":{"role":"lead_continuation"}}),
+            true,
+        ),
+        ("assistant", json!({"presentation":{"hidden":"true"}}), true),
+    ];
+    let db = f.pool.get().await?;
+    for (role, metadata, notifies) in cases {
+        let message = Uuid::new_v4();
+        let author = (role == "user").then_some(f.users[0]);
+        db.execute(
+            "insert into conversation_messages(id,conversation_id,project_id,role,content,metadata,created_by)
+             values($1,$2,$3,$4,'Kept out of every preview.',$5,$6)",
+            &[&message, &conversation, &f.project, &role, &PgJson(&metadata), &author],
+        )
+        .await?;
+        let events: i64 = db
+            .query_one(
+                "select count(*) from notification_events where producer_key=$1",
+                &[&format!("conversation.reply:{message}")],
+            )
+            .await?
+            .get(0);
+        assert_eq!(events, i64::from(notifies), "{role} {metadata}");
+    }
+    drop(db);
+    f.cleanup().await
+}

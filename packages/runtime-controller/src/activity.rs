@@ -171,10 +171,46 @@ fn message_type(metadata: &JsonValue) -> String {
         .to_ascii_lowercase()
 }
 
+/// Does the Studio keep this message out of the conversation transcript on
+/// its own metadata (`shouldDisplayChatMessage`)? A hidden presentation hint,
+/// at the top level or under details and only as JSON `true`, or a plan
+/// helper's own message, which folds into the plan card; a helper's question
+/// to a person stays a row. The reply notification trigger applies the same
+/// rule (`20261028120002_hidden_reply_notifications.sql`).
+pub(crate) fn is_kept_out_of_transcript(metadata: &JsonValue) -> bool {
+    if ["/presentation/hidden", "/details/presentation/hidden"]
+        .iter()
+        .any(|path| metadata.pointer(path).and_then(JsonValue::as_bool) == Some(true))
+    {
+        return true;
+    }
+    let plan_role = ["multiAgentPlan", "multi_agent_plan"]
+        .iter()
+        .find_map(|key| metadata.get(*key).filter(|plan| plan.is_object()))
+        .and_then(|plan| plan.get("role"))
+        .and_then(JsonValue::as_str)
+        .map(|role| role.trim().to_ascii_lowercase());
+    // The Studio's isUUID: the hyphenated form, an RFC version and variant.
+    let worker_question = message_type(metadata) == "action_request"
+        && metadata
+            .pointer("/details/userInputRequestId")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|raw| raw.len() == 36)
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+            .is_some_and(|id| {
+                (1..=5).contains(&id.get_version_num())
+                    && id.get_variant() == uuid::Variant::RFC4122
+            });
+    plan_role.as_deref() == Some("worker") && !worker_question
+}
+
 /// Is this assistant message the agent conversationally speaking? Mirrors
 /// the SQL predicate the run ledger uses (`run_has_visible_assistant_message`)
 /// so the feed and the transcript agree on what a reply is: tool/status
 /// telemetry and controller notices (runtime alerts, cancellations) are not.
+/// The one difference is a plan helper's own message: it still counts as its
+/// run replying, but it folds into the plan card, so it is no feed reply.
 pub(crate) fn is_visible_reply(
     role: &str,
     created_by: Option<Uuid>,
@@ -185,10 +221,7 @@ pub(crate) fn is_visible_reply(
     {
         return false;
     }
-    if ["/presentation/hidden", "/details/presentation/hidden"]
-        .iter()
-        .any(|path| metadata.pointer(path).and_then(JsonValue::as_bool) == Some(true))
-    {
+    if is_kept_out_of_transcript(metadata) {
         return false;
     }
     let message_type = message_type(metadata);
@@ -1028,6 +1061,34 @@ mod tests {
             "Agent job cancelled",
             &cancelled
         ));
+    }
+
+    #[test]
+    fn visible_reply_leaves_a_plan_helpers_own_messages_in_the_plan() {
+        let question = |id: &str| {
+            json!({ "multiAgentPlan": { "role": "worker" }, "messageType": "action_request",
+                "details": { "userInputRequestId": id } })
+        };
+        for plan in [
+            json!({ "multiAgentPlan": { "role": "worker" } }),
+            json!({ "multi_agent_plan": { "role": " Worker " } }),
+            json!({ "multiAgentPlan": { "role": "worker" }, "messageType": "action_request" }),
+            // Ids the Studio's isUUID rejects: no RFC version or variant, or
+            // not the hyphenated form.
+            question("11111111-1111-1111-1111-111111111111"),
+            question("11111111111141118111111111111111"),
+        ] {
+            assert!(is_kept_out_of_transcript(&plan), "{plan}");
+            assert!(!is_visible_reply("assistant", None, "x", &plan), "{plan}");
+        }
+        for plan in [
+            json!({ "multiAgentPlan": { "role": "lead_continuation" } }),
+            json!({ "multi_agent_plan": { "role": "worker" }, "multiAgentPlan": { "role": "lead" } }),
+            question(" 11111111-1111-4111-8111-111111111111 "),
+        ] {
+            assert!(!is_kept_out_of_transcript(&plan), "{plan}");
+            assert!(is_visible_reply("assistant", None, "x", &plan), "{plan}");
+        }
     }
 
     #[test]
