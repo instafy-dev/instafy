@@ -60,12 +60,26 @@ export function browserReadingHost(page: Pick<BrowserSessionPage, "host" | "url"
   }
 }
 
+// A title that is only a media type ("image/svg+xml"), as an image or svg
+// shown on its own can leave: it names nothing. Software writes the type in
+// lower case; "Audio/Video" is a title.
+const MEDIA_TYPE_TITLE = /^(?:image|video|audio|application|text|font|model|multipart)\/[A-Za-z0-9][A-Za-z0-9.+-]*(?:\s*;.*)?$/;
+
+/**
+ * A page's title as a tab shows it, or null when it has none: a title that
+ * is only a media type names nothing, so the tab is named by its site.
+ */
+export function shownBrowserPageTitle(title: string | null | undefined): string | null {
+  const value = title?.replace(/\s+/g, " ").trim() ?? "";
+  return value && !MEDIA_TYPE_TITLE.test(value) ? value : null;
+}
+
 /**
  * The page's own title, shortened for one line. Page titles are page data:
  * they are only ever shown as text, never followed.
  */
 export function browserReadingTitle(page: Pick<BrowserSessionPage, "title">): string | null {
-  const title = page.title?.replace(/\s+/g, " ").trim() ?? "";
+  const title = shownBrowserPageTitle(page.title) ?? "";
   if (!title) return null;
   return title.length > READING_TITLE_MAX_CHARS ? `${title.slice(0, READING_TITLE_MAX_CHARS - 1).trimEnd()}…` : title;
 }

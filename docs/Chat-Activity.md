@@ -187,7 +187,12 @@ activity line, to the person who started the run only, and the line says `Waitin
   “{label}” on {host}.` (plus `It goes to {site}.` when the form posts to another site), `to press
   Enter on “{label}” on {host}.` and `to press {key} on {host}.` `{label}` is the runtime's
   already-masked name of the control, cut at 40 characters: the page's own words appear only
-  here, where the person needs them to decide, never in the line. `Allow site` answers a site
+  here, where the person needs them to decide, never in the line. The runtime leads its label
+  with the step's category (`Delete, cancel or sign out: Delete account`); the row quotes only
+  the name and says what a risky category adds as a sentence of its own (`Octo wants to click
+  “Delete account” on example.com. It may delete, cancel or sign out of something.`). An
+  ordinary step's category (`Change something`) adds nothing (`browserApprovalLabel.ts`, from the
+  runtime's fixed list of titles). `Allow site` answers a site
   prompt and `Allow` one step; neither button takes focus. In the prompt's last minute the row
   says `Expires in under a minute`; an error shows after the buttons. The row is a labelled
   group, says `Octo needs your answer: …` once to screen readers, and its buttons are 44 px tall

@@ -96,6 +96,21 @@ describe("SharedBrowserChrome", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  it("names a tab whose title is a bare media type by its site", async () => {
+    // The live test of 2026-10-27 showed a tab as "image/svg+xml".
+    const pages = [
+      page({ id: "svg", url: "https://www.visitlisboa.com/logo.svg", host: "visitlisboa.com", title: "image/svg+xml", label: "image/svg+xml", isActive: true }),
+      page({ id: "octo", url: "https://www.carris.pt/x.png", host: "carris.pt", title: "image/png", label: "carris.pt", isActive: false, openedBy: "agent", agentTabNumber: 1 }),
+    ];
+    await act(async () => {
+      root.render(<SharedBrowserChrome {...props({ pages })} />);
+    });
+    const labels = [...container.querySelectorAll<HTMLOptionElement>('[data-testid="shared-browser-page-select"] option')]
+      .map((option) => option.textContent);
+    expect(labels).toEqual(["visitlisboa.com", "Octo's tab 1: carris.pt"]);
+    expect(container.textContent).not.toContain("image/");
+  });
+
   it("names the agent on the tabs it holds while it has control, and on no tab after", async () => {
     const pages = [
       page({ id: "mine", title: "My page", isActive: false }),

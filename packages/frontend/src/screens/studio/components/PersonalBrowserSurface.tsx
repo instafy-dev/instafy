@@ -32,7 +32,7 @@ import { SendPageToOctoButton } from "./SendPageToOctoButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { BrowserReadingRow } from "./BrowserReadingRow";
-import { personalBrowserTabPages, resolveAgentReadingPages } from "./browserAgentTabs";
+import { personalBrowserTabPages, resolveAgentReadingPages, shownBrowserPageTitle } from "./browserAgentTabs";
 import { browserPageOrigin } from "./browserHandoffRouting";
 import {
   BrowserChromeShell,
@@ -95,7 +95,8 @@ export function BrowserTransportSelector({
 type PersonalBrowserTab = NonNullable<InstafyDesktopPersonalBrowserStatus["tabs"]>[number];
 
 function tabLabel(tab: PersonalBrowserTab): string {
-  if (tab.title) return tab.title;
+  const title = shownBrowserPageTitle(tab.title);
+  if (title) return title;
   try {
     return new URL(tab.url).host || "New tab";
   } catch {

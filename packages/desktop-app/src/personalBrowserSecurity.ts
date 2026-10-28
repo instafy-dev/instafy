@@ -84,6 +84,8 @@ export type PersonalBrowserActionDescriptor = {
   role?: string | null;
   type?: string | null;
   text?: string | null;
+  /** The text the control draws, for the label prompts show; `text` holds every text inside it. */
+  shownText?: string | null;
   ariaLabel?: string | null;
   title?: string | null;
   value?: string | null;
@@ -157,6 +159,7 @@ export const PERSONAL_BROWSER_SECURITY_FINGERPRINT_FIELDS = [
   "placeholder",
   "inputMode",
   "text",
+  "shownText",
   "title",
   "value",
   "href",

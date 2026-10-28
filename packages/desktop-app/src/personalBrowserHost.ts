@@ -45,6 +45,7 @@ import {
   categoryTitle,
   classifyAddress,
   isEditable as isEditableStepTarget,
+  isPlaceholderName,
   refusalFor,
   stepLabels,
   type PersonalBrowserStepClassification,
@@ -335,13 +336,20 @@ function navigationHistoryStatus(webContents: WebContents | null) {
   };
 }
 
+// A page's title as a tab shows it; a title that names nothing (a bare
+// media type, as an image or svg shown on its own can leave) is none.
+function tabTitle(raw: string | null | undefined): string | undefined {
+  const title = raw?.trim() ?? "";
+  return title && !isPlaceholderName(title) ? title : undefined;
+}
+
 function pageLabel(descriptor: PersonalBrowserTargetDescriptor): string {
+  // What the control draws names it; a bare media type an svg's metadata
+  // leaves names nothing.
+  const drawn = typeof descriptor.shownText === "string" ? descriptor.shownText : descriptor.text;
   return (
-    descriptor.ariaLabel ||
-    descriptor.text ||
-    descriptor.title ||
-    descriptor.value ||
-    descriptor.formActionText ||
+    [descriptor.ariaLabel, drawn, descriptor.title, descriptor.value, descriptor.formActionText]
+      .find((value) => typeof value === "string" && !isPlaceholderName(value)) ||
     "this action"
   ).slice(0, 160);
 }
@@ -674,7 +682,7 @@ export class PersonalBrowserHost {
     const contents = this.getWebContents();
     const navigation = navigationHistoryStatus(contents);
     const url = contents?.getURL() || "about:blank";
-    const title = contents?.getTitle().trim() || undefined;
+    const title = tabTitle(contents?.getTitle());
     return {
       supported: this.supported,
       enabled: this.enabled,
@@ -1125,7 +1133,7 @@ export class PersonalBrowserHost {
   private tabStatus(tab: PersonalBrowserTab): PersonalBrowserTabStatus {
     const contents = tab.view?.webContents;
     const live = contents && !contents.isDestroyed() ? contents : null;
-    const title = live?.getTitle().trim() || undefined;
+    const title = tabTitle(live?.getTitle());
     return {
       id: tab.id,
       openedBy: tab.openedBy,

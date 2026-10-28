@@ -437,12 +437,31 @@ An icon-only control whose icon is a trash can, a paper plane, a cart or card,
 a share or add-user, a download or a sign-out asks in that category, and one
 whose icon is a floppy disk, pencil or plus asks as a commit button.
 
+A control is named by its accessible name or the text it draws. The text it
+draws leaves out what never draws: scripts and styles, parts the page's CSS
+hides (`display: none`, as the `hidden` attribute does unless the page's own
+style shows it), and an svg's metadata, title, description and definitions
+(an Inkscape icon's `<dc:format>image/svg+xml</dc:format>` once named a search
+button "image/svg+xml"); the HTML in an svg's `<foreignObject>` is drawn. Risk
+words still read every text inside the control. An image button is named by
+its alt text and an input button by its value, and text that names nothing,
+such as a bare media type in lower case as software writes it ("image/png",
+never "Audio/Video"), is never a name or a tab title (`isPlaceholderName`). The page describer reads all of this with the
+shared in-page rules (`controlNameRulesInPage` in
+`@instafy/browser-action-policy`), which the Desktop Personal Browser runs too.
+
 A control with no accessible name or visible text is named from its own
 hints rather than its index: a tooltip attribute or described-by text, its
-image's alt text or svg title, a generic noun for its icon, and where it sits,
-for example "profile picture button in the top right". The name is masked like
-any other control name before it reaches a snapshot, a prompt or the action
-log.
+image's alt text, svg title or an inner element's label or title, a generic
+noun for its icon (its classes or its svg sprite's symbol), the short text
+right beside it ("button next to “Idioma”", at most 40 characters and never
+another control's), read only when it has no name of its own, and where it
+sits, for example "profile picture button in the top right". The text beside
+it names only what it sits next to, never the control itself. An inner
+element's label and the text beside it never set the step's category; like
+any name, their words can only make a routine step ask (the consequential
+floor), never let one go. The name is masked like any other control name
+before it reaches a snapshot, a prompt or the action log.
 
 Every step's result carries `activity: {step, url, approval}` for the turn's plain-language
 activity line ([Chat activity line](Chat-Activity.md#browser-steps)): the step's kind

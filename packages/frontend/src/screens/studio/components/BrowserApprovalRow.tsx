@@ -7,6 +7,7 @@ import type {
   RuntimeSharedBrowserApprovalRequest,
 } from "../../../sdk/instafy";
 import { displayActivityHost } from "./activityHost";
+import { splitBrowserApprovalLabel } from "./browserApprovalLabel";
 import {
   sharedBrowserApprovalAllowDecision,
   sharedBrowserApprovalTargetAddress,
@@ -70,9 +71,18 @@ function cut(label: string): string {
  * the person needs them to decide.
  */
 export function browserApprovalSentence(agent: string, request: RuntimeSharedBrowserApprovalRequest): string {
+  // The step's category leads the runtime's label ("Delete, cancel or sign
+  // out: Delete account"): only the control's name goes in quotes, and the
+  // category, when it adds something, follows as its own sentence.
+  const { label: name, note } = splitBrowserApprovalLabel(request.display.label);
+  const sentence = stepSentence(agent, request, name);
+  return note ? `${sentence} ${note}` : sentence;
+}
+
+function stepSentence(agent: string, request: RuntimeSharedBrowserApprovalRequest, name: string): string {
   const destination = shownHost(request.display.destinationOrigin) ?? shownHost(request.destinationOrigin);
   const site = shownHost(request.sourceOrigin) ?? destination ?? "this site";
-  const label = cut(request.display.label);
+  const label = cut(name);
   const quoted = label ? ` “${label}”` : "";
   // The exact page a site prompt or a navigation will load, when the runtime names it.
   const page = sharedBrowserApprovalTargetAddress(request);
@@ -95,7 +105,7 @@ export function browserApprovalSentence(agent: string, request: RuntimeSharedBro
       return `${agent} wants to press Space on${quoted || " a control"} on ${site}.`;
     case "press-key": {
       // The runtime names the key itself: "Press Tab on Search".
-      const key = cut(request.display.label.trim().replace(/^Press /u, ""));
+      const key = cut(name.replace(/^Press /u, ""));
       return `${agent} wants to press ${key || "a key"} on ${site}.`;
     }
     default:
