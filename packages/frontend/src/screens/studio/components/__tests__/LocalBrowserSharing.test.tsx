@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { LocalBrowserSharing, LocalBrowserTabPublisher } from "../LocalBrowserSharing";
+import { INCOMING_SHARES_SHOW_MIN_GAP_MS, LocalBrowserSharing, LocalBrowserTabPublisher } from "../LocalBrowserSharing";
 import { browserShareClient, publishLocalBrowserTab } from "../../../../services/runtimeController/browserShares";
 vi.mock("../../../../services/runtimeController/browserShares", () => ({ browserShareClient: vi.fn(), publishLocalBrowserTab: vi.fn() }));
 let container: HTMLDivElement; let root: Root;
@@ -254,4 +254,24 @@ it("polls incoming shares only while the chat is shown and the tab is in use", a
   } finally {
     setVisibility("visible");
   }
+});
+
+it("reads incoming shares at most once per interval while the chat is shown and hidden again and again", async () => {
+  const list = vi.fn().mockResolvedValue([]);
+  vi.mocked(browserShareClient).mockResolvedValue({ list } as never);
+  const show = (active: boolean) => act(async () => root.render(<LocalBrowserSharing projectId="project" userId="viewer" active={active} />));
+  window.dispatchEvent(new Event("pointerdown"));
+  await show(true);
+  expect(list).toHaveBeenCalledTimes(1);
+  // Oct 28: the chat surface was shown and hidden many times a second.
+  for (let flip = 0; flip < 40; flip += 1) {
+    await show(flip % 2 === 1);
+    await act(async () => vi.advanceTimersByTimeAsync(50));
+  }
+  expect(list).toHaveBeenCalledTimes(1);
+  // Shown again once the last read is an interval old: it reads at once.
+  await show(false);
+  await act(async () => vi.advanceTimersByTimeAsync(INCOMING_SHARES_SHOW_MIN_GAP_MS));
+  await show(true);
+  expect(list).toHaveBeenCalledTimes(2);
 });

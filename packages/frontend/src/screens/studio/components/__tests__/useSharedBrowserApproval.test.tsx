@@ -18,7 +18,12 @@ vi.mock("../../../../sdk/instafy", () => ({
   },
 }));
 
-import { useSharedBrowserApproval, type SharedBrowserApprovalState } from "../useSharedBrowserApproval";
+import {
+  APPROVAL_INTERRUPTED_GRACE_MS,
+  APPROVAL_INTERRUPTED_MESSAGE,
+  useSharedBrowserApproval,
+  type SharedBrowserApprovalState,
+} from "../useSharedBrowserApproval";
 
 const pending = {
   runtimeId: "11111111-1111-4111-8111-111111111111",
@@ -178,7 +183,7 @@ describe("useSharedBrowserApproval", () => {
     expect(fetchPendingApprovalMock).not.toHaveBeenCalled();
   });
 
-  it("keeps the live request visible while polling reconnects after a network loss", async () => {
+  it("keeps the live request visible, and quiet, through one failed read", async () => {
     fetchPendingApprovalMock
       .mockResolvedValueOnce(pending)
       .mockRejectedValueOnce(new TypeError("network unavailable"))
@@ -194,13 +199,18 @@ describe("useSharedBrowserApproval", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(400);
     });
+    expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
     expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe(
       pending.request.approvalId,
     );
-    expect(container.querySelector('[data-testid="error"]')?.textContent).toBe(
-      "Approval connection interrupted. Reconnecting…",
-    );
+    // One failed read between good ones says nothing.
+    expect(container.querySelector('[data-testid="error"]')?.textContent).toBe("none");
 
+    // The read after a failure waits twice as long.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(400);
     });
@@ -209,6 +219,65 @@ describe("useSharedBrowserApproval", () => {
       pending.request.approvalId,
     );
     expect(container.querySelector('[data-testid="error"]')?.textContent).toBe("none");
+  });
+
+  it("says the connection was interrupted only once reads keep failing, backing off, and clears it on the next good read", async () => {
+    let failing = true;
+    fetchPendingApprovalMock.mockImplementation(async () => {
+      if (fetchPendingApprovalMock.mock.calls.length === 1) return pending;
+      if (failing) throw new TypeError("network unavailable");
+      return pending;
+    });
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    const error = () => container.querySelector('[data-testid="error"]')?.textContent;
+    const readTimes: number[] = [];
+    for (let elapsed = 0; elapsed < 8_000; elapsed += 100) {
+      const before = fetchPendingApprovalMock.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      if (fetchPendingApprovalMock.mock.calls.length > before) readTimes.push(elapsed + 100);
+      if (elapsed + 100 < APPROVAL_INTERRUPTED_GRACE_MS) expect(error()).toBe("none");
+    }
+    // 400 ms after the good read, then 800, 1.6 s and 3.2 s after each failure.
+    expect(readTimes).toEqual([400, 1_200, 2_800, 6_000]);
+    expect(error()).toBe(APPROVAL_INTERRUPTED_MESSAGE);
+    expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe(
+      pending.request.approvalId,
+    );
+    failing = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_400);
+    });
+    expect(error()).toBe("none");
+  });
+
+  it("does not read again at once when its lane stops and starts again a moment later", async () => {
+    fetchPendingApprovalMock.mockResolvedValue(null);
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(1);
+    // The lane flips off and on twenty times within 200 ms (Oct 28: the tab
+    // under it came and went ten times a second).
+    for (let flip = 0; flip < 20; flip += 1) {
+      await act(async () => {
+        root.render(<Harness active={flip % 2 === 0 ? false : true} />);
+        await vi.advanceTimersByTimeAsync(10);
+      });
+    }
+    expect(fetchPendingApprovalMock.mock.calls.length).toBeLessThanOrEqual(2);
+    // A new lane (another page) still reads at once.
+    const reads = fetchPendingApprovalMock.mock.calls.length;
+    await act(async () => {
+      root.render(<Harness browserPageId="page-2" />);
+      await Promise.resolve();
+    });
+    expect(fetchPendingApprovalMock.mock.calls.length).toBe(reads + 1);
   });
 
   it("retains the exact request when a decision write fails and permits a safe retry", async () => {

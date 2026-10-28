@@ -248,6 +248,15 @@ export function quietPollDelay(delayMs: number, quietReads: number, quietMaxMs: 
 }
 
 /**
+ * How soon {@link useAdaptivePoll} may read "at once" again (at most its
+ * `fastMs`): after it is enabled again with the same callback, or after a
+ * second change of `fast`. Inputs that flip quickly then cost at most one
+ * read a second instead of one read per flip; a new callback (a new scope)
+ * and a first change of `fast` still read at once.
+ */
+export const ADAPTIVE_POLL_MIN_GAP_MS = 1_000;
+
+/**
  * Runs `callback` at once when enabled (and whenever `callback` changes),
  * then one {@link adaptivePollDelay} after each run. A gate transition
  * re-arms the timer against that due time, so coming back reads at once only
@@ -258,10 +267,17 @@ export function quietPollDelay(delayMs: number, quietReads: number, quietMaxMs: 
  * not part of any scope, so a change never resets the caller's state. With
  * `quietMaxMs`, reads that find nothing new stretch the delay (see
  * {@link quietPollDelay}); a change of `fast` starts from the plain cadence.
+ * Being enabled again with the same callback, or a second change of `fast`,
+ * reads no sooner than {@link ADAPTIVE_POLL_MIN_GAP_MS} after the read or the
+ * change before it.
  */
 export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs, slowMs, slowIdleMs = slowMs, quietMaxMs }: AdaptivePollOptions): void {
   const fastRef = useRef(fast);
   const kickRef = useRef<(() => void) | null>(null);
+  // The last read's callback and start, kept across restarts; and when a
+  // change of `fast` last read at once.
+  const lastStartRef = useRef<{ callback: unknown; atMs: number }>({ callback: null, atMs: 0 });
+  const lastKickAtRef = useRef(0);
   useEffect(() => {
     if (typeof window === "undefined" || !enabled) return;
     let timer: number | null = null;
@@ -269,6 +285,7 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
     let lastRunAt = 0;
     let quietReads = 0;
     let run = 0;
+    const minGapMs = Math.min(ADAPTIVE_POLL_MIN_GAP_MS, fastMs);
     const clear = () => { if (timer !== null) window.clearTimeout(timer); timer = null; };
     const schedule = () => {
       clear();
@@ -278,6 +295,13 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
       const wait = lastRunAt + quietPollDelay(delay, quietReads, quietMaxMs) - Date.now();
       if (wait <= 0) tick();
       else timer = window.setTimeout(tick, wait);
+    };
+    // At once, or `sinceMs` + the minimum gap when that is later.
+    const readSoon = (sinceMs: number) => {
+      const wait = sinceMs + minGapMs - Date.now();
+      if (wait <= 0) { tick(); return; }
+      clear();
+      timer = window.setTimeout(tick, wait);
     };
     // Only the latest read moves the backoff; a stale answer changes nothing.
     const settle = (thisRun: number, foundSomething: boolean) => {
@@ -290,6 +314,7 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
     const tick = () => {
       clear();
       lastRunAt = Date.now();
+      lastStartRef.current = { callback, atMs: lastRunAt };
       run += 1;
       const thisRun = run;
       let result: Promise<unknown>;
@@ -305,10 +330,14 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
       quietReads = 0;
       // Hidden: owe the read to the return instead of reading now.
       if (pollingGateState() === "hidden") { lastRunAt = 0; return; }
-      tick();
+      // A first change reads now; one that follows it soon waits the gap.
+      const previousKickAtMs = lastKickAtRef.current;
+      lastKickAtRef.current = Date.now();
+      readSoon(previousKickAtMs);
     };
     const unsubscribe = subscribePollingGate(schedule);
-    tick();
+    // Enabled again with the same callback right after a read: wait the gap.
+    readSoon(lastStartRef.current.callback === callback ? lastStartRef.current.atMs : 0);
     return () => { cancelled = true; clear(); unsubscribe(); kickRef.current = null; };
   }, [callback, enabled, fastMs, quietMaxMs, slowIdleMs, slowMs]);
   useEffect(() => {

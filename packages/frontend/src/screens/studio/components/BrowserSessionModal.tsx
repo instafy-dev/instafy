@@ -57,6 +57,7 @@ import { resolvePublicAppUrl } from "../../../utils/publicAppUrl";
 import { SharedBrowserParticipantPointers } from "./SharedBrowserParticipantPointers";
 import { collaborationSelfOwnsControl } from "./sharedBrowserCollaboration";
 import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
+import { useSustainedFlag } from "./useSustainedFlag";
 import { BrowserIdentityBadge } from "./BrowserIdentityBadge";
 import { BrowserSessionRecovery, BrowserSessionReconnecting } from "./BrowserSessionRecovery";
 import {
@@ -199,6 +200,12 @@ export const SHARED_BROWSER_LOST_CONNECTION_REASON = "connection lost and its re
  * before it says it lost the connection and offers Retry.
  */
 export const SHARED_BROWSER_RECONNECT_TIMEOUT_MS = 60_000;
+/**
+ * How long a live view must have lost its picture before it says
+ * "Reconnecting…". An automatic reconnect that is back sooner (a viewer
+ * swap, a cached grant, a socket blip) shows nothing at all.
+ */
+export const RECONNECTING_GRACE_MS = 1_500;
 const DOCKED_BROWSER_ASPECT_RATIO = 1280 / 720;
 const connectedBrowserSessionScopes = new Set<string>();
 const BROWSER_SESSION_SAFE_ZONE_SELECTOR = "[data-browser-session-safe-zone='true']";
@@ -573,12 +580,17 @@ export function BrowserSessionModal({
     sharedBrowserChrome?.pages.find((page) => page.isActive)?.id ??
     sharedBrowserChrome?.pages[0]?.id ??
     null;
+  // The roster belongs to the browser, not to a tab: it stays connected while
+  // Studio's tab list is empty or reloading (a page id follows by heartbeat).
+  // Tying it to the list made a loop: a view that showed an error emptied the
+  // list, the roster closed, its absence read as "connecting", the list came
+  // back, the roster opened, and the error came back, ten times a second.
   const collaboration = useSharedBrowserCollaboration({
     active:
       isOpen &&
       transportActive &&
       !browserDataClearInFlight &&
-      Boolean(sharedBrowserPageId),
+      sharedBrowserViewportOnly,
     pageId: sharedBrowserPageId,
     sessionId: browserSessionId,
     wsUrl: collaborationWsUrl,
@@ -2377,6 +2389,16 @@ export function BrowserSessionModal({
       setFailure(null);
       return;
     }
+    if (sharedBrowserCapabilitiesAvailable && canControlBrowser && remoteControllerPresent) {
+      // Octo or another person drives a browser whose only viewer is the
+      // controller's own lane. The browser is open and working; this person
+      // has no picture until control comes back, so the view stays live with
+      // the last frame and says who has control (Take over), as it does over
+      // a picture.
+      setStatus("connected");
+      setFailure(null);
+      return;
+    }
     if (sharedBrowserCapabilitiesAvailable && canControlBrowser) {
       // Its roster is known: the person can ask for control with the
       // collaboration controls, so the connection stays.
@@ -2410,6 +2432,7 @@ export function BrowserSessionModal({
     dropConnection,
     fail,
     isOpen,
+    remoteControllerPresent,
     sharedBrowserCapabilitiesAvailable,
     sharedBrowserCapabilitiesResolved,
     sharedBrowserCapabilitiesUnsupported,
@@ -2533,6 +2556,12 @@ export function BrowserSessionModal({
     }, SHARED_BROWSER_RECONNECT_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
   }, [fail, projectId, reconnectingShown]);
+
+  // On screen only once the picture has been gone for the grace period.
+  const reconnectingNoteShown = useSustainedFlag(
+    !shouldCollapseDocked && viewLive && status === "connecting",
+    RECONNECTING_GRACE_MS,
+  );
 
   // The card on a chat message says what this browser says.
   const shownError = isOpen && error ? viewState.sentence : null;
@@ -3550,7 +3579,7 @@ export function BrowserSessionModal({
               />
             </>
           ) : null}
-          {!shouldCollapseDocked && viewLive && status === "connecting" ? <BrowserSessionReconnecting /> : null}
+          {reconnectingNoteShown ? <BrowserSessionReconnecting /> : null}
           {compactCardBody}
           {!shouldCollapseDocked && displayStatus !== "selecting" && !viewLive ? (
             <BrowserSessionRecovery viewState={viewState} reason={error}
