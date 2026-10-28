@@ -10,6 +10,7 @@ import {
 import { Expand, Safari, Xmark } from "iconoir-react";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { Button, IconButton } from "../../../components/Button";
+import { StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import {
@@ -3281,7 +3282,8 @@ export function BrowserSessionModal({
       onChoose={chooseSession}
       onStart={startNewSession}
       onRefresh={() => { void refreshSessionChoices(); startAttempt(); }}
-      footer={canClearBrowserData ? <div className="mt-1 border-t border-slate-200 pt-1 dark:border-slate-700/50">
+      footer={canClearBrowserData ? <>
+        <StudioMenuSeparator />
         <SharedBrowserDataClearAction
           canClear={canClearBrowserData && !browserDataClearInFlight}
           onClearSettled={handleBrowserDataClearSettled}
@@ -3297,7 +3299,7 @@ export function BrowserSessionModal({
               }
             : {})}
         />
-      </div> : null}
+      </> : null}
     >
       {sessionControlsVisible && sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
     </SharedBrowserSessionControl>

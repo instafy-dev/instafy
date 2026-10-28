@@ -1,8 +1,12 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Dialog, DialogTrigger } from "react-aria-components";
-import { Check, Link, MoreHoriz, Plus, Refresh, Xmark } from "iconoir-react";
-import { Button, IconButton } from "../../../components/Button";
+import { Check, Link, MoreHoriz, NavArrowDown, Plus, Refresh, Xmark } from "iconoir-react";
+import { IconButton } from "../../../components/Button";
 import { Input } from "../../../components/Input";
+import { MenuItemContent } from "../../../components/MenuItemContent";
+import { Text } from "../../../components/Text";
+import { StudioMenuAction, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
+import { STUDIO_MENU_NATIVE_ROW_CLASS } from "../../../components/aria/studioMenuStyles";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { addFloatingSurfaceViewportChangeListener, readStudioSafeAreaInsets } from "../../../utils/floatingSurfacePosition";
 import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
@@ -54,19 +58,19 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
       data-testid="shared-browser-sessions-toggle">
       <MoreHoriz className="h-4 w-4" aria-hidden="true" />
     </IconButton>
-    <StudioPopover placement="bottom end" offset={6} maxHeight={bounds.maxHeight} containerPadding={bounds.containerPadding}
-      className="w-80 max-w-[calc(100vw-1.5rem)] p-1.5"
+    <StudioPopover layout="menu" placement="bottom end" maxHeight={bounds.maxHeight} containerPadding={bounds.containerPadding}
+      className="w-80"
       data-browser-session-safe-zone="true" data-testid="shared-browser-session-control">
       <Dialog aria-label="Browser options" className="outline-none">
-        <section className="text-sm" aria-label="Shared sessions and resume">
+        <section aria-label="Shared sessions and resume">
           <div className="flex items-center justify-between gap-2 px-2 py-1">
-            <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400">Browser options</h3>
+            <Text as="h3" variant="bodyStrong" tone="primary">Browser options</Text>
             <IconButton size="xs" variant="ghost" aria-label="Close browser options" onPress={() => onOpenChange(false)}>
               <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
             </IconButton>
           </div>
           {actions}
-          {resumeUrl ? <Button size="sm" variant="ghost" className="w-full justify-start" onPress={() => {
+          {resumeUrl ? <StudioMenuAction onPress={() => {
             void writeClipboardText(resumeUrl).then(
               () => setCopyStatus({ url: resumeUrl, text: "Resume link copied." }),
               () => {
@@ -77,31 +81,37 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
                 }
               },
             );
-          }}><Link className="h-4 w-4 shrink-0" aria-hidden="true" />Copy resume link</Button> : null}
-          {copyStatus?.url === resumeUrl ? <p className="px-2.5 py-1 text-xs" role="status">{copyStatus.text}</p> : null}
-          {canStart ? <Button size="sm" variant="ghost" className="w-full justify-start" isDisabled={busy} onPress={onStart}>
-            <Plus className="h-4 w-4 shrink-0" aria-hidden="true" />Start new session
-          </Button> : null}
-          <div className="mt-1 border-t border-slate-200 pt-1 dark:border-slate-700/50">
+          }}><MenuItemContent start={<Link aria-hidden="true" />}>Copy resume link</MenuItemContent></StudioMenuAction> : null}
+          {copyStatus?.url === resumeUrl ? <Text variant="caption" tone="muted" className="px-2.5 py-1" role="status">{copyStatus.text}</Text> : null}
+          {canStart ? <StudioMenuAction isDisabled={busy} onPress={onStart}>
+            <MenuItemContent start={<Plus aria-hidden="true" />}>Start new session</MenuItemContent>
+          </StudioMenuAction> : null}
+          <StudioMenuSeparator />
+          <div>
             <div className="flex items-center justify-between px-2 py-1">
-              <h4 className="text-xs text-slate-500 dark:text-slate-400">Sessions</h4>
+              <Text as="h4" variant="caption" tone="muted">Sessions</Text>
               <IconButton size="xs" variant="ghost" isDisabled={busy} aria-label="Refresh sessions" title="Refresh sessions" onPress={onRefresh}>
                 <Refresh className="h-3.5 w-3.5" aria-hidden="true" />
               </IconButton>
             </div>
-            {error ? <p className="px-2.5 py-1 text-xs" role={selectionRequired ? "status" : "alert"}>{error}</p> : null}
-            {candidates.map((candidate) => <Button key={candidate.runtimeId} size="sm" variant="ghost" isDisabled={busy}
-              className="w-full justify-start text-left" onPress={() => onChoose(candidate.runtimeId)} aria-label={`Resume Shared session ${candidate.runtimeId}`}>
-              <span className="min-w-0 flex-1 truncate">{candidate.mode === "lazy" ? "This space's machine" : `Session ${candidate.runtimeId.slice(0, 8)}`}</span>
-              {candidate.runtimeId === runtimeId ? <><span className="text-xs text-slate-500 dark:text-slate-400">Current</span><Check className="h-4 w-4 shrink-0" aria-hidden="true" /></> : null}
-            </Button>)}
+            {error ? <Text variant="caption" tone={selectionRequired ? "muted" : "danger"} className="px-2.5 py-1" role={selectionRequired ? "status" : "alert"}>{error}</Text> : null}
+            {candidates.map((candidate) => <StudioMenuAction key={candidate.runtimeId} isDisabled={busy}
+              onPress={() => onChoose(candidate.runtimeId)} aria-label={`Resume Shared session ${candidate.runtimeId}`}>
+              <MenuItemContent end={candidate.runtimeId === runtimeId ? <Check aria-hidden="true" /> : null}
+                description={candidate.runtimeId === runtimeId ? "Current" : undefined}>
+                {candidate.mode === "lazy" ? "This space's machine" : `Session ${candidate.runtimeId.slice(0, 8)}`}
+              </MenuItemContent>
+            </StudioMenuAction>)}
           </div>
-          <details ref={detailsRef} className="mt-1 border-t border-slate-200 pt-1 dark:border-slate-700/50">
-            <summary className="cursor-pointer rounded-lg px-2.5 py-1.5 text-xs text-slate-500 hover:bg-slate-100 pointer-coarse:min-h-11 pointer-coarse:py-3.5 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)]">Session details</summary>
-            <div className="space-y-2 px-2.5 py-2 text-xs">
-              <p>Members of this space can use the resume link to join and request control.</p>
-              {runtimeId ? <p className="break-all" data-testid="shared-browser-current-runtime">Current session: {runtimeId}</p> : null}
-              {resumeUrl ? <Input size="xs" radius="md" aria-label="Shared Browser resume link"
+          <StudioMenuSeparator />
+          <details ref={detailsRef} className="group">
+            <summary className={`${STUDIO_MENU_NATIVE_ROW_CLASS} list-none [&::-webkit-details-marker]:hidden`}>
+              <MenuItemContent end={<NavArrowDown className="transition-transform group-open:rotate-180" aria-hidden="true" />}>Session details</MenuItemContent>
+            </summary>
+            <div className="space-y-2 px-2.5 py-2">
+              <Text variant="caption" tone="muted">Members of this space can use the resume link to join and request control.</Text>
+              {runtimeId ? <Text variant="caption" tone="muted" className="break-all" data-testid="shared-browser-current-runtime">Current session: {runtimeId}</Text> : null}
+              {resumeUrl ? <Input size="xs" aria-label="Shared Browser resume link"
                 readOnly value={resumeUrl} onFocus={(event) => event.currentTarget.select()} /> : null}
               {children}
             </div>

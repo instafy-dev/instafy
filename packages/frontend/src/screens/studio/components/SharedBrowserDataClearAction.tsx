@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { Refresh, Trash } from "iconoir-react";
-import { Button } from "../../../components/Button";
+import { MenuItemContent } from "../../../components/MenuItemContent";
+import { StudioMenuAction } from "../../../components/aria/StudioMenu";
 import { controllerClient } from "../../../sdk/instafy";
 import type { StatusIntent } from "../../../status/useStatus";
 
@@ -89,22 +90,19 @@ export function SharedBrowserDataClearAction({
     ? "Clearing shared browser data"
     : "Clear shared browser data";
   return (
-    <Button
+    <StudioMenuAction
       aria-label={label}
-      className="w-full justify-start gap-2"
       data-testid="shared-browser-clear-data"
       isDisabled={clearing}
       onPress={() => void handleClear()}
-      size="sm"
-      title={label}
-      variant="ghost"
     >
-      {clearing ? (
-        <Refresh className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+      <MenuItemContent start={clearing ? (
+        <Refresh className="animate-spin" aria-hidden="true" />
       ) : (
-        <Trash className="h-3.5 w-3.5" aria-hidden="true" />
-      )}
+        <Trash aria-hidden="true" />
+      )}>
       {label}
-    </Button>
+      </MenuItemContent>
+    </StudioMenuAction>
   );
 }

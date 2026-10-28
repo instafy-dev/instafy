@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   Computer,
+  Check,
   Globe,
   NavArrowDown,
   NavArrowLeft,
@@ -25,6 +26,9 @@ import { BrowserAddressField } from "./BrowserAddressField";
 import { Checkbox } from "../../../components/Checkbox";
 import { Select } from "../../../components/Select";
 import { Button, IconButton } from "../../../components/Button";
+import { MenuItemContent } from "../../../components/MenuItemContent";
+import { Text } from "../../../components/Text";
+import { StudioMenuAction, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
 import { BrowserExpandButton } from "./BrowserExpandButton";
@@ -71,22 +75,26 @@ export function BrowserTransportSelector({
         <NavArrowDown className="h-3 w-3" aria-hidden="true" />
       </Button>
     }>
-      <p className="font-medium">Run browser on</p>
-      <div className="space-y-2" role="group" aria-label="Browser location">
-        <Button variant="ghost" className="w-full justify-start" aria-label="This device" aria-pressed={mode === "personal"}
+      <Text variant="bodyStrong" tone="primary" className="px-2.5 py-1">Run browser on</Text>
+      <div role="group" aria-label="Browser location">
+        <StudioMenuAction aria-label="This device" aria-pressed={mode === "personal"}
           aria-describedby={`${descriptionId}-personal`} data-testid="browser-transport-personal"
           isDisabled={!checked || !personalAvailable} onPress={() => choose("personal")}>
-          <Computer className="h-4 w-4" aria-hidden="true" />This device
-        </Button>
-        <p id={`${descriptionId}-personal`} className="text-xs text-slate-500 dark:text-slate-400">
-          {!checked ? "Checking this device… " : !personalAvailable ? "Available in the Instafy desktop app. " : ""}
-          Your logins stay on this device and follow you across projects. They are not copied to Shared Browser or your other devices.
-        </p>
-        <Button variant="ghost" className="w-full justify-start" aria-label="Workspace browser" aria-pressed={mode === "shared"}
+          <MenuItemContent start={<Computer aria-hidden="true" />} end={mode === "personal" ? <Check aria-hidden="true" /> : null}
+            description={<span id={`${descriptionId}-personal`}>
+              {!checked ? "Checking this device… " : !personalAvailable ? "Available in the Instafy desktop app. " : ""}
+              Your logins stay on this device and follow you across projects. They are not copied to Shared Browser or your other devices.
+            </span>}>
+            This device
+          </MenuItemContent>
+        </StudioMenuAction>
+        <StudioMenuAction aria-label="Workspace browser" aria-pressed={mode === "shared"}
           aria-describedby={`${descriptionId}-shared`} data-testid="browser-transport-shared" onPress={() => choose("shared")}>
-          <Globe className="h-4 w-4" aria-hidden="true" />Workspace
-        </Button>
-        <p id={`${descriptionId}-shared`} className="text-xs text-slate-500 dark:text-slate-400">Project members see the same remote browser and logged-in pages. Your personal logins are not copied here.</p>
+          <MenuItemContent start={<Globe aria-hidden="true" />} end={mode === "shared" ? <Check aria-hidden="true" /> : null}
+            description={<span id={`${descriptionId}-shared`}>Project members see the same remote browser and logged-in pages. Your personal logins are not copied here.</span>}>
+            Workspace
+          </MenuItemContent>
+        </StudioMenuAction>
       </div>
     </BrowserToolsPopover>
   </div>;
@@ -633,27 +641,23 @@ export function PersonalBrowserSurface({
           ) : null}
           <BrowserToolsPopover label="Browser settings" isOpen={settingsOpen} onOpenChange={setSettingsOpen} trigger={<IconButton aria-label="Browser settings" variant="ghost" size="sm"><MoreHoriz className="h-4 w-4" aria-hidden="true" /></IconButton>}>
             {compactChrome ? (
-              <div className="flex items-center gap-1" role="group" aria-label="Page history">
-                <Button
-                  variant="ghost"
-                  size="sm"
+              <div role="group" aria-label="Page history">
+                <StudioMenuAction
                   isDisabled={!ready || humanInputLocked || !model.status?.canGoBack}
                   onPress={() => { setSettingsOpen(false); void model.goBack(); }}
                 >
-                  <NavArrowLeft className="h-4 w-4" aria-hidden="true" />Back
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
+                  <MenuItemContent start={<NavArrowLeft aria-hidden="true" />}>Back</MenuItemContent>
+                </StudioMenuAction>
+                <StudioMenuAction
                   isDisabled={!ready || humanInputLocked || !model.status?.canGoForward}
                   onPress={() => { setSettingsOpen(false); void model.goForward(); }}
                 >
-                  <NavArrowRight className="h-4 w-4" aria-hidden="true" />Forward
-                </Button>
+                  <MenuItemContent start={<NavArrowRight aria-hidden="true" />}>Forward</MenuItemContent>
+                </StudioMenuAction>
               </div>
             ) : null}
             {routineApprovalAvailable ? (
-              <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
+              <div className="space-y-1 px-2.5 py-1" data-browser-session-safe-zone="true">
                 <Checkbox
                   label={ownerTierApproval
                     ? "Let Octo browse and read without asking for each site"
@@ -663,7 +667,7 @@ export function PersonalBrowserSurface({
                   isDisabled={humanInputLocked}
                   onChange={(checked) => model.setPreferredApprovalMode(checked ? "routine" : "ask")}
                 />
-                <span className="text-slate-500 dark:text-slate-400">
+                <Text variant="caption" tone="muted">
                   {model.status?.tabControlActive
                     ? "Take back control before continuing the AI task."
                     : humanInputState.active
@@ -673,12 +677,12 @@ export function PersonalBrowserSurface({
                     : ownerTierApproval
                     ? "Choose before Resume. Forms, buttons and messages still ask; secrets stay manual."
                     : "Choose before Resume. High-impact actions still ask; secrets stay manual."}
-                </span>
+                </Text>
               </div>
             ) : null}
           {model.searchChoice ? (
-            <div className="flex items-center gap-2 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800">
-              <label htmlFor={searchEngineFieldId} className="shrink-0 text-slate-600 dark:text-slate-300">Search with</label>
+            <div className="flex items-center gap-2 px-2.5 py-1">
+              <Text as="label" htmlFor={searchEngineFieldId} variant="caption" tone="muted" className="shrink-0">Search with</Text>
               <Select
                 id={searchEngineFieldId}
                 size="sm"
@@ -692,26 +696,24 @@ export function PersonalBrowserSurface({
               </Select>
             </div>
           ) : null}
-          <Button
+          <StudioMenuSeparator />
+          <StudioMenuAction
             aria-label={
               model.clearDataState === "clearing"
                 ? "Clearing personal browser data"
                 : "Clear personal browser data"
             }
             isDisabled={!ready || model.clearDataState === "clearing"}
-            className="w-full justify-start"
             onPress={handleClearData}
-            size="sm"
-            title="Clear personal browser data"
-            variant="ghost"
           >
-            {model.clearDataState === "clearing" ? (
-              <Refresh className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            <MenuItemContent start={model.clearDataState === "clearing" ? (
+              <Refresh className="animate-spin" aria-hidden="true" />
             ) : (
-              <Trash className="h-3.5 w-3.5" aria-hidden="true" />
-            )}
+              <Trash aria-hidden="true" />
+            )}>
             Clear personal browser data
-          </Button>
+            </MenuItemContent>
+          </StudioMenuAction>
           </BrowserToolsPopover>
           {sharingControls}
           <BrowserExpandButton

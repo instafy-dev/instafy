@@ -1,0 +1,8 @@
+const MENU_ROW_PRESENTATION =
+  "flex w-full cursor-pointer select-none items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-sm leading-5 text-slate-600 outline-none transition pointer-coarse:min-h-11 dark:text-slate-300";
+
+export const STUDIO_MENU_ARIA_ROW_CLASS = `${MENU_ROW_PRESENTATION} data-[focus-visible]:ring-2 data-[focus-visible]:ring-inset data-[focus-visible]:ring-primary-400/40 data-[hovered]:bg-slate-100 data-[focused]:bg-slate-100 data-[pressed]:bg-slate-100 data-[selected]:text-slate-900 data-[selected]:font-medium data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50 dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[focused]:bg-[var(--color-studio-dark-control-hover)] dark:data-[pressed]:bg-[var(--color-studio-dark-control-hover)] dark:data-[selected]:text-slate-50`;
+
+// Native buttons and disclosure summaries keep their own interaction semantics.
+// Typeahead highlights are driven by the editor while focus stays in its input.
+export const STUDIO_MENU_NATIVE_ROW_CLASS = `${MENU_ROW_PRESENTATION} text-left focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-400/40 not-disabled:hover:bg-slate-100 not-disabled:active:bg-slate-100 data-[highlighted=true]:bg-slate-100 data-[highlighted=true]:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 dark:not-disabled:hover:bg-[var(--color-studio-dark-control-hover)] dark:not-disabled:active:bg-[var(--color-studio-dark-control-hover)] dark:data-[highlighted=true]:bg-[var(--color-studio-dark-control-hover)] dark:data-[highlighted=true]:text-slate-50`;
