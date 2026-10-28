@@ -181,13 +181,26 @@ enum AgentRoutingPreflightRoute {
 }
 
 /// Recorded on a turn whose request was read as needing file changes and whose
-/// recovery pass still changed and claimed none: the reply stood as the result.
+/// recovery pass changed none and said so: the reply stood as the result.
 const REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND: &str = "codex/required-changes-not-made";
+
+/// The line a recovery pass for a required change ends its reply with when it
+/// changed no file on purpose (an answer, a question for the person, or what
+/// blocks the work). The runtime removes it before anyone reads the reply.
+/// Without it, a reply that changed nothing reads as one that promised a change
+/// it did not make, and the turn fails.
+const NO_FILE_CHANGES_MARKER: &str = "NO_FILE_CHANGES";
+
+/// Added to the recovery prompt of a required change that is still missing.
+const NO_FILE_CHANGES_REPORT_REQUIREMENT: &str = "\n\nIMPORTANT NO-CHANGE REPORT REQUIREMENT:\n\
+- If you end this attempt without changing any file, say in plain words what you found, what you need from the person, or what blocks the change, and end that reply with a separate last line that is exactly `NO_FILE_CHANGES` (as the last line of the `summary` text when you answer in JSON). The runtime removes that line before the person reads your reply.\n\
+- Never add that line when you changed files, and never say a change was made when it was not.\n";
 
 // A completion requirement, never permission to write. Conditional work may
 // legitimately finish after inspection without producing a patch. A required
-// change gets one recovery pass; a reply that still changes and claims nothing
-// then stands, and only a claimed file missing from disk fails the turn.
+// change gets one recovery pass; a reply that still changes nothing stands
+// only when it says so (`NO_FILE_CHANGES_MARKER`), and any other, or one that
+// lists a file missing from disk, fails the turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceFileChangeRequirement {
     None,
@@ -7374,6 +7387,12 @@ impl JobProcessor {
         )
         .await?
             == 0;
+        // A turn's provider thread keeps an earlier recovery prompt, so a
+        // first answer can end with the runtime's no-change line too; the
+        // person never reads it.
+        if let Some(summary) = take_no_file_changes_marker(&outcome.summary) {
+            outcome.summary = summary;
+        }
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -7735,6 +7754,11 @@ impl JobProcessor {
                 {
                     retry_codex_run_options.disable_shell_tool = true;
                 }
+            }
+            // A required change is still missing: the recovery pass may end
+            // without one only by saying so.
+            if workspace_file_changes_missing {
+                retry_prompt.push_str(NO_FILE_CHANGES_REPORT_REQUIREMENT);
             }
             let mut retry_prompt_context = prompt_context.clone();
             if let (Some(pending), Some(reply)) = (&pending_worker_input, &worker_question_reply) {
@@ -8318,6 +8342,16 @@ impl JobProcessor {
                     }));
                 }
             }
+            // The recovery pass's own report that it changed nothing on
+            // purpose; the person reads the reply without it.
+            let retry_reported_no_file_changes =
+                match take_no_file_changes_marker(&retry_outcome.summary) {
+                    Some(summary) => {
+                        retry_outcome.summary = summary;
+                        true
+                    }
+                    None => false,
+                };
             let retry_final_messages = with_runtime_metadata_vec(
                 build_final_messages_from_outcome(&retry_outcome, Some(&workspace_dir)),
                 &registration.runtime_id,
@@ -8452,23 +8486,33 @@ impl JobProcessor {
                         job_id = %job_id,
                         "accepting successful apply_patch events as workspace file-change evidence after retry"
                     );
-                } else {
+                } else if retry_reported_no_file_changes {
                     // The routing preflight read the request as needing file
                     // changes before anything ran. The recovery pass asked
                     // again for the changes or the concrete blocker, and the
-                    // agent changed nothing and claimed no file (a claimed
-                    // file missing from disk failed above). Its reply answers,
+                    // agent changed nothing and said so (a claimed file
+                    // missing from disk failed above). Its reply answers,
                     // asks or says what blocks the work, so it is the turn's
                     // result: failing the turn would hide it and invite a
                     // resend that cannot do more.
                     tracing::info!(
                         job_id = %job_id,
-                        "no file change after the recovery pass and none claimed; keeping the reply"
+                        "no file change after the recovery pass, and the reply says so; keeping it"
                     );
                     retry_artifacts.push(json!({
                         "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
                         "metadata": { "reason": "no_change_after_recovery" },
                     }));
+                } else {
+                    // Nothing changed, and the reply did not say so: it reads
+                    // as a promise of a change that was not made.
+                    return Err(JobFailureWithArtifacts {
+                        message:
+                            "Codex did not apply any workspace changes for a file-modifying request."
+                                .to_string(),
+                        artifacts: retry_artifacts,
+                    }
+                    .into());
                 }
             }
 
@@ -10148,6 +10192,20 @@ fn tracks_workspace_file_changes(
 /// ([`reported_workspace_file_changes_missing`]) stays with tracked turns.
 fn records_workspace_change_receipts(commit_to_workspace: bool, read_only_workspace: bool) -> bool {
     commit_to_workspace && !read_only_workspace
+}
+
+/// The reply without its last line when that line is
+/// [`NO_FILE_CHANGES_MARKER`] (bare, or in backticks, brackets or bold) and
+/// something else says why nothing changed; otherwise `None`.
+fn take_no_file_changes_marker(text: &str) -> Option<String> {
+    let trimmed = text.trim_end();
+    let (rest, last) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
+    let bare = last
+        .trim()
+        .trim_matches(|c: char| matches!(c, '`' | '*' | '_' | '[' | ']' | '(' | ')' | '.' | ' '));
+    let rest = rest.trim_end();
+    (bare.eq_ignore_ascii_case(NO_FILE_CHANGES_MARKER) && !rest.trim().is_empty())
+        .then(|| rest.to_string())
 }
 
 fn reported_workspace_file_changes_missing(
@@ -18317,6 +18375,9 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             if text.is_empty() || !should_surface_agent_text(text) {
                                 continue;
                             }
+                            // The note repeats the reply, without the runtime's marker.
+                            let unmarked = take_no_file_changes_marker(text);
+                            let text = unmarked.as_deref().unwrap_or(text);
                             let key = format!("agent_message::{text}");
                             push_message(
                                 key,
@@ -32437,6 +32498,35 @@ mod tests {
                 .and_then(|value| value.get("kind"))
                 .and_then(JsonValue::as_str),
             Some("agent_message")
+        );
+    }
+
+    /// A recovery pass that changed no file on purpose ends its reply with the
+    /// runtime's marker line. The person reads the reply without it: in the
+    /// answer, and in the note that repeats the answer among the turn's steps.
+    #[test]
+    fn the_no_change_marker_never_reaches_the_person() {
+        let reply = "I can't open www.roborock.com from this turn, so I left the page unbuilt.";
+        for marked in [
+            format!("{reply}\n\nNO_FILE_CHANGES"),
+            format!("{reply}\n`NO_FILE_CHANGES`\n"),
+            format!("{reply}\n**no_file_changes.**"),
+        ] {
+            assert_eq!(take_no_file_changes_marker(&marked).as_deref(), Some(reply));
+            let messages = extract_codex_messages(&[json!({
+                "type": "item.completed",
+                "item": { "type": "agent_message", "text": marked },
+            })]);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].content, reply);
+        }
+        // A reply without the line, the line alone, or the words inside a
+        // sentence is not a report that nothing changed on purpose.
+        assert_eq!(take_no_file_changes_marker(reply), None);
+        assert_eq!(take_no_file_changes_marker("NO_FILE_CHANGES"), None);
+        assert_eq!(
+            take_no_file_changes_marker("I built the page.\nNO_FILE_CHANGES were needed elsewhere"),
+            None
         );
     }
 
