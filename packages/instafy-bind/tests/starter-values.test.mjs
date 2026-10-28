@@ -200,6 +200,23 @@ test("compare: when no row is known to fit, the page says so instead of an empty
   assert.equal(rows(document).apart.length, 3);
 });
 
+// The third 28 Oct drive: the maker's site never answered, so no value of the three models was read; the page dropped
+// them all and read "No options yet". A candidate nothing could be read for stays a row: a table of unknowns.
+test("compare: candidates nothing could be read for are a table of unknowns, never \"No options yet\"", async () => {
+  const data = compareData();
+  data.items = ["Model One", "Model Two", "Model Three"].map((name, i) => item(`m${i + 1}`, name, { price: { note: "maker.example did not answer" } }));
+  for (const width of [1280, 390]) {
+    const { document } = await draw("compare", data, { width });
+    const list = document.getElementById("list").textContent;
+    assert.doesNotMatch(list, /No options yet/);
+    assert.match(list, /None is known to be €600 or less\./);
+    assert.deepEqual(rows(document).apart, ["option:m1", "option:m2", "option:m3"], `${width}px: every candidate is a row`);
+    const row = rowText(document, "option:m2");
+    assert.match(row, /(Price u|U)nknown · maker\.example did not answer/, row);
+    assert.equal((row.match(/[Uu]nknown/g) || []).length, 3, `price, battery and suction each say so: ${row}`);
+  }
+});
+
 test("compare: no cell is blank or a dash, and every value cites its page and day", async () => {
   const { document } = await draw("compare", compareData(), { search: "?show=all" });
   const read = rowText(document, "option:read");
