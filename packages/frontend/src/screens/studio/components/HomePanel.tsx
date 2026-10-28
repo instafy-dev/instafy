@@ -41,7 +41,7 @@ import { getHomeNotificationTarget } from "../homeNotifications";
 import type { HomeSupportReport } from "../homeSupportReports";
 import { useHomeActivity } from "../useHomeActivity";
 import { homeRecentChats } from "../homeRecentChats";
-import { arrangeHomeSections, homeConversationChatKey } from "../homeSections";
+import { arrangeHomeSections, homeChatKey, homeConversationChatKey } from "../homeSections";
 import { useWorkspaceControls } from "../workspaceControls";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
@@ -559,6 +559,12 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
   );
   const showResumeConversation = resumeConversation && sections.showResume ? resumeConversation : null;
   const visibleRecentChats = sections.recentChats;
+  // A chat listed above Recent activity whose In progress row stepped aside
+  // for it says what that row said ("Run in progress") on its own row.
+  const liveStatusFor = (chatKey: string | null) => {
+    const live = chatKey === null ? undefined : sections.liveByChat.get(chatKey);
+    return live ? statusSubtitle(live, viewerUserId) : null;
+  };
   const activityTotal = useMemo(() => sections.activity.reduce((count, day) => count + day.events.length, 0), [sections.activity]);
   const activityEvents = useMemo(
     () => sections.activity.flatMap((day) => day.events).slice(0, recentLimit),
@@ -580,19 +586,22 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
       : feed.teamFilter === HOME_PERSONAL_TEAM_KEY
         ? null
         : feed.teamFilter;
-  const visibleNeeds = needsExpanded ? feed.needs : feed.needs.slice(0, UNREAD_PREVIEW_LIMIT);
+  const visibleNeeds = needsExpanded ? sections.needs : sections.needs.slice(0, UNREAD_PREVIEW_LIMIT);
   const canExpandUnread = !needsExpanded && feed.needs.length > COMPACT_UNREAD_PREVIEW_LIMIT;
   const filteredTeam = feed.teams.find((team) => team.key === feed.teamFilter) ?? null;
   const feedLoading = activityLoading || notifications?.loading === true || supportLoading;
   const feedError = activityError || notifications?.error || supportError;
   const moreHistory = activityHasMore || Boolean(notifications?.page.nextCursor);
-  const lanesEmpty = feed.needs.length === 0 && visibleRecentChats.length === 0 && activityEvents.length === 0 && !feedLoading;
+  // Empty only when the feed is: a row that moved up to Continue working or
+  // Recent chats still means the team is not quiet.
+  const feedHasActivity = feed.activity.some((day) => day.events.length > 0);
+  const lanesEmpty = feed.needs.length === 0 && !feedHasActivity && !feedLoading;
   const filteredTeamHasSpaces =
     filteredTeam !== null && homeProjects.some((project) => teamKeyForOrgId(project.orgId) === filteredTeam.key);
   const canShowMoreRecent = activityTotal > recentLimit || moreHistory;
   // Every activity row is about a chat already listed above: "Quiet so far"
   // would be untrue, and an empty heading says nothing, so the lane steps aside.
-  const activityListedAbove = activityTotal === 0 && feed.activity.some((day) => day.events.length > 0) &&
+  const activityListedAbove = activityTotal === 0 && feedHasActivity &&
     !feedLoading && !feedError && !canShowMoreRecent;
   const handleShowMoreRecent = useCallback(() => {
     if (activityTotal > recentLimit) {
@@ -624,7 +633,7 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
         ? "Scheduled"
         : null;
     const rest =
-      [scheduled, updates, statusSubtitle(event, viewerUserId), event.kind === "run_failed" || event.source.type === "notification" ? null : usablePreview(event.preview)].filter(Boolean).join(" · ") ||
+      [scheduled, updates, liveStatusFor(homeChatKey(event, conversations)), statusSubtitle(event, viewerUserId), event.kind === "run_failed" || event.source.type === "notification" ? null : usablePreview(event.preview)].filter(Boolean).join(" · ") ||
       null;
     return (
       <div key={event.key} className={[ROW_HOVER_CLASS, options.divider ? ROW_DIVIDER_CLASS : ""].filter(Boolean).join(" ")}>
@@ -732,7 +741,8 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
           <section aria-label="Continue working" data-testid="home-continue-working">
             <LaneHeader label="Continue working" />
             <div className={ROW_HOVER_CLASS}>
-              <FeedRow title={showResumeConversation.title} subtitle={`${resumeTeamName} · ${currentSpaceName}`}
+              <FeedRow title={showResumeConversation.title}
+                subtitle={[resumeTeamName, currentSpaceName, liveStatusFor(resumeChatKey)].filter(Boolean).join(" · ")}
                 icon={<ChatLines className="h-5 w-5" aria-hidden="true" />} iconClassName={ROW_ICON_CLASS}
                 end={<NavArrowRight className="h-4 w-4 text-slate-400" aria-hidden="true" />}
                 density="compact" surface="plain" verticalAlign="center" className="min-h-16 !rounded-none !bg-transparent"
@@ -840,7 +850,8 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
                 <LaneHeader label="Recent chats" />
                 {visibleRecentChats.map((event, index) => (
                   <div key={event.key} className={[ROW_HOVER_CLASS, index > 0 ? ROW_DIVIDER_CLASS : ""].join(" ")}>
-                    <FeedRow title={event.title} subtitle={`${event.team.name} · ${event.project.name}`}
+                    <FeedRow title={event.title}
+                      subtitle={[event.team.name, event.project.name, liveStatusFor(homeChatKey(event, conversations))].filter(Boolean).join(" · ")}
                       icon={<ChatLines className="h-4 w-4" aria-hidden="true" />} iconClassName={ROW_ICON_CLASS}
                       density="compact" surface="plain" verticalAlign="center"
                       className="min-h-14 !rounded-none !bg-transparent"

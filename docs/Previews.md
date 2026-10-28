@@ -142,8 +142,8 @@ stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
   their wake could not go ahead (they may not change the space, and the machine is not up or the preview was closed),
   so the card reads "Stopped · only people who can edit this space can start it" and cannot be pressed. A stopped
   preview that cannot be woken (no recorded command, or replaced by a newer one) reads "Stopped · ask Octo to start it
-  again" and cannot be pressed either, since Octo can start it again in a turn. A card that cannot be pressed draws no
-  chevron. A self-hosted machine that is offline fails with `409 runtime_offline`
+  again" and cannot be pressed either, since Octo can start it again in a turn. Until the controller has answered
+  whether a press can start it, a stopped card reads just "Stopped". A card that cannot be pressed draws no chevron. A self-hosted machine that is offline fails with `409 runtime_offline`
   ("The computer this space runs on is offline.").
 - The runtime agent polls `POST /agent/preview-restarts/claim` with its agent token. A claim reconnects the same
   preview tunnel on the machine's current lease and hands the agent the recorded command and the tunnel client

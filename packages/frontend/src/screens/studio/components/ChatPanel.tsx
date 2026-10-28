@@ -5851,7 +5851,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [credentialsReady, inputValue, onboardingInputLocked, sendingAttachment, submitMessage]);
 
   // Managed AI is available and send is already unblocked (credentialsReady is
-  // true), so the connect wizard's "Use free managed AI" button just dismisses
+  // true), so the connect wizard's "Use Instafy AI" button just dismisses
   // the wizard and fires whatever prompt the user already typed. The draft is
   // still in the composer (openAiOnboarding never clears it), so there is no
   // stashed draft to restore, and the false→true auto-submit effect above

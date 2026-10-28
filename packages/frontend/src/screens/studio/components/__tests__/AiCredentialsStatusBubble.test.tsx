@@ -205,10 +205,12 @@ describe("AiCredentialsStatusBubble", () => {
     });
 
     const managedButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Use free Instafy AI"),
+      button.textContent?.includes("Use Instafy AI"),
     );
     expect(managedButton).toBeInstanceOf(HTMLButtonElement);
-    expect(managedButton?.textContent).toBe("Use free Instafy AI (20 a day)");
+    expect(managedButton?.textContent).toBe("Use Instafy AI (20 a day)");
+    // Instafy AI is paid for with credits: the gate, like the card, never calls it free.
+    expect(container.textContent).not.toMatch(/\bfree\b/i);
     expect(managedButton?.hasAttribute("disabled")).toBe(false);
     // No provider list in the chat: the modal owns it.
     expect(container.textContent).not.toContain("Choose provider");
@@ -242,7 +244,7 @@ describe("AiCredentialsStatusBubble", () => {
     });
 
     const managedButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Use free Instafy AI"),
+      button.textContent?.includes("Use Instafy AI"),
     );
     expect(managedButton).toBeInstanceOf(HTMLButtonElement);
     expect(managedButton?.hasAttribute("disabled")).toBe(true);
@@ -280,7 +282,7 @@ describe("AiCredentialsStatusBubble", () => {
     });
 
     const managedButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Use free Instafy AI"),
+      button.textContent?.includes("Use Instafy AI"),
     );
     expect(managedButton).toBeUndefined();
     expect(container.textContent).toContain("Choose which AI connection to use.");
@@ -340,7 +342,7 @@ describe("AiCredentialsStatusBubble", () => {
     expect(onStashDraft).not.toHaveBeenCalled();
   });
 
-  it("adds the free tier as a secondary action in the gate only while it is available", async () => {
+  it("adds Instafy AI as a secondary action in the gate only while it is available", async () => {
     const onUseManagedAi = vi.fn();
     const render = async (managedAi: ReturnType<typeof managedAiFixture> | null) => {
       await act(async () => {
@@ -366,7 +368,7 @@ describe("AiCredentialsStatusBubble", () => {
     const buttons = () => Array.from(container.querySelectorAll<HTMLButtonElement>("button"));
     expect(buttons().map((button) => button.textContent)).toEqual([
       "Connect AI",
-      "Use free Instafy AI (20 a day)",
+      "Use Instafy AI (20 a day)",
     ]);
     const managed = container.querySelector<HTMLButtonElement>('[data-testid="ai-gate-use-managed-ai"]');
     expect(managed?.className).not.toContain("bg-primary");
@@ -570,7 +572,7 @@ describe("AiCredentialsStatusBubble", () => {
     const buttons = Array.from(container.querySelectorAll("button")).map(
       (button) => button.getAttribute("aria-label") ?? button.textContent,
     );
-    expect(buttons).toEqual(["Close AI connect", "Connect AI", "Use free Instafy AI (20 a day)"]);
+    expect(buttons).toEqual(["Close AI connect", "Connect AI", "Use Instafy AI (20 a day)"]);
     // The p2p escape belongs to the blocking gate only.
     expect(container.querySelector('[data-testid="ai-gate-chat-without-ai"]')).toBeNull();
 
@@ -615,7 +617,7 @@ describe("AiCredentialsStatusBubble", () => {
 
     expect(container.textContent).toContain("Add another AI connection?");
     expect(container.textContent).toContain("Currently using: My OpenAI");
-    expect(container.textContent).not.toContain("Use free Instafy AI");
+    expect(container.textContent).not.toContain("Use Instafy AI");
     expect(container.querySelector('[data-testid="ai-gate-connect-ai"]')).toBeInstanceOf(HTMLButtonElement);
   });
 

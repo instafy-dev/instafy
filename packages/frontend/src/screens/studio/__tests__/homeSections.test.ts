@@ -92,6 +92,9 @@ describe("arrangeHomeSections", () => {
     expect(sections.recentChats).toEqual([recent]);
     expect(sections.activity.map((group) => group.key)).toEqual(["today"]);
     expect(sections.activity[0].events.map((row) => row.key)).toEqual(["activity:30"]);
+    // Its In progress row stepped aside; the row that lists the chat says it instead.
+    expect(sections.liveByChat.get(CHAT_A)?.key).toBe("activity:60");
+    expect(sections.liveByChat.size).toBe(1);
 
     const resumed = arrangeHomeSections({
       feed: { needs: [], hasCut: false, activity: [day("today", [recent])] },
@@ -100,6 +103,22 @@ describe("arrangeHomeSections", () => {
     expect(resumed.showResume).toBe(true);
     expect(resumed.recentChats).toEqual([]);
     expect(resumed.activity).toEqual([]);
+  });
+
+  it("puts the chat Continue working gave way to first under Unread, where a phone still shows it", () => {
+    const resumed = activityEvent(10, CHAT_A, { lane: "needs" });
+    const newer = [1, 2, 3, 4, 5].map((n) => activityEvent(50 + n, `9999999${n}-9999-4999-8999-999999999999`, { lane: "needs" }));
+    const sections = arrangeHomeSections({
+      feed: { needs: [...newer, resumed], hasCut: false, activity: [] },
+      conversations: [], resumeChatKey: CHAT_A, recentChats: [],
+    });
+    expect(sections.showResume).toBe(false);
+    expect(sections.needs.map((row) => row.key)).toEqual([resumed.key, ...newer.map((row) => row.key)]);
+    // Without a chat to resume, Unread keeps its newest-first order.
+    expect(arrangeHomeSections({
+      feed: { needs: [...newer, resumed], hasCut: false, activity: [] },
+      conversations: [], resumeChatKey: null, recentChats: [],
+    }).needs.map((row) => row.key)).toEqual([...newer, resumed].map((row) => row.key));
   });
 
   it("puts the cut before the first row already seen, among the rows that remain", () => {

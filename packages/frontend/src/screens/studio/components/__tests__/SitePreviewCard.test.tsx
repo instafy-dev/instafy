@@ -208,13 +208,20 @@ describe("SitePreviewCard", () => {
     expect(card().textContent).not.toContain("Showing");
   });
 
-  it("reads Stopped, not pressable, while the controller has not said whether it can start the site", async () => {
-    mocks.getSitePreview.mockReturnValue(new Promise(() => {}));
+  it("reads plain Stopped, not pressable, until the controller says whether a press can start the site", async () => {
+    let answer: (value: ControllerSitePreview) => void = () => {};
+    mocks.getSitePreview.mockReturnValue(new Promise<ControllerSitePreview>((resolve) => { answer = resolve; }));
     mocks.runtime = { tunnelGrants: { [PREVIEW_ID]: { id: PREVIEW_ID, tunnelId: "tunnel-1", status: "revoked" } }, runtimeStatuses: [] };
     await render();
-    expect(status().textContent).toBe("Stopped · ask Octo to start it again");
+    // Not known yet: "ask Octo" would send the reader off to spend a turn on a
+    // site a press may start, which is what the answer below says.
+    expect(status().textContent).toBe("Stopped");
     expect(disabled()).toBe(true);
     expect(container.querySelector("[data-testid=preview-card-open-icon]")).toBeNull();
+    await act(async () => answer(server({ status: "revoked", restartable: true })));
+    expect(status().textContent).toBe("Stopped · opening restarts it");
+    expect(disabled()).toBe(false);
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).not.toBeNull();
   });
 
   it("reads Stopped from a revoked tunnel event even when asking again fails", async () => {

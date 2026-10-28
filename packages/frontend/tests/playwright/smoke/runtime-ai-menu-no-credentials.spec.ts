@@ -98,7 +98,7 @@ test.describe("Runtime & AI menu", () => {
     await expect(credentialWizard).toBeVisible();
     await expect(credentialWizard).toContainText("Add AI connection");
     await expect(credentialWizard.getByTestId("credentials-connect-choice-codex")).toBeVisible();
-    await expect(credentialWizard.getByText("Use free Instafy AI", { exact: false })).toHaveCount(0);
+    await expect(credentialWizard.getByText("Use Instafy AI", { exact: false })).toHaveCount(0);
     await credentialWizard.getByRole("button", { name: "Close" }).click();
     await expect(onboarding).toBeVisible();
 

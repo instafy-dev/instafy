@@ -638,9 +638,11 @@ shared panel surface. Failed runs retain a warning icon and a concise failure la
 remaining markable as read. A completion or failure retires the matching running entry.
 
 Home lists each chat once. An unread chat is under **Unread** only, so **Continue working** does
-not repeat it; **Recent chats** leaves out both; and **Recent activity** leaves out every chat
-listed above it, stepping aside rather than reading "Quiet so far" when that leaves it empty.
-Rows that follow each other for the same chat read as one row that counts their updates.
+not repeat it, and comes first there when Continue working gave way to it; **Recent chats** leaves
+out both; and **Recent activity** leaves out every chat listed above it, stepping aside rather than
+reading "Quiet so far" when that leaves it empty. A chat listed above that is running says so on its
+own row ("Run in progress"), in place of its In progress row. Rows that follow each other for the
+same chat read as one row that counts their updates.
 
 Narrow panels initially show four unread rows with **View all**; wide panels show up to
 eight. Previews can wrap to two lines in narrow panels. When team filters are available,
@@ -714,7 +716,8 @@ step for Instafy AI and opens the AI panel for a saved connection.
 
 Typing or sending with no AI connected shows one sentence in the chat, "Connect AI to send this.
 Your message is kept.", with a primary **Connect AI** that opens the Add AI connection modal and,
-while the free tier is available, **Use free Instafy AI (20 a day)**. "Just chatting with
+while Instafy AI is available, **Use Instafy AI** ("Use Instafy AI (20 a day)" when there is a daily
+cap), never "free", as on the card. "Just chatting with
 teammates? Turn the assistant off." appears as a quiet caption below only when the space has
 more than one member. The draft stays in the composer. Switching the assistant on with no AI
 connected, or an expired connection, shows the same hand-off in the chat: no provider list is

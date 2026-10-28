@@ -39,11 +39,17 @@ export function homeConversationChatKey(conversation: Pick<ConversationState, "l
 export interface HomeSections {
   /** Whether Continue working shows its chat: not when that chat is already unread. */
   showResume: boolean;
+  /** Unread, newest first, except that the chat Continue working gave way to comes first. */
   needs: HomeFeedEvent[];
   recentChats: HomeFeedEvent[];
   /** Recent activity, In progress first, then by day. */
   activity: HomeFeedDay[];
   sinceCutIndex: number | null;
+  /**
+   * The In progress row of each chat listed above Recent activity, by chat:
+   * that row steps aside, so the row listing the chat says it is running.
+   */
+  liveByChat: ReadonlyMap<string, HomeFeedEvent>;
 }
 
 function updateCount(event: HomeFeedEvent): number {
@@ -67,9 +73,11 @@ function mergeRows(newer: HomeFeedEvent, older: HomeFeedEvent): HomeFeedEvent {
 }
 
 /**
- * Home lists each chat once. A chat that is unread is under Unread only; the
- * chat Continue working resumes is not listed again below it; Recent chats
- * leaves out both; and Recent activity leaves out every chat listed above it.
+ * Home lists each chat once. A chat that is unread is under Unread only, and
+ * first there when Continue working would have resumed it, so a phone's short
+ * Unread list still shows it; the chat Continue working resumes is not listed
+ * again below it; Recent chats leaves out both; and Recent activity leaves out
+ * every chat listed above it, whose In progress row the listing row speaks for.
  * Rows that remain in a row for the same chat merge into one.
  */
 export function arrangeHomeSections({
@@ -89,6 +97,10 @@ export function arrangeHomeSections({
   const listed = new Set(feed.needs.map(chatKey).filter((key): key is string => key !== null));
   const showResume = resumeChatKey !== null && !listed.has(resumeChatKey);
   if (showResume) listed.add(resumeChatKey);
+  const needs = resumeChatKey === null || showResume ? feed.needs : [
+    ...feed.needs.filter((event) => chatKey(event) === resumeChatKey),
+    ...feed.needs.filter((event) => chatKey(event) !== resumeChatKey),
+  ];
   const shownRecentChats = recentChats.filter((event) => {
     const key = chatKey(event);
     return key !== null && !listed.has(key);
@@ -96,11 +108,16 @@ export function arrangeHomeSections({
   for (const event of shownRecentChats) listed.add(chatKey(event)!);
 
   const activity: HomeFeedDay[] = [];
+  const liveByChat = new Map<string, HomeFeedEvent>();
   for (const day of feed.activity) {
     const events: HomeFeedEvent[] = [];
     for (const event of day.events) {
       const key = chatKey(event);
-      if (key !== null && listed.has(key)) continue;
+      if (key !== null && listed.has(key)) {
+        // Running before queued: the first In progress row is the chat's state.
+        if (day.key === HOME_LIVE_DAY_KEY && !liveByChat.has(key)) liveByChat.set(key, event);
+        continue;
+      }
       const previous = events.at(-1);
       if (key !== null && previous && chatKey(previous) === key) {
         events[events.length - 1] = mergeRows(previous, event);
@@ -118,5 +135,5 @@ export function arrangeHomeSections({
   const firstSeen = dated.findIndex((event) => !event.isNew);
   const sinceCutIndex = feed.hasCut && firstSeen > 0 ? live + firstSeen : null;
 
-  return { showResume, needs: feed.needs, recentChats: shownRecentChats, activity, sinceCutIndex };
+  return { showResume, needs, recentChats: shownRecentChats, activity, sinceCutIndex, liveByChat };
 }

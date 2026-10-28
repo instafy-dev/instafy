@@ -263,6 +263,62 @@ describe("HomePanel activity states", () => {
     expect(container.textContent?.match(/Local unread work/g)).toHaveLength(1);
   });
 
+  // A run in a chat listed above Recent activity: its In progress row steps
+  // aside, so the row that lists the chat says it is running.
+  it("says a chat under Continue working is running, without listing it again", async () => {
+    mocks.conversationWorkspace = true;
+    mocks.conversations = [localConversation({ unreadCount: 0, pendingRunIds: ["run-1"] })];
+    mocks.activeConversationId = "local-unread";
+    await render({}, true);
+    expect(query("home-resume-conversation")?.textContent).toContain("Run in progress");
+    expect(container.textContent?.match(/Local unread work/g)).toHaveLength(1);
+  });
+
+  it("says a chat under Recent chats is running, without listing it again", async () => {
+    mocks.recentChatKeys = [JSON.stringify(["project-personal", "conversation-recent"])];
+    mocks.activity.activityItems = [
+      activityItem({ id: "21", kind: "run.started", live: true, at: "2026-09-06T12:05:00Z", preview: null,
+        run: { id: "run-1", status: "running", promptId: null } }),
+      activityItem(),
+    ];
+    await render();
+    expect(query("home-recent-chats")?.textContent).toContain("Recent work");
+    expect(query("home-recent-chats")?.textContent).toContain("Run in progress");
+    expect(container.textContent?.match(/Recent work/g)).toHaveLength(1);
+  });
+
+  // On a phone Unread shows four rows: the chat Continue working gave way to
+  // must not be left behind View all.
+  it("puts the chat Continue working gave way to first under Unread", async () => {
+    mocks.conversationWorkspace = true;
+    mocks.conversations = [localConversation()];
+    mocks.activeConversationId = "local-unread";
+    const newer = [1, 2, 3, 4, 5].map((n) => inboxItem({
+      conversationId: `conversation-newer-${n}`, conversationTitle: `Newer work ${n}`, lastMessageId: `message-newer-${n}`,
+      lastMessageAt: `2026-09-06T12:4${n}:00Z`,
+    }));
+    await render({ inboxItems: newer }, true);
+    expect(query("home-continue-working")).toBeNull();
+    const rows = Array.from(query("home-attention-section")!.querySelectorAll<HTMLElement>('[data-testid^="home-attention-"]'))
+      .filter((row) => row.getAttribute("data-testid") !== "home-attention-section" && row.getAttribute("data-testid") !== "home-attention-show-all");
+    expect(rows[0]?.textContent).toContain("Local unread work");
+  });
+
+  it("does not call a team quiet while Continue working shows its latest chat", async () => {
+    mocks.conversationWorkspace = true;
+    mocks.conversations = [localConversation({ unreadCount: 0, controllerId: "conversation-recent" })];
+    mocks.activeConversationId = "local-unread";
+    mocks.activity.activityItems = [activityItem(), activityItem({
+      id: "19", project: { id: "other-space", name: "Design space" }, org: { id: "team-design", name: "Design review" },
+      conversation: { id: "other-chat", title: "Other work", visibility: "public", threadKind: null }, title: "Other work",
+    })];
+    await render({}, true);
+    await act(async () => query("home-team-chip-personal")!.click());
+    expect(query("home-resume-conversation")?.textContent).toContain("Local unread work");
+    expect(query("home-filter-empty")).toBeNull();
+    expect(container.textContent).not.toMatch(/Quiet in|Quiet so far/);
+  });
+
   it("leaves an unread chat out of Recent chats", async () => {
     mocks.projects = [{ id: PROJECT, name: "My space", orgId: null, orgName: "Personal" }];
     mocks.activeProjectId = PROJECT;
