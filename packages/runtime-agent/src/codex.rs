@@ -4221,7 +4221,7 @@ fn append_shared_browser_developer_instructions(
 
 /// Said when this turn's Shared Browser page was last used by a run of
 /// another chat (the browser is shared across the space's chats).
-const SHARED_BROWSER_PAGE_FROM_OTHER_CHAT_INSTRUCTIONS: &str = "- The page this turn starts on was left open by a task in another chat. What it shows is not this task's earlier work: do not describe it as resuming or continuing there. Start this task's own step: `navigate` that page to what this task needs, or open a tab of your own.";
+const SHARED_BROWSER_PAGE_FROM_OTHER_CHAT_INSTRUCTIONS: &str = "- The page this turn starts on was left open by a task in another chat. What it shows is not this task's earlier work: do not describe it as resuming or continuing there. When the person's message is about that page, use it as it is. Otherwise start this task's own step: `navigate` that page to what this task needs, or open a tab of your own.";
 
 fn append_shared_browser_page_start_instructions(base: String, left_by_other_chat: bool) -> String {
     if !left_by_other_chat {
@@ -6152,9 +6152,6 @@ mod tests {
         assert!(!own.retries_a_timed_out_run(1, 1));
     }
 
-    /// Octo opens Instafy's browser without a press, but nothing in a browser
-    /// turn's run-level policy may tell it to skip the browser's own site and
-    /// action prompts, or claim Studio grants routine browsing for it.
     #[test]
     fn a_shared_turn_on_a_page_another_chat_left_is_told_so() {
         let base = "Base".to_string();
@@ -6171,6 +6168,11 @@ mod tests {
             told.contains(
                 "`navigate` that page to what this task needs, or open a tab of your own"
             )
+        );
+        // A person who asks about the page on screen still gets that page.
+        assert!(
+            told.contains("When the person's message is about that page, use it as it is"),
+            "{told}"
         );
     }
 
@@ -6209,6 +6211,9 @@ mod tests {
         assert!(!skill.contains("exact execution error"));
     }
 
+    /// Octo opens Instafy's browser without a press, but nothing in a browser
+    /// turn's run-level policy may tell it to skip the browser's own site and
+    /// action prompts, or claim Studio grants routine browsing for it.
     #[test]
     fn browser_turn_policy_keeps_every_approval_gate() {
         assert!(

@@ -384,13 +384,38 @@ fn clear_stale_agent_control_marker_at_startup(
     Ok(())
 }
 
-/// Which conversation's run last held each page of this machine's browser,
-/// newest last. Page ids are CDP target ids, so a restarted browser has new
-/// ones; a restarted runtime knows none and says nothing.
-static PAGE_CONVERSATIONS: LazyLock<Mutex<Vec<(String, Uuid)>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
 /// Pages remembered; the oldest go first.
 const MAX_PAGE_CONVERSATIONS: usize = 32;
+
+/// Which conversation's run last held each page of a browser, newest last,
+/// at most [`MAX_PAGE_CONVERSATIONS`] pages.
+#[derive(Debug, Default)]
+pub(crate) struct PageConversations {
+    pages: Vec<(String, Uuid)>,
+}
+
+impl PageConversations {
+    /// Records that a run of `conversation_id` starts on `page_id`, and
+    /// returns whether a run of another conversation held that page last.
+    pub(crate) fn record(&mut self, page_id: &str, conversation_id: Uuid) -> bool {
+        let previous = self
+            .pages
+            .iter()
+            .position(|(page, _)| page == page_id)
+            .map(|index| self.pages.remove(index).1);
+        self.pages.push((page_id.to_string(), conversation_id));
+        if self.pages.len() > MAX_PAGE_CONVERSATIONS {
+            let excess = self.pages.len() - MAX_PAGE_CONVERSATIONS;
+            self.pages.drain(..excess);
+        }
+        previous.is_some_and(|previous| previous != conversation_id)
+    }
+}
+
+/// This machine's browser. Page ids are CDP target ids, so a restarted
+/// browser has new ones; a restarted runtime knows none and says nothing.
+static PAGE_CONVERSATIONS: LazyLock<Mutex<PageConversations>> =
+    LazyLock::new(|| Mutex::new(PageConversations::default()));
 
 /// Records that a run of `conversation_id` starts on `page_id`, and returns
 /// whether a run of another conversation held that page last. Studio binds a
@@ -403,19 +428,10 @@ pub(crate) fn page_left_by_another_conversation(
     let Some(conversation_id) = conversation_id else {
         return false;
     };
-    let mut pages = PAGE_CONVERSATIONS
+    PAGE_CONVERSATIONS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let previous = pages
-        .iter()
-        .position(|(page, _)| page == page_id)
-        .map(|index| pages.remove(index).1);
-    pages.push((page_id.to_string(), conversation_id));
-    if pages.len() > MAX_PAGE_CONVERSATIONS {
-        let excess = pages.len() - MAX_PAGE_CONVERSATIONS;
-        pages.drain(..excess);
-    }
-    previous.is_some_and(|previous| previous != conversation_id)
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .record(page_id, conversation_id)
 }
 
 /// The run a marker or a record is bound to.
@@ -2163,6 +2179,28 @@ const SITE_INSECURE_REASON: &str =
     "That site's secure connection failed, so Instafy's browser didn't open it.";
 const SITE_REDIRECT_LOOP_REASON: &str =
     "That site kept redirecting, so Instafy's browser couldn't open it.";
+/// `net::ERR_ABORTED`: the site answered, but the load stopped. Downloads are
+/// denied in this browser, and a navigation another one replaced ends so too.
+const PAGE_LOAD_STOPPED_REASON: &str = "That page stopped loading before it opened: it was a file to download (downloads are blocked in Instafy's browser), or another navigation replaced it.";
+/// Any other code: the page did not load, without a guess at why.
+const PAGE_NOT_LOADED_REASON: &str = "That page didn't load in Instafy's browser.";
+/// Codes for a connection to the site that did not happen or did not last
+/// (the browser's proxy answers a denied, refused or silent site alike).
+const CONNECTION_FAILURE_CODE_PREFIXES: &[&str] = &[
+    "ERR_CONNECTION_",
+    "ERR_TUNNEL_",
+    "ERR_PROXY_",
+    "ERR_SOCKS_",
+    "ERR_ADDRESS_",
+];
+const CONNECTION_FAILURE_CODES: &[&str] = &[
+    "ERR_TIMED_OUT",
+    "ERR_EMPTY_RESPONSE",
+    "ERR_UNSAFE_PORT",
+    "ERR_INTERNET_DISCONNECTED",
+    "ERR_NETWORK_CHANGED",
+    "ERR_NETWORK_ACCESS_DENIED",
+];
 /// Longest code kept; Chromium's names are far shorter.
 const MAX_NETWORK_ERROR_CODE_CHARS: usize = 64;
 
@@ -2181,8 +2219,16 @@ fn network_failure(message: &str) -> Option<NetworkFailure> {
     let reason = match code {
         "ERR_NAME_NOT_RESOLVED" | "ERR_NAME_RESOLUTION_FAILED" => SITE_NOT_FOUND_REASON,
         "ERR_TOO_MANY_REDIRECTS" => SITE_REDIRECT_LOOP_REASON,
+        "ERR_ABORTED" => PAGE_LOAD_STOPPED_REASON,
         _ if code.starts_with("ERR_CERT_") || code.starts_with("ERR_SSL_") => SITE_INSECURE_REASON,
-        _ => SITE_UNREACHABLE_REASON,
+        _ if CONNECTION_FAILURE_CODES.contains(&code)
+            || CONNECTION_FAILURE_CODE_PREFIXES
+                .iter()
+                .any(|prefix| code.starts_with(prefix)) =>
+        {
+            SITE_UNREACHABLE_REASON
+        }
+        _ => PAGE_NOT_LOADED_REASON,
     };
     Some(NetworkFailure {
         reason,

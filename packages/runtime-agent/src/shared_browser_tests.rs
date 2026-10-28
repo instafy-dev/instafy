@@ -8372,12 +8372,63 @@ fn remembers_which_chat_last_held_each_page_within_a_bound() {
     assert!(!page_left_by_another_conversation(&first, None));
     assert!(page_left_by_another_conversation(&first, Some(chat_a)));
     // Only the newest pages are kept: an old page is forgotten, not misread.
+    // (On a value of its own: the machine's memory is shared with other tests.)
+    let mut pages = PageConversations::default();
+    assert!(!pages.record(&first, chat_a));
     for _ in 0..MAX_PAGE_CONVERSATIONS {
         let other = format!("PAGE_{}", Uuid::new_v4().simple());
-        assert!(!page_left_by_another_conversation(
-            &other,
-            Some(Uuid::new_v4())
-        ));
+        assert!(!pages.record(&other, Uuid::new_v4()));
     }
-    assert!(!page_left_by_another_conversation(&first, Some(chat_b)));
+    assert!(!pages.record(&first, chat_b));
+}
+
+/// Downloads are denied in this browser, so `goto` on a file to download fails
+/// with `net::ERR_ABORTED`, as does a navigation another one replaced. The
+/// site answered both times: the reason must not say it could not be reached,
+/// nor may a code that is not about the connection.
+#[test]
+fn a_stopped_or_refused_page_load_does_not_say_the_site_was_unreachable() {
+    let aborted = network_failure("page.goto: net::ERR_ABORTED at https://example.test/report.pdf")
+        .expect("a network code");
+    assert!(
+        !aborted.reason.contains("couldn't reach"),
+        "{}",
+        aborted.reason
+    );
+    assert!(aborted.reason.contains("download"), "{}", aborted.reason);
+    assert_eq!(aborted.code, "net::ERR_ABORTED");
+    for code in [
+        "ERR_BLOCKED_BY_RESPONSE",
+        "ERR_BLOCKED_BY_CLIENT",
+        "ERR_INVALID_URL",
+        "ERR_HTTP_RESPONSE_CODE_FAILURE",
+    ] {
+        let failure = network_failure(&format!("page.goto: net::{code} at https://example.test/"))
+            .expect("a network code");
+        assert!(
+            !failure.reason.contains("couldn't reach"),
+            "{code}: {}",
+            failure.reason
+        );
+        assert!(
+            !failure.reason.contains("ERR_"),
+            "{code}: {}",
+            failure.reason
+        );
+        assert_eq!(failure.code, format!("net::{code}"));
+    }
+    // Failures of the connection itself still say so.
+    for code in [
+        "ERR_TUNNEL_CONNECTION_FAILED",
+        "ERR_CONNECTION_RESET",
+        "ERR_CONNECTION_CLOSED",
+        "ERR_EMPTY_RESPONSE",
+        "ERR_TIMED_OUT",
+        "ERR_UNSAFE_PORT",
+        "ERR_INTERNET_DISCONNECTED",
+    ] {
+        let failure = network_failure(&format!("page.goto: net::{code} at https://example.test/"))
+            .expect("a network code");
+        assert_eq!(failure.reason, SITE_UNREACHABLE_REASON, "{code}");
+    }
 }
