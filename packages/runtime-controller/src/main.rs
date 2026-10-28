@@ -153,6 +153,8 @@ mod tests_send_round_trips;
 #[cfg(test)]
 mod tests_stopped_turn_report;
 #[cfg(test)]
+mod tests_user_credential_policies;
+#[cfg(test)]
 mod tests_workspace_lease_after_stop;
 mod tokens;
 mod tunnels;
