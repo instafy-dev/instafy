@@ -66,8 +66,11 @@ the saved files). The runtime names them in its registration capabilities (`skil
 `{"version": 1, "packs": [{"name", "version", "title", "summary"}]}`, the packs whose scripts run with
 its `node`; `title` is the skill's first heading and `summary` the manifest's `description`), and the
 controller passes a checked, bounded copy on the space's runtime status (`skillPacks` on each entry).
-The runtime's managed copy found in a workspace listing is shown the same way; a space's own copy of a
-pack (an import) is one of its skills, with its switch.
+The panel lists the packs of the runtime that runs the space (before one is chosen, the preferred
+runtime's). The runtime's unchanged copy found in a workspace listing (its marker line still names the
+file's sha256) is shown the same way; a space's own copy of a pack (an import, or the runtime's copy
+after someone edited it, which the runtime then leaves alone and the space saves) is one of its skills,
+with its switch.
 
 Importing a pack in full with `/skills import <url>` writes over the runtime's unchanged copy without
 `--overwrite`, and the imported files are saved and then kept by the space.

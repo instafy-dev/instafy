@@ -26,6 +26,7 @@ const DISABLED_SKILL_FILE_NAME = "SKILL.disabled.md";
 const INSTAFY_COMPAT_MARKER = "<!-- instafy-compat -->";
 /** The line the runtime writes into the copy of a skill pack it keeps in a space (runtime_pack_files.rs). */
 const RUNTIME_MANAGED_SKILL_MARKER = "<!-- instafy:managed-skill sha256:";
+const RUNTIME_MANAGED_SKILL_MARKER_END = " -->\n";
 
 type SkillStatus = "enabled" | "disabled";
 
@@ -63,10 +64,12 @@ export type IncludedSkillItem = {
 
 /**
  * The skill packs the space's runtime gives it, beside the space's own skills.
- * The runtime's status entry names them (`skillPacks`), so they show although
- * their files are never saved with the space; the runtime's managed copy in a
- * workspace listing (legacy reads) counts as the same pack. A space's own copy
- * of a pack (an import) is a skill of the space and wins. Exported for tests.
+ * The status entry of the runtime that runs the space names them
+ * (`skillPacks`), so they show although their files are never saved with the
+ * space; the runtime's unchanged copy in a workspace listing (legacy reads)
+ * counts as the same pack. A space's own copy of a pack (an import, or the
+ * runtime's copy once someone edited it) is a skill of the space and wins.
+ * Exported for tests.
  */
 export function includedSkillPacks(params: {
   runtimeStatuses: readonly ControllerRuntimeStatusEntry[];
@@ -74,12 +77,13 @@ export function includedSkillPacks(params: {
   workspaceSkills: readonly SkillItem[];
 }): IncludedSkillItem[] {
   const { runtimeStatuses, effectiveRuntimeId, workspaceSkills } = params;
+  // the runtime that runs the space's turns gives it its packs (none when it names none, such as an older runtime);
+  // only before one is chosen does the preferred runtime, or the first that names packs, stand in
+  const effective = effectiveRuntimeId
+    ? runtimeStatuses.find((entry) => entry.runtimeId === effectiveRuntimeId)
+    : undefined;
   const withPacks = runtimeStatuses.filter((entry) => (entry.skillPacks?.length ?? 0) > 0);
-  const source =
-    withPacks.find((entry) => entry.runtimeId === effectiveRuntimeId) ??
-    withPacks.find((entry) => entry.isPreferred) ??
-    withPacks[0] ??
-    null;
+  const source = effective ?? withPacks.find((entry) => entry.isPreferred) ?? withPacks[0] ?? null;
   const ownSlugs = new Set(workspaceSkills.filter((skill) => !skill.managedByRuntime).map((skill) => skill.slug));
   const included = new Map<string, IncludedSkillItem>();
   for (const pack of source?.skillPacks ?? []) {
@@ -103,6 +107,58 @@ export function includedSkillPacks(params: {
     });
   }
   return [...included.values()].sort((a, b) => a.title.localeCompare(b.title));
+}
+
+/**
+ * Whether `content` is a skill pack's `SKILL.md` as the runtime wrote it into the space and nobody changed since: its
+ * marker line names the sha256 of the file without that line (`has_intact_skill_marker` in runtime_pack_files.rs).
+ * The runtime rewrites only such a copy, every turn, and never saves it. A copy someone edited is left alone and saved
+ * with the space, so it is the space's own skill. Without WebCrypto (an insecure context) the marker line alone
+ * counts. Exported for tests.
+ */
+export async function isRuntimeManagedSkill(content: string): Promise<boolean> {
+  let offset = 0;
+  for (const line of content.split(/(?<=\n)/)) {
+    if (line.startsWith(RUNTIME_MANAGED_SKILL_MARKER)) {
+      if (!line.endsWith(RUNTIME_MANAGED_SKILL_MARKER_END)) return false;
+      const hash = line.slice(RUNTIME_MANAGED_SKILL_MARKER.length, -RUNTIME_MANAGED_SKILL_MARKER_END.length);
+      const subtle = globalThis.crypto?.subtle;
+      if (!subtle) return true;
+      const unmarked = content.slice(0, offset) + content.slice(offset + line.length);
+      try {
+        const digest = await subtle.digest("SHA-256", new TextEncoder().encode(unmarked));
+        return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("") === hash;
+      } catch (_error) {
+        return true;
+      }
+    }
+    offset += line.length;
+  }
+  return false;
+}
+
+/**
+ * The pack's own skill inside the runtime's copy: the runtime puts its note and marker line right after the
+ * frontmatter (or at the top), so the title and summary come from what follows them.
+ */
+function withoutRuntimeNote(content: string): string {
+  const marker = content.indexOf(RUNTIME_MANAGED_SKILL_MARKER);
+  const lineEnd = marker >= 0 ? content.indexOf("\n", marker) : -1;
+  if (lineEnd < 0) return content;
+  let frontmatterEnd = 0;
+  if (content.startsWith("---\n")) {
+    let offset = 4;
+    for (const line of content.slice(4).split(/(?<=\n)/)) {
+      offset += line.length;
+      if (line.trimEnd() === "---") {
+        frontmatterEnd = offset;
+        break;
+      }
+    }
+  }
+  return frontmatterEnd > 0 && frontmatterEnd <= marker
+    ? content.slice(0, frontmatterEnd) + content.slice(lineEnd + 1)
+    : content.slice(lineEnd + 1);
 }
 
 function stripWrappingQuotes(value: string): string {
@@ -557,7 +613,8 @@ export function SkillsPanel() {
 
       const content = await workspaceReads.readText(projectId, filePath);
       if (content === null) throw new Error(`Couldn’t read the ${directoryName} skill.`);
-      const parsed = parseSkillDocumentDetails(content);
+      const managedByRuntime = await isRuntimeManagedSkill(content);
+      const parsed = parseSkillDocumentDetails(managedByRuntime ? withoutRuntimeNote(content) : content);
       const title = parsed.headingTitle ?? parsed.frontmatterName ?? humanizeSkillName(directoryName);
       const description = parsed.summaryParagraph ?? parsed.frontmatterDescription ?? null;
       const imageSource = parsed.firstImageSource;
@@ -580,7 +637,7 @@ export function SkillsPanel() {
         description,
         iconUrl,
         status,
-        managedByRuntime: content.includes(RUNTIME_MANAGED_SKILL_MARKER),
+        managedByRuntime,
         directoryPath,
         filePath,
         enabledPath,
