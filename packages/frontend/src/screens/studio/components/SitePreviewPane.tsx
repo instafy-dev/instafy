@@ -358,7 +358,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   });
   siteMessage.current = host.handleSiteMessage;
   const follow = host.follow;
-  const followNote = followLabels(follow.state).note;
+  const followLine = followLabels(follow.state);
+  const followNote = followLine.note;
   useEffect(() => {
     if (!frameOnScreen || !viewerUrl) return;
     const controller = new AbortController();
@@ -441,15 +442,17 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   // In place of the site, the pane's message is the one signal: no pill beside it saying the same.
   const problemShown = down || problem !== null;
   // On a phone the bar is one row: Present and Open in new tab sit beside the title, so the site keeps the room a
-  // second row of chrome took (a map's panel ended up squeezed under the chat's title, the bar and that row).
-  const phone = !useBreakpoint("sm");
+  // second row of chrome took (a map's panel ended up squeezed under the chat's title, the bar and that row). A follow
+  // chip ("Following Kim · Stop") keeps its own row: beside the title it squeezed the title out and pushed Open in new
+  // tab off a narrow screen.
+  const oneRow = !useBreakpoint("sm") && followLine.status === null;
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="site-preview-pane" data-state={shown}>
       <BrowserChromeShell
         label={`${title} controls`}
         testId="site-preview-chrome"
-        compact={phone}
+        compact={oneRow}
         busy={shown === "opening" || shown === "starting"}
         navigation={
           <IconButton aria-label="Reload" title="Reload" className="max-[540px]:h-10 max-[540px]:w-10" data-testid="site-preview-reload"
