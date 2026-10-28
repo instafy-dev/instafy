@@ -38,19 +38,17 @@ Plan handoffs carry deliverables, completion checks and unresolved task requirem
 
 ## Execution model
 
-Choose the execution mode deliberately:
-
-- **Hidden Codex subagents**: use supported native helpers for bounded subtasks within the current turn. They share its outcome, are not user-facing personas or linked threads, and have no separate controller write-scope metadata.
-- **Top-level Instafy agents**: use linked `threadKind=agent` conversations for durable context, an independent reply stream, or a handoff. Coordinate through normal `@agent` messages and thread/message references.
-- **Multiple runtimes**: use for actual parallel top-level work. One runtime may lease a read-only batch but serialize execution because its Codex/proxy/tool environment is process-scoped. Ordinary native jobs serialize on one runtime.
-- **Experimental isolated tool workers**: only an opted-in runtime supports disjoint owned paths in private source copies with native tool sessions. Do not assume it is enabled. Workers have no shared process state, browser/MCP tools or native subdelegation. Use real commands for timers and observations; model text is not execution evidence. Without opt-in, scoped file generation is tool-free and cannot execute a real timer.
+- **Hidden Codex subagents**: supported native helpers for bounded subtasks within the current turn. They share its outcome, are not user-facing personas or linked threads, and have no controller write scopes.
+- **Top-level Instafy agents**: linked `threadKind=agent` conversations for durable context, independent replies or handoffs. Coordinate with normal `@agent` messages and thread/message references.
+- **Multiple runtimes**: use for parallel top-level work. A runtime may lease read-only batches yet serialize execution: ordinary native jobs serialize because they share process-scoped Codex/proxy/tool state.
+- **Experimental isolated tool workers**: require runtime opt-in and disjoint owned paths in private source copies with native tool sessions. They share no process state and have no browser/MCP tools or native subdelegation. Timers and observations need real commands, not model text. Without opt-in, scoped file generation is tool-free.
 
 Write-scope rules for top-level agents:
 
 - Assign disjoint owned paths/modules before concurrent edits. Write access must be explicit structured metadata; the controller cannot infer it from prompt text. Do not rely on one runtime serializing work as a safety boundary.
 - If scope is missing or overlaps, expect `writeScope.mode = coordination_required`; stop before editing and ask for an explicit split.
 - With `writeScope.mode = owned`, edit only `ownedPaths`; treat `readOnlyPaths` as inspect-only. Read-only/Q&A agents need no editable paths.
-- For independent generated files or small disjoint edits on one machine, prefer exact `ownedPaths` over `ownedPathGlobs` only when the scoped worker's execution capabilities cover the task. Set `requiresTools: true` on each plan worker that needs commands, tests or live observations. This requirement grants no permissions and survives retries and replies. Tool-free file generation cannot perform those operations; use admitted tool-capable execution or report the unavailable capability. Do not remove requirements to make a worker eligible; explain an unavailable explicitly requested mechanism.
+- For independent generated files or small disjoint edits on one machine, prefer exact `ownedPaths` over `ownedPathGlobs` only if the worker has the required capabilities. Set `requiresTools: true` per worker for commands, tests or live observations; it survives retries/replies and grants no permissions. Tool-free generation cannot do this work. Use admitted tool-capable execution or explain the unavailable mechanism; never drop requirements or silently replace an explicit choice.
 
 ## Observing concurrency
 
