@@ -93,7 +93,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "one plain line opens Details by keyboard at 1280px (light)",
       "one plain line opens Details by keyboard at 390px (dark)",
       "gives the line and the step rows a 44px target on a coarse pointer",
-      "a turn the AI never answered offers its actions by keyboard at 390px (dark)",
+      "a failed turn offers its actions by keyboard, in plain words, and is one quiet line while it is tried again, at 390px (dark)",
       "gives the failure block's actions a 44px target on a coarse pointer",
       "a browser prompt wraps under its sentence on a phone and keeps 44px buttons",
       "names the card, the lock and the status for screen readers",
