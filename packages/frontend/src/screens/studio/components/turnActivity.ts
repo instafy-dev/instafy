@@ -662,6 +662,33 @@ function isRuntimeStatus(message: ChatMessage): boolean {
   return (getMessageType(message) ?? "").trim().toLowerCase() === "status";
 }
 
+/**
+ * The done line of a turn that ran no step but left something in Details:
+ * Octo's notes, a plan, a thread it started. Neutral counts only, never the
+ * notes' own words (they are free text the model wrote after reading pages),
+ * so Details stays reachable: "Wrote 2 notes", "Made a plan, wrote a note".
+ * Reasoning titles alone leave no line, as they leave Details closed, and a
+ * status the runtime wrote itself (a retry, its label attached) is no note.
+ */
+export function detailsOnlySummary(items: readonly DetailItem[], threads = 0): string | null {
+  let notes = 0;
+  let plans = 0;
+  for (const item of items) {
+    if (item.kind !== "update") continue;
+    const type = (getMessageType(item.message) ?? "").trim().toLowerCase();
+    if (type === "reasoning") continue;
+    if (readStepActivity(item.message, null) !== null) continue;
+    if (type === "todo_list") plans += 1;
+    else notes += 1;
+  }
+  const parts = [
+    plans > 0 ? "made a plan" : null,
+    notes > 0 ? plural(notes, "wrote a note", "wrote {n} notes") : null,
+    threads > 0 ? plural(threads, "started a thread", "started {n} threads") : null,
+  ].filter((part): part is string => part !== null);
+  return parts.length > 0 ? capitalize(parts.join(", ")) : null;
+}
+
 export type SummarizeTurnActivityOptions = {
   jobId: string | null;
   phase: TurnActivityPhase;

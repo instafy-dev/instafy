@@ -153,19 +153,16 @@ export const TURN_END_MS = TURN_BEATS[TURN_END_BEAT].atMs;
 export const TYPEWRITER_TICK_MS = 60;
 export const TYPEWRITER_TICKS = 24;
 
-// The chip kinds the studio's compact activity rail really draws
-// (threadPreviewHelpers.tsx renderThreadCompactEventIcon).
-export type TurnStepKind = "tool" | "command" | "plan" | "thinking";
-
+/**
+ * One step of a run as the studio's activity line names it while it runs
+ * (TurnActivityLine.tsx from turnActivity.ts): the step's live label from the
+ * runtime's own tables (docs/Chat-Activity.md), "Thinking…" while the model
+ * works between steps (a plan update is no step), and "Waiting for you" while
+ * a browser prompt waits on the viewer. Never a command's text, never
+ * "Calling tool…": the studio shows neither any more.
+ */
 export interface TurnStep {
-  kind: TurnStepKind;
-  // Only captions the thread preview really shows: "Calling tool…",
-  // "Updating plan…", "Thinking…", or a command's own text
-  // (threadPreviewState.ts). A Shared Browser step is a tool call.
-  caption: string;
-  // A delegate's lowercase handle: the chip shows its initial and the caption
-  // wears the owner badge, as the real rail does for another agent's step.
-  ownerHandle?: string;
+  live: string;
 }
 
 export interface TurnFile {
@@ -239,6 +236,8 @@ export interface BrowserScript {
   /** The label of the control Octo clicks (Click "…"). */
   clickLabel: string;
   steps: TurnStep[];
+  /** The run's done line ("Opened …, read a page"), before Details. */
+  activity: string;
   summary: string;
 }
 
@@ -256,6 +255,8 @@ export interface SessionScenario {
   presenceHandle: string;
   opener: string;
   steps: [TurnStep, TurnStep, TurnStep, TurnStep, TurnStep];
+  /** The run's done line ("Edited 3 files, ran tests"), before Details. */
+  activity: string;
   /** Octo's summary as rendered. */
   summaryParts: MessagePart[];
   /** The summary's text (messageText of summaryParts). */
@@ -375,12 +376,15 @@ const SITE_BROWSER: BrowserScript = {
   url: "https://k7m2qa.instafy.site/pricing",
   title: "Pricing · Forma",
   clickLabel: "Choose Team",
+  // The site prompt waits on Ada, then each step names the preview's site.
   steps: [
-    { kind: "tool", caption: "Calling tool…" },
-    { kind: "tool", caption: "Calling tool…" },
-    { kind: "tool", caption: "Calling tool…" },
-    { kind: "tool", caption: "Calling tool…" },
+    { live: "Waiting for you" },
+    { live: "Opening k7m2qa.instafy.site…" },
+    { live: "Reading k7m2qa.instafy.site…" },
+    { live: "Browsing k7m2qa.instafy.site…" },
+    { live: "Browsing k7m2qa.instafy.site…" },
   ],
+  activity: "Opened k7m2qa.instafy.site, read a page · you allowed opening k7m2qa.instafy.site",
   summary: "Clicked through the preview: both plans load, and Choose Team selects the Team plan.",
 };
 
@@ -407,13 +411,16 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
     presenceAgent: "Quill",
     presenceHandle: "quill",
     opener: "February's bank export is in the ledger folder. Two card payments look doubled.",
+    // A tool reads the bank export, a script reconciles it, Quill's tool
+    // checks the VAT lines and the review file is written.
     steps: [
-      { kind: "tool", caption: "Calling tool…" },
-      { kind: "command", caption: "python scripts/reconcile.py 2026-02" },
-      { kind: "plan", caption: "Updating plan…" },
-      { kind: "tool", caption: "Calling tool…", ownerHandle: "quill" },
-      { kind: "command", caption: "python scripts/reconcile.py 2026-02 --review" },
+      { live: "Using a tool…" },
+      { live: "Working…" },
+      { live: "Thinking…" },
+      { live: "Using a tool…" },
+      { live: "Editing files…" },
     ],
+    activity: "Used 2 tools, edited a file",
     summaryParts: [
       "February is reconciled: 18 of 21 bank rows match the ledger, and Quill checked the VAT lines. Three rows need a second look, each with a note; the Acme charge at ",
       { file: "ledger/2026-02-review.csv", line: 2 },
@@ -440,13 +447,16 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
     presenceAgent: "Canary",
     presenceHandle: "canary",
     opener: "Checkout still lives inside the API package. Can we split it before launch?",
+    // Octo moves the code, runs checkout's tests, Canary runs the payment
+    // tests, and the type check is a command with no label of its own.
     steps: [
-      { kind: "tool", caption: "Calling tool…" },
-      { kind: "command", caption: "pnpm test --filter checkout" },
-      { kind: "plan", caption: "Updating plan…" },
-      { kind: "command", caption: "pnpm test --filter payments", ownerHandle: "canary" },
-      { kind: "command", caption: "pnpm typecheck" },
+      { live: "Editing files…" },
+      { live: "Running tests…" },
+      { live: "Thinking…" },
+      { live: "Running tests…" },
+      { live: "Working…" },
     ],
+    activity: "Edited 3 files, ran tests",
     summaryParts: [
       "Checkout is its own package now and the API routes import it. Canary ran ",
       { code: "pnpm test --filter payments" },
@@ -487,13 +497,16 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
     presenceAgent: "Pixel",
     presenceHandle: "pixel",
     opener: "Plans are final: Starter 19, Team 49. Copy is in notes/pricing.md.",
+    // Octo writes the page, starts its server, Pixel does the layout and
+    // the tunnel makes the preview link.
     steps: [
-      { kind: "tool", caption: "Calling tool…" },
-      { kind: "command", caption: "pnpm dev --port 4173" },
-      { kind: "plan", caption: "Updating plan…" },
-      { kind: "tool", caption: "Calling tool…", ownerHandle: "pixel" },
-      { kind: "command", caption: "instafy tunnel start --port 4173" },
+      { live: "Editing files…" },
+      { live: "Working…" },
+      { live: "Thinking…" },
+      { live: "Editing files…" },
+      { live: "Making a public link…" },
     ],
+    activity: "Edited 2 files, made a public link",
     summaryParts: [
       "The pricing page follows notes/pricing.md, and Pixel did the layout. Preview URL: ",
       { link: SITE_BROWSER.url },

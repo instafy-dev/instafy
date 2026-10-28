@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { RunRecord } from "../../../types";
 import { BrowserApprovalRow } from "./BrowserApprovalRow";
-import { runMatchesThreadJobId } from "./chatMessagePresentation";
+import type { ChatMessage } from "../types";
+import { extractAgentJobId, runMatchesThreadJobId } from "./chatMessagePresentation";
 import type { ChatSharedBrowserApprovalTarget } from "./chatSharedBrowserApproval";
 import type { SessionBrowserApproval } from "./turnActivity";
 import type { SharedBrowserApprovalState } from "./useSharedBrowserApproval";
@@ -98,6 +99,21 @@ export function useTurnBrowserApprovalProvider({
     return () => window.clearTimeout(timer);
   }, [claimed, targetRunId]);
   return { value, showFallback: targetRunId !== null && !claimed && unclaimedRunId === targetRunId };
+}
+
+/**
+ * Whether the end-of-transcript row continues the message right above it:
+ * that message belongs to the prompt's own run, so the row takes no avatar
+ * of its own (one avatar per turn). Any other message above, or none, and
+ * the row shows the agent's avatar.
+ */
+export function fallbackRowContinuesTail(
+  tail: ChatMessage | null | undefined,
+  run: RunRecord | null | undefined,
+): boolean {
+  if (!tail || !run || tail.role !== "assistant") return false;
+  const jobId = extractAgentJobId(tail);
+  return jobId !== null && runMatchesThreadJobId(run, jobId);
 }
 
 export type TurnBrowserApproval = {

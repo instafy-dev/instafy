@@ -17,6 +17,7 @@ import { ChatBubbleRow } from "../ChatBubbleRow";
 import type { SessionBrowserApproval } from "../turnActivity";
 import {
   BROWSER_APPROVAL_UNCLAIMED_FALLBACK_MS,
+  fallbackRowContinuesTail,
   TurnBrowserApprovalContext,
   TurnBrowserApprovalStateContext,
   useTurnBrowserApprovalProvider,
@@ -338,10 +339,12 @@ function Turn({ threadMessages }: { threadMessages: ChatMessage[] }) {
 const TARGET = { runId: RUN_ID, runtimeId: "11111111-1111-4111-8111-111111111111", browserPageId: "page-of-the-job", runMetadata: {} };
 
 /** ChatPanel's part: the context, and the end-of-transcript row when no turn claims the prompt. */
-function Chat({ state, showTurn, threadMessages }: {
+function Chat({ state, showTurn, threadMessages, tail = null }: {
   state: SharedBrowserApprovalState;
   showTurn: boolean;
   threadMessages: ChatMessage[];
+  /** The last message the transcript shows, above the row. */
+  tail?: ChatMessage | null;
 }) {
   const { value, showFallback } = useTurnBrowserApprovalProvider({ target: TARGET, approval: state, agentName: "Octo" });
   return (
@@ -354,7 +357,14 @@ function Chat({ state, showTurn, threadMessages }: {
           approval={state}
           onSettled={(entry) => value.recordSettled(RUN_ID, entry)}
           frame={(row) => (
-            <ChatBubbleRow align="left" avatar={<span data-testid="fallback-avatar">O</span>} testId="browser-approval-fallback">
+            <ChatBubbleRow
+              align="left"
+              // As ChatPanel does: an avatar only when the row above is not the same run's.
+              avatar={fallbackRowContinuesTail(tail, run())
+                ? <span aria-hidden="true" data-testid="fallback-avatar-gutter" className="h-8 w-8" />
+                : <span data-testid="fallback-avatar">O</span>}
+              testId="browser-approval-fallback"
+            >
               {row}
             </ChatBubbleRow>
           )}
@@ -480,6 +490,25 @@ describe("a browser prompt inside Octo's turn", () => {
     );
   });
 
+  it("shows the fallback row's avatar only when the row above is not the same run's", async () => {
+    // The run's own message is last (its turn is not on screen as a turn):
+    // the row continues it with no second avatar.
+    const ownMessage = reply("Looking up the tram.", NOW + 1_000);
+    await act(async () => { root.render(<Chat state={withPending(request())} showTurn={false} threadMessages={[]} tail={ownMessage} />); });
+    await advance(BROWSER_APPROVAL_UNCLAIMED_FALLBACK_MS);
+    expect(byTestId("browser-approval-fallback")?.querySelector("[data-testid='browser-approval-row']")).not.toBeNull();
+    expect(byTestId("fallback-avatar")).toBeNull();
+    expect(byTestId("fallback-avatar-gutter")).not.toBeNull();
+    // Someone else's message, or another run's, is last: the row shows Octo's avatar.
+    const person: ChatMessage = { id: "person", role: "user", content: "Hi", timestamp: NOW + 2_000 };
+    const otherRun: ChatMessage = { ...ownMessage, id: "other-run", metadata: { ...ownMessage.metadata, jobId: "55555555-5555-4555-8555-555555555555" } };
+    for (const tail of [person, otherRun]) {
+      await act(async () => { root.render(<Chat state={withPending(request())} showTurn={false} threadMessages={[]} tail={tail} />); });
+      expect(byTestId("fallback-avatar")).not.toBeNull();
+      expect(byTestId("fallback-avatar-gutter")).toBeNull();
+    }
+  });
+
   it("shows the prompt at the end of the chat when no turn claims it", async () => {
     await act(async () => { root.render(<Chat state={withPending(request())} showTurn={false} threadMessages={[]} />); });
     expect(byTestId("browser-approval-fallback")).toBeNull();
@@ -493,5 +522,17 @@ describe("a browser prompt inside Octo's turn", () => {
     });
     expect(byTestId("browser-approval-fallback")).toBeNull();
     expect(allByTestId("browser-approval-row")).toHaveLength(1);
+  });
+});
+
+describe("fallbackRowContinuesTail", () => {
+  it("is true only under an assistant message of the prompt's own run", () => {
+    const own = reply("Looking up the tram.", NOW);
+    expect(fallbackRowContinuesTail(own, run())).toBe(true);
+    expect(fallbackRowContinuesTail({ ...own, metadata: { ...own.metadata, jobId: "someone-else" } }, run())).toBe(false);
+    expect(fallbackRowContinuesTail({ ...own, role: "user" }, run())).toBe(false);
+    expect(fallbackRowContinuesTail({ ...own, metadata: {} }, run())).toBe(false);
+    expect(fallbackRowContinuesTail(null, run())).toBe(false);
+    expect(fallbackRowContinuesTail(own, null)).toBe(false);
   });
 });

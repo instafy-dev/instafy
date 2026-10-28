@@ -26,6 +26,7 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
 | Done | up to two "what it did" groups, biggest first and in the order they happened, then the latest "what it made": `Looked up 14 places, read 6 pages, built the map`; then, after ` · `, what the person answered to the turn's browser prompts |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files` |
+| Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
 | Stopped by the person | `Stopped · looked up 9 places`, or `Stopped` |
 | No news for 45 seconds while not in flight | `Status unavailable` |
 
@@ -146,7 +147,12 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   and `open_tab` take the host from the address Octo asked for; any other step, and a step
   whose result names no page, uses the last host the turn's browser steps named. A step the
   person said no to, or left unanswered, never reaches the page, so its kind comes from the tool
-  call: typing with submit is `submit` (a form), whatever field it was for.
+  call (typing with submit is `submit`, a form), unless the browser had judged it before it
+  asked: a search field's typing with submit, or Enter in it, is `search`. The controller prints
+  only that word on a failed command's stdout (`{"ok":false,"activity":{"step":"search"}}`, or
+  `submit`), and runtime-agent puts it in its own terminal answer for the call that ended the run
+  (`terminalConsent` plus `activity.step`), from which only the kind is read: "you said no to a
+  search", not "a form".
 - **The labels** (`jobs/activity_labels.rs`):
 
   | Step | Running | Done (one / other / some) | Role |
@@ -169,8 +175,14 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   A host in punycode shows in Unicode when all its letters are of one script (or one of the CJK
   sets written with Latin, Unicode's "highly restrictive" profile), so "münchen.de" reads as
   itself and a name that mixes scripts stays in punycode (`activityHost.ts`).
-- The Personal Browser's steps say "used the browser" until its results carry the same
-  `activity`.
+- **The Personal Browser** (Desktop) reports the same `activity: {step, url, approval}` on each
+  step's result, from its own state: the kind (`search` or `submit` for typing with submit and
+  Enter, by its own classifier), the masked address of the page it left the tab on (only on a
+  site the agent may use there, never a link-only or private one) and how it was allowed: `once`
+  after a dialog the person allowed, `routine` or `free` (a site search) when routine browsing
+  took it without one. runtime-agent keeps the same four facts for `instafy_personal_browser` as
+  for the Shared Browser, so its steps read "Opened carris.pt, read a page" too. A step it
+  refuses ends with an error and names nothing more than its tool.
 
 ## Browser prompts
 
@@ -201,7 +213,8 @@ activity line, to the person who started the run only, and the line says `Waitin
   (`turnBrowserApproval.tsx`); the turn whose job that run serves claims it and shows it under
   its line, with no avatar of its own. When no turn on screen claims it within 300 ms (the turn
   is not in this view), the chat shows the same row at the end of the transcript, with Octo's
-  avatar. The browser view's sheet shares the same approval state, so answering one settles both.
+  avatar only when the message above it is not the same run's (`fallbackRowContinuesTail`):
+  one avatar per turn. The browser view's sheet shares the same approval state, so answering one settles both.
 - **Once answered**, or left to expire, the row goes and the turn's done line gains one clause
   after ` · `, and Details an entry with a lock:
 

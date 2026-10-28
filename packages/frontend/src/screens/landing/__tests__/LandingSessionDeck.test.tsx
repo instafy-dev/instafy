@@ -550,8 +550,8 @@ describe("landing workspace example", () => {
 
     await advance(450);
     expect(deck().dataset.beat).toBe("step1");
-    expect(deck().querySelector('[data-testid="landing-run-caption"]')?.textContent).toBe("Calling tool…");
-    expect(deck().querySelectorAll(".instafy-compact-event-pill-live")).toHaveLength(1);
+    expect(deck().querySelector('[data-testid="landing-run-line"]')?.textContent).toBe("Using a tool…");
+    expect(deck().querySelectorAll(".instafy-status-sweep")).toHaveLength(1);
 
     await advance(2500);
     expect(deck().dataset.beat).toBe("done");
@@ -845,9 +845,10 @@ describe("landing workspace example", () => {
     await setVisible(true);
     await advance(2200);
     expect(running()).toBe(1);
-    expect(deck().querySelector('[data-testid="landing-run-caption"]')).toBeNull();
+    expect(deck().textContent).not.toContain("Calling tool…");
     await advance(1800);
-    expect(deck().querySelector('[data-testid="landing-owner-badge"]')?.textContent).toBe("quill");
+    // Quill's step: the line names what it does, as the studio's line does.
+    expect(deck().querySelector('[data-testid="landing-run-line"]')?.textContent).toBe("Using a tool…");
     await advance(850);
     expect(deck().dataset.beat).toBe("done");
     expect(running()).toBe(0);

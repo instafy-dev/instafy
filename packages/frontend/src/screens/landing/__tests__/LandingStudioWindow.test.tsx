@@ -54,7 +54,7 @@ describe("landing studio window turn column", () => {
   // nothing in the column is a control or a live region, at any beat.
   function expectPresentational() {
     const transient = all(
-      '[data-testid="landing-typing-line"], [data-testid="landing-run-caption"], [data-testid="landing-run-chip"], [data-testid="landing-run-spinner"], [data-testid="landing-kim-typing"], [data-testid="landing-browse-typing"], [data-testid="landing-browse-caption"], [data-testid="landing-browse-chip"]',
+      '[data-testid="landing-run-line"], [data-testid="landing-kim-typing"], [data-testid="landing-browse-line"]',
     );
     expect(transient.length).toBeGreaterThan(0);
     expect(transient.every((node) => node.closest('[aria-hidden="true"]') !== null)).toBe(true);
@@ -153,7 +153,9 @@ describe("landing studio window turn column", () => {
       expect(container.textContent).not.toContain("Kim is typing…");
       expect(all('[data-octo-motion="thinking"]')).toHaveLength(0);
       expect(all("[data-beat-visible]").every((node) => node.getAttribute("data-beat-visible") === "true")).toBe(true);
-      expect(all('[data-testid="landing-run-chip"]').some((chip) => chip.classList.contains("invisible"))).toBe(false);
+      // The finished line says what the run did, with Details beside it.
+      expect(container.querySelector('[data-testid="landing-run-line"]')?.textContent).toBe(scenario.activity);
+      expect(container.querySelector('[data-testid="landing-run-line"]')?.parentElement?.textContent).toContain("Details");
     }
   });
 
@@ -213,7 +215,7 @@ describe("landing studio window turn column", () => {
     expect(thread?.contains(request!)).toBe(true);
     expect(container.querySelector('[data-testid="landing-continuation"]')?.textContent).toBe(browserContinuation(site.browser!.task));
     expect(container.querySelector('[data-testid="landing-browse-summary"]')?.textContent).toContain(site.browser!.summary);
-    expect(all('[data-testid="landing-browse-chip"]')).toHaveLength(4);
+    expect(container.querySelector('[data-testid="landing-browse-line"]')?.textContent).toBe(site.browser!.activity);
     // The browser itself is never drawn inside the conversation.
     expect(container.querySelector('[data-testid="landing-browser-dock"]')).toBeNull();
     const reply = container.querySelector('[data-testid="landing-kim-reply"]');
@@ -242,11 +244,13 @@ describe("landing studio window turn column", () => {
     expect(copy).not.toContain("forma.site/pricing");
     expect(copy).not.toMatch(/390 wide|\bReady\b/);
     expect(SESSION_SCENARIOS[2].browser!.url).toMatch(/^https:\/\/[a-z0-9]+\.instafy\.site\//);
-    // Command captions are the command's own text (books once used prose).
-    for (const scenario of SESSION_SCENARIOS) {
-      for (const step of scenario.steps) {
-        if (step.kind === "command") expect(step.caption).toMatch(/^(pnpm|python|instafy) /);
-        else expect(["Calling tool…", "Updating plan…", "Thinking…"]).toContain(step.caption);
+    // The activity line shows what the studio's line shows: a step's own
+    // label, "Thinking…" or "Waiting for you", never a command's text or
+    // "Calling tool…", which the studio retired.
+    for (const steps of [...SESSION_SCENARIOS.map((scenario) => scenario.steps), SESSION_SCENARIOS[2].browser!.steps]) {
+      for (const step of steps) {
+        expect(step.live).toMatch(/^(?:[A-Z][a-z]+(?: [a-z0-9.-]+)*…|Waiting for you)$/u);
+        expect(step.live).not.toMatch(/Calling tool|Running command|pnpm|python|instafy /u);
       }
     }
   });
@@ -276,44 +280,41 @@ describe("landing studio window turn column", () => {
   });
 
   it("draws the live run from the beat table", async () => {
+    const line = () => container.querySelector('[data-testid="landing-run-line"]')?.textContent;
     const scenario = await render("code", BEAT.STEP2, true);
     expectPresentational();
-    expect(container.querySelector('[data-testid="landing-run-caption"]')?.textContent).toBe(scenario.steps[1].caption);
-    // A running command carries no per-command stop on the landing: the red
-    // X reads as an error and is being retired from the studio's rail.
-    expect(container.querySelector('[data-testid="landing-run-stop"]')).toBeNull();
-    expect(container.querySelector('[data-testid="landing-run-caption"]')?.parentElement?.querySelector(".text-rose-500")).toBeNull();
-    expect(container.querySelector('[data-testid="landing-run-spinner"]')).not.toBeNull();
-    const chips = all('[data-testid="landing-run-chip"]');
-    expect(chips).toHaveLength(5);
-    expect(chips.slice(0, 2).every((chip) => !chip.classList.contains("invisible"))).toBe(true);
-    expect(chips.slice(2).every((chip) => chip.classList.contains("invisible"))).toBe(true);
-    // While a command is in flight the spinner pill is the single live indicator.
-    expect(chips.some((chip) => chip.classList.contains("instafy-compact-event-pill-live"))).toBe(false);
+    // One line names the running step; no chips, no command text, no spinner.
+    expect(line()).toBe(scenario.steps[1].live);
+    expect(line()).toBe("Running tests…");
+    expect(all(".instafy-compact-event-pill")).toHaveLength(0);
+    expect(all(".animate-spin")).toHaveLength(0);
+    expect(all(".instafy-status-sweep")).toHaveLength(1);
     expect(all('[data-octo-motion="thinking"]')).toHaveLength(1);
     expect(container.querySelector('[data-testid="landing-summary"]')?.getAttribute("data-beat-visible")).toBe("false");
+    expect(container.textContent).not.toContain("Details");
+
+    // A plan update is no step: between steps the line says Thinking….
+    await render("code", BEAT.STEP3, true);
+    expect(line()).toBe("Thinking…");
 
     await render("code", BEAT.STEP4, true);
     expectPresentational();
-    expect(container.querySelector('[data-testid="landing-owner-badge"]')?.textContent).toBe("canary");
-    expect(container.querySelector('[data-testid="landing-run-caption"]')?.textContent).toBe(scenario.steps[3].caption);
+    expect(line()).toBe(scenario.steps[3].live);
 
     await render("site", BEAT.STEP4, true);
     expectPresentational();
-    expect(container.querySelector('[data-testid="landing-owner-badge"]')?.textContent).toBe("pixel");
-    expect(container.querySelector('[data-testid="landing-run-stop"]')).toBeNull();
-    expect(container.querySelector('[data-testid="landing-run-spinner"]')).toBeNull();
-    expect(all('[data-testid="landing-run-chip"]').filter((chip) => chip.classList.contains("instafy-compact-event-pill-live"))).toHaveLength(1);
+    expect(line()).toBe("Editing files…");
     // The browser request is laid out at final size, but not shown yet.
     expect(container.querySelector('[data-testid="landing-browser-request"]')?.closest("[data-beat-visible]")?.getAttribute("data-beat-visible")).toBe("false");
 
     await render("site", BEAT.STEP5, true);
-    // The tunnel is a command, captioned with its own text.
-    expect(container.querySelector('[data-testid="landing-run-caption"]')?.textContent).toBe("instafy tunnel start --port 4173");
-    expect(container.querySelector('[data-testid="landing-run-stop"]')).toBeNull();
+    // The tunnel's own label, never the command.
+    expect(line()).toBe("Making a public link…");
+    expect(container.textContent).not.toContain("instafy tunnel start");
 
     await render("site", BEAT.ARTIFACT, true);
     expectPresentational();
+    expect(line()).toBe(SESSION_SCENARIOS[2].activity);
     // The request lands with the rest of Octo's message, before anyone presses it.
     expect(container.querySelector('[data-testid="landing-browser-request"]')?.closest("[data-beat-visible]")?.getAttribute("data-beat-visible")).toBe("true");
     expect(container.querySelector('[data-testid="landing-browser-request-button"]')?.getAttribute("data-busy")).toBe("false");
@@ -334,27 +335,34 @@ describe("landing studio window turn column", () => {
     expect(button?.textContent).toBe("Opening browser…");
     expect(button?.querySelector(".animate-spin")).not.toBeNull();
 
+    const browseLine = () => container.querySelector('[data-testid="landing-browse-line"]')?.textContent;
+    await render("site", "browse", true);
+    expect(browseLine()).toBe("Thinking…");
+
+    // Octo's browser run waits on Ada while the site prompt is up, then
+    // names each step and the preview's site.
     await render("site", "approve", true);
     expectPresentational();
-    // Octo's browser run: tool chips captioned "Calling tool…", the first live.
-    expect(container.querySelector('[data-testid="landing-browse-caption"]')?.textContent).toBe("Calling tool…");
-    const browseChips = all('[data-testid="landing-browse-chip"]');
-    expect(browseChips.filter((chip) => !chip.classList.contains("invisible"))).toHaveLength(1);
-    expect(browseChips.filter((chip) => chip.classList.contains("instafy-compact-event-pill-live"))).toHaveLength(1);
+    expect(browseLine()).toBe("Waiting for you");
     expect(all('[data-octo-motion="thinking"]')).toHaveLength(1);
-
-    await render("site", "browse", true);
-    expect(container.querySelector('[data-testid="landing-browse-typing"]')?.textContent).toBe("Thinking…");
+    await render("site", "navigate", true);
+    expect(browseLine()).toBe("Opening k7m2qa.instafy.site…");
+    await render("site", "loaded", true);
+    expect(browseLine()).toBe("Reading k7m2qa.instafy.site…");
+    await render("site", "click", true);
+    expect(browseLine()).toBe("Browsing k7m2qa.instafy.site…");
+    await render("site", "browseDone", true);
+    expect(browseLine()).toBe(SESSION_SCENARIOS[2].browser!.activity);
 
     await render("site", BEAT.STEP1, true);
     expectPresentational();
-    expect(all('[data-testid="landing-run-chip"]').filter((chip) => chip.classList.contains("instafy-compact-event-pill-live"))).toHaveLength(1);
+    expect(line()).toBe("Editing files…");
     expect(container.querySelector('[data-testid="landing-continuation"]')?.closest("[data-beat-visible]")?.getAttribute("data-beat-visible")).toBe("false");
     expect(all(".animate-spin")).toHaveLength(0);
 
     await render("code", BEAT.THINKING, true);
     expectPresentational();
-    expect(container.querySelector('[data-testid="landing-typing-line"]')?.textContent).toBe("Thinking…");
+    expect(line()).toBe("Thinking…");
     expect(all(".instafy-status-sweep")).toHaveLength(1);
 
     await render("code", BEAT.REST, true);
@@ -452,29 +460,14 @@ describe("landing studio window turn column", () => {
     for (const avatar of kimAvatars) expectAvatarCoinLightEdge(avatar);
   });
 
-  // The rail reserves one slot per step plus one for the in-flight spinner, so
-  // it is the same width at every beat and the spinner never floats away from
-  // the last drawn chip.
-  it("keeps the run rail one width with the spinner next to the last chip", async () => {
-    const slots = (): string[] =>
-      Array.from(container.querySelector('[data-testid="landing-run-rail"]')?.children ?? []).map((node) =>
-        node.getAttribute("data-testid") === "landing-run-spinner"
-          ? "spinner"
-          : node.classList.contains("invisible")
-            ? "reserved"
-            : "chip",
-      );
-
-    await render("code", BEAT.STEP2, true);
-    expect(slots()).toEqual(["chip", "chip", "spinner", "reserved", "reserved", "reserved"]);
-
-    await render("code", BEAT.STEP4, true);
-    expect(slots()).toEqual(["chip", "chip", "chip", "chip", "spinner", "reserved"]);
-
-    await render("code", BEAT.STEP3, true);
-    expect(slots()).toEqual(["chip", "chip", "chip", "reserved", "reserved", "reserved"]);
-
-    await render("code", TURN_END_BEAT, false);
-    expect(slots()).toEqual(["chip", "chip", "chip", "chip", "chip", "reserved"]);
+  // The line is one line at every beat, so the transcript never moves as its
+  // words change.
+  it("keeps the run's activity line in one place at every beat", async () => {
+    const lineRow = () => container.querySelector('[data-testid="landing-run-line"]')?.closest("[data-pin]");
+    for (const beat of [BEAT.THINKING, BEAT.STEP2, BEAT.STEP4, TURN_END_BEAT]) {
+      await render("code", beat, beat !== TURN_END_BEAT);
+      expect(lineRow()).not.toBeNull();
+      expect(container.querySelectorAll('[data-testid="landing-run-line"]')).toHaveLength(1);
+    }
   });
 });

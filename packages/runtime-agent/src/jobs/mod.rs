@@ -18358,12 +18358,14 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             "terminalConsent": terminal_consent,
                             "event": event.clone(),
                         });
-                        // A Shared Browser step names its site from the browser's own result
-                        // (`browserStep`, kept by the event adapter); any other tool call, or a
-                        // browser step without those facts, is "Using the browser" / "a tool".
-                        let browser_step = item
-                            .get("browserStep")
-                            .filter(|_| server.eq_ignore_ascii_case("instafy_shared_browser"));
+                        // A Shared or Personal Browser step names its site from the browser's
+                        // own result (`browserStep`, kept by the event adapter); any other tool
+                        // call, or a browser step without those facts, is "Using the browser" /
+                        // "a tool".
+                        let browser_step = item.get("browserStep").filter(|_| {
+                            server.eq_ignore_ascii_case("instafy_shared_browser")
+                                || server.eq_ignore_ascii_case("instafy_personal_browser")
+                        });
                         if let Some(activity) = browser_step
                             .and_then(activity_labels::browser_step_activity)
                             .or_else(|| activity_labels::mcp_tool_activity(server))
@@ -32768,6 +32770,28 @@ mod tests {
         let other = activity(2);
         assert_eq!(other["key"], json!("tool/use"));
         assert!(other.get("host").is_none());
+    }
+
+    #[test]
+    fn extract_codex_messages_names_a_personal_browser_steps_site() {
+        // The Personal Browser's results carry the same facts as the Shared
+        // Browser's; before they did, its steps only ever said "used the browser".
+        let events = vec![json!({"type": "item.completed", "item": {
+            "id": "item_read", "type": "mcp_tool_call", "server": "instafy_personal_browser",
+            "tool": "snapshot", "status": "completed",
+            "browserStep": {"step": "snapshot", "host": "carris.pt", "pageKey": "bbbbbbbbbbbbbbbb"}
+        }})];
+        let messages = extract_codex_messages(&events);
+        let activity = messages[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("activity"))
+            .cloned()
+            .expect("labelled");
+        assert_eq!(activity["key"], json!("browser/read"));
+        assert_eq!(activity["live"], json!("Reading {host}"));
+        assert_eq!(activity["host"], json!("carris.pt"));
+        assert_eq!(activity["pageKey"], json!("bbbbbbbbbbbbbbbb"));
     }
 
     #[test]

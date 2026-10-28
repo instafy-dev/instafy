@@ -231,9 +231,6 @@ export const SHELL_MESSAGE_BODY = "w-full min-w-0";
 // ChatMessageEntries.tsx:325-330 the current user's own bubble.
 export const OWN_BUBBLE = `group relative inline-flex w-fit max-w-[min(92%,56rem)] min-w-0 flex-col items-start rounded-2xl rounded-br-none bg-slate-50/90 px-3.5 py-2.5 text-sm text-slate-800 ring-1 ring-inset ring-slate-200/70 ${DARK_RAISED_CONTROL_BG_CLASS} dark:text-slate-200 dark:ring-[color:var(--color-studio-dark-raised-control-border)]`;
 
-// ChatTypingRows.tsx:53-84 the assistant status line.
-export const TYPING_LINE = "flex min-h-8 w-fit max-w-full min-w-0 items-center gap-2 px-1 text-sm text-slate-500 dark:text-slate-400";
-export const TYPING_LINE_TEXT = "instafy-status-sweep min-w-0 max-w-full text-xs";
 
 // AgentJobThreadPreviewLayout.tsx:1283-1290 thread root; spine offsets from
 // useAgentJobThreadPreviewState.ts:885-891 with a 0 safe inset. The studio
@@ -251,23 +248,15 @@ export const THREAD_SPINE_LEFT = "-30px";
 export const THREAD_SPINE_MAIN =
   "pointer-events-none absolute left-[var(--thread-spine-left)] transition-opacity duration-0 ease-out group-data-[deck-settled]/deck:duration-200 motion-reduce:transition-none";
 export const THREAD_SPINE_NOTCH = "pointer-events-none absolute top-0 h-full left-[var(--thread-spine-left)]";
-// AgentJobThreadPreviewLayout.tsx:1385-1395 the compact rail row.
-export const RAIL_ROW = "group relative py-1";
-export const RAIL_ROW_INNER = "flex min-w-0 w-full items-center gap-2 rounded-lg py-0.5 pr-1";
-export const RAIL_ROW_TRACK = "flex min-w-0 flex-1 items-center rounded-lg py-0.5";
-export const RAIL_CHIPS = "flex shrink-0 items-center -space-x-2 pl-0.5 py-0.5";
-// AgentJobThreadPreviewLayout.tsx:1449-1451 chip; dark cool-slate border and background (700/900) replaced by the raised-control tier.
-export const RAIL_CHIP = `inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm ${DARK_RAISED_CONTROL_CLASS} dark:text-slate-300`;
-// AgentJobThreadPreviewLayout.tsx:1409 another agent's chip shows its initial.
-export const RAIL_CHIP_INITIAL = "text-3xs font-semibold";
-// AgentJobThreadPreviewLayout.tsx:878-910 the caption row under the rail.
-export const CAPTION_SECTION = "relative py-1";
-// Landing-only min-h-6: every caption row is as tall as a command's (its Stop
-// is 24px), so the pinned transcript never bobs as the steps alternate.
-export const CAPTION_ROW = "flex min-h-6 min-w-0 items-center gap-1.5 pl-1 text-xs text-slate-600 dark:text-slate-400";
-export const CAPTION_TEXT = "instafy-status-sweep min-w-0 truncate";
-// AgentJobThreadPreviewLayout.tsx:686-693 owner badge; dark cool-slate border and background (700/80, 900/70) replaced by the raised-control tier.
-export const OWNER_BADGE = `inline-flex max-w-28 flex-none items-center rounded-full border border-slate-200/70 bg-white/70 px-1.5 py-0.5 text-xxs font-semibold leading-none text-slate-600 ${DARK_RAISED_CONTROL_CLASS} dark:text-slate-300`;
+// TurnActivityLine.tsx: the turn's one activity line, muted caption text on
+// one 20px line that truncates, at every beat, so the pinned transcript never
+// bobs as its words change; while the turn runs its words sweep, and once it
+// ended Details follows them.
+export const ACTIVITY_SECTION = "relative py-1";
+export const ACTIVITY_ROW = "flex h-5 max-w-full min-w-0 items-center gap-1.5 pl-1 text-xs leading-5 text-slate-500 dark:text-slate-400";
+export const ACTIVITY_TEXT = "min-w-0 truncate";
+export const ACTIVITY_TEXT_LIVE = "instafy-status-sweep min-w-0 truncate";
+export const ACTIVITY_DETAILS = "inline-flex flex-none items-center gap-0.5 font-medium";
 // AgentJobThreadPreviewLayout.tsx:1626-1650 the completed summary section.
 export const SUMMARY_SECTION = "relative pt-2 pb-0";
 export const SUMMARY_STACK = "space-y-1.5";

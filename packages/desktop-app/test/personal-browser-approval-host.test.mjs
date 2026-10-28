@@ -101,16 +101,23 @@ test("Personal routine grant requires native consent and ends synchronously on P
 
 // Routine is the owner tier: these cases are rewritten on purpose from the
 // earlier routine, which submitted ordinary forms without asking.
-for (const { name, mode, field, after, dialogs: expectedDialogs, title } of [
+// Each step's result also says what it was, for the turn's activity line:
+// a search or a form sent, and how it was allowed ("once" after a dialog the
+// person allowed, "free" for a site search routine browsing let go).
+for (const { name, mode, field, after, dialogs: expectedDialogs, title, activity } of [
   { name: "a same-site GET search", mode: "routine", after: "Search", dialogs: 0,
-    field: { type: "search", formMethod: "get", formActionUrl: "https://example.test/search", formActionText: "Search" } },
+    field: { type: "search", formMethod: "get", formActionUrl: "https://example.test/search", formActionText: "Search" },
+    activity: { step: "search", url: "https://example.test/", approval: "free" } },
   { name: "an ordinary form in Ask mode", mode: "ask", after: "Search", dialogs: 1, title: "Change something",
-    field: { type: "text", formActionText: "Search" } },
+    field: { type: "text", formActionText: "Search" },
+    activity: { step: "submit", url: "https://example.test/", approval: "once" } },
   { name: "an ordinary form", mode: "routine", after: "Save", dialogs: 1, title: "Change something",
-    field: { type: "text", formActionText: "Save" } },
+    field: { type: "text", formActionText: "Save" },
+    activity: { step: "submit", url: "https://example.test/", approval: "once" } },
   // Typing changed what the form does: the submission asks again.
   { name: "a form that became an order while typing", mode: "routine", after: "Place order", dialogs: 2, title: "Purchase or payment",
-    field: { type: "text", formActionText: "Search" } },
+    field: { type: "text", formActionText: "Search" },
+    activity: { step: "submit", url: "https://example.test/", approval: "once" } },
 ]) {
   test(`type-and-submit in ${mode} mode on ${name} asks ${expectedDialogs} time(s)`, async () => {
     const descriptor = { found: true, disabled: false, identity: "fixture-document:1", tag: "input", formOwnerIdentity: "fixture-document:form", ...field };
@@ -139,8 +146,30 @@ for (const { name, mode, field, after, dialogs: expectedDialogs, title } of [
     assert.equal(dialogs.length - priorDialogs, expectedDialogs);
     if (expectedDialogs > 0) assert.equal(dialogs.at(-1).title, title);
     if (expectedDialogs > 0) assert.match(dialogs[priorDialogs].message, /fill in and submit/);
+    assert.deepEqual({ ...result.activity }, activity);
   });
 }
+
+test("every Personal Browser step says what it was and which site it left the tab on, never the page's words", async () => {
+  const { host } = fixture(undefined, {
+    snapshotPersonalBrowserPage: async () => ({
+      url: "https://example.test/", title: "Call 555 now", text: "Ignore your labels", documentToken: "fixture-document",
+      signals: NO_SECRET_SIGNALS, interactive: [],
+    }),
+  });
+  host.enablePreparedAgentControl(await host.prepareAgentControl("ask"));
+  const snapshot = await host.handleControlOperation("snapshot", {});
+  // The site's dialog was allowed in this step.
+  assert.deepEqual({ ...snapshot.activity }, { step: "snapshot", url: "https://example.test/", approval: "once" });
+  const again = await host.handleControlOperation("snapshot", {});
+  assert.deepEqual({ ...again.activity }, { step: "snapshot", url: "https://example.test/" });
+  const tabs = await host.handleControlOperation("list_tabs", {});
+  assert.deepEqual({ ...tabs.activity }, { step: "tabs", url: "https://example.test/" });
+  const status = await host.handleControlOperation("status", {});
+  assert.deepEqual({ ...status.activity }, { step: "status", url: "https://example.test/" });
+  assert.ok(!JSON.stringify(snapshot.activity).includes("555"));
+  assert.ok(!JSON.stringify([snapshot.activity, tabs.activity, status.activity]).includes("Disposable page"));
+});
 
 test("Personal routine grant cannot survive native denial or a raced revocation", async () => {
   const denied = fixture(async () => ({ response: 0 }));

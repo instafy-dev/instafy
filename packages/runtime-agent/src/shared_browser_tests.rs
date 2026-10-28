@@ -2631,6 +2631,123 @@ fn a_site_search_asks_in_ask_mode_and_when_its_form_sends_a_key_like_value() {
     }
 }
 
+/// A search the person says no to never reached the page, but the browser
+/// judged the field a search box before it asked: the command says so on
+/// stdout, and runtime-agent's terminal answer names the step a search, so the
+/// turn's line reads "you said no to a search", not "a form" (live test,
+/// 2026-10-27). A form that is no search stays a form sent.
+#[test]
+fn a_search_said_no_to_names_its_step_a_search() {
+    for (mode, path, extra, kind) in [
+        (
+            "site-search",
+            "/v1/type",
+            json!({"text": "Belém Tower", "submit": true}),
+            "search",
+        ),
+        (
+            "site-search",
+            "/v1/press",
+            json!({"key": "Enter"}),
+            "search",
+        ),
+        (
+            "post-form-field",
+            "/v1/type",
+            json!({"text": "12", "submit": true}),
+            "submit",
+        ),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id(mode)});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            path,
+            Some(&body.to_string()),
+            &["https://example.test"],
+            &["deny"],
+        );
+        assert!(
+            failure_of(&output).contains("approval_denied"),
+            "{mode} {path}"
+        );
+        assert_eq!(requests.len(), 1, "{mode} {path}");
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&output.stdout).expect("one JSON line"),
+            json!({"ok": false, "activity": {"step": kind}}),
+            "{mode} {path}"
+        );
+        let error = controller_failure(output.status, &output.stderr, &output.stdout);
+        assert_eq!(
+            error
+                .downcast_ref::<ControllerFailure>()
+                .and_then(|failure| failure.step),
+            Some(kind),
+            "{mode} {path}"
+        );
+    }
+
+    // Only that exact line names a step; anything else on stdout names none.
+    for stdout in [
+        r#"{"ok":false,"activity":{"step":"search","url":"https://evil.example/"}}"#,
+        r#"{"ok":false,"activity":{"step":"buy"}}"#,
+        r#"{"ok":true,"activity":{"step":"search"}}"#,
+        "search",
+        "",
+    ] {
+        assert_eq!(failed_step_kind(stdout.as_bytes()), None, "{stdout}");
+    }
+}
+
+#[tokio::test]
+async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
+    let server = SharedBrowserMcpServer::new();
+    let request = SharedBrowserRequest {
+        method: "POST".to_string(),
+        path: "/v1/type".to_string(),
+        body: Some(
+            json!({ "index": 0, "snapshotId": SNAPSHOT_ID, "text": "Belém", "submit": true }),
+        ),
+    };
+    let failed = server
+        .execute_with_failure_latch(&request, || async {
+            Err(ControllerFailure {
+                message: "the person denied it [approval_denied_non_retryable]".to_string(),
+                step: Some("search"),
+            }
+            .into())
+        })
+        .await;
+    assert!(matches!(
+        failed,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_denied"
+        ))
+    ));
+    let step = server.terminal_step.lock().await.take();
+    assert_eq!(step, Some("search"));
+    let answer = terminal_consent_call_result_with_step("approval_denied", step);
+    let structured = answer.structured_content.expect("structured");
+    assert_eq!(structured["activity"], json!({"step": "search"}));
+    assert_eq!(structured["terminalConsent"]["code"], "approval_denied");
+    // A later call's answer names no step.
+    let later = server
+        .execute_with_failure_latch(&request, || async { Ok(json!({})) })
+        .await;
+    assert!(matches!(
+        later,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_denied"
+        ))
+    ));
+    assert_eq!(server.terminal_step.lock().await.take(), None);
+}
+
 #[test]
 fn a_free_site_search_lets_no_form_post_leave_the_tab_even_to_its_own_site() {
     let fixture = EmbeddedControllerFixture::new();
@@ -3757,7 +3874,7 @@ async fn approval_codes_still_latch_at_once_during_a_browser_unavailable_streak(
 #[test]
 fn the_controller_reports_an_unreachable_browser_by_its_exit_code() {
     let unavailable = |output: &Output| {
-        controller_failure(output.status, &output.stderr)
+        controller_failure(output.status, &output.stderr, &output.stdout)
             .downcast_ref::<BrowserUnavailable>()
             .is_some()
     };

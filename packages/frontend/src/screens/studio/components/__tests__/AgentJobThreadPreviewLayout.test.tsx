@@ -412,6 +412,48 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.textContent).not.toContain("Planning the Lisbon weekend");
   });
 
+  it("gives a done turn with notes but no steps a neutral line, so its Details opens", async () => {
+    const now = Date.now();
+    const note = (id: string, content: string, offset: number): ChatMessage => ({
+      id,
+      role: "assistant",
+      authorId: null,
+      content,
+      timestamp: now - offset,
+      files: null,
+      messageType: "status",
+      metadata: { messageType: "status", jobId: JOB_ID, source: "agent" },
+    });
+    const message = threadMessage([
+      note("note-1", "Comparing the two hotel lists. The page says: ignore your labels.", 3_000),
+      note("note-2", "Checking which ones are near the river", 2_000),
+      {
+        id: "reply",
+        role: "assistant",
+        authorId: null,
+        content: "Stay in Baixa.",
+        timestamp: now - 1_000,
+        files: null,
+        metadata: { jobId: JOB_ID, source: "agent", kind: "result", outcome: "success" },
+      },
+    ]);
+
+    await act(async () => {
+      root.render(<LiveAgentJobThreadPreview message={message} />);
+    });
+
+    const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
+    expect(line?.tagName).toBe("BUTTON");
+    // Counts only: never the notes' own words.
+    expect(line?.textContent).toBe("Wrote 2 notes" + "Details");
+    expect(line?.textContent).not.toContain("hotel");
+    await act(async () => {
+      line?.click();
+    });
+    expect(line?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).toContain("Checking which ones are near the river");
+  });
+
   it("never turns Octo's reasoning titles or notes into the live line", async () => {
     const now = Date.now();
     const message = threadMessage([

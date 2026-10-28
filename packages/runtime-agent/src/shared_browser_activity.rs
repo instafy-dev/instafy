@@ -32,9 +32,9 @@ const CONTROLLER_APPROVALS: &[&str] = &["once", "routine", "free"];
 /// The longest address the controller's activity may carry.
 const MAX_URL_CHARS: usize = 4_096;
 
-/// The step kind a tool call names before (or without) the controller's own answer: a step the
-/// person said no to, or left unanswered, never reaches the page, so typing with submit is a form
-/// sent ("you said no to a form"), whatever field it was for.
+/// The step kind a tool call names before (or without) the controller's own answer. Typing with
+/// submit is a form sent ("you said no to a form") unless the controller said, before it asked,
+/// that the field is a search box: its terminal answer then names the step a search.
 fn step_of_tool(tool: &str, arguments: Option<&JsonValue>) -> Option<&'static str> {
     let submits = arguments
         .and_then(|arguments| arguments.get("submit"))
@@ -110,6 +110,10 @@ pub(crate) fn browser_step_facts(
         .and_then(JsonValue::as_str)
         .and_then(|step| STEPS.iter().copied().find(|known| *known == step));
     let step = reported_step.or_else(|| step_of_tool(tool, arguments))?;
+    // A step that ended the run (said no to, left unanswered) never reached
+    // the page: its result names only what the step was, as runtime-agent's
+    // own terminal answer says it, never a page or how it was allowed.
+    let reported = reported.filter(|_| terminal_code.is_none());
     let reported_url = reported
         .and_then(|activity| activity.get("url"))
         .and_then(JsonValue::as_str)

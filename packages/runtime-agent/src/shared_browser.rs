@@ -1916,6 +1916,22 @@ fn terminal_consent_status(code: &'static str) -> JsonValue {
     status
 }
 
+/// A terminal consent result, with the step's kind (`activity.step`) when the
+/// controller said what the step was before it asked: the turn's line then
+/// says "you said no to a search", not "a form".
+fn terminal_consent_call_result_with_step(
+    code: &'static str,
+    step: Option<&'static str>,
+) -> CallToolResult {
+    let mut result = terminal_consent_call_result(code);
+    if let Some(step) = step
+        && let Some(JsonValue::Object(structured)) = result.structured_content.as_mut()
+    {
+        structured.insert("activity".to_string(), json!({ "step": step }));
+    }
+    result
+}
+
 fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
     if code == "human_input_required" {
         let mut result = CallToolResult::success(vec![Content::text(
@@ -1958,6 +1974,9 @@ struct SharedBrowserMcpServer {
     tools: Arc<Vec<Tool>>,
     action_lock: Arc<AsyncMutex<()>>,
     terminal_consent_failure: Arc<AsyncMutex<Option<&'static str>>>,
+    /// The step kind of the call that latched the terminal failure, for its
+    /// own result only.
+    terminal_step: Arc<AsyncMutex<Option<&'static str>>>,
     /// Tool calls in a row that found the browser unavailable.
     browser_unavailable_streak: Arc<AtomicU32>,
 }
@@ -1968,6 +1987,7 @@ impl SharedBrowserMcpServer {
             tools: Arc::new(shared_browser_mcp_tools()),
             action_lock: Arc::new(AsyncMutex::new(())),
             terminal_consent_failure: Arc::new(AsyncMutex::new(None)),
+            terminal_step: Arc::new(AsyncMutex::new(None)),
             browser_unavailable_streak: Arc::new(AtomicU32::new(0)),
         }
     }
@@ -2019,7 +2039,16 @@ impl SharedBrowserMcpServer {
             Ok(payload) => Ok(payload),
             Err(error) => {
                 if let Some(code) = terminal_consent_failure_code_from_error(&error) {
-                    return Err(self.latch_terminal_failure(code).await);
+                    let latched = self.latch_terminal_failure(code).await;
+                    // The call that ended the run names its step's kind
+                    // (a search said no to), for the turn's line.
+                    if matches!(latched, SharedBrowserMcpExecutionFailure::TerminalConsent(latched_code) if latched_code == code)
+                    {
+                        *self.terminal_step.lock().await = error
+                            .downcast_ref::<ControllerFailure>()
+                            .and_then(|failure| failure.step);
+                    }
+                    return Err(latched);
                 }
                 if streak >= BROWSER_UNAVAILABLE_STREAK_LIMIT {
                     return Err(self.latch_terminal_failure(BROWSER_UNAVAILABLE_CODE).await);
@@ -2072,7 +2101,8 @@ impl ServerHandler for SharedBrowserMcpServer {
         {
             Ok(payload) => Ok(successful_tool_result(payload)),
             Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code)) => {
-                Ok(terminal_consent_call_result(code))
+                let step = self.terminal_step.lock().await.take();
+                Ok(terminal_consent_call_result_with_step(code, step))
             }
             Err(SharedBrowserMcpExecutionFailure::Other(error)) => {
                 Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2643,7 +2673,11 @@ async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {
         );
     }
     if !output.status.success() {
-        return Err(controller_failure(output.status, &output.stderr));
+        return Err(controller_failure(
+            output.status,
+            &output.stderr,
+            &output.stdout,
+        ));
     }
     serde_json::from_slice::<JsonValue>(&output.stdout)
         .context("Shared Browser controller returned invalid JSON")
@@ -2651,7 +2685,11 @@ async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {
 
 /// The error of a controller command that exited unsuccessfully. Only its
 /// exit code, never its error text, marks the browser as unavailable.
-fn controller_failure(status: std::process::ExitStatus, stderr: &[u8]) -> anyhow::Error {
+fn controller_failure(
+    status: std::process::ExitStatus,
+    stderr: &[u8],
+    stdout: &[u8],
+) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(stderr);
     let details = stderr.trim();
     let message = format!(
@@ -2665,8 +2703,50 @@ fn controller_failure(status: std::process::ExitStatus, stderr: &[u8]) -> anyhow
     if status.code() == Some(BROWSER_UNAVAILABLE_EXIT_CODE) {
         BrowserUnavailable(message).into()
     } else {
-        anyhow!(message)
+        ControllerFailure {
+            message,
+            step: failed_step_kind(stdout),
+        }
+        .into()
     }
+}
+
+/// A controller command that failed, with the step's kind when the command
+/// said it (a search, or a form sent) before it asked the person.
+#[derive(Debug)]
+struct ControllerFailure {
+    message: String,
+    step: Option<&'static str>,
+}
+
+impl std::fmt::Display for ControllerFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ControllerFailure {}
+
+/// The step kind a failed command printed: exactly `{"ok":false,"activity":
+/// {"step":<kind>}}` on stdout, the kind one of the few the controller names
+/// there. Anything else names none. The controller writes nothing else to
+/// stdout before it fails, and never page text there.
+fn failed_step_kind(stdout: &[u8]) -> Option<&'static str> {
+    const KINDS: &[&str] = &["search", "submit"];
+    if stdout.len() > 256 {
+        return None;
+    }
+    let value = serde_json::from_slice::<JsonValue>(stdout).ok()?;
+    let object = value.as_object()?;
+    if object.len() != 2 || object.get("ok") != Some(&JsonValue::Bool(false)) {
+        return None;
+    }
+    let activity = object.get("activity")?.as_object()?;
+    if activity.len() != 1 {
+        return None;
+    }
+    let step = activity.get("step")?.as_str()?;
+    KINDS.iter().copied().find(|known| *known == step)
 }
 
 fn embedded_shared_browser_script() -> String {

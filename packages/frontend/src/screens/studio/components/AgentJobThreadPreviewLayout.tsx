@@ -55,7 +55,7 @@ import {
 import { isTransientThreadUpdate } from "./threadPreviewProxyError";
 import { TurnActivityDetails } from "./TurnActivityDetails";
 import { TurnActivityLine } from "./TurnActivityLine";
-import type { TurnActivity } from "./turnActivity";
+import { detailsOnlySummary, type TurnActivity } from "./turnActivity";
 import { TurnBrowserApprovalRow, type TurnBrowserApproval } from "./turnBrowserApproval";
 
 const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
@@ -411,7 +411,6 @@ export function AgentJobThreadPreviewLayout({
     () => activity.details.filter((item) => item.kind !== "update" || visibleUpdateIds.has(item.id)),
     [activity.details, visibleUpdateIds],
   );
-  const activityText = activity.live ?? activity.summary ?? "";
   // Details opens once the turn has done something: a step, a note, a plan or
   // a child thread. Reasoning titles are listed there too, but on their own
   // they leave the line plain ("Thinking…" before the first step).
@@ -421,6 +420,13 @@ export function AgentJobThreadPreviewLayout({
     ) || branchThreads.length > 0;
   // A failed turn has one Details: the failure block's, which lists the steps.
   const activityLineOpensDetails = hasDetails && runFailurePresentation === null;
+  // A done turn that ran no step but left notes, a plan or a thread still
+  // gets a line, so its Details can open: "Wrote 2 notes".
+  const activityText =
+    activity.live ??
+    activity.summary ??
+    (activityLineOpensDetails ? detailsOnlySummary(detailItems, branchThreads.length) : null) ??
+    "";
   const showActivityLine = activityText.length > 0;
   const showDetailsPanel = detailsOpen && activityLineOpensDetails;
   const normalizeThreadPlaceholderText = (value: string) =>

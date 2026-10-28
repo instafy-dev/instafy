@@ -333,6 +333,12 @@ function siteApproved(rawUrl) {
 // This process runs one step. Set once the step waited on a prompt and the
 // person allowed it, so its activity says it was allowed at its prompt.
 let stepAllowedAtPrompt = false;
+// What the step is, once the browser has judged it and before it asks the
+// person: a search, or a form sent. A step the person says no to, or leaves
+// unanswered, ends in an error, and its kind still names the clause the turn's
+// line says ("you said no to a search"). Only these words, never page text.
+const FAILED_STEP_KINDS = new Set(["search", "submit"]);
+let stepKind = null;
 
 async function ensureSiteApproved(rawUrl, label, { destinationUrl = null } = {}) {
   // A site the run already uses, or routine browsing, opens without a prompt.
@@ -3384,6 +3390,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
         );
       }
     }
+    if (submitting) {
+      stepKind = step.category === "search" ? "search" : "submit";
+    }
     await allowStepOnce({
       operation: submitting ? "form-submit" : "type",
       label: submitting
@@ -3499,6 +3508,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
           { destinationUrl: rawDestination },
         );
       }
+    }
+    if (pressKey === "Enter" && step.category === "search") {
+      stepKind = "search";
     }
     await allowStepOnce({
       operation: activationKey
@@ -3618,7 +3630,12 @@ async function main() {
 
 main().then(
   () => process.exit(0),
-  (error) => {
+  async (error) => {
+    // The step's kind, for the turn's line, on stdout: runtime-agent reads it
+    // only from a failed command's stdout, as one of a few fixed words.
+    if (FAILED_STEP_KINDS.has(stepKind)) {
+      await writeStdout(`${JSON.stringify({ ok: false, activity: { step: stepKind } })}\n`).catch(() => {});
+    }
     const message = error && error.message ? error.message : String(error);
     // Errors reach the model and logs; browser errors can quote page markup.
     let masked = "Shared Browser command failed and its error could not be masked";
