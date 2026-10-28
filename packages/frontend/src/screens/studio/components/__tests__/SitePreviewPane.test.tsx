@@ -106,6 +106,30 @@ describe("SitePreviewPane", () => {
     expect(JSON.stringify({ ...localStorage })).not.toContain("p-aaaa");
   });
 
+  it("is one row on a phone: Present and Open in new tab sit beside the title, never on a row of their own", async () => {
+    const bar = () => container.querySelector<HTMLElement>("[data-testid=site-preview-chrome]")!;
+    const contextRow = () => bar().querySelector<HTMLElement>("[data-testid=browser-chrome-context-row]")!;
+    const viewport = (wide: boolean) => vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: wide, media: query, onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false,
+    }));
+    try {
+      // a phone (narrower than 640 px): the bar never wraps its controls onto a second row
+      viewport(false);
+      await render();
+      expect(bar().className).not.toContain("flex-wrap");
+      expect(contextRow().className).not.toContain("basis-full");
+      expect(contextRow().querySelector('[aria-label="Open in new tab"]')).not.toBeNull();
+      // a wider screen keeps the bar it had
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      viewport(true);
+      await render();
+      expect(bar().className).toContain("max-[540px]:flex-wrap");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("shows one loading signal while opening: the line in the pane, its pill for screen readers only", async () => {
     mocks.createSitePreviewViewer.mockImplementation(() => new Promise(() => {}));
     await render();

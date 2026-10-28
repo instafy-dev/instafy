@@ -15,6 +15,7 @@ import {
   type SitePreviewProblem,
   type SitePreviewShownState,
 } from "../../../services/runtimeController/previews";
+import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import { reserveExternalWindow } from "../../../utils/openExternalUrl";
 import { BrowserChromeShell, BrowserStatusPill } from "./BrowserChromeShell";
 import { withHostQuery } from "./previewHost/hostMessages";
@@ -439,12 +440,16 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   const problem = problemText(shown);
   // In place of the site, the pane's message is the one signal: no pill beside it saying the same.
   const problemShown = down || problem !== null;
+  // On a phone the bar is one row: Present and Open in new tab sit beside the title, so the site keeps the room a
+  // second row of chrome took (a map's panel ended up squeezed under the chat's title, the bar and that row).
+  const phone = !useBreakpoint("sm");
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="site-preview-pane" data-state={shown}>
       <BrowserChromeShell
         label={`${title} controls`}
         testId="site-preview-chrome"
+        compact={phone}
         busy={shown === "opening" || shown === "starting"}
         navigation={
           <IconButton aria-label="Reload" title="Reload" className="max-[540px]:h-10 max-[540px]:w-10" data-testid="site-preview-reload"
