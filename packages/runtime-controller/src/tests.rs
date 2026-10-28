@@ -24,6 +24,7 @@ use crate::origins::{
     resolve_origin_for_protocol, upsert_workspace_origin, AccessTokenRequest, CommitReceiptBody,
     LeaseAcquireOutcome, OriginMode, OriginPresenceStatus, OriginRegisterBody,
 };
+use crate::projects::ensure_project_scoped_write_access;
 use crate::rate_limit::RateLimiter;
 use crate::tokens::{decode_scoped_token, mint_scoped_token, ScopedTokenRequest};
 use crate::tunnels::{
@@ -276,6 +277,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         strict_mode: false,
         dev_isolation_mode: false,
         dev_mode: false,
+        device_grants: Default::default(),
         runtime_idle_release_seconds: 150,
         runtime_idle_stop_seconds: 1800,
         runtime_limit_reclaim_idle_seconds: 120,
@@ -2216,6 +2218,106 @@ pub(crate) async fn require_origin_test_pool_with_max_size(
                 "{test_name} requires TEST_DATABASE_URL; run it through `pnpm test:controller`"
             )
         })
+}
+
+/// Runs one statement on a connection of its own from `pool`, returned as
+/// soon as it ends, and gives the number of rows it changed.
+pub(crate) async fn sql(
+    pool: &PgPool,
+    statement: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> anyhow::Result<u64> {
+    Ok(pool.get().await?.execute(statement, params).await?)
+}
+
+/// Runs one query on a connection of its own from `pool`, and gives the first
+/// column of the one row it returns.
+pub(crate) async fn sql_one<T: tokio_postgres::types::FromSqlOwned>(
+    pool: &PgPool,
+    query: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> anyhow::Result<T> {
+    Ok(pool
+        .get()
+        .await?
+        .query_one(query, params)
+        .await?
+        .try_get(0)?)
+}
+
+/// Polls `check` every 20 ms for up to 10 s, and gives what it first finds.
+pub(crate) async fn eventually<T, F, Fut>(what: &str, mut check: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Option<T>>>,
+{
+    for _ in 0..500 {
+        if let Some(found) = check().await? {
+            return Ok(found);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    anyhow::bail!("timed out waiting for {what}")
+}
+
+/// Only the controller reaches `tables`: each has row level security on, and
+/// neither browser role holds a privilege on it, whatever Supabase's default
+/// grants give a new public table.
+pub(crate) async fn assert_controller_only(pool: &PgPool, tables: &[&str]) -> anyhow::Result<()> {
+    let db = pool.get().await?;
+    for table in tables {
+        let table = format!("public.{table}");
+        let row = db
+            .query_one(
+                "select relrowsecurity from pg_class where oid=$1::text::regclass",
+                &[&table],
+            )
+            .await?;
+        assert!(row.get::<_, bool>(0), "{table} has row level security");
+        for role in ["anon", "authenticated"] {
+            let privilege: bool = db
+                .query_one(
+                    "select has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE')",
+                    &[&role, &table],
+                )
+                .await?
+                .get(0);
+            assert!(
+                !privilege,
+                "{role} must not bypass the controller via {table}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Sends one request to `app` with `authorization` as its header, and returns
+/// the status and the JSON body, which is null when the body is empty or not
+/// JSON.
+pub(crate) async fn call_router(
+    app: &Router,
+    authorization: Option<&str>,
+    method: &str,
+    uri: String,
+    body: Option<serde_json::Value>,
+) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+    let mut request = Request::builder().method(method).uri(uri);
+    if let Some(authorization) = authorization {
+        request = request.header(axum::http::header::AUTHORIZATION, authorization);
+    }
+    let request = match body {
+        Some(body) => request
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))?,
+        None => request.body(Body::empty())?,
+    };
+    let response = app.clone().oneshot(request).await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    Ok((
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 /// Rows a shared-database test creates, deleted by [`with_shared_db_fixture`]
@@ -13502,7 +13604,9 @@ async fn lease_next_agent_job_leases_queued_work() -> anyhow::Result<()> {
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -13600,7 +13704,9 @@ async fn lease_next_agent_job_can_filter_for_read_only_batches() -> anyhow::Resu
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -13709,7 +13815,9 @@ async fn lease_next_agent_job_scopes_read_only_batch_to_same_team_group() -> any
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -13817,7 +13925,9 @@ async fn lease_next_agent_job_can_lease_runtime_spread_jobs_when_preference_pinn
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -13923,7 +14033,9 @@ async fn lease_next_agent_job_isolates_personal_browser_runtimes_and_jobs() -> a
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -14211,7 +14323,9 @@ async fn lease_next_agent_job_never_spreads_shared_browser_work_off_target() -> 
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -14320,7 +14434,9 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );
             ALTER TABLE agent_jobs ADD COLUMN agent_role text;
             CREATE TEMP TABLE upstream_pacing (
@@ -14487,7 +14603,9 @@ async fn lease_next_agent_job_yields_spread_group_to_unused_group_runtime() -> a
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -14659,7 +14777,9 @@ async fn lease_next_agent_job_batches_exact_write_scoped_siblings() -> anyhow::R
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -14799,7 +14919,9 @@ async fn lease_next_agent_job_excludes_runtime_spread_jobs_from_secondary_batch_
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -14882,7 +15004,9 @@ async fn lease_next_agent_job_skips_runtime_spread_when_runtime_is_busy() -> any
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );",
         )
         .await?;
@@ -24843,7 +24967,9 @@ async fn create_runtime_tables(client: &mut tokio_postgres::Client) -> anyhow::R
                 active_input_ready_expires_at timestamptz,
                 active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                trigger_received_at timestamptz,
+                grant_ids uuid[]
             );
             CREATE TEMP TABLE agent_job_inputs (
                 id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -28727,6 +28853,7 @@ async fn load_conversation_history_for_agent_limit_skips_progress_rows() -> anyh
         &conversation_id,
         None,
         None,
+        None,
         80,
     )
     .await
@@ -28851,6 +28978,7 @@ async fn load_conversation_history_for_agent_drops_dispatch_alerts_and_labels_fa
     let history = crate::agent::load_conversation_history_for_agent(
         &transaction,
         &conversation_id,
+        None,
         None,
         None,
         80,
@@ -32910,7 +33038,7 @@ fn controller_error(context: &str, error: (StatusCode, axum::Json<ApiError>)) ->
 }
 
 #[tokio::test]
-async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> anyhow::Result<()> {
+async fn provider_dispatch_takes_a_person_but_no_scoped_token() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping provider dispatch scope test: TEST_DATABASE_URL not set");
         return Ok(());
@@ -33000,12 +33128,10 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
         .map_err(|error| controller_error("mint scoped token", error))?
         .token)
     };
-    // An explicitly scoped token reserved for a future bounded provider grant.
-    // Ordinary job-token minting deliberately withholds provider.call.
-    let job_token = mint(vec!["prompt.execute", "provider.call"], project_id)?;
-    // A job token that predates (or was stripped of) provider.call.
+    // The scope once reserved for model-made provider calls reaches no device:
+    // no scoped token dispatches a provider request, whatever its scopes.
+    let provider_call_token = mint(vec!["prompt.execute", "provider.call"], project_id)?;
     let scopeless_job_token = mint(vec!["prompt.execute", "fs.write"], project_id)?;
-    // provider.call for a different project must not cross project boundaries.
     let cross_project_token = mint(vec!["prompt.execute", "provider.call"], other_project_id)?;
     let user_token = crate::auth::issue_controller_token(&config, &owner_id)
         .map_err(|error| controller_error("mint controller user token", error))?
@@ -33019,9 +33145,14 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
         "arguments": { "quality": "low" },
         "timeoutMs": 5000,
     });
-    let dispatch_tool_call = |token: String, body: serde_json::Value| {
+    let resource_read_body = json!({
+        "providerId": provider_id,
+        "uri": "camera://front/latest",
+        "timeoutMs": 5000,
+    });
+    let dispatch = |route: &'static str, token: String, body: serde_json::Value| {
         let app = app.clone();
-        let uri = format!("/projects/{project_id}/provider-tools/call");
+        let uri = format!("/projects/{project_id}/{route}");
         async move {
             app.oneshot(
                 Request::builder()
@@ -33036,17 +33167,19 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
         }
     };
 
-    // A job token without provider.call keeps getting 403 even though the
-    // subject user owns the project: scoped tokens are capabilities, not
-    // memberships.
-    let denied_missing_scope =
-        dispatch_tool_call(scopeless_job_token, tool_call_body.clone()).await?;
-    assert_eq!(denied_missing_scope.status(), StatusCode::FORBIDDEN);
-
-    // provider.call scoped to another project is rejected by project match.
-    let denied_cross_project =
-        dispatch_tool_call(cross_project_token, tool_call_body.clone()).await?;
-    assert_eq!(denied_cross_project.status(), StatusCode::FORBIDDEN);
+    for token in [
+        provider_call_token,
+        scopeless_job_token,
+        cross_project_token,
+    ] {
+        for (route, body) in [
+            ("provider-tools/call", tool_call_body.clone()),
+            ("provider-resources/read", resource_read_body.clone()),
+        ] {
+            let denied = dispatch(route, token.clone(), body).await?;
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{route}");
+        }
+    }
 
     {
         let connection = pool.get().await?;
@@ -33063,9 +33196,9 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
         );
     }
 
-    // Background "device" that completes the next pending request over SQL so
-    // the dispatch long-poll resolves without standing up the device routes.
-    let spawn_completer = |response: serde_json::Value| {
+    // A person's own session dispatches the tool call end to end, answered by
+    // a background "device" that completes the pending request over SQL.
+    let completer = {
         let pool = pool.clone();
         tokio::spawn(async move {
             for _ in 0..200u32 {
@@ -33086,7 +33219,10 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
                                  limit 1
                           )
                       returning id",
-                        &[&project_id, &PgJson(&response)],
+                        &[
+                            &project_id,
+                            &PgJson(&json!({ "ok": true, "result": "snapshot-42" })),
+                        ],
                     )
                     .await
                 else {
@@ -33098,64 +33234,35 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
             }
         })
     };
-
-    // A job token carrying provider.call for the right project dispatches the
-    // tool call end to end.
-    let completer = spawn_completer(json!({ "ok": true, "result": "snapshot-42" }));
-    let allowed_job_token = dispatch_tool_call(job_token.clone(), tool_call_body.clone()).await?;
-    assert_eq!(allowed_job_token.status(), StatusCode::OK);
+    let allowed = dispatch(
+        "provider-tools/call",
+        user_token.clone(),
+        tool_call_body.clone(),
+    )
+    .await?;
+    assert_eq!(allowed.status(), StatusCode::OK);
     let allowed_payload: serde_json::Value =
-        serde_json::from_slice(&to_bytes(allowed_job_token.into_body(), usize::MAX).await?)?;
-    assert_eq!(allowed_payload["ok"], json!(true));
+        serde_json::from_slice(&to_bytes(allowed.into_body(), usize::MAX).await?)?;
     assert_eq!(allowed_payload["result"], json!("snapshot-42"));
     completer.await?;
     {
         let connection = pool.get().await?;
         let row = connection
             .query_one(
-                "select status, requested_by, tool_name from project_provider_requests
+                "select requested_by, job_id from project_provider_requests
                   where project_id = $1
                   order by created_at desc
                   limit 1",
                 &[&project_id],
             )
             .await?;
-        assert_eq!(row.get::<_, String>("status"), "completed");
         assert_eq!(row.get::<_, Option<Uuid>>("requested_by"), Some(owner_id));
-        assert_eq!(
-            row.get::<_, Option<String>>("tool_name").as_deref(),
-            Some("camera.snapshot")
-        );
+        assert_eq!(row.get::<_, Option<Uuid>>("job_id"), None);
     }
-
-    // The resource-read dispatch route accepts the same job token.
-    let completer = spawn_completer(json!({ "ok": true, "exists": true, "text": "hello" }));
-    let resource_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/projects/{project_id}/provider-resources/read"))
-                .header("authorization", format!("Bearer {job_token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&json!({
-                    "providerId": provider_id,
-                    "uri": "camera://front/latest",
-                    "timeoutMs": 5000,
-                }))?))?,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("resource dispatch failed: {error}"))?;
-    assert_eq!(resource_response.status(), StatusCode::OK);
-    let resource_payload: serde_json::Value =
-        serde_json::from_slice(&to_bytes(resource_response.into_body(), usize::MAX).await?)?;
-    assert_eq!(resource_payload["ok"], json!(true));
-    assert_eq!(resource_payload["text"], json!("hello"));
-    completer.await?;
 
     // User-session dispatch still works, and an unanswered request drains
     // through the pending -> expired path instead of hanging.
-    let unanswered = dispatch_tool_call(user_token, tool_call_body).await?;
+    let unanswered = dispatch("provider-tools/call", user_token, tool_call_body).await?;
     assert_eq!(unanswered.status(), StatusCode::OK);
     let unanswered_payload: serde_json::Value =
         serde_json::from_slice(&to_bytes(unanswered.into_body(), usize::MAX).await?)?;

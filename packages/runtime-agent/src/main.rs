@@ -14,7 +14,8 @@ use runtime_agent::{
     agent::{AgentExit, RuntimeAgent, SPACE_DELETED_EXIT_CODE, exits_when_space_deleted},
     code_mode_host, config,
     config::Config,
-    local_browser, loopback_proxy, personal_browser, process_hardening, shared_browser,
+    local_browser, loopback_proxy, personal_browser, process_hardening, provider_mcp,
+    shared_browser,
 };
 use tokio::signal;
 use tracing::{Level, error, info, warn};
@@ -72,6 +73,10 @@ fn main() -> anyhow::Result<()> {
     if shared_browser::is_shared_browser_mcp_command(&args) {
         let runtime = build_cli_tokio_runtime()?;
         return runtime.block_on(shared_browser::run_mcp_stdio());
+    }
+    if provider_mcp::is_mcp_command(&args) {
+        let runtime = build_cli_tokio_runtime()?;
+        return runtime.block_on(provider_mcp::run_mcp_stdio());
     }
     if local_browser::is_mcp_command(&args) {
         let runtime = build_cli_tokio_runtime()?;

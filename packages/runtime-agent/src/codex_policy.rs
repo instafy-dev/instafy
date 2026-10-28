@@ -152,9 +152,10 @@ fn compose_catalog_instructions(template: &str) -> String {
 
 /// Applies the runtime policy to a freshly loaded Codex configuration.
 ///
-/// `bounded_browser` marks a Shared or Personal Browser turn, which may only use
-/// its browser MCP server.
-pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded_browser: bool) -> Result<()> {
+/// `bounded` marks a turn whose only tools are one trusted broker's MCP server:
+/// a Shared or Personal Browser turn's browser, or a granted turn's
+/// `provider-mcp`.
+pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded: bool) -> Result<()> {
     // Billing: never request a paid service tier. Codex does not apply a model's
     // default tier on its own; FastMode (below) is the other way to select one.
     config.service_tier = None;
@@ -202,13 +203,13 @@ pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded_browser: b
         .set(WebSearchMode::Disabled)
         .context("Codex requirements keep web search on, which the Instafy runtime never allows")?;
 
-    if bounded_browser {
+    if bounded {
         // A model whose catalog entry selects multi-agent v2 (gpt-6-luna) gets the child-agent
         // tools even with the Collab and MultiAgentV2 features off; only `[agents]` disables them.
         config.agents_enabled = false;
     }
 
-    apply_feature_policy(&mut config.features, bounded_browser)
+    apply_feature_policy(&mut config.features, bounded)
 }
 
 /// Pin the controller's child capacity after local configuration has loaded. V2
@@ -278,16 +279,17 @@ enum FeaturePin {
     On,
     /// Off for every runtime turn.
     Off,
-    /// Off for Shared and Personal Browser turns. Page content is untrusted, so
-    /// it must not reach local files, child agents, another network tool,
-    /// plugins, or image generation through prompt injection.
-    OffInBoundedBrowser,
+    /// Off for bounded turns. A browser page's content is untrusted, so it must
+    /// not reach local files, child agents, another network tool, plugins, or
+    /// image generation through prompt injection; a granted turn acts with a
+    /// person's device, so its tools are its broker's and nothing else.
+    OffInBounded,
 }
 
 /// Every Codex feature, with no catch-all arm: a feature added upstream fails
 /// the build until its runtime value is chosen here.
 fn feature_pin(feature: Feature) -> FeaturePin {
-    use FeaturePin::{Off, OffInBoundedBrowser, On, Upstream};
+    use FeaturePin::{Off, OffInBounded, On, Upstream};
     match feature {
         // Billing: Fast mode selects the paid priority tier.
         Feature::FastMode => Off,
@@ -353,7 +355,7 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         | Feature::Artifact
         | Feature::WorkspaceDependencies
         | Feature::ToolCallMcpElicitation
-        | Feature::AuthElicitation => OffInBoundedBrowser,
+        | Feature::AuthElicitation => OffInBounded,
 
         // Upstream behavior. UnifiedExec is listed here because Codex forces it
         // on; a bounded browser turn has no shell tool because ShellTool is off
@@ -469,22 +471,22 @@ fn feature_pin(feature: Feature) -> FeaturePin {
     }
 }
 
-fn pinned_value(feature: Feature, bounded_browser: bool) -> Option<bool> {
+fn pinned_value(feature: Feature, bounded: bool) -> Option<bool> {
     match feature_pin(feature) {
         FeaturePin::Upstream => None,
         FeaturePin::On => Some(true),
         FeaturePin::Off => Some(false),
-        FeaturePin::OffInBoundedBrowser => bounded_browser.then_some(false),
+        FeaturePin::OffInBounded => bounded.then_some(false),
     }
 }
 
 /// Sets every pinned feature in one update, so Codex normalizes dependencies
 /// once (CodeModeOnly implies CodeMode), then fails closed if a managed
 /// requirement or normalization kept any pin from holding.
-fn apply_feature_policy(features: &mut ManagedFeatures, bounded_browser: bool) -> Result<()> {
+fn apply_feature_policy(features: &mut ManagedFeatures, bounded: bool) -> Result<()> {
     let mut next = features.get().clone();
     for spec in FEATURES {
-        if let Some(enabled) = pinned_value(spec.id, bounded_browser) {
+        if let Some(enabled) = pinned_value(spec.id, bounded) {
             next.set_enabled(spec.id, enabled);
         }
     }
@@ -492,7 +494,7 @@ fn apply_feature_policy(features: &mut ManagedFeatures, bounded_browser: bool) -
         .set(next)
         .context("Codex feature requirements conflict with the Instafy runtime policy")?;
     for spec in FEATURES {
-        if let Some(enabled) = pinned_value(spec.id, bounded_browser)
+        if let Some(enabled) = pinned_value(spec.id, bounded)
             && features.enabled(spec.id) != enabled
         {
             bail!(

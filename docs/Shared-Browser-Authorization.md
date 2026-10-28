@@ -64,6 +64,7 @@ the turn.
   ordinary turns from its browser is tracked as later Shared Browser work. A
   Desktop Personal Browser runtime only leases `desktop-personal` turns.
 
-Studio shows the refusal as "Only the person who started this browser task can
-steer it. Queue your message instead." Older Studio builds show the
-controller's message for the same refusal.
+Studio shows the refusal as "Only the person who started this turn can steer
+it. Queue your message instead." Older Studio builds show the controller's
+message for the same refusal. A turn holding device grants follows the same
+rule (Architecture.md, Device Grants).

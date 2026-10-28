@@ -152,6 +152,8 @@ deleted chat state are checked on the server. Access is checked again for every
 page and message-context request. Search does not start a workspace or model run.
 Responses are marked `Cache-Control: no-store`; excerpts are plain text with
 UTF-16 match offsets, rendered without HTML injection.
+Message search also takes a device grant's token, which searches as its turn's
+person and only their own words (Architecture.md, Device Grants).
 
 Older controllers report message search as unavailable while the other result
 types remain usable. Deploying only the frontend does not enable message search.

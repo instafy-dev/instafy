@@ -77,6 +77,10 @@ pub(crate) const INTERNAL_CREDENTIAL_ENV_KEYS: &[&str] = &[
     "OPENAI_FEDERATION_RULE_ID",
     "OPENAI_IDENTITY_TOKEN_FILE",
     "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+    // A granted turn's grant token. Only its `provider-mcp` broker's own
+    // environment carries it; this keeps it out of every model child even if
+    // it ever reaches this process's.
+    crate::provider_mcp::TOKEN_ENV,
 ];
 
 const LAUNCH_CREDENTIAL_KEY_COUNT: usize = 4;

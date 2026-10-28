@@ -861,6 +861,9 @@ pub struct AppConfig {
     pub strict_mode: bool,
     pub dev_isolation_mode: bool,
     pub dev_mode: bool,
+    /// Who may let their agents use their own devices
+    /// (`DEVICE_GRANTS_USER_IDS`): nobody by default.
+    pub device_grants: DeviceGrantUsers,
     pub runtime_idle_release_seconds: i64,
     /// Stop a healthy hosted runtime after this many seconds with no user
     /// activity and no leased job. Without this, an abandoned runtime bills
@@ -1097,6 +1100,57 @@ pub(crate) fn working_state_saves_enabled(raw: Option<&str>) -> bool {
             .as_deref(),
         Some("off" | "0" | "false" | "no")
     )
+}
+
+/// Who device grants are on for: nobody, everyone, or only the listed users.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DeviceGrantUsers {
+    #[default]
+    Nobody,
+    Everyone,
+    Only(Vec<Uuid>),
+}
+
+impl DeviceGrantUsers {
+    /// `DEVICE_GRANTS_USER_IDS`: unset or empty is nobody, `*` everyone, and
+    /// anything else a comma-separated list of user ids. A malformed value is
+    /// logged and means nobody: the switch that turns grants off must never
+    /// keep the controller from starting.
+    pub(crate) fn from_env_value(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).unwrap_or_default() {
+            "" => Self::Nobody,
+            "*" => Self::Everyone,
+            ids => match ids
+                .split(',')
+                .map(|id| Uuid::parse_str(id.trim()))
+                .collect()
+            {
+                Ok(ids) => Self::Only(ids),
+                Err(_) => {
+                    tracing::error!(
+                        "DEVICE_GRANTS_USER_IDS must be * or a comma-separated list of user ids; \
+                         device grants are off for everyone"
+                    );
+                    Self::Nobody
+                }
+            },
+        }
+    }
+
+    /// Whether device grants are on for anyone: the switch for the rules that
+    /// hold whoever the caller is.
+    pub fn on(&self) -> bool {
+        *self != Self::Nobody
+    }
+
+    /// Whether device grants are on for `user_id`.
+    pub fn allow(&self, user_id: Uuid) -> bool {
+        match self {
+            Self::Nobody => false,
+            Self::Everyone => true,
+            Self::Only(user_ids) => user_ids.contains(&user_id),
+        }
+    }
 }
 
 impl AppConfig {
@@ -1402,6 +1456,9 @@ impl AppConfig {
             .ok()
             .map(|value| parse_uuid_list(&value))
             .unwrap_or_default();
+        let device_grants = DeviceGrantUsers::from_env_value(
+            std::env::var("DEVICE_GRANTS_USER_IDS").ok().as_deref(),
+        );
         let desktop_release_github_owner = read_first_env(&["DESKTOP_RELEASE_GITHUB_OWNER"]);
         let desktop_release_github_repo = read_first_env(&["DESKTOP_RELEASE_GITHUB_REPO"]);
         let desktop_release_github_token = read_first_env(&["DESKTOP_RELEASE_GITHUB_TOKEN"]);
@@ -1835,6 +1892,7 @@ impl AppConfig {
             strict_mode,
             dev_isolation_mode,
             dev_mode,
+            device_grants,
             runtime_idle_release_seconds,
             runtime_idle_stop_seconds,
             runtime_limit_reclaim_idle_seconds,
@@ -1988,8 +2046,8 @@ mod tests {
         normalized_admin_user_email, parse_browser_profile_persist_project_ids,
         published_development_key_warning, resolve_credential_encryption_key,
         resolve_credential_key_ring, resolve_user_token_secret, working_state_saves_enabled,
-        AdminUserLookup, AdminUsersPage, CredentialEncryptionKey, HostedBrowserHostPolicy,
-        DEV_USER_TOKEN_SECRET,
+        AdminUserLookup, AdminUsersPage, CredentialEncryptionKey, DeviceGrantUsers,
+        HostedBrowserHostPolicy, DEV_USER_TOKEN_SECRET,
     };
     use crate::credential_keys::{
         credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
@@ -2032,6 +2090,38 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn device_grants_are_on_for_nobody_everyone_or_the_listed_users() {
+        let (listed, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let users = |raw: &str| DeviceGrantUsers::from_env_value(Some(raw));
+        assert_eq!(
+            DeviceGrantUsers::from_env_value(None),
+            DeviceGrantUsers::Nobody
+        );
+        assert_eq!(users(" "), DeviceGrantUsers::Nobody);
+        assert_eq!(users(" * "), DeviceGrantUsers::Everyone);
+        let only = users(&format!("{listed}, {other}"));
+        assert_eq!(only, DeviceGrantUsers::Only(vec![listed, other]));
+        // A malformed value turns grants off, and never fails the startup.
+        for bad in [
+            "on".to_string(),
+            format!("*,{listed}"),
+            format!("{listed},"),
+            format!("{listed} {other}"),
+        ] {
+            assert_eq!(users(&bad), DeviceGrantUsers::Nobody, "{bad}");
+        }
+
+        assert!(!DeviceGrantUsers::Nobody.on());
+        assert!(!DeviceGrantUsers::Nobody.allow(listed));
+        assert!(DeviceGrantUsers::Everyone.on());
+        assert!(DeviceGrantUsers::Everyone.allow(other));
+        let only = DeviceGrantUsers::Only(vec![listed]);
+        assert!(only.on());
+        assert!(only.allow(listed));
+        assert!(!only.allow(other));
     }
 
     #[test]

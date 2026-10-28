@@ -184,7 +184,29 @@ pub(crate) async fn authorize_active_job_if_scoped(
     let Some(claims) = context.scoped_claims.as_ref() else {
         return Ok(None);
     };
-    if !claims_have_scopes(claims, &[ACTIVE_JOB_CONTROLLER_SCOPE]) {
+    authorize_active_job(
+        transaction,
+        state,
+        claims,
+        ACTIVE_JOB_CONTROLLER_SCOPE,
+        required_access,
+    )
+    .await
+    .map(Some)
+}
+
+/// Resolve a job token carrying `required_scope` to its still-active leased
+/// job: leased by the runtime the token names, under that runtime's live lease
+/// and generation, for the token's subject, in a conversation the subject can
+/// still use.
+pub(crate) async fn authorize_active_job(
+    transaction: &Transaction<'_>,
+    state: &AppState,
+    claims: &runtime_contracts::AccessTokenClaims,
+    required_scope: &str,
+    required_access: ActiveJobProjectAccess,
+) -> Result<ActiveJobAuthorization, (StatusCode, Json<ApiError>)> {
+    if !claims_have_scopes(claims, &[required_scope]) {
         return Err(unauthorized("insufficient active job token scopes"));
     }
 
@@ -339,7 +361,7 @@ pub(crate) async fn authorize_active_job_if_scoped(
         .get::<_, Option<Uuid>>("plan_group_id")
         .or_else(|| payload_plan_group_id(&payload));
 
-    Ok(Some(ActiveJobAuthorization {
+    Ok(ActiveJobAuthorization {
         job_id: row.get("id"),
         project_id,
         subject_user_id,
@@ -348,7 +370,7 @@ pub(crate) async fn authorize_active_job_if_scoped(
         plan_group_id,
         conversation_is_private: conversation.visibility.eq_ignore_ascii_case("private"),
         subject_is_service,
-    }))
+    })
 }
 
 pub(crate) fn conversation_root_id(conversation: &ConversationRecord) -> Uuid {

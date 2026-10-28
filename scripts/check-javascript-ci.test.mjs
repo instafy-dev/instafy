@@ -65,15 +65,15 @@ function route(key, github, enabled = '') {
 // These are source-only cancellation regressions, not a GitHub scheduler test.
 // Keep them in this existing CI test entrypoint so no workflow command changes.
 const cancellationWorkflows = [
-  // Build includes the reviewed proxy_retry_budget and read-reference selectors, the
-  // code-mode host build, per-model proxy_retry_budget runs, inert native compaction
-  // and native chat image selectors, and provider unit tests, independently bound by check-rust-ci, and the CLI git
+  // Build includes the reviewed proxy_retry_budget, provider_mcp and read-reference selectors, the
+  // code-mode host build, per-model proxy_retry_budget runs, inert native compaction,
+  // native chat image and granted turn selectors, and provider unit tests, independently bound by check-rust-ci, and the CLI git
   // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture and web search and link suites bound below, and the local author pseudonym key
   // test in the contracts lane, and the tunnel broker test lane in the Rust tests
   // aggregate, also bound by check-rust-ci; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: '7586c1eb06a571537b03eba9983ea64caa62e82eb318eaac5ea6031d63f0e256' },
+    previousHash: 'ece087f0bea707d44c0447b7ef5b27ca2b67af7f33414eab6c10b3ccd3243283' },
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];

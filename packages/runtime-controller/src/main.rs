@@ -42,6 +42,7 @@ mod db_pool_headers;
 mod desktop_updates;
 mod dev;
 mod device_auth;
+mod device_grants;
 mod diagnostics;
 mod dispatch;
 mod edge_downloads;
@@ -52,6 +53,7 @@ mod git_events;
 mod group_participation;
 mod imports;
 mod integrations;
+mod job_trigger;
 mod jwks;
 mod message_search;
 mod message_stashes;
@@ -105,9 +107,13 @@ mod tests_completion_reply_first;
 #[cfg(test)]
 mod tests_deleted_space_fence;
 #[cfg(test)]
+mod tests_device_grants;
+#[cfg(test)]
 mod tests_hosted_runtime_billing;
 #[cfg(test)]
 mod tests_idle_lease_poll;
+#[cfg(test)]
+mod tests_job_trigger;
 #[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]
@@ -118,6 +124,10 @@ mod tests_personal_org_slug;
 mod tests_platform_job_record;
 #[cfg(test)]
 mod tests_presence_beat;
+#[cfg(test)]
+mod tests_provider_request_lifecycle;
+#[cfg(test)]
+mod tests_provider_space;
 #[cfg(test)]
 mod tests_runtime_stop_fence;
 mod tokens;
@@ -134,7 +144,7 @@ pub(crate) use errors::{
     unauthorized, ApiError,
 };
 pub(crate) use projects::{
-    ensure_project_access, ensure_project_scoped_write_access, ensure_project_write_access,
+    ensure_project_access, ensure_project_write_access,
     ensure_scoped_claims_allow_requested_scopes, load_project_record, parse_optional_uuid_param,
     resolve_scope, ProjectRecord, ScopeParams,
 };
@@ -534,6 +544,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(integrations::router())
         .merge(providers::router())
         .merge(provider_devices::router())
+        .merge(device_grants::router())
         .merge(provider_requests::router())
         .merge(agent::router())
         .merge(agent_contexts::router())

@@ -35,10 +35,10 @@ export const MANUAL_CI_JOBS = [
   {"file":"npm-release.yml","key":"pack","toggle":"CI_PUBLIC_CONTROL_SELF_HOSTED","label":"public-npm-pack","hosted":"ubuntu-24.04"},
 ];
 export const MANUAL_CI_BASELINES = {
-  // The reviewed Build baseline additionally selects proxy_retry_budget and
-  // filtered read-reference integration tests, builds the Codex code-mode host and
-  // runs proxy_retry_budget per model, plus the inert native_compaction and
-  // native_images selectors;
+  // The reviewed Build baseline additionally selects proxy_retry_budget, the
+  // broker's provider_mcp tests and filtered read-reference integration tests, builds the Codex code-mode host and
+  // runs proxy_retry_budget per model, plus the inert native_compaction,
+  // native_images and granted_turns selectors;
   // check-rust-ci binds their exact argv.
   // Reviewed additions: the CLI lane runs the git wrapper suite, and the
   // provider lane runs the provider core and service unit tests, and the
@@ -50,7 +50,7 @@ export const MANUAL_CI_BASELINES = {
   // included), the preview picture suite (what a capture may load), and the `instafy web search`
   // (with its fixture evals, the shopping comparison's included, and reference
   // search) and `instafy web link` suites.
-  "build.yml": { sha256: "c5a4d8700814526d9377113fbe50917cc4a15430dd63ad1ced9a5a1cc6bf3733" },
+  "build.yml": { sha256: "080215746dc2c15ad1269a4a9d6b55dc9e1c027e0a7781604e3898930e2c79b7" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper
