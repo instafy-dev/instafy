@@ -232,9 +232,11 @@ test.describe("Org Shared Browser collaboration", () => {
 
       const ownerBinding = await openSharedBrowser(page);
       await expectSharedBlankSurfacePainted(page);
-      await expect(collaborationState(page)).toContainText("You control", {
+      // Alone, the owner drives without a control chip: there is nothing to hand over.
+      await expect(sharedSurface(page)).toHaveAttribute("data-input-enabled", "true", {
         timeout: 30_000,
       });
+      await expect(collaborationState(page)).toHaveCount(0);
       await waitForOpenInputSocket(page);
 
       const memberBinding = await openSharedBrowser(memberPage);
@@ -370,7 +372,9 @@ test.describe("Org Shared Browser collaboration", () => {
       await returnToConversation(viewer);
 
       const firstBinding = await openSharedBrowser(page);
-      await expect(collaborationState(page)).toContainText("You control");
+      // Alone, the first device drives without a control chip.
+      await expect(sharedSurface(page)).toHaveAttribute("data-input-enabled", "true", { timeout: 30_000 });
+      await expect(collaborationState(page)).toHaveCount(0);
       const secondBinding = await openSharedBrowser(secondDevice);
       const viewerBinding = await openSharedBrowser(viewer, { access: "view" });
       for (const binding of [secondBinding, viewerBinding]) {

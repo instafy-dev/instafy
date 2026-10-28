@@ -1081,7 +1081,8 @@ test.describe("Electron Shared Browser real agent turn", () => {
           "human",
           { timeout: 30_000 },
         );
-        await expect(controlState).toHaveText("You control");
+        // Back with the person, who is alone in the browser: no control chip.
+        await expect(controlState).toHaveCount(0);
         await expect
           .poll(() => serverControl.agentReturnedToHuman(), {
             message:
