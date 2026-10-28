@@ -37,6 +37,12 @@ const PLAIN_WORD_MAX_CHARS = 20;
 const SMALL_NUMBER_PATTERN = /^(?:\d{1,2}|(?:19|20)\d{2})[.,?!:]*$/;
 // Punctuation standing alone between words ("-", "..."), skipped, not a word.
 const SEPARATOR_PATTERN = /^[-'\u2019.,?!:]+$/;
+// A site's name a title may hold, as a person names a site ("visitlisboa.com",
+// "carris.pt"): plain labels of letters and hyphens, never a path, a query, a
+// port, a sign-in, a number or a name that only works on a local network.
+const TITLE_HOST_PATTERN = /^(?:[a-z](?:[a-z-]{0,30}[a-z])?\.){1,3}[a-z]{2,24}$/;
+const TITLE_HOST_MAX_CHARS = 30;
+const LOCAL_ONLY_HOST_ENDINGS = new Set(["localhost", "local", "internal", "lan", "home", "corp", "test", "invalid", "arpa"]);
 // A message that mentions a secret can hold one in words no pattern tells
 // apart from ordinary ones ("my password is sonnenblume"), so it gets no title.
 const SENSITIVE_TOPIC_PATTERN =
@@ -308,6 +314,43 @@ export function isTrailingSmallWord(word: string): boolean {
   return TRAILING_SMALL_WORDS.has(bareWord(word).toLowerCase());
 }
 
+/** A site's name a title may hold, such as "visitlisboa.com", with ending punctuation after it. */
+function isTitleHost(word: string): boolean {
+  const host = word.replace(/[.,?!:]+$/, "").toLowerCase();
+  if (host.length > TITLE_HOST_MAX_CHARS || !TITLE_HOST_PATTERN.test(host)) {
+    return false;
+  }
+  return !LOCAL_ONLY_HOST_ENDINGS.has(host.slice(host.lastIndexOf(".") + 1));
+}
+
+/** The site a link names ("https://www.visitlisboa.com/en" names "visitlisboa.com"), or null. */
+function titleHostOfLink(link: string): string | null {
+  try {
+    const url = new URL(/^www\./i.test(link) ? `https://${link}` : link);
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) {
+      return null;
+    }
+    const host = url.hostname.toLowerCase().replace(/\.$/, "").replace(/^www\./, "");
+    return isTitleHost(host) ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A link inside a sentence leaves the site's name it points at ("Open
+ * www.visitlisboa.com and find…" reads "Open visitlisboa.com and find…"), so a
+ * message that names a site still gets a title. A link that opens a sentence,
+ * or whose site has no plain name, is taken out.
+ */
+function markLink(link: string, offset: number, text: string): string {
+  const bare = link.replace(/[)\]}>"'.,;:!?]+$/, "");
+  const ending = link.slice(bare.length).replace(/[^.,;:!?]/g, "");
+  const host = titleHostOfLink(bare);
+  const insideSentence = /[\p{L}\p{N}][,;:]?\s+$/u.test(text.slice(0, offset));
+  return host && insideSentence ? `${host}${ending}` : ` ${REMOVED} `;
+}
+
 function isPlainWord(word: string): boolean {
   return SMALL_NUMBER_PATTERN.test(word) || (PLAIN_WORD_PATTERN.test(word) &&
     [...word.replace(/[.,?!:]+$/, "")].length <= PLAIN_WORD_MAX_CHARS);
@@ -319,11 +362,13 @@ function isPlainWord(word: string): boolean {
  * while its first turn runs or after it fails. A `/skills import` line gets
  * its structured title; any other slash command gets none.
  *
- * Links, addresses, mentions, paths and code are taken out first. The title is
- * then the first clause that says something, cut to about 40 characters at a
- * word, with "…" where it was cut. It is made of plain words: letters in any
- * script, with apostrophes and hyphens inside a word and . , ? ! : after it,
- * and small numbers (a count up to 99, or a year). It ends before the first
+ * Links, addresses, mentions, paths and code are taken out first; a link
+ * inside a sentence leaves only the name of its site ("visitlisboa.com"). The
+ * title is then the first clause that says something, cut to about 40
+ * characters at a word, with "…" where it was cut. It is made of plain words:
+ * letters in any script, with apostrophes and hyphens inside a word and
+ * . , ? ! : after it, small numbers (a count up to 99, or a year) and a site's
+ * plain name. It ends before the first
  * other word (a longer number, a word with a digit or another character, or a
  * word longer than 20 characters), and when that leaves fewer than two words
  * there is no title. A message that mentions a password, PIN, login, secret,
@@ -340,7 +385,7 @@ export function getFallbackConversationTitle(message: string): string | null {
   }
   const marked = trimmed
     .replace(FENCED_CODE_PATTERN, ` ${REMOVED} `)
-    .replace(URL_PATTERN, ` ${REMOVED} `)
+    .replace(URL_PATTERN, markLink)
     .replace(EMAIL_PATTERN, ` ${REMOVED} `)
     .replace(MENTION_PATTERN, `$1${REMOVED} `)
     .replace(PATH_PATTERN, `$1${REMOVED} `)
@@ -361,7 +406,7 @@ export function getFallbackConversationTitle(message: string): string | null {
       if (word.length === 0 || SEPARATOR_PATTERN.test(word)) {
         continue;
       }
-      if (!isPlainWord(word)) {
+      if (!isPlainWord(word) && !isTitleHost(word)) {
         endsAtOtherWord = true;
         break;
       }

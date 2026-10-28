@@ -1093,6 +1093,16 @@ keeps the manual-step controls, so login redirects can finish before continuatio
 a fresh turn. A target change during asynchronous continuation aborts it; no
 hidden or stale completion may send it automatically.
 
+A follow-up typed in the chat keeps them too. When the conversation's newest
+run is the person's own Shared Browser run on the browser that is open, it
+succeeded less than ten minutes ago, and its tab is still open, a message from
+the chat composer goes on in that tab as a browser turn, as one from the
+browser's own composer would, and names that run (`browserContinuesRunId`,
+`sharedBrowserFollowUp`). It needs no new card or press, and the site the
+person already allowed does not ask again. A skill setup's replies, a message
+with a picture, a message for a new tab and a send the app makes for the person
+stay chat turns.
+
 Action/cursor polling runs only while Shared is visible and filters the selected
 page. If the agent requests input while Chat is visible, the field guidance is
 loaded when Browser is reopened; there is not yet a separate conversation badge
@@ -1572,6 +1582,12 @@ unless the policy is `"covered"`.
   the conversation's machine continues there without a press, even within ten
   minutes of the last automatic start; the declined check, the browser-turn
   check and every check before sending still apply.
+- **Cards after a press.** A card that was continued reads a plain **Opened**
+  in place of its button, also after a reload. A card a newer card followed
+  offers no button: the newer card carries the task on, so two live cards
+  never stack up. The one-line record of a continuation names Octo only when
+  Studio opened the browser by itself ("Octo opened Instafy's browser for
+  …"); after the person's own press it reads "Opened Instafy's browser for …".
 - **Hand-back.** When a browser turn that continued Octo's card finishes,
   Studio sends one ordinary turn back to the building lane, "Continue building
   with what the browser turn found.", shown as the notice "Octo continued with

@@ -75,6 +75,58 @@ export function continuedSharedBrowserRunId(
   return newest?.id ?? null;
 }
 
+/**
+ * How long after a browser turn a message from the chat still goes on in the
+ * browser: as long as the runtime keeps that turn's approvals for a run that
+ * continues it.
+ */
+export const SHARED_BROWSER_FOLLOW_UP_WINDOW_MS = 10 * 60_000;
+
+function runStartedAt(run: RunRecord): number {
+  return Date.parse(run.createdAt ?? run.updatedAt ?? "") || 0;
+}
+
+/**
+ * The browser turn a message from the chat continues in Instafy's browser,
+ * and the tab it continues in. Only when the conversation's newest run is
+ * this person's Shared Browser run on this browser, it finished successfully
+ * within {@link SHARED_BROWSER_FOLLOW_UP_WINDOW_MS}, and its tab is still
+ * open. Studio sends such a message as a browser turn in that tab, naming the
+ * run it continues (`browserContinuesRunId`), so the runtime carries the
+ * run's approvals over and no card or press stands in between. Null
+ * otherwise: the message is an ordinary chat turn.
+ */
+export function sharedBrowserFollowUp<Page extends { id: string }>(
+  runs: readonly RunRecord[],
+  scope: {
+    conversationId: string | null;
+    runtimeId: string | null;
+    userId: string | null;
+    pages: readonly Page[];
+    nowMs?: number;
+  },
+): { runId: string; page: Page } | null {
+  if (!scope.conversationId || !scope.runtimeId || !scope.userId) return null;
+  let newest: RunRecord | null = null;
+  for (const run of runs) {
+    if (run.conversationId !== scope.conversationId) continue;
+    if (!newest || runStartedAt(run) > runStartedAt(newest)) newest = run;
+  }
+  const metadata = newest?.metadata;
+  if (
+    !newest || !UUID.test(newest.id) || newest.status !== "success" ||
+    metadata?.browserTransport !== "shared" ||
+    metadata.browserRuntimeId !== scope.runtimeId ||
+    metadata.initiatingUserId !== scope.userId
+  ) {
+    return null;
+  }
+  const endedAt = runTimestamp(newest);
+  if (!endedAt || (scope.nowMs ?? Date.now()) - endedAt > SHARED_BROWSER_FOLLOW_UP_WINDOW_MS) return null;
+  const page = scope.pages.find((candidate) => candidate.id === metadata.browserPageId);
+  return page ? { runId: newest.id, page } : null;
+}
+
 function activeSharedBrowserRuns(runs: readonly RunRecord[], runtimeId: string): RunRecord[] {
   return runs.filter((run) => {
     const metadata = run.metadata;

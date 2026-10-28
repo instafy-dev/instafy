@@ -420,6 +420,7 @@ import {
 import {
   BrowserRequestHostContext,
   browserRequestContinuedKeys,
+  newestBrowserRequestKey,
   type BrowserRequestHost,
 } from "./browserRequest";
 import {
@@ -435,7 +436,11 @@ import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
 import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
-import { sharedBrowserAgentPageIds, sharedBrowserConversationRunIds } from "./browserHandoffRouting";
+import {
+  sharedBrowserAgentPageIds,
+  sharedBrowserConversationRunIds,
+  sharedBrowserFollowUp,
+} from "./browserHandoffRouting";
 import { BROWSER_AGENT_DEFAULT_NAME } from "./browserAgentTabs";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
@@ -4591,6 +4596,31 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     })();
   }, [currentRuntime?.isLikelyLocal, ensureDesktopRuntime, ensureHostedRuntime]);
 
+  // A message from the chat right after this person's turn in Instafy's
+  // browser goes on there while that browser is still open, without another
+  // card or press (sharedBrowserFollowUp).
+  const resolveSharedBrowserFollowUp = useCallback(
+    () =>
+      browserTransport === "shared" && (browserSessionOpen || hasHiddenBrowserSession)
+        ? sharedBrowserFollowUp(Object.values(runs ?? {}), {
+            conversationId: activeConversationEntry?.controllerId ?? null,
+            runtimeId: resolvedBrowserRuntimeId,
+            userId: currentUserId,
+            pages: sharedBrowserChromePages,
+          })
+        : null,
+    [
+      activeConversationEntry?.controllerId,
+      browserSessionOpen,
+      browserTransport,
+      currentUserId,
+      hasHiddenBrowserSession,
+      resolvedBrowserRuntimeId,
+      runs,
+      sharedBrowserChromePages,
+    ],
+  );
+
   const { submissionPending, submitMessage } = useChatSubmitFlow({
     activeConversationEntry,
     activeConversationId,
@@ -4654,6 +4684,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserActive:
       browserTransport === "shared" && browserComposerActive,
     sharedBrowserBindingPage,
+    resolveSharedBrowserFollowUp,
     sharedBrowserRuntimeId: resolvedBrowserRuntimeId,
     showCredentialsGate: showChatCredentialsGate,
     showStatus,
@@ -4940,6 +4971,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [messages, browserRequestState.cardStates],
   );
+  const newestBrowserRequest = useMemo(() => newestBrowserRequestKey(messages), [messages]);
   const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
     transport: browserTransport,
     personalAvailable: personalBrowser.available,
@@ -4947,8 +4979,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalTurnsAllowed,
     cardStates: browserRequestState.cardStates,
     continuedKeys: browserRequestContinued,
+    newestCardKey: newestBrowserRequest,
   }), [
     browserRequestContinued,
+    newestBrowserRequest,
     browserRequestState.cardStates,
     browserTransport,
     personalBrowser.available,

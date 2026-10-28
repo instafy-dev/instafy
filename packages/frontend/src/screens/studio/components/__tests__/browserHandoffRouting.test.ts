@@ -1,7 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../../../types";
 import type { RuntimeBrowserSessionAction } from "../../../../sdk/instafy";
-import { browserPageOrigin, continuedSharedBrowserRunId, selectSharedBrowserHumanInput, sharedBrowserAgentPageIds, sharedBrowserConversationRunIds, sharedBrowserTakeoverJob } from "../browserHandoffRouting";
+import {
+  SHARED_BROWSER_FOLLOW_UP_WINDOW_MS,
+  browserPageOrigin,
+  continuedSharedBrowserRunId,
+  selectSharedBrowserHumanInput,
+  sharedBrowserAgentPageIds,
+  sharedBrowserConversationRunIds,
+  sharedBrowserFollowUp,
+  sharedBrowserTakeoverJob,
+} from "../browserHandoffRouting";
 
 const JOB_ID = "00000000-0000-4000-8000-000000000001";
 const RUN_ID = "00000000-0000-4000-8000-000000000002";
@@ -236,5 +245,58 @@ describe("continuedSharedBrowserRunId", () => {
     }
     expect(continuedSharedBrowserRunId([ended()], { ...scope, userId: null })).toBeNull();
     expect(continuedSharedBrowserRunId([ended()], { ...scope, pageId: null })).toBeNull();
+  });
+});
+
+// Local drive, Oct 28: a follow-up typed in the chat right after a browser
+// turn got a new card, a second press and a second approval for the same
+// site. It goes on in the open browser instead, continuing that run.
+describe("sharedBrowserFollowUp", () => {
+  const ENDED_AT = Date.parse("2026-10-28T19:55:10Z");
+  const pages = [{ id: "page-1" }, { id: "page-2" }];
+  const scope = { conversationId: "conversation-1", runtimeId: "runtime-1", userId: USER_ID, pages, nowMs: ENDED_AT + 60_000 };
+  const browserTurn = (overrides: Partial<RunRecord> = {}, metadata: Record<string, unknown> = {}) => run({
+    status: "success", createdAt: "2026-10-28T19:53:39Z", updatedAt: "2026-10-28T19:55:10Z", ...overrides,
+    metadata: { ...run().metadata, initiatingUserId: USER_ID, ...metadata },
+  });
+  const earlierTurn = run({
+    id: "00000000-0000-4000-8000-000000000010", status: "success",
+    createdAt: "2026-10-28T19:49:19Z", updatedAt: "2026-10-28T19:49:26Z", metadata: { jobId: JOB_ID },
+  });
+
+  it("continues the person's browser turn when it was the chat's last, in its own tab", () => {
+    expect(sharedBrowserFollowUp([earlierTurn, browserTurn()], scope)).toEqual({ runId: RUN_ID, page: { id: "page-1" } });
+    // Within the time the runtime keeps that turn's approvals, and no longer.
+    expect(sharedBrowserFollowUp([browserTurn()], { ...scope, nowMs: ENDED_AT + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS }))
+      .toEqual({ runId: RUN_ID, page: { id: "page-1" } });
+    expect(sharedBrowserFollowUp([browserTurn()], { ...scope, nowMs: ENDED_AT + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS + 1 }))
+      .toBeNull();
+  });
+
+  it("leaves the message to the chat when a later turn was not in the browser", () => {
+    const handBack = run({
+      id: "00000000-0000-4000-8000-000000000011", status: "success",
+      createdAt: "2026-10-28T19:55:11Z", updatedAt: "2026-10-28T19:55:30Z", metadata: { jobId: JOB_ID },
+    });
+    expect(sharedBrowserFollowUp([browserTurn(), handBack], scope)).toBeNull();
+  });
+
+  it("continues no browser turn that failed, was stopped, still runs, or is not this person's on this browser", () => {
+    for (const candidate of [
+      browserTurn({ status: "failed" }),
+      browserTurn({ status: "canceled" }),
+      browserTurn({ status: "in_progress" }),
+      browserTurn({}, { initiatingUserId: "00000000-0000-4000-8000-000000000099" }),
+      browserTurn({}, { browserRuntimeId: "runtime-2" }),
+      browserTurn({}, { browserTransport: "desktop-personal" }),
+      browserTurn({}, { browserPageId: "closed-tab" }),
+      browserTurn({ conversationId: "conversation-2" }),
+      browserTurn({ id: "not-a-run-id" }),
+    ]) {
+      expect(sharedBrowserFollowUp([candidate], scope)).toBeNull();
+    }
+    expect(sharedBrowserFollowUp([browserTurn()], { ...scope, userId: null })).toBeNull();
+    expect(sharedBrowserFollowUp([browserTurn()], { ...scope, runtimeId: null })).toBeNull();
+    expect(sharedBrowserFollowUp([browserTurn()], { ...scope, pages: [] })).toBeNull();
   });
 });

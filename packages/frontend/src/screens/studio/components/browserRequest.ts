@@ -44,6 +44,11 @@ export type BrowserRequestHost = {
   cardStates?: ReadonlyMap<string, BrowserRequestCardState>;
   /** Cards a continuation was already sent for, by {@link browserRequestKey}. */
   continuedKeys?: ReadonlySet<string>;
+  /**
+   * The conversation's newest card, by {@link browserRequestKey}. An older
+   * card no longer offers its button: the newer one carries the task on.
+   */
+  newestCardKey?: string | null;
 };
 
 /**
@@ -174,6 +179,15 @@ export function browserRequestKey(message: Pick<ChatMessage, "id" | "metadata">)
   return jobId ? `job:${jobId}` : `message:${message.id}`;
 }
 
+/** The key of the newest card in these messages, or null when there is none. */
+export function newestBrowserRequestKey(messages: readonly ChatMessage[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (browserRequestFromMessage(message)) return browserRequestKey(message);
+  }
+  return null;
+}
+
 /** The job that sent a card, when the controller stamped one. */
 export function browserRequestJobId(message: Pick<ChatMessage, "metadata">): string | null {
   return readJobId(message.metadata);
@@ -240,11 +254,18 @@ export function browserRequestFromContinuationPrompt(
 
 /**
  * The one-line record a continuation leaves in the chat, in place of the task
- * it sent: "Octo opened Instafy's browser for dashboard.stripe.com". The host
- * is where the task is headed; the browser may not have loaded it yet.
+ * it sent: "Opened Instafy's browser for dashboard.stripe.com". It names Octo
+ * only when Studio opened the browser by itself ("Octo opened Instafy's
+ * browser for …"); after the person's own press it never says Octo did it.
+ * The host is where the task is headed; the browser may not have loaded it
+ * yet.
  */
-export function browserRequestNotice(agentName: string, task: string): string {
-  const name = agentName.trim() || "Octo";
+export function browserRequestNotice(
+  agentName: string,
+  task: string,
+  options: { automatic?: boolean } = {},
+): string {
+  const opened = options.automatic ? `${agentName.trim() || "Octo"} opened` : "Opened";
   const [host] = browserRequestDestinations(task);
-  return host ? `${name} opened Instafy's browser for ${host}` : `${name} opened Instafy's browser`;
+  return host ? `${opened} Instafy's browser for ${host}` : `${opened} Instafy's browser`;
 }

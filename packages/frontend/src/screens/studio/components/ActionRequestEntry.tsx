@@ -249,16 +249,23 @@ export function ActionRequestEntry({
   const browserUnavailable =
     browserRequest && browserHost ? browserRequestUnavailableReason(browserRequest, browserHost) : null;
   // Studio opens the browser for a card by itself where it can: the card then
-  // reads Opening and then Browser opened in place of its button. Where it
-  // cannot, the button stays, with the reason when there is one. A continued
-  // card reads Browser opened after a reload too, so an old card is not
-  // pressed again.
+  // reads Opening and then Opened in place of its button. Where it cannot,
+  // the button stays, with the reason when there is one. A continued card
+  // reads Opened after a reload too, so an old card is not pressed again. A
+  // card a newer card followed offers no button either: the newer one
+  // carries the task on, so two live cards never stack up.
   const browserKey = browserRequest ? browserRequestKey(message) : null;
   const browserCardState = browserKey ? browserHost?.cardStates?.get(browserKey) ?? null : null;
+  const browserSuperseded = Boolean(browserKey && browserHost?.newestCardKey && browserHost.newestCardKey !== browserKey);
   const browserPhase = browserKey && (browserHost?.continuedKeys?.has(browserKey) || browserCardState?.kind === "opened")
     ? "opened"
-    : browserCardState?.kind === "opening" ? "opening" : "button";
-  const browserReason = browserCardState?.kind === "button" && !browserUnavailable ? browserCardState.reason : null;
+    : browserCardState?.kind === "opening"
+      ? "opening"
+      : browserSuperseded ? "superseded" : "button";
+  const browserReason = browserPhase === "button" && browserCardState?.kind === "button" && !browserUnavailable
+    ? browserCardState.reason
+    : null;
+  const browserUnavailableNote = browserPhase === "button" ? browserUnavailable : null;
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [selectOpen, setSelectOpen] = useState(false);
@@ -381,7 +388,8 @@ export function ActionRequestEntry({
       title={fallbackTitle}
       description={parsed.description}
       children={
-        parsed.input || parsed.context || browserDestinations.length > 0 || browserUnavailable || browserPhase !== "button" || browserReason ? (
+        parsed.input || parsed.context || (browserPhase !== "superseded" && browserDestinations.length > 0) ||
+          browserUnavailableNote || browserPhase === "opening" || browserPhase === "opened" || browserReason ? (
           <div className="space-y-2">
             {browserPhase === "opening" ? (
               <Text as="div" variant="caption" tone="muted" className="flex items-center gap-2 break-all" data-testid="browser-request-opening">
@@ -394,17 +402,9 @@ export function ActionRequestEntry({
               </Text>
             ) : browserPhase === "opened" ? (
               <div className="flex items-center gap-2" data-testid="browser-request-opened">
-                <Badge tone="success">Browser opened</Badge>
-                {browserDestinations.length > 0 ? (
-                  <>
-                    {" "}
-                    <Text as="span" variant="caption" tone="muted" className="break-all">
-                      for <span className="font-mono">{browserDestinations.join(", ")}</span>
-                    </Text>
-                  </>
-                ) : null}
+                <Badge tone="success">Opened</Badge>
               </div>
-            ) : browserDestinations.length > 0 ? (
+            ) : browserPhase === "button" && browserDestinations.length > 0 ? (
               <Text as="div" variant="caption" tone="muted" className="break-all" data-testid="browser-request-destination">
                 For <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations.join(", ")}</span>
               </Text>
@@ -419,9 +419,9 @@ export function ActionRequestEntry({
                 {browserReason}
               </Text>
             ) : null}
-            {browserUnavailable ? (
+            {browserUnavailableNote ? (
               <Text as="div" variant="caption" tone="muted" data-testid="browser-request-unavailable">
-                {browserUnavailable}
+                {browserUnavailableNote}
               </Text>
             ) : null}
             {parsed.context ? (
