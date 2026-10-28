@@ -272,6 +272,36 @@ const special = {
     description: control("", { nameAttribute: "", idAttribute: "" }),
     nameHints: { image: `Key ${CANARY}`, hasImage: true, position: "top right" },
   },
+  // A search button drawn by an Inkscape svg: its metadata's
+  // <dc:format>image/svg+xml</dc:format> is text inside the button that
+  // nothing draws (the live test of 2026-10-27 read "Pesquisa (shown as
+  // "image/svg+xml")").
+  "svg-metadata-search": {
+    description: control("image/svg+xml", { ariaLabel: "Pesquisa", shownText: "", nameAttribute: "", idAttribute: "" }),
+  },
+  "svg-metadata-unnamed": {
+    description: control("image/svg+xml", { shownText: "", nameAttribute: "", idAttribute: "" }),
+    nameHints: { position: "top right" },
+  },
+  // A bare media type as an image's alt text names nothing either.
+  "media-type-alt": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { image: "image/png", hasImage: true, position: "top right" },
+  },
+  // An unnamed control whose page puts short text right beside it.
+  "nearby-text": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { nearby: "Idioma", position: "top right" },
+  },
+  // An image button named only by its alt text, and an icon from an svg sprite.
+  "image-input-alt": {
+    description: control("", { tag: "input", inputType: "image", nameAttribute: "", idAttribute: "" }),
+    nameHints: { ownName: "Pesquisar" },
+  },
+  "sprite-icon": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { sprite: "/assets/icons.svg#icon-search", position: "top right" },
+  },
 };
 // "<mode>-typeless": the same button with no type attribute, which the
 // browser reports as type "submit" even outside a form.
@@ -596,6 +626,8 @@ const makePage = (targetId, opened = null) => {
     url: () => currentUrl,
     title: async () => mode === "hostile-title"
       ? "Call 555 now at www.evil.example"
+      : mode === "media-type-title"
+      ? "image/svg+xml"
       : currentUrl.includes("unapproved-secret")
       ? "Secret destination title"
       : currentUrl === "about:blank" || currentUrl.startsWith("chrome://")
@@ -5209,6 +5241,80 @@ fn unnamed_controls_are_named_from_their_own_hints_never_their_index() {
     assert_eq!(requests.len(), 1);
     assert_no_canary("approval label", &requests[0]["display"].to_string());
     assert_no_canary("action log", &fixture.action_log());
+}
+
+/// A control is named by what it draws, never by text nothing draws (an svg's
+/// metadata, a bare media type), and an unnamed one by its own attributes, its
+/// sprite's icon or the short text right beside it (live test, 2026-10-27:
+/// "Pesquisa (shown as "image/svg+xml")" and "unnamed button in the top right").
+#[test]
+fn controls_are_named_by_what_they_draw_and_what_sits_beside_them() {
+    for (mode, expected) in [
+        ("svg-metadata-search", "Pesquisa"),
+        ("svg-metadata-unnamed", "unnamed button in the top right"),
+        ("media-type-alt", "unnamed button in the top right"),
+        (
+            "nearby-text",
+            "button next to \u{201c}Idioma\u{201d} in the top right",
+        ),
+        ("image-input-alt", "Pesquisar"),
+        ("sprite-icon", "search button in the top right"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot = payload_of(&fixture.run(mode, "GET", "/v1/snapshot", None));
+        assert_eq!(
+            snapshot["interactiveElements"][0]["label"], expected,
+            "{mode}"
+        );
+    }
+
+    // The prompt names the control by its name alone: its visible text is
+    // nothing it draws, so there is no "(shown as …)".
+    let mode = "svg-metadata-search";
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id(mode);
+    let (output, requests) = fixture.run_with_decisions(
+        mode,
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&json!({"index": 0, "snapshotId": snapshot_id}).to_string()),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1);
+    let label = requests[0]["display"]["label"].as_str().unwrap_or_default();
+    assert!(label.ends_with("Pesquisa"), "{label}");
+    assert!(!label.contains("image/svg+xml"), "{label}");
+    assert!(!fixture.action_log().contains("image/svg+xml"));
+}
+
+/// A page whose title is only a media type ("image/svg+xml") has no title:
+/// the tab list, the snapshot and the action log fall back to its address.
+#[test]
+fn a_bare_media_type_is_no_page_title() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let mode = "media-type-title";
+    let snapshot = payload_of(&fixture.call(mode, "GET", "/v1/snapshot", None));
+    assert_eq!(snapshot["title"], "");
+    let listed = payload_of(&fixture.call(mode, "GET", "/v1/tabs", None));
+    let tab = listed["tabs"]
+        .as_array()
+        .and_then(|tabs| tabs.first())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(tab["title"], "", "{listed}");
+    payload_of(&fixture.call(
+        mode,
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/logo.svg"}"#),
+    ));
+    let log = fixture.action_log();
+    assert!(!log.contains("image/svg+xml"), "{log}");
+    assert!(log.contains("\"type\":\"nav_result\""), "{log}");
 }
 
 /// A menu item whose label records or finalizes something ("Festschreiben",

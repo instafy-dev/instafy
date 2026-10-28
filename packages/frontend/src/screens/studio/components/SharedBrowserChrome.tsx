@@ -14,7 +14,7 @@ import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
 import { BrowserChromeShell } from "./BrowserChromeShell";
 import { SendPageToOctoButton } from "./SendPageToOctoButton";
-import { resolveAgentTabIds, sharedBrowserAgentTabLabel } from "./browserAgentTabs";
+import { resolveAgentTabIds, sharedBrowserAgentTabLabel, shownBrowserPageTitle } from "./browserAgentTabs";
 import {
   HUMAN_SHARED_BROWSER_CONTROL_OWNER,
   type SharedBrowserControlOwner,
@@ -71,7 +71,7 @@ export function normalizeSharedBrowserAddress(rawAddress: string): string | null
 export const KEEP_TAB_LABEL = "Keep tab";
 
 function pageOptionLabel(page: BrowserSessionPage, agentName: string | null = null): string {
-  const label = page.title?.trim() || page.label.trim() || page.host.trim() || page.url;
+  const label = shownBrowserPageTitle(page.title) || shownBrowserPageTitle(page.label) || page.host.trim() || page.url;
   // A tab Octo opened says so for everyone watching, with the number its
   // prompts use ("Octo's tab 2"), while Octo holds it, after control ends
   // (Pause, take-over) and when a person kept it.

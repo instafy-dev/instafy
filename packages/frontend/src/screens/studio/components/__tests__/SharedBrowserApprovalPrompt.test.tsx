@@ -167,6 +167,11 @@ describe("SharedBrowserApprovalPrompt", () => {
     ["press-enter", "Continue", "press Enter on “Continue”"],
     ["press-space", "Remember me", "press Space on “Remember me”"],
     ["press-key", "Press Backspace on Search", "press the requested key (Press Backspace on Search)"],
+    // The runtime's category leads its label: only the name is quoted, and
+    // the category says what it adds after it.
+    ["click", "Change something: unnamed button in the top right", "click “unnamed button in the top right”"],
+    ["click", "Delete, cancel or sign out: Delete account",
+      "click “Delete account”. It may delete, cancel or sign out of something"],
   ])("states the %s operation even when the runtime supplies a label", async (operation, label, expected) => {
     await act(async () => {
       root.render(

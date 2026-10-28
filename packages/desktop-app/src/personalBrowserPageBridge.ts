@@ -14,7 +14,7 @@ import {
   pageLinksInPage,
   type RawPageLink,
 } from "./personalBrowserRedaction";
-import { formSubmissionRulesInPage } from "./personalBrowserActionPolicy";
+import { controlNameRulesInPage, formSubmissionRulesInPage } from "./personalBrowserActionPolicy";
 
 // The shared reader's link listing (pageCapture.js), run inside the page as it
 // stands: the same function the Shared Browser's origin runs.
@@ -207,6 +207,9 @@ const PAGE_SECRET_SIGNAL_SCRIPT = `
 `;
 
 const FORM_SUBMISSION_RULES_SOURCE = formSubmissionRulesInPage.toString();
+// The text a control draws (no scripts, styles, svg metadata or hidden
+// parts); the Shared Browser runs the same rules.
+const CONTROL_NAME_RULES_SOURCE = controlNameRulesInPage.toString();
 
 function buildPageScript(argumentsValue: unknown, body: string): string {
   return `(() => {
@@ -246,6 +249,24 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
     } catch {
       formRules = null;
     }
+    let nameRules = null;
+    try {
+      nameRules = (${CONTROL_NAME_RULES_SOURCE})();
+    } catch {
+      nameRules = null;
+    }
+    // What a control draws: its rendered text, or, when that is empty (an
+    // icon-only control), its text less what never draws, such as an svg's
+    // metadata ("image/svg+xml") or title.
+    const shownTextOf = (element) => {
+      const rendered = clean(element.innerText || "", 2_000);
+      if (rendered) return rendered;
+      try {
+        return nameRules ? clean(nameRules.shownTextOf(element), 2_000) : "";
+      } catch {
+        return "";
+      }
+    };
     const forbiddenTarget = (element) => element.matches("iframe, frame, object, embed");
     const candidates = () => Array.from(document.querySelectorAll(interactiveSelector))
       .filter((element) => element.ownerDocument === document && !forbiddenTarget(element) && visible(element));
@@ -562,6 +583,8 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
           ? clean(element.value)
           : "",
         text: clean(element.innerText || element.textContent),
+        // The visible label prompts show; risk words still read \`text\`.
+        shownText: shownTextOf(element),
         href: link instanceof HTMLAnchorElement ? clean(link.href, 4096) : "",
         // Bind approvals to the actual form owner independently of its label.
         formOwnerIdentity: form ? targetIdentity(form) : "",

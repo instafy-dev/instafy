@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Lock } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
+import { splitBrowserApprovalLabel } from "./browserApprovalLabel";
 
 export type SharedBrowserApprovalKind = "origin" | "action";
 export type SharedBrowserApprovalDecision = "allow_origin" | "allow_once" | "allow_routine" | "deny";
@@ -60,7 +61,17 @@ export function sharedBrowserApprovalTargetAddress(
 export function sharedBrowserApprovalActionDescription(
   request: Pick<SharedBrowserApprovalPromptRequest, "kind" | "operation" | "destinationOrigin" | "display">,
 ): string {
-  const label = request.display.label.trim();
+  // The step's category leads the runtime's label; the sheet quotes only the
+  // control's name and says what the category adds after it.
+  const { label, note } = splitBrowserApprovalLabel(request.display.label);
+  const description = stepDescription(request, label);
+  return note ? `${description}. ${note.replace(/\.$/u, "")}` : description;
+}
+
+function stepDescription(
+  request: Pick<SharedBrowserApprovalPromptRequest, "kind" | "operation" | "destinationOrigin" | "display">,
+  label: string,
+): string {
   const target = label ? ` “${label}”` : "";
   switch (request.operation) {
     case "navigate": {

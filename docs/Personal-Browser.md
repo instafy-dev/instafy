@@ -343,7 +343,10 @@ category: purchase or payment, money transfer, send a message, sharing or access
 change, key or password change, download or export, delete/cancel/sign out,
 "May show a secret" (a row or entry in a credential context), or "Change
 something" by default. When a control's accessible name and visible text differ,
-the dialog shows both. After a key or password step, or a step that may show a
+the dialog shows both. The visible text is what the control draws: its rendered
+text, or for an icon-only control its text without an svg's metadata or title
+(the shared `controlNameRulesInPage` rules the Shared Browser runs too), and text
+that is only a media type ("image/svg+xml") never names a control or a tab. After a key or password step, or a step that may show a
 secret, the page stays withheld from the agent until a new page loads, and so
 does the page that step opens. Withholding starts before the step runs, so a
 pause or rotation after the click cannot leave the page readable. It is kept

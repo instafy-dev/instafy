@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   browserReadingHost,
   browserReadingTitle,
+  shownBrowserPageTitle,
   PERSONAL_BROWSER_SINGLE_PAGE_ID,
   personalBrowserTabPages,
   resolveAgentReadingPages,
@@ -91,6 +92,15 @@ describe("reading labels", () => {
     const long = browserReadingTitle({ title: "x".repeat(200) })!;
     expect(long.length).toBe(80);
     expect(long.endsWith("…")).toBe(true);
+  });
+
+  it("never shows a bare media type as a title (an image or svg shown on its own)", () => {
+    for (const title of ["image/svg+xml", " image/PNG ", "application/pdf; charset=binary"]) {
+      expect(shownBrowserPageTitle(title)).toBeNull();
+      expect(browserReadingTitle({ title })).toBeNull();
+    }
+    expect(shownBrowserPageTitle("Pesquisa | Visit Lisboa")).toBe("Pesquisa | Visit Lisboa");
+    expect(shownBrowserPageTitle("TCP/IP basics")).toBe("TCP/IP basics");
   });
 });
 

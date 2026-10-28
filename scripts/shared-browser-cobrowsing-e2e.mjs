@@ -691,6 +691,34 @@ export async function runSharedBrowserCobrowsingFixture() {
       assert.equal(await page.locator("#details-form").getAttribute("data-submissions"), String(expectedSubmissions));
       assert.equal(observedApprovals.length, 2 + expectedSubmissions, "Each form submission needs its own action confirmation");
     }
+    // A control is named by what it draws (live test, 2026-10-27: "Pesquisa
+    // (shown as "image/svg+xml")"): an Inkscape svg's metadata is text inside
+    // the button that nothing draws. An unnamed one is named by the short text
+    // beside it, and an image button by its alt text.
+    await page.locator("body").evaluate((body) => {
+      const icon = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:dc="http://purl.org/dc/elements/1.1/" viewBox="0 0 24 24" width="24" height="24">' +
+        '<metadata><dc:format>image/svg+xml</dc:format></metadata><title>Lupa</title><path d="M1 1h20v20H1z"/></svg>';
+      const names = document.createElement("div");
+      names.id = "control-names";
+      names.innerHTML = `<span>Idioma</span><button type="button" id="language">${icon}</button>` +
+        `<button type="button" id="site-search" aria-label="Pesquisa">${icon}</button>` +
+        '<input type="image" alt="Pesquisar" width="24" height="24" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">';
+      body.prepend(names);
+    });
+    const named = (await successfulTool("GET", "/v1/snapshot")).payload;
+    const namedLabels = named.interactiveElements.map((entry) => entry.label);
+    assert.ok(namedLabels.includes("Pesquisa"), `The search button was not named by its label: ${namedLabels}`);
+    assert.ok(namedLabels.includes("Pesquisar"), `The image button was not named by its alt text: ${namedLabels}`);
+    assert.ok(namedLabels.some((label) => label.startsWith("Lupa button") || label.startsWith("button next to \u201cIdioma\u201d")),
+      `The unnamed button was named by neither its icon's title nor the text beside it: ${namedLabels}`);
+    assert.ok(!JSON.stringify(named).includes("image/svg+xml"), "An svg's metadata reached the snapshot");
+    const approvalsBeforeNames = observedApprovals.length;
+    await successfulTool("POST", "/v1/click", target(named, "Pesquisa"));
+    assert.equal(observedApprovals.length, approvalsBeforeNames, "An ordinary routine click prompted");
+    const clickLine = fs.readFileSync(actionsPath, "utf8").trim().split("\n").at(-1);
+    assert.equal(JSON.parse(clickLine).label, 'Click "Pesquisa"', "The click's label named text nothing draws");
+    await page.locator("#control-names").evaluate((element) => element.remove());
+
     // A download link asks under routine with its category in the label, and
     // even an approved download never lands: the controller denies downloads
     // for its connection, and the profile blocks them after it.
@@ -830,7 +858,7 @@ export async function runSharedBrowserCobrowsingFixture() {
         compactSnapshotWithinBudget: true, receiptsFillTheLimit: true, omittedControlsCounted: true,
         linkPathNavigation: true, ariaHiddenAndInertLeftOut: true, libraryDrawnCheckboxesListed: true,
         clipsFollowContainingBoxes: true, topLayerListed: true, transitionsSettleBeforeResult: true,
-        selectReadsAsAWord: true,
+        selectReadsAsAWord: true, controlsNamedByWhatTheyDraw: true,
       },
       measurements,
       erpSnapshotTokens,

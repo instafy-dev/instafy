@@ -88,9 +88,18 @@ export type UnnamedControlHints = {
   iconHint?: string | null;
   /** Where the control sits in the visible page, such as "top right". */
   position?: string | null;
+  /** The short text right beside it (controlNameRulesInPage's nearbyTextOf). */
+  nearby?: string | null;
 };
 /** A short generic name such as "profile picture button, top right"; never "button 5". */
 export declare function unnamedControlName(hints: UnnamedControlHints): string;
+/** Run inside the page from its source: the text a control draws, and the text right beside it. */
+export declare function controlNameRulesInPage(): {
+  shownTextOf(element: Element, max?: number): string;
+  nearbyTextOf(element: Element, max?: number): string;
+};
+/** True for text that names nothing, such as a bare media type ("image/svg+xml"). */
+export declare function isPlaceholderName(value: unknown): boolean;
 export declare function isEditable(target: PersonalBrowserStepTarget): boolean;
 export declare function isSearchField(target: PersonalBrowserStepTarget): boolean;
 /**

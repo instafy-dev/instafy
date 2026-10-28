@@ -685,10 +685,38 @@ fn normalize_browser_page_title(raw: &str) -> Option<String> {
         .trim()
         .trim_matches('.')
         .to_string();
-    if collapsed.is_empty() {
+    if collapsed.is_empty() || is_bare_media_type(&collapsed) {
         return None;
     }
     Some(collapsed)
+}
+
+/// A title that is only a media type ("image/svg+xml"), as an image or svg
+/// shown on its own can leave: it names nothing, so the tab is named by its
+/// site instead (`@instafy/browser-action-policy`'s `isPlaceholderName`).
+fn is_bare_media_type(title: &str) -> bool {
+    let essence = title.split(';').next().unwrap_or_default().trim();
+    let Some((kind, subtype)) = essence.split_once('/') else {
+        return false;
+    };
+    const KINDS: [&str; 8] = [
+        "image",
+        "video",
+        "audio",
+        "application",
+        "text",
+        "font",
+        "model",
+        "multipart",
+    ];
+    KINDS.iter().any(|known| kind.eq_ignore_ascii_case(known))
+        && subtype
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        && subtype
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".+-".contains(character))
 }
 
 fn normalize_browser_page_host(url: &str) -> String {
@@ -2067,6 +2095,35 @@ mod tests {
             "entries": [{"id": 10}]
         }))
         .is_none());
+    }
+
+    #[test]
+    fn a_bare_media_type_is_no_page_title() {
+        for title in [
+            "image/svg+xml",
+            "image/png",
+            " Image/SVG+XML ",
+            "application/pdf; charset=binary",
+        ] {
+            assert_eq!(normalize_browser_page_title(title), None, "{title}");
+        }
+        // The tab is named by its site instead.
+        let title = normalize_browser_page_title("image/svg+xml");
+        assert_eq!(
+            derive_browser_page_label(
+                title.as_deref(),
+                "visitlisboa.com",
+                "https://www.visitlisboa.com/logo.svg"
+            ),
+            "visitlisboa.com"
+        );
+        for title in ["Pesquisa", "image/svg+xml editor", "TCP/IP basics", "a/b"] {
+            assert_eq!(
+                normalize_browser_page_title(title).as_deref(),
+                Some(title),
+                "{title}"
+            );
+        }
     }
 
     #[test]

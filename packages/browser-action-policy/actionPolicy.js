@@ -21,8 +21,16 @@
  * navigation", a hamburger icon) on a button outside a dialog.
  *
  * unnamedControlName(hints) names a control the page left unnamed from its
- * own hints (tooltip attribute, image text, icon name, position), so a
- * prompt never reads "button 5". Hosts mask it like any other control name.
+ * own hints (tooltip attribute, image text, icon name, the short text right
+ * beside it, position), so a prompt never reads "button 5". Hosts mask it
+ * like any other control name.
+ *
+ * controlNameRulesInPage() runs inside the page (a host sends its source):
+ * the text a control shows, without what never draws (scripts, styles, an
+ * svg's metadata, title or defs, hidden parts), and the short text right
+ * beside an unnamed control. isPlaceholderName(text) is true for text that
+ * names nothing, such as a bare media type ("image/svg+xml") a page or an
+ * svg's metadata leaves where a name would be.
  *
  * isFreeSiteSearch(target, pageUrl, submittedEntries) is the stricter test a
  * host applies before it lets Enter in a site's own search box go without a
@@ -300,10 +308,31 @@
     return cleanText([target.ariaLabel, target.text, target.title, target.value].filter(Boolean).join(" "));
   }
 
-  /** Visible text and accessible name, for dialogs that show both when they differ. */
+  // A bare media type ("image/svg+xml", "image/png"): what an svg's metadata,
+  // an <object> or a CMS's alt text leaves where a name would be.
+  const MEDIA_TYPE_NAME = /^(?:image|video|audio|application|text|font|model|multipart)\/[a-z0-9][a-z0-9.+-]*(?:\s*;.*)?$/i;
+
+  /** Text that names nothing, so a host never shows it as a name or a title. */
+  function isPlaceholderName(value) {
+    const text = cleanText(value);
+    return !text || MEDIA_TYPE_NAME.test(text);
+  }
+
+  // The text as a name: empty when it names nothing.
+  const nameText = (value) => {
+    const text = cleanText(value);
+    return text && !MEDIA_TYPE_NAME.test(text) ? text : "";
+  };
+
+  /**
+   * Visible text and accessible name, for dialogs that show both when they
+   * differ. `shownText`, when the host reads it, is the text the control
+   * draws; `text` is every text inside it.
+   */
   function stepLabels(target) {
-    const accessible = cleanText(target.ariaLabel || "");
-    const visible = cleanText(target.text || target.value || target.title || "");
+    const accessible = nameText(target.ariaLabel || "");
+    const drawn = typeof target.shownText === "string" ? target.shownText : target.text;
+    const visible = nameText(drawn) || nameText(target.value) || nameText(target.title);
     return { accessible, visible, differ: Boolean(accessible && visible && accessible !== visible) };
   }
 
@@ -473,7 +502,7 @@
    */
   function unnamedControlName(hints) {
     const source = hints && typeof hints === "object" ? hints : {};
-    const short = (value) => Array.from(cleanText(value)).slice(0, 80).join("");
+    const short = (value, max = 80) => Array.from(nameText(value)).slice(0, max).join("");
     const kind = controlKind(source);
     const where = POSITION_PHRASES.get(lower(source.position)) || "";
     const placed = (base) => (where ? `${base} ${where}` : base);
@@ -484,7 +513,84 @@
     const hint = cleanText(source.iconHint);
     const noun = hint ? (ICON_NOUNS.find(([, pattern]) => pattern.test(hint)) || [null])[0] : null;
     if (noun === "profile") return placed(`${source.hasImage === true ? "profile picture" : "account"} ${kind}`);
-    return placed(noun ? `${noun} ${kind}` : `unnamed ${kind}`);
+    if (noun) return placed(`${noun} ${kind}`);
+    // The short text right beside it, quoted as what it sits next to, never
+    // as its own name ("button next to “Idioma”").
+    const nearby = short(source.nearby, 40);
+    if (nearby && /\p{L}/u.test(nearby) && !/@|:\/\/|^www\./i.test(nearby)) {
+      return placed(`${kind} next to \u201c${nearby}\u201d`);
+    }
+    return placed(`unnamed ${kind}`);
+  }
+
+  // Runs inside the page: it uses nothing from this file's scope, so a host
+  // sends its source into the page (Shared) or into an isolated world
+  // (Personal).
+  function controlNameRulesInPage() {
+    const SVG = "http://www.w3.org/2000/svg";
+    const NEVER_DRAWN = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
+    // An svg draws text only in these; its metadata, title, desc, defs,
+    // style, symbols, masks and gradients draw none.
+    const SVG_TEXT = new Set(["svg", "g", "a", "switch", "text", "tspan", "textPath"]);
+    const MAX_NODES = 2_000;
+    const CONTROL = "a[href], button, input, select, textarea, [role='button'], [role='link']";
+    const clean = (value, max) =>
+      (typeof value === "string" ? value : "").replace(/\s+/g, " ").trim().slice(0, max);
+    const isElement = (node) => Boolean(node) && node.nodeType === 1;
+    const hidden = (element) => {
+      if (element.hasAttribute("hidden")) return true;
+      try {
+        return element.ownerDocument.defaultView.getComputedStyle(element).display === "none";
+      } catch (_) {
+        return false;
+      }
+    };
+    // The text `element` draws, in document order: what textContent holds,
+    // less what never draws.
+    const shownTextOf = (element, max = 2_000) => {
+      let text = "";
+      let visited = 0;
+      const walk = (node, root) => {
+        if (visited > MAX_NODES || text.length > max) return;
+        visited += 1;
+        if (node.nodeType === 3) {
+          text += node.nodeValue || "";
+          return;
+        }
+        if (!isElement(node)) return;
+        if (node.namespaceURI === SVG) {
+          if (!SVG_TEXT.has(node.localName)) return;
+        } else if (NEVER_DRAWN.has(String(node.tagName).toUpperCase())) {
+          return;
+        }
+        if (!root && hidden(node)) return;
+        for (const child of node.childNodes) walk(child, false);
+      };
+      if (isElement(element)) walk(element, true);
+      return clean(text, max);
+    };
+    // The short text right beside an unnamed control: the sibling before or
+    // after it when that is plain text and no control, else the text of its
+    // parent outside it. Empty when there is none, or it is long.
+    const nearbyTextOf = (element, max = 40) => {
+      if (!isElement(element)) return "";
+      const fits = (text) => text && text.length <= max && /\p{L}/u.test(text);
+      for (const sibling of [element.previousElementSibling, element.nextElementSibling]) {
+        if (!isElement(sibling) || hidden(sibling)) continue;
+        if (sibling.matches(CONTROL) || sibling.querySelector(CONTROL)) continue;
+        const text = shownTextOf(sibling, 200);
+        if (fits(text)) return text;
+      }
+      const parent = element.parentElement;
+      if (!parent) return "";
+      let own = "";
+      for (const child of parent.childNodes) {
+        if (child.nodeType === 3) own += child.nodeValue || "";
+      }
+      own = clean(own, 200);
+      return fits(own) ? own : "";
+    };
+    return { shownTextOf, nearbyTextOf };
   }
 
   function idLike(segment) {
@@ -898,6 +1004,8 @@
     refusalFor,
     stepLabels,
     unnamedControlName,
+    controlNameRulesInPage,
+    isPlaceholderName,
     isEditable,
     isSearchField,
     isFreeSiteSearch,

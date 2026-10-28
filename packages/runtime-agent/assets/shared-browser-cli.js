@@ -449,6 +449,13 @@ function emitAction(event) {
   }
 }
 
+// The page's title, or "" when it names nothing: an image or svg shown on
+// its own can leave a bare media type ("image/svg+xml") as its title.
+async function pageTitle(page) {
+  const title = await page.title().catch(() => "");
+  return typeof title === "string" && !actionPolicy.isPlaceholderName(title) ? title : "";
+}
+
 async function writeStdout(value) {
   await new Promise((resolve, reject) => {
     process.stdout.write(value, (error) => {
@@ -835,7 +842,7 @@ function shownTextInPage(rule, request) {
 // needs, the same ones the Desktop Personal Browser collects. A control a
 // person cannot see is reported only as `shown: false` with its name, which
 // the secret-screen check still reads.
-function describeInPage(rule, forms, element, sources) {
+function describeInPage(rule, forms, names, element, sources) {
   const bounded = (value, max = 2_000) =>
     typeof value === "string"
       ? value.replace(/\s+/g, " ").trim().slice(0, max)
@@ -1132,14 +1139,16 @@ function describeInPage(rule, forms, element, sources) {
   try {
     const read = (node, name) =>
       node && typeof node.getAttribute === "function" ? node.getAttribute(name) : null;
+    // An image's alt text, an svg's title, or the label or title of an
+    // element inside the control (an icon's own name).
     const image = element.querySelector(
-      "img[alt], [role='img'][aria-label], svg title, svg[aria-label], i[aria-label], i[title], span[aria-hidden='true'][title]",
+      "img[alt], [role='img'][aria-label], svg title, svg[aria-label], [aria-label], [title]",
     );
     const imageTag = image && typeof image.tagName === "string" ? image.tagName.toLowerCase() : "";
     const imageText = !image
       ? ""
       : imageTag === "img"
-        ? read(image, "alt")
+        ? read(image, "alt") || read(image, "title")
         : imageTag === "title"
           ? image.textContent
           : read(image, "aria-label") || read(image, "title");
@@ -1161,6 +1170,25 @@ function describeInPage(rule, forms, element, sources) {
       const column = x < width / 3 ? "left" : x > (2 * width) / 3 ? "right" : "";
       position = [row, column].filter(Boolean).join(" ") || "middle";
     }
+    // The name an image button or an input button carries in its own
+    // attributes: its alt text, or its value (the browser's own "Submit" or
+    // "Reset" without one).
+    const tag = typeof element.tagName === "string" ? element.tagName.toUpperCase() : "";
+    const type = tag === "INPUT" ? String(element.type || "").toLowerCase() : "";
+    const ownName =
+      tag === "IMG" || tag === "AREA" || type === "image"
+        ? read(element, "alt")
+        : ["submit", "reset", "button"].includes(type)
+          ? read(element, "value") ?? (type === "submit" ? "Submit" : type === "reset" ? "Reset" : "")
+          : "";
+    // An svg sprite's symbol (`<use href="#icon-search">`) names its icon.
+    const sprite = element.querySelector("use");
+    let nearby = "";
+    try {
+      nearby = names.nearbyTextOf(element);
+    } catch (_) {
+      nearby = "";
+    }
     nameHints = {
       tooltip: bounded(
         read(element, "data-bs-original-title") || read(element, "data-original-title") ||
@@ -1170,6 +1198,9 @@ function describeInPage(rule, forms, element, sources) {
       ),
       describedBy: bounded(describedBy, 120),
       image: bounded(imageText || "", 120),
+      ownName: bounded(ownName || "", 120),
+      sprite: bounded(read(sprite, "href") || read(sprite, "xlink:href") || "", 160),
+      nearby: bounded(nearby, 40),
       hasImage:
         Boolean(element.querySelector("img, picture, [role='img']")) ||
         /url\(/.test(view?.getComputedStyle(element).backgroundImage || ""),
@@ -1255,6 +1286,15 @@ function describeInPage(rule, forms, element, sources) {
       : "",
     labels,
     text: bounded(element.textContent || ""),
+    // The text the control draws: what textContent holds, less scripts,
+    // styles, an svg's metadata, title and defs, and hidden parts.
+    shownText: (() => {
+      try {
+        return bounded(names.shownTextOf(element));
+      } catch (_) {
+        return bounded(element.textContent || "");
+      }
+    })(),
     policy,
     nameHints,
   };
@@ -1271,17 +1311,24 @@ function nameHintsOf(raw) {
     tooltip: text(raw?.tooltip, 120),
     describedBy: text(raw?.describedBy, 120),
     image: text(raw?.image, 120),
+    ownName: text(raw?.ownName, 120),
+    sprite: text(raw?.sprite, 160),
+    nearby: text(raw?.nearby, 40),
     hasImage: valid && raw.hasImage === true,
     position: valid && NAME_POSITIONS.has(raw.position) ? raw.position : "",
   };
 }
 
 // The hints that name a control, without the ones that change while a
-// person hovers (described-by tooltips) or the layout moves (position), so
-// fingerprints stay stable across an approval.
+// person hovers (described-by tooltips), the layout moves (position) or the
+// page around it updates (nearby text), so fingerprints stay stable across
+// an approval.
 function stableNameHints(description) {
   const hints = description.nameHints || nameHintsOf(null);
-  return { tooltip: hints.tooltip, image: hints.image, hasImage: hints.hasImage };
+  return {
+    tooltip: hints.tooltip, image: hints.image, ownName: hints.ownName, sprite: hints.sprite,
+    hasImage: hints.hasImage,
+  };
 }
 
 // Page functions run inside the page: Playwright sends their source, so they
@@ -1295,7 +1342,7 @@ function withShownRule(pageFunction) {
 // joined in the same way.
 const DESCRIBE_IN_PAGE = new Function(
   "...args",
-  `return (${describeInPage})((${shownRuleInPage})(), (${formSubmission.formSubmissionRulesInPage})(), ...args);`,
+  `return (${describeInPage})((${shownRuleInPage})(), (${formSubmission.formSubmissionRulesInPage})(), (${actionPolicy.controlNameRulesInPage})(), ...args);`,
 );
 const SHOWN_TEXT_IN_PAGE = withShownRule(shownTextInPage);
 const AREA_NAMES = new Set(["dialog", "menu", "tabs", "nav", "search", "header", "footer", "aside"]);
@@ -1319,16 +1366,20 @@ async function describeElement(locator, index, hiddenNames) {
   }
   const policy = policyFactsOf(attributes.policy);
   const nameHints = nameHintsOf(attributes.nameHints);
+  const shownText = typeof attributes.shownText === "string" ? attributes.shownText : attributes.text;
+  // Text that names nothing (a bare media type an svg's metadata leaves)
+  // is skipped.
   const named = [
     attributes.ariaLabel,
     attributes.ariaLabelledByText,
     attributes.labels,
     attributes.placeholder,
     attributes.titleAttribute,
-    attributes.text,
+    nameHints.ownName,
+    shownText,
     attributes.nameAttribute,
   ]
-    .find((value) => typeof value === "string" && value.trim())
+    .find((value) => typeof value === "string" && value.trim() && !actionPolicy.isPlaceholderName(value))
     ?.trim();
   // An unnamed control gets a name from its own hints, never its index: the
   // index means nothing to the person reading a prompt.
@@ -1339,7 +1390,7 @@ async function describeElement(locator, index, hiddenNames) {
       role: attributes.role,
       type: attributes.inputType,
       ...nameHints,
-      iconHint: policy ? policy.iconHint : "",
+      iconHint: [policy ? policy.iconHint : "", nameHints.sprite].filter(Boolean).join(" "),
     })
   ).slice(0, MAX_LABEL_CHARS);
   return {
@@ -1357,6 +1408,7 @@ async function describeElement(locator, index, hiddenNames) {
     valueAttribute: attributes.valueAttribute,
     labels: attributes.labels,
     text: attributes.text,
+    shownText: typeof shownText === "string" ? shownText : "",
     href: attributes.href,
     inputType: attributes.inputType,
     autocomplete: attributes.autocomplete,
@@ -1427,6 +1479,9 @@ function policyTarget(description) {
     // risk words count like any other name's.
     ariaLabel: description.ariaLabel || description.ariaLabelledByText || description.labels || hints.image || "",
     text: description.text || "",
+    // What the control draws, for the visible label prompts show; risk words
+    // still read every text inside it.
+    shownText: typeof description.shownText === "string" ? description.shownText : undefined,
     title: description.titleAttribute || hints.tooltip || "",
     value: buttonLike ? description.valueAttribute || "" : "",
     placeholder: description.placeholder || "",
@@ -1553,6 +1608,7 @@ function snapshotFingerprint(url, interactive) {
     valueAttribute: description.valueAttribute,
     labels: description.labels,
     text: description.text,
+    shownText: description.shownText,
     href: description.href,
     inputType: description.inputType,
     autocomplete: description.autocomplete,
@@ -1589,6 +1645,7 @@ function targetFingerprint(description) {
         valueAttribute: description.valueAttribute,
         labels: description.labels,
         text: description.text,
+        shownText: description.shownText,
         href: description.href,
         inputType: description.inputType,
         autocomplete: description.autocomplete,
@@ -1769,7 +1826,7 @@ async function snapshot(page, { withhold = false } = {}) {
     .evaluate(SHOWN_TEXT_IN_PAGE, { kind: "shown-text", limit: MAX_VISIBLE_TEXT_CHARS * 5 })
     .catch(() => null);
   const visibleText = typeof shownText === "string" ? shownText : renderedText;
-  const title = await page.title().catch(() => "");
+  const title = await pageTitle(page);
   let signals = await pageSecretSignals(page);
   if (signals === null) {
     // A page that was still changing documents fails the check; try once
@@ -1911,7 +1968,7 @@ async function emitNavigationResult(page) {
     });
     return;
   }
-  const title = await page.title().catch(() => "");
+  const title = await pageTitle(page);
   emitAction({
     type: "nav_result",
     label: title
@@ -2673,7 +2730,7 @@ async function describeTabs(tabs) {
       } else if (!siteApproved(page.url())) {
         described.push({ ...line, originApproved: false, url: null, title: null });
       } else {
-        const title = await page.title().catch(() => "");
+        const title = await pageTitle(page);
         described.push({
           ...line,
           originApproved: true,
@@ -3048,7 +3105,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (!siteApproved(page.url())) {
       return approvalProtocol.redactedPageResult(shared);
     }
-    const title = await page.title().catch(() => "");
+    const title = await pageTitle(page);
     return {
       ...shared,
       originApproved: true,
