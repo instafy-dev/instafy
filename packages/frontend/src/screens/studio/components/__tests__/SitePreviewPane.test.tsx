@@ -106,6 +106,17 @@ describe("SitePreviewPane", () => {
     expect(JSON.stringify({ ...localStorage })).not.toContain("p-aaaa");
   });
 
+  it("shows one loading signal while opening: the line in the pane, its pill for screen readers only", async () => {
+    mocks.createSitePreviewViewer.mockImplementation(() => new Promise(() => {}));
+    await render();
+    expect(pane().dataset.state).toBe("opening");
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Opening Docs site…");
+    const pill = container.querySelector<HTMLElement>("[data-testid=site-preview-status]")!;
+    expect(pill.classList.contains("sr-only")).toBe(true);
+    expect(pill.getAttribute("role")).toBe("status");
+    expect(pill.textContent).toBe("Starting…");
+  });
+
   it("reads only the broker's status message, only from its own frame and origin", async () => {
     await render();
     const target = frame()!.contentWindow!;

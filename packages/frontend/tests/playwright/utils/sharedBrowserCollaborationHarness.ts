@@ -1,5 +1,6 @@
 import { expect, type Locator, type Page, type Response } from "@playwright/test";
 
+import { chooseBrowserLocation } from "./browserLocation.js";
 import { installSharedBrowserSocketProbe } from "./sharedBrowserSocketProbe.js";
 
 export {
@@ -89,10 +90,7 @@ export async function openSharedBrowser(
   await page.evaluate(() => {
     window.dispatchEvent(new CustomEvent("instafy:browser-open", { detail: {} }));
   });
-  await page.getByTestId("browser-location-menu").click();
-  const sharedButton = page.getByTestId("browser-transport-shared");
-  await expect(sharedButton).toBeVisible({ timeout: 30_000 });
-  await sharedButton.click();
+  await chooseBrowserLocation(page, "shared");
 
   const modal = page.getByTestId("browser-session-modal");
   await expect(modal).toBeVisible({ timeout: 60_000 });

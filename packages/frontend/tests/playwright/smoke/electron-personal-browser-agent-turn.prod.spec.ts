@@ -34,6 +34,7 @@ import {
   parsePersonalBrowserToolEventProof,
   type PersonalBrowserToolEventProof,
 } from "../utils/electronPersonalBrowserCanaryProof.js";
+import { chooseBrowserLocation } from "../utils/browserLocation.js";
 import { focusLastConversationTab } from "../utils/chatUi.js";
 import { openSidebarSecondaryItem } from "../utils/sidebar.js";
 
@@ -736,10 +737,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     await focusLastConversationTab(page);
     await page.getByTestId("composer-action-menu-trigger").click();
     await page.getByTestId("composer-action-menu-open-browser").click();
-    await page.getByTestId("browser-location-menu").click();
-    const personalButton = page.getByTestId("browser-transport-personal");
-    await expect(personalButton).toBeEnabled({ timeout: 30_000 });
-    await personalButton.click();
+    await chooseBrowserLocation(page, "personal");
 
     const personal = page.getByTestId("personal-browser-surface");
     await expect(personal).toBeVisible({ timeout: 30_000 });

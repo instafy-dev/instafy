@@ -96,6 +96,23 @@ describe("BrowserChromeShell", () => {
     expect(status?.getAttribute("aria-label")).toBe(`${label}: Transport-specific detail.`);
   });
 
+  it("tells only a screen reader it is starting while the view says so itself", async () => {
+    await act(async () => {
+      root.render(<BrowserStatusPill detail="Opening Instafy's browser…" state="starting" startingShownInView />);
+    });
+    const status = container.querySelector('[role="status"]')!;
+    expect(status.textContent).toBe("Starting…");
+    expect(status.className).toBe("sr-only");
+    expect(status.getAttribute("aria-label")).toBe("Starting…: Opening Instafy's browser…");
+    expect(status.querySelector("svg")).toBeNull();
+
+    // Paused, off and unavailable stay visible.
+    await act(async () => {
+      root.render(<BrowserStatusPill detail="Instafy's browser is off." state="off" startingShownInView />);
+    });
+    expect(container.querySelector('[role="status"]')!.className).not.toContain("sr-only");
+  });
+
   it("says Off in a neutral tone, without the unavailable mark", async () => {
     await act(async () => {
       root.render(<BrowserStatusPill detail="Instafy's browser is off." state="off" />);

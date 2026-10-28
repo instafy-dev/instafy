@@ -7,7 +7,7 @@ import { ConversationSurfaceTabs } from "../../../src/workspace/ConversationSurf
 import { BrowserSessionModal } from "../../../src/screens/studio/components/BrowserSessionModal";
 import { BrowserChromeShell, BrowserStatusPill } from "../../../src/screens/studio/components/BrowserChromeShell";
 import { SharedBrowserChrome } from "../../../src/screens/studio/components/SharedBrowserChrome";
-import { BrowserTransportSelector } from "../../../src/screens/studio/components/PersonalBrowserSurface";
+import { BrowserLocationOptions } from "../../../src/screens/studio/components/PersonalBrowserSurface";
 import "./review.css";
 
 declare const __BROWSER_BOUNDARIES_BASELINE__: boolean;
@@ -46,7 +46,7 @@ function Review() {
               currentUserId="review-user" preferRuntimeId={null} resumeRuntimeId="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
               presentation="docked" fillContainer canControlBrowser sharedBrowserCapabilitiesResolved={false}
               sharedBrowserViewerKind="cdp-screencast" sharedBrowserAvailableViewerKinds={["cdp-screencast"]}
-              toolbarLeading={<BrowserTransportSelector checked compact mode="shared" personalAvailable onModeChange={noop} />}
+              locationOptions={<BrowserLocationOptions checked mode="shared" personalAvailable onModeChange={noop} />}
               sharedBrowserChrome={{
                 compact: true, resolved: true, pendingAction: null, error: null,
                 pages: [{ id: "review-page", url: "https://fixture.example.test", host: "fixture.example.test", label: "Review", title: "Review page", isActive: true }],

@@ -419,9 +419,11 @@ test.describe("Org Shared Browser web/Electron collaboration", () => {
       await setElectronContentViewport(electronApp, electronPage, PHONE_VIEWPORT);
 
       const ownerBinding = await openSharedBrowser(webPage, { constrainForCdp: false });
-      await expect(collaborationState(webPage)).toContainText("You control", {
+      // Alone, the owner drives without a control chip: there is nothing to hand over.
+      await expect(sharedSurface(webPage)).toHaveAttribute("data-input-enabled", "true", {
         timeout: 30_000,
       });
+      await expect(collaborationState(webPage)).toHaveCount(0);
       const ownerAddress = webPage
         .getByTestId("shared-browser-chrome")
         .getByTestId("shared-browser-address");

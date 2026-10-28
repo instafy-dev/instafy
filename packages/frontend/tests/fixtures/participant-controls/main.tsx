@@ -9,7 +9,7 @@ import { SharedBrowserCollaborationControls } from "../../../src/screens/studio/
 import { SharedBrowserSessionControl } from "../../../src/screens/studio/components/SharedBrowserSessionControl";
 import { BrowserExpandButton } from "../../../src/screens/studio/components/BrowserExpandButton";
 import { BrowserStatusPill } from "../../../src/screens/studio/components/BrowserChromeShell";
-import { BrowserTransportSelector } from "../../../src/screens/studio/components/PersonalBrowserSurface";
+import { BrowserLocationOptions } from "../../../src/screens/studio/components/PersonalBrowserSurface";
 import { SharedBrowserApprovalPrompt } from "../../../src/screens/studio/components/SharedBrowserApprovalPrompt";
 import { StudioDialogModal } from "../../../src/components/aria/StudioModal";
 import { StudioDialogBody, StudioDialogHeader } from "../../../src/components/aria/StudioDialogLayout";
@@ -133,7 +133,6 @@ function Review() {
           onNavigate={(_id, value) => { setAddress(value); record("Address updated locally; no navigation started."); }}
           onBack={() => record("Back selected locally.")} onForward={() => record("Forward selected locally.")} onReload={() => record("Reload selected locally.")}
           onFocusPage={() => record("Page selected locally.")} onClearError={() => record("Message dismissed locally.")}
-          toolbarLeading={<BrowserTransportSelector checked compact={compact} mode="shared" personalAvailable onModeChange={mode => record(`Browser location ${mode} selected locally; no browser started.`)} />}
           toolbarStatus={compact ? null : <BrowserStatusPill state="ready" />}
           toolbarActions={navigation => <>
             <SharedBrowserCollaborationControls client={client} compact={compact} localControlOwner={owner}
@@ -144,6 +143,7 @@ function Review() {
             <SharedBrowserSessionControl runtimeId="local-review" resumeUrl={null} open={optionsOpen} busy={false} candidates={[]} error={null} canStart
               onOpenChange={setOptionsOpen} onChoose={() => record("Session selected locally.")} onRefresh={() => record("Sessions refreshed locally.")}
               onStart={() => { record("New session selected locally; no browser started."); setOptionsOpen(false); }}
+              location={<BrowserLocationOptions checked mode="shared" personalAvailable onModeChange={mode => { setOptionsOpen(false); record(`Browser location ${mode} selected locally; no browser started.`); }} />}
               actions={compact ? <>{navigation}<BrowserExpandButton expanded={expanded} showLabel onPress={() => { setExpanded(!expanded); setOptionsOpen(false); record("Browser expansion toggled locally."); }} /></> : null} />
             {!compact ? <BrowserExpandButton expanded={expanded} onPress={() => { setExpanded(!expanded); record("Browser expansion toggled locally."); }} /> : null}
           </>} />

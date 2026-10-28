@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CursorPointer, Group } from "iconoir-react";
 import { Dialog, DialogTrigger } from "react-aria-components";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
@@ -30,6 +30,11 @@ function participantById(
   return participants.find((participant) => participant.id === participantId) ?? null;
 }
 
+/** How long a control action may wait for the browser's answer before it says so. */
+export const CONTROL_ACTION_ANSWER_MS = 5_000;
+const CONTROL_ACTION_NO_ANSWER = "The browser didn't answer. Try again.";
+const CONTROL_ACTION_OFFLINE = "Not connected to the browser. Try again in a moment.";
+
 export function SharedBrowserCollaborationControls({
   client,
   compact,
@@ -43,10 +48,11 @@ export function SharedBrowserCollaborationControls({
   client: SharedBrowserCollaborationClientState;
   compact: boolean;
   localControlOwner: SharedBrowserControlOwner;
-  onGrantControl: (participantId: string) => void;
-  onReleaseControl: () => void;
-  onRequestControl: () => void;
-  onTakeControl: () => void;
+  /** Each returns false when the browser could not be reached, so nothing was sent. */
+  onGrantControl: (participantId: string) => boolean | void;
+  onReleaseControl: () => boolean | void;
+  onRequestControl: () => boolean | void;
+  onTakeControl: () => boolean | void;
   children?: ReactNode;
 }) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -72,6 +78,44 @@ export function SharedBrowserCollaborationControls({
   const requestPending = Boolean(
     client.participantId && state?.requests.includes(client.participantId),
   );
+  // Who controls the browser matters only when someone else could: another
+  // person (or another of your devices) in this browser, or Octo driving it.
+  // Alone, there is nothing to hand over, so neither the control chip nor
+  // Release shows. Take control still shows when control is free, and someone
+  // else holding control (even before the roster lists them) still shows with
+  // Request control, so a person left alone is never locked out.
+  const othersPresent = Boolean(
+    client.participantId && participants.some((participant) => participant.id !== client.participantId),
+  );
+  const someoneElseControls = serverOwner?.kind === "human" && serverOwner.participantId !== client.participantId;
+  const controlShown = othersPresent || someoneElseControls || Boolean(agentDisplayName);
+  const ownerKey = serverOwner === null
+    ? "none"
+    : serverOwner.kind === "agent" ? `agent:${serverOwner.displayName}` : `human:${serverOwner.participantId}`;
+  // A pressed action waits for the browser's answer: the owner changes (or,
+  // for a request, the request is listed). Until then it shows Studio's
+  // pending spinner; without an answer it says so instead of doing nothing.
+  const [pending, setPending] = useState<{ kind: string; ownerKey: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const answered = pending !== null &&
+    (ownerKey !== pending.ownerKey || (pending.kind === "request" && requestPending));
+  useEffect(() => {
+    if (answered) setPending(null);
+  }, [answered]);
+  useEffect(() => {
+    if (!pending) return;
+    const timer = window.setTimeout(() => {
+      setPending(null);
+      setNotice(CONTROL_ACTION_NO_ANSWER);
+    }, CONTROL_ACTION_ANSWER_MS);
+    return () => window.clearTimeout(timer);
+  }, [pending]);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 2 * CONTROL_ACTION_ANSWER_MS);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+  useEffect(() => setNotice(null), [ownerKey]);
 
   let statusLabel = "Control syncing…";
   if (agentDisplayName) {
@@ -85,7 +129,7 @@ export function SharedBrowserCollaborationControls({
   }
 
   let action:
-    | { label: string; kind: string; disabled: boolean; run: () => void }
+    | { label: string; kind: string; disabled: boolean; run: () => boolean | void }
     | null = null;
   if (!agentDisplayName && self?.canControl && state) {
     if (selfOwnsControl && firstRequester) {
@@ -118,6 +162,11 @@ export function SharedBrowserCollaborationControls({
       };
     }
   }
+
+  if (action && !controlShown && action.kind !== "take") {
+    action = null;
+  }
+  const actionPending = action !== null && pending?.kind === action.kind && !answered;
 
   const visibleParticipants = participants.slice(0, compact ? 1 : 3);
   const participantNames = participants.map((participant) => participant.displayName).join(", ");
@@ -169,7 +218,20 @@ export function SharedBrowserCollaborationControls({
       Controls
     </Text>
   );
-  const ownershipStatus = compact ? (
+  const noticeText = notice ? (
+    <Text
+      as="span"
+      variant="caption"
+      tone="danger"
+      className={compact ? "block break-words" : "min-w-0 max-w-64 truncate"}
+      data-testid="shared-browser-collaboration-control-notice"
+      role="status"
+      title={notice}
+    >
+      {notice}
+    </Text>
+  ) : null;
+  const ownershipStatus = !controlShown ? null : compact ? (
     <Text
       as="span"
       variant="caption"
@@ -206,11 +268,20 @@ export function SharedBrowserCollaborationControls({
       data-action={action.kind}
       data-testid="shared-browser-collaboration-control-action"
       isDisabled={action.disabled}
+      // Pending keeps keyboard focus on the pressed control while it waits.
+      isPending={actionPending}
       onPress={() => {
-        // Requesting disables the action; granting moves it out of this row.
-        // Keep focus inside the popup before either change removes button focus.
+        // A request disables the action once listed; granting moves it out of
+        // this row. Keep focus inside the popup before either removes it.
         if (compact && (action.kind === "request" || action.kind === "grant")) dialogRef.current?.focus();
-        action.run();
+        const kind = action.kind;
+        if (action.run() === false) {
+          setPending(null);
+          setNotice(CONTROL_ACTION_OFFLINE);
+          return;
+        }
+        setNotice(null);
+        setPending({ kind, ownerKey });
       }}
       title={action.label}
       type="button"
@@ -234,11 +305,13 @@ export function SharedBrowserCollaborationControls({
       {compact ? (
         <DialogTrigger>
           <Button
-            aria-label={`Browser participants and control: ${statusLabel}. ${participantNames || "No participants connected"}${requestLabel ? `. ${requestLabel}` : ""}`}
+            aria-label={controlShown
+              ? `Browser participants and control: ${statusLabel}. ${participantNames || "No participants connected"}${requestLabel ? `. ${requestLabel}` : ""}`
+              : `Browser participants: ${participantNames || "No participants connected"}`}
             className="relative shrink-0"
             data-testid="shared-browser-collaboration-toggle"
             preset="toolbar"
-            title={`Browser participants and control — ${statusLabel}`}
+            title={controlShown ? `Browser participants and control — ${statusLabel}` : "Browser participants"}
             variant="ghost"
           >
             {participantAvatars ?? <Group aria-hidden="true" className="h-4 w-4" />}
@@ -293,7 +366,12 @@ export function SharedBrowserCollaborationControls({
                   ) : null}
                 </ul>
               ) : null}
-              <div className={hasListedController || !participants.length ? undefined : "mt-3"}>{ownershipStatus}</div>
+              {ownershipStatus || noticeText ? (
+                <div className={hasListedController || !participants.length ? undefined : "mt-3"}>
+                  {ownershipStatus}
+                  {noticeText}
+                </div>
+              ) : null}
               {footerAction || children ? (
                 <div className={`space-y-2 ${participants.length || agentDisplayName ? "mt-3 border-t border-slate-200 pt-3 dark:border-slate-700" : "mt-2"}`}>
                   <div className="flex flex-wrap justify-end gap-2">
@@ -304,13 +382,15 @@ export function SharedBrowserCollaborationControls({
               ) : null}
             </Dialog>
           </StudioPopover>
-          <span className="sr-only" role="status">{statusLabel}{requestLabel ? `. ${requestLabel}` : ""}</span>
+          {controlShown ? (
+            <span className="sr-only" role="status">{statusLabel}{requestLabel ? `. ${requestLabel}` : ""}</span>
+          ) : null}
         </DialogTrigger>
       ) : (
         <>
           {children}
           {participantAvatars}
-          {ownershipStatus}
+          {noticeText ?? ownershipStatus}
           {controlAction}
         </>
       )}
