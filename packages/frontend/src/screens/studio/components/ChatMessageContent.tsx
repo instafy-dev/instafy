@@ -20,6 +20,8 @@ import {
   listBuiltInAssistantHandles,
 } from "../../../assistants/localBuiltInAssistantCatalog";
 import { Text } from "../../../components/Text";
+import { Button } from "../../../components/Button";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import {
@@ -2029,24 +2031,25 @@ const MessageContentBody = memo(function MessageContentBody({
         );
       })}
       {upstreamGuidance?.detail || upstreamGuidance?.actionLabel ? (
-        <div
+        <InlineNotice
+          tone="danger"
+          role="alert"
           data-testid="chat-message-proxy-error-guidance"
-          className="mt-3 flex max-w-xl flex-wrap items-center gap-2 rounded-xl border border-rose-200/80 bg-rose-50/70 px-3 py-2 text-xs text-rose-800 dark:border-rose-400/25 dark:bg-rose-500/10 dark:text-rose-100"
-        >
-          {upstreamGuidance.detail ? (
-            <span className="min-w-0 flex-1">{upstreamGuidance.detail}</span>
-          ) : null}
-          {upstreamGuidance.actionLabel && upstreamGuidance.actionKind === "open_ai_settings" ? (
-            <button
+          className="mt-3 max-w-xl"
+          actions={upstreamGuidance.actionLabel && upstreamGuidance.actionKind === "open_ai_settings" ? (
+            <Button
               type="button"
+              preset="inline"
+              variant="outline"
               data-testid="chat-message-proxy-error-action"
-              onClick={handleProxyErrorAction}
-              className="inline-flex flex-none items-center justify-center rounded-full border border-rose-300/80 bg-white/80 px-2.5 py-1 font-medium text-rose-700 shadow-sm shadow-rose-900/5 transition hover:border-rose-400 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 dark:border-rose-300/25 dark:bg-white/10 dark:text-rose-100 dark:hover:bg-white/15"
+              onPress={handleProxyErrorAction}
             >
               {upstreamGuidance.actionLabel}
-            </button>
+            </Button>
           ) : null}
-        </div>
+        >
+          {upstreamGuidance.detail}
+        </InlineNotice>
       ) : null}
     </div>
   );

@@ -195,6 +195,7 @@ describe("proxyError", () => {
     for (const summary of [
       SIGN_IN,
       "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
+      "AI credentials need reconnecting. Reconnect AI credentials, then retry the message.",
     ]) {
       const guidance = resolveProxyUpstreamErrorGuidance(summary);
       expect(guidance?.summary).toBe(SIGN_IN);

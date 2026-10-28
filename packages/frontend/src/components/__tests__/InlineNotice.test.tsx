@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, type FormEvent } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InlineNotice } from "../InlineNotice";
@@ -45,5 +45,26 @@ describe("InlineNotice", () => {
     await act(async () => root.render(<InlineNotice tone="success" role="status">Saved.</InlineNotice>));
     expect(container.querySelector('[role="status"]')?.textContent).toBe("Saved.");
     expect(container.querySelector("button")).toBeNull();
+  });
+
+  it("keeps inline recovery feedback addressable without submitting its surrounding form", async () => {
+    const retry = vi.fn();
+    const submit = vi.fn((event: FormEvent) => event.preventDefault());
+    await act(async () => root.render(
+      <form onSubmit={submit}>
+        <InlineNotice appearance="inline" tone="danger" role="alert" id="connection-error"
+          actions={<Button preset="inline" aria-describedby="connection-error" onPress={retry}>Retry</Button>}>
+          The connection ended. Your draft is still available.
+        </InlineNotice>
+      </form>,
+    ));
+    const notice = container.querySelector('#connection-error')!;
+    const action = notice.querySelector<HTMLButtonElement>('button')!;
+    expect(notice.getAttribute("role")).toBe("alert");
+    expect(notice.textContent).toContain("Your draft is still available.");
+    expect(action.getAttribute("aria-describedby")).toBe(notice.id);
+    await act(async () => action.click());
+    expect(retry).toHaveBeenCalledOnce();
+    expect(submit).not.toHaveBeenCalled();
   });
 });
