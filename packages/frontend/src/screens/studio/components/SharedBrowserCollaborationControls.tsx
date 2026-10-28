@@ -97,8 +97,8 @@ export function SharedBrowserCollaborationControls({
     ? "none"
     : serverOwner.kind === "agent" ? `agent:${serverOwner.displayName}` : `human:${serverOwner.participantId}`;
   // A pressed action waits for the browser's answer: the owner changes (or,
-  // for a request, the request is listed). Until then it reads "Releasing
-  // control…"; without an answer it says so instead of doing nothing.
+  // for a request, the request is listed). Until then it reads "Releasing…";
+  // without an answer it says so instead of doing nothing.
   const [pending, setPending] = useState<{ kind: string; ownerKey: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const answered = pending !== null &&
