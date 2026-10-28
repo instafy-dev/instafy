@@ -28,6 +28,11 @@ export const START_NEEDS_BUILDER = "start_needs_builder";
 export const START_NEEDS_BUILDER_TEXT = "Only people who can edit this space can start it. Ask one of them to open it.";
 /** The space runs on someone's own computer, which is offline: nothing in Studio can start it. */
 export const RUNTIME_OFFLINE = "runtime_offline";
+/**
+ * A start that failed on the machine. The wake's own line is the machine's words (a port, a command, an exit status),
+ * kept in the record and the logs; the person reads what to do next.
+ */
+export const START_FAILED_TEXT = "Couldn't start it. Ask Octo to start it again.";
 
 /** One short line for the card: what went wrong, never a stack or a URL. */
 export function wakeErrorText(cause: unknown): string {
@@ -101,7 +106,7 @@ export async function wakeUntilLive(deps: {
     }
     if (preview) {
       deps.onPreview?.(preview);
-      if (preview.wake?.state === "failed") throw new PreviewWakeError(preview.wake.error ? `Couldn't start: ${preview.wake.error}` : "Couldn't start it.");
+      if (preview.wake?.state === "failed") throw new PreviewWakeError(START_FAILED_TEXT);
       if (preview.wake?.state !== "waking" && sitePreviewShownState(preview) === "live") return preview;
     }
     if (now() - started >= (deps.timeoutMs ?? WAKE_TIMEOUT_MS)) throw new PreviewWakeError("It's taking too long to start.");
