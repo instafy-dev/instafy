@@ -77,7 +77,9 @@ async function expectPhoneTransportRecovery(
 
   const reconnecting = modal.getByTestId("browser-session-reconnecting");
   const frozenFrame = modal.getByTestId("browser-session-frozen-frame");
-  await expect(reconnecting).toBeVisible({ timeout: 3_000 });
+  // The last frame stays at once; "Reconnecting…" joins it only once the
+  // picture has been gone for RECONNECTING_GRACE_MS, so a quick reconnect
+  // may never show it.
   await expect(frozenFrame).toBeVisible({ timeout: 3_000 });
   const frozenScreenshotPath = testInfo.outputPath(
     "shared-browser-phone-390x844-interrupted.png",
