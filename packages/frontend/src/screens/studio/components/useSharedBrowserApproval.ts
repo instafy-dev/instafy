@@ -13,6 +13,24 @@ const APPROVAL_PENDING_POLL_INTERVAL_MS = 400;
 // run in the space the lane only keeps a slow safety read.
 export const APPROVAL_QUIET_POLL_INTERVAL_MS = 15_000;
 export const APPROVAL_QUIET_IDLE_POLL_INTERVAL_MS = 30_000;
+/**
+ * The fewest milliseconds between two reads of a prompt lane, also when it
+ * stops and starts again or comes back to a page or grant it read recently:
+ * inputs that flip quickly, or a page that changes back and forth, cannot
+ * turn it into a read per flip. A page or grant it has not read yet reads at
+ * once.
+ */
+export const APPROVAL_MIN_READ_GAP_MS = APPROVAL_PENDING_POLL_INTERVAL_MS;
+/** How many lanes count as read recently for {@link APPROVAL_MIN_READ_GAP_MS}. */
+const APPROVAL_RECENT_LANES = 8;
+/** Reads that fail in a row wait twice as long each time, up to this. */
+export const APPROVAL_FAILURE_MAX_POLL_INTERVAL_MS = 10_000;
+/**
+ * How long reads must keep failing before the prompt says the connection was
+ * interrupted. One failed read between good ones says nothing.
+ */
+export const APPROVAL_INTERRUPTED_GRACE_MS = 2_000;
+export const APPROVAL_INTERRUPTED_MESSAGE = "Approval connection interrupted. Reconnecting…";
 
 /** A decision the origin accepted. */
 export type SharedBrowserApprovalSettlement = {
@@ -61,6 +79,9 @@ export function useSharedBrowserApproval({
   pendingRef.current = pending;
   const runActiveRef = useRef(runActive);
   const kickPollRef = useRef<(() => void) | null>(null);
+  // When the last read started, and the lanes (machine, page, grant) read
+  // recently, newest last; kept across restarts.
+  const lastReadRef = useRef<{ atMs: number; lanes: string[] }>({ atMs: 0, lanes: [] });
 
   const identity = JSON.stringify([projectId, browserSessionId, runtimeId, browserPageId]);
   // A decision belongs to one mounted, authenticated browser surface. The token
@@ -97,14 +118,21 @@ export function useSharedBrowserApproval({
       return;
     }
 
+    const lane = JSON.stringify([scope.identity, scope.originEndpoint, scope.originAccessToken]);
+    const gapLeft = () =>
+      lastReadRef.current.lanes.includes(lane) ? lastReadRef.current.atMs + APPROVAL_MIN_READ_GAP_MS - Date.now() : 0;
     let cancelled = false;
     let timerId: number | null = null;
     let pollAbort: AbortController | null = null;
     let inFlight = false;
     let lastSettledAt = Date.now();
+    // Reads that failed in a row, and since when.
+    let failures = 0;
+    let failingSinceMs: number | null = null;
     // The next read is due one delay after the last answer: 400 ms while a
     // prompt is shown, 1.5 s while a run may raise one, otherwise a slow
     // safety read; none while hidden. Coming back reads at once if it is due.
+    // Failed reads back off; no two reads start closer than the minimum gap.
     const schedule = () => {
       if (timerId !== null) window.clearTimeout(timerId);
       timerId = null;
@@ -116,14 +144,26 @@ export function useSharedBrowserApproval({
         APPROVAL_QUIET_IDLE_POLL_INTERVAL_MS,
       );
       if (delay === null) return;
-      const wait = lastSettledAt + delay - Date.now();
+      const backedOff = failures > 0
+        ? Math.max(delay, Math.min(APPROVAL_FAILURE_MAX_POLL_INTERVAL_MS, delay * 2 ** Math.min(failures, 8)))
+        : delay;
+      const wait = Math.max(lastSettledAt + backedOff - Date.now(), gapLeft());
       if (wait <= 0) void poll();
       else timerId = window.setTimeout(poll, wait);
     };
     const poll = async () => {
       timerId = null;
       if (inFlight) return;
+      const gap = gapLeft();
+      if (gap > 0) {
+        timerId = window.setTimeout(poll, gap);
+        return;
+      }
       inFlight = true;
+      lastReadRef.current = {
+        atMs: Date.now(),
+        lanes: [...lastReadRef.current.lanes.filter((read) => read !== lane), lane].slice(-APPROVAL_RECENT_LANES),
+      };
       pollAbort = new AbortController();
       try {
         const next = await controllerClient.browserSessions.fetchPendingApproval({
@@ -145,10 +185,16 @@ export function useSharedBrowserApproval({
           pendingRef.current = null;
           setPending(null);
         }
+        failures = 0;
+        failingSinceMs = null;
         setError(null);
       } catch (pollError) {
-        if (!cancelled && scopeRef.current === scope && !isAbortError(pollError) && pendingRef.current) {
-          setError("Approval connection interrupted. Reconnecting…");
+        if (!cancelled && scopeRef.current === scope && !isAbortError(pollError)) {
+          failures += 1;
+          failingSinceMs ??= Date.now();
+          if (pendingRef.current && Date.now() - failingSinceMs >= APPROVAL_INTERRUPTED_GRACE_MS) {
+            setError(APPROVAL_INTERRUPTED_MESSAGE);
+          }
         }
       } finally {
         inFlight = false;
@@ -168,6 +214,7 @@ export function useSharedBrowserApproval({
     };
     kickPollRef.current = kick;
     const unsubscribe = subscribePollingGate(schedule);
+    // The first read goes at once, unless the lane read a moment ago.
     void poll();
 
     return () => {

@@ -152,7 +152,7 @@ Studio Shared Browser shell
 
 `GET /browser/capabilities` returns a versioned, `Cache-Control: no-store` contract. Studio waits for that authoritative response before opening a pixel transport, so runtime discovery cannot briefly connect RFB and then tear it down to upgrade. A WebRTC-enabled runtime advertises `webrtc`, `cdp-screencast`, and `rfb` in that order. A CDP-only runtime advertises `cdp-screencast` and `rfb`; RFB is always the safety lane. Runtime capabilities are authoritative—the Vite flags provision transports on new runtimes, while the runtime flags are the operational kill switches.
 
-Fallback stays on the same runtime and profile. A fatal WebRTC error moves to CDP; a fatal CDP error moves to RFB. During reconnect the UI captures a bounded frozen frame, keeps the prior page visible, and shows an explicit **Reconnecting…** state. CDP is ready after its first painted JPEG. WebRTC controllers wait for both a decoded video frame and the separate input WebSocket; view-only participants are ready from video alone and never open the input socket. CDP has a bounded first-frame startup watchdog; WebRTC also monitors active, visible video for frame stalls.
+Fallback stays on the same runtime and profile. A fatal WebRTC error moves to CDP; a fatal CDP error moves to RFB. During reconnect the UI captures a bounded frozen frame, keeps the prior page visible, and shows an explicit **Reconnecting…** state once the picture has been gone for 1.5 s (`RECONNECTING_GRACE_MS`); a reconnect that is back sooner shows nothing, so the note never flickers with the live view. CDP is ready after its first painted JPEG. WebRTC controllers wait for both a decoded video frame and the separate input WebSocket; view-only participants are ready from video alone and never open the input socket. CDP has a bounded first-frame startup watchdog; WebRTC also monitors active, visible video for frame stalls.
 
 ## Multi-user presence and exclusive control
 
@@ -211,7 +211,15 @@ RFB cannot safely separate pixels from arbitrary raw input without parsing the
 RFB client protocol. It therefore remains driver-exclusive: non-drivers use
 WebRTC or CDP, and the origin rechecks the exact owner before forwarding every
 client packet (with a one-second idle poll to close a quiet revoked bridge). It
-is not presented as a view-only collaboration lane.
+is not presented as a view-only collaboration lane. On a runtime whose only
+viewer is RFB, a person who may control the browser while Octo or someone else
+drives it keeps a live view without a picture: the last frame, and who has
+control with **Take over** (or the request controls). When nobody holds control
+the view says to request it.
+
+The collaboration roster belongs to the browser, not to a tab: its socket stays
+connected while Studio's tab list is empty or reloading, and the participant's
+page follows by heartbeat.
 
 Agent control uses the same runtime-wide authority. A Shared Browser job writes
 a strict, mode-0600 heartbeat marker under the protected runtime directory
@@ -905,7 +913,16 @@ action log every second while it keeps finding new actions; each read that
 finds none doubles the wait up to 4 s (the agent spends most of a turn
 thinking between actions), and the next action found brings back the 1 s tail.
 It reads the pending prompt 1.5 s after each answer (every 400 ms while a
-prompt is shown). With neither, it reads the action log every
+prompt is shown). Reads that fail in a row wait twice as long each time, up to
+10 s, and the prompt says "Approval connection interrupted. Reconnecting…"
+only once reads have kept failing for 2 s. Two reads are never closer than
+400 ms when the poll stops and starts again, or comes back to a machine, page
+or grant it read recently (one it has not read yet reads at once), so a page
+that changes back and forth costs no read per change. The tab list and action
+log polls likewise read "at once" at most once a second while they are
+switched off and on, or while their pace keeps changing: a change soon after
+the read for the change before it owes one read a second after that read, and
+later changes neither add reads nor put it off. With neither, it reads the action log every
 10 s and the prompt every 15 s, 30 s each once nobody has touched the tab for
 three minutes. A run starting, or the agent taking control, reads both at once;
 a run ending takes one more read of the action log, so a human-input request
