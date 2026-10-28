@@ -10,6 +10,7 @@ import {
   requestPasswordRecovery,
 } from "../auth/pkce";
 import {
+  claimNativeAuthCallback,
   clearNativeAuthCallbackAttemptId,
   clearPendingNativeAuthAttempt,
   NATIVE_AUTH_ERROR_EVENT,
@@ -307,7 +308,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     let cancelled = false;
-    const handled = new Set<string>();
     let inFlight = false;
     let resumeCheckTimeout: number | null = null;
 
@@ -411,12 +411,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       const trimmed = (rawUrl ?? "").trim();
-      if (!trimmed || handled.has(trimmed) || inFlight) {
+      if (!trimmed || inFlight) {
         return;
       }
 
       const parsed = parseNativeAuthCallbackUrl(trimmed);
-      if (!parsed) {
+      if (!parsed || !claimNativeAuthCallback(parsed)) {
         return;
       }
 
@@ -428,7 +428,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const kind = (event: string) => `auth.login.${provider}.${event}`;
 
       inFlight = true;
-      handled.add(trimmed);
       try {
         const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
         const hashParams = new URLSearchParams(hash);

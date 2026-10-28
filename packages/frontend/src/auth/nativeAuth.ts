@@ -69,6 +69,46 @@ function isSupportedNativeAuthScheme(rawScheme: string): boolean {
   );
 }
 
+const claimedNativeAuthCallbacks = new Set<string>();
+
+/**
+ * Claims a parsed callback for the one handler that acts on it. The app-wide
+ * handler (AuthProvider) and the login page's handler both listen for
+ * instafy://auth, and on Android both receive the same deep link. Each used to
+ * keep its own record of handled URLs, so both exchanged the code: the first
+ * signed in, the second found the code spent and reported a failure over the
+ * good sign-in. Claim synchronously, before any await, and act only on true.
+ *
+ * A code is keyed by itself, since it can be exchanged once, so a remounted
+ * login page replaying the launch URL cannot spend it again. Any other
+ * callback is keyed by its URL until the next sign-in starts: a refusal
+ * carries nothing unique to its attempt, so a second refusal of a later
+ * attempt would otherwise be dropped.
+ */
+export function claimNativeAuthCallback(callbackUrl: URL): boolean {
+  const hashParams = new URLSearchParams(callbackUrl.hash.replace(/^#/, ""));
+  const code = (callbackUrl.searchParams.get("code") ?? hashParams.get("code") ?? "").trim();
+  const key = code ? `code:${code}` : `url:${callbackUrl.href}`;
+  if (claimedNativeAuthCallbacks.has(key)) {
+    return false;
+  }
+  claimedNativeAuthCallbacks.add(key);
+  return true;
+}
+
+/** Called when a sign-in starts, so its callback can repeat the last one's URL. */
+export function releaseNativeAuthCallbackUrlClaims(): void {
+  for (const key of claimedNativeAuthCallbacks) {
+    if (key.startsWith("url:")) {
+      claimedNativeAuthCallbacks.delete(key);
+    }
+  }
+}
+
+export function forgetNativeAuthCallbackClaimsForTests(): void {
+  claimedNativeAuthCallbacks.clear();
+}
+
 export function parseNativeAuthCallbackUrl(rawUrl: string): URL | null {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
@@ -153,16 +193,33 @@ export function createPendingNativeAuthAttempt(provider: string): PendingNativeA
   };
 }
 
+/**
+ * How long a started sign-in still names the callback that comes back: long
+ * enough for a slow provider sign-in, after which an abandoned attempt is
+ * ignored rather than labelling an unrelated callback.
+ */
+const PENDING_NATIVE_AUTH_ATTEMPT_MAX_AGE_MS = 30 * 60 * 1000;
+
+// The attempt lives in localStorage, not sessionStorage. Android can end the
+// app's process while the provider's custom tab is in front; the deep link then
+// starts a new process with an empty sessionStorage. The PKCE verifier is in
+// localStorage, so the sign-in still completes, and the attempt has to survive
+// with it or the callback names the wrong provider.
 export function readPendingNativeAuthAttempt(): PendingNativeAuthAttempt | null {
   if (typeof window === "undefined") {
     return null;
   }
   try {
-    const raw = window.sessionStorage?.getItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY);
+    const raw = window.localStorage?.getItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY);
     if (!raw) {
       return null;
     }
-    return normalizePendingNativeAuthAttempt(JSON.parse(raw));
+    const attempt = normalizePendingNativeAuthAttempt(JSON.parse(raw));
+    const startedAt = attempt ? Date.parse(attempt.startedAt) : Number.NaN;
+    if (!Number.isFinite(startedAt) || Math.abs(Date.now() - startedAt) > PENDING_NATIVE_AUTH_ATTEMPT_MAX_AGE_MS) {
+      return null;
+    }
+    return attempt;
   } catch {
     return null;
   }
@@ -174,10 +231,10 @@ export function writePendingNativeAuthAttempt(attempt: PendingNativeAuthAttempt 
   }
   try {
     if (!attempt) {
-      window.sessionStorage?.removeItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY);
+      window.localStorage?.removeItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY);
       return;
     }
-    window.sessionStorage?.setItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY, JSON.stringify(attempt));
+    window.localStorage?.setItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY, JSON.stringify(attempt));
   } catch {
     // ignore storage failures
   }
