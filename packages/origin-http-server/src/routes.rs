@@ -240,11 +240,19 @@ enum WorkspaceSyncBehavior {
     RefreshInBackground,
 }
 
+/// How long a browser may reuse a preflight answer, as the controller's own
+/// CORS policy says. Studio calls an origin it reaches directly (one the
+/// controller does not proxy) with an `Authorization` header, and reads the
+/// browser approval prompt every 400 ms while one is shown: without this every
+/// read costs an OPTIONS first.
+const CORS_PREFLIGHT_MAX_AGE: Duration = Duration::from_secs(600);
+
 pub fn router(state: AppState) -> Router {
     let cors_layer = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .max_age(CORS_PREFLIGHT_MAX_AGE);
 
     let health_routes = Router::new().route("/healthz", get(|| async { "ok" }));
 
@@ -4512,6 +4520,55 @@ mod tests {
             None,
         )
         .expect("open workspace root")
+    }
+
+    /// Studio reads the browser approval prompt with an `Authorization`
+    /// header every 400 ms while one is shown. An origin it reaches directly
+    /// (not through the controller) must let the browser cache the preflight,
+    /// as the controller does, or every read costs an OPTIONS first.
+    #[tokio::test]
+    async fn a_preflight_for_the_approval_read_is_cached_for_ten_minutes() {
+        let workspace = TempDir::new().expect("workspace");
+        let state = test_app_state(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &workspace,
+            "http://127.0.0.1:1".parse().expect("controller url"),
+            false,
+        );
+        let app = super::router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
+        let address = listener.local_addr().expect("origin address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve origin");
+        });
+        let response = reqwest::Client::new()
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://{address}/browser/approval/pending?runtimeId=r&browserPageId=p"),
+            )
+            .header("origin", "http://localhost:5174")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "authorization")
+            .send()
+            .await
+            .expect("preflight");
+        server.abort();
+        assert_eq!(response.status(), StatusCode::OK);
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        assert_eq!(header("access-control-max-age").as_deref(), Some("600"));
+        // The policy is otherwise the same: any origin, these methods.
+        assert_eq!(header("access-control-allow-origin").as_deref(), Some("*"));
+        assert_eq!(
+            header("access-control-allow-methods").as_deref(),
+            Some("GET,POST,OPTIONS")
+        );
     }
 
     const HELLO_BLOB: &str = "ce013625030ba8dba906f756967f9e9ca394464a";
