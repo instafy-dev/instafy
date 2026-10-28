@@ -276,7 +276,7 @@ export type TurnStep = {
   state: StepState;
   /**
    * The label Details shows beside the step: from its activity, else a
-   * neutral one for its kind ("Checked the space"). A finished step reads in
+   * neutral one for its kind ("Ran a command"). A finished step reads in
    * the past tense, a failed one as what it tried ("Tried searching the web").
    */
   label: string;
@@ -404,18 +404,24 @@ export function primaryEntry(activity: StepActivity): ActivityEntry {
 }
 
 // Steps no runtime labelled (an unlisted command, an older runtime) read as
-// what such steps nearly always are: looking around the space, a tool, a
-// search or an edit. The command itself stays the row's second line.
+// what is sure of their kind, the words the line's own neutral count uses. An
+// unlabelled command may read a file, but as often stops a site by its
+// process, writes a file or deletes one, so it never reads as a look around.
+// The command itself stays the row's second line.
 const NEUTRAL_LABELS: Record<StepKind, { live: string; done: string }> = {
-  command: { live: "Checking the space", done: "checked the space" },
+  command: { live: "Running a command", done: "ran a command" },
   tool: { live: "Using a tool", done: "used a tool" },
   search: { live: "Searching the web", done: "searched the web" },
   edit: { live: "Editing files", done: "edited files" },
 };
 
-// A step that names the turn's result when no step made something itself:
-// a site that opened in a preview is what a turn without its own outcome made.
-const RESULT_WITHOUT_OUTCOME = new Map<string, string>([["instafy/preview-open", "opened a preview"]]);
+// Steps that leave a site open or stopped. When no step made something itself,
+// the turn's result is the last of them that succeeded: a site it stopped and
+// opened again is open, never "stopped the preview".
+const PREVIEW_RESULTS = new Map<string, string>([
+  ["instafy/preview-open", "opened a preview"],
+  ["instafy/preview-close", "stopped the preview"],
+]);
 
 function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many.replace("{n}", String(count));
@@ -526,10 +532,16 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
         }
         continue;
       }
-      if (entry.role === "quiet") {
+      const previewResult = PREVIEW_RESULTS.get(entry.key);
+      if (previewResult !== undefined) {
+        // A chain's entries come in the order it ran them, so the later
+        // preview step overwrites the earlier one.
         if (step.state === "done") {
-          result = RESULT_WITHOUT_OUTCOME.get(entry.key) ?? result;
+          result = previewResult;
         }
+        continue;
+      }
+      if (entry.role === "quiet") {
         continue;
       }
       if (!entry.done) {

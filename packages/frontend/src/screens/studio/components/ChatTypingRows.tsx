@@ -46,7 +46,17 @@ function AssistantTypingStatusLine({
   const isFinalizing = snapshot.phase === "finalizing";
   // The same steady label as the turn's own line, which takes over from this
   // row: a turn opens with one "Starting…", not three labels in a second.
-  const label = useSteadyActivityLabel(snapshot.label, !hidden);
+  // The runtime-busy notice (the one label that wraps) asks the person to
+  // act, so it never waits behind the label before it.
+  const label = useSteadyActivityLabel(snapshot.label, !hidden, false, snapshot.wraps);
+  // A screen reader hears the label on screen: the words that came with it,
+  // not those of a newer label the row still holds back.
+  const ariaLabels = useRef(new Map<string, string>());
+  ariaLabels.current.set(snapshot.label, snapshot.ariaLabel);
+  for (const key of [...ariaLabels.current.keys()]) {
+    if (key !== label && key !== snapshot.label) ariaLabels.current.delete(key);
+  }
+  const ariaLabel = ariaLabels.current.get(label) ?? snapshot.ariaLabel;
   // One line in a fixed box, whatever the label: a multi-agent count or a
   // fallback that wrapped at phone width changed the row's height each time
   // the runs changed. Only the runtime-busy notice, a sentence to read, wraps.
@@ -77,7 +87,7 @@ function AssistantTypingStatusLine({
         }
       }}
     >
-      {!hidden ? <span className="sr-only">{snapshot.ariaLabel}</span> : null}
+      {!hidden ? <span className="sr-only">{ariaLabel}</span> : null}
       {!hidden ? snapshot.indicator : null}
       <span
         className={["instafy-status-sweep min-w-0 max-w-full text-xs", labelClassName].join(" ")}

@@ -227,6 +227,89 @@ describe("ChatTypingRows", () => {
     expect(label()).toBe("Thinking…");
   });
 
+  // What a screen reader hears goes with the label on screen: while "Starting…"
+  // holds, the row is not announced as thinking, and a label that never showed
+  // is never read out.
+  it("announces the label the row shows, not one it is holding back", async () => {
+    vi.useFakeTimers();
+    const spoken = () =>
+      container.querySelector('[data-testid="assistant-typing-indicator"] .sr-only')?.textContent;
+    const row = (phase: "waiting" | "thinking", text: string, aria: string) => (
+      <ChatTypingRows
+        peerTypingLabel={null}
+        isAssistantTyping
+        isAssistantTypingCoveredByJobThreadPreview={false}
+        typingAgents={[]}
+        hasMultipleTypingAgents={false}
+        typingAgentHandle="octo"
+        typingAgentAvatarSeed="octo"
+        typingIndicatorState={{ phase, label: null }}
+        typingStatusLabel={text}
+        typingStatusAriaLabel={aria}
+        isThinkingLabelExpanded={false}
+        onToggleThinkingLabel={() => undefined}
+        latestDisplayedMessageId="message-1"
+        renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+      />
+    );
+    await act(async () => {
+      root.render(row("waiting", "Starting…", "Octo is starting"));
+    });
+    expect(spoken()).toBe("Octo is starting");
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+      root.render(row("thinking", "Thinking…", "Octo is thinking"));
+    });
+    expect(spoken()).toBe("Octo is starting");
+    await act(async () => {
+      vi.advanceTimersByTime(THINKING_LABEL_DELAY_MS);
+    });
+    expect(spoken()).toBe("Octo is thinking");
+  });
+
+  // The runtime-busy notice asks the person to do something ("Stop it there or
+  // let it go idle"), so it never waits behind the label before it, and the
+  // label after it follows at once when the machine is free.
+  it("shows the runtime-busy notice at once, and lets it go at once", async () => {
+    vi.useFakeTimers();
+    const shown = () =>
+      container.querySelector('[data-testid="assistant-typing-indicator"] [data-sweep-text]')?.textContent;
+    const notice =
+      'Your cloud runtime is busy in "Space B". Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.';
+    const row = (text: string, wraps: boolean) => (
+      <ChatTypingRows
+        peerTypingLabel={null}
+        isAssistantTyping
+        isAssistantTypingCoveredByJobThreadPreview={false}
+        typingAgents={[]}
+        hasMultipleTypingAgents={false}
+        typingAgentHandle="octo"
+        typingAgentAvatarSeed="octo"
+        typingIndicatorState={{ phase: "waiting", label: null }}
+        typingStatusLabel={text}
+        typingStatusAriaLabel={text}
+        typingStatusWraps={wraps}
+        isThinkingLabelExpanded={false}
+        onToggleThinkingLabel={() => undefined}
+        latestDisplayedMessageId="message-1"
+        renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+      />
+    );
+    await act(async () => {
+      root.render(row("Starting…", false));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+      root.render(row(notice, true));
+    });
+    expect(shown()).toBe(notice);
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+      root.render(row("Starting…", false));
+    });
+    expect(shown()).toBe("Starting…");
+  });
+
   it("keeps every typing label on one truncated line except the runtime-busy notice", async () => {
     // A multi-agent count or a fallback could wrap at phone width and flip
     // between one and two lines as runs changed; only the clickable reasoning

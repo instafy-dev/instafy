@@ -111,7 +111,7 @@ describe("a standalone command in the conversation", () => {
   it("never shows an unlabelled command line, which can carry the space id", async () => {
     await render(commandMessage(`instafy secrets list --space ${SPACE_ID} --json`, "[]", null));
 
-    expect(container.querySelector('[data-testid="turn-activity-step-label"]')?.textContent).toBe("Checked the space");
+    expect(container.querySelector('[data-testid="turn-activity-step-label"]')?.textContent).toBe("Ran a command");
     expect(container.textContent).not.toContain(SPACE_ID);
     expect(container.textContent).not.toContain("--json");
     expect(container.querySelector('[data-testid="chat-command-output"]')).toBeNull();

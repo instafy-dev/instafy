@@ -349,6 +349,29 @@ describe("summarizeTurnActivity", () => {
     expect(summarize(messages).summary).toBe("Stopped the preview");
   });
 
+  // "Restart the preview": a turn that stopped the site and opened it again
+  // left it open, so the line never says it stopped. The later step is what
+  // is true now, in separate steps or in one chain.
+  it("names the preview step that came last, so a restarted site never reads Stopped", () => {
+    const close = (overrides: Record<string, unknown> = {}) =>
+      command(PREVIEW_CLOSE, { command: "bash -lc 'instafy preview close 9b5fcdfb'", ...overrides });
+    const open = () => command(PREVIEW_OPEN, { command: "bash -lc 'instafy preview open --port 4178'" });
+    expect(summarize([close(), open()]).summary).toBe("Opened a preview");
+    expect(summarize([open(), close()]).summary).toBe("Stopped the preview");
+    expect(summarize([command({ ...PREVIEW_CLOSE, also: [entryOf(PREVIEW_OPEN)] })]).summary).toBe("Opened a preview");
+    // A close that failed left the site as it was.
+    expect(summarize([open(), close({ status: "failed", exitCode: 1 })]).summary).toBe("Opened a preview");
+  });
+
+  // Stopping a preview is the turn's result only when it made nothing else:
+  // a map it built and then stopped is still a built map.
+  it("ranks a stopped preview below what the turn made", () => {
+    expect(
+      summarize([command(ADD_POINT), command(VALIDATE), command(PREVIEW_CLOSE, { command: "bash -lc 'instafy preview close 9b5fcdfb'" })])
+        .summary,
+    ).toBe("Built the map, looked up a place");
+  });
+
   // A local test's map turn, its labels as the runtime streamed them.
   it("reads a map turn by what it made", () => {
     const pack = (sub: string, role: string, live: string, done?: string) => ({
@@ -400,14 +423,24 @@ describe("summarizeTurnActivity", () => {
       return item.kind === "step" ? item.step.label : null;
     };
     expect(label(command(PREVIEW_OPEN))).toBe("Opened a preview");
-    expect(label(command(null))).toBe("Checked the space");
-    expect(label(command(null, { status: "in_progress", exitCode: null }))).toBe("Checking the space");
-    expect(label(command(null, { status: "failed", exitCode: 1 }))).toBe("Tried checking the space");
+    expect(label(command(null))).toBe("Ran a command");
+    expect(label(command(null, { status: "in_progress", exitCode: null }))).toBe("Running a command");
+    expect(label(command(null, { status: "failed", exitCode: 1 }))).toBe("Tried running a command");
     expect(label(step("mcp_tool_call", null, { server: "files", tool: "list" }))).toBe("Used a tool");
     expect(label(step("mcp_tool_call", { v: 1, key: "browser/use", role: "content", live: "Using the browser", done: "used the browser", count: 1, also: [] }, { status: "failed" }))).toBe(
       "Tried using the browser",
     );
     expect(label(step("file_change", null, { paths: ["a.md", "b.md"] }))).toBe("Edited 2 files");
+  });
+
+  // Steps no runtime labelled are of every kind: reading a file, but also
+  // stopping a site by its process ("kill 4321", as the previews skill says),
+  // writing a file or deleting one. Their row claims nothing it cannot know.
+  it("never says an unlabelled command only looked around", () => {
+    for (const script of ["cat SKILL.md", "kill 4321", "cat > index.html <<'EOF'", "rm -rf dist", "python3 AGENTS.py"]) {
+      const item = summarize([command(null, { command: `bash -lc '${script}'` })]).details[0];
+      expect(item.kind === "step" && item.step.label, script).toBe("Ran a command");
+    }
   });
 
   it("names the two biggest content groups in the order they happened", () => {

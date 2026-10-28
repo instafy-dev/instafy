@@ -292,6 +292,8 @@ function Harness({
         typingIndicatorState={limitWait ? { phase: "waiting", label: null } : { phase: "thinking", label: THINKING_LABEL }}
         typingStatusLabel={limitWait?.label ?? "Thinking…"}
         typingStatusAriaLabel={limitWait?.ariaLabel ?? "Octo is thinking"}
+        // As ChatPanel passes it: the runtime-busy notice is the label that wraps.
+        typingStatusWraps={limitWait?.isRuntimeBusyNotice === true}
         suppressAssistantStatus={stoppedTurnNotice !== null}
         isThinkingLabelExpanded={false}
         onToggleThinkingLabel={() => undefined}

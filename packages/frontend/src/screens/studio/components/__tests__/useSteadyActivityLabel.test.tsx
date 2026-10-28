@@ -154,4 +154,17 @@ describe("useSteadyActivityLabel", () => {
     await render("Looked up 3 places", false);
     expect(line()).toBe("Looked up 3 places");
   });
+
+  // Once the person answered, the line never says it still waits for them:
+  // "Deny" on a browser prompt read "Waiting for you" for 3 s more.
+  it("drops Waiting for you as soon as the person answered", async () => {
+    await render("Waiting for you");
+    await wait(400);
+    await render("Thinking…");
+    expect(line()).toBe("Thinking…");
+    await render("Waiting for you");
+    expect(line()).toBe("Waiting for you");
+    await render("Opening visitlisboa.com…");
+    expect(line()).toBe("Opening visitlisboa.com…");
+  });
 });

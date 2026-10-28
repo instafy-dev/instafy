@@ -24,7 +24,7 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives |
 | The model is working with no step running | `Thinking…` (never its reasoning titles or notes), once there has been no step for 3 seconds; until then the line keeps the step before it, or `Starting…` |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
-| Done | what it made leads (the latest outcome), then up to two "what it did" groups, the biggest, in the order they happened: `Built the map, looked up 14 places, read 6 pages`; then, after ` · `, what the person answered to the turn's browser prompts. A turn that made nothing labelled but opened a preview leads with it: `Opened a preview, edited a file`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web` |
+| Done | what it made leads (the latest outcome), then up to two "what it did" groups, the biggest, in the order they happened: `Built the map, looked up 14 places, read 6 pages`; then, after ` · `, what the person answered to the turn's browser prompts. A turn that made nothing labelled but opened or stopped a preview leads with the later of the two: `Opened a preview, edited a file`, `Stopped the preview`, and a site stopped and opened again reads `Opened a preview`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web` |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files` |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
 | Done, nothing of its own after an automatic retry | `Took two tries`, so Details opens on the first try |
@@ -33,8 +33,10 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 
 - While the turn runs, the line changes only to a label that has lasted: each one it shows stays at
   least 1.2 seconds, and a label replaced before its turn came is never shown, so a step that ends
-  at once never flashes past (`useSteadyActivityLabel.ts`). `Waiting for you` shows at once. The
-  typing row before the turn's own line uses the same rule, so a turn opens with one `Starting…`.
+  at once never flashes past (`useSteadyActivityLabel.ts`). `Waiting for you` shows at once, and goes at once when the person answered. The
+  typing row before the turn's own line uses the same rule, so a turn opens with one `Starting…`,
+  and a screen reader hears the label it shows, never one it holds back. Its runtime-busy notice,
+  which asks the person to act, shows and goes at once.
 - Once the turn has a step, the whole line is one button that opens Details (`aria-expanded`,
   `aria-controls`); it reads "Details ›", then "Hide details", and opens and closes as often as it
   is pressed. Opening Details never moves the line or changes the turn's chrome.
@@ -75,12 +77,12 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   not quiet, so `uw geocode Baixa; uw stay …` reads "Found places to stay". A finished row reads
   in the past tense ("Opened a preview"), a running one as it runs, and a failed one as what it
   tried ("Tried checking the map"), never as what it would have done. A row with no label reads
-  "Checked the space" ("Checking the space" while it runs; "Used a tool" for a tool): the command
+  "Ran a command" ("Running a command" while it runs; "Used a tool" for a tool), never a guess at what it did: the command
   itself is only its second line. It shows the newest 60 rows, with "Show earlier steps" above
   them; pressing that moves focus to the first row it reveals.
 - Cards (secrets, connections, action and preview cards, team plans) stay in the turn's default
   view, and the file changes stay under the reply. Run traces keep their full view.
-- A command on its own in the conversation is one row: its label (or "Checked the space"), its
+- A command on its own in the conversation is one row: its label (or "Ran a command"), its
   state and a chevron that shows the command and its output.
 - The typing row that shows before the turn's own line, or under a newer message while a turn
   runs (a person wrote in the meantime), says the run's phase ("Starting…", "Thinking…", "Trying
@@ -106,7 +108,8 @@ from trusted data only, in this order:
    is "Searching the web" (the step itself keeps only the query and the number of results);
    `instafy preview open` and `instafy preview check` are quiet (the preview card already says it),
    with a past form for Details ("opened a preview", "checked the page"); `instafy preview close`
-   is what the turn made, "stopped the preview", once it exits 0; `instafy bind init|serve`,
+   is "stopped the preview" once it exits 0 (Studio names a preview opened or stopped only when
+   the turn made nothing else, and then the later of the two); `instafy bind init|serve`,
    `instafy tunnel start` and `instafy conversation search|grep|show` have their own words;
    `instafy secrets …` and `instafy agents context …` are quiet.
 3. **A few common tools**: package installs (`pnpm`/`npm`/`yarn` `install|i|add`), test runners
