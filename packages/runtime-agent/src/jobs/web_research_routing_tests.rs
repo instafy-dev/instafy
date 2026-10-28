@@ -640,6 +640,47 @@ fn the_research_skill_names_reference_search_for_open_sources() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
 }
 
+/// Three or more products to compare are a research team's job, one lane per product: a lane reads with the research
+/// skill's readers and follows its "Comparing items" (a price from the maker's or a shop's page or why not, the reviews
+/// the request asks for, of that exact model), and an unedited earlier copy of the lane rules is upgraded. An ask for
+/// independent reviews reaches the research skill.
+#[test]
+fn a_research_team_lane_compares_its_product_by_the_research_skill() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let current = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-research-team/references/researcher.md"
+    ));
+    let rules = flat(current);
+    for needle in [
+        "else `instafy-web-research` (`instafy web read`, and `instafy web search` to find pages) or Instafy's browser (`instafy-browser-automation`)",
+        "A product follows \"Comparing items\" in `instafy-web-research`: its exact model as its official page gives it;",
+        "a price from the maker's or a shop's own page, else `\"check: price (<why>)\"` in `unknowns`;",
+        "as many independent reviews of that exact model as the request asks for, else `\"check: 1 of 2 reviews found\"`.",
+    ] {
+        assert!(rules.contains(needle), "{needle}");
+    }
+    assert!(current.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+
+    let tmp = scaffolded_space();
+    let path = tmp
+        .path()
+        .join(learn::RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH);
+    assert_eq!(fs::read_to_string(&path).unwrap(), current);
+    let previous = include_str!("legacy/research-team-researcher-v1.md");
+    assert!(!previous.contains("Comparing items"));
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&path).unwrap(), current);
+
+    let contexts = build_top_level_context_nodes(tmp.path());
+    let ids = routed(
+        &contexts,
+        "compare three robot vacuums for me, with two independent reviews of each",
+    );
+    assert!(ids.iter().any(|id| id == RESEARCH), "{ids:?}");
+}
+
 /// Comparing items: a price per item from the maker's or a shop's page, or "price unknown" with why and a way for the
 /// person to check (a search with the space's key, reference search for shops' official sites, a guided link); the
 /// independent reviews the person asked for, of the exact model, or how many were found; and a stated limit that never

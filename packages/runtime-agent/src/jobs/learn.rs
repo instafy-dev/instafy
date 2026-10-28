@@ -284,7 +284,10 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     include_str!("legacy/interactive-artifacts-v1.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[];
-const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[];
+const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
+    // From before a lane read with the research skill and compared a product by its "Comparing items".
+    include_str!("legacy/research-team-researcher-v1.md"),
+];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-router/SKILL.md"

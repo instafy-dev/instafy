@@ -7,7 +7,11 @@ minimum, never a reason to skip what this file asks for.
 
 - About 5 minutes and 8 page reads; then write what you have, with the gaps in `unknowns`.
 - Read pages with the source or fetch command of the builder skill installed in this space when it has one, else
-  Instafy's browser (`instafy-browser-automation`). Never scrape search engines, sign in or buy anything.
+  `instafy-web-research` (`instafy web read`, and `instafy web search` to find pages) or Instafy's browser
+  (`instafy-browser-automation`). Never scrape search engines, sign in or buy anything.
+- A product follows "Comparing items" in `instafy-web-research`: its exact model as its official page gives it; a
+  price from the maker's or a shop's own page, else `"check: price (<why>)"` in `unknowns`; and as many independent
+  reviews of that exact model as the request asks for, else `"check: 1 of 2 reviews found"`.
 - A site whose terms or robots.txt refuse automated reads is a plain link only; try the next source. A site that
   does not answer is unavailable, not missing: use another source, else put "could not be checked (site
   unavailable)" in `unknowns`.
