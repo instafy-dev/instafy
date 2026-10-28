@@ -11,8 +11,9 @@
 
 use super::*;
 use crate::browser_hand_back::{
-    HAND_BACK_CLAIM_KEY, HAND_BACK_KEY, HAND_BACK_PAUSED_CODE, HAND_BACK_SECOND_HOP_CODE,
-    HAND_BACK_SUPERSEDED_CODE, HAND_BACK_USED_CODE,
+    HAND_BACK_CLAIM_KEY, HAND_BACK_KEY, HAND_BACK_NOTHING_READ_CODE, HAND_BACK_NOT_BUILDING_CODE,
+    HAND_BACK_PAUSED_CODE, HAND_BACK_SECOND_HOP_CODE, HAND_BACK_SUPERSEDED_CODE,
+    HAND_BACK_USED_CODE,
 };
 
 fn fixtures() -> serde_json::Value {
@@ -164,14 +165,81 @@ impl Chain {
         Ok(())
     }
 
-    /// An ordinary turn that ends with a card, and the browser turn that
-    /// continues it, still running: the card's job and the browser job.
+    /// A message from the runtime in a running turn, as `/agent/message`
+    /// posts one.
+    async fn post(
+        &self,
+        job_id: &Uuid,
+        content: &str,
+        message_type: &str,
+        metadata: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.pool
+            .get()
+            .await?
+            .execute(
+                "update agent_jobs set status = 'leased' where id = $1",
+                &[job_id],
+            )
+            .await?;
+        let token = mint_agent_message_token(&self.config, &self.project_id)?;
+        let status = post_agent_endpoint(
+            &self.state,
+            &token,
+            "/agent/message",
+            json!({
+                "job_id": job_id,
+                "content": content,
+                "message_type": message_type,
+                "metadata": metadata,
+            }),
+        )
+        .await?;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{message_type} message for {job_id}"
+        );
+        Ok(())
+    }
+
+    /// The card a turn ends with, as the runtime posts it
+    /// (runtime-agent `browser_request.rs`).
+    async fn post_card(&self, job_id: &Uuid, continue_building: bool) -> anyhow::Result<()> {
+        let mut request = json!({ "task": "Read the coastal timetables.", "location": "auto" });
+        if continue_building {
+            request["continueBuilding"] = json!(true);
+        }
+        self.post(
+            job_id,
+            "Continue this task in Instafy's browser.",
+            "action_request",
+            json!({
+                "messageType": "action_request",
+                "details": { "testId": "browser-request-card", "browserRequest": request },
+            }),
+        )
+        .await
+    }
+
+    /// An ordinary turn that ends with a card that continues building, and
+    /// the browser turn that continues it, still running: the card's job and
+    /// the browser job.
     async fn card_and_running_browser_turn(&self) -> anyhow::Result<(Uuid, Uuid)> {
+        self.card_and_running_browser_turn_for(true).await
+    }
+
+    /// The same, with a card for a question when `continue_building` is false.
+    async fn card_and_running_browser_turn_for(
+        &self,
+        continue_building: bool,
+    ) -> anyhow::Result<(Uuid, Uuid)> {
         let card_turn = self
             .send(&self.owner, "Plan a day on the coast.", json!({}))
             .await
             .map_err(|error| controller_error("card turn", error))?;
         let card_job = self.job_of(&card_turn).await?;
+        self.post_card(&card_job, continue_building).await?;
         self.finish(
             &card_job,
             Some("Continue this task in Instafy's browser."),
@@ -408,6 +476,8 @@ async fn a_second_hop_is_refused() -> anyhow::Result<()> {
             assert_eq!(record["reply"], streamed);
             assert_eq!(record["findings"][0]["url"], "https://a.example.com/");
             assert_eq!(record["findings"][0]["title"], "Page");
+            // An older runtime let a hand-back turn end with a card.
+            chain.post_card(&hand_back_job, true).await?;
             chain
                 .finish(
                     &hand_back_job,
@@ -586,6 +656,7 @@ async fn a_teammates_card_or_a_later_message_hands_nothing_back() -> anyhow::Res
                 .await
                 .map_err(|error| controller_error("teammate's card turn", error))?;
             let card_job = chain.job_of(&card_turn).await?;
+            chain.post_card(&card_job, true).await?;
             chain
                 .finish(
                     &card_job,
@@ -622,6 +693,143 @@ async fn a_teammates_card_or_a_later_message_hands_nothing_back() -> anyhow::Res
             assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
             assert_eq!(body.code.as_deref(), Some(HAND_BACK_SUPERSEDED_CODE));
             assert_eq!(jobs().await?, before, "a refused hand-back starts no turn");
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Local drive, Oct 28: after every browser turn Octo started a turn nobody
+/// asked for. A card for a question is answered by its browser turn, and a
+/// browser turn that read no page has nothing to continue with: neither hands
+/// back, and neither starts a turn.
+#[tokio::test]
+async fn a_question_or_a_turn_that_read_nothing_hands_nothing_back() -> anyhow::Result<()> {
+    with_chain("browser-hand-back-only-builds", |chain| {
+        Box::pin(async move {
+            let fixtures = fixtures();
+            let jobs = || async {
+                anyhow::Ok(
+                    chain
+                        .pool
+                        .get()
+                        .await?
+                        .query_one(
+                            "select count(*) from agent_jobs where conversation_id = $1",
+                            &[&chain.conversation_id],
+                        )
+                        .await?
+                        .get::<_, i64>(0),
+                )
+            };
+
+            // A card for a question ("find the opening hours").
+            let (_, question_job) = chain.card_and_running_browser_turn_for(false).await?;
+            chain
+                .finish(
+                    &question_job,
+                    Some(fixtures["browserReply"].as_str().unwrap()),
+                    "succeeded",
+                )
+                .await?;
+            let before = jobs().await?;
+            let (status, body) =
+                refused(chain.hand_back(&chain.owner, &question_job, json!({})).await);
+            assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
+            assert_eq!(body.code.as_deref(), Some(HAND_BACK_NOT_BUILDING_CODE));
+            assert_eq!(jobs().await?, before, "a refused hand-back starts no turn");
+
+            // A building card whose browser turn read no page.
+            let (_, empty_job) = chain.card_and_running_browser_turn().await?;
+            chain
+                .finish(
+                    &empty_job,
+                    Some("The product page did not load, so no page was read.\n{\"url\": \"https://www.example.com/\", \"stopped\": \"blocked\"}"),
+                    "succeeded",
+                )
+                .await?;
+            let before = jobs().await?;
+            let (status, body) =
+                refused(chain.hand_back(&chain.owner, &empty_job, json!({})).await);
+            assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
+            assert_eq!(body.code.as_deref(), Some(HAND_BACK_NOTHING_READ_CODE));
+            assert_eq!(jobs().await?, before, "a refused hand-back starts no turn");
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// The runtime posts the reply without its finding lines and keeps them in a
+/// Details note: the hand-back reads them back, so the building turn gets the
+/// same findings, after the reply the person read.
+#[tokio::test]
+async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::Result<()> {
+    with_chain("browser-hand-back-details-note", |chain| {
+        Box::pin(async move {
+            let fixtures = fixtures();
+            let posted = fixtures["postedReply"].as_str().unwrap();
+            let lines = fixtures["findingLines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|line| line.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (_, browser_job) = chain.card_and_running_browser_turn().await?;
+            chain
+                .post(
+                    &browser_job,
+                    &lines,
+                    "status",
+                    json!({
+                        "kind": "agent_message",
+                        "browserFindings": { "pages": 3, "pagesRead": 2 },
+                    }),
+                )
+                .await?;
+            chain
+                .finish(&browser_job, Some(posted), "succeeded")
+                .await?;
+
+            // The browser turn's reply, as the person reads it, has no line.
+            let shown: String = chain
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select content from conversation_messages
+                      where conversation_id = $1 and metadata #>> '{jobId}' = $2
+                        and role = 'assistant' and metadata #>> '{outcome}' = 'succeeded'",
+                    &[&chain.conversation_id, &browser_job.to_string()],
+                )
+                .await?
+                .get(0);
+            assert_eq!(shown, posted);
+
+            let response = chain
+                .hand_back(&chain.owner, &browser_job, json!({}))
+                .await
+                .map_err(|error| controller_error("hand-back", error))?;
+            let hand_back_job = chain.job_of(&response).await?;
+            let record = &chain.payload_metadata(&hand_back_job).await?[HAND_BACK_KEY];
+            assert_eq!(record["reply"], format!("{posted}\n\n{lines}"));
+            let findings: Vec<serde_json::Value> = record["findings"]
+                .as_array()
+                .context("findings")?
+                .iter()
+                .map(|finding| {
+                    let mut value = json!({ "url": finding["url"], "title": finding["title"] });
+                    if let Some(reason) = finding.get("stopped") {
+                        value["stopped"] = reason.clone();
+                    }
+                    value
+                })
+                .collect();
+            assert_eq!(
+                serde_json::Value::Array(findings),
+                fixtures["expectedFindings"]
+            );
             Ok(())
         })
     })

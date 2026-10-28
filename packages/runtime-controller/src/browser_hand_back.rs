@@ -16,12 +16,19 @@
 //!   person's (a manual step on the page, or a step its approval ended);
 //! - the card's own turn was the sender's, and not itself a hand-back: one
 //!   automatic hop only, so a later card stays a button for the person to press;
+//! - the card continues building something (`continueBuilding`, a page or a
+//!   map): a card for a question is answered by the browser turn itself;
+//! - the browser turn read at least one page: a finding that only says where
+//!   it stopped gives the building turn nothing to continue with;
 //! - no other hand-back for that browser job is queued, running or done;
 //! - nobody sent a prompt in the conversation after the browser turn.
 //!
 //! The record carries the browser turn's last reply (bounded) and labelled
 //! findings `{url, title, readAt, viewer}`: the address and title come from
 //! the reply's lines, `readAt` and `viewer` from the job itself. The runtime
+//! moves those lines out of the reply the person reads into a Details note of
+//! the browser turn (runtime-agent `move_findings_into_details`); the record's
+//! reply puts them back after it. The runtime
 //! shows it to the building turn as quoted page data, never as the person's
 //! words and never as their consent (runtime-agent `jobs/browser_hand_back.rs`).
 //! A hand-back is never queued or recorded without a dispatch: it resumes an
@@ -59,6 +66,8 @@ pub(crate) const HAND_BACK_SECOND_HOP_CODE: &str = "browser_hand_back_second_hop
 pub(crate) const HAND_BACK_USED_CODE: &str = "browser_hand_back_used";
 pub(crate) const HAND_BACK_PAUSED_CODE: &str = "browser_hand_back_paused";
 pub(crate) const HAND_BACK_SUPERSEDED_CODE: &str = "browser_hand_back_superseded";
+pub(crate) const HAND_BACK_NOT_BUILDING_CODE: &str = "browser_hand_back_not_building";
+pub(crate) const HAND_BACK_NOTHING_READ_CODE: &str = "browser_hand_back_nothing_read";
 
 /// Removes every client-supplied hand-back claim and record, top level and
 /// nested, and returns the top-level claim for [`require_hand_back`].
@@ -332,6 +341,32 @@ pub(crate) fn bounded_reply(reply: &str) -> (String, bool) {
     )
 }
 
+/// The browser turn's reply with the finding lines the runtime moved into its
+/// Details note put back after it, as the browser turn wrote them for Octo. A
+/// reply from an older runtime still holds its lines and has no note.
+pub(crate) fn reply_with_finding_lines(reply: &str, finding_lines: Option<&str>) -> String {
+    match finding_lines
+        .map(str::trim)
+        .filter(|lines| !lines.is_empty())
+    {
+        Some(lines) if reply.trim().is_empty() => lines.to_string(),
+        Some(lines) => format!("{}\n\n{lines}", reply.trim_end()),
+        None => reply.to_string(),
+    }
+}
+
+/// Whether a checked record names at least one page the browser turn read.
+pub(crate) fn record_read_a_page(record: &JsonValue) -> bool {
+    record
+        .get("findings")
+        .and_then(JsonValue::as_array)
+        .is_some_and(|findings| {
+            findings
+                .iter()
+                .any(|finding| finding.get("stopped").is_none())
+        })
+}
+
 /// Who read the pages, from the browser job's own transport.
 pub(crate) fn viewer_for_transport(transport: &str) -> Option<&'static str> {
     match transport
@@ -560,6 +595,16 @@ pub(crate) async fn require_hand_back(
             "Octo already continued once from the browser in this chain. Open the browser from Octo's message to keep going.",
         ));
     }
+    // Only a card that continues building something hands back: a question's
+    // browser turn already answered it. The card is the runtime's own message
+    // for that job, which says so (runtime-agent `browser_request.rs`).
+    if !card_continues_building(transaction, conversation_id, &card_job_id).await? {
+        return Err(hand_back_refused(
+            StatusCode::CONFLICT,
+            HAND_BACK_NOT_BUILDING_CODE,
+            "The browser turn answered that request itself, so nothing goes back to Octo.",
+        ));
+    }
 
     let used = transaction
         .query_one(
@@ -627,13 +672,82 @@ pub(crate) async fn require_hand_back(
         )
     })?;
 
-    Ok(hand_back_record(
+    let finding_lines = finding_lines_note(transaction, conversation_id, &browser_job_id).await?;
+    let record = hand_back_record(
         &browser_job_id,
         &card_job_id,
         viewer,
         completed_at,
-        &reply,
-    ))
+        &reply_with_finding_lines(&reply, finding_lines.as_deref()),
+    );
+    // A browser turn that read no page leaves the building turn nothing to
+    // continue with; its own reply already says what stopped it.
+    if !record_read_a_page(&record) {
+        return Err(hand_back_refused(
+            StatusCode::CONFLICT,
+            HAND_BACK_NOTHING_READ_CODE,
+            "That browser turn read no page, so there is nothing to hand back.",
+        ));
+    }
+    Ok(record)
+}
+
+/// Whether the card a browser turn continued says Octo continues building
+/// from what the browser finds: the runtime's `action_request` message for
+/// that job carries `browserRequest.continueBuilding`.
+async fn card_continues_building(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    card_job_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select exists (
+                 select 1 from conversation_messages
+                  where conversation_id = $1
+                    and role = 'assistant'
+                    and created_by is null
+                    and metadata #>> '{jobId}' = $2
+                    and lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', ''))
+                        = 'action_request'
+                    and (metadata #> '{details,browserRequest,continueBuilding}' = 'true'::jsonb
+                         or metadata #> '{details,details,browserRequest,continueBuilding}' = 'true'::jsonb)
+             )",
+            &[conversation_id, &card_job_id.to_string()],
+        )
+        .await
+        .map(|row| row.get::<_, bool>(0))
+        .map_err(|error| internal_error(format!("failed to read the browser card: {error}")))
+}
+
+/// The finding lines the runtime moved out of the browser turn's reply into
+/// its Details note, if any.
+async fn finding_lines_note(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    browser_job_id: &Uuid,
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_opt(
+            "select content
+               from conversation_messages
+              where conversation_id = $1
+                and role = 'assistant'
+                and created_by is null
+                and metadata #>> '{jobId}' = $2
+                and coalesce(metadata #> '{details,browserFindings}',
+                             metadata #> '{details,details,browserFindings}') is not null
+              order by created_at desc
+              limit 1",
+            &[conversation_id, &browser_job_id.to_string()],
+        )
+        .await
+        .map(|row| row.map(|row| row.get::<_, String>("content")))
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to read the browser turn's findings: {error}"
+            ))
+        })
 }
 
 /// Whether a browser turn ended on a step that is the person's: it asked for
@@ -865,6 +979,58 @@ https://three.example.com\n\
         );
         assert_eq!(record["viewer"], VIEWER_DEVICE);
         assert_eq!(viewer_for_transport("local"), None);
+    }
+
+    /// The runtime moves the finding lines out of the reply the person reads
+    /// and into the browser turn's Details note: the record's reply puts them
+    /// back, so the building turn gets the same findings as before.
+    #[test]
+    fn finding_lines_from_the_details_note_go_back_after_the_reply() {
+        let fixtures = fixtures();
+        let posted = fixtures["postedReply"].as_str().unwrap();
+        let lines = fixtures["findingLines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let reply = reply_with_finding_lines(posted, Some(&lines));
+        assert_eq!(reply, format!("{posted}\n\n{lines}"));
+        let findings: Vec<JsonValue> = findings_from_reply(&reply)
+            .into_iter()
+            .map(|finding| {
+                let mut value = json!({ "url": finding.url, "title": finding.title });
+                if let Some(reason) = finding.stopped {
+                    value["stopped"] = json!(reason);
+                }
+                value
+            })
+            .collect();
+        assert_eq!(JsonValue::Array(findings), fixtures["expectedFindings"]);
+        // An older runtime's reply keeps its lines and has no note.
+        let full = fixtures["browserReply"].as_str().unwrap();
+        assert_eq!(reply_with_finding_lines(full, None), full);
+        assert_eq!(reply_with_finding_lines(full, Some("  ")), full);
+        assert_eq!(reply_with_finding_lines("", Some(&lines)), lines);
+    }
+
+    /// Local drive, Oct 28: a browser turn that read nothing still handed back,
+    /// and the building turn said "The browser returned no page findings".
+    #[test]
+    fn a_record_reads_a_page_only_with_a_finding_that_did_not_stop() {
+        let fixtures = fixtures();
+        assert!(record_read_a_page(&fixtures["stampedRecord"]));
+        let read_at = Utc::now();
+        let job = Uuid::new_v4();
+        for reply in [
+            "Roborock's official page did not load. No pages were read.",
+            "{\"url\": \"https://www.example.com/\", \"stopped\": \"blocked\"}",
+            "{\"url\": \"https://a.example.com/\", \"stopped\": \"captcha\"}\n{\"url\": \"http://127.0.0.1/\", \"title\": \"Local\"}",
+        ] {
+            let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at, reply);
+            assert!(!record_read_a_page(&record), "{reply}");
+        }
     }
 
     #[test]

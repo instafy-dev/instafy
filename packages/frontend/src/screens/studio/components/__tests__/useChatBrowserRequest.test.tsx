@@ -88,6 +88,23 @@ describe("Chat browser request handoff", () => {
     expect(lastState?.cardStates.get("message:request-1")).toEqual({ kind: "opened" });
   });
 
+  // Local drive, Oct 28: a question's browser turn was followed by a turn
+  // nobody asked for. Only a card Octo builds from asks for a hand-back.
+  it("marks the continuation of a card Octo builds from, and only that one", async () => {
+    value.messages = [request("auto", { continueBuilding: true })]; await render();
+    let attempt = await begin();
+    value.open = true; value.personalReady = true; await render(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenLastCalledWith("personal", expect.any(String),
+      expect.objectContaining({ metadata: { browserRequestOf: "message:request-1", browserHandsBack: true } }));
+
+    value.messages = [{ ...request(), id: "request-2" }]; await render();
+    attempt = await begin("request-2"); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenLastCalledWith("personal", expect.any(String),
+      expect.objectContaining({ metadata: { browserRequestOf: "message:request-2" } }));
+  });
+
   it("honors an explicit Workspace request after a native default and waits for the original run to finish", async () => {
     value.messages = [request("workspace")]; value.busy = true; await render();
     const attempt = await begin(); expect(value.activate).toHaveBeenCalledWith("shared", null);

@@ -20,6 +20,7 @@ import {
 import { browserHandBackOfPromptMetadata } from "./browserHandBack";
 import {
   BROWSER_AUTO_STARTED_METADATA_KEY,
+  BROWSER_HANDS_BACK_METADATA_KEY,
   BROWSER_REQUEST_OF_METADATA_KEY,
   browserRequestContinuation,
   browserRequestContinuedKeys,
@@ -488,6 +489,7 @@ export function useChatBrowserRequest(options: Options) {
               ...(extraMetadata ?? {}),
               [BROWSER_REQUEST_OF_METADATA_KEY]: key,
               ...(autoStarted ? { [BROWSER_AUTO_STARTED_METADATA_KEY]: true } : {}),
+              ...(request.continueBuilding ? { [BROWSER_HANDS_BACK_METADATA_KEY]: true } : {}),
             },
             knownHosts: browserRequestDestinations(request.task),
           });
