@@ -26,14 +26,13 @@ import {
   resolveSupabaseRedirectTo,
   type PendingNativeAuthAttempt,
   writeNativeAuthCallbackAttemptId,
+  writeOAuthRedirectTarget,
   writePendingNativeAuthAttempt,
   writeNativeAuthError,
 } from "../../auth/nativeAuth";
 import { hasSupabaseConfig, supabase, supabaseAnonKey } from "../../lib/supabaseClient";
 import { describeExchangeError } from "../../auth/pkce";
 import { postAuthTelemetryEvent } from "../../services/runtimeController/authTelemetry";
-
-export const OAUTH_REDIRECT_TARGET_KEY = "instafy.login.oauthRedirectTarget";
 
 // The OAuth providers the login page offers. Everything downstream of the
 // entry function -- pending attempts, deep links, telemetry metadata -- is
@@ -139,7 +138,9 @@ export function useNativeGithubAuth({
       clearNativeAuthCallbackAttemptId();
       clearPendingNativeAuthAttempt();
       clearNativeAuthLaunchState();
-      writeNativeAuthError(nextMessage);
+      // This page shows the error now; a stored copy would show it again on the
+      // next visit to the login page, after any later sign-in.
+      writeNativeAuthError(null);
       setAwaitingBrowser(null);
       setError(nextMessage);
       setPendingProvider(null);
@@ -243,6 +244,9 @@ export function useNativeGithubAuth({
       clearNativeAuthCallbackAttemptId();
       clearPendingNativeAuthAttempt();
       clearNativeAuthLaunchState();
+      // AuthProvider stores the error for a login page that is not open; this
+      // one is, and shows it now.
+      writeNativeAuthError(null);
       setAwaitingBrowser(null);
       setError(message);
       setPendingProvider(null);
@@ -576,13 +580,9 @@ export function useNativeGithubAuth({
     try {
       const redirectTo = resolveSupabaseRedirectTo("/login");
       const queryParams = oauthLoginQueryParams(supabaseAnonKey);
-      if (redirectTarget.startsWith("/") && !redirectTarget.startsWith("//")) {
-        try {
-          window.sessionStorage?.setItem(OAUTH_REDIRECT_TARGET_KEY, redirectTarget);
-        } catch {
-          // ignore session storage failures
-        }
-      }
+      writeOAuthRedirectTarget(redirectTarget, {
+        durable: Capacitor.isNativePlatform() || (isDesktopShell() && desktopCanReceiveAuthCallback()),
+      });
       if (Capacitor.isNativePlatform()) {
         const nativePlatform = Capacitor.getPlatform();
         nativeAttempt = createPendingNativeAuthAttempt(provider);

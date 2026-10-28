@@ -9,6 +9,7 @@ import {
   NATIVE_AUTH_ERROR_EVENT,
   NATIVE_AUTH_ERROR_STORAGE_KEY,
   parseNativeAuthCallbackUrl,
+  readOAuthRedirectTarget,
 } from "../../../auth/nativeAuth";
 
 const supabaseMock = vi.hoisted(() => ({
@@ -243,6 +244,35 @@ describe("useNativeGithubAuth pending status", () => {
     ]);
   });
 
+  it("keeps a native sign-in's destination where a new process finds it", async () => {
+    platform.native = true;
+    await mount();
+
+    await act(async () => handlers?.handleGoogleLogin());
+    window.sessionStorage.clear();
+
+    expect(readOAuthRedirectTarget()).toBe("/studio");
+  });
+
+  it("shows an error the app-wide handler reported once, not again on the next visit", async () => {
+    platform.native = true;
+    await mount();
+    const message = "Google sign-in was cancelled or refused. Try again.";
+
+    await act(async () => {
+      window.sessionStorage.setItem(NATIVE_AUTH_ERROR_STORAGE_KEY, message);
+      window.dispatchEvent(new CustomEvent(NATIVE_AUTH_ERROR_EVENT, { detail: message }));
+    });
+    expect(setError).toHaveBeenLastCalledWith(message);
+    expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
+
+    await act(async () => root.unmount());
+    setError.mockClear();
+    root = createRoot(container);
+    await mount();
+    expect(setError).not.toHaveBeenCalledWith(message);
+  });
+
   it("leaves a callback alone that the app-wide handler already took", async () => {
     platform.native = true;
     const listeners = installNativePlugins();
@@ -292,12 +322,11 @@ describe("useNativeGithubAuth pending status", () => {
     await act(async () => platform.desktopListener?.("instafy://auth?error_description=access_denied"));
 
     expect(setAwaitingBrowser).toHaveBeenLastCalledWith(null);
-    // The callback is a deep link any app can open: the screen and the stored
-    // error show a fixed message, and only telemetry records the URL's text.
+    // The callback is a deep link any app can open: the screen shows a fixed
+    // message, and only telemetry records the URL's text. The page shows the
+    // error now, so no copy is kept for its next visit.
     expect(setError).toHaveBeenLastCalledWith("GitHub sign-in was cancelled or refused. Try again.");
-    expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBe(
-      "GitHub sign-in was cancelled or refused. Try again.",
-    );
+    expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
     expect(telemetry.post).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "auth.login.github.callback_error", message: "access_denied" }),
     );

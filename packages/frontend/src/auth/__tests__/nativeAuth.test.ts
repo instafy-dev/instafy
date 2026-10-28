@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   claimNativeAuthCallback,
   clearNativeAuthCallbackAttemptId,
+  clearOAuthRedirectTarget,
   clearPendingNativeAuthAttempt,
   createPendingNativeAuthAttempt,
   forgetNativeAuthCallbackClaimsForTests,
@@ -9,8 +10,10 @@ import {
   nativeAuthCallbackErrorMessage,
   parseNativeAuthCallbackUrl,
   readNativeAuthCallbackAttemptId,
+  readOAuthRedirectTarget,
   readPendingNativeAuthAttempt,
   writeNativeAuthCallbackAttemptId,
+  writeOAuthRedirectTarget,
   writePendingNativeAuthAttempt,
 } from "../nativeAuth";
 
@@ -138,6 +141,24 @@ describe("claimNativeAuthCallback", () => {
     expect(claim("instafy://auth?code=def")).toBe(true);
   });
 
+  // App.getLaunchUrl() keeps returning the launch URL for the life of the
+  // process, so a reloaded page sees the same spent code again.
+  it("does not hand a reloaded page a code it already claimed, and keeps only a hash", async () => {
+    expect(claim("instafy://auth?code=launch-code")).toBe(true);
+    expect(JSON.stringify(window.sessionStorage.getItem("instafy.login.nativeAuthClaimedCodes"))).not.toContain(
+      "launch-code",
+    );
+
+    vi.resetModules();
+    const reloaded = await import("../nativeAuth");
+    expect(reloaded.claimNativeAuthCallback(reloaded.parseNativeAuthCallbackUrl("instafy://auth?code=launch-code")!)).toBe(false);
+
+    vi.resetModules();
+    window.sessionStorage.clear();
+    const newProcess = await import("../nativeAuth");
+    expect(newProcess.claimNativeAuthCallback(newProcess.parseNativeAuthCallbackUrl("instafy://auth?code=launch-code")!)).toBe(true);
+  });
+
   it("claims a callback without a code by its URL", () => {
     expect(claim("instafy://auth?error=access_denied")).toBe(true);
     expect(claim("instafy://auth?error=access_denied")).toBe(false);
@@ -174,5 +195,42 @@ describe("native auth callback attempt storage", () => {
     clearNativeAuthCallbackAttemptId();
 
     expect(readNativeAuthCallbackAttemptId()).toBeNull();
+  });
+});
+
+describe("OAuth redirect target", () => {
+  it("keeps a native sign-in's destination for a new process, and a web one in its tab", () => {
+    writeOAuthRedirectTarget("/studio?projectId=p1", { durable: true });
+    window.sessionStorage.clear();
+    expect(readOAuthRedirectTarget()).toBe("/studio?projectId=p1");
+
+    clearOAuthRedirectTarget();
+    writeOAuthRedirectTarget("/studio?projectId=p2", { durable: false });
+    expect(readOAuthRedirectTarget()).toBe("/studio?projectId=p2");
+    window.sessionStorage.clear();
+    expect(readOAuthRedirectTarget()).toBeNull();
+  });
+
+  it("ignores a stale or off-site destination", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-28T08:00:00Z"));
+    writeOAuthRedirectTarget("/studio?projectId=p1", { durable: true });
+    window.sessionStorage.clear();
+    vi.setSystemTime(new Date("2026-10-28T08:31:00Z"));
+    expect(readOAuthRedirectTarget()).toBeNull();
+
+    writeOAuthRedirectTarget("//elsewhere.example/studio", { durable: true });
+    expect(readOAuthRedirectTarget()).toBeNull();
+    window.localStorage.setItem(
+      "instafy.login.oauthRedirectTargetDurable",
+      JSON.stringify({ target: "https://elsewhere.example/", savedAt: new Date().toISOString() }),
+    );
+    expect(readOAuthRedirectTarget()).toBeNull();
+  });
+
+  it("forgets both copies once sign-in finishes", () => {
+    writeOAuthRedirectTarget("/studio?projectId=p1", { durable: true });
+    clearOAuthRedirectTarget();
+    expect(readOAuthRedirectTarget()).toBeNull();
   });
 });

@@ -12,6 +12,7 @@ import {
 import {
   claimNativeAuthCallback,
   clearNativeAuthCallbackAttemptId,
+  clearOAuthRedirectTarget,
   clearPendingNativeAuthAttempt,
   NATIVE_AUTH_ERROR_EVENT,
   NATIVE_AUTH_PROVIDER_LABELS,
@@ -399,6 +400,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       clearNativeAuthCallbackAttemptId();
       clearPendingNativeAuthAttempt();
+      // A login page that is open already read where to go; with none open, a
+      // kept destination would otherwise steer a later, unrelated sign-in.
+      clearOAuthRedirectTarget();
       writeNativeAuthError(null);
       setSession(nextSession);
       setUser(nextUser);
