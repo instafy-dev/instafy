@@ -29,6 +29,7 @@ const BROWSER_CHANNEL = resolveBrowserChannel();
  */
 const REQUIRED_BROWSER_UI_SPECS = [
   "browser-agent-tabs.spec.ts",
+  "browser-approval-feedback.spec.ts",
   "browser-chrome-mobile-layout.spec.ts",
   "browser-cobrowsing-ui.spec.ts",
   "browser-cursor-overlay.spec.ts",

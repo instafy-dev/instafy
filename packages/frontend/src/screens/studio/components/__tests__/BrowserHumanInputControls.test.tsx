@@ -155,6 +155,22 @@ describe("BrowserHumanInputControls", () => {
     expect(props.onContinue).not.toHaveBeenCalled();
   });
 
+  it("keeps a failed continuation readable beside its retry action without relying on a tooltip", async () => {
+    const message = "The connection was lost while continuing the browser task. Your changes are still on the page; reconnect and let the AI continue when ready.";
+    props.request = { version: 1, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] };
+    props.humanControlConfirmed = true;
+    props.onContinue = vi.fn().mockRejectedValueOnce(new Error(message)).mockResolvedValueOnce(true);
+    await render();
+    await click("browser-human-input-continue");
+    const alert = container.querySelector<HTMLElement>('[role="alert"]')!;
+    expect(alert.textContent).toBe(message);
+    expect(alert.hasAttribute("title")).toBe(false);
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')!.disabled).toBe(false);
+    await click("browser-human-input-continue");
+    expect(props.onContinue).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it("ignores a takeover failure arriving after the browser identity changes", async () => {
     let reject!: (cause: Error) => void;
     props.onTakeOver = vi.fn(() => new Promise<boolean>((_resolve, fail) => { reject = fail; }));

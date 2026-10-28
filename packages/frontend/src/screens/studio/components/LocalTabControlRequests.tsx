@@ -4,6 +4,8 @@ import type {
 } from "../../../services/runtimeController/localTabExplore";
 import { useLayoutEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
+import { InlineNotice } from "../../../components/InlineNotice";
+import { Text } from "../../../components/Text";
 import type { BrowserSharePerson } from "../../../services/runtimeController/browserShares";
 import type {
   LocalTabControlState,
@@ -51,14 +53,14 @@ export function LocalTabControlRequests({
     }
   }
   return (
-    <div ref={requestsRef} className="space-y-1 text-xs" data-testid="local-tab-control-owner">
+    <div ref={requestsRef} className="space-y-3" data-testid="local-tab-control-owner">
       {state?.grant && showTakeBack ? (
         <div className="flex flex-wrap items-center gap-2">
-          <span role="status">
+          <Text variant="bodyCompact" tone="primary" role="status" className="min-w-0 [overflow-wrap:anywhere]">
             {label(state.grant.userId)} controls this tab
-          </span>
+          </Text>
           <Button
-            size="sm"
+            preset="inline"
             data-testid="local-tab-take-back"
             onPress={() => void act(control.revoke)}
           >
@@ -71,9 +73,9 @@ export function LocalTabControlRequests({
           key={request.connectionId}
           className="flex flex-wrap items-center gap-2"
         >
-          <span>{label(request.userId)} requests control</span>
+          <Text variant="bodyCompact" tone="primary" className="min-w-0 [overflow-wrap:anywhere]">{label(request.userId)} requests control</Text>
           <Button
-            size="sm"
+            preset="inline"
             data-testid="local-tab-grant-control"
             isDisabled={busy || Boolean(state.grant)}
             onPress={() => void act(() => control.grant(request.connectionId))}
@@ -81,15 +83,15 @@ export function LocalTabControlRequests({
             Allow control
           </Button>
           <Button
-            size="sm"
+            preset="inline"
             variant="ghost"
             onPress={() => control.deny(request.connectionId)}
           >
             Decline
           </Button>
-          <span className="text-slate-500">
+          <Text variant="caption" tone="muted" className="min-w-0 basis-full [overflow-wrap:anywhere]">
             They can click and type in this tab using its signed-in accounts.
-          </span>
+          </Text>
         </div>
       ))}
       {exploreState?.requests?.map((request) =>
@@ -98,9 +100,9 @@ export function LocalTabControlRequests({
             key={`explore-${request.connectionId}`}
             className="flex flex-wrap items-center gap-2"
           >
-            <span>{label(request.userId)} wants to browse independently</span>
+            <Text variant="bodyCompact" tone="primary" className="min-w-0 [overflow-wrap:anywhere]">{label(request.userId)} wants to browse independently</Text>
             <Button
-              size="sm"
+              preset="inline"
               data-testid="local-tab-allow-explore"
               isDisabled={busy || (exploreState.views?.length ?? 0) >= 4}
               onPress={() => void act(() => explore.approve(request))}
@@ -108,23 +110,23 @@ export function LocalTabControlRequests({
               Allow browsing
             </Button>
             <Button
-              size="sm"
+              preset="inline"
               variant="ghost"
               onPress={() => explore.deny(request.connectionId)}
             >
               Decline
             </Button>
-            <span className="text-slate-500">
+            <Text variant="caption" tone="muted" className="min-w-0 basis-full [overflow-wrap:anywhere]">
               Their page and scroll are separate. Website logins and saved data
               are shared; changes depend on the website.
-            </span>
+            </Text>
           </div>
         ) : null,
       )}
       {error ? (
-        <p role="alert" className="text-rose-600">
+        <InlineNotice role="alert" tone="danger" appearance="inline">
           {error}
-        </p>
+        </InlineNotice>
       ) : null}
     </div>
   );
