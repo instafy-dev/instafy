@@ -166,8 +166,8 @@ test.describe("Chat onboarding", () => {
     const card = page.getByTestId("onboarding-getting-started");
     await expect(card).toHaveAttribute("data-collapsed", "true");
     await expect(card.getByTestId("onboarding-collapsed-row").getByRole("button")).toHaveText([
-      "Import a repo",
       "Notion",
+      "GitHub",
       "More tools",
     ]);
     // First character enables send: empty studio to first message is type, send.

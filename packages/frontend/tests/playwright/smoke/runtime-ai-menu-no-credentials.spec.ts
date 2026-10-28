@@ -88,7 +88,7 @@ test.describe("Runtime & AI menu", () => {
     const onboarding = page.getByTestId("onboarding-getting-started");
     await expect(onboarding).toBeVisible();
     await expect(onboarding.getByTestId("onboarding-use-managed-ai")).toContainText(
-      "20 of 20 free prompts left today",
+      "20 of 20 prompts left today",
     );
     await expect(onboarding.getByTestId("onboarding-connect-own-ai")).toBeVisible();
     await expect(page.getByTestId("credentials-status-indicator")).toHaveCount(0);
@@ -98,7 +98,7 @@ test.describe("Runtime & AI menu", () => {
     await expect(credentialWizard).toBeVisible();
     await expect(credentialWizard).toContainText("Add AI connection");
     await expect(credentialWizard.getByTestId("credentials-connect-choice-codex")).toBeVisible();
-    await expect(credentialWizard.getByText("Use free Instafy AI", { exact: false })).toHaveCount(0);
+    await expect(credentialWizard.getByText("Use Instafy AI", { exact: false })).toHaveCount(0);
     await credentialWizard.getByRole("button", { name: "Close" }).click();
     await expect(onboarding).toBeVisible();
 

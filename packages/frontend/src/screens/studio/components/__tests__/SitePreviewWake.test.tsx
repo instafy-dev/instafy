@@ -90,11 +90,14 @@ describe("the card wakes a stopped site on Open", () => {
     await render();
     expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · opening restarts it");
     expect(disabled()).toBe(false);
+    // A press starts it, so the card keeps its chevron.
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).not.toBeNull();
     await press("[data-testid=preview-ready-open]");
     expect(mocks.wakeSitePreview).toHaveBeenCalledWith("project-1", PREVIEW_ID, expect.anything());
     expect(text("[data-testid=preview-ready-status]")).toBe("Starting…");
     expect(open().getAttribute("aria-busy")).toBe("true");
     expect(disabled()).toBe(true);
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).toBeNull();
     expect(opener.openPreview).not.toHaveBeenCalled();
     await advance(2_000); // still waking
     expect(opener.openPreview).not.toHaveBeenCalled();
@@ -105,11 +108,12 @@ describe("the card wakes a stopped site on Open", () => {
     expect(text("[data-testid=preview-ready-status]")).toBe("");
   });
 
-  it("reads Stopped, and is not pressable, for a stopped site nobody recorded how to start", async () => {
+  it("reads Stopped with who can start it, and is not pressable, for a stopped site nobody recorded how to start", async () => {
     mocks.getSitePreview.mockResolvedValue(stopped({ restartable: false }));
     await render();
-    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped");
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · ask Octo to start it again");
     expect(disabled()).toBe(true);
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).toBeNull();
     await act(async () => open().click());
     expect(mocks.wakeSitePreview).not.toHaveBeenCalled();
     expect(opener.openPreview).not.toHaveBeenCalled();
@@ -138,7 +142,7 @@ describe("the card wakes a stopped site on Open", () => {
     }));
     mocks.wakeSitePreview.mockResolvedValue({ state: "live" });
     await render();
-    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped");
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · ask Octo to start it again");
     expect(disabled()).toBe(true);
     // The record is the newer site's now: its picture and facts are not this card's.
     expect(container.querySelector("[data-testid=preview-card-picture]")).toBeNull();
@@ -166,6 +170,7 @@ describe("the card wakes a stopped site on Open", () => {
     expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · only people who can edit this space can start it");
     expect(disabled()).toBe(true);
     expect(container.querySelector("[data-testid=preview-ready-card]")!.className).not.toContain("hover:shadow-md");
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).toBeNull();
     await act(async () => open().click());
     await flush();
     expect(mocks.wakeSitePreview).not.toHaveBeenCalled();

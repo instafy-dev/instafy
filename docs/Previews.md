@@ -24,7 +24,8 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    holds the preview's id and port, and no URL. Each run that opens a site posts its own card, so a conversation can
    hold several for one site. Studio draws only the latest one in full; an earlier one shrinks to a line ("Hello ·
    opened again further down"), so a conversation shows one card per site, at its latest place. The card looks like a
-   link preview: a picture of the site, its title with a lock (private) and a chevron, and one line of facts (see
+   link preview: a picture of the site, its title with a lock (private) and, when a press does something, a chevron,
+   and one line of facts (see
    [The card's picture and facts](#the-cards-picture-and-facts)).
 4. A member presses the card. Studio asks the controller for a viewer session and shows the site as a tab in the
    conversation's side pane, next to Chat, Browser and files, under the same browser bar (title, Reload, Open in new
@@ -140,8 +141,9 @@ stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
   someone who may change the space, machine up or not. A person's `GET` of the preview says `canStart: false` when
   their wake could not go ahead (they may not change the space, and the machine is not up or the preview was closed),
   so the card reads "Stopped · only people who can edit this space can start it" and cannot be pressed. A stopped
-  preview that cannot be woken (no recorded command, or replaced by a newer one) reads "Stopped" and cannot be pressed
-  either; Octo can start it again in a turn. A self-hosted machine that is offline fails with `409 runtime_offline`
+  preview that cannot be woken (no recorded command, or replaced by a newer one) reads "Stopped · ask Octo to start it
+  again" and cannot be pressed either, since Octo can start it again in a turn. Until the controller has answered
+  whether a press can start it, a stopped card reads just "Stopped". A card that cannot be pressed draws no chevron. A self-hosted machine that is offline fails with `409 runtime_offline`
   ("The computer this space runs on is offline.").
 - The runtime agent polls `POST /agent/preview-restarts/claim` with its agent token. A claim reconnects the same
   preview tunnel on the machine's current lease and hands the agent the recorded command and the tunnel client

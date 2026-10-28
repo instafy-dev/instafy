@@ -182,7 +182,10 @@ export const SITE_PREVIEW_STATUS_TEXT = {
   starting: "Starting…",
   notResponding: "Not responding",
   unavailable: "Status unavailable",
+  // Not known yet whether a press can start it: nothing more than what is true.
   stopped: "Stopped",
+  // Nothing here can start it, so the line says who can: the pane says the same.
+  stoppedAskOcto: "Stopped · ask Octo to start it again",
   stoppedRestarts: "Stopped · opening restarts it",
   stoppedNeedsBuilder: "Stopped · only people who can edit this space can start it",
   couldNotStart: "Couldn't start",
@@ -498,8 +501,11 @@ export function SitePreviewCard({
   );
   const pictureGone = picture.status === "unavailable" || picture.status === "failed";
 
+  // Only an answer (a record, or the preview being gone) says a press cannot
+  // start it; before one, "ask Octo" could send someone to spend a turn on a
+  // site a press would have started.
   const stoppedText = !wakeable
-    ? SITE_PREVIEW_STATUS_TEXT.stopped
+    ? server || gone ? SITE_PREVIEW_STATUS_TEXT.stoppedAskOcto : SITE_PREVIEW_STATUS_TEXT.stopped
     : startBlocked
       ? SITE_PREVIEW_STATUS_TEXT.stoppedNeedsBuilder
       : SITE_PREVIEW_STATUS_TEXT.stoppedRestarts;

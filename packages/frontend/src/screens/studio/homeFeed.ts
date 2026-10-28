@@ -83,6 +83,8 @@ export interface HomeFeedModel {
   activity: HomeFeedDay[];
   /** Position in the flat activity list before which everything is new. */
   sinceCutIndex: number | null;
+  /** Whether a previous visit's cut applies at all (it may still fall outside the list). */
+  hasCut: boolean;
   isEmpty: boolean;
 }
 
@@ -757,6 +759,7 @@ export function buildHomeFeed({
     needs,
     activity,
     sinceCutIndex,
+    hasCut,
     isEmpty: needsAll.length === 0 && liveAll.length === 0 && activityAll.length === 0,
   };
 }

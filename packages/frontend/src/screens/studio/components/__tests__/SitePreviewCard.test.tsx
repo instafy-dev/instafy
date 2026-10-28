@@ -188,15 +188,18 @@ describe("SitePreviewCard", () => {
       mocks.getSitePreview.mockResolvedValue(server());
       mocks.runtime = { tunnelGrants: {}, runtimeStatuses: [{ runtimeId: "runtime-1", status: "stopped" }] };
     }],
-  ])("reads Stopped, and does not look pressable, when %s and nothing records how to start it", async (_name, arrange) => {
+  ])("reads Stopped with who can start it, and does not look pressable, when %s and nothing records how to start it", async (_name, arrange) => {
     arrange();
     await render();
     expect(status().dataset.state).toBe("stopped");
-    expect(status().textContent).toBe("Stopped");
+    // Nothing on the card can start it: the line says who can, as the pane does.
+    expect(status().textContent).toBe("Stopped · ask Octo to start it again");
     expect(disabled()).toBe(true);
     expect(card().className).not.toContain("hover:shadow-md");
     expect(openButton()?.className).toContain("cursor-default");
-    expect(openButton()?.getAttribute("aria-label")).toBe("Open Site preview, stopped");
+    // No chevron: it would promise a press that does nothing.
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).toBeNull();
+    expect(openButton()?.getAttribute("aria-label")).toBe("Open Site preview, stopped, ask Octo to start it again");
     await act(async () => openButton()!.click());
     expect(opener!.openPreview).not.toHaveBeenCalled();
     // A stopped site's pane may still be selected; the card never says Showing for it.
@@ -205,12 +208,20 @@ describe("SitePreviewCard", () => {
     expect(card().textContent).not.toContain("Showing");
   });
 
-  it("reads Stopped, not pressable, while the controller has not said whether it can start the site", async () => {
-    mocks.getSitePreview.mockReturnValue(new Promise(() => {}));
+  it("reads plain Stopped, not pressable, until the controller says whether a press can start the site", async () => {
+    let answer: (value: ControllerSitePreview) => void = () => {};
+    mocks.getSitePreview.mockReturnValue(new Promise<ControllerSitePreview>((resolve) => { answer = resolve; }));
     mocks.runtime = { tunnelGrants: { [PREVIEW_ID]: { id: PREVIEW_ID, tunnelId: "tunnel-1", status: "revoked" } }, runtimeStatuses: [] };
     await render();
+    // Not known yet: "ask Octo" would send the reader off to spend a turn on a
+    // site a press may start, which is what the answer below says.
     expect(status().textContent).toBe("Stopped");
     expect(disabled()).toBe(true);
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).toBeNull();
+    await act(async () => answer(server({ status: "revoked", restartable: true })));
+    expect(status().textContent).toBe("Stopped · opening restarts it");
+    expect(disabled()).toBe(false);
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).not.toBeNull();
   });
 
   it("reads Stopped from a revoked tunnel event even when asking again fails", async () => {
@@ -230,7 +241,7 @@ describe("SitePreviewCard", () => {
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
     expect(status().dataset.state).toBe("stopped");
     // Its last record recorded no start command: Stopped, and nothing to press.
-    expect(status().textContent).toBe("Stopped");
+    expect(status().textContent).toBe("Stopped · ask Octo to start it again");
     expect(disabled()).toBe(true);
   });
 
