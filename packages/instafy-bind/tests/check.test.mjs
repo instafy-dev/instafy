@@ -229,3 +229,12 @@ test("on a ranked page, a row with no price at all is noted as listed apart too"
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a filter without a label fails the check: the page would have nothing to call the limit", () => {
+  const dir = optionsSite("compare", (data) => ({ ...data, filter: { key: "price", max: 140 } }));
+  try {
+    assert.deepEqual(checkValues(dir).problems, ['the filter has no "label" (what the person asked for: "€600 or less").']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -240,8 +240,7 @@
     var when = x.asof || x.date;
     var day = when && date(when) ? ((o.price || x.asof ? "seen " : "checked ") + date(when)) : "";
     var site = host(x.url);
-    // the host never breaks at its own hyphen ("shop-" / "one.example"): a narrow cell breaks before it instead
-    if (site) return [h("span", { "class": "cite" }, day ? day + " on " : "", link(x.url, site.replace(/-/g, "\u2011")))];
+    if (site) return [h("span", { "class": "cite" }, day ? day + " on " : "", link(x.url, site))];
     var out = [];
     if (x.src) out.push(String(x.src));
     if (day) out.push(h("span", { "class": "age", text: day }));

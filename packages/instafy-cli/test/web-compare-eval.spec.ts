@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { webLink } from "../src/web-link.js";
 import { webRead } from "../src/web-read.js";
@@ -223,7 +224,7 @@ describe("the shopping comparison eval (fixtures)", () => {
 
   it("grades by rules the skills and the starter state", () => {
     const flat = (s: string) => s.replace(/\s+/g, " ");
-    const skills = path.join(path.dirname(new URL(import.meta.url).pathname), "../../runtime-agent/assets/instafy/.agents/skills");
+    const skills = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../runtime-agent/assets/instafy/.agents/skills");
     const research = flat(fs.readFileSync(path.join(skills, "instafy-web-research/SKILL.md"), "utf8"));
     for (const rule of [
       "## Comparing items",

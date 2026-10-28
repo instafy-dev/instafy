@@ -200,11 +200,11 @@
       wideNow = isWide();
       var wrap = h("div", { "class": "stack" });
       if (shown.length) wrap.appendChild(wideNow ? table(data, shown, st, shared) : cards(data, shown, st, shared));
-      else wrap.appendChild(h("p", { "class": "cap", text: "None is known to be " + lowerFirst(data.filter.label) + "." }));
+      else wrap.appendChild(h("p", { "class": "cap", text: "None is known to be " + lowerFirst(data.filter.label || "within the limit") + "." }));
       if (apart.length) {
         wrap.appendChild(h("section", { "class": "group", attrs: { id: "group-unknown", "aria-label": unknownTitle(data) } },
           h("div", { "class": "group-head" }, h("h2", { text: unknownTitle(data) }),
-            h("span", { "class": "cap", text: "Not counted as " + lowerFirst(data.filter.label) })),
+            h("span", { "class": "cap", text: "Not counted as " + lowerFirst(data.filter.label || "within the limit") })),
           wideNow ? table(data, apart, st, shared) : cards(data, apart, st, shared)));
       }
       var lines = [];

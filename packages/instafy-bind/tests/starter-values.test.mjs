@@ -203,9 +203,9 @@ test("compare: when no row is known to fit, the page says so instead of an empty
 test("compare: no cell is blank or a dash, and every value cites its page and day", async () => {
   const { document } = await draw("compare", compareData(), { search: "?show=all" });
   const read = rowText(document, "option:read");
-  assert.match(read, /€549 · seen 27 Oct( 2026)? on shop‑one\.example ↗/, read);
+  assert.match(read, /€549 · seen 27 Oct( 2026)? on shop-one\.example ↗/, read);
   assert.match(read, /180 min · checked 27 Oct( 2026)? on maker\.example ↗/, read);
-  assert.match(read, /8,000 Pa · checked 27 Oct( 2026)? on review‑two\.example ↗/, read);
+  assert.match(read, /8,000 Pa · checked 27 Oct( 2026)? on review-two\.example ↗/, read);
   const silent = rowText(document, "option:silent");
   assert.doesNotMatch(silent, /—|n\/a/, `a dash is no value: ${silent}`);
   assert.equal((silent.match(/Not listed/g) || []).length, 3, `the maker's page was read and gives none of the three: ${silent}`);

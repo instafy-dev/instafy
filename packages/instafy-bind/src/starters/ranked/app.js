@@ -88,11 +88,11 @@
       var inline = !!(shared && stores && site.storesBlocked(items));
       if (inline) stores = null;
       if (shown.length) wrap.appendChild(h("ol", { "class": "list ranked" }, shown.map(function (item) { return row(item, st, priced, shared); })));
-      else wrap.appendChild(h("p", { "class": "cap", text: "None is known to be " + lowerFirst(data.filter.label) + "." }));
+      else wrap.appendChild(h("p", { "class": "cap", text: "None is known to be " + lowerFirst(data.filter.label || "within the limit") + "." }));
       if (apart.length) {
         wrap.appendChild(h("section", { "class": "group", attrs: { id: "group-unknown", "aria-label": unknownTitle(data) } },
           h("div", { "class": "group-head" }, h("h2", { text: unknownTitle(data) }),
-            h("span", { "class": "cap", text: "Not counted as " + lowerFirst(data.filter.label) })),
+            h("span", { "class": "cap", text: "Not counted as " + lowerFirst(data.filter.label || "within the limit") })),
           h("ol", { "class": "list ranked" }, apart.map(function (item) { return row(item, st, priced, shared); }))));
       }
       if (hidden > 0) {

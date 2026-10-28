@@ -278,6 +278,7 @@ export function checkValues(dir) {
     const columns = Array.isArray(data.columns) ? data.columns : null;
     const isNumber = (v) => v != null && v !== "" && Number.isFinite(Number(v));
     if (!filter.key) problems.push(`the filter "${label}" has no "key".`);
+    if (!filter.label) problems.push('the filter has no "label" (what the person asked for: "€600 or less").');
     else if (columns && !columns.some((c) => c && c.key === filter.key)) problems.push(`the filter's key "${filter.key}" is not a column, so "${label}" filters nothing.`);
     if (!isNumber(filter.max) && !isNumber(filter.min)) problems.push(`the filter "${label}" has no number in "max" or "min".`);
     let app = "";
