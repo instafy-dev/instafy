@@ -191,6 +191,20 @@ describe("the card wakes a stopped site on Open", () => {
     expect(disabled()).toBe(false);
   });
 
+  it("says a start that failed on the machine in plain words, and a press tries again", async () => {
+    mocks.getSitePreview.mockResolvedValueOnce(record({ health: { listening: false, status: null } }))
+      .mockResolvedValue(record({ health: { listening: false, status: null },
+        wake: { state: "failed", startedAt: null, error: "the start command exited (exit status: 1) before the site answered on port 4173" } }));
+    mocks.wakeSitePreview.mockResolvedValue({ state: "waking" });
+    await render();
+    await press("[data-testid=preview-ready-open]");
+    await advance(2_000);
+    expect(text("[data-testid=preview-ready-status]")).toBe("Couldn't start · Ask Octo to start it again");
+    expect(container.querySelector("[data-testid=preview-ready-card]")!.innerHTML).not.toMatch(/4173|exit status|start command/);
+    expect(opener.openPreview).not.toHaveBeenCalled();
+    expect(disabled()).toBe(false);
+  });
+
   it("follows a wake someone else started", async () => {
     mocks.getSitePreview.mockResolvedValueOnce(stopped({ wake: { state: "waking", startedAt: null, error: null } }))
       .mockResolvedValue(record());
@@ -294,6 +308,19 @@ describe("the pane starts a stopped site again", () => {
     expect(mocks.wakeSitePreview).toHaveBeenCalledOnce();
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
     expect(frame()?.getAttribute("src")).toContain("p-aaaa");
+  });
+
+  it("says a failed Start again in plain words, with no port or command", async () => {
+    mocks.createSitePreviewViewer.mockRejectedValue(apiError(409));
+    mocks.getSitePreview.mockResolvedValueOnce(stopped()).mockResolvedValue(stopped({
+      wake: { state: "failed", startedAt: null, error: "the site did not answer on port 4173 within 60 s" },
+    }));
+    mocks.wakeSitePreview.mockResolvedValue({ state: "waking" });
+    await render();
+    await press("[data-testid=site-preview-wake]");
+    await advance(2_000);
+    expect(text("[data-testid=site-preview-feedback]")).toContain("Couldn't start it. Ask Octo to start it again.");
+    expect(container.querySelector("[data-testid=site-preview-pane]")!.textContent).not.toContain("4173");
   });
 
   it("stops following its wake when it closes", async () => {

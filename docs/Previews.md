@@ -158,10 +158,11 @@ again** in its pane), Studio calls `POST /projects/:id/previews/:pid/wake`, then
   wake done; when the broker cannot be asked, the wake ends on the agent's word but the `preview.wake` event says
   `unverified`, not `live`, and Studio's own `GET` decides what it shows.
 - `GET` on the preview shows the wake as `wake: {state: "idle" | "waking" | "failed", startedAt?, error?}`. Studio
-  follows it until the site answers, then opens it. A failed wake shows its reason: a fixed plain line ("the start
-  command exited (exit status: 1) before the site answered on port 4173", "the space could not start; try again in a
-  few minutes"), never a local path, user name or command line, since every member who may view the preview reads
-  it. The details stay in the agent's and the controller's logs.
+  follows it until the site answers, then opens it. A failed wake records a fixed line ("the start command exited
+  (exit status: 1) before the site answered on port 4173", "the space could not start; try again in a few minutes"),
+  never a local path, user name or command line. Studio does not show that line, since it names ports and exit
+  statuses: the card reads "Couldn't start · Ask Octo to start it again" (a press tries again) and the pane says
+  "Couldn't start it. Ask Octo to start it again." The details stay in the agent's and the controller's logs.
 
 No agent job, run, chat message or model call is involved. Limits: 6 new wakes per preview per 10 minutes and 30 per
 person per space per hour (`429`); a wake not claimed within 10 minutes fails, and a claim without a result is retried
