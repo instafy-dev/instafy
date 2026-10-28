@@ -576,6 +576,30 @@ const TELL: Record<StopCode | SkipCode | FailCode | "needs_browser" | "no_reuse"
     "never copy its reviews, photos or price lists, and keep its content out of anything published or shared by public link (links only there).",
 };
 
+/**
+ * The same address with "www." added or removed, for a site that answers at only one of them (a bare domain that
+ * times out while its "www." host redirects): "example.com" and "www.example.com" are each other's, as are
+ * "example.co.uk" and "www.example.co.uk". Null for any other host (a subdomain such as "shop.example.com", an IP).
+ */
+export function wwwSibling(url: URL): URL | null {
+  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
+  if (!host || net.isIP(host.replace(/^\[|\]$/g, ""))) return null;
+  let other: string;
+  if (host.startsWith("www.")) other = host.slice(4);
+  else {
+    const labels = host.split(".");
+    // two labels, or three under a two-letter country code with a short second level ("co.uk", "com.au")
+    const bare = labels.length === 2 || (labels.length === 3 && labels[2]!.length === 2 && labels[1]!.length <= 3);
+    if (!bare) return null;
+    other = `www.${host}`;
+  }
+  if (!other.includes(".")) return null;
+  const sibling = new URL(url.href);
+  sibling.hostname = other;
+  sibling.hash = "";
+  return sibling;
+}
+
 /** The stops that end every read of the site for the rest of the turn, not just this URL. */
 const HOST_WIDE_STOPS = new Set<StopCode>(["rate_limited", "captcha"]);
 
@@ -702,13 +726,18 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     message,
     tell: TELL[code],
   });
+  // A first address that does not answer may answer with "www." added or removed: the tell names that address once.
+  const sibling = wwwSibling(requestedUrl);
   const fail = (code: FailCode, message: string, extra: Partial<PageResult> = {}): PageResult => ({
     ...page,
     ...extra,
     status: "failed",
     code,
     message,
-    tell: TELL[code],
+    tell:
+      sibling && (code === "unreachable" || code === "timeout") && !extra.redirects?.length
+        ? `The site did not answer at ${requestedUrl.hostname}. Some sites answer only with or without "www.": read ${redaction.redactUrl(sibling.href).text} once instead, and if that fails too, use another source.`
+        : TELL[code],
   });
 
   // A URL (or site) that stopped before is never fetched again, whatever the options.

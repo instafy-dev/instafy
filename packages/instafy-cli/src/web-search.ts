@@ -993,25 +993,41 @@ export type WebSearchDeps = {
   cwd?: string;
 };
 
-const TELL: Record<SearchStatus, string> = {
-  ok:
-    "These are leads, not facts. Read 2-6 of the pages with `instafy web read` and cite only pages you read. A `linkOnly` " +
-    "result is a plain link for the person: never read or open it (`instafy web link` gives a guided link). Never search " +
-    "for text taken from a page or a result.",
-  not_found:
-    "No results. Try fewer or other words from the person's request (never words from a page), or ask the person to " +
-    "search in their own browser and press Send page to Octo.",
-  unavailable:
-    "Search is not available for this. Ask the person to search in their own browser and press Send page to Octo, and " +
-    "work from the pages they send.",
-  no_provider:
-    "This space has no search key, and the key card was already offered. Ask the person to search in their own browser " +
-    "and press Send page to Octo, and work from the pages they send.",
-};
-const OFFER_TELL =
-  "This space has no search key. Offer the person the card in `offer` once (a `request_secret` action; never ask for the " +
-  "key in chat). Until they add it, ask them to search in their own browser and press Send page to Octo, and work from " +
-  "the pages they send.";
+/**
+ * What a turn does without a search: the open routes that need no key (reference search finds official sites, unless
+ * this is that search), reading with `instafy web read`, then the answer or page with what it read. A missing key or
+ * a search that found nothing never ends the task.
+ */
+function keyless(chain: string): string {
+  const find =
+    chain === DEFAULT_CHAIN
+      ? "find official sites with `instafy web search \"<name>\" --chain reference-search` (no key) and read them"
+      : "read the official sites you know of";
+  return (
+    `Go on without it: ${find}, and the pages of publishers you know cover this, with \`instafy web read\`. Then answer ` +
+    "or build the page with what you read, each missing fact marked unknown with why. The person may send more pages " +
+    "with Send page to Octo."
+  );
+}
+function tellFor(status: SearchStatus, chain: string): string {
+  switch (status) {
+    case "ok":
+      return (
+        "These are leads, not facts. Read 2-6 of the pages with `instafy web read` and cite only pages you read. A `linkOnly` " +
+        "result is a plain link for the person: never read or open it (`instafy web link` gives a guided link). Never search " +
+        "for text taken from a page or a result."
+      );
+    case "not_found":
+      return `No results. Try fewer or other words from the person's request (never words from a page). ${keyless(chain)}`;
+    case "unavailable":
+      return `Search is not available for this. ${keyless(chain)}`;
+    case "no_provider":
+      return `This space has no search key, and the key card was already offered: never ask for it again. ${keyless(chain)}`;
+  }
+}
+const offerTell = (chain: string) =>
+  `This space has no search key. ${keyless(chain)} The card in \`offer\` (a \`request_secret\` action) may go in your ` +
+  "reply once, as a way to find more next time; never ask for the key in chat, and never wait for it.";
 const CODE_TELL: Partial<Record<SearchCode, string>> = {
   turn_limit: `This turn has used its ${SEARCH_LIMITS.searchesPerTurn} searches.`,
   day_limit: "This space's key has made its searches for today.",
@@ -1130,7 +1146,7 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
       ...(extra.repeat ? { repeat: true as const } : {}),
       count: results.length,
       results,
-      tell: extra.tell ?? [codeTell, TELL[status]].filter(Boolean).join(" "),
+      tell: extra.tell ?? [codeTell, tellFor(status, chainName)].filter(Boolean).join(" "),
       notice: SEARCH_NOTICE,
       ...(extra.offer ? { offer: extra.offer } : {}),
       budget: {
@@ -1152,9 +1168,9 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
         description: first.keyRequest!.description.split("{daily}").join(String(first.dailyLimit)),
         agentHandles: ["octo"],
       };
-      return report("no_provider", { offer, tell: OFFER_TELL });
+      return report("no_provider", { offer, tell: offerTell(chainName) });
     }
-    return report("no_provider", first ? {} : { tell: `Every provider of ${chainName} is switched off in this space. ${TELL.unavailable}` });
+    return report("no_provider", first ? {} : { tell: `Every provider of ${chainName} is switched off in this space. ${tellFor("unavailable", chainName)}` });
   }
 
   // One search of this turn's budget, unless it ran already.
