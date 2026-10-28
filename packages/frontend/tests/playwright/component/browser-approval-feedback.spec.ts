@@ -193,12 +193,20 @@ for (const width of [320, 390, 1280]) for (const theme of ["light", "dark"]) {
       const errors = await configure(page);
       await open(page, "recovery", theme);
       const recovery = page.getByTestId("chat-message-proxy-error-guidance");
+      const action = recovery.getByTestId("chat-message-proxy-error-action");
       await fits(page, recovery);
-      await expect(recovery).toContainText("The saved AI login is stale.");
+      await expect(recovery).toHaveRole("alert");
+      // Exact recovery copy belongs to proxyError's unit tests. Here, require
+      // visible guidance beyond the action label, regardless of its wording.
+      await expect.poll(async () =>
+        (await recovery.innerText()).replace(await action.innerText(), "").trim(),
+      ).toMatch(/\S/);
       expect(await recovery.evaluate(element => element.scrollWidth <= element.clientWidth + 1 && element.scrollHeight <= element.clientHeight + 1)).toBe(true);
-      const action = page.getByTestId("chat-message-proxy-error-action");
+      await expect(action).toHaveAccessibleName(/\S/);
+      await expect(action).toBeEnabled();
       await touchTargets(action, width);
       await action.focus();
+      await expect(action).toBeFocused();
       await action.press("Enter");
       await expect(page.getByTestId("review-recovery-panel")).toHaveText("ai");
 
