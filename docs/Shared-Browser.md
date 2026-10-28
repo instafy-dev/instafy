@@ -1599,8 +1599,13 @@ unless the policy is `"covered"`.
   the conversation's machine continues there without a press, even within ten
   minutes of the last automatic start; the declined check, the browser-turn
   check and every check before sending still apply.
-- **Hand-back.** When a browser turn that continued Octo's card finishes,
-  Studio sends one ordinary turn back to the building lane, "Continue building
+- **Hand-back.** Only a card Octo builds from hands back: the runtime's card
+  carries `browserRequest.continueBuilding` when Octo is building something (a
+  page, a map) and continues it from what the browser finds, and its
+  continuation carries `browserHandsBack`. A card for a question has neither,
+  and the browser turn's reply is the answer. When a browser turn that
+  continued a building card finishes and read at least one page, Studio sends
+  one ordinary turn back to the building lane, "Continue building
   with what the browser turn found.", shown as the notice "Octo continued with
   what it found in the browser" and naming the browser job in
   `continuesFromBrowserJob`. It does so only in the tab that sent both the
@@ -1620,13 +1625,22 @@ unless the policy is `"covered"`.
   who ran the browser turn, and whose turn sent the card, can send it, once per
   browser turn, within 30 minutes, only while no prompt was sent in the
   conversation after the browser turn (`browser_hand_back_superseded`), and
-  never as a send-queue entry. The
+  never as a send-queue entry. It also refuses a card without
+  `continueBuilding` (`browser_hand_back_not_building`) and a browser turn
+  whose findings name no page it read (`browser_hand_back_nothing_read`). The
   runtime shows that record to the building turn as quoted page data: not the
-  person's words, not their consent, and no instruction. One automatic hop
-  only: a card the hand-back turn sends never opens by itself, and its browser
-  turn is never handed back (`browser_hand_back_second_hop`). A browser turn
-  that continues a card is asked to end its reply with one finding per page,
-  one JSON object per line, as the browser skill writes them. The fixtures in
+  person's words, not their consent, and no instruction; the turn says what it
+  built with it, without repeating the browser turn's answer. A hand-back turn
+  never asks for the browser again: the runtime drops its `request_browser`
+  card and leaves the browser rule out of its prompt, and the controller still
+  refuses a second hop from an older runtime (`browser_hand_back_second_hop`).
+  A browser turn that continues a building card is asked to end its reply
+  with one finding per page, one JSON object per line, as the browser skill
+  writes them. Those lines are for Octo: the runtime takes every line the
+  controller would read as a finding out of the reply the person reads, and
+  posts them as one note in the turn's Details
+  (`details.browserFindings: {pages, pagesRead}`), where the controller reads
+  them back after the reply for the record. The fixtures in
   `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
   three halves together.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live
