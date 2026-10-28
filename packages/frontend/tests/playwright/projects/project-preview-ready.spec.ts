@@ -407,17 +407,19 @@ test.describe("Site preview card and pane", () => {
       await expect(card.getByRole("button", { name: `Open ${PREVIEW_TITLE}` })).toBeVisible();
       await expect.poll(() => ingressStatus(viewer.hostname, ingressPort), { timeout: 35_000, intervals: [1_000] }).toBe(401);
 
-      // The server dies: the pane and the card both say so.
+      // The server dies: the pane and the card both say the site is stopped, in plain words, with no port.
       await openFromCard(page);
       stopFixtureServer(container);
       await expect(page.getByTestId("site-preview-pane")).toHaveAttribute("data-state", "not_responding", { timeout: 40_000 });
-      await expect(page.getByTestId("site-preview-pane")).toContainText(`Not responding on port ${PREVIEW_PORT}`);
-      await expect(previewCard(page).getByTestId("preview-ready-status")).toHaveText("Not responding", { timeout: 35_000 });
+      await expect(page.getByTestId("site-preview-problem")).toContainText("This site is stopped.");
+      await expect(page.getByTestId("site-preview-pane")).not.toContainText(String(PREVIEW_PORT));
+      await expect(page.getByTestId("site-preview-frame")).toHaveCount(0);
+      await expect(previewCard(page).getByTestId("preview-ready-status")).toHaveText(/^Stopped/, { timeout: 35_000 });
 
       // The runtime closes the preview: both read Stopped.
       docker(["exec", container, "instafy", "preview", "close", previewId]);
       await expect(page.getByTestId("site-preview-pane")).toHaveAttribute("data-state", "stopped", { timeout: 30_000 });
-      await expect(page.getByTestId("site-preview-pane")).toContainText("Stopped");
+      await expect(page.getByTestId("site-preview-problem")).toContainText("This site is stopped.");
       await expect(previewCard(page)).toContainText("Stopped", { timeout: 35_000 });
     } finally {
       stopFixtureServer(container);

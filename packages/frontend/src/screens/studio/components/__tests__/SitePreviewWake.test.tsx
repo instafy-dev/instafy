@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   createSitePreviewViewer: vi.fn(),
   heartbeatSitePreviewViewer: vi.fn(),
   revokeSitePreviewViewer: vi.fn(),
+  runtime: { tunnelGrants: {}, runtimeStatuses: [] } as Record<string, unknown>,
 }));
 vi.mock("../../../../services/runtimeController/previews", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../services/runtimeController/previews")>()),
@@ -27,7 +28,7 @@ vi.mock("../../../../services/runtimeController/previews", async (importOriginal
   heartbeatSitePreviewViewer: mocks.heartbeatSitePreviewViewer,
   revokeSitePreviewViewer: mocks.revokeSitePreviewViewer,
 }));
-vi.mock("../../../../runtime/RuntimeStateProvider", () => ({ useOptionalRuntimeState: () => ({ tunnelGrants: {}, runtimeStatuses: [] }) }));
+vi.mock("../../../../runtime/RuntimeStateProvider", () => ({ useOptionalRuntimeState: () => mocks.runtime }));
 
 function record(overrides: Partial<ControllerSitePreview> = {}): ControllerSitePreview {
   return {
@@ -57,7 +58,9 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  Object.values(mocks).forEach(mock => mock.mockReset());
+  [mocks.getSitePreview, mocks.wakeSitePreview, mocks.createSitePreviewViewer, mocks.heartbeatSitePreviewViewer, mocks.revokeSitePreviewViewer]
+    .forEach(mock => mock.mockReset());
+  mocks.runtime = { tunnelGrants: {}, runtimeStatuses: [] };
   mocks.heartbeatSitePreviewViewer.mockResolvedValue("live");
   mocks.revokeSitePreviewViewer.mockResolvedValue(undefined);
 });
@@ -188,22 +191,49 @@ describe("the card wakes a stopped site on Open", () => {
     expect(disabled()).toBe(false);
   });
 
-  it("follows a wake someone else started, and offers Start again for a site that stopped answering", async () => {
+  it("says a start that failed on the machine in plain words, and a press tries again", async () => {
+    mocks.getSitePreview.mockResolvedValueOnce(record({ health: { listening: false, status: null } }))
+      .mockResolvedValue(record({ health: { listening: false, status: null },
+        wake: { state: "failed", startedAt: null, error: "the start command exited (exit status: 1) before the site answered on port 4173" } }));
+    mocks.wakeSitePreview.mockResolvedValue({ state: "waking" });
+    await render();
+    await press("[data-testid=preview-ready-open]");
+    await advance(2_000);
+    expect(text("[data-testid=preview-ready-status]")).toBe("Couldn't start · Ask Octo to start it again");
+    expect(container.querySelector("[data-testid=preview-ready-card]")!.innerHTML).not.toMatch(/4173|exit status|start command/);
+    expect(opener.openPreview).not.toHaveBeenCalled();
+    expect(disabled()).toBe(false);
+  });
+
+  it("follows a wake someone else started", async () => {
     mocks.getSitePreview.mockResolvedValueOnce(stopped({ wake: { state: "waking", startedAt: null, error: null } }))
-      .mockResolvedValueOnce(record({ health: { listening: false, status: null } }))
-      .mockResolvedValue(record({ health: { listening: false, status: null } }));
-    mocks.wakeSitePreview.mockResolvedValue({ state: "live" });
+      .mockResolvedValue(record());
     await render();
     expect(text("[data-testid=preview-ready-status]")).toBe("Starting…");
     expect(disabled()).toBe(true);
     await advance(3_000);
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
-    expect(text("[data-testid=preview-ready-status]")).toBe("Not responding");
-    expect(container.querySelector("[data-testid=preview-ready-status]")!.getAttribute("title")).toBe("Nothing answers on port 4173");
-    await press("[data-testid=preview-ready-restart]");
+    expect(container.querySelector<HTMLElement>("[data-testid=preview-ready-status]")!.dataset.state).toBe("live");
+    expect(mocks.wakeSitePreview).not.toHaveBeenCalled();
+  });
+
+  // Local drive, Oct 28: after "stop the preview server" (Octo stopped the server by its process), pressing the card
+  // opened a pane with the problem in it, and only that pane's Start again brought the site back.
+  it("starts a site whose server stopped (nothing answers) on a press, then opens it", async () => {
+    mocks.getSitePreview.mockResolvedValueOnce(record({ health: { listening: false, status: null } }))
+      .mockResolvedValue(record());
+    mocks.wakeSitePreview.mockResolvedValue({ state: "waking" });
+    await render();
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · opening restarts it");
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).not.toBeNull();
+    expect(container.querySelector("[data-testid=preview-ready-restart]")).toBeNull();
+    await press("[data-testid=preview-ready-open]");
     expect(mocks.wakeSitePreview).toHaveBeenCalledOnce();
-    // Start again does not pull the person into the site.
+    expect(text("[data-testid=preview-ready-status]")).toBe("Starting…");
     expect(opener.openPreview).not.toHaveBeenCalled();
+    await advance(2_000);
+    expect(opener.openPreview).toHaveBeenCalledExactlyOnceWith({ previewId: PREVIEW_ID, title: "Site preview" });
+    expect(text("[data-testid=preview-ready-status]")).toBe("");
   });
 });
 
@@ -226,7 +256,35 @@ describe("a card beside its open pane", () => {
     await advance(60_000);
     // The pane's four checks a minute, and nothing more from the card.
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(4);
-    expect(text("[data-testid=preview-ready-status]")).toBe("Not responding");
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · opening restarts it");
+  });
+
+  it("has the pane check the site when a turn ends, so the pane and the card say Stopped at once", async () => {
+    mocks.createSitePreviewViewer.mockResolvedValue({ viewerUrl: VIEWER, idleTimeoutSeconds: 1800, expiresAt: null });
+    mocks.getSitePreview.mockResolvedValue(record());
+    mocks.runtime = { tunnelGrants: {}, runtimeStatuses: [], runs: { "run-1": { id: "run-1", status: "in_progress" } } };
+    const opener = { openPreview: vi.fn(), visiblePreviewId: PREVIEW_ID };
+    const draw = async () => {
+      await act(async () => root.render(
+        <ConversationPreviewContext.Provider value={opener}>
+          <SitePreviewCard preview={{ previewId: PREVIEW_ID, title: "Site preview", port: 4173 }} projectId="project-1" />
+          <SitePreviewPane projectId="project-1" previewId={PREVIEW_ID} title="Site preview" visible />
+        </ConversationPreviewContext.Provider>,
+      ));
+      await flush();
+    };
+    await draw();
+    expect(container.querySelector("[data-testid=site-preview-frame]")).not.toBeNull();
+    mocks.getSitePreview.mockClear();
+    // Octo stopped the server in this turn; the turn ends.
+    mocks.getSitePreview.mockResolvedValue(record({ health: { listening: false, status: null } }));
+    mocks.runtime = { ...mocks.runtime, runs: { "run-1": { id: "run-1", status: "success" } } };
+    await draw();
+    expect(mocks.getSitePreview).toHaveBeenCalledExactlyOnceWith("project-1", PREVIEW_ID, undefined, { fresh: true });
+    expect(container.querySelector<HTMLElement>("[data-testid=site-preview-pane]")!.dataset.state).toBe("not_responding");
+    expect(text("[data-testid=site-preview-problem]")).toBe("This site is stopped.Start again");
+    expect(container.querySelector("[data-testid=site-preview-frame]")).toBeNull();
+    expect(text("[data-testid=preview-ready-status]")).toBe("Stopped · opening restarts it");
   });
 });
 
@@ -242,11 +300,27 @@ describe("the pane starts a stopped site again", () => {
     mocks.getSitePreview.mockResolvedValueOnce(stopped()).mockResolvedValue(record());
     mocks.wakeSitePreview.mockResolvedValue({ state: "live" });
     await render();
-    expect(text("[data-testid=site-preview-problem]")).toContain("Start it again to pick up where it was");
+    // One line and one button: no Reload beside it, no pill above it saying the same.
+    expect(container.querySelector("[data-testid=site-preview-problem] [role=status]")?.textContent).toBe("This site is stopped.");
+    expect([...container.querySelectorAll("[data-testid=site-preview-problem] button")].map(button => button.textContent)).toEqual(["Start again"]);
+    expect(container.querySelector("[data-testid=site-preview-status]")).toBeNull();
     await press("[data-testid=site-preview-wake]");
     expect(mocks.wakeSitePreview).toHaveBeenCalledOnce();
     expect(mocks.createSitePreviewViewer).toHaveBeenCalledTimes(2);
     expect(frame()?.getAttribute("src")).toContain("p-aaaa");
+  });
+
+  it("says a failed Start again in plain words, with no port or command", async () => {
+    mocks.createSitePreviewViewer.mockRejectedValue(apiError(409));
+    mocks.getSitePreview.mockResolvedValueOnce(stopped()).mockResolvedValue(stopped({
+      wake: { state: "failed", startedAt: null, error: "the site did not answer on port 4173 within 60 s" },
+    }));
+    mocks.wakeSitePreview.mockResolvedValue({ state: "waking" });
+    await render();
+    await press("[data-testid=site-preview-wake]");
+    await advance(2_000);
+    expect(text("[data-testid=site-preview-feedback]")).toContain("Couldn't start it. Ask Octo to start it again.");
+    expect(container.querySelector("[data-testid=site-preview-pane]")!.textContent).not.toContain("4173");
   });
 
   it("stops following its wake when it closes", async () => {
@@ -263,20 +337,29 @@ describe("the pane starts a stopped site again", () => {
     expect(mocks.getSitePreview.mock.calls.length).toBe(polls);
   });
 
-  it("keeps Start again off, with the reason, for a member who may not start the machine", async () => {
+  it("says who can start it, with no button, to a member who may not start the machine", async () => {
     mocks.createSitePreviewViewer.mockRejectedValue(apiError(409));
     mocks.getSitePreview.mockResolvedValue(stopped({ canStart: false }));
     await render();
-    expect(text("[data-testid=site-preview-problem]")).toContain("Only people who can edit this space can start it.");
-    expect(container.querySelector<HTMLButtonElement>("[data-testid=site-preview-wake]")?.disabled).toBe(true);
+    expect(text("[data-testid=site-preview-problem]"))
+      .toBe("This site is stopped. Only people who can edit this space can start it. Ask one of them to open it.");
+    expect(container.querySelector("[data-testid=site-preview-wake]")).toBeNull();
     expect(mocks.wakeSitePreview).not.toHaveBeenCalled();
+  });
+
+  it("says only that the site is stopped until a record says whether Start again can work", async () => {
+    mocks.createSitePreviewViewer.mockRejectedValue(apiError(409));
+    mocks.getSitePreview.mockReturnValue(new Promise(() => {}));
+    await render();
+    expect(text("[data-testid=site-preview-problem]")).toBe("This site is stopped.");
+    expect(container.querySelector("[data-testid=site-preview-problem] button")).toBeNull();
   });
 
   it("asks Octo, not the pane, for a site nobody recorded how to start", async () => {
     mocks.createSitePreviewViewer.mockRejectedValue(apiError(409));
     mocks.getSitePreview.mockResolvedValue(stopped({ restartable: false }));
     await render();
-    expect(text("[data-testid=site-preview-problem]")).toContain("Ask Octo to start it again");
+    expect(text("[data-testid=site-preview-problem]")).toBe("This site is stopped. Ask Octo to start it again.");
     expect(container.querySelector("[data-testid=site-preview-wake]")).toBeNull();
   });
 

@@ -16,7 +16,7 @@ import {
   type SitePreviewShownState,
 } from "../../../services/runtimeController/previews";
 import { reserveExternalWindow } from "../../../utils/openExternalUrl";
-import { BrowserChromeShell, BrowserStatusPill, type BrowserChromeState } from "./BrowserChromeShell";
+import { BrowserChromeShell, BrowserStatusPill } from "./BrowserChromeShell";
 import { withHostQuery } from "./previewHost/hostMessages";
 import { useSiteHost, type SiteMessageEvent, type SiteRecord } from "./previewHost/useSiteHost";
 import { setLocationStopped } from "./previewHost/locationSites";
@@ -26,7 +26,7 @@ import { FollowRing, FollowRipples, FollowToast, SitePreviewFollowControls } fro
 import { AskConfirmStrip } from "./previewHost/AskConfirmStrip";
 import type { SiteAskHost } from "./previewHost/useSiteAsks";
 import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
-import { shareSitePreviewRecord } from "./SitePreviewCard";
+import { registerSitePreviewPaneCheck, shareSitePreviewRecord } from "./SitePreviewCard";
 
 export const SITE_PREVIEW_HEALTH_POLL_MS = 15_000;
 /** While the frame is on screen: keeps a quiet site's session alive. */
@@ -76,43 +76,30 @@ export function nextMountedSitePreviews(current: MountedSitePreviews, scope: str
   return { scope, ids: add ? [...kept, shownPreviewId] : kept };
 }
 
-/** What the pane says in place of the site. Reload is offered only where asking again can help. */
-const PROBLEM_TEXT: Record<Exclude<SitePreviewPaneState, "opening" | "starting" | "checking" | "live">, { title: string | null; body: string; reload: boolean }> = {
-  not_responding: { title: null, body: "The site stopped answering. Reload once it is back, or ask Octo to start it again.", reload: true },
-  stopped: { title: null, body: "The machine or the site stopped. Ask Octo to start it again.", reload: true },
+/**
+ * What the pane says in place of a site that stopped, or stopped answering (to the person, both are stopped): one
+ * line, and Start again where the record knows how to start it. It comes back by itself once it answers again.
+ */
+const STOPPED_TEXT = "This site is stopped.";
+const STOPPED_ASK_OCTO_TEXT = `${STOPPED_TEXT} Ask Octo to start it again.`;
+
+type ProblemText = { title: string; body: string; reload: boolean };
+
+/** What the pane says in place of the site otherwise. Reload is offered only where asking again can help. */
+const PROBLEM_TEXT = {
   missing: { title: "This preview no longer exists", body: "It was closed. Ask Octo to open the site again.", reload: false },
   no_access: { title: "You can't open this preview", body: "You may no longer have access to it.", reload: false },
   ended: { title: "This preview session ended", body: "Reload to open a new session.", reload: true },
   busy: { title: "Too many previews opened", body: "Too many previews were opened just now. Wait a minute, then reload.", reload: true },
   unavailable: { title: UNAVAILABLE_TEXT, body: "This server does not offer site previews.", reload: false },
-};
+} satisfies Record<Exclude<SitePreviewPaneState, "opening" | "starting" | "checking" | "live" | "not_responding" | "stopped">, ProblemText>;
 
-/** A site `instafy preview open` knows how to start: the pane starts it itself, without Octo. */
-const WAKE_TEXT: Partial<Record<SitePreviewPaneState, string>> = {
-  not_responding: "The site stopped answering. Start it again, or reload once it is back.",
-  stopped: "The machine or the site stopped. Start it again to pick up where it was.",
-};
-
-function chromeState(state: SitePreviewPaneState): BrowserChromeState {
-  if (state === "live") return "ready";
-  return state === "opening" || state === "starting" || state === "checking" ? "starting" : "unavailable";
+function problemText(state: SitePreviewPaneState): ProblemText | null {
+  return (PROBLEM_TEXT as Partial<Record<SitePreviewPaneState, ProblemText>>)[state] ?? null;
 }
 
-function statusDetail(state: SitePreviewPaneState, port: number | null): string | null {
-  switch (state) {
-    case "opening": return "Opening";
-    case "starting": return "Starting";
-    case "checking": return "Checking";
-    case "live": return "Live";
-    case "not_responding": return port ? `Not responding on port ${port}` : "Not responding";
-    case "stopped": return "Stopped";
-    case "missing": return "Closed";
-    case "no_access": return "No access";
-    case "ended": return "Session ended";
-    case "busy": return "Try again shortly";
-    default: return UNAVAILABLE_TEXT;
-  }
-}
+/** The pill's words while the site is on its way or there; in place of the site, the pane's message says the rest. */
+const PILL_DETAIL: Partial<Record<SitePreviewPaneState, string>> = { opening: "Opening", starting: "Starting", checking: "Checking", live: "Live" };
 
 /**
  * One running site in a conversation's side pane, inside upstream's browser bar.
@@ -152,14 +139,13 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [session, setSession] = useState<SessionState>("opening");
   const [health, setHealth] = useState<HealthState>("checking");
-  const [port, setPort] = useState<number | null>(null);
   /** The record's title, port and path: what keys this site for location. */
   const [record, setRecord] = useState<SiteRecord | null>(null);
   const [frameKey, setFrameKey] = useState(0);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [openingTab, setOpeningTab] = useState(false);
-  /** The record says how to start the site again (`instafy preview open` recorded it). */
-  const [restartable, setRestartable] = useState(false);
+  /** The record says how to start the site again (`instafy preview open` recorded it); null until a record says. */
+  const [restartable, setRestartable] = useState<boolean | null>(null);
   /** False when the person may not start the stopped machine (the controller says so up front). */
   const [canStart, setCanStart] = useState<boolean | null>(null);
   const [waking, setWaking] = useState(false);
@@ -272,7 +258,6 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
       if (signal?.aborted || !mounted.current) return;
       // The cards of this preview read it too, instead of asking themselves.
       shareSitePreviewRecord(previewId, preview);
-      setPort(preview.port);
       setRecord(current => current && current.title === preview.title && current.port === preview.port && current.path === preview.path
         ? current : { title: preview.title, port: preview.port, path: preview.path });
       setRestartable(preview.restartable === true);
@@ -298,6 +283,12 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
     const timer = window.setInterval(tick, SITE_PREVIEW_HEALTH_POLL_MS);
     return () => { controller.abort(); window.clearInterval(timer); };
   }, [checkHealth, healthSettled, sessionWaits, visible]);
+  // While on screen, the cards of this preview have the pane check the site (a turn ended, a card started it), so
+  // the two never read it two ways.
+  useEffect(() => {
+    if (!visible || !sessionWaits || healthSettled) return;
+    return registerSitePreviewPaneCheck(previewId, () => { void checkHealth(undefined, true); });
+  }, [checkHealth, healthSettled, previewId, sessionWaits, visible]);
 
   // The site answers again while this pane's session was refused as stopped:
   // open a new session, once each time the record turns live.
@@ -352,10 +343,13 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   }, [visible]);
 
   const shown: SitePreviewPaneState = waking ? "starting" : session === "ready" ? health : session === "stopped" && health === "not_responding" ? "stopped" : session;
-  // Only a stopped machine needs someone who may change the space; a site that stopped answering on a running one
-  // restarts for anyone who may view it.
-  const startBlocked = shown === "stopped" && canStart === false;
-  const frameShown = Boolean(viewerUrl) && session === "ready" && (shown === "checking" || shown === "live" || shown === "not_responding");
+  const down = shown === "stopped" || shown === "not_responding";
+  // The controller says who may start it: a stopped machine needs someone who may change the space; a site that
+  // stopped answering on a running one restarts for anyone who may view it.
+  const startBlocked = down && canStart === false;
+  // A site that stopped answering has no frame: its frame would hold the broker's error page, showing through the
+  // pane's own message, and still showing once the site is back. The frame loads again when it answers.
+  const frameShown = Boolean(viewerUrl) && session === "ready" && (shown === "checking" || shown === "live");
   const frameOnScreen = visible && frameShown;
   const host = useSiteHost({
     frame, viewerUrl: frameShown ? viewerUrl : null, frameKey, projectId, previewId, frameOnScreen, record, title, spaceName, asks,
@@ -442,7 +436,9 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
     })();
   }, [openingTab, previewId, projectId, revoke]);
 
-  const detail = statusDetail(shown, port);
+  const problem = problemText(shown);
+  // In place of the site, the pane's message is the one signal: no pill beside it saying the same.
+  const problemShown = down || problem !== null;
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="site-preview-pane" data-state={shown}>
@@ -465,8 +461,10 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
           <LocationBarControl site={host.location.site} status={host.location.status} />
           <SitePreviewFollowControls follow={follow} supportsView={host.supportsView && frameOnScreen} />
           {/* While opening or starting, the pane's own line is the one loading signal on screen. */}
-          <BrowserStatusPill state={chromeState(shown)} detail={detail} testId="site-preview-status"
-            startingShownInView={shown === "opening" || shown === "starting"} />
+          {problemShown ? null : (
+            <BrowserStatusPill state={shown === "live" ? "ready" : "starting"} detail={PILL_DETAIL[shown] ?? null} testId="site-preview-status"
+              startingShownInView={shown === "opening" || shown === "starting"} />
+          )}
         </>}
         actions={
           <IconButton aria-label="Open in new tab" title="Open in new tab" className="max-[540px]:h-10 max-[540px]:w-10" data-testid="site-preview-open-tab"
@@ -507,23 +505,30 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
             <Spinner aria-hidden="true" tone="slate" size="sm" /> {shown === "starting" ? "Starting" : "Opening"} {title}…
           </div>
         ) : null}
-        {shown !== "opening" && shown !== "starting" && shown !== "checking" && shown !== "live" ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-white/95 p-6 dark:bg-[var(--color-studio-dark-canvas)]/95" data-testid="site-preview-problem">
-            <div className="max-w-sm space-y-3 text-center">
-              <Text as="div" variant="bodyStrong" tone="primary">{PROBLEM_TEXT[shown].title ?? detail}</Text>
-              <Text as="div" variant="caption" tone="muted">
-                {restartable && WAKE_TEXT[shown] ? (startBlocked ? START_NEEDS_BUILDER_TEXT : WAKE_TEXT[shown]) : PROBLEM_TEXT[shown].body}
-              </Text>
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                {PROBLEM_TEXT[shown].reload ? (
-                  <Button variant="outline" size="sm" radius="full" onPress={reload}>Reload</Button>
-                ) : null}
-                {restartable && WAKE_TEXT[shown] ? (
+        {problemShown ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-white p-6 dark:bg-[var(--color-studio-dark-canvas)]" data-testid="site-preview-problem">
+            {down ? (
+              <div className="max-w-sm space-y-3 text-center">
+                <Text as="div" variant="body" tone="primary" role="status" aria-live="polite">
+                  {/* Until a record says whether Start again can work, nothing more than what is true. */}
+                  {restartable === false ? STOPPED_ASK_OCTO_TEXT : restartable && startBlocked ? `${STOPPED_TEXT} ${START_NEEDS_BUILDER_TEXT}` : STOPPED_TEXT}
+                </Text>
+                {restartable && !startBlocked ? (
                   // Started the way it was opened: no Octo turn, no message.
-                  <Button variant="primary" size="sm" radius="full" data-testid="site-preview-wake" isDisabled={startBlocked} onPress={() => void wakeSite()}>Start again</Button>
+                  <Button variant="primary" size="sm" radius="full" data-testid="site-preview-wake" onPress={() => void wakeSite()}>Start again</Button>
                 ) : null}
               </div>
-            </div>
+            ) : problem ? (
+              <div className="max-w-sm space-y-3 text-center" role="status" aria-live="polite">
+                <Text as="div" variant="bodyStrong" tone="primary">{problem.title}</Text>
+                <Text as="div" variant="caption" tone="muted">{problem.body}</Text>
+                {problem.reload ? (
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button variant="outline" size="sm" radius="full" onPress={reload}>Reload</Button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>

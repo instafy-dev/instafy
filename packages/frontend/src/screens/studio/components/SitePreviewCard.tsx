@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WebWindow } from "iconoir-react";
 import { Text } from "../../../components/Text";
 import { useOptionalRuntimeState } from "../../../runtime/RuntimeStateProvider";
+import type { RunRecord } from "../../../types";
 import { ControllerApiError } from "../../../services/runtimeController/core";
 import {
   SITE_PREVIEW_THUMBNAIL_EVENT,
@@ -47,6 +48,8 @@ const RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
 export const SITE_PREVIEW_CHECKING_QUIET_MS = 3_000;
 const ENDED_GRANT_STATUSES: ReadonlySet<string> = new Set(["revoked", "expired", "closed", "failed"]);
 const ENDED_RUNTIME_STATUSES: ReadonlySet<string> = new Set(["stopped", "stopping", "terminated", "released", "failed"]);
+/** A turn in one of these has ended: whatever it did to a site is done. */
+const ENDED_RUN_STATUSES: ReadonlySet<string> = new Set(["success", "failed", "canceled", "merged"]);
 
 /**
  * What a card says about its site. Only the controller's record (grant and
@@ -147,6 +150,20 @@ export function shareSitePreviewRecord(previewId: string, preview: ControllerSit
   for (const member of cardsByPreview.get(previewId)?.members ?? []) member.read({ preview });
 }
 
+/** The pane on screen for each preview, as its own "check the site now". */
+const paneChecks = new Map<string, () => void>();
+
+/**
+ * While a preview's pane is on screen, its cards ask the pane to check the site instead of asking themselves, so the
+ * pane and the cards read the same answer. Returns the unregister.
+ */
+export function registerSitePreviewPaneCheck(previewId: string, check: () => void): () => void {
+  paneChecks.set(previewId, check);
+  return () => {
+    if (paneChecks.get(previewId) === check) paneChecks.delete(previewId);
+  };
+}
+
 /**
  * What a failed check means for the card: `gone` (the preview does not exist,
  * this viewer may not see it, or it stopped) reads Stopped; `final` (this
@@ -176,11 +193,13 @@ function whenVisible(run: () => void): () => void {
   return () => document.removeEventListener("visibilitychange", onChange);
 }
 
-/** What the card says under its title in each state that is not the normal live one. */
+/**
+ * What the card says under its title in each state that is not the normal live one. A site that stopped answering
+ * reads as stopped: to the person it is, whether its server was stopped or its machine was.
+ */
 export const SITE_PREVIEW_STATUS_TEXT = {
   checking: "Checking the site…",
   starting: "Starting…",
-  notResponding: "Not responding",
   unavailable: "Status unavailable",
   // Not known yet whether a press can start it: nothing more than what is true.
   stopped: "Stopped",
@@ -210,7 +229,27 @@ function useStoreSignals(previewId: string, runtimeId: string | null) {
   return {
     grantStatus: grant?.status ? grant.status.toLowerCase() : null,
     runtimeStatus: runtimeEntry?.status ? runtimeEntry.status.toLowerCase() : null,
+    runs: runtime?.runs ?? null,
   };
+}
+
+/**
+ * Calls `onEnded` when a turn in the space ends that this card saw running. Octo stops a site's server with a command,
+ * which sends no event, so the end of the turn is the first moment anything can tell.
+ */
+function useTurnEnded(runs: Record<string, RunRecord> | null, onEnded: () => void) {
+  const ended = useRef(onEnded);
+  ended.current = onEnded;
+  const running = useRef(new Map<string, boolean>());
+  useEffect(() => {
+    let news = false;
+    for (const run of Object.values(runs ?? {})) {
+      const done = ENDED_RUN_STATUSES.has(run.status);
+      if (done && running.current.get(run.id) === true) news = true;
+      running.current.set(run.id, !done);
+    }
+    if (news) ended.current();
+  }, [runs]);
 }
 
 /**
@@ -269,13 +308,16 @@ export function SitePreviewCard({
   }), []);
   useEffect(() => joinPreviewCards(preview.previewId, member), [member, preview.previewId]);
 
-  const refresh = useCallback(async () => {
+  // `fresh`: a new probe of the site, not the controller's answer of a few seconds ago.
+  const refresh = useCallback(async (fresh = false) => {
     if (!projectId) return;
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
     try {
-      const next = await getSitePreview(projectId, preview.previewId, controller.signal);
+      const next = fresh
+        ? await getSitePreview(projectId, preview.previewId, controller.signal, { fresh: true })
+        : await getSitePreview(projectId, preview.previewId, controller.signal);
       if (controller.signal.aborted) return;
       member.read({ preview: next });
       shareAnswer(preview.previewId, member, { preview: next });
@@ -290,15 +332,15 @@ export function SitePreviewCard({
     }
   }, [member, preview.previewId, projectId]);
 
-  // Something new happened (a press, a tunnel or runtime event): every
-  // automatic check the card gave up on may answer now, so ask again.
-  const renew = useCallback(() => {
+  // Something new happened (a press, a tunnel or runtime event, a turn that
+  // ended): every automatic check the card gave up on may answer now, so ask again.
+  const renew = useCallback((fresh = false) => {
     setFailures(0);
     setCannotCheck(false);
     const cards = cardsByPreview.get(preview.previewId);
     if (cards) cards.unseenFollows = 0;
     setFollowsSpent(false);
-    void refresh();
+    void refresh(fresh);
   }, [preview.previewId, refresh]);
 
   // Wake (a model-free restart): `instafy preview open` recorded how to start
@@ -308,7 +350,7 @@ export function SitePreviewCard({
   const [wakeError, setWakeError] = useState<string | null>(null);
   const wakeRequest = useRef<AbortController | null>(null);
   useEffect(() => () => wakeRequest.current?.abort(), []);
-  const wake = useCallback(async (then: (() => void) | null) => {
+  const wake = useCallback(async (then: () => void) => {
     if (!projectId || wakeRequest.current) return;
     const controller = new AbortController();
     wakeRequest.current = controller;
@@ -326,7 +368,9 @@ export function SitePreviewCard({
         member.read({ preview: live });
         shareAnswer(preview.previewId, member, { preview: live });
       } else renew();
-      then?.();
+      // A pane already showing the stopped site opens it again now, not at its next check.
+      paneChecks.get(preview.previewId)?.();
+      then();
     } catch (cause) {
       if (controller.signal.aborted) return;
       if (cause instanceof PreviewWakeError && cause.gone) member.read({ gone: true });
@@ -384,10 +428,12 @@ export function SitePreviewCard({
     runtimeStatus: signals.runtimeStatus,
   });
   const showing = state !== "stopped" && opener?.visiblePreviewId === preview.previewId;
+  // Stopped, or nothing answers (Octo stopped its server): to the person, either way the site is stopped.
+  const down = state === "stopped" || state === "not_responding";
   // Only a record that says how to start the site can be woken; a preview that is gone cannot.
   const wakeable = server?.restartable === true && !gone && !replaced;
   // Starting its stopped machine takes someone who may change the space: others see why before they press Open.
-  const startBlocked = wakeable && state === "stopped" && server?.canStart === false;
+  const startBlocked = wakeable && down && server?.canStart === false;
   // Someone else (another member, another tab) is waking it: follow along.
   const wakingElsewhere = !waking && !replaced && server?.wake?.state === "waking";
   const starting = waking || wakingElsewhere;
@@ -424,6 +470,17 @@ export function SitePreviewCard({
     return () => window.clearInterval(timer);
   }, [following, preview.previewId, refresh, showing, wakingElsewhere]);
 
+  // A turn ended: Octo may have stopped, restarted or replaced the site in it,
+  // and a stopped server sends no event. The latest card for the preview asks
+  // for a new probe at once (the pane does, when it is on screen), and every
+  // card reads the answer, so none still looks live after "stop the preview".
+  useTurnEnded(signals.runs, () => {
+    if (!latest) return;
+    const paneCheck = showing ? paneChecks.get(preview.previewId) : undefined;
+    if (paneCheck) paneCheck();
+    else renew(true);
+  });
+
   // Follow mode: who presents this site now (events keep it current; one look when the card first reads Live).
   const followEntry = useFollowEntry(preview.previewId);
   const selfId = useFollowAccount();
@@ -438,7 +495,7 @@ export function SitePreviewCard({
     return () => controller.abort();
   }, [preview.previewId, projectId, state]);
   // A stopped site has nothing to follow.
-  const followPresence = state === "stopped" ? null : followEntry.presence;
+  const followPresence = down ? null : followEntry.presence;
   // My own presentation from another screen: never "Follow" myself.
   const mine = Boolean(selfId && followPresence?.presenter.id === selfId);
   const followable = Boolean(followPresence) && !mine && followEntry.role !== "presenting" && followEntry.role !== "following";
@@ -456,7 +513,7 @@ export function SitePreviewCard({
   }, [opener, preview.previewId, preview.title]);
   const open = () => {
     // A stopped site that can be started: start it, then open it.
-    if (state === "stopped" && wakeable) { if (!startBlocked) void wake(openNow); return; }
+    if (down && wakeable) { if (!startBlocked) void wake(openNow); return; }
     renew();
     openNow();
   };
@@ -509,7 +566,6 @@ export function SitePreviewCard({
     : startBlocked
       ? SITE_PREVIEW_STATUS_TEXT.stoppedNeedsBuilder
       : SITE_PREVIEW_STATUS_TEXT.stoppedRestarts;
-  const port = server?.port ?? preview.port;
   let status: SitePreviewCardStatus | null = null;
   let pictureTone: SitePreviewCardViewProps["pictureTone"] = "normal";
   if (starting) {
@@ -521,19 +577,16 @@ export function SitePreviewCard({
   } else if (wakeError) {
     status = { text: couldNotStartText(wakeError) };
     pictureTone = "gray";
-  } else if (state === "stopped") {
+  } else if (down) {
     status = { text: stoppedText };
     pictureTone = "gray";
-  } else if (state === "not_responding") {
-    status = { text: SITE_PREVIEW_STATUS_TEXT.notResponding, ...(port ? { title: `Nothing answers on port ${port}` } : {}) };
-    pictureTone = "dim";
   } else if (state === "unavailable") {
     status = { text: SITE_PREVIEW_STATUS_TEXT.unavailable };
   } else if (state === "checking" && checkingLong) {
     status = { text: SITE_PREVIEW_STATUS_TEXT.checking };
   }
   // A card that can do nothing on a press does not look pressable.
-  const pressable = Boolean(opener) && !starting && !(state === "stopped" && (!wakeable || startBlocked)) &&
+  const pressable = Boolean(opener) && !starting && !(down && (!wakeable || startBlocked)) &&
     !(wakeError === START_NEEDS_BUILDER_TEXT);
 
   const actions: SitePreviewCardAction[] = [];
@@ -543,10 +596,6 @@ export function SitePreviewCard({
       id: "follow-preview", label: `Follow ${followPresence.presenter.name}`, testId: "preview-ready-follow",
       onPress: () => { requestFollow(preview.previewId); open(); },
     });
-  }
-  // A site that stopped answering starts again from here (a stopped one starts with a press on the card).
-  if (opener && wakeable && !starting && state === "not_responding") {
-    actions.push({ id: "restart-preview", label: "Start again", onPress: () => void wake(null), testId: "preview-ready-restart" });
   }
 
   // An earlier card for a site Octo opened again: the latest one, further down, is the one to use.
