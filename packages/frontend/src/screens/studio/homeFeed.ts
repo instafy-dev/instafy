@@ -461,8 +461,10 @@ export function buildHomeFeed({
         lane: "activity",
         kind,
         // A chat's real name, never a bare "Conversation": an untitled chat is
-        // "New chat" here as everywhere else.
-        title: chatTitle(item.conversation?.id, item.title) ?? NEW_CHAT_TITLE,
+        // "New chat" here as everywhere else. A run in no chat is about its space.
+        title: item.conversation
+          ? chatTitle(item.conversation.id, item.title) ?? NEW_CHAT_TITLE
+          : item.title?.trim() || getSpaceLabel(item.project?.name),
         preview: item.preview,
         statusLabel: kind === "run_failed" ? homeFailureStatusLabel(item.kind, item.data) : undefined,
         at: parseTimestamp(item.at),

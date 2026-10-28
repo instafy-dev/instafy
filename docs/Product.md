@@ -249,7 +249,8 @@ another device is read before writing.
 
 Every untitled chat is called **New chat**, in the chat list, its tab, Home and on every device:
 never a number taken from its place in the list, which changed whenever the list did. (Older chats
-stored as "Conversation 3" keep that name until they are titled.) A new chat holding a `/skills
+stored as "Conversation 3" keep that name until they are titled.) Home's rows use a chat's real
+name, and a run that belongs to no chat is named after its space. A new chat holding a `/skills
 import` line is titled after what it sets up: **Connect FreeFinance** for a built-in connector or
 **Set up Bookkeeping** for any other pack. Otherwise the client of the person who wrote the chat's
 opening message names it from that message's first line as soon as it is sent, so the chat has a

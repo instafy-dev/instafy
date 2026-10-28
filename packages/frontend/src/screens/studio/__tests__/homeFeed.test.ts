@@ -516,6 +516,24 @@ describe("buildHomeFeed with ledger rows", () => {
     });
   });
 
+  // A run with no chat (one started outside any conversation) is not a "New chat".
+  it("names a run that belongs to no chat by its space, never \"New chat\"", () => {
+    const model = buildHomeFeed({
+      attentionEntries: [],
+      recentConversations: [],
+      activity: [activityItem({ id: "5", kind: "run.finished", title: null, conversation: null, preview: null,
+        run: { id: "run-5", status: "succeeded", promptId: null } })],
+      projects: [acmeProject],
+      activeProject: acmeProject,
+      conversations: [],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+    const rows = model.activity.flatMap((day) => day.events);
+    expect(rows.map((row) => [row.kind, row.title])).toEqual([["run_finished", "checkout-flow"]]);
+  });
+
   it("folds ledger rows to one row per conversation, newest state first, with real actors", () => {
     const model = buildHomeFeed({
       attentionEntries: [],
