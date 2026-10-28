@@ -621,6 +621,7 @@ fn dump_job_failure_debug(error: &anyhow::Error) {
     }
 }
 
+/// The host's real Codex login, for the opt-in live tests only.
 fn locate_codex_home() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("$HOME environment variable is not set")?;
     let source_dir = Path::new(&home).join(".codex");
@@ -634,6 +635,29 @@ fn locate_codex_home() -> Result<PathBuf> {
     }
 
     Ok(source_dir)
+}
+
+/// The ChatGPT login the stub ChatGPT server accepts. It has no refresh token,
+/// so the proxy never calls the real token endpoint.
+const INERT_CHATGPT_ACCESS_TOKEN: &str = "inert-proxy-chatgpt-access-token";
+const INERT_CHATGPT_ACCOUNT_ID: &str = "inert-proxy-chatgpt-account";
+
+/// Writes that login as `dir/auth.json`, a Codex home of the proxy's own.
+fn write_inert_chatgpt_login(dir: &Path) -> Result<PathBuf> {
+    let auth_path = dir.join("auth.json");
+    fs::write(
+        &auth_path,
+        json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": INERT_CHATGPT_ACCESS_TOKEN,
+                "account_id": INERT_CHATGPT_ACCOUNT_ID,
+            },
+        })
+        .to_string(),
+    )
+    .context("failed to write the proxy's inert ChatGPT login")?;
+    Ok(auth_path)
 }
 
 /// Runs this binary's `test_name` again in a child process that sets
@@ -1287,37 +1311,10 @@ fn codex_embedded_via_proxy_creates_file() -> Result<()> {
 
 async fn codex_embedded_via_proxy_creates_file_inner() -> Result<()> {
     let _env_guard = env_guard().await;
-    let codex_home = locate_codex_home()?;
-    let auth_path = codex_home.join("auth.json");
-
-    let auth_contents =
-        fs::read_to_string(&auth_path).context("failed to read host auth.json for proxy setup")?;
-    let mut proxy_auth_json: Value =
-        serde_json::from_str(&auth_contents).context("failed to parse host auth.json")?;
-    let tokens = proxy_auth_json
-        .get("tokens")
-        .and_then(Value::as_object)
-        .context("auth.json missing tokens; run `codex login`")?;
-    let access_token = tokens
-        .get("access_token")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .context("auth.json tokens missing access_token; run `codex login`")?;
-    let account_id = tokens
-        .get("account_id")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    if let Value::Object(ref mut obj) = proxy_auth_json {
-        obj.remove("OPENAI_API_KEY");
-    }
-
+    // The proxy loads an inert login of its own, never the host's login or key.
+    let _guard_host_api_key = EnvGuard::remove("OPENAI_API_KEY");
     let proxy_auth_dir = TempDir::new().context("failed to create proxy credential directory")?;
-    let proxy_auth_path = proxy_auth_dir.path().join("auth.json");
-    fs::write(&proxy_auth_path, serde_json::to_string(&proxy_auth_json)?)
-        .context("failed to write sanitized proxy auth.json")?;
+    let proxy_auth_path = write_inert_chatgpt_login(proxy_auth_dir.path())?;
 
     let proxy_port = reserve_port()?;
     let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port)
@@ -1391,8 +1388,8 @@ async fn codex_embedded_via_proxy_creates_file_inner() -> Result<()> {
 
     let (stub_addr, stub_shutdown) = spawn_stub_chatgpt_server(
         project_workspace.clone(),
-        access_token.clone(),
-        account_id.clone(),
+        INERT_CHATGPT_ACCESS_TOKEN.to_string(),
+        Some(INERT_CHATGPT_ACCOUNT_ID.to_string()),
     )
     .await
     .context("failed to start stub ChatGPT server")?;
@@ -1570,37 +1567,10 @@ fn codex_embedded_retries_after_stream_error() -> Result<()> {
 
 async fn codex_embedded_retries_after_stream_error_inner() -> Result<()> {
     let _env_guard = env_guard().await;
-    let codex_home = locate_codex_home()?;
-    let auth_path = codex_home.join("auth.json");
-
-    let auth_contents =
-        fs::read_to_string(&auth_path).context("failed to read host auth.json for proxy setup")?;
-    let mut proxy_auth_json: Value =
-        serde_json::from_str(&auth_contents).context("failed to parse host auth.json")?;
-    let tokens = proxy_auth_json
-        .get("tokens")
-        .and_then(Value::as_object)
-        .context("auth.json missing tokens; run `codex login`")?;
-    let access_token = tokens
-        .get("access_token")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .context("auth.json tokens missing access_token; run `codex login`")?;
-    let account_id = tokens
-        .get("account_id")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    if let Value::Object(ref mut obj) = proxy_auth_json {
-        obj.remove("OPENAI_API_KEY");
-    }
-
+    // The proxy loads an inert login of its own, never the host's login or key.
+    let _guard_host_api_key = EnvGuard::remove("OPENAI_API_KEY");
     let proxy_auth_dir = TempDir::new().context("failed to create proxy credential directory")?;
-    let proxy_auth_path = proxy_auth_dir.path().join("auth.json");
-    fs::write(&proxy_auth_path, serde_json::to_string(&proxy_auth_json)?)
-        .context("failed to write sanitized proxy auth.json")?;
+    let proxy_auth_path = write_inert_chatgpt_login(proxy_auth_dir.path())?;
 
     let proxy_port = reserve_port()?;
     let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port)
@@ -1617,28 +1587,11 @@ async fn codex_embedded_retries_after_stream_error_inner() -> Result<()> {
     let runtime_codex_home =
         TempDir::new().context("failed to create temporary runtime Codex home directory")?;
     let runtime_auth_path = runtime_codex_home.path().join("auth.json");
-    let runtime_auth_mode = std::env::var("LIVE_BROWSER_DIRECT_AUTH_MODE")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "api_key".to_string());
-    if runtime_auth_mode == "chatgpt_tokens" {
-        let mut runtime_auth_json = proxy_auth_json.clone();
-        if let Value::Object(ref mut obj) = runtime_auth_json {
-            obj.remove("OPENAI_API_KEY");
-        }
-        fs::write(
-            &runtime_auth_path,
-            serde_json::to_string(&runtime_auth_json)?,
-        )
-        .context("failed to write runtime auth.json with chatgpt tokens")?;
-    } else {
-        fs::write(
-            &runtime_auth_path,
-            json!({ "OPENAI_API_KEY": "integration-proxy-dummy-key" }).to_string(),
-        )
-        .context("failed to write runtime auth.json with dummy API key")?;
-    }
+    fs::write(
+        &runtime_auth_path,
+        json!({ "OPENAI_API_KEY": "integration-proxy-dummy-key" }).to_string(),
+    )
+    .context("failed to write runtime auth.json with dummy API key")?;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let proxy_task = tokio::spawn({
@@ -1691,8 +1644,8 @@ async fn codex_embedded_retries_after_stream_error_inner() -> Result<()> {
 
     let (stub_addr, stub_shutdown, stub_state) = spawn_stub_chatgpt_server_with_responses(
         project_workspace.clone(),
-        access_token.clone(),
-        account_id.clone(),
+        INERT_CHATGPT_ACCESS_TOKEN.to_string(),
+        Some(INERT_CHATGPT_ACCOUNT_ID.to_string()),
         vec![StubResponse::HttpError(502), StubResponse::Success],
     )
     .await
