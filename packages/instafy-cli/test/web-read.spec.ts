@@ -782,6 +782,24 @@ describe("a site that answers only with or without www.", () => {
     expect(moved.tell).toBe("The site did not answer. Use another source rather than retrying.");
   });
 
+  it("names the other address only while it has not failed this turn, so the two never send the turn back and forth", async () => {
+    const PLAIN = "The site did not answer. Use another source rather than retrying.";
+    // neither answers: the bare domain names www. once, and www. (its failure now the second) names nothing
+    const bare = await one("https://down.example/models");
+    expect(bare.tell).toContain("read https://www.down.example/models once instead");
+    const www = await one("https://www.down.example/models");
+    expect(www).toMatchObject({ status: "failed", code: "unreachable" });
+    expect(www.tell).toBe(PLAIN);
+    expect((await one("https://down.example/models")).tell).toBe(PLAIN);
+    // the same in one call, www. first
+    const both = await read(["https://www.gone.example/", "https://gone.example/"]);
+    expect(both.pages[0]!.tell).toContain("read https://gone.example/ once instead");
+    expect(both.pages[1]!.tell).toBe(PLAIN);
+    // another turn starts afresh
+    const next = await one("https://www.down.example/models", {}, { env: { INSTAFY_TURN_STARTED_AT: "2026-10-26T11:00:00Z", INSTAFY_PROJECT_ID: "project-1" } });
+    expect(next.tell).toContain("read https://down.example/models once instead");
+  });
+
   it("pairs only a site's own address with its www. form", () => {
     const sib = (url: string) => wwwSibling(new URL(url))?.href ?? null;
     expect(sib("https://maker.example/a?b=1#c")).toBe("https://www.maker.example/a?b=1");

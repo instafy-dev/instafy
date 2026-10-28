@@ -1995,8 +1995,6 @@ mod tests {
         assert!(BOUND_SITES_TEMPLATE.contains("## When someone asks from a site"));
     }
 
-    /// A page of options cites each value's page and day, and a stated limit lists a row whose value is unknown
-    /// apart: the bound-sites skill and its cheat sheet say so, and unedited earlier copies are brought up to date.
     /// Replies speak the person's words (28 Oct drive: "Overpass place search was
     /// unavailable", "net::ERR_TUNNEL_CONNECTION_FAILED", "recorded PID (1368)",
     /// "index.html"): `AGENTS.md`, which every turn loads, says what a reply leaves
@@ -2034,6 +2032,8 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
     }
 
+    /// A page of options cites each value's page and day, and a stated limit lists a row whose value is unknown
+    /// apart: the bound-sites skill and its cheat sheet say so, and unedited earlier copies are brought up to date.
     #[test]
     fn scaffold_upgrades_the_bound_sites_skill_and_cheat_sheet_to_cited_values() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");

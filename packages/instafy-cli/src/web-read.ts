@@ -600,6 +600,13 @@ export function wwwSibling(url: URL): URL | null {
   return sibling;
 }
 
+/** A failure of the address asked for itself (not of a redirect's target) that says the site did not answer. */
+function unanswered(code: string | undefined, page: Partial<PageResult>): boolean {
+  return (code === "unreachable" || code === "timeout") && !page.redirects?.length;
+}
+/** The turn's key for a host that did not answer, hashed so no address is written to disk. */
+const unansweredKey = (url: URL) => sha256(`unanswered:${url.hostname.toLowerCase().replace(/\.+$/, "")}`);
+
 /** The stops that end every read of the site for the rest of the turn, not just this URL. */
 const HOST_WIDE_STOPS = new Set<StopCode>(["rate_limited", "captcha"]);
 
@@ -726,8 +733,9 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     message,
     tell: TELL[code],
   });
-  // A first address that does not answer may answer with "www." added or removed: the tell names that address once.
-  const sibling = wwwSibling(requestedUrl);
+  // A first address that does not answer may answer with "www." added or removed: the tell names that address once,
+  // and not at all when it already did not answer this turn (so the two never send the turn back and forth).
+  let sibling = wwwSibling(requestedUrl);
   const fail = (code: FailCode, message: string, extra: Partial<PageResult> = {}): PageResult => ({
     ...page,
     ...extra,
@@ -735,7 +743,7 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     code,
     message,
     tell:
-      sibling && (code === "unreachable" || code === "timeout") && !extra.redirects?.length
+      sibling && unanswered(code, extra)
         ? `The site did not answer at ${requestedUrl.hostname}. Some sites answer only with or without "www.": read ${redaction.redactUrl(sibling.href).text} once instead, and if that fails too, use another source.`
         : TELL[code],
   });
@@ -748,7 +756,9 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     stop: state.stops[firstKeys.exact] ?? state.stops[firstKeys.path] ?? state.hostStops[firstSite] ?? null,
     loads: state.loads,
     hostLoads: state.hosts[firstSite]?.loads ?? 0,
+    siblingUnanswered: sibling ? Boolean(state.unanswered?.[unansweredKey(sibling)]) : false,
   }));
+  if (earlier.siblingUnanswered) sibling = null;
   const remembered =
     earlier.stop ??
     ctx.cache.get<StopRecord>("stops", firstKeys.exact, LIMITS.stopTtlMs, ctx.now()) ??
@@ -1055,7 +1065,16 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
   };
 
   const pages: PageResult[] = [];
-  for (const url of urls) pages.push(await readOne(url, { maxChars, links, fresh: Boolean(options.fresh), terms }, ctx));
+  for (const url of urls) {
+    const page = await readOne(url, { maxChars, links, fresh: Boolean(options.fresh), terms }, ctx);
+    if (page.status === "failed" && unanswered(page.code, page)) {
+      const key = unansweredKey(new URL(url));
+      await turn.update((state) => {
+        (state.unanswered ??= {})[key] = now();
+      });
+    }
+    pages.push(page);
+  }
   const state = await turn.update((s) => ({ loads: s.loads, hosts: Object.fromEntries(Object.entries(s.hosts).map(([h, r]) => [h, r.loads])) }));
   return {
     ok: true,
