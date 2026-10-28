@@ -316,6 +316,18 @@ describe("useRunFailureAutoRetry", () => {
       autoRetry,
     });
     expect(autoRetry).not.toHaveBeenCalled();
+
+    // A turn that did not make the changes it was asked for already had its
+    // runtime's own second try. Sending the prompt again would charge for a
+    // third, so it waits for the person's "Try again".
+    const noChangesFailure = failureMessage("failure-n", NO_WORKSPACE_CHANGES, 6);
+    await rerender({
+      messages: [prompt, verificationFailure, genericFailure, noChangesFailure],
+      conversationKey: "conv-1",
+      isBusy: false,
+      autoRetry,
+    });
+    expect(autoRetry).not.toHaveBeenCalled();
   });
 
   it("(e) isBusy suppresses auto-retry until the run settles", async () => {
@@ -323,7 +335,7 @@ describe("useRunFailureAutoRetry", () => {
     const prompt = userMessage("Build me a landing page");
     await render({ messages: [prompt], conversationKey: "conv-1", isBusy: true, autoRetry });
 
-    const failure = failureMessage("failure-1", NO_WORKSPACE_CHANGES, 2);
+    const failure = failureMessage("failure-1", MISSING_FINAL_MESSAGE, 2);
     await rerender({ messages: [prompt, failure], conversationKey: "conv-1", isBusy: true, autoRetry });
     expect(autoRetry).not.toHaveBeenCalled();
 

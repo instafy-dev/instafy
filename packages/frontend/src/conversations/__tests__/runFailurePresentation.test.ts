@@ -427,7 +427,6 @@ describe("hasFailedRunMetadata", () => {
 describe("isAutoRetryEligibleFailureKind", () => {
   it("is true for the transient kinds", () => {
     expect(isAutoRetryEligibleFailureKind("missing_final_message")).toBe(true);
-    expect(isAutoRetryEligibleFailureKind("no_workspace_changes")).toBe(true);
     // Codex already retried the 429 inside the turn; one more resend after a
     // visible countdown usually gets through (see resolveRunFailureAutoRetryDelayMs).
     expect(isAutoRetryEligibleFailureKind("provider_rate_limited")).toBe(true);
@@ -435,6 +434,9 @@ describe("isAutoRetryEligibleFailureKind", () => {
 
   it("is false for deterministic/unhelpful kinds and nullish input", () => {
     expect(isAutoRetryEligibleFailureKind("missing_verification")).toBe(false);
+    // The runtime already tried the missing changes a second time inside the
+    // turn; a resend would charge the person for a third.
+    expect(isAutoRetryEligibleFailureKind("no_workspace_changes")).toBe(false);
     expect(isAutoRetryEligibleFailureKind("needs_ai")).toBe(false);
     // The provider billed the cut-short answer; the same request would stop the same way.
     expect(isAutoRetryEligibleFailureKind("response_incomplete")).toBe(false);
@@ -474,9 +476,9 @@ describe("resolveRunFailureAutoRetryDelayMs", () => {
     return presentation;
   };
 
-  it("resends the hiccup kinds at once", () => {
+  it("resends a dropped reply at once, and never a turn that did not make its changes", () => {
     expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(MISSING_FINAL_MESSAGE) })).toBe(0);
-    expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(NO_WORKSPACE_CHANGES) })).toBe(0);
+    expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(NO_WORKSPACE_CHANGES) })).toBeNull();
   });
 
   it("keeps Codex's bare 429 manual, because a spent plan window reads the same", () => {

@@ -292,8 +292,7 @@ const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
  * Failure kinds that may be re-dispatched automatically, once per originating
  * prompt. All are transient:
  * - `missing_final_message` is a provider hiccup that usually resolves on a
- *   fresh attempt, and `no_workspace_changes` is a reply that dropped its file
- *   writes. Both resend at once.
+ *   fresh attempt. It resends at once.
  * - `provider_rate_limited` resends only after a visible countdown, and only
  *   when the failure itself says the limit is short (see
  *   {@link resolveRunFailureAutoRetryDelayMs}). Codex already retries a
@@ -303,9 +302,13 @@ const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
  *   countdown and keep the manual "Try again".
  *
  * `missing_verification` and `generic` are excluded because retrying rarely
- * helps and/or the underlying cause is deterministic. `needs_ai` needs a
- * credential, not a retry. A 429 that names an exhausted quota or plan limit
- * never classifies as `provider_rate_limited` (it stays `generic`), and a
+ * helps and/or the underlying cause is deterministic. `no_workspace_changes`
+ * is excluded because the runtime already gave the turn a second try inside
+ * it, and the model answered both times: a resend would charge the person for
+ * a third full turn they did not ask for, so "Try again" is theirs to press.
+ * `needs_ai` needs a credential, not a retry. A 429 that names an exhausted
+ * quota or plan limit never classifies as `provider_rate_limited` (it stays
+ * `generic`), and a
  * spent usage window is `provider_usage_limit`, which waits hours or days, so
  * it is neither retried automatically nor offered a manual "Try again".
  * `response_incomplete` is excluded because the provider already billed the
@@ -322,7 +325,6 @@ const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
  */
 export const AUTO_RETRY_ELIGIBLE_KINDS = [
   "missing_final_message",
-  "no_workspace_changes",
   "provider_rate_limited",
 ] as const satisfies readonly RunFailureKind[];
 
