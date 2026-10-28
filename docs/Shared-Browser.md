@@ -1684,7 +1684,15 @@ Browser access is separate from workspace file access:
 The high-level facade rejects privileged schemes, credential-bearing URLs,
 unknown fields, oversized values, arbitrary CDP, and raw JavaScript. CDP and
 the WebRTC sender remain loopback-only. The egress proxy blocks runtime-local
-and control-plane destinations for Chromium navigation. The per-origin plus
+and control-plane destinations for Chromium navigation. Chromium reports every
+CONNECT the proxy does not complete as `net::ERR_TUNNEL_CONNECTION_FAILED`,
+whether the policy denied the address, its name did not resolve, or the site
+refused or never answered, so the proxy logs each failed destination to its log
+(`browser-egress-proxy.log` in the runtime's state directory) as
+`browser egress tunnel failed (port 443): the site did not answer in time`: the
+request kind, port and a fixed reason, never the host, path or address. At most
+30 lines a minute are written; the next minute's first line says how many were
+left out. The per-origin plus
 one-shot confirmation policy above is the sensitive-site action policy for
 otherwise public sites; a future denylist may reduce prompt volume but is not
 an authorization substitute.
