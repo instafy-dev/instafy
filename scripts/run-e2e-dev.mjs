@@ -49,7 +49,7 @@ import {
   tunnelBrokerComposeCalls,
   tunnelBrokerStartPlan,
 } from "./lib/localTunnelBroker.mjs";
-import { stopOwnedService } from "./lib/devStackProcesses.mjs";
+import { isRecordedService, stopOwnedService } from "./lib/devStackProcesses.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2645,6 +2645,11 @@ function isProviderProcess(pid) {
   return command.includes("runtime-provider-service");
 }
 
+/** Whether `pid` is still the provider this checkout recorded in its pid file. */
+function isRecordedProvider(pid) {
+  return isRecordedService(pid, { pidFile: providerPidFile, name: "runtime-provider-service" });
+}
+
 function findProviderPidByPort() {
   const byPort = tryCapture("lsof", ["-ti", `:${providerPort}`]);
   if (byPort.code !== 0 || !(byPort.stdout ?? "").trim()) {
@@ -2666,7 +2671,7 @@ async function stopOwnedProvider() {
   const recordedPid = readProviderPid();
   const result = await stopOwnedService({
     recordedPid,
-    isService: isProviderProcess,
+    isService: isRecordedProvider,
     listeners: () => portListeners(providerPort),
     kill: killPid,
     wait,
@@ -2795,7 +2800,7 @@ async function startProviderService() {
     await clearProviderPortForPrebuiltLaunch();
   } else if (fileExists(providerPidFile)) {
     const pid = readProviderPid();
-    if (pid && isProviderProcess(pid)) {
+    if (pid && isRecordedProvider(pid)) {
       const ready = await waitForProvider(providerPort);
       if (ready) {
         return reuseRunningProvider(pid);
@@ -2901,19 +2906,9 @@ function listListeningPidsByPort(port) {
   }
   return parsePidOutput(result.stdout ?? "");
 }
-function isControllerProcess(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) {
-    return false;
-  }
-  const result = tryCapture("ps", ["-p", String(pid), "-o", "command="]);
-  if (result.code !== 0) {
-    return false;
-  }
-  const command = (result.stdout ?? "").trim().toLowerCase();
-  if (!command) {
-    return false;
-  }
-  return command.includes("runtime-controller");
+/** Whether `pid` is still the controller this checkout recorded in its pid file. */
+function isRecordedController(pid) {
+  return isRecordedService(pid, { pidFile: controllerPidFile, name: "runtime-controller" });
 }
 /** The process group of `pid`, or 0 when it cannot be read. */
 function processGroupOf(pid) {
@@ -2926,7 +2921,7 @@ function thisCheckoutStartedController() {
   const recordedPid = readPid();
   return ownsControllerListener({
     recordedPid,
-    recordedIsController: isControllerProcess(recordedPid),
+    recordedIsController: isRecordedController(recordedPid),
     listeners: portListeners(controllerPort),
   });
 }
@@ -2941,7 +2936,7 @@ function portListeners(port) {
 async function stopOwnedController() {
   const result = await stopOwnedService({
     recordedPid: readPid(),
-    isService: isControllerProcess,
+    isService: isRecordedController,
     listeners: () => portListeners(controllerPort),
     kill: killPid,
     wait,

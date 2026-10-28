@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ownedServicePids, stopOwnedService } from "./devStackProcesses.mjs";
+import {
+  isRecordedService,
+  ownedServicePids,
+  parseElapsedSeconds,
+  startedBeforeRecord,
+  stopOwnedService,
+} from "./devStackProcesses.mjs";
 
 test("only the recorded pid and its process group's listeners are this checkout's", () => {
   const listeners = [
@@ -130,6 +137,62 @@ test("stopping this checkout's controller leaves another project's controller ru
   assert.equal(isRunning(theirs.pid), true, "another project's controller is never stopped");
 });
 
+test("ps elapsed times read as seconds", () => {
+  assert.equal(parseElapsedSeconds("00:07"), 7);
+  assert.equal(parseElapsedSeconds(" 05:07\n"), 307);
+  assert.equal(parseElapsedSeconds("1:02:03"), 3723);
+  assert.equal(parseElapsedSeconds("2-01:02:03"), 2 * 86_400 + 3723);
+  assert.ok(Number.isNaN(parseElapsedSeconds("")));
+  assert.ok(Number.isNaN(parseElapsedSeconds("soon")));
+});
+
+test("a process that started after its pid file was written is not the recorded one", () => {
+  const recordedAtMs = Date.parse("2026-10-28T08:00:00Z");
+  // Started a minute before the record, as the launcher writes it right after spawning.
+  assert.equal(startedBeforeRecord({ elapsedSeconds: 3660, recordedAtMs, nowMs: recordedAtMs + 3_600_000 }), true);
+  // Started within ps's one-second resolution of the record.
+  assert.equal(startedBeforeRecord({ elapsedSeconds: 59, recordedAtMs, nowMs: recordedAtMs + 60_000 }), true);
+  // Started half an hour after the record: the recorded process exited and its pid was reused.
+  assert.equal(startedBeforeRecord({ elapsedSeconds: 1800, recordedAtMs, nowMs: recordedAtMs + 3_600_000 }), false);
+  assert.equal(startedBeforeRecord({ elapsedSeconds: Number.NaN, recordedAtMs, nowMs: recordedAtMs }), false);
+  assert.equal(startedBeforeRecord({ elapsedSeconds: 10, recordedAtMs: Number.NaN, nowMs: recordedAtMs }), false);
+});
+
+test("a recorded pid that another project's controller now holds is never stopped", { skip: process.platform === "win32" }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dev-stack-pid-"));
+  const pidFile = path.join(dir, ".controller.pid");
+  const theirs = spawn(process.execPath, ["-e", idle, "runtime-controller"], { detached: true, stdio: "ignore" });
+  t.after(() => {
+    kill(theirs.pid, "SIGKILL");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  // This checkout recorded the pid an hour ago; its controller has since
+  // exited, and the system gave the pid to another project's controller.
+  fs.writeFileSync(pidFile, String(theirs.pid));
+  const anHourAgo = new Date(Date.now() - 3_600_000);
+  fs.utimesSync(pidFile, anHourAgo, anHourAgo);
+  assert.match(commandOf(theirs.pid), /runtime-controller/);
+  const isRecordedController = (pid) => isRecordedService(pid, { pidFile, name: "runtime-controller" });
+  assert.equal(isRecordedController(theirs.pid), false);
+
+  const result = await stopOwnedService({
+    recordedPid: theirs.pid,
+    isService: isRecordedController,
+    listeners: () => [{ pid: theirs.pid, pgid: groupOf(theirs.pid) }],
+    kill,
+    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    pollMs: 20,
+  });
+  assert.deepEqual(result, { pids: [], stopped: false });
+  assert.equal(isRunning(theirs.pid), true, "another project's controller is never stopped");
+
+  // Recorded when it was started, the same process is this checkout's.
+  fs.writeFileSync(pidFile, String(theirs.pid));
+  assert.equal(isRecordedController(theirs.pid), true);
+  assert.equal(isRecordedService(theirs.pid, { pidFile, name: "runtime-provider-service" }), false);
+  assert.equal(isRecordedService(theirs.pid, { pidFile: path.join(dir, "missing.pid"), name: "runtime-controller" }), false);
+});
+
 test("the dev launcher never looks up a process to stop by its name", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "..", "run-e2e-dev.mjs"), "utf8");
   assert.doesNotMatch(source, /\b(pkill|pgrep|killall)\b/);
@@ -148,6 +211,12 @@ test("the dev launcher never looks up a process to stop by its name", () => {
   for (const name of ["stopProviderService", "clearProviderPortForPrebuiltLaunch"]) {
     assert.doesNotMatch(body(name), /killPid|process\.kill/, name);
   }
+  // A recorded pid counts only while it is still the process that was recorded.
+  assert.match(source, /isRecordedService\(pid, \{ pidFile: controllerPidFile, name: "runtime-controller" \}\)/);
+  assert.match(source, /isRecordedService\(pid, \{ pidFile: providerPidFile, name: "runtime-provider-service" \}\)/);
+  assert.match(body("stopOwnedController"), /isService: isRecordedController/);
+  assert.match(body("stopOwnedProvider"), /isService: isRecordedProvider/);
+  assert.match(source, /recordedIsController: isRecordedController\(recordedPid\)/);
   // A provider this checkout did not start is not recorded as its own.
   assert.doesNotMatch(body("startProviderService"), /writeProviderPid\(existingPid\)/);
 });
