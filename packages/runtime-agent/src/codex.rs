@@ -426,6 +426,7 @@ fn default_final_output_json_schema() -> JsonValue {
                   "precision",
                   "task",
                   "browserLocation",
+                  "continueBuilding",
                   "requiredScopes",
                   "capabilities",
                   "authMethods",
@@ -477,6 +478,10 @@ fn default_final_output_json_schema() -> JsonValue {
                   "browserLocation": {
                     "type": ["string", "null"], "enum": ["auto", "device", "workspace", null],
                     "description": "For request_browser, use auto so Studio can resume the correct session or select an available device. Use device or workspace only when the user explicitly distinguishes the physical device from the remote Workspace; browser ownership alone does not choose a location."
+                  },
+                  "continueBuilding": {
+                    "type": ["boolean", "null"],
+                    "description": "For request_browser, true only when this turn is building something for the person (a page, a map, files) and continues it from what the browser finds. Null when the browser's reply answers the request."
                   },
                   "requiredScopes": {
                     "type": ["array", "null"],

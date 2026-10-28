@@ -40,7 +40,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 pub(crate) mod activity_labels;
-mod browser_hand_back;
+pub(crate) mod browser_hand_back;
 mod browser_request;
 mod card_text;
 mod chat_attachments;
@@ -3217,7 +3217,8 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - Whenever a web page would help (to look something up, check a page, or walk the person through a provider's screens), open Instafy's browser yourself, without asking in chat first or waiting for them to mention a browser; this replaces any earlier instruction to offer it first.\n\
 - It opens public web addresses only; its safety policy blocks this space's own addresses (localhost, 127.0.0.1, private addresses, ports here). A site running in this space is shown to people with a private Studio preview card (`instafy preview open`), not this browser.\n\
-- With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace' }. Write `task` as the person's request: what to do and where to stop. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
+- With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do and where to stop. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
+- `continueBuilding: true` only when you build something from what it finds (a page, a map); for a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
 - In `summary`, say in one sentence where the browser goes and why; never say a page opened, or what it shows, before a browser tool saw it.\n\
 - Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person closed, paused or stopped it or denied an action there.\n\
@@ -3261,6 +3262,7 @@ fn browser_choice_applies(
         && !crate::personal_browser::payload_requests_personal_browser(&job.payload)
         && !crate::shared_browser::payload_requests_shared_browser(&job.payload)
         && !job_is_unattended(job)
+        && !browser_hand_back::is_hand_back_job(job)
 }
 
 /// Keeps a skill setup going on follow-up turns. The full Studio contract
@@ -9713,7 +9715,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - Use `actions` for interactive UI help: secrets, integrations, location, and opening Instafy's browser. Supported actions:\n\
               - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
               - { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n\
-              - { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace' }\n\
+              - { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }\n\
               - { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, optional expectedReportFormat: string only for an explicit user-requested format }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
               - { type: 'goal_update', status: 'active' | 'paused' | 'completed' | 'blocked' | 'canceled', optional objective: string, optional progressSummary: string, optional doneWhen: string, optional stopWhen: string, optional operation: 'clear' }\n\
               - Emit `goal_update` when the latest user request explicitly asks to create, set, start, update, pause, resume, complete, block, cancel, or clear a conversation goal, or when an active conversation goal is included and this turn has concrete evidence that the goal changed. Use status `active` with `objective` to create or update a goal. Do not infer goals from ordinary questions or small one-off requests.\n\
@@ -10326,11 +10328,14 @@ fn suppress_multi_agent_plan_actions_for_worker(job: &LeaseJob, outcome: &mut Co
 /// granted turn's only tools are its broker's. Workers, lead checkpoints and
 /// planning turns act on work handed to them; a browser belongs to the turn the
 /// person is talking to.
+/// A hand-back turn continues from what a browser turn found: a card from it
+/// would be a turn nobody asked for.
 fn suppress_browser_requests_where_unsupported(job: &LeaseJob, outcome: &mut CodexOutcome) {
     let unsupported = is_bounded_job(job)
         || is_multi_agent_worker_job(job)
         || is_multi_agent_lead_continuation_job(job)
-        || is_explicit_team_planning_job(job);
+        || is_explicit_team_planning_job(job)
+        || browser_hand_back::is_hand_back_job(job);
     if !unsupported {
         return;
     }
@@ -10341,7 +10346,7 @@ fn suppress_browser_requests_where_unsupported(job: &LeaseJob, outcome: &mut Cod
     if outcome.actions.len() != before {
         tracing::warn!(
             job_id = %job.id,
-            "suppressed request_browser action emitted by a browser, granted, worker or planning turn"
+            "suppressed request_browser action emitted by a browser, granted, worker, planning or hand-back turn"
         );
     }
 }
@@ -23311,9 +23316,10 @@ mod tests {
         // loads no skill that could carry it. It is measured on its own and
         // the rest keeps main's budget. Since Oct 25 it also says the browser
         // opens public addresses only and a site in the space is a preview card.
+        // Since Oct 28 it says which card continues building (`continueBuilding`).
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 450,
+            browser_choice <= 490,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
@@ -24186,6 +24192,9 @@ mod tests {
             json!({"automation":{"id":"automation-1","name":"Morning digest"}}),
             json!({"spaceReview":{"automationId":"automation-2","enforcedBy":"runtime-controller"}}),
             json!({"controllerDispatch":{"suppressUserMessage": true}}),
+            // A hand-back turn continues from the browser's findings and
+            // cannot ask for the browser again.
+            json!({"browserHandBack":{"verified": true, "reply": "Read the timetable."}}),
         ] {
             let mut job = test_lease_job(Some("feature"), json!({"metadata": metadata.clone()}));
             job.project_id = Some(project_id);
@@ -24273,13 +24282,20 @@ mod tests {
             json!({"multiAgentPlan":{"role":"worker","groupId":"group-1"}}),
             json!({"multiAgentPlan":{"role":"lead_continuation","groupId":"group-1"}}),
             json!({"agentCollaboration":{"mode":"team_plan", "requested":true}}),
+            // A hand-back turn: its card would be a turn nobody asked for.
+            json!({"browserHandBack":{"verified": true, "reply": "Read the timetable."}}),
         ] {
             let job = test_lease_job(Some("feature"), json!({"metadata": metadata.clone()}));
             let mut outcome = outcome_with_card();
             suppress_browser_requests_where_unsupported(&job, &mut outcome);
             assert!(outcome.actions.is_empty(), "{metadata}");
         }
-        for metadata in [json!({}), json!({"automation":{"id":"automation-1"}})] {
+        for metadata in [
+            json!({}),
+            json!({"automation":{"id":"automation-1"}}),
+            // Only the controller's checked record makes a hand-back.
+            json!({"browserHandBack":{"reply": "Read the timetable."}}),
+        ] {
             let job = test_lease_job(Some("feature"), json!({"metadata": metadata.clone()}));
             let mut outcome = outcome_with_card();
             suppress_browser_requests_where_unsupported(&job, &mut outcome);
@@ -27661,12 +27677,15 @@ mod tests {
         let prompt = prompt_for(hand_back_prompt, json!({ "browserHandBack": unchecked })).await;
         assert!(!prompt.contains("Browser findings"), "{prompt}");
 
-        // The browser turn that continues the card returns labelled findings.
+        // The browser turn that continues a building card returns labelled
+        // findings; one that continues a question's card answers in its own
+        // words.
         let prompt = prompt_for(
             "Continue this browser task using the browser attached to this turn.".to_string(),
             json!({
                 "browserTransport": "shared",
                 "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserHandsBack": true,
             }),
         )
         .await;
@@ -27675,6 +27694,18 @@ mod tests {
             .expect("the findings contract");
         let latest = prompt.find("Latest user request:").expect("the request");
         assert!(contract < latest, "{prompt}");
+        let prompt = prompt_for(
+            "Continue this browser task using the browser attached to this turn.".to_string(),
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            }),
+        )
+        .await;
+        assert!(
+            !prompt.contains("Findings for the building turn:"),
+            "{prompt}"
+        );
     }
 
     #[test]
