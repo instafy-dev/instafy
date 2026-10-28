@@ -106,6 +106,16 @@ describe("SkillsPanel reads", () => {
     });
   }
 
+  /** Lets the panel finish loading until `selector` is on the page (checking a pack copy's marker hashes it). */
+  async function until(selector: string, ms = 2000) {
+    const end = Date.now() + ms;
+    while (!container.querySelector(selector) && Date.now() < end) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+    }
+  }
+
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
@@ -343,6 +353,7 @@ describe("SkillsPanel reads", () => {
     );
     mocks.read.mockImplementation(async ({ path }: { path: string }) => ({ contentText: files[path] ?? null }));
     await render();
+    await until('[data-testid="skills-included-interactive-map"]');
     expect(container.querySelector('[data-testid="skills-included-interactive-map"]')?.textContent).toContain("Interactive map sites");
     expect(container.querySelector('[data-testid="skills-toggle-interactive-map"]')).toBeNull();
     expect(container.querySelector('[data-testid="skills-item-writer"]')).not.toBeNull();
@@ -352,6 +363,7 @@ describe("SkillsPanel reads", () => {
     files[".agents/skills/interactive-map/SKILL.md"] = runtimeCopy.replace("A site is a folder.", "A site is a folder. Always dark.");
     mocks.projectId = "space-edited";
     await render();
+    await until('[data-testid="skills-item-interactive-map"]');
     expect(container.querySelector('[data-testid="skills-item-interactive-map"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="skills-toggle-interactive-map"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="skills-included-interactive-map"]')).toBeNull();
@@ -361,6 +373,7 @@ describe("SkillsPanel reads", () => {
     mocks.runtime.runtimeStatuses = [{ runtimeId: "runtime-1", isPreferred: true, skillPacks: [{ name: "interactive-map", version: "0.1.4", title: "Interactive map sites", summary: null }] }];
     mocks.projectId = "space-b";
     await render();
+    await until('[data-testid="skills-item-interactive-map"]');
     expect(container.querySelector('[data-testid="skills-item-interactive-map"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="skills-included-interactive-map"]')).toBeNull();
   });
@@ -382,6 +395,7 @@ describe("SkillsPanel reads", () => {
     mocks.runtime.effectiveRuntimeId = null as unknown as string;
     mocks.projectId = "space-b";
     await render();
+    await until('[data-testid="skills-included-label-interactive-map"]');
     expect(container.querySelector('[data-testid="skills-included-label-interactive-map"]')?.textContent).toBe("Included with Instafy · 0.1.4");
   });
 
