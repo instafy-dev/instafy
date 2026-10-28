@@ -13,6 +13,7 @@ import {
   browserRequestTransport,
   browserRequestUnavailableReason,
   isBrowserTurnPromptMetadata,
+  newestBrowserRequestKey,
   readBrowserRequestOf,
   type BrowserRequest,
 } from "../browserRequest";
@@ -109,6 +110,16 @@ describe("continuations of a card", () => {
     expect(browserRequestKey(card({ task: "Open x", location: "auto" }, "card-2"))).toBe("message:card-2");
   });
 
+  it("finds the newest card", () => {
+    const older = card({ task: "Open x", location: "auto" }, "card-1");
+    const olderJobCard = { ...older, metadata: { ...older.metadata, jobId: "job-1" } };
+    const newer = card({ task: "Open y", location: "auto" }, "card-2");
+    const reply = { id: "r", role: "assistant" as const, content: "Done.", timestamp: 4 };
+    expect(newestBrowserRequestKey([olderJobCard, newer, reply])).toBe("message:card-2");
+    expect(newestBrowserRequestKey([olderJobCard, reply, jobCard])).toBe("job:job-1");
+    expect(newestBrowserRequestKey([reply])).toBeNull();
+  });
+
   it("reads the card a prompt continued from its own or its stored prompt metadata", () => {
     const local = { id: "p1", role: "user" as const, content: "Octo opened Instafy's browser", timestamp: 3,
       metadata: { browserRequestOf: "job:job-1" } };
@@ -126,11 +137,17 @@ describe("continuations of a card", () => {
     expect(isBrowserTurnPromptMetadata(null)).toBe(false);
   });
 
-  it("records a continuation as a one-line notice naming the agent and the host, without em dashes", () => {
+  // Local drive, Oct 28: "Octo opened Instafy's browser" after the person's
+  // own press. Octo is named only when Studio opened it by itself.
+  it("records a continuation as a one-line notice naming the host, and Octo only when it opened by itself", () => {
     expect(browserRequestNotice("Octo", "Open https://dashboard.stripe.com/apikeys and stop on the list."))
+      .toBe("Opened Instafy's browser for dashboard.stripe.com");
+    expect(browserRequestNotice("Octo", "Continue comparing the saved items.")).toBe("Opened Instafy's browser");
+    expect(browserRequestNotice("Octo", "Open https://dashboard.stripe.com/apikeys", { automatic: true }))
       .toBe("Octo opened Instafy's browser for dashboard.stripe.com");
-    expect(browserRequestNotice("", "Continue comparing the saved items.")).toBe("Octo opened Instafy's browser");
-    expect(browserRequestNotice("Cub", "Open https://a.example")).not.toMatch(/\u2014/);
+    expect(browserRequestNotice("", "Continue comparing the saved items.", { automatic: true }))
+      .toBe("Octo opened Instafy's browser");
+    expect(browserRequestNotice("Cub", "Open https://a.example", { automatic: true })).not.toMatch(/\u2014/);
   });
 });
 

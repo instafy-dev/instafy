@@ -384,9 +384,34 @@ describe("conversationAutoTitle", () => {
     expect(getFallbackConversationTitle("1. Do this 2. Do that")).toBe("Do this");
   });
 
+  // Local drive, Oct 28: "Open www.visitlisboa.com in your browser and find
+  // the Belém Tower opening hours." left its chat "New chat" in three drives:
+  // the link was taken out, and "Open" alone is no title.
+  it("keeps the name of the site a link inside a sentence points at, and nothing else of it", () => {
+    expect(getFallbackConversationTitle("Open www.visitlisboa.com in your browser and find the Belém Tower opening hours."))
+      .toBe("Open visitlisboa.com in your browser…");
+    expect(getFallbackConversationTitle("Look at https://example.com/some/page please")).toBe("Look at example.com please");
+    expect(getFallbackConversationTitle("Read https://www.shop.example.com/orders?id=4821&ref=mail#x for the order"))
+      .toBe("Read shop.example.com for the order");
+    expect(getFallbackConversationTitle("Compare https://a.example.com and https://b.example.org/prices."))
+      .toBe("Compare a.example.com and b.example.org");
+    // A site named without a link reads the same.
+    expect(getFallbackConversationTitle("Open carris.pt and find tram 15E")).toBe("Open carris.pt and find tram");
+    // Never a sign-in, an address, a local-only name, digits or an overlong name.
+    for (const message of [
+      "Open https://user:secret@example.com/account and check it",
+      "Open http://192.168.1.1/admin and fix the router",
+      "Open http://printer.local/queue and print it",
+      "Open http://localhost:3000 and check the page",
+      "Open https://9gag.example.com and find the post",
+      "Open https://a-really-long-subdomain-name.example.com and look",
+    ]) {
+      expect(getFallbackConversationTitle(message), message).toBeNull();
+    }
+  });
+
   it("stops where a link, address, path or code was taken out instead of joining the words around it", () => {
     expect(getFallbackConversationTitle("email me at bob@example.com about the invoice")).toBe("Email me");
-    expect(getFallbackConversationTitle("Look at https://example.com/some/page please")).toBeNull();
     expect(getFallbackConversationTitle("email jane@example.com about https://example.com/invoice/42 today please"))
       .toBeNull();
     expect(getFallbackConversationTitle("Fix the bug in src/components/Card.tsx where the button overflows"))

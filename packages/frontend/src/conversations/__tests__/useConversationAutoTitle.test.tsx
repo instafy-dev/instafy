@@ -278,6 +278,19 @@ describe("useConversationAutoTitle", () => {
     expect(setConversationTitle).toHaveBeenCalledTimes(1);
   });
 
+  // Local drive, Oct 28: the browser chat was "New chat" in its tab, in Chats
+  // and on the phone in three drives. Its first prompt named a site with a link.
+  it("names a chat whose first prompt opens a site in the browser", async () => {
+    const prompt = "Open www.visitlisboa.com in your browser and find the Belém Tower opening hours.";
+    const conversation = buildConversation([prompt]);
+    await renderAndSettle(conversation);
+    expect(setConversationTitle).toHaveBeenCalledExactlyOnceWith(conversation.localId, "Open visitlisboa.com in your browser…");
+    expect(updateMetadataMock).toHaveBeenCalledExactlyOnceWith({
+      conversationId: conversation.controllerId,
+      metadata: { title: "Open visitlisboa.com in your browser…" },
+    });
+  });
+
   it("keeps the first line's name when the title request is refused or fails", async () => {
     requestTitleMock.mockResolvedValue({ success: false, title: null, error: "Upstream unavailable" });
     const conversation = buildConversation(["Draft the April newsletter"]);
