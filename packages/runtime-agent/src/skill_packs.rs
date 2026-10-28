@@ -160,6 +160,8 @@ const SOURCE_SKILL_PACKS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/asset
 pub struct InstalledPack {
     pub name: String,
     pub version: String,
+    /// The manifest's one-line `description`, when it has one.
+    pub description: Option<String>,
     /// The pack's folder.
     pub dir: PathBuf,
     /// The pack's skill document, relative to `dir`.
@@ -230,6 +232,8 @@ struct Manifest {
     schema: u32,
     name: String,
     version: String,
+    #[serde(default)]
+    description: Option<String>,
     #[serde(default)]
     skill: Option<String>,
     #[serde(default)]
@@ -557,6 +561,7 @@ pub fn load_pack(dir: &Path) -> Result<InstalledPack, String> {
     Ok(InstalledPack {
         name: manifest.name,
         version: manifest.version,
+        description: manifest.description,
         dir: dir.to_path_buf(),
         skill,
         cli,
@@ -564,6 +569,84 @@ pub fn load_pack(dir: &Path) -> Result<InstalledPack, String> {
         env: manifest.env,
         bin,
     })
+}
+
+/// The `skillPacks` key of the runtime's registration capabilities.
+pub const SKILL_PACKS_CAPABILITY: &str = "skillPacks";
+/// Longest `title` and `summary` the capability carries, in characters.
+pub const SKILL_PACK_TITLE_MAX: usize = 80;
+pub const SKILL_PACK_SUMMARY_MAX: usize = 200;
+
+/// One line of plain text: Markdown emphasis and code marks dropped, control characters and runs of
+/// white space as one space, at most `max` characters (cut at a word, with "…").
+fn plain_line(text: &str, max: usize) -> Option<String> {
+    let cleaned: String = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .filter(|ch| !matches!(ch, '*' | '`' | '_' | '#'))
+        .collect();
+    let line = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() <= max {
+        return Some(line);
+    }
+    let cut: String = line.chars().take(max.saturating_sub(1)).collect();
+    let cut = match cut.rfind(' ') {
+        Some(at) if at >= cut.len() / 2 => cut[..at].to_string(),
+        _ => cut,
+    };
+    Some(format!(
+        "{}…",
+        cut.trim_end_matches([' ', ',', '.', ';', ':'])
+    ))
+}
+
+/// The first `# ` heading of a skill document, after its frontmatter.
+fn skill_title(skill: &str) -> Option<String> {
+    let body = skill
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.find("\n---\n").map(|end| &rest[end + 5..]))
+        .unwrap_or(skill);
+    body.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("# "))
+        .and_then(|heading| plain_line(heading, SKILL_PACK_TITLE_MAX))
+}
+
+/// The registration capability `skillPacks`: the packs whose skill this runtime writes into every
+/// space (those whose scripts run with `node`), so Studio can list them beside a space's own skills
+/// although their files are never saved with the space:
+/// `{"version": 1, "packs": [{"name", "version", "title"?, "summary"?}]}`. `title` is the skill's
+/// first heading and `summary` the manifest's `description`, as plain text. `None` without packs.
+pub fn registration_capability(
+    packs: &[InstalledPack],
+    node: Option<NodeVersion>,
+) -> Option<serde_json::Value> {
+    let entries: Vec<serde_json::Value> = packs
+        .iter()
+        .filter(|pack| match &pack.node {
+            None => true,
+            Some(requirement) => node.is_some_and(|version| requirement.allows(version)),
+        })
+        .map(|pack| {
+            let mut entry = serde_json::json!({ "name": pack.name, "version": pack.version });
+            let skill = std::fs::read_to_string(pack.dir.join(&pack.skill)).unwrap_or_default();
+            if let Some(title) = skill_title(&skill) {
+                entry["title"] = serde_json::Value::String(title);
+            }
+            if let Some(summary) = pack
+                .description
+                .as_deref()
+                .and_then(|text| plain_line(text, SKILL_PACK_SUMMARY_MAX))
+            {
+                entry["summary"] = serde_json::Value::String(summary);
+            }
+            entry
+        })
+        .collect();
+    (!entries.is_empty()).then(|| serde_json::json!({ "version": 1, "packs": entries }))
 }
 
 /// Every pack in `root`, by name. Folders that are not valid packs are skipped with a warning.
@@ -1316,6 +1399,38 @@ pub(crate) mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn the_registration_capability_names_the_packs_every_space_gets() {
+        let root = tempfile::tempdir().expect("tmp");
+        let dir = make_pack(root.path(), "demo", true);
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: REQUIRED for any request about demos\n---\n\n# Demo *sites*\n\nRun it.\n",
+        )
+        .expect("skill");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(PACK_MANIFEST)).unwrap()).unwrap();
+        manifest["description"] =
+            serde_json::json!("Demo maps\u{0007} and   trips as a skill pack");
+        fs::write(dir.join(PACK_MANIFEST), manifest.to_string()).expect("manifest");
+        make_pack(root.path(), "plain", false);
+        let packs = list_packs(root.path());
+        assert_eq!(
+            registration_capability(&packs, Some(TEST_PACK_NODE)),
+            Some(serde_json::json!({ "version": 1, "packs": [
+                { "name": "demo", "version": "0.1.0", "title": "Demo sites", "summary": "Demo maps and trips as a skill pack" },
+                { "name": "plain", "version": "0.1.0", "title": "plain" },
+            ]}))
+        );
+        // a pack whose scripts need a newer Node.js is not written into spaces, so it is not listed
+        assert_eq!(registration_capability(&packs, Some((20, 0, 0))), None);
+        assert_eq!(registration_capability(&[], Some(TEST_PACK_NODE)), None);
+        assert_eq!(
+            plain_line(&"word ".repeat(60), 40).map(|s| s.chars().count() <= 40),
+            Some(true)
+        );
     }
 
     #[test]

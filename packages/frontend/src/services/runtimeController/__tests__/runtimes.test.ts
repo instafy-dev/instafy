@@ -69,6 +69,32 @@ describe("fetchRuntimeStatus", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("keeps the skill packs a runtime installs, well-formed entries only", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      preferredRuntimeId: null,
+      runtimes: [
+        { runtimeId: "packs", skillPacks: [
+          { name: "interactive-map", version: "0.1.4", title: "Interactive map sites", summary: "Interactive maps, trips and place lookups" },
+          { name: "Not A Name", version: "1.0.0" },
+          { name: "no-version" },
+          { name: "interactive-map", version: "9.9.9" },
+          { name: "plain", version: "2.0.0", title: "\u0007" },
+        ] },
+        { runtimeId: "older" },
+        { runtimeId: "odd", skillPacks: "interactive-map" },
+      ],
+    })));
+    const result = await fetchRuntimeStatus({ projectId: "project-1" });
+    expect(result?.runtimes.map((entry) => entry.skillPacks ?? null)).toEqual([
+      [
+        { name: "interactive-map", version: "0.1.4", title: "Interactive map sites", summary: "Interactive maps, trips and place lookups" },
+        { name: "plain", version: "2.0.0", title: null, summary: null },
+      ],
+      null,
+      null,
+    ]);
+  });
+
   it("reads the browser-host policy and keeps only the known host shape on entries", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
       preferredRuntimeId: null,

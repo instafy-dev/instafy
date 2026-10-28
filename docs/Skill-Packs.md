@@ -60,6 +60,15 @@ alone and saved like other work. Each `SKILL.md` also carries a marker line with
 of the file, so an unchanged copy is upgraded with its pack in a folder without git too. A pack whose scripts need a newer Node.js than the one on the
 runtime's PATH is skipped.
 
+Studio's Skills panel lists these packs beside the space's own skills, as "Included with Instafy"
+with their version, although their files are never saved with the space (a cloud space's panel reads
+the saved files). The runtime names them in its registration capabilities (`skillPacks`:
+`{"version": 1, "packs": [{"name", "version", "title", "summary"}]}`, the packs whose scripts run with
+its `node`; `title` is the skill's first heading and `summary` the manifest's `description`), and the
+controller passes a checked, bounded copy on the space's runtime status (`skillPacks` on each entry).
+The runtime's managed copy found in a workspace listing is shown the same way; a space's own copy of a
+pack (an import) is one of its skills, with its switch.
+
 Importing a pack in full with `/skills import <url>` writes over the runtime's unchanged copy without
 `--overwrite`, and the imported files are saved and then kept by the space.
 

@@ -7,6 +7,7 @@ import { useConversation } from "../../../conversations/useConversation";
 import { useProject } from "../../../projects/useProject";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { controllerClient } from "../../../sdk/instafy";
+import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController/runtimes";
 import { useStudioGuardedNavigation } from "../../../navigation/StudioDraftNavigationGuard";
 import { useStatus } from "../../../status/useStatus";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
@@ -23,6 +24,8 @@ const SKILLS_ROOT_PATH = ".agents/skills";
 const SKILL_FILE_NAME = "SKILL.md";
 const DISABLED_SKILL_FILE_NAME = "SKILL.disabled.md";
 const INSTAFY_COMPAT_MARKER = "<!-- instafy-compat -->";
+/** The line the runtime writes into the copy of a skill pack it keeps in a space (runtime_pack_files.rs). */
+const RUNTIME_MANAGED_SKILL_MARKER = "<!-- instafy:managed-skill sha256:";
 
 type SkillStatus = "enabled" | "disabled";
 
@@ -45,7 +48,62 @@ type SkillItem = {
   filePath: string;
   enabledPath: string;
   disabledPath: string;
+  /** The runtime's own copy of a skill pack it installs (rewritten every turn, never saved). */
+  managedByRuntime?: boolean;
 };
+
+/** A skill pack installed with the space's runtime: listed, but managed by the runtime. */
+export type IncludedSkillItem = {
+  id: string;
+  slug: string;
+  title: string;
+  description: string | null;
+  version: string | null;
+};
+
+/**
+ * The skill packs the space's runtime gives it, beside the space's own skills.
+ * The runtime's status entry names them (`skillPacks`), so they show although
+ * their files are never saved with the space; the runtime's managed copy in a
+ * workspace listing (legacy reads) counts as the same pack. A space's own copy
+ * of a pack (an import) is a skill of the space and wins. Exported for tests.
+ */
+export function includedSkillPacks(params: {
+  runtimeStatuses: readonly ControllerRuntimeStatusEntry[];
+  effectiveRuntimeId: string | null;
+  workspaceSkills: readonly SkillItem[];
+}): IncludedSkillItem[] {
+  const { runtimeStatuses, effectiveRuntimeId, workspaceSkills } = params;
+  const withPacks = runtimeStatuses.filter((entry) => (entry.skillPacks?.length ?? 0) > 0);
+  const source =
+    withPacks.find((entry) => entry.runtimeId === effectiveRuntimeId) ??
+    withPacks.find((entry) => entry.isPreferred) ??
+    withPacks[0] ??
+    null;
+  const ownSlugs = new Set(workspaceSkills.filter((skill) => !skill.managedByRuntime).map((skill) => skill.slug));
+  const included = new Map<string, IncludedSkillItem>();
+  for (const pack of source?.skillPacks ?? []) {
+    if (ownSlugs.has(pack.name)) continue;
+    included.set(pack.name, {
+      id: `runtime-pack:${pack.name}`,
+      slug: pack.name,
+      title: pack.title ?? humanizeSkillName(pack.name),
+      description: pack.summary,
+      version: pack.version,
+    });
+  }
+  for (const skill of workspaceSkills) {
+    if (!skill.managedByRuntime || included.has(skill.slug)) continue;
+    included.set(skill.slug, {
+      id: `runtime-pack:${skill.slug}`,
+      slug: skill.slug,
+      title: skill.title,
+      description: skill.description,
+      version: null,
+    });
+  }
+  return [...included.values()].sort((a, b) => a.title.localeCompare(b.title));
+}
 
 function stripWrappingQuotes(value: string): string {
   const trimmed = value.trim();
@@ -427,7 +485,7 @@ function parseSkillDocumentDetails(markdown: string): SkillDocumentDetails {
 export function SkillsPanel() {
   const { activeProjectId } = useProject();
   const { issue: workspaceIssue, reportFailure, recoveryVersion } = useWorkspaceAvailability();
-  const { effectiveRuntimeId } = useRuntime();
+  const { effectiveRuntimeId, runtimeStatuses } = useRuntime();
   const { showStatus } = useStatus();
   // On the stateless gateway and Desktop origins, reads and writes use the
   // pinned default origin and every change is one version; legacy keeps
@@ -454,7 +512,15 @@ export function SkillsPanel() {
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const skillsScope = JSON.stringify([activeProjectId, readsVersioning, effectiveRuntimeId]);
   const [loadedSkillsScope, setLoadedSkillsScope] = useState<string | null>(null);
-  const visibleSkills = loadedSkillsScope === skillsScope ? skills : [];
+  const visibleSkills = useMemo(
+    () => (loadedSkillsScope === skillsScope ? skills : []),
+    [loadedSkillsScope, skills, skillsScope],
+  );
+  const ownSkills = useMemo(() => visibleSkills.filter((skill) => !skill.managedByRuntime), [visibleSkills]);
+  const includedSkills = useMemo(
+    () => includedSkillPacks({ runtimeStatuses: runtimeStatuses ?? [], effectiveRuntimeId: effectiveRuntimeId ?? null, workspaceSkills: visibleSkills }),
+    [effectiveRuntimeId, runtimeStatuses, visibleSkills],
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bootstrapPending, setBootstrapPending] = useState(false);
@@ -514,6 +580,7 @@ export function SkillsPanel() {
         description,
         iconUrl,
         status,
+        managedByRuntime: content.includes(RUNTIME_MANAGED_SKILL_MARKER),
         directoryPath,
         filePath,
         enabledPath,
@@ -877,7 +944,8 @@ export function SkillsPanel() {
       <InstalledSkillsSection
         hasProject={hasProject}
         loading={loading}
-        skills={visibleSkills}
+        skills={ownSkills}
+        includedSkills={includedSkills}
         error={error}
         workspaceUnavailable={workspaceIssue !== null}
         bootstrapPending={bootstrapPending}

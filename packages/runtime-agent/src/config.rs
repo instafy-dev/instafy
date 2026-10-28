@@ -309,6 +309,13 @@ impl Config {
             &mut capabilities,
             crate::browser_host::registration_capability(),
         );
+        apply_skill_packs_capability(
+            &mut capabilities,
+            crate::skill_packs::registration_capability(
+                crate::skill_packs::installed_packs(),
+                crate::skill_packs::node_on_path(),
+            ),
+        );
 
         let metadata = launch_metadata()
             .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -666,6 +673,22 @@ fn apply_browser_host_capability(capabilities: &mut Value, browser_host: Option<
     }
 }
 
+/// `skillPacks` names the skill packs this runtime writes into every space
+/// ([`crate::skill_packs::registration_capability`]). Like `localBrowser`, a value from the launch
+/// capabilities is never trusted.
+fn apply_skill_packs_capability(capabilities: &mut Value, skill_packs: Option<Value>) {
+    let Some(map) = capabilities.as_object_mut() else {
+        return;
+    };
+    map.remove(crate::skill_packs::SKILL_PACKS_CAPABILITY);
+    if let Some(capability) = skill_packs {
+        map.insert(
+            crate::skill_packs::SKILL_PACKS_CAPABILITY.to_string(),
+            capability,
+        );
+    }
+}
+
 fn detect_rathole_use_subcommands(bin: &str) -> bool {
     let Ok(output) = Command::new(bin).arg("--help").output() else {
         return false;
@@ -688,7 +711,8 @@ mod tests {
     use super::{
         CONFIGURED_LAUNCH_CREDENTIAL_KEYS, Config, LAUNCH_METADATA_ENV_KEY,
         apply_browser_host_capability, apply_local_browser_capability,
-        capture_and_scrub_launch_credentials, normalize_lease_max_jobs,
+        apply_skill_packs_capability, capture_and_scrub_launch_credentials,
+        normalize_lease_max_jobs,
     };
     use crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS;
     use serde_json::json;
@@ -825,6 +849,21 @@ mod tests {
             capabilities["localBrowser"],
             json!({ "enabled": true, "tools": ["observe"] })
         );
+    }
+
+    #[test]
+    fn skill_packs_registration_is_process_owned() {
+        let mut capabilities = json!({
+            "custom": { "preserved": true },
+            "skillPacks": { "version": 1, "packs": [{ "name": "spoofed", "version": "9.9.9" }] }
+        });
+        apply_skill_packs_capability(&mut capabilities, None);
+        assert_eq!(capabilities, json!({ "custom": { "preserved": true } }));
+        let packs =
+            json!({ "version": 1, "packs": [{ "name": "interactive-map", "version": "0.1.4" }] });
+        apply_skill_packs_capability(&mut capabilities, Some(packs.clone()));
+        assert_eq!(capabilities["custom"], json!({ "preserved": true }));
+        assert_eq!(capabilities["skillPacks"], packs);
     }
 
     #[test]

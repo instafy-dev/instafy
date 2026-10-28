@@ -125,6 +125,90 @@ pub(crate) struct RuntimeStatusEntry {
     /// demand for its live lease, while the policy covers the space.
     #[serde(skip_serializing_if = "Option::is_none")]
     shared_browser_host: Option<SharedBrowserHostStatus>,
+    /// The skill packs this runtime writes into every space it serves (its `skillPacks`
+    /// registration capability), checked and bounded: Studio lists them beside the space's own
+    /// skills, although their files are never saved with the space. Absent when it named none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill_packs: Option<Vec<RuntimeSkillPack>>,
+}
+
+/// One entry of `skillPacks` on a runtime status entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct RuntimeSkillPack {
+    name: String,
+    version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+}
+
+const MAX_RUNTIME_SKILL_PACKS: usize = 16;
+const MAX_SKILL_PACK_TITLE_CHARS: usize = 80;
+const MAX_SKILL_PACK_SUMMARY_CHARS: usize = 200;
+
+/// A pack name as the runtime accepts one: lowercase letters, digits and dashes, ≤ 64 bytes.
+fn is_skill_pack_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// One line of display text: control characters as spaces, runs of white space as one, at most
+/// `max` characters; `None` when nothing is left.
+fn skill_pack_text(value: Option<&JsonValue>, max: usize) -> Option<String> {
+    let text = value?.as_str()?;
+    let line = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!line.is_empty()).then(|| line.chars().take(max).collect())
+}
+
+/// `skillPacks` from a runtime's registration capabilities (`{"version": 1, "packs": [...]}`), as
+/// Studio may show it: only version 1, at most 16 packs, each with a valid pack name and a short
+/// version; titles and summaries as bounded plain lines. Anything else reads as no packs.
+pub(crate) fn skill_packs_from_capabilities(
+    capabilities: &JsonValue,
+) -> Option<Vec<RuntimeSkillPack>> {
+    let capability = capabilities.get("skillPacks")?;
+    if capability.get("version").and_then(JsonValue::as_u64) != Some(1) {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let packs: Vec<RuntimeSkillPack> = capability
+        .get("packs")?
+        .as_array()?
+        .iter()
+        .filter_map(|pack| {
+            let name = pack.get("name")?.as_str()?;
+            let version = pack.get("version")?.as_str()?;
+            let version_ok = !version.is_empty()
+                && version.len() <= 32
+                && version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'));
+            (is_skill_pack_name(name) && version_ok && seen.insert(name.to_string())).then(|| {
+                RuntimeSkillPack {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                    title: skill_pack_text(pack.get("title"), MAX_SKILL_PACK_TITLE_CHARS),
+                    summary: skill_pack_text(pack.get("summary"), MAX_SKILL_PACK_SUMMARY_CHARS),
+                }
+            })
+        })
+        .take(MAX_RUNTIME_SKILL_PACKS)
+        .collect();
+    (!packs.is_empty()).then_some(packs)
 }
 
 /// `sharedBrowserHost` on a runtime status entry:
@@ -1144,6 +1228,7 @@ async fn load_runtime_status_response_for_viewer(
             resources,
             runtime_image,
             shared_browser_host,
+            skill_packs: skill_packs_from_capabilities(&capabilities),
         });
         // Apply the public response cap only after private-runtime ownership
         // filtering. Otherwise another user's private rows can consume the SQL
@@ -1830,6 +1915,59 @@ pub(crate) fn determine_runtime_health(
 mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;
+
+    #[test]
+    fn skill_packs_show_only_well_formed_bounded_entries() {
+        let capabilities = json!({
+            "skillPacks": { "version": 1, "packs": [
+                { "name": "interactive-map", "version": "0.1.4", "title": "Interactive map\u{0007} sites",
+                  "summary": format!("Maps and trips {}", "x".repeat(400)) },
+                { "name": "Bad Name", "version": "1.0.0" },
+                { "name": "no-version" },
+                { "name": "odd-version", "version": "1.0; rm -rf /" },
+                { "name": "interactive-map", "version": "9.9.9" },
+                { "name": "plain", "version": "2.0.0", "title": "   " },
+            ]}
+        });
+        let packs = skill_packs_from_capabilities(&capabilities).expect("packs");
+        assert_eq!(packs.len(), 2);
+        assert_eq!(packs[0].name, "interactive-map");
+        assert_eq!(packs[0].version, "0.1.4", "the first entry of a name wins");
+        assert_eq!(packs[0].title.as_deref(), Some("Interactive map sites"));
+        assert_eq!(
+            packs[0].summary.as_ref().map(|s| s.chars().count()),
+            Some(MAX_SKILL_PACK_SUMMARY_CHARS)
+        );
+        assert_eq!(
+            packs[1],
+            RuntimeSkillPack {
+                name: "plain".into(),
+                version: "2.0.0".into(),
+                title: None,
+                summary: None
+            }
+        );
+        let many: Vec<JsonValue> = (0..40)
+            .map(|i| json!({ "name": format!("pack-{i}"), "version": "1.0.0" }))
+            .collect();
+        assert_eq!(
+            skill_packs_from_capabilities(
+                &json!({ "skillPacks": { "version": 1, "packs": many } })
+            )
+            .map(|p| p.len()),
+            Some(MAX_RUNTIME_SKILL_PACKS)
+        );
+        for other in [
+            json!({}),
+            json!({ "skillPacks": { "version": 2, "packs": [{ "name": "a", "version": "1" }] } }),
+            json!({ "skillPacks": { "version": 1, "packs": [] } }),
+            json!({ "skillPacks": "interactive-map" }),
+        ] {
+            assert_eq!(skill_packs_from_capabilities(&other), None, "{other}");
+        }
+        let entry = serde_json::to_value(&packs[1]).unwrap();
+        assert_eq!(entry, json!({ "name": "plain", "version": "2.0.0" }));
+    }
 
     #[test]
     fn shared_browser_host_shows_only_for_a_live_covered_registered_host() {

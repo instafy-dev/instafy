@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => ({
     effectiveRuntimeId: "runtime-1",
     desktopOrigin: null as unknown,
     desktopOriginProjectId: null as string | null,
+    runtimeStatuses: [] as unknown[],
   },
 }));
 
@@ -109,6 +110,7 @@ describe("SkillsPanel reads", () => {
     mocks.availability.recoveryVersion = 0;
     mocks.runtime.desktopOrigin = null;
     mocks.runtime.desktopOriginProjectId = null;
+    mocks.runtime.runtimeStatuses = [];
     mocks.list.mockImplementation(async ({ path }: { path: string }) =>
       path === ".agents/skills"
         ? [{ name: "writer", path: ".agents/skills/writer", kind: "directory" }]
@@ -297,6 +299,51 @@ describe("SkillsPanel reads", () => {
     expect(mocks.listAt).toHaveBeenCalledTimes(2);
     expect(mocks.listAt).toHaveBeenLastCalledWith(expect.objectContaining({ originId: "origin-2" }));
     expect(mocks.list).not.toHaveBeenCalled();
+  });
+
+  it("lists the skill packs the space's runtime installs, which are never saved with the space", async () => {
+    // a cloud space reads its committed files: the runtime's pack copy is not among them
+    mocks.versioning.mode = "stateless";
+    mocks.versioning.originId = "origin-1";
+    mocks.listAt.mockResolvedValue({ ok: true, entries: [], rev: "r1", originId: "origin-1", originMode: "hosted" });
+    mocks.runtime.runtimeStatuses = [
+      { runtimeId: "runtime-old", isPreferred: false, skillPacks: [{ name: "interactive-map", version: "0.1.2", title: "Old", summary: null }] },
+      { runtimeId: "runtime-1", isPreferred: false, skillPacks: [{ name: "interactive-map", version: "0.1.4", title: "Interactive map sites", summary: "Interactive maps, trips and place lookups as an Instafy skill pack" }] },
+    ];
+    await render();
+    const row = container.querySelector('[data-testid="skills-included-interactive-map"]');
+    expect(row?.textContent).toContain("Interactive map sites");
+    expect(row?.textContent).toContain("Interactive maps, trips and place lookups");
+    expect(container.querySelector('[data-testid="skills-included-label-interactive-map"]')?.textContent).toBe("Included with Instafy · 0.1.4");
+    // the runtime manages it: no switch, no uninstall, no file to open
+    expect(row?.querySelector('[role="switch"]')).toBeNull();
+    expect(container.querySelector('[data-testid="skills-uninstall-interactive-map"]')).toBeNull();
+    expect(container.textContent).not.toContain("No installed skills yet.");
+  });
+
+  it("shows the runtime's own copy of a pack in a workspace listing as included, and a space's own copy as its skill", async () => {
+    const files: Record<string, string> = {
+      ".agents/skills/interactive-map/SKILL.md": "---\nname: interactive-map\n---\n<!-- instafy:managed-skill sha256:abc -->\n\n# Interactive map sites\n\nA site is a folder.\n",
+      ".agents/skills/writer/SKILL.md": "# Writer\n\nWrites things.\n",
+    };
+    mocks.list.mockImplementation(async ({ path }: { path: string }) =>
+      path === ".agents/skills"
+        ? [{ name: "interactive-map", path: ".agents/skills/interactive-map", kind: "directory" }, { name: "writer", path: ".agents/skills/writer", kind: "directory" }]
+        : [{ name: "SKILL.md", path: `${path}/SKILL.md`, kind: "file" }],
+    );
+    mocks.read.mockImplementation(async ({ path }: { path: string }) => ({ contentText: files[path] ?? null }));
+    await render();
+    expect(container.querySelector('[data-testid="skills-included-interactive-map"]')?.textContent).toContain("Interactive map sites");
+    expect(container.querySelector('[data-testid="skills-toggle-interactive-map"]')).toBeNull();
+    expect(container.querySelector('[data-testid="skills-item-writer"]')).not.toBeNull();
+
+    // imported in full (no runtime marker): the space's own skill, with its switch, and not listed twice
+    files[".agents/skills/interactive-map/SKILL.md"] = "# Interactive map sites\n\nMy own copy.\n";
+    mocks.runtime.runtimeStatuses = [{ runtimeId: "runtime-1", isPreferred: true, skillPacks: [{ name: "interactive-map", version: "0.1.4", title: "Interactive map sites", summary: null }] }];
+    mocks.projectId = "space-b";
+    await render();
+    expect(container.querySelector('[data-testid="skills-item-interactive-map"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="skills-included-interactive-map"]')).toBeNull();
   });
 
   it("never pairs a cloud space with the previous Desktop space's origin", async () => {
