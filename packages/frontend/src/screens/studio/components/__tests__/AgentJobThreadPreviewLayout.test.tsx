@@ -391,7 +391,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     }
   });
 
-  // Drive 3: every turn opened with three labels inside 1.1 s. The line says
+  // A local test: every turn opened with three labels inside 1.1 s. The line says
   // Starting… until the model has worked a moment with no step.
   it("opens with Starting…, then says Thinking once the model has worked a moment before its first step", async () => {
     vi.useFakeTimers();

@@ -303,7 +303,7 @@ describe("summarizeTurnActivity", () => {
     expect(done.kind === "step" && done.step.label).toBe("Built the map");
   });
 
-  // Drive 3: "Searched the web 2 times, read a page" after both searches and
+  // A local test: "Searched the web 2 times, read a page" after both searches and
   // the read had failed.
   it("never counts a step that failed, and says what was tried when nothing else is left", () => {
     const failedSearch = command(WEB_SEARCH, { status: "failed", exitCode: 1 });
@@ -320,7 +320,7 @@ describe("summarizeTurnActivity", () => {
     expect(summarize([failedSearch], "cancelled").summary).toBe("Stopped · tried searching the web");
   });
 
-  // Drive 3: the map turn read "Looked up transit, found places to stay" and
+  // A local test: the map turn read "Looked up transit, found places to stay" and
   // the hello turn "Edited a file": neither said what the turn made.
   it("leads with a preview that opened when nothing else the turn made is named", () => {
     const rows = (overrides: Record<string, unknown> = {}) => [
@@ -349,8 +349,8 @@ describe("summarizeTurnActivity", () => {
     expect(summarize(messages).summary).toBe("Stopped the preview");
   });
 
-  // Drive 3's map turn, its labels as the runtime streamed them.
-  it("reads the drive's map turn by what it made", () => {
+  // A local test's map turn, its labels as the runtime streamed them.
+  it("reads a map turn by what it made", () => {
     const pack = (sub: string, role: string, live: string, done?: string) => ({
       key: `pack/interactive-map/uw/${sub}`, role, live, ...(done ? { done } : {}), count: 1,
     });
@@ -375,7 +375,7 @@ describe("summarizeTurnActivity", () => {
     expect(summarize(messages).summary).toBe("Opened a preview, looked up transit, found places to stay");
   });
 
-  // Drive 3: "uw geocode Baixa; uw stay …" read "Working on the map".
+  // A local test: "uw geocode Baixa; uw stay …" read "Working on the map".
   it("names a chain by its meaningful command, not the quiet one before it", () => {
     const stay = { key: "pack/interactive-map/uw/stay", role: "content", live: "Finding places to stay", done: "found places to stay", count: 1 };
     const chain = { ...MAP_SETUP, also: [stay] };

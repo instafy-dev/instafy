@@ -186,7 +186,7 @@ describe("ChatTypingRows", () => {
     expect(container.querySelector('[data-testid="chat-speaker-marker"]')).toBeNull();
   });
 
-  // Drive 3: "Octo is starting its workspace…", "Octo is waiting for its
+  // A local test: "Octo is starting its workspace…", "Octo is waiting for its
   // turn…", then "Thinking…", all inside 1.1 s.
   it("opens a turn with one Starting… that holds while the model begins", async () => {
     vi.useFakeTimers();

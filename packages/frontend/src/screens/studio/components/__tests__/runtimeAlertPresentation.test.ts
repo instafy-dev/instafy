@@ -94,7 +94,7 @@ describe("isRuntimeAlertSupersededByStart", () => {
 });
 
 describe("resolveAgentWaitingActivityCopy", () => {
-  // Drive 3: "Octo is starting its workspace…", "Octo is waiting for its
+  // A local test: "Octo is starting its workspace…", "Octo is waiting for its
   // turn…" and "Thinking…" inside 1.1 s. A turn opens with one label.
   it("says Starting… whether the workspace starts, the turn waits or no run state has arrived", () => {
     for (const state of [

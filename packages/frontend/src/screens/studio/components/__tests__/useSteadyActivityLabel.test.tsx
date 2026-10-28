@@ -60,7 +60,7 @@ describe("useSteadyActivityLabel", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  // Drive 3's map turn, sampled every 200 ms: "Working on the map…" for 239 ms
+  // A map turn in a local test, sampled every 200 ms: "Working on the map…" for 239 ms
   // and 131 ms with "Thinking…" between, "Looking up transit…" for 457 ms,
   // "Saving your changes…" for 36 ms.
   it("never flashes a label: each one it shows holds for at least the hold time", async () => {
