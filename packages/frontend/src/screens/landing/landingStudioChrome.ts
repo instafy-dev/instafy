@@ -249,11 +249,11 @@ export const THREAD_SPINE_MAIN =
   "pointer-events-none absolute left-[var(--thread-spine-left)] transition-opacity duration-0 ease-out group-data-[deck-settled]/deck:duration-200 motion-reduce:transition-none";
 export const THREAD_SPINE_NOTCH = "pointer-events-none absolute top-0 h-full left-[var(--thread-spine-left)]";
 // TurnActivityLine.tsx: the turn's one activity line, muted caption text on
-// one line that truncates; while the turn runs its words sweep, and once it
-// ended Details follows them. Landing-only min-h-6: the line is as tall at
-// every beat, so the pinned transcript never bobs as its words change.
+// one 20px line that truncates, at every beat, so the pinned transcript never
+// bobs as its words change; while the turn runs its words sweep, and once it
+// ended Details follows them.
 export const ACTIVITY_SECTION = "relative py-1";
-export const ACTIVITY_ROW = "flex h-5 min-h-6 max-w-full min-w-0 items-center gap-1.5 pl-1 text-xs leading-5 text-slate-500 dark:text-slate-400";
+export const ACTIVITY_ROW = "flex h-5 max-w-full min-w-0 items-center gap-1.5 pl-1 text-xs leading-5 text-slate-500 dark:text-slate-400";
 export const ACTIVITY_TEXT = "min-w-0 truncate";
 export const ACTIVITY_TEXT_LIVE = "instafy-status-sweep min-w-0 truncate";
 export const ACTIVITY_DETAILS = "inline-flex flex-none items-center gap-0.5 font-medium";
