@@ -34,6 +34,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-cursor-overlay.spec.ts",
   "browser-live-proof.spec.ts",
   "browser-transport-switch.spec.ts",
+  "browser-recovery.spec.ts",
   "conversation-surfaces.spec.ts",
   "composer-panels.spec.ts",
   "suggestion-browser-menus.spec.ts",

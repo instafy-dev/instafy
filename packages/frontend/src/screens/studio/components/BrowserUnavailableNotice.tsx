@@ -17,7 +17,7 @@ export function BrowserUnavailableNotice({
 }) {
   const showDetails = Boolean(reason) && reason !== sentence && runtimeDebugEnabled();
   return <div className="min-w-0 space-y-2" data-debug-reason={reason ?? undefined}>
-    <Text as="p" variant={compact ? "caption" : "body"} tone="primary" className="leading-snug"
+    <Text as="p" variant={compact ? "caption" : "bodyCompact"} tone="primary" className="[overflow-wrap:anywhere]"
       data-testid="browser-session-view-sentence">
       {sentence}
     </Text>

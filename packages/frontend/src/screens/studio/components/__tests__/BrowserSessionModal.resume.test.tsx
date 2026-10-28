@@ -193,6 +193,32 @@ describe("production Shared modal resume selection", () => {
     await act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="Resume Shared session ${firstId}"]`)!.click());
     expect(onResolved).toHaveBeenCalledWith(firstId); expect(mocks.ensure).not.toHaveBeenCalled();
   });
+  it.each([false, true])("lets compact recovery content determine the stage height (runtime limit: %s)", async limit => {
+    // Inline recovery collapses below 760px; below 620px the whole viewer is fullscreen.
+    vi.stubGlobal("innerHeight", 700);
+    mocks.stop.mockClear();
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [] });
+    const reason = limit
+      ? Object.assign(new Error("Runtime limit reached"), { code: "runtime_limit_reached", details: {
+        activeCount: 1, maxActiveCount: 1, blockerRuntimeId: secondId,
+        blockerProjectLabel: "Another space with a very long name", blockerRuntimeLabel: "Long-running research machine",
+      } })
+      : new Error("provider 'test-cloud' is not configured on this controller");
+    mocks.ensure.mockRejectedValue(reason);
+    await act(async () => root.render(<BrowserSessionModal isOpen onOpenChange={noop} projectId={projectId}
+      currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={null} presentation="docked" canControlBrowser
+      sharedBrowserCapabilitiesResolved={false} />));
+    const stage = container.querySelector<HTMLElement>('[data-testid="browser-session-stage"]')!;
+    expect(stage).not.toBeNull();
+    expect(stage.style.height).toBe("");
+    expect(stage.classList.contains("overflow-hidden")).toBe(false);
+    expect(stage.querySelector('[data-testid="browser-session-collapsed-card"]')).not.toBeNull();
+    if (limit) {
+      expect(stage.textContent).toContain("Another space with a very long name");
+      expect(stage.textContent).toContain("This can interrupt work running there.");
+      expect(mocks.stop).not.toHaveBeenCalled();
+    } else expect(stage.textContent).toContain("Browsing hasn't been set up for this workspace.");
+  });
   it("requires a choice among multiple live sessions instead of taking the first", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId), entry(secondId)] });
     await render(null);

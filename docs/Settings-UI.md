@@ -662,6 +662,21 @@ Use the neutral divider and panel helpers in `theme/darkSurfaces.ts`; do not
 substitute slate-ramp borders or unrelated dark fills on one page. These rules
 describe container boundaries, not input outlines or semantic warning borders.
 
+Browser connection feedback follows the same rules. `BrowserSessionRecovery` owns
+the shared surface, typography and inline actions for expanded and compact recovery;
+the browser modal still owns connection state, permissions and retry/takeover callbacks.
+Compact recovery sizes to its content so long workspace names and touch-sized actions
+remain visible. Expanded recovery scrolls within the available browser pane on short
+screens. Keep normal Off states neutral and show technical failure details only when
+runtime debugging is enabled. The reconnect indicator uses the shared surface and
+loading status above the retained page. It must not clear the page or add another
+connection sentence.
+
+`/tests/fixtures/browser-recovery/index.html` mounts the real browser modal with inert
+controller and viewer boundaries. It covers reconnecting, disconnected and runtime-limit
+states, compact/expanded layouts, long blocker names and busy actions in both themes.
+The fixture verifies presentation and callback wiring, not a live remote browser.
+
 On macOS Desktop, the outer organization rail reaches the top of the window and
 widens from 64px to a 92px cap around the native window controls. The cap's shoulder
 and its inward turn at the window's top edge use the workspace's shared 14px corner
