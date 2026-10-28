@@ -478,6 +478,62 @@ describe("buildHomeFeed with ledger rows", () => {
     };
   }
 
+  // Local drive, Oct 28: Home called untitled chats "Conversation", four rows
+  // in a row reading the same.
+  it("names each row by its chat's real name, never a bare \"Conversation\"", () => {
+    const untitled = (id: string, conversationId: string, kind = "conversation.reply") => activityItem({
+      id, kind, title: null, at: new Date(NOW - Number(id) * 60 * 1000).toISOString(),
+      conversation: { id: conversationId, title: null, visibility: "public", threadKind: null },
+    });
+    const model = buildHomeFeed({
+      attentionEntries: [],
+      recentConversations: [],
+      activity: [
+        untitled("1", "c-named-here"),
+        untitled("2", "c-unnamed"),
+        untitled("3", "c-new", "conversation.created"),
+        activityItem({ id: "4", conversation: { id: "c-elsewhere", title: "Ledger name", visibility: "public", threadKind: null }, title: "Ledger name" }),
+      ],
+      projects: [personalProject],
+      activeProject: personalProject,
+      conversations: [
+        // Named on this device a moment ago: newer than the ledger's read.
+        localConversation({ localId: "l-1", controllerId: "c-named-here", title: "Plan 3 days in Lisbon…" }),
+        // Still untitled here, while the ledger already has its name.
+        localConversation({ localId: "l-2", controllerId: "c-elsewhere", title: "New chat" }),
+      ],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+    const titles = Object.fromEntries(model.activity.flatMap((day) => day.events)
+      .map((event) => [event.source.type === "activity" ? event.source.item.conversation?.id : event.key, event.title]));
+    expect(titles).toEqual({
+      "c-named-here": "Plan 3 days in Lisbon…",
+      "c-unnamed": "New chat",
+      "c-new": "New chat",
+      "c-elsewhere": "Ledger name",
+    });
+  });
+
+  // A run with no chat (one started outside any conversation) is not a "New chat".
+  it("names a run that belongs to no chat by its space, never \"New chat\"", () => {
+    const model = buildHomeFeed({
+      attentionEntries: [],
+      recentConversations: [],
+      activity: [activityItem({ id: "5", kind: "run.finished", title: null, conversation: null, preview: null,
+        run: { id: "run-5", status: "succeeded", promptId: null } })],
+      projects: [acmeProject],
+      activeProject: acmeProject,
+      conversations: [],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+    const rows = model.activity.flatMap((day) => day.events);
+    expect(rows.map((row) => [row.kind, row.title])).toEqual([["run_finished", "checkout-flow"]]);
+  });
+
   it("folds ledger rows to one row per conversation, newest state first, with real actors", () => {
     const model = buildHomeFeed({
       attentionEntries: [],

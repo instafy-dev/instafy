@@ -38,6 +38,10 @@ export function useConversationAutoTitle({
   useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
+  const findConversation = useCallback(
+    (conversationId: string) => conversationsRef.current.find((entry) => entry.localId === conversationId) ?? null,
+    [],
+  );
 
   // `openingMessage` is the conversation's first user message, from a caller
   // that has its whole history loaded; without it only the local list can say
@@ -86,57 +90,63 @@ export function useConversationAutoTitle({
       // Read before the requests below: a list refresh while they run can mark
       // a brand-new chat as holding remote messages.
       const initialOpeningMessage = openingMessage ?? getOpeningUserMessage(initialConversation);
+      // The chat is named from the first line of its opening message at once,
+      // in the same tick as the send, so it has a name while its first turn
+      // runs and after that turn fails. Only from the opening message, never a
+      // later one such as "Yes, that one", and only on the client of the person
+      // who wrote it, so only they turn their words into a title everyone sees.
+      const isOwnOpeningMessage = (message: OpeningUserMessage | null): message is OpeningUserMessage =>
+        Boolean(message && currentUserId && message.authorId === currentUserId);
+      const promptTitle = isOwnOpeningMessage(initialOpeningMessage)
+        ? getFallbackConversationTitle(initialOpeningMessage.content)
+        : null;
+      if (promptTitle) {
+        setConversationTitle(conversationId, promptTitle);
+      }
+      const shownTitle = promptTitle ?? initialTitle;
       const controllerId = await ensureControllerConversationId(projectId, initialConversation);
       if (!controllerId) {
         return;
       }
+      // Nobody renamed it meanwhile. The list read here may not hold the name
+      // set above yet, so the title it replaced also counts as unchanged.
+      const isStillShown = (conversation: ConversationState | null): conversation is ConversationState =>
+        Boolean(
+          conversation &&
+            !conversation.parentConversationId &&
+            !conversation.threadKind &&
+            !conversation.remoteSummaryPending &&
+            (conversation.title === shownTitle || conversation.title === initialTitle),
+        );
+      if (promptTitle && isStillShown(findConversation(conversationId))) {
+        void updateControllerConversationMetadata({ conversationId: controllerId, metadata: { title: promptTitle } });
+      }
 
+      // The controller titles only with the person's own credential; its
+      // title replaces the line's name once, while nobody has renamed the chat.
       const titleResult = await requestProjectConversationTitle({
         projectId,
         message: trimmedMessage,
       });
       const modelTitle = titleResult.success ? titleResult.title?.trim() ?? "" : "";
 
-      const latestConversation =
-        conversationsRef.current.find((entry) => entry.localId === conversationId) ?? null;
-      if (!latestConversation) {
-        return;
-      }
-      if (
-        latestConversation.parentConversationId ||
-        latestConversation.threadKind ||
-        latestConversation.remoteSummaryPending ||
-        latestConversation.title !== initialTitle ||
-        !isDefaultConversationTitle(latestConversation.title)
-      ) {
+      const latestConversation = findConversation(conversationId);
+      if (!isStillShown(latestConversation)) {
         return;
       }
 
-      let nextTitle = modelTitle && modelTitle !== initialTitle ? modelTitle : "";
-      if (!nextTitle) {
-        // The controller titles only with the person's own credential, so a
-        // managed-tier chat gets an answer with no title. Name it from its
-        // opening message instead, never from a later one such as "Yes, that
-        // one", and only:
-        // - when the request went through: a refusal (a viewer) or an outage
-        //   is not that answer;
-        // - for the person who wrote the opening message, so only their own
-        //   client turns their words into a title everyone sees.
-        // A caller can run before its message lands in the list, so the
-        // latest list may be the first to hold it.
-        const knownOpeningMessage = initialOpeningMessage ?? getOpeningUserMessage(latestConversation);
-        if (
-          !titleResult.success ||
-          !knownOpeningMessage ||
-          !currentUserId ||
-          knownOpeningMessage.authorId !== currentUserId
-        ) {
+      let nextTitle = modelTitle && modelTitle !== shownTitle ? modelTitle : "";
+      if (!nextTitle && !promptTitle) {
+        // A caller can run before its message lands in the list, so the latest
+        // list may be the first to hold the opening message.
+        const knownOpeningMessage = getOpeningUserMessage(latestConversation);
+        if (!isDefaultConversationTitle(latestConversation.title) || !isOwnOpeningMessage(knownOpeningMessage)) {
           return;
         }
         nextTitle = getFallbackConversationTitle(knownOpeningMessage.content) ?? "";
-        if (!nextTitle) {
-          return;
-        }
+      }
+      if (!nextTitle) {
+        return;
       }
 
       setConversationTitle(conversationId, nextTitle);
@@ -147,7 +157,7 @@ export function useConversationAutoTitle({
         },
       });
     },
-    [currentUserId, ensureControllerConversationId, resolveProjectId, setConversationTitle],
+    [currentUserId, ensureControllerConversationId, findConversation, resolveProjectId, setConversationTitle],
   );
 
   // A submit queues in the same tick it appends its message, before this

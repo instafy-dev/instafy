@@ -1,5 +1,6 @@
 import { getOrgDisambiguator, getOrgDisplayName, isPersonalOrgName } from "../../org/orgNaming";
 import type { ConversationState } from "../../conversations/ConversationsProvider";
+import { isDefaultConversationTitle, NEW_CHAT_TITLE } from "../../conversations/conversationAutoTitle";
 import { spaceDisplayName } from "../../projects/spaceName";
 import { homeFailureStatusLabel, type HomeAttentionEntry, type HomeFailureStatusLabel } from "./homeAttention";
 import type { ActivityItem } from "../../services/runtimeController/activity";
@@ -375,6 +376,13 @@ export function buildHomeFeed({
       .filter((conversation) => conversation.controllerId)
       .map((conversation) => [conversation.controllerId!.trim().toLowerCase(), conversation]),
   );
+  // A chat's own name for a row about it: the name this device already shows
+  // (it may be newer than the ledger's), else the one the ledger read.
+  const chatTitle = (conversationId: string | null | undefined, ledgerTitle: string | null | undefined): string | null => {
+    const local = conversationId ? conversationsByControllerId.get(conversationId.trim().toLowerCase()) : null;
+    const localTitle = local?.title.trim();
+    return (localTitle && !isDefaultConversationTitle(localTitle) ? localTitle : null) ?? (ledgerTitle?.trim() || null);
+  };
   // Local rows are keyed by their controller id when they have one, so a
   // ledger row for the same conversation dedupes against them.
   const canonicalKey = (event: HomeFeedEvent): string => {
@@ -454,7 +462,11 @@ export function buildHomeFeed({
         key: `activity:${item.id}`,
         lane: "activity",
         kind,
-        title: item.title ?? (kind === "conversation" ? "New conversation" : "Conversation"),
+        // A chat's real name, never a bare "Conversation": an untitled chat is
+        // "New chat" here as everywhere else. A run in no chat is about its space.
+        title: item.conversation
+          ? chatTitle(item.conversation.id, item.title) ?? NEW_CHAT_TITLE
+          : item.title?.trim() || getSpaceLabel(item.project?.name),
         preview: item.preview,
         statusLabel: kind === "run_failed" ? homeFailureStatusLabel(item.kind, item.data) : undefined,
         at: parseTimestamp(item.at),
@@ -629,7 +641,9 @@ export function buildHomeFeed({
       key: `notification:${key}`,
       lane: unread ? "needs" : "activity",
       ...notificationKinds[item.eventName],
-      title: (target.supportReportId ? supportById.get(target.supportReportId)?.title.trim() : null) || notificationKinds[item.eventName].title,
+      title: (target.supportReportId ? supportById.get(target.supportReportId)?.title.trim() : null) ||
+        (target.kind === "conversation" ? chatTitle(target.conversationId, null) : null) ||
+        notificationKinds[item.eventName].title,
       preview: item.body || null,
       statusLabel: homeFailureStatusLabel(item.eventName),
       at: parseTimestamp(item.occurredAt),

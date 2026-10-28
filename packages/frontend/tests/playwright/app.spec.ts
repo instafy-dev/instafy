@@ -1,4 +1,4 @@
-import { activeConversationId, openChats, selectConversation } from "./utils/conversationNavigation.js";
+import { activeConversationId, conversationRow, openChats, selectConversation } from "./utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import {
   prepareStudio,
@@ -400,7 +400,7 @@ test.afterEach(async ({ page }) => {
     await openChats(page);
     await expect(page.getByTestId("conversation-history-item")).toHaveCount(3);
     await selectConversation(page, first);
-    await expect(page.getByTestId("conversation-history-item").filter({ hasText: "Conversation 1" })).toHaveAttribute("aria-current", "page");
+    await expect(conversationRow(page, first)).toHaveAttribute("aria-current", "page");
     await selectConversation(page, third);
     await expect(page.getByTestId("workspace-tabs")).toHaveCount(0);
   });

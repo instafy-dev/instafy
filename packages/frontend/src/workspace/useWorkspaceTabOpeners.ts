@@ -223,10 +223,7 @@ export function useWorkspaceTabOpeners({
 
         let conversationId = resolveDefaultConversationId();
         if (!conversationId) {
-          const conversation = createConversation({
-            title: `Conversation ${conversations.length + 1}`,
-            select: true,
-          });
+          const conversation = createConversation({ select: true });
           conversationId = conversation.localId;
         }
         const tabId = getTabIdForConversation(conversationId);
@@ -236,10 +233,7 @@ export function useWorkspaceTabOpeners({
         if (!tab) {
           const conversation =
             conversations.find((entry) => entry.localId === conversationId) ??
-            createConversation({
-              title: `Conversation ${conversations.length + 1}`,
-              select: false,
-            });
+            createConversation({ select: false });
           tab = createTabForConversation(conversation);
           commitTabs([...tabsRef.current, tab]);
         }

@@ -1,4 +1,4 @@
-import { openChats, activeConversationId, returnToConversation } from "../utils/conversationNavigation.js";
+import { openChats, activeConversationId, conversationRow, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import {
   prepareStudio,
@@ -190,6 +190,8 @@ test.describe("Controller conversation smoke", () => {
     // This is an assistant-dispatch smoke, not an ambient group-participation
     // classifier proof. Address Octo explicitly so busy state is guaranteed
     // while the exact agent turn starts.
+    // Untitled chats all read "New chat", so rows are picked by their chat.
+    const firstChat = await activeConversationId(page);
     const firstPrompt = "@octo What is 1+1? Reply with just the number.";
     await page.getByTestId("chat-input").fill(firstPrompt);
     const baselineAnswerCount = await assistantResponses.filter({ hasText: numericReply }).count();
@@ -221,7 +223,8 @@ test.describe("Controller conversation smoke", () => {
 
     await createPublicChatFromTopBar(page);
     await expect(conversationRowsLocator).toHaveCount(2);
-    await expect(conversationRowsLocator.filter({ hasText: "Conversation 2" }).first()).toContainText("Conversation 2");
+    const secondChat = await activeConversationId(page);
+    await expect(conversationRow(page, secondChat)).toBeVisible();
 
     const secondPrompt = "@octo What is 1+2? Reply with just the number.";
     await page.getByTestId("chat-input").fill(secondPrompt);
@@ -250,8 +253,8 @@ test.describe("Controller conversation smoke", () => {
     await setupIndicator.waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
     await typingIndicator.waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
 
-    await conversationRowsLocator.filter({ hasText: "Conversation 1" }).first().click();
-    await expect(conversationRowsLocator.filter({ hasText: "Conversation 1" }).first()).toHaveAttribute("aria-current", "page");
+    await conversationRow(page, firstChat).click();
+    await expect(conversationRow(page, firstChat)).toHaveAttribute("aria-current", "page");
     await page.getByTestId("chat-input").fill("What is 2+2? Reply with just the number.");
     const baselineAnswerCount3 = await assistantResponses.filter({ hasText: numericReply }).count();
     const baselineAssistantCountSecond = await assistantResponses.count();
@@ -303,6 +306,7 @@ test.describe("Controller conversation smoke", () => {
       const userBubbles = page.locator('[data-testid="chat-bubble-user"]');
       await expect(conversationRowsLocator).toHaveCount(1);
 
+      const firstChat = await activeConversationId(page);
       const firstPrompt = `What is 1+1? Reply with just the number. ${Date.now()}`;
       await page.getByTestId("chat-input").fill(firstPrompt);
       await page.getByTestId("chat-send-button").click();
@@ -310,20 +314,21 @@ test.describe("Controller conversation smoke", () => {
 
       await createPublicChatFromTopBar(page);
       await expect(conversationRowsLocator).toHaveCount(2);
-      await expect(conversationRowsLocator.filter({ hasText: "Conversation 2" }).first()).toContainText("Conversation 2");
+      const secondChat = await activeConversationId(page);
+      await expect(conversationRow(page, secondChat)).toBeVisible();
 
       const secondPrompt = `What is 1+2? Reply with just the number. ${Date.now()}`;
       await page.getByTestId("chat-input").fill(secondPrompt);
       await page.getByTestId("chat-send-button").click();
       await expect(userBubbles.last()).toContainText("What is 1+2?", { timeout: 15_000 });
 
-      await conversationRowsLocator.filter({ hasText: "Conversation 1" }).first().click();
-      await expect(conversationRowsLocator.filter({ hasText: "Conversation 1" }).first()).toHaveAttribute("aria-current", "page");
+      await conversationRow(page, firstChat).click();
+      await expect(conversationRow(page, firstChat)).toHaveAttribute("aria-current", "page");
       await expect(userBubbles.last()).toContainText("What is 1+1?", { timeout: 15_000 });
       await waitForAssistantNumberReplyInActiveConversation(page, 2);
 
-      await conversationRowsLocator.filter({ hasText: "Conversation 2" }).first().click();
-      await expect(conversationRowsLocator.filter({ hasText: "Conversation 2" }).first()).toHaveAttribute("aria-current", "page");
+      await conversationRow(page, secondChat).click();
+      await expect(conversationRow(page, secondChat)).toHaveAttribute("aria-current", "page");
       await expect(userBubbles.last()).toContainText("What is 1+2?", { timeout: 15_000 });
       await waitForAssistantNumberReplyInActiveConversation(page, 3);
     });

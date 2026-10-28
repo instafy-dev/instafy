@@ -247,21 +247,26 @@ names nothing. A newer chat never stands in for the first one, and a space whose
 are cut to 60 characters at a word. A name a person chose is never replaced, and a rename made on
 another device is read before writing.
 
-A chat that still has its numbered title and holds a `/skills import` line is titled after what
-it sets up: **Connect FreeFinance** for a built-in connector or **Set up Bookkeeping** for any
-other pack. Otherwise the controller's model titles the chat, but only when the person has a
-default AI credential of their own. Without one, the client of the person who wrote the chat's
-opening message titles it from that message: the first sentence that says something, without
-greetings or "can you help me" openers, links, email addresses, mentions, file paths or code, at
-most six words and 48 characters, and without a dangling small word such as "the" or "for" where
-it was cut. The title holds plain words only (letters in any script, apostrophes, hyphens and
-ending punctuation) and ends before the first word with a digit or any other character, or one
-longer than 20 characters. Other slash commands, messages that leave fewer than two such words,
-and messages that mention a password, PIN, login, secret, token or key, or hold a known key prefix
-or a long run of letters and digits, keep the numbered title.
-This fallback reads only the opening message, never a later reply, so a chat whose earlier
-messages are not loaded keeps its numbered title until they are. A chat this tab learns of from a
-single incoming message, or rebuilds from a saved draft, is not titled until the chat list has
+Every untitled chat is called **New chat**, in the chat list, its tab, Home and on every device:
+never a number taken from its place in the list, which changed whenever the list did. (Older chats
+stored as "Conversation 3" keep that name until they are titled.) Home's rows use a chat's real
+name, and a run that belongs to no chat is named after its space. A new chat holding a `/skills
+import` line is titled after what it sets up: **Connect FreeFinance** for a built-in connector or
+**Set up Bookkeeping** for any other pack. Otherwise the client of the person who wrote the chat's
+opening message names it from that message's first line as soon as it is sent, so the chat has a
+name while its first turn runs and after that turn fails: the first sentence that says something,
+without greetings or "can you help me" openers, links, email addresses, mentions, file paths or
+code, cut to about 40 characters at a word with "…" where it was cut, and without a dangling small
+word such as "the" or "for" there. The name holds plain words (letters in any script, apostrophes,
+hyphens and ending punctuation) and small numbers (a count up to 99, or a year), and ends before
+the first other word: a longer number, a word with a digit or another character, or one longer
+than 20 characters. Other slash commands, messages that leave fewer than two such words, and
+messages that mention a password, PIN, login, secret, token or key, or hold a known key prefix or
+a long run of letters and digits, stay **New chat**. When the person has a default AI credential
+of their own, the controller's model title then replaces that name once, unless someone renamed
+the chat meanwhile. Names come only from the opening message, never a later reply, so a chat whose
+earlier messages are not loaded stays **New chat** until they are. A chat this tab learns of from
+a single incoming message, or rebuilds from a saved draft, is not titled until the chat list has
 confirmed its title.
 
 ## Scoped search
