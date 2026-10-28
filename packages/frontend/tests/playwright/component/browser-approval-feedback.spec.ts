@@ -17,11 +17,13 @@ async function configure(page: Page) {
 async function open(page: Page, surface: string, theme: string, extra = "") {
   await page.goto(`${fixture}?surface=${surface}&theme=${theme}${extra}`, { waitUntil: "domcontentloaded" });
   const touch = page.viewportSize()!.width < 640;
-  // Chromium can reset the primary pointer on a later document even when the
-  // context hasTouch option is set. Reapply native emulation after navigation;
-  // the media and target assertions below still verify the rendered result.
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: touch, maxTouchPoints: 1 });
+  // Reapply touch emulation after navigation, but leave the desktop context's
+  // native mouse alone. Explicitly disabling touch in headless Linux Chromium
+  // can report pointer:none instead of restoring pointer:fine.
+  if (touch) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  }
   await expect(page.getByTestId("browser-approval-feedback-review")).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
   await expect.poll(() => page.evaluate(() => ({
