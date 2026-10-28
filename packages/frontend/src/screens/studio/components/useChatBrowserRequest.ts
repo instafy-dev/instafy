@@ -484,7 +484,7 @@ export function useChatBrowserRequest(options: Options) {
           }
           const sending = latest.current;
           const sent = await sending.continueTask(transport, browserRequestContinuation(request), {
-            display: browserRequestNotice(sending.agentName ?? "Octo", request.task),
+            display: browserRequestNotice(sending.agentName ?? "Octo", request.task, { automatic: autoStarted }),
             metadata: {
               ...(extraMetadata ?? {}),
               [BROWSER_REQUEST_OF_METADATA_KEY]: key,

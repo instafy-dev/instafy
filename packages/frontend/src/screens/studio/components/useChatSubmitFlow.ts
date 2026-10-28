@@ -37,6 +37,7 @@ import type { ChatSubmitDispatchPayload } from "./useChatSubmitDispatch";
 import type { EnqueueServerSendQueuePayload } from "./useChatServerSendQueue";
 import { buildServerSendQueuePromptBody } from "./useChatServerSendQueue";
 import type { PersonalBrowserAgentPhase } from "./usePersonalBrowserBridge";
+import { BROWSER_CONTINUES_RUN_METADATA_KEY } from "./useChatBrowserHandoff";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 import { withUserMentionMetadata } from "../../../conversations/userMentions";
 
@@ -215,6 +216,7 @@ export function useChatSubmitFlow({
   sendingAttachment,
   sharedBrowserActive: sharedBrowserShown,
   sharedBrowserBindingPage,
+  resolveSharedBrowserFollowUp,
   sharedBrowserRuntimeId,
   showCredentialsGate,
   showStatus,
@@ -335,6 +337,15 @@ export function useChatSubmitFlow({
    * task on a blank tab again.
    */
   sharedBrowserBindingPage: BrowserSessionPage | null;
+  /**
+   * The browser turn a message from the chat composer continues, and its tab,
+   * when the conversation's last turn was this person's turn in Instafy's
+   * browser and that browser is still open (sharedBrowserFollowUp). Such a
+   * message goes straight to the browser, naming that run so its approvals
+   * carry over, instead of an ordinary turn that would ask for the browser
+   * with a card. Read at send time.
+   */
+  resolveSharedBrowserFollowUp?: () => { runId: string; page: BrowserSessionPage } | null;
   sharedBrowserRuntimeId: string | null;
   showCredentialsGate: () => void;
   showStatus: ShowStatus;
@@ -367,6 +378,20 @@ export function useChatSubmitFlow({
     const allowWhileBusy = options?.allowWhileBusy ?? false;
     const requestedIntent = options?.intent ?? "send";
     const automatic = options?.automatic === true;
+    // A follow-up in a browser chat: the person writes in the chat while the
+    // browser that just answered is still open. It goes on there, in the tab
+    // that turn worked in, as the browser's own composer would send it.
+    const sharedBrowserFollowUp =
+      !automatic &&
+      !skillSetupConversation &&
+      !sharedBrowserActive &&
+      !personalBrowserActive &&
+      !override?.runtimeOverride?.runtimeId &&
+      !override?.browserPageTarget &&
+      imageFiles.length === 0 &&
+      (override?.browserLaunchMode ?? pendingBrowserLaunchMode) !== "new_page"
+        ? resolveSharedBrowserFollowUp?.() ?? null
+        : null;
     const {
       agentSelection,
       browserLaunchMode,
@@ -390,7 +415,7 @@ export function useChatSubmitFlow({
       inputValue,
       override,
       pendingBrowserLaunchMode,
-      preferredBrowserPage,
+      preferredBrowserPage: sharedBrowserFollowUp?.page ?? preferredBrowserPage,
       resolvePromptAgentTargets,
       softPrefillSuggestion,
     });
@@ -425,6 +450,7 @@ export function useChatSubmitFlow({
         !automatic &&
         (personalBrowserActive ||
           sharedBrowserActive ||
+          Boolean(sharedBrowserFollowUp) ||
           shouldApplyBrowserPageTarget ||
           shouldApplyNewBrowserLaunch),
       humanPeerContext,
@@ -465,10 +491,11 @@ export function useChatSubmitFlow({
     });
     const sharedBrowserRouting = resolveSharedBrowserSubmitRouting({
       active:
-        !queuedRuntimeOverride &&
-        !automatic &&
-        sharedBrowserActive &&
-        browserLaunchMode !== "new_page",
+        (!queuedRuntimeOverride &&
+          !automatic &&
+          sharedBrowserActive &&
+          browserLaunchMode !== "new_page") ||
+        Boolean(sharedBrowserFollowUp),
       messageRequiresAi: effectiveMessageRequiresAi,
       resolvedRuntimeId: sharedBrowserRuntimeId,
       terminalRequest,
@@ -516,9 +543,10 @@ export function useChatSubmitFlow({
       queuedRuntimeOverride ??
       personalBrowserRouting.runtimeOverride ??
       sharedBrowserRouting.runtimeOverride;
-    const sharedBrowserPageTarget =
-      browserPageTarget ??
-      (sharedBrowserBindingPage ? toBrowserSessionPageTarget(sharedBrowserBindingPage) : null);
+    const sharedBrowserPageTarget = sharedBrowserFollowUp
+      ? toBrowserSessionPageTarget(sharedBrowserFollowUp.page)
+      : browserPageTarget ??
+        (sharedBrowserBindingPage ? toBrowserSessionPageTarget(sharedBrowserBindingPage) : null);
     if (useSharedBrowserRuntime && !sharedBrowserPageTarget) {
       showStatus(
         "Open a page in the browser before sending a browser task. Your message is kept.",
@@ -534,7 +562,12 @@ export function useChatSubmitFlow({
         })
       : useSharedBrowserRuntime && submitRuntimeOverride?.runtimeId
         ? buildSharedBrowserSubmitMetadata({
-            baseMetadata: resolvedBaseSubmitMetadata,
+            baseMetadata: sharedBrowserFollowUp
+              ? {
+                  ...(resolvedBaseSubmitMetadata ?? {}),
+                  [BROWSER_CONTINUES_RUN_METADATA_KEY]: sharedBrowserFollowUp.runId,
+                }
+              : resolvedBaseSubmitMetadata,
             browserPageTarget:
               browserLaunchMode === "new_page" ? null : sharedBrowserPageTarget,
             runtimeId: submitRuntimeOverride.runtimeId,
@@ -912,6 +945,7 @@ export function useChatSubmitFlow({
     requestRuntimeRecovery,
     resolveGroupParticipationBeforeSubmit,
     resolvePromptAgentTargets,
+    resolveSharedBrowserFollowUp,
     runtimeControllerEnabled,
     runtimeReady,
     scrollToBottom,
