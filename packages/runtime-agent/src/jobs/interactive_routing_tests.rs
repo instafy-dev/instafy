@@ -136,3 +136,37 @@ fn hub_and_an_installed_pack_skill_load_whole_within_the_budget() {
         "the hub is in the index"
     );
 }
+
+#[test]
+fn research_execution_policy_upgrades_unedited_skills_but_keeps_local_edits() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    let current =
+        include_str!("../../assets/instafy/.agents/skills/instafy-research-team/SKILL.md");
+    let researcher = include_str!(
+        "../../assets/instafy/.agents/skills/instafy-research-team/references/researcher.md"
+    );
+    for (relative, previous, expected) in [
+        (
+            learn::RESEARCH_TEAM_RELATIVE_PATH,
+            include_str!("legacy/research-team-v1.md"),
+            current,
+        ),
+        (
+            learn::RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,
+            include_str!("legacy/research-team-researcher-v2.md"),
+            researcher,
+        ),
+    ] {
+        let path = root.join(relative);
+        fs::write(&path, previous).unwrap();
+        learn::ensure_project_memory_scaffold(root);
+        assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+        let customized = format!("{previous}\nLocal research preference.\n");
+        fs::write(&path, &customized).unwrap();
+        learn::ensure_project_memory_scaffold(root);
+        assert_eq!(fs::read_to_string(path).unwrap(), customized);
+    }
+    assert!(current.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+}

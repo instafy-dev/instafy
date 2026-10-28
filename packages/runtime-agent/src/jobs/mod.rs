@@ -5089,6 +5089,7 @@ impl JobProcessor {
         job: &LeaseJob,
     ) -> bool {
         self.parallel_scoped_scope_paths(job).is_some()
+            && !scoped_worker_requires_tools(job)
             && self
                 .parallel_direct_worker_proxy_config(
                     job.proxy.as_ref().or(registration.proxy.as_ref()),
@@ -5137,6 +5138,8 @@ impl JobProcessor {
         {
             bail!("lease lost before parallel write-scoped worker execution");
         }
+
+        ensure_tool_free_worker_compatible(job)?;
 
         // Parallel workers use per-job proxy configuration and must not mutate
         // process-wide credentials, but still validate the same job scope before
@@ -6245,6 +6248,11 @@ impl JobProcessor {
                 "Experimental scoped tool workers require the isolated worker dispatch path; this task has unsupported inputs, capabilities, or scope."
             );
         }
+        if is_multi_agent_worker_job(job)
+            && metadata_requests_write_scoped_workspace(job.payload.get("metadata"))
+        {
+            ensure_tool_free_worker_compatible(job)?;
+        }
         let task_usage = TaskUsage::default();
         let turn_files = turn_continuation::TurnFiles::for_job(job);
         let result = self
@@ -6749,6 +6757,7 @@ impl JobProcessor {
         let runtime_expectations =
             runtime_job_expectations_for_execution(&job.payload, bounded_execution);
         let scoped_worker_has_precollected_observations = is_multi_agent_worker_job(job)
+            && !scoped_worker_requires_tools(job)
             && scoped_worker_path_observation
                 .as_ref()
                 .is_some_and(|observation| observation.complete);
@@ -7645,6 +7654,7 @@ impl JobProcessor {
                 match kind {
                     CodexFallbackSummaryKind::MissingFinalAssistantMessage => {
                         if is_multi_agent_worker_job(job)
+                            && !scoped_worker_requires_tools(job)
                             && scoped_worker_path_observation
                                 .as_ref()
                                 .is_some_and(|observation| observation.complete)
@@ -8455,6 +8465,15 @@ impl JobProcessor {
                 }
             }
 
+            ensure_worker_tool_evidence(
+                job,
+                &retry_outcome,
+                retry_observed_command_execution,
+                has_mcp_tool_call_message(&interim_messages)
+                    || has_mcp_tool_call_message(&retry_messages),
+                &mut retry_artifacts,
+            )?;
+
             // The retry's result is settled: its cards go out now, right
             // behind its answer, not after the workspace sync and the
             // turn-end save.
@@ -8575,6 +8594,14 @@ impl JobProcessor {
                 final_messages: retry_final_messages,
             });
         }
+
+        ensure_worker_tool_evidence(
+            job,
+            &outcome,
+            observed_command_execution,
+            has_mcp_tool_call_message(&interim_messages),
+            &mut artifacts,
+        )?;
 
         // No retry: the turn's result is settled, so its cards go out now,
         // right behind its answer, not after the workspace sync and the
@@ -8967,6 +8994,7 @@ impl JobProcessor {
         let mut prompt_section_metrics = JsonMap::new();
 
         if multi_agent_worker
+            && !scoped_worker_requires_tools(job)
             && let Some(observation) = scoped_worker_path_observation
             && observation.complete
         {
@@ -10884,6 +10912,11 @@ fn parse_codex_multi_agent_plan_action(
             && let Some(read_only_paths) = read_only_paths_from_agent_paths(agent, source_root)
         {
             agent_out.insert("writeScope".to_string(), read_only_paths);
+        }
+        // Preserve the requirement through normalization, including malformed values:
+        // the controller rejects those rather than silently dispatching without tools.
+        if let Some(required) = agent.get("requiresTools").filter(|value| !value.is_null()) {
+            agent_out.insert("requiresTools".to_string(), required.clone());
         }
         agents.push(JsonValue::Object(agent_out));
     }
@@ -13569,6 +13602,54 @@ fn runtime_job_expectations(payload: &JsonValue) -> RuntimeJobExpectations {
     }
 
     overrides.into_expectations()
+}
+
+/// Requirements cannot grant tools, but must prevent a tool-free optimization
+/// from silently dropping live observations. Retain older explicit expectations too.
+fn scoped_worker_requires_tools(job: &LeaseJob) -> bool {
+    let required = job
+        .payload
+        .pointer("/metadata/multiAgentPlan/requiresTools");
+    required.is_some_and(|value| !value.is_null() && value != &JsonValue::Bool(false))
+        || runtime_job_expectations(&job.payload).command_execution
+        || runtime_job_expectations(&job.payload).generic_mcp_tool_execution
+}
+
+fn ensure_tool_free_worker_compatible(job: &LeaseJob) -> Result<()> {
+    anyhow::ensure!(
+        !scoped_worker_requires_tools(job),
+        "This worker requires tools, but scoped file generation has no execution tools. Use an admitted tool-capable worker or available native helpers; required observations were not performed."
+    );
+    Ok(())
+}
+
+/// Tool-capable execution still needs a receipt before a required worker can
+/// complete. MCP observations count without imposing a shell command, and a
+/// structured human question may defer the work. Keep evidence on rejection.
+fn ensure_worker_tool_evidence(
+    job: &LeaseJob,
+    outcome: &CodexOutcome,
+    observed_command: bool,
+    observed_mcp: bool,
+    artifacts: &mut Vec<JsonValue>,
+) -> Result<()> {
+    if !is_multi_agent_worker_job(job)
+        || !scoped_worker_requires_tools(job)
+        || observed_command
+        || observed_mcp
+        || outcome
+            .actions
+            .iter()
+            .any(|action| matches!(action, CodexAction::RequestUserInput(_)))
+    {
+        return Ok(());
+    }
+    Err(JobFailureWithArtifacts {
+        message: "This worker requires tools, but no tool execution was observed; required observations were not performed."
+            .to_string(),
+        artifacts: std::mem::take(artifacts),
+    }
+    .into())
 }
 
 /// A bounded turn writes no files and runs no commands, whatever its metadata says.
