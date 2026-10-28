@@ -19,10 +19,45 @@ export interface ProxyUpstreamErrorGuidance {
   actionKind: "open_ai_settings" | null;
 }
 
-const CHATGPT_CREDENTIAL_RECONNECT_SUMMARY =
-  "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.";
-const AI_CREDENTIAL_RECONNECT_SUMMARY =
-  "AI credentials need reconnecting. Reconnect AI credentials, then retry the message.";
+// What a person reads for a proxy failure. Plain words only: never "upstream",
+// "provider" or "credentials", which name the plumbing, not what happened.
+const SIGN_IN_SUMMARY = "Your AI connection needs you to sign in again.";
+const QUOTA_SUMMARY = "Your AI account has reached its limit.";
+const REFUSED_SUMMARY = "Your AI connection couldn't answer this request.";
+const BUSY_SUMMARY = "Your AI connection is limiting requests right now.";
+
+// Summaries this module wrote before. A message that is exactly one of these,
+// or of the summaries above, gets the same guidance back (a summary shown
+// again, as in an expanded step); other prose never does.
+const LEGACY_SIGN_IN_SUMMARIES = [
+  "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
+  "AI credentials need reconnecting. Reconnect AI credentials, then retry the message.",
+];
+
+type ProxyEnvelope = { status: number; code: string; sentence: string };
+
+// The proxy's safe envelopes (openai-proxy-server/src/upstream_error.rs) for
+// a sign-in it could not use and for a spent quota. A JSON diagnostic carries
+// the code. Codex's plain diagnostic quotes only the envelope's message
+// ("unexpected status 424 Failed Dependency: Upstream credentials could not
+// be refreshed., url: …"), so the proxy's fixed sentence stands in for it.
+const SIGN_IN_PROXY_ENVELOPES: readonly ProxyEnvelope[] = [
+  {
+    status: 401,
+    code: "upstream_authentication_error",
+    sentence: "the upstream provider rejected authentication",
+  },
+  {
+    status: 424,
+    code: "upstream_credential_refresh_failed",
+    sentence: "upstream credentials could not be refreshed",
+  },
+];
+const QUOTA_PROXY_ENVELOPE: ProxyEnvelope = {
+  status: 402,
+  code: "upstream_insufficient_quota",
+  sentence: "the upstream provider has no available quota",
+};
 
 function asRecord(value: unknown): ProxyErrorRecord | null {
   if (!value || typeof value !== "object") {
@@ -174,15 +209,29 @@ function formatDurationSeconds(seconds: number): string {
   return `${Math.max(1, minutes)}m`;
 }
 
-function isExpiredCredentialProxyErrorInfo(info: ProxyUpstreamErrorInfo): boolean {
+/**
+ * True when the diagnostic is this proxy envelope: its status, and its typed
+ * code when the diagnostic carries one, else its fixed sentence. Never a
+ * generic 401/424 or a provider's similarly named error.
+ */
+function isProxyEnvelope(
+  info: ProxyUpstreamErrorInfo,
+  diagnosticText: string,
+  envelope: ProxyEnvelope,
+): boolean {
+  if (info.proxyStatus !== envelope.status) {
+    return false;
+  }
   const upstreamCode = info.upstreamCode?.trim().toLowerCase() ?? "";
-  // Safe proxy envelopes replace raw provider token details. Match their typed
-  // contract, not a generic 401/424 or a provider's similarly named error.
-  if (
-    info.upstreamType === "upstream_error" &&
-    ((info.proxyStatus === 401 && upstreamCode === "upstream_authentication_error") ||
-      (info.proxyStatus === 424 && upstreamCode === "upstream_credential_refresh_failed"))
-  ) {
+  if (upstreamCode) {
+    return info.upstreamType === "upstream_error" && upstreamCode === envelope.code;
+  }
+  return diagnosticText.toLowerCase().includes(envelope.sentence);
+}
+
+function isExpiredCredentialProxyErrorInfo(info: ProxyUpstreamErrorInfo, diagnosticText: string): boolean {
+  const upstreamCode = info.upstreamCode?.trim().toLowerCase() ?? "";
+  if (SIGN_IN_PROXY_ENVELOPES.some((envelope) => isProxyEnvelope(info, diagnosticText, envelope))) {
     return true;
   }
   if (
@@ -285,41 +334,34 @@ function buildTransientProxyErrorGuidance(
   isRetrying: boolean,
 ): ProxyUpstreamErrorGuidance {
   const headline = isProxyTimeout(info, diagnosticText)
-    ? "The AI provider took too long to respond"
-    : "Connection to the AI provider dropped";
+    ? "The AI took too long to answer"
+    : "The connection to the AI dropped";
   return {
-    summary: isRetrying ? `${headline}; retrying.` : `${headline}. This is usually temporary.`,
+    summary: isRetrying ? `${headline}. Trying again.` : `${headline}. This is usually temporary.`,
     detail: isRetrying
-      ? "The request is being retried automatically. Nothing needs to change."
-      : "Requests that hit this are retried automatically. If the run stopped, send your message again.",
+      ? "It is being tried again on its own. Nothing needs to change."
+      : "If the turn stopped, send your message again.",
     actionLabel: null,
     actionKind: null,
   };
 }
 
-function formatProxyUpstreamErrorStatus(info: ProxyUpstreamErrorInfo): string {
-  return info.upstreamStatus ? `Upstream ${info.upstreamStatus}` : "The upstream provider";
-}
-
-function buildInsufficientQuotaGuidance(upstreamLabel: string): ProxyUpstreamErrorGuidance {
+function buildQuotaGuidance(): ProxyUpstreamErrorGuidance {
   return {
-    summary: `${upstreamLabel} rejected the AI request (insufficient_quota).`,
-    detail:
-      "The selected upstream AI credential/account has no available provider quota. This is separate from Instafy workspace credits.",
+    summary: QUOTA_SUMMARY,
+    detail: "This is a limit on your AI account, not on your Instafy credits.",
     actionLabel: "Manage AI",
     actionKind: "open_ai_settings",
   };
 }
 
-function buildExpiredCredentialGuidance(summary: string): ProxyUpstreamErrorGuidance {
+function buildSignInGuidance(): ProxyUpstreamErrorGuidance {
   return {
-    summary,
-    // The button opens AI settings and nothing more — there is no credential
-    // picker and no retry control on this row, so the sentence must not
-    // promise either. Send the message again once the connection is fixed.
-    detail:
-      "The saved AI login is stale. Fix the connection in AI settings, then send your message again.",
-    actionLabel: "Open AI settings",
+    summary: SIGN_IN_SUMMARY,
+    // The button opens AI settings and nothing more, with no retry control
+    // on this row, so the sentence must not promise one.
+    detail: "Sign in again under Manage AI, then send your message again.",
+    actionLabel: "Manage AI",
     actionKind: "open_ai_settings",
   };
 }
@@ -327,8 +369,11 @@ function buildExpiredCredentialGuidance(summary: string): ProxyUpstreamErrorGuid
 function resolveFormattedProxySummaryGuidance(content: string): ProxyUpstreamErrorGuidance | null {
   const trimmed = content.trim();
   // Only recognize summaries generated by this module. Do not infer CTAs from arbitrary user prose.
-  if (trimmed === CHATGPT_CREDENTIAL_RECONNECT_SUMMARY || trimmed === AI_CREDENTIAL_RECONNECT_SUMMARY) {
-    return buildExpiredCredentialGuidance(trimmed);
+  if (trimmed === SIGN_IN_SUMMARY || LEGACY_SIGN_IN_SUMMARIES.includes(trimmed)) {
+    return buildSignInGuidance();
+  }
+  if (trimmed === QUOTA_SUMMARY) {
+    return buildQuotaGuidance();
   }
 
   const match = trimmed.match(/^(Upstream\s+\d{3})\s+rejected the AI request\s+\(([^)]+)\)\.?/i);
@@ -338,7 +383,7 @@ function resolveFormattedProxySummaryGuidance(content: string): ProxyUpstreamErr
   if (match[2]?.trim().toLowerCase() !== "insufficient_quota") {
     return null;
   }
-  return buildInsufficientQuotaGuidance(match[1] ?? "Upstream 429");
+  return buildQuotaGuidance();
 }
 
 export function parseProxyUpstreamError(content: string): ProxyUpstreamErrorInfo | null {
@@ -376,7 +421,7 @@ export function isExpiredCredentialProxyError(content: string): boolean {
   if (!info) {
     return false;
   }
-  return isExpiredCredentialProxyErrorInfo(info);
+  return isExpiredCredentialProxyErrorInfo(info, extractProxyDiagnosticText(content) ?? content);
 }
 
 export function formatProxyUpstreamErrorSummary(content: string): string | null {
@@ -394,41 +439,34 @@ export function resolveProxyUpstreamErrorGuidance(content: string): ProxyUpstrea
     return null;
   }
 
-  if (isExpiredCredentialProxyErrorInfo(info)) {
-    const providerLabel =
-      (info.upstreamEndpoint && info.upstreamEndpoint.toLowerCase().includes("chatgpt.com")) ||
-      info.upstreamMessage?.toLowerCase().includes("codex oauth refresh failed")
-        ? "ChatGPT login needs reconnecting."
-        : "AI credentials need reconnecting.";
-    return buildExpiredCredentialGuidance(`${providerLabel} Reconnect AI credentials, then retry the message.`);
-  }
-
-  const upstreamLabel = formatProxyUpstreamErrorStatus(info);
-  if (hasUpstreamErrorToken(info, "insufficient_quota")) {
-    return buildInsufficientQuotaGuidance(upstreamLabel);
-  }
-
   const diagnosticText = extractProxyDiagnosticText(content) ?? content;
+  if (isExpiredCredentialProxyErrorInfo(info, diagnosticText)) {
+    return buildSignInGuidance();
+  }
+
+  if (
+    hasUpstreamErrorToken(info, "insufficient_quota") ||
+    isProxyEnvelope(info, diagnosticText, QUOTA_PROXY_ENVELOPE)
+  ) {
+    return buildQuotaGuidance();
+  }
+
   if (isTransientProxyErrorInfo(info, diagnosticText)) {
     return buildTransientProxyErrorGuidance(info, diagnosticText, /^\s*retrying:/i.test(content));
   }
 
-  // What remains is the provider refusing the request itself (auth,
-  // permission, rate limit, bad request), where another credential can help.
-
-  const parts = [
-    `${upstreamLabel} rejected the AI request${info.upstreamType ? ` (${info.upstreamType})` : ""}.`,
-    "Retry later or switch credentials.",
-  ];
-  if (typeof info.resetsInSeconds === "number") {
-    parts.push(
-      `Rate limit resets in ${formatDurationSeconds(info.resetsInSeconds)}${info.planType ? ` (${info.planType})` : ""}.`,
-    );
-  }
-
+  // What remains is the AI service refusing the request itself (auth,
+  // permission, rate limit, bad request), where another connection can help.
+  const busy = info.upstreamStatus === 429 || (info.upstreamStatus === null && info.proxyStatus === 429);
+  const wait =
+    typeof info.resetsInSeconds === "number"
+      ? `Try again in ${formatDurationSeconds(info.resetsInSeconds)}.`
+      : busy
+        ? "Wait a little, then try again."
+        : null;
   return {
-    summary: parts.join(" "),
-    detail: "If this keeps happening, switch to another AI credential or reconnect the selected provider.",
+    summary: [busy ? BUSY_SUMMARY : REFUSED_SUMMARY, wait].filter(Boolean).join(" "),
+    detail: "If this keeps happening, check your AI connection under Manage AI.",
     actionLabel: "Manage AI",
     actionKind: "open_ai_settings",
   };

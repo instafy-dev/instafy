@@ -46,6 +46,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "notification-preferences.spec.ts",
   "organization-rail-reorder.spec.ts",
   "preview-card-responsive.spec.ts",
+  "run-failure-block.spec.ts",
   "run-stop-control.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
   "shared-browser-expanded-safe-area.spec.ts",

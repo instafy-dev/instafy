@@ -406,8 +406,8 @@ describe("ChatMessageContent", () => {
       root.render(<MessageContent content={quotaError} />);
     });
 
-    expect(container.textContent).toContain("Upstream 429 rejected the AI request (insufficient_quota).");
-    expect(container.textContent).toContain("separate from Instafy workspace credits");
+    expect(container.textContent).toContain("Your AI account has reached its limit.");
+    expect(container.textContent).toContain("not on your Instafy credits");
     const action = container.querySelector<HTMLButtonElement>('[data-testid="chat-message-proxy-error-action"]');
     expect(action?.textContent).toBe("Manage AI");
 
@@ -419,15 +419,13 @@ describe("ChatMessageContent", () => {
 
   it("offers reconnect action from summarized credential failures", async () => {
     await act(async () => {
-      root.render(
-        <MessageContent content="ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message." />,
-      );
+      root.render(<MessageContent content="Your AI connection needs you to sign in again." />);
     });
 
-    expect(container.textContent).toContain("ChatGPT login needs reconnecting.");
-    expect(container.textContent).toContain("The saved AI login is stale");
+    expect(container.textContent).toContain("Your AI connection needs you to sign in again.");
+    expect(container.textContent).toContain("Sign in again under Manage AI, then send your message again.");
     const action = container.querySelector<HTMLButtonElement>('[data-testid="chat-message-proxy-error-action"]');
-    expect(action?.textContent).toBe("Open AI settings");
+    expect(action?.textContent).toBe("Manage AI");
 
     action?.click();
 

@@ -1070,6 +1070,50 @@ describe("ConversationMessageRows", () => {
     );
   });
 
+  it("shows a proxy refusal in an error bubble through the same failure block", async () => {
+    const refused =
+      "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses";
+    const message = createMessage({
+      id: "proxy-error",
+      role: "assistant",
+      content: refused,
+      timestamp: 1,
+      messageType: "error",
+      metadata: { messageType: "error", source: "agent", outcome: "failed", aiAccessMode: "managed" },
+    });
+
+    await act(async () => {
+      root.render(
+        <ConversationMessageRows
+          messages={[message]}
+          currentUserId="user-1"
+          chatClientSessionId="session-1"
+          projectId="project-1"
+          runtimeId={null}
+          conversationLocalId="conversation-local"
+          conversationControllerId="conversation-controller"
+          firstPlanMessageId={null}
+          humanLabelByUserId={new Map()}
+          runAgentIdentityByRunId={new Map()}
+          runAgentHandleByRunId={new Map()}
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+          onRequestActions={vi.fn()}
+          onRequestActionsAtPoint={vi.fn()}
+          onCancelTerminalCommand={null}
+          onMessageContextMenu={vi.fn()}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+      "Instafy AI isn't answering right now.",
+    );
+    expect(container.querySelector('[data-testid="run-failure-details-toggle"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-message-proxy-error-guidance"]')).toBeNull();
+    expect(container.textContent).not.toContain("Upstream credentials");
+  });
+
   it("animates only the active job thread speaker avatar", async () => {
     const historicalThread = createMessage({
       id: "historical-thread",
@@ -2128,7 +2172,7 @@ describe("ConversationMessageRows", () => {
     });
 
     expect(container.textContent).toContain(
-      "The reply didn't come through — this is usually a temporary provider hiccup.",
+      "The reply didn't come through. This is usually temporary.",
     );
     expect(container.textContent).not.toContain(rawFailure);
     expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
@@ -2210,7 +2254,7 @@ describe("ConversationMessageRows", () => {
     // Calm auto state: friendly sentence + quiet "trying again automatically",
     // Details still available, no manual "Try again" button.
     expect(container.textContent).toContain(
-      "The reply didn't come through — this is usually a temporary provider hiccup.",
+      "The reply didn't come through. This is usually temporary.",
     );
     expect(container.querySelector('[data-testid="run-failure-auto-retrying"]')?.textContent).toBe(
       "Trying again automatically…",

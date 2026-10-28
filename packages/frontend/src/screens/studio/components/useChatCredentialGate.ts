@@ -17,6 +17,17 @@ import { connectDesktopCodexAuthJson } from "./desktopCodexAuthJson";
 import { isExpiredCredentialProxyError } from "./proxyError";
 import { canRestorePersistedAiOnboarding } from "./gettingStartedAiChoices";
 
+/** True when the message is a run's final message that says it ran on Instafy AI. */
+function ranOnInstafyAi(message: ChatMessage): boolean {
+  const metadata = message.metadata;
+  return (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    !Array.isArray(metadata) &&
+    (metadata as Record<string, unknown>)["aiAccessMode"] === "managed"
+  );
+}
+
 const {
   createCodex: createCodexCredential,
   getRequirements: getCredentialRequirements,
@@ -457,6 +468,11 @@ export function useChatCredentialGate({
       }
       if (!isExpiredCredentialProxyError(candidate.content)) {
         continue;
+      }
+      // Instafy AI's own sign-in is not the person's to fix, so the newest
+      // such failure on it opens nothing, not even for an older one.
+      if (ranOnInstafyAi(candidate)) {
+        break;
       }
       latestExpiredAssistantMessage = candidate;
       break;

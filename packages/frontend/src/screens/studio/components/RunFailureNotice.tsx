@@ -172,7 +172,10 @@ export function RunFailureMessageBody({
   // the same way. Instafy AI's own limit leaves the person nothing to do; on
   // their own account they can switch to another AI connection.
   const usageLimit = presentation.kind === "provider_usage_limit";
-  const usageLimitOnOwnAi = usageLimit && readAiAccessMode(message) === "byoc";
+  // The person's own AI connection can fix it in AI settings: a spent usage
+  // window, or a sign-in or account the AI refused (presentation.manageAi).
+  const offersManageAi =
+    (usageLimit && readAiAccessMode(message) === "byoc") || presentation.manageAi === true;
   const onConnectAi = retryContext?.onConnectAi;
   const cancelAutoRetry = retryContext?.cancelAutoRetry;
   // Manual controls give way to the automatic states; a pressed "Try again"
@@ -267,7 +270,7 @@ export function RunFailureMessageBody({
             Connect AI
           </Button>
         ) : null}
-        {usageLimitOnOwnAi && onConnectAi ? (
+        {offersManageAi && onConnectAi ? (
           <Button
             variant="secondary"
             size="sm"
