@@ -73,7 +73,7 @@ func (proxy *egressProxy) handleHTTP(response http.ResponseWriter, request *http
 
 	target, err := proxy.policy.resolve(request.Context(), request.URL.Hostname(), request.URL.Port(), 80)
 	if err != nil {
-		proxy.failures.record("request", requestedPort(request.URL.Port(), 80), resolutionFailureReason(err))
+		proxy.failures.recordError("request", requestedPort(request.URL.Port(), 80), err, resolutionFailureReason)
 		writeResolutionError(response, err)
 		return
 	}
@@ -103,7 +103,7 @@ func (proxy *egressProxy) handleHTTP(response http.ResponseWriter, request *http
 
 	upstream, err := transport.RoundTrip(outbound)
 	if err != nil {
-		proxy.failures.record("request", target.port, dialFailureReason(err))
+		proxy.failures.recordError("request", target.port, err, dialFailureReason)
 		http.Error(response, "upstream request failed", http.StatusBadGateway)
 		return
 	}
@@ -133,14 +133,14 @@ func (proxy *egressProxy) handleConnect(response http.ResponseWriter, request *h
 	}
 	target, err := proxy.policy.resolve(request.Context(), host, rawPort, 443)
 	if err != nil {
-		proxy.failures.record("tunnel", requestedPort(rawPort, 443), resolutionFailureReason(err))
+		proxy.failures.recordError("tunnel", requestedPort(rawPort, 443), err, resolutionFailureReason)
 		writeResolutionError(response, err)
 		return
 	}
 
 	upstream, err := proxy.dialResolvedTarget(request.Context(), "tcp", target)
 	if err != nil {
-		proxy.failures.record("tunnel", target.port, dialFailureReason(err))
+		proxy.failures.recordError("tunnel", target.port, err, dialFailureReason)
 		http.Error(response, "upstream connection failed", http.StatusBadGateway)
 		return
 	}

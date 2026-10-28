@@ -62,6 +62,17 @@ func (failures *failureLog) record(kind string, port uint16, reason string) {
 	failures.printf("browser egress %s failed (port %s): %s", kind, portLabel(port), reason)
 }
 
+// recordError writes the line for a failed resolution or dial, with
+// `reason`'s fixed text for err. A request the browser gave up on itself (it
+// navigated away or dropped a speculative connection, so the request's
+// context was cancelled) is not a failed destination and writes nothing.
+func (failures *failureLog) recordError(kind string, port uint16, err error, reason func(error) string) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	failures.record(kind, port, reason(err))
+}
+
 func portLabel(port uint16) string {
 	if port == 0 {
 		return "unknown"

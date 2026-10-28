@@ -1690,9 +1690,10 @@ whether the policy denied the address, its name did not resolve, or the site
 refused or never answered, so the proxy logs each failed destination to its log
 (`browser-egress-proxy.log` in the runtime's state directory) as
 `browser egress tunnel failed (port 443): the site did not answer in time`: the
-request kind, port and a fixed reason, never the host, path or address. At most
-30 lines a minute are written; the next minute's first line says how many were
-left out. The per-origin plus
+request kind, port and a fixed reason, never the host, path or address. A
+request Chromium gave up on itself (it navigated away or dropped a speculative
+connection) is not a failed destination and is not logged. At most 30 lines a
+minute are written; the next minute's first line says how many were left out. The per-origin plus
 one-shot confirmation policy above is the sensitive-site action policy for
 otherwise public sites; a future denylist may reduce prompt volume but is not
 an authorization substitute.

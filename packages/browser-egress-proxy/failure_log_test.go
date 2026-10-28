@@ -163,3 +163,34 @@ func TestFailureLogIsBoundedPerMinute(t *testing.T) {
 		t.Fatalf("expected the count of left-out lines first in the next minute, got %#v", lines[failureLogLinesPerWindow:])
 	}
 }
+
+// Chromium gives up on connections itself (it navigates away, or drops a
+// speculative connection while the dial is still waiting). The site did not
+// fail, so the log, which says why destinations failed and holds 30 lines a
+// minute, must not spend a line on it.
+func TestARequestTheBrowserGaveUpOnIsNotLoggedAsAFailedDestination(t *testing.T) {
+	t.Parallel()
+
+	public := fakeResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}
+	gaveUp := func(context.Context, string, string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}
+	}
+	proxy, captured := proxyWithLog(public, gaveUp)
+	if status := connectThrough(t, proxy, "slow.example:443"); status != http.StatusBadGateway {
+		t.Fatalf("expected 502 for a dial the browser gave up on, got %d", status)
+	}
+	if lines := captured.all(); len(lines) != 0 {
+		t.Fatalf("a dial the browser gave up on must not be logged: %#v", lines)
+	}
+
+	lookupGaveUp := fakeResolver{err: &net.DNSError{Err: "operation was canceled", Name: "slow.example", UnwrapErr: context.Canceled}}
+	proxy, captured = proxyWithLog(lookupGaveUp, gaveUp)
+	if status := connectThrough(t, proxy, "slow.example:443"); status != http.StatusBadGateway {
+		t.Fatalf("expected 502 for a lookup the browser gave up on, got %d", status)
+	}
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://slow.example/", nil))
+	if lines := captured.all(); len(lines) != 0 {
+		t.Fatalf("a lookup the browser gave up on must not be logged: %#v", lines)
+	}
+}
