@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  claimNativeAuthCallback,
   clearNativeAuthCallbackAttemptId,
   clearPendingNativeAuthAttempt,
   createPendingNativeAuthAttempt,
+  forgetNativeAuthCallbackClaimsForTests,
   nativeAuthAttemptProvider,
   nativeAuthCallbackErrorMessage,
   parseNativeAuthCallbackUrl,
@@ -33,12 +35,15 @@ function createSessionStorageMock() {
 beforeEach(() => {
   vi.stubGlobal("window", {
     sessionStorage: createSessionStorageMock(),
+    localStorage: createSessionStorageMock(),
   });
 });
 
 afterEach(() => {
   clearNativeAuthCallbackAttemptId();
   clearPendingNativeAuthAttempt();
+  forgetNativeAuthCallbackClaimsForTests();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -94,9 +99,49 @@ describe("pending native auth attempt storage", () => {
   });
 
   it("returns null for malformed stored attempts", () => {
-    window.sessionStorage.setItem("instafy.login.nativeAuthAttempt", JSON.stringify({ provider: "github" }));
+    window.localStorage.setItem("instafy.login.nativeAuthAttempt", JSON.stringify({ provider: "github" }));
 
     expect(readPendingNativeAuthAttempt()).toBeNull();
+  });
+
+  // Android can end the app's process while the provider's custom tab is in
+  // front; the deep link then starts a new process with an empty
+  // sessionStorage.
+  it("keeps the attempt when the process that started it is gone", () => {
+    writePendingNativeAuthAttempt(createPendingNativeAuthAttempt("google"));
+    vi.stubGlobal("window", { sessionStorage: createSessionStorageMock(), localStorage: window.localStorage });
+
+    expect(nativeAuthAttemptProvider(readPendingNativeAuthAttempt())).toBe("google");
+  });
+
+  it("ignores an attempt abandoned more than 30 minutes ago", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-28T08:00:00Z"));
+    writePendingNativeAuthAttempt(createPendingNativeAuthAttempt("google"));
+
+    vi.setSystemTime(new Date("2026-10-28T08:29:00Z"));
+    expect(readPendingNativeAuthAttempt()?.provider).toBe("google");
+
+    vi.setSystemTime(new Date("2026-10-28T08:31:00Z"));
+    expect(readPendingNativeAuthAttempt()).toBeNull();
+  });
+});
+
+describe("claimNativeAuthCallback", () => {
+  const claim = (url: string) => claimNativeAuthCallback(parseNativeAuthCallbackUrl(url)!);
+
+  it("lets exactly one handler take a code, however the callback is spelled", () => {
+    expect(claim("instafy://auth?code=abc")).toBe(true);
+    expect(claim("instafy://auth?code=abc")).toBe(false);
+    expect(claim("instafy://auth/?code=abc")).toBe(false);
+    expect(claim("instafy://auth#code=abc")).toBe(false);
+    expect(claim("instafy://auth?code=def")).toBe(true);
+  });
+
+  it("claims a callback without a code by its URL", () => {
+    expect(claim("instafy://auth?error=access_denied")).toBe(true);
+    expect(claim("instafy://auth?error=access_denied")).toBe(false);
+    expect(claim("instafy://auth?error=server_error")).toBe(true);
   });
 });
 
