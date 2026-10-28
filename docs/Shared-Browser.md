@@ -1098,6 +1098,23 @@ keeps the manual-step controls, so login redirects can finish before continuatio
 a fresh turn. A target change during asynchronous continuation aborts it; no
 hidden or stale completion may send it automatically.
 
+A follow-up typed in the chat keeps them too. When the conversation's newest
+run is the person's own Shared Browser run on the browser that is open, it
+succeeded less than ten minutes ago, its tab is still open, and it did not
+continue a card Octo builds from (`browserHandsBack`), a message from the chat
+composer goes on in that tab as a browser turn, as one from the browser's own
+composer would, and names that run (`browserContinuesRunId`,
+`sharedBrowserFollowUp`). It needs no new card or press, and the site the
+person already allowed does not ask again. A browser turn has only the
+browser's tools, so this never happens silently: while it applies, the
+composer shows **Goes to Instafy's browser** in its context row,
+and its × ("Don't send it to the browser") keeps the next message in the chat,
+where Octo can also build, until a newer browser turn ends
+(`useSharedBrowserFollowUp`). After the browser turn of a card Octo builds
+from, the building turn keeps the chat, as with the hand-back. A skill setup's
+replies, a message with a picture, a message for a new tab and a send the app
+makes for the person stay chat turns.
+
 Action/cursor polling runs only while Shared is visible and filters the selected
 page. If the agent requests input while Chat is visible, the field guidance is
 loaded when Browser is reopened; there is not yet a separate conversation badge
@@ -1577,6 +1594,13 @@ unless the policy is `"covered"`.
   the conversation's machine continues there without a press, even within ten
   minutes of the last automatic start; the declined check, the browser-turn
   check and every check before sending still apply.
+- **Cards after a press.** A card that was continued reads a plain **Opened**
+  in place of its button, also after a reload. A card a newer card followed
+  offers no button and reads **Not opened**, without the line that says what
+  pressing it does: the newer card carries the task on, so two live cards
+  never stack up. The one-line record of a continuation names Octo only when
+  Studio opened the browser by itself ("Octo opened Instafy's browser for
+  …"); after the person's own press it reads "Opened Instafy's browser for …".
 - **Hand-back.** Only a card Octo builds from hands back: the runtime's card
   carries `browserRequest.continueBuilding` when Octo is building something (a
   page, a map) and continues it from what the browser finds, and its

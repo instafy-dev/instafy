@@ -290,6 +290,8 @@ const RESEARCH_TEAM_RESEARCHER_TEMPLATE: &str = include_str!(concat!(
 const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before a page of options cited each value and listed unknown values apart from a filter.
     include_str!("legacy/interactive-artifacts-v1.md"),
+    // From before a candidate nothing could be read for stayed a row, so a page of options was never empty.
+    include_str!("legacy/interactive-artifacts-v2.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[include_str!("legacy/research-team-v1.md")];
 const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
@@ -355,6 +357,9 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // From before a missing search key or a site that did not load never ended the task (pages read without a
     // search, "www." added or removed once, the page built with what was read).
     include_str!("legacy/web-research-v6.md"),
+    // From before an item without a price was listed as "price unknown" (it read as never listed), two failures on
+    // the official site sent the turn to an independent source, and a page of options had a row per candidate.
+    include_str!("legacy/web-research-v7.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

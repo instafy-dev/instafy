@@ -420,6 +420,7 @@ import {
 import {
   BrowserRequestHostContext,
   browserRequestContinuedKeys,
+  newestBrowserRequestKey,
   type BrowserRequestHost,
 } from "./browserRequest";
 import {
@@ -436,6 +437,7 @@ import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./use
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
 import { sharedBrowserAgentPageIds, sharedBrowserConversationRunIds } from "./browserHandoffRouting";
+import { useSharedBrowserFollowUp } from "./useSharedBrowserFollowUp";
 import { BROWSER_AGENT_DEFAULT_NAME } from "./browserAgentTabs";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
@@ -4591,6 +4593,36 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     })();
   }, [currentRuntime?.isLikelyLocal, ensureDesktopRuntime, ensureHostedRuntime]);
 
+  // A message from the chat right after this person's turn in Instafy's
+  // browser goes on there while that browser is still open, without another
+  // card or press (sharedBrowserFollowUp). The composer says so, and the
+  // person can keep the message in the chat instead.
+  const followUpRuns = useMemo(() => Object.values(runs ?? {}), [runs]);
+  const sharedBrowserFollowUpState = useSharedBrowserFollowUp({
+    enabled: browserTransport === "shared" && (browserSessionOpen || hasHiddenBrowserSession),
+    runs: followUpRuns,
+    conversationId: activeConversationEntry?.controllerId ?? null,
+    runtimeId: resolvedBrowserRuntimeId,
+    userId: currentUserId,
+    pages: sharedBrowserChromePages,
+  });
+  const resolveSharedBrowserFollowUp = sharedBrowserFollowUpState.resolve;
+  const dismissSharedBrowserFollowUp = sharedBrowserFollowUpState.dismiss;
+  const keepNextMessageInChat = useCallback(() => {
+    dismissSharedBrowserFollowUp();
+    focusInput();
+  }, [dismissSharedBrowserFollowUp, focusInput]);
+  // Shown only where a send would follow up in the browser (useChatSubmitFlow):
+  // the chat's own composer, with no picture and no new tab for the message.
+  const composerBrowserFollowUp =
+    sharedBrowserFollowUpState.followUp &&
+    !browserComposerActive &&
+    !skillSetupConversation &&
+    imageAttachments.length === 0 &&
+    pendingBrowserLaunchMode !== "new_page"
+      ? { onCancel: keepNextMessageInChat }
+      : null;
+
   const { submissionPending, submitMessage } = useChatSubmitFlow({
     activeConversationEntry,
     activeConversationId,
@@ -4654,6 +4686,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserActive:
       browserTransport === "shared" && browserComposerActive,
     sharedBrowserBindingPage,
+    resolveSharedBrowserFollowUp,
     sharedBrowserRuntimeId: resolvedBrowserRuntimeId,
     showCredentialsGate: showChatCredentialsGate,
     showStatus,
@@ -4940,6 +4973,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [messages, browserRequestState.cardStates],
   );
+  const newestBrowserRequest = useMemo(() => newestBrowserRequestKey(messages), [messages]);
   const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
     transport: browserTransport,
     personalAvailable: personalBrowser.available,
@@ -4947,8 +4981,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalTurnsAllowed,
     cardStates: browserRequestState.cardStates,
     continuedKeys: browserRequestContinued,
+    newestCardKey: newestBrowserRequest,
   }), [
     browserRequestContinued,
+    newestBrowserRequest,
     browserRequestState.cardStates,
     browserTransport,
     personalBrowser.available,
@@ -6744,6 +6780,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         pendingNewTab={pendingBrowserLaunchMode === "new_page"
           ? { onCancel: handleClearPendingNewBrowserSession }
           : null}
+        browserFollowUp={composerBrowserFollowUp}
         composerOverlayRef={composerOverlayRef}
         composerAutoHidden={composerAutoHidden}
         touchLikeInput={touchLikeInput}
