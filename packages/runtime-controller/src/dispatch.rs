@@ -2344,6 +2344,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
         let mut agent_request = request.clone();
         apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
         inject_agent_target_metadata(&mut agent_request.metadata, target);
+        crate::multi_agent_plan::apply_worker_tool_requirement(
+            &mut agent_request.metadata,
+            &target.handle,
+        )?;
         apply_agent_write_scope_metadata(
             &mut agent_request.metadata,
             write_scope_plan.get(&target.handle),

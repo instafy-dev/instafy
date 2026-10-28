@@ -653,7 +653,7 @@ fn a_research_team_lane_compares_its_product_by_the_research_skill() {
     ));
     let rules = flat(current);
     for needle in [
-        "else `instafy-web-research` (`instafy web read`, and `instafy web search` to find pages) or Instafy's browser (`instafy-browser-automation`)",
+        "else `instafy-web-research` (`instafy web read`, and `instafy web search` to find pages)",
         "A product follows \"Comparing items\" in `instafy-web-research`: its exact model as its official page gives it;",
         "a price from the maker's or a shop's own page, else `\"check: price (<why>)\"` in `unknowns`;",
         "as many independent reviews of that exact model as the request asks for, else `\"check: 1 of 2 reviews found\"`.",

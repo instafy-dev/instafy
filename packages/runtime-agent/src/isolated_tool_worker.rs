@@ -549,8 +549,18 @@ fn worker_environment(
     workspace: &Path,
 ) -> HashMap<String, String> {
     let base = request.proxy_base_url.trim_end_matches('/');
+    // These are host-owned turn facts, never inherited from another worker or
+    // supplied as a project secret. Web tools use them for pacing and budgets.
+    let started = chrono::Utc::now();
+    let format =
+        |at: chrono::DateTime<chrono::Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut environment = request.job_environment.clone();
     environment.extend(HashMap::from([
+        ("INSTAFY_TURN_STARTED_AT".into(), format(started)),
+        (
+            "INSTAFY_TURN_DEADLINE".into(),
+            format(started + chrono::Duration::seconds(RUN_TIMEOUT.as_secs() as i64)),
+        ),
         (
             "HOME".into(),
             state.join("home").to_string_lossy().into_owned(),
@@ -1044,6 +1054,12 @@ mod tests {
         };
         assert!(request.validate().is_ok());
         let environment = worker_environment(&request, &state_dir, &workspace_dir);
+        let start =
+            chrono::DateTime::parse_from_rfc3339(&environment["INSTAFY_TURN_STARTED_AT"]).unwrap();
+        let deadline =
+            chrono::DateTime::parse_from_rfc3339(&environment["INSTAFY_TURN_DEADLINE"]).unwrap();
+        assert_eq!((deadline - start).to_std().unwrap(), RUN_TIMEOUT);
+        assert!((chrono::Utc::now() - start.with_timezone(&chrono::Utc)).num_seconds() < 5);
         assert_eq!(
             environment
                 .get(crate::skill_packs::SKILL_PACK_CACHE_DIR_ENV)

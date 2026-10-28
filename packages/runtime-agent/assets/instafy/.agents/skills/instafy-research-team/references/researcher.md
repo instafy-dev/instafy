@@ -5,10 +5,14 @@ minimum, never a reason to skip what this file asks for.
 
 ## How
 
-- About 5 minutes and 8 page reads; then write what you have, with the gaps in `unknowns`.
+- Stay within the lead's allocated time and read/search budget (at most 5 minutes and 8 page reads); then
+  write what you have, with gaps in `unknowns`. Sibling helpers share the parent turn's tool budgets.
 - Read pages with the source or fetch command of the builder skill installed in this space when it has one, else
-  `instafy-web-research` (`instafy web read`, and `instafy web search` to find pages) or Instafy's browser
-  (`instafy-browser-automation`). Never scrape search engines, sign in or buy anything.
+  `instafy-web-research` (`instafy web read`, and `instafy web search` to find pages).
+  Never scrape search engines, sign in or buy anything. No interactive browser control in a research worker:
+  return `needs_browser` sources in `unknowns` for the lead's separate single-agent browser step.
+- If execution tools are unavailable, report that limitation. Do not manufacture live findings from memory
+  or treat a generated handoff as evidence that a page was read.
 - A product follows "Comparing items" in `instafy-web-research`: its exact model as its official page gives it; a
   price from the maker's or a shop's own page, else `"check: price (<why>)"` in `unknowns`; and as many independent
   reviews of that exact model as the request asks for, else `"check: 1 of 2 reviews found"`.
