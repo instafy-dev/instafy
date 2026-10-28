@@ -368,7 +368,8 @@ Two steps never ask, in Ask too:
   www.example.com"), and the person's press on it is their OK for that site.
   Studio names the sites of every card the person pressed in the chat
   (`browserCardSites` in the turn's metadata: plain host names, at most eight,
-  never a card Studio opened by itself), and the runtime starts each later
+  never a card Studio opened by itself, and never a teammate's press in a
+  shared chat, which is that teammate's OK), and the runtime starts each later
   Shared Browser run of that chat with those sites' `https` origins approved on
   the person's page, as an answered site prompt leaves them. The controller
   keeps the key only on the person's own signed-in message (never a service,
