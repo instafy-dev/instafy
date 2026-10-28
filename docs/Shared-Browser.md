@@ -438,13 +438,15 @@ a share or add-user, a download or a sign-out asks in that category, and one
 whose icon is a floppy disk, pencil or plus asks as a commit button.
 
 A control is named by its accessible name or the text it draws. The text it
-draws leaves out what never draws: scripts and styles, hidden parts, and an
-svg's metadata, title, description and definitions (an Inkscape icon's
-`<dc:format>image/svg+xml</dc:format>` once named a search button
-"image/svg+xml"). Risk words still read every text inside the control. An
-image button is named by its alt text and an input button by its value, and
-text that names nothing, such as a bare media type, is never a name or a tab
-title (`isPlaceholderName`). The page describer reads all of this with the
+draws leaves out what never draws: scripts and styles, parts the page's CSS
+hides (`display: none`, as the `hidden` attribute does unless the page's own
+style shows it), and an svg's metadata, title, description and definitions
+(an Inkscape icon's `<dc:format>image/svg+xml</dc:format>` once named a search
+button "image/svg+xml"); the HTML in an svg's `<foreignObject>` is drawn. Risk
+words still read every text inside the control. An image button is named by
+its alt text and an input button by its value, and text that names nothing,
+such as a bare media type in lower case as software writes it ("image/png",
+never "Audio/Video"), is never a name or a tab title (`isPlaceholderName`). The page describer reads all of this with the
 shared in-page rules (`controlNameRulesInPage` in
 `@instafy/browser-action-policy`), which the Desktop Personal Browser runs too.
 

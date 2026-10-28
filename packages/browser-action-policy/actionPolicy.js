@@ -310,7 +310,9 @@
 
   // A bare media type ("image/svg+xml", "image/png"): what an svg's metadata,
   // an <object> or a CMS's alt text leaves where a name would be.
-  const MEDIA_TYPE_NAME = /^(?:image|video|audio|application|text|font|model|multipart)\/[a-z0-9][a-z0-9.+-]*(?:\s*;.*)?$/i;
+  // Software writes the type in lower case, so a person's label that joins
+  // two words with a slash ("Audio/Video", "Model/Year") still names something.
+  const MEDIA_TYPE_NAME = /^(?:image|video|audio|application|text|font|model|multipart)\/[A-Za-z0-9][A-Za-z0-9.+-]*(?:\s*;.*)?$/;
 
   /** Text that names nothing, so a host never shows it as a name or a title. */
   function isPlaceholderName(value) {
@@ -529,9 +531,10 @@
   function controlNameRulesInPage() {
     const SVG = "http://www.w3.org/2000/svg";
     const NEVER_DRAWN = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
-    // An svg draws text only in these; its metadata, title, desc, defs,
-    // style, symbols, masks and gradients draw none.
-    const SVG_TEXT = new Set(["svg", "g", "a", "switch", "text", "tspan", "textPath"]);
+    // An svg draws text only in these (a foreignObject draws the HTML inside
+    // it); its metadata, title, desc, defs, style, symbols, masks and
+    // gradients draw none.
+    const SVG_TEXT = new Set(["svg", "g", "a", "switch", "text", "tspan", "textPath", "foreignObject"]);
     // A control's own text is short; a link around a whole card is cut here
     // (its full text still reaches the step's risk words as textContent).
     const MAX_NODES = 400;
@@ -539,12 +542,13 @@
     const clean = (value, max) =>
       (typeof value === "string" ? value : "").replace(/\s+/g, " ").trim().slice(0, max);
     const isElement = (node) => Boolean(node) && node.nodeType === 1;
+    // What the page's CSS says, not the `hidden` attribute alone: a page's
+    // own style can show a part the attribute hides.
     const hidden = (element) => {
-      if (element.hasAttribute("hidden")) return true;
       try {
         return element.ownerDocument.defaultView.getComputedStyle(element).display === "none";
       } catch (_) {
-        return false;
+        return element.hasAttribute("hidden");
       }
     };
     // The text `element` draws, in document order: what textContent holds,

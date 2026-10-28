@@ -101,6 +101,9 @@ describe("reading labels", () => {
     }
     expect(shownBrowserPageTitle("Pesquisa | Visit Lisboa")).toBe("Pesquisa | Visit Lisboa");
     expect(shownBrowserPageTitle("TCP/IP basics")).toBe("TCP/IP basics");
+    // A title that joins two words with a slash is a title.
+    expect(shownBrowserPageTitle("Audio/Video")).toBe("Audio/Video");
+    expect(shownBrowserPageTitle("Model/Year")).toBe("Model/Year");
   });
 });
 

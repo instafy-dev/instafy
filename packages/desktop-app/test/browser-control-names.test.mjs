@@ -44,7 +44,10 @@ test("a control's shown text leaves out what never draws", () => {
     <button id="icon">${INKSCAPE_ICON}</button>
     <button id="drawn"><svg xmlns="http://www.w3.org/2000/svg"><text>Go</text><title>tooltip</title></svg></button>
     <button id="hidden"><span hidden>Secret</span>Save<script>var x = "script text"</script><style>.b{}</style><noscript>Enable JS</noscript></button>
-    <button id="display"><span style="display:none">Hidden part</span> Open <b>now</b></button>`);
+    <button id="display"><span style="display:none">Hidden part</span> Open <b>now</b></button>
+    <button id="foreign" aria-label="Cancel"><svg xmlns="http://www.w3.org/2000/svg"><foreignObject width="80" height="20"><div xmlns="http://www.w3.org/1999/xhtml">Delete account</div></foreignObject></svg></button>
+    <style>.shown { display: inline }</style>
+    <button id="unhidden" aria-label="Cancel"><span hidden class="shown">Delete account</span></button>`);
   const { shownTextOf } = rules(window);
   const byId = (id) => window.document.getElementById(id);
   assert.equal(shownTextOf(byId("icon")), "");
@@ -52,6 +55,18 @@ test("a control's shown text leaves out what never draws", () => {
   assert.equal(shownTextOf(byId("drawn")), "Go");
   assert.equal(shownTextOf(byId("hidden")), "Save");
   assert.equal(shownTextOf(byId("display")), "Open now");
+  // An svg draws the HTML inside its foreignObject, and a `hidden` part the
+  // page's own CSS shows is drawn too: a page cannot draw words outside the
+  // shown text and so hide them from the "(shown as …)" a prompt adds when a
+  // control's name and its drawn words differ.
+  for (const id of ["foreign", "unhidden"]) {
+    assert.equal(shownTextOf(byId(id)), "Delete account", id);
+    assert.deepEqual(
+      { ...policy.stepLabels({ ariaLabel: "Cancel", text: byId(id).textContent, shownText: shownTextOf(byId(id)) }) },
+      { accessible: "Cancel", visible: "Delete account", differ: true },
+      id,
+    );
+  }
 });
 
 test("the text beside an unnamed control is short plain text, never another control", () => {
@@ -78,6 +93,11 @@ test("names come from what a control draws, never from text that names nothing",
   assert.equal(policy.isPlaceholderName("application/pdf; charset=binary"), true);
   assert.equal(policy.isPlaceholderName("Pesquisa"), false);
   assert.equal(policy.isPlaceholderName("TCP/IP"), false);
+  // Software writes a media type in lower case; a person's label that joins
+  // two words with a slash names something.
+  for (const label of ["Audio/Video", "Model/Year", "Text/SMS", "Image/Video"]) {
+    assert.equal(policy.isPlaceholderName(label), false, label);
+  }
   // The visible text is what the control draws, when the host reads it.
   assert.deepEqual(
     { ...policy.stepLabels({ ariaLabel: "Pesquisa", text: "image/svg+xml", shownText: "" }) },

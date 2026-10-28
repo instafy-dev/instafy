@@ -61,8 +61,9 @@ export function browserReadingHost(page: Pick<BrowserSessionPage, "host" | "url"
 }
 
 // A title that is only a media type ("image/svg+xml"), as an image or svg
-// shown on its own can leave: it names nothing.
-const MEDIA_TYPE_TITLE = /^(?:image|video|audio|application|text|font|model|multipart)\/[a-z0-9][a-z0-9.+-]*(?:\s*;.*)?$/i;
+// shown on its own can leave: it names nothing. Software writes the type in
+// lower case; "Audio/Video" is a title.
+const MEDIA_TYPE_TITLE = /^(?:image|video|audio|application|text|font|model|multipart)\/[A-Za-z0-9][A-Za-z0-9.+-]*(?:\s*;.*)?$/;
 
 /**
  * A page's title as a tab shows it, or null when it has none: a title that

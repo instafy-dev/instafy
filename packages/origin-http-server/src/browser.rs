@@ -694,6 +694,8 @@ fn normalize_browser_page_title(raw: &str) -> Option<String> {
 /// A title that is only a media type ("image/svg+xml"), as an image or svg
 /// shown on its own can leave: it names nothing, so the tab is named by its
 /// site instead (`@instafy/browser-action-policy`'s `isPlaceholderName`).
+/// Software writes the type in lower case, so a title that joins two words
+/// with a slash ("Audio/Video") stays a title.
 fn is_bare_media_type(title: &str) -> bool {
     let essence = title.split(';').next().unwrap_or_default().trim();
     let Some((kind, subtype)) = essence.split_once('/') else {
@@ -709,7 +711,7 @@ fn is_bare_media_type(title: &str) -> bool {
         "model",
         "multipart",
     ];
-    KINDS.iter().any(|known| kind.eq_ignore_ascii_case(known))
+    KINDS.contains(&kind)
         && subtype
             .chars()
             .next()
@@ -2102,7 +2104,7 @@ mod tests {
         for title in [
             "image/svg+xml",
             "image/png",
-            " Image/SVG+XML ",
+            " image/PNG ",
             "application/pdf; charset=binary",
         ] {
             assert_eq!(normalize_browser_page_title(title), None, "{title}");
@@ -2117,7 +2119,17 @@ mod tests {
             ),
             "visitlisboa.com"
         );
-        for title in ["Pesquisa", "image/svg+xml editor", "TCP/IP basics", "a/b"] {
+        // Software writes a media type in lower case: a title that joins two
+        // words with a slash is a title.
+        for title in [
+            "Pesquisa",
+            "image/svg+xml editor",
+            "TCP/IP basics",
+            "a/b",
+            "Audio/Video",
+            "Model/Year",
+            "Image/SVG+XML",
+        ] {
             assert_eq!(
                 normalize_browser_page_title(title).as_deref(),
                 Some(title),
