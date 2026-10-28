@@ -85,6 +85,8 @@ def main():
             print('PASS: the managed credential id is reserved; ordinary credential rows still insert and update')
             sql((ROOT/'supabase/tests/agent_credential_owner.sql').read_text())
             print('PASS: an agent pins only a credential its owner holds; owners still pin, switch and clear their own')
+            sql('begin;\n' + (ROOT/'supabase/tests/user_credential_client_writes.sql').read_text() + '\nrollback;')
+            print('PASS: only the controller writes credential rows; owners still read their own')
             sql((ROOT/'supabase/tests/deleted_space_access.sql').read_text())
             print('PASS: a deleted space is hidden from its owner, members and team; live spaces and the service role still read')
             sql((ROOT/'supabase/tests/user_deletion.sql').read_text())

@@ -14,13 +14,15 @@ insert into user_credentials(id,user_id,kind,nonce_b64,ciphertext_b64) values
   ('50000000-0000-0000-0000-000000000013','50000000-0000-0000-0000-000000000002','openai_api_key','fixture','fixture');
 -- Hosted Supabase grants these to the signed-in role and scopes rows with RLS;
 -- mirror that here so the checks below run through the "user agents self"
--- policy exactly as a signed-in client would.
+-- policy exactly as a signed-in client would. Credential rows are only read:
+-- the controller alone writes them (user_credential_client_writes.sql).
 do $$ begin
   if not has_schema_privilege('authenticated','auth','usage') then
     grant usage on schema auth to authenticated;
   end if;
 end $$;
-grant select, insert, update on public.user_credentials, public.user_agents to authenticated;
+grant select on public.user_credentials to authenticated;
+grant select, insert, update on public.user_agents to authenticated;
 
 set local role authenticated;
 set local request.jwt.claim.sub = '50000000-0000-0000-0000-000000000001';
