@@ -24,13 +24,27 @@ const (
 type dialContextFunc func(context.Context, string, string) (net.Conn, error)
 
 type egressProxy struct {
-	policy destinationResolver
-	dial   dialContextFunc
+	policy   destinationResolver
+	dial     dialContextFunc
+	failures *failureLog
 }
 
 func newEgressProxy(policy destinationResolver) *egressProxy {
 	dialer := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
-	return &egressProxy{policy: policy, dial: dialer.DialContext}
+	return &egressProxy{policy: policy, dial: dialer.DialContext, failures: newFailureLog()}
+}
+
+// requestedPort is the port a request names, or its scheme's default, for
+// the failure log only (0 when it names none that parses).
+func requestedPort(raw string, fallback uint16) uint16 {
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseUint(raw, 10, 16)
+	if err != nil {
+		return 0
+	}
+	return uint16(value)
 }
 
 func (proxy *egressProxy) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -59,6 +73,7 @@ func (proxy *egressProxy) handleHTTP(response http.ResponseWriter, request *http
 
 	target, err := proxy.policy.resolve(request.Context(), request.URL.Hostname(), request.URL.Port(), 80)
 	if err != nil {
+		proxy.failures.recordError("request", requestedPort(request.URL.Port(), 80), err, resolutionFailureReason)
 		writeResolutionError(response, err)
 		return
 	}
@@ -88,6 +103,7 @@ func (proxy *egressProxy) handleHTTP(response http.ResponseWriter, request *http
 
 	upstream, err := transport.RoundTrip(outbound)
 	if err != nil {
+		proxy.failures.recordError("request", target.port, err, dialFailureReason)
 		http.Error(response, "upstream request failed", http.StatusBadGateway)
 		return
 	}
@@ -117,12 +133,14 @@ func (proxy *egressProxy) handleConnect(response http.ResponseWriter, request *h
 	}
 	target, err := proxy.policy.resolve(request.Context(), host, rawPort, 443)
 	if err != nil {
+		proxy.failures.recordError("tunnel", requestedPort(rawPort, 443), err, resolutionFailureReason)
 		writeResolutionError(response, err)
 		return
 	}
 
 	upstream, err := proxy.dialResolvedTarget(request.Context(), "tcp", target)
 	if err != nil {
+		proxy.failures.recordError("tunnel", target.port, err, dialFailureReason)
 		http.Error(response, "upstream connection failed", http.StatusBadGateway)
 		return
 	}
