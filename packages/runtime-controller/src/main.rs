@@ -7,7 +7,6 @@ use axum::routing::get;
 use axum::Router;
 use reqwest::Client;
 use serde_json::json;
-use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -34,6 +33,7 @@ mod config;
 mod connection_limit;
 mod conversation_stop;
 mod conversations;
+mod cors;
 mod credential_keys;
 mod credential_rotation;
 mod credentials;
@@ -476,7 +476,7 @@ async fn main() -> anyhow::Result<()> {
         .spawn();
     }
 
-    let cors = CorsLayer::permissive();
+    let cors = cors::controller_cors_layer();
 
     let mut app = Router::new()
         .route(

@@ -11,8 +11,6 @@ export type SitePreviewCardStatus = {
   text: string;
   /** a spinner dot (Starting…) */
   busy?: boolean;
-  /** more on hover, e.g. the port that does not answer */
-  title?: string;
 };
 
 export type SitePreviewCardAction = { id: string; label: string; onPress: () => void; testId: string };
@@ -26,7 +24,7 @@ export type SitePreviewCardViewProps = {
    * space is kept, so nothing moves when it arrives.
    */
   picture: { url: string | null } | null;
-  /** a site that is starting or not answering is dimmed; a stopped one grey */
+  /** a site that is starting is dimmed; a stopped one grey */
   pictureTone: "normal" | "dim" | "gray";
   /** who may open it, as the controller recorded it; only `private` is known today */
   visibility: "private" | null;
@@ -171,7 +169,6 @@ export function SitePreviewCardView({
           role="status"
           aria-live="polite"
           className={status ? "mt-0.5 flex min-w-0 items-start gap-1.5" : undefined}
-          title={status?.title}
           data-testid="preview-ready-status"
           data-state={state}
           data-wake={wake}

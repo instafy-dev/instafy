@@ -77,6 +77,27 @@ cleanup removes the child from its manager before awaiting shutdown in a detache
 An empty manager therefore does not prove that this pending cleanup has finished. The
 runtime does not claim complete process containment or a verified barrier for that case.
 
+## Live research and tool requirements
+
+Plan agents may set `requiresTools: true` for live reads, commands or tests. This is a
+capability requirement, not a permission grant. The controller retains it per worker through
+retries, timed continuations and human replies. A tool-free owned-file worker fails before
+model execution when tools are required; a complete read-only file preview no longer removes
+its required tools. Plans without the field retain their existing behavior.
+
+The research-team skill chooses available native helpers for ordinary independent live
+research, or admitted tool-capable durable workers when useful. It does not treat owned files
+or runtime spread as proof of execution capability. Isolated tool workers remain opt-in,
+retain private snapshots and scoped publication, and receive their own host-generated turn
+clock for paced web tools. CLI availability, authorized search configuration and the worker's
+actual tool results still need verification. Separate jobs have separate budgets; native
+helpers share their parent's turn budgets. The lead allocates a bounded research budget and
+reconciles sources and unknowns before synthesis.
+
+Interactive browser control remains single-agent. Research helpers use public reading/search
+commands and return browser-dependent gaps for a separate authorized browser step. This
+change does not alter model defaults, enable isolated execution or introduce model-cost routing.
+
 ## Worker Settings and Evidence Handoffs
 
 Scoped workers preserve the controller-resolved agent model and reasoning effort. An explicit
@@ -335,8 +356,19 @@ Before a normal root turn enters detailed planning, the runtime asks for one sma
 Write permission and completion requirements are separate. Controller `writeIntent` and
 `writeScope` authorize and constrain mutations; routing cannot grant permission. A conditional
 review must still perform its required observations and tests, but may explain why no edit is
-warranted. It can also make justified edits within its existing scope. Required writes retain
-their missing-change retry and failure checks; a no-change explanation does not waive them.
+warranted. It can also make justified edits within its existing scope. A required write that
+ends without a change gets one recovery pass, which asks again for the change or the concrete
+blocker, and asks a reply that changes nothing to end with the line `NO_FILE_CHANGES`. The
+preflight reads the request before anything runs, so when the recovery pass still changes
+nothing and its reply ends with that line, the reply (an answer, a question for the person, or
+what blocks the work) is the turn's result, without the line, recorded as a
+`codex/required-changes-not-made` artifact. A reply that changes nothing without that line reads
+as a promise of a change that was not made, and fails the turn, as does a reply that lists a file
+missing from disk.
+
+Every turn that saves to the workspace lists the files it changed on disk in its receipts,
+whatever the requirement: a tool such as a skill pack's command can write files on a turn read
+as needing none, and the turn's checkpoint saves them either way.
 
 New preflight responses use the three-state field. The runtime accepts the legacy Boolean
 `requiresWorkspaceFileChanges` when that field is absent (`true` maps to `required`, `false`

@@ -344,7 +344,9 @@ pub(super) fn validate_worker_evidence(
         .iter()
         .any(|action| matches!(action, CodexAction::RequestUserInput(_)));
     anyhow::ensure!(
-        !requirements.command_execution || deferred_for_input || observed_command,
+        !(requirements.command_execution || scoped_worker_requires_tools(job))
+            || deferred_for_input
+            || observed_command,
         "isolated worker did not execute the required native command"
     );
     anyhow::ensure!(

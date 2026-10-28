@@ -674,11 +674,12 @@ export function SecretRequestEntry({
   // has never carried. The agent used to narrate it in chat instead.
   const whereToGet = secretName && !refusedClass ? parsed.whereToGet : null;
   // Fixed provenance for a request no curated entry claims: the person can see
-  // which skill in their own space is doing the asking.
+  // which skill in their own space is doing the asking, by its name (never its
+  // folder path).
   const provenance =
     secretName && !refusedClass && !connector
       ? parsed.skill
-        ? `Asked for by the skill at .agents/skills/${parsed.skill}.`
+        ? `Asked for by the ${parsed.skill} skill in this space.`
         : "Asked for by a skill in this space."
       : null;
 

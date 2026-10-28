@@ -576,6 +576,37 @@ const TELL: Record<StopCode | SkipCode | FailCode | "needs_browser" | "no_reuse"
     "never copy its reviews, photos or price lists, and keep its content out of anything published or shared by public link (links only there).",
 };
 
+/**
+ * The same address with "www." added or removed, for a site that answers at only one of them (a bare domain that
+ * times out while its "www." host redirects): "example.com" and "www.example.com" are each other's, as are
+ * "example.co.uk" and "www.example.co.uk". Null for any other host (a subdomain such as "shop.example.com", an IP).
+ */
+export function wwwSibling(url: URL): URL | null {
+  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
+  if (!host || net.isIP(host.replace(/^\[|\]$/g, ""))) return null;
+  let other: string;
+  if (host.startsWith("www.")) other = host.slice(4);
+  else {
+    const labels = host.split(".");
+    // two labels, or three under a two-letter country code with a short second level ("co.uk", "com.au")
+    const bare = labels.length === 2 || (labels.length === 3 && labels[2]!.length === 2 && labels[1]!.length <= 3);
+    if (!bare) return null;
+    other = `www.${host}`;
+  }
+  if (!other.includes(".")) return null;
+  const sibling = new URL(url.href);
+  sibling.hostname = other;
+  sibling.hash = "";
+  return sibling;
+}
+
+/** A failure of the address asked for itself (not of a redirect's target) that says the site did not answer. */
+function unanswered(code: string | undefined, page: Partial<PageResult>): boolean {
+  return (code === "unreachable" || code === "timeout") && !page.redirects?.length;
+}
+/** The turn's key for a host that did not answer, hashed so no address is written to disk. */
+const unansweredKey = (url: URL) => sha256(`unanswered:${url.hostname.toLowerCase().replace(/\.+$/, "")}`);
+
 /** The stops that end every read of the site for the rest of the turn, not just this URL. */
 const HOST_WIDE_STOPS = new Set<StopCode>(["rate_limited", "captcha"]);
 
@@ -702,13 +733,19 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     message,
     tell: TELL[code],
   });
+  // A first address that does not answer may answer with "www." added or removed: the tell names that address once,
+  // and not at all when it already did not answer this turn (so the two never send the turn back and forth).
+  let sibling = wwwSibling(requestedUrl);
   const fail = (code: FailCode, message: string, extra: Partial<PageResult> = {}): PageResult => ({
     ...page,
     ...extra,
     status: "failed",
     code,
     message,
-    tell: TELL[code],
+    tell:
+      sibling && unanswered(code, extra)
+        ? `The site did not answer at ${requestedUrl.hostname}. Some sites answer only with or without "www.": read ${redaction.redactUrl(sibling.href).text} once instead, and if that fails too, use another source.`
+        : TELL[code],
   });
 
   // A URL (or site) that stopped before is never fetched again, whatever the options.
@@ -719,7 +756,9 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     stop: state.stops[firstKeys.exact] ?? state.stops[firstKeys.path] ?? state.hostStops[firstSite] ?? null,
     loads: state.loads,
     hostLoads: state.hosts[firstSite]?.loads ?? 0,
+    siblingUnanswered: sibling ? Boolean(state.unanswered?.[unansweredKey(sibling)]) : false,
   }));
+  if (earlier.siblingUnanswered) sibling = null;
   const remembered =
     earlier.stop ??
     ctx.cache.get<StopRecord>("stops", firstKeys.exact, LIMITS.stopTtlMs, ctx.now()) ??
@@ -1026,7 +1065,16 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
   };
 
   const pages: PageResult[] = [];
-  for (const url of urls) pages.push(await readOne(url, { maxChars, links, fresh: Boolean(options.fresh), terms }, ctx));
+  for (const url of urls) {
+    const page = await readOne(url, { maxChars, links, fresh: Boolean(options.fresh), terms }, ctx);
+    if (page.status === "failed" && unanswered(page.code, page)) {
+      const key = unansweredKey(new URL(url));
+      await turn.update((state) => {
+        (state.unanswered ??= {})[key] = now();
+      });
+    }
+    pages.push(page);
+  }
   const state = await turn.update((s) => ({ loads: s.loads, hosts: Object.fromEntries(Object.entries(s.hosts).map(([h, r]) => [h, r.loads])) }));
   return {
     ok: true,

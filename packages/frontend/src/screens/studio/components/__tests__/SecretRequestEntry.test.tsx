@@ -628,9 +628,12 @@ describe("SecretRequestEntry", () => {
     expect(byTestId("secret-request-where")?.textContent).toBe(
       "The API tokens page of your account settings.",
     );
+    // Which skill asked, by its name: never a folder path (28 Oct drive: "Asked for by the skill at
+    // .agents/skills/instafy-web-research." on the search key's card).
     expect(byTestId("secret-request-provenance")?.textContent).toBe(
-      "Asked for by the skill at .agents/skills/deploy.",
+      "Asked for by the deploy skill in this space.",
     );
+    expect(text()).not.toContain(".agents");
     expect(text()).toContain("Saved in this space’s Secrets, never in the chat.");
     expect(byTestId<HTMLInputElement>("secret-request-value-CLOUDFLARE_API_TOKEN")?.getAttribute(
       "aria-label",

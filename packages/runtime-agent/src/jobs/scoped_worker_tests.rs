@@ -267,3 +267,136 @@ async fn direct_workers_defer_questions_without_forcing_files_or_tool_calls() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn tool_required_owned_workers_fail_before_tool_free_execution_or_workspace_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let processor = test_job_processor(temp.path());
+    let registration = super::tests::test_registration_with_proxy();
+    for requirement in [json!(true), json!("invalid but must not downgrade")] {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({"metadata": {
+                "multiAgentPlan":{"role":"worker", "requiresTools":requirement},
+                "writeScope":{"mode":"owned", "ownedPaths":["findings.json"]}
+            }}),
+        );
+        assert!(!processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+        for result in [
+            processor
+                .run_apply_job(&registration, &job, true, None, None, None)
+                .await,
+            processor
+                .run_parallel_direct_write_scoped_worker_job(
+                    &registration,
+                    &job,
+                    None,
+                    None,
+                    Default::default(),
+                )
+                .await,
+        ] {
+            assert!(result.err().unwrap().to_string().contains("requires tools"));
+        }
+    }
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn tool_requirement_preserves_read_only_worker_tools_even_with_complete_file_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("source.txt"), "complete cached source").unwrap();
+    let processor = test_job_processor(temp.path());
+    let mut job = read_only_worker(&["source.txt"]);
+    job.payload["metadata"]["multiAgentPlan"]["requiresTools"] = json!(true);
+    let observation = build_scoped_worker_path_observation(temp.path(), &job).unwrap();
+    assert!(observation.complete);
+    let (prompt, _, metrics) = processor
+        .build_prompt_with_text(
+            &Uuid::new_v4(),
+            &job,
+            temp.path(),
+            "Verify the current source online.",
+            true,
+            None,
+            &[],
+            Some(&observation),
+            None,
+        )
+        .unwrap();
+    assert_ne!(metrics["promptMode"], "scoped_worker_preobserved");
+    assert!(!prompt.contains("produce the lane report from the evidence below"));
+    assert!(metadata_requests_read_only_workspace(
+        job.payload.get("metadata")
+    ));
+}
+
+#[test]
+fn plan_normalization_retains_tool_requirements_and_legacy_workers_keep_file_generation() {
+    let payload = json!({"type":"multi_agent_plan", "mode":"write_scoped", "agents":[
+        {"handle":"research", "prompt":"Read a live source.", "requiresTools":true},
+        {"handle":"format", "prompt":"Format supplied facts."},
+        {"handle":"invalid", "prompt":"Invalid requirement.", "requiresTools":"yes"}
+    ], "lead":{"leadHandle":"octo", "continuationPrompt":"Combine."}});
+    let (plan, _, _) = parse_codex_multi_agent_plan_action(payload.as_object().unwrap()).unwrap();
+    assert_eq!(plan["agents"][0]["requiresTools"], true);
+    assert!(plan["agents"][1].get("requiresTools").is_none());
+    assert_eq!(plan["agents"][2]["requiresTools"], "yes");
+    let mut job = read_only_worker(&["source.txt"]);
+    assert!(!scoped_worker_requires_tools(&job));
+    for field in ["commandExecution", "genericMcpToolExecution"] {
+        job.payload["metadata"]["runtimeExpectations"] = json!({field:true});
+        assert!(scoped_worker_requires_tools(&job));
+    }
+}
+
+#[test]
+fn required_worker_tool_evidence_accepts_commands_or_mcp_and_retains_failed_attempts() {
+    let mut job = read_only_worker(&["source.txt"]);
+    job.payload["metadata"]["multiAgentPlan"]["requiresTools"] = json!(true);
+    let completed =
+        extract_codex_outcome(&json!({"summary":"Current facts verified", "files":[]})).unwrap();
+    for attempts in [1, 2] {
+        let expected = (1..=attempts)
+            .map(|attempt| json!({"kind":"codex/run-log", "metadata":{"attempt":attempt}}))
+            .collect::<Vec<_>>();
+        let mut artifacts = expected.clone();
+        let error = ensure_worker_tool_evidence(&job, &completed, false, false, &mut artifacts)
+            .unwrap_err();
+        assert!(error.to_string().contains("requires tools"));
+        assert_eq!(
+            error
+                .downcast_ref::<JobFailureWithArtifacts>()
+                .unwrap()
+                .artifacts,
+            expected
+        );
+    }
+    for (command, mcp) in [(true, false), (false, true)] {
+        let mut artifacts = vec![json!({"kind":"codex/run-log"})];
+        ensure_worker_tool_evidence(&job, &completed, command, mcp, &mut artifacts).unwrap();
+        assert_eq!(artifacts.len(), 1);
+    }
+    let deferred = extract_codex_outcome(&json!({"actions":[{
+        "type":"request_user_input",
+        "questions":[{"id":"date", "header":"Date", "question":"Which date should I verify?"}],
+        "continuationNote":"Wait for the date before reading the source."
+    }]}))
+    .unwrap();
+    ensure_worker_tool_evidence(&job, &deferred, false, false, &mut vec![]).unwrap();
+    let browser = extract_codex_outcome(&json!({"actions":[{
+        "type":"request_browser", "task":"Read the sources"
+    }]}))
+    .unwrap();
+    assert!(ensure_worker_tool_evidence(&job, &browser, false, false, &mut vec![]).is_err());
+
+    job.payload["metadata"]["multiAgentPlan"]["requiresTools"] = json!(false);
+    ensure_worker_tool_evidence(&job, &completed, false, false, &mut vec![]).unwrap();
+    job.payload["metadata"]["runtimeExpectations"] = json!({"commandExecution":true});
+    assert!(ensure_worker_tool_evidence(&job, &completed, false, false, &mut vec![]).is_err());
+    job.payload["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("multiAgentPlan");
+    ensure_worker_tool_evidence(&job, &completed, false, false, &mut vec![]).unwrap();
+}
