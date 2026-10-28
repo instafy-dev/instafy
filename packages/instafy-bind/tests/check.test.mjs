@@ -214,3 +214,18 @@ test("a price a check read counts for the filter; a check that found the shop bl
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("on a ranked page, a row with no price at all is noted as listed apart too", () => {
+  const dir = optionsSite("ranked", (data) => {
+    delete data.items[1].price;
+    delete data.items[1].store;
+    return { ...data, filter: { key: "price", max: 140, label: "Under $140" } };
+  });
+  try {
+    const { notes, problems } = checkValues(dir);
+    assert.deepEqual(problems, []);
+    assert.match(notes[0], /^2 item\(s\) have no price the page can show: Option B, Option C\./);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

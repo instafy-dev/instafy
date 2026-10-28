@@ -291,10 +291,13 @@ export function checkValues(dir) {
     }
     if (filter.key) {
       const live = liveRecords(root);
-      const unknown = optionCells(data)
-        .filter((c) => c.key === filter.key)
-        .filter((c) => knownNumber(c.fact) == null && liveValue(live.get(c.ref), filter.key) == null)
-        .map((c) => c.item);
+      // per item, as the page's filter reads it: its value for the key (none counts as unknown), or a check's
+      const factOf = (item) => columns ? item.facts?.[filter.key]
+        : filter.key === "price" ? item.price : (Array.isArray(item.details) ? item.details : []).find((d) => d?.key === filter.key)?.fact;
+      const unknown = data.items
+        .filter((item) => item && typeof item === "object")
+        .filter((item) => knownNumber(factOf(item)) == null && liveValue(live.get(item.ref), filter.key) == null)
+        .map((item) => String(item.name ?? item.ref ?? "an item"));
       if (unknown.length) {
         const col = columns?.find((c) => c && c.key === filter.key);
         const title = filter.unknown || `${col?.label ?? (filter.key === "price" ? "Price" : filter.key)} unknown`;
