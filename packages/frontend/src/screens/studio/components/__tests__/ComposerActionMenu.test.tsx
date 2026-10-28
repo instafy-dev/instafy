@@ -72,6 +72,8 @@ describe("ComposerActionMenu", () => {
     sendActions: {
       onQueueMessage?: () => void;
       onStashDraft?: () => void;
+      queueDisabled?: boolean;
+      stashDisabled?: boolean;
       onExpandDraft?: () => void;
       onUploadImage?: () => void;
       uploadImageDisabled?: boolean;
@@ -550,14 +552,35 @@ describe("ComposerActionMenu", () => {
     expect(stash.textContent).toContain("Stash draft");
     expect(queue.querySelector("kbd")?.getAttribute("aria-label")).toMatch(/plus Enter/);
     expect(stash.querySelector("kbd")?.getAttribute("aria-label")).toMatch(/Shift plus Enter/);
-    expect(container.querySelector('[data-testid="composer-action-menu-enter-hint"]')?.textContent).toBe(
-      "Enter sends or steers · ⇧Enter adds a line",
-    );
     expect(container.querySelector('[role="separator"]')).not.toBeNull();
 
     await act(async () => queue.click());
     await act(async () => stash.click());
     expect(onQueueMessage).toHaveBeenCalledTimes(1);
     expect(onStashDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists only what can be done now: no disabled Queue or Stash, and no keyboard tip", async () => {
+    await renderMenu(true, true, {
+      onQueueMessage: vi.fn(), onStashDraft: vi.fn(), queueDisabled: true, stashDisabled: true,
+    });
+    expect(container.querySelector('[data-testid="composer-action-menu-queue"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-stash"]')).toBeNull();
+    expect(container.textContent).not.toContain("Queue message");
+    expect(container.textContent).not.toContain("Stash draft");
+    // The send button's own label says what Enter does; the menu does not repeat it.
+    expect(container.textContent).not.toContain("Enter sends or steers");
+    expect(container.querySelector('[data-testid="composer-action-menu-enter-hint"]')).toBeNull();
+    // No separator is left behind for the missing pair.
+    const separators = container.querySelectorAll('[role="separator"]');
+    for (const separator of separators) {
+      expect(separator.nextElementSibling?.getAttribute("role")).not.toBe("separator");
+    }
+
+    await renderMenu(true, true, {
+      onQueueMessage: vi.fn(), onStashDraft: vi.fn(), queueDisabled: false, stashDisabled: true,
+    });
+    expect(container.querySelector('[data-testid="composer-action-menu-queue"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-stash"]')).toBeNull();
   });
 });

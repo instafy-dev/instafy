@@ -64,6 +64,32 @@ describe("StudioRecentSpaces", () => {
     });
   }
 
+  it.each([{ presentation: "path" as const }, { collapsed: true }, {}])(
+    "ends the space switcher with New space, which opens the create dialog (%j)", async (presentation) => {
+      const onNewSpace = vi.fn();
+      const onBrowseAll = vi.fn();
+      await render({ ...presentation, onNewSpace, onBrowseAll });
+      if ("presentation" in presentation || "collapsed" in presentation) await click("sidebar-space-button");
+      const list = document.querySelector('[data-testid="sidebar-recent-spaces-list"]')!;
+      const buttons = [...list.querySelectorAll("button")];
+      expect(buttons.at(-1)?.getAttribute("data-testid")).toBe("sidebar-recent-spaces-new");
+      expect(buttons.at(-1)?.textContent).toBe("New space");
+      expect(buttons.at(-2)?.getAttribute("data-testid")).toBe("sidebar-browse-all-spaces");
+      await click("sidebar-recent-spaces-new");
+      expect(onNewSpace).toHaveBeenCalledOnce();
+      expect(onBrowseAll).not.toHaveBeenCalled();
+      if ("presentation" in presentation || "collapsed" in presentation) {
+        expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+      }
+    },
+  );
+
+  it("offers no New space where this person cannot start one", async () => {
+    await render({ presentation: "path" });
+    await click("sidebar-space-button");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-new"]')).toBeNull();
+  });
+
   it.each([{ presentation: "path" as const }, { collapsed: true }])(
     "shows every provided space in a fresh-browser switcher (%j)", async (presentation) => {
       const onSelectSpace = vi.fn();

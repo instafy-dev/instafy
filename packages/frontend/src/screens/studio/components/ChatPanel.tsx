@@ -390,6 +390,7 @@ import { previewTabLocation } from "./previewHost/PreviewLocation";
 import { useLocationSitesVersion } from "./previewHost/locationSites";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
 import { FilesPanel } from "../StudioLazyPanels";
+import { composerBrowserActions } from "./composerBrowserActions";
 import {
   BrowserLocationOptions,
   BrowserTransportSelector,
@@ -6840,8 +6841,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           // it enabled here is what makes repo import reachable before setup.
           disabled: sendingAttachment,
           mutationDisabled: projectWriteDisabled,
-          showBrowserAction: !(browserSessionOpen || hasHiddenBrowserSession),
-          showNewBrowserAction: browserTransport === "shared",
+          ...composerBrowserActions({
+            transport: browserTransport,
+            browserOpen: browserSessionOpen || hasHiddenBrowserSession,
+          }),
           showInviteAction:
             canOpenProjectDeviceHandoff(activeProjectId, projectCapabilitiesResolved),
           inviteActionLabel: projectReadOnly ? "Open on another device" : "Invite or open elsewhere",

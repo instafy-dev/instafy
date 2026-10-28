@@ -205,6 +205,11 @@ export function ComposerActionMenu({
     () => CHAT_SLASH_COMMANDS.filter((command) => !command.hidden),
     [],
   );
+  // The menu lists only what can be done now: Queue message and Stash draft
+  // appear once there is a draft they can take, not as disabled rows. The send
+  // button's own label already says what Enter does.
+  const showQueue = !mutationDisabled && Boolean(onQueueMessage) && !queueDisabled;
+  const showStash = !mutationDisabled && Boolean(onStashDraft) && !stashDisabled;
   const commandKeyLabel = useMemo(() => {
     if (typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/i.test(navigator.platform)) {
       return "⌘";
@@ -359,11 +364,11 @@ export function ComposerActionMenu({
                 testId="composer-action-menu-voice-replies"
               />
             ) : null}
-            {(onInsertSuggestion || (!mutationDisabled && (onUploadImage || onStartVoiceInput || onToggleVoiceReplies))) &&
+            {(onExpandDraft || onInsertSuggestion || (!mutationDisabled && (onUploadImage || onStartVoiceInput || onToggleVoiceReplies))) &&
             (!mutationDisabled || showInviteAction) ? (
               <StudioMenuSeparator />
             ) : null}
-            {!mutationDisabled && onQueueMessage ? (
+            {showQueue && onQueueMessage ? (
               <ActionRow
                 icon={<Send className="h-4 w-4" aria-hidden="true" />}
                 title="Queue message"
@@ -376,11 +381,10 @@ export function ComposerActionMenu({
                     {commandKeyLabel} ↵
                   </Text>
                 }
-                disabled={queueDisabled}
                 testId="composer-action-menu-queue"
               />
             ) : null}
-            {!mutationDisabled && onStashDraft ? (
+            {showStash && onStashDraft ? (
               <ActionRow
                 icon={<Bookmark className="h-4 w-4" aria-hidden="true" />}
                 title="Stash draft"
@@ -393,23 +397,10 @@ export function ComposerActionMenu({
                     {commandKeyLabel} ⇧ ↵
                   </Text>
                 }
-                disabled={stashDisabled}
                 testId="composer-action-menu-stash"
               />
             ) : null}
-            {!mutationDisabled && (onQueueMessage || onStashDraft) ? (
-              <>
-                <Text
-                  variant="captionSmall"
-                  tone="muted"
-                  className="px-2.5 py-1"
-                  data-testid="composer-action-menu-enter-hint"
-                >
-                  Enter sends or steers · ⇧Enter adds a line
-                </Text>
-                <StudioMenuSeparator />
-              </>
-            ) : null}
+            {showQueue || showStash ? <StudioMenuSeparator /> : null}
             {!mutationDisabled ? (
               <ActionRow
                 icon={<Github className="h-4 w-4" aria-hidden="true" />}

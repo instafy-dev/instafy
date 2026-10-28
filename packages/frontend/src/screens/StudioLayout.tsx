@@ -1789,6 +1789,7 @@ function StudioLayoutInner() {
     onSettings={navigationScope.orgKey === "personal" ? undefined : () => handleOpenOrgSettings(navigationScope.orgKey)}
     onSwitchTeam={() => openMobileContextDirectory("teams-and-spaces")}
     onBrowseSpaces={() => openMobileContextDirectory("spaces")}
+    onNewSpace={() => runStudioNavigation(() => handleNewProject(navigationScope.orgKey === "personal" ? null : navigationScope.orgKey))}
     onSpace={id => handleActivateProject(id, navigationScope.orgKey)}
   />;
 
