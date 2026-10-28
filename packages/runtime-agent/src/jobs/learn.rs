@@ -316,6 +316,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v8.md"),
     // From before it said to take another route after a declined site.
     include_str!("legacy/browser-automation-v9.md"),
+    // From before it said to give a failed step's plain reason, never a raw error code, and that
+    // a Shared page another chat left is not this task's work.
+    include_str!("legacy/browser-automation-v10.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
