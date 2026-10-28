@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   claimNativeAuthCallback,
   clearNativeAuthCallbackAttemptId,
-  clearOAuthRedirectTarget,
+  clearSignInReturnPath,
   clearPendingNativeAuthAttempt,
   createPendingNativeAuthAttempt,
   forgetNativeAuthCallbackClaimsForTests,
@@ -10,10 +10,10 @@ import {
   nativeAuthCallbackErrorMessage,
   parseNativeAuthCallbackUrl,
   readNativeAuthCallbackAttemptId,
-  readOAuthRedirectTarget,
+  readSignInReturnPath,
   readPendingNativeAuthAttempt,
   writeNativeAuthCallbackAttemptId,
-  writeOAuthRedirectTarget,
+  writeSignInReturnPath,
   writePendingNativeAuthAttempt,
 } from "../nativeAuth";
 
@@ -200,37 +200,49 @@ describe("native auth callback attempt storage", () => {
 
 describe("OAuth redirect target", () => {
   it("keeps a native sign-in's destination for a new process, and a web one in its tab", () => {
-    writeOAuthRedirectTarget("/studio?projectId=p1", { durable: true });
+    writeSignInReturnPath("/studio?projectId=p1", { durable: true });
     window.sessionStorage.clear();
-    expect(readOAuthRedirectTarget()).toBe("/studio?projectId=p1");
+    expect(readSignInReturnPath()).toBe("/studio?projectId=p1");
 
-    clearOAuthRedirectTarget();
-    writeOAuthRedirectTarget("/studio?projectId=p2", { durable: false });
-    expect(readOAuthRedirectTarget()).toBe("/studio?projectId=p2");
+    clearSignInReturnPath();
+    writeSignInReturnPath("/studio?projectId=p2", { durable: false });
+    expect(readSignInReturnPath()).toBe("/studio?projectId=p2");
     window.sessionStorage.clear();
-    expect(readOAuthRedirectTarget()).toBeNull();
+    expect(readSignInReturnPath()).toBeNull();
   });
 
   it("ignores a stale or off-site destination", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-28T08:00:00Z"));
-    writeOAuthRedirectTarget("/studio?projectId=p1", { durable: true });
+    writeSignInReturnPath("/studio?projectId=p1", { durable: true });
     window.sessionStorage.clear();
     vi.setSystemTime(new Date("2026-10-28T08:31:00Z"));
-    expect(readOAuthRedirectTarget()).toBeNull();
+    expect(readSignInReturnPath()).toBeNull();
 
-    writeOAuthRedirectTarget("//elsewhere.example/studio", { durable: true });
-    expect(readOAuthRedirectTarget()).toBeNull();
+    writeSignInReturnPath("//elsewhere.example/studio", { durable: true });
+    expect(readSignInReturnPath()).toBeNull();
     window.localStorage.setItem(
-      "instafy.login.oauthRedirectTargetDurable",
-      JSON.stringify({ target: "https://elsewhere.example/", savedAt: new Date().toISOString() }),
+      "instafy.login.returnPathDurable",
+      JSON.stringify({ path: "https://elsewhere.example/", savedAt: new Date().toISOString() }),
     );
-    expect(readOAuthRedirectTarget()).toBeNull();
+    expect(readSignInReturnPath()).toBeNull();
+  });
+
+  // The path can carry an invite's token, so a stale copy does not stay on the device.
+  it("removes a stale kept copy when it reads it", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-28T08:00:00Z"));
+    writeSignInReturnPath("/invite?token=T", { durable: true });
+    window.sessionStorage.clear();
+    vi.setSystemTime(new Date("2026-10-28T08:31:00Z"));
+
+    expect(readSignInReturnPath()).toBeNull();
+    expect(window.localStorage.getItem("instafy.login.returnPathDurable")).toBeNull();
   });
 
   it("forgets both copies once sign-in finishes", () => {
-    writeOAuthRedirectTarget("/studio?projectId=p1", { durable: true });
-    clearOAuthRedirectTarget();
-    expect(readOAuthRedirectTarget()).toBeNull();
+    writeSignInReturnPath("/studio?projectId=p1", { durable: true });
+    clearSignInReturnPath();
+    expect(readSignInReturnPath()).toBeNull();
   });
 });

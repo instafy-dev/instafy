@@ -26,7 +26,7 @@ import {
   resolveSupabaseRedirectTo,
   type PendingNativeAuthAttempt,
   writeNativeAuthCallbackAttemptId,
-  writeOAuthRedirectTarget,
+  writeSignInReturnPath,
   writePendingNativeAuthAttempt,
   writeNativeAuthError,
 } from "../../auth/nativeAuth";
@@ -580,7 +580,7 @@ export function useNativeGithubAuth({
     try {
       const redirectTo = resolveSupabaseRedirectTo("/login");
       const queryParams = oauthLoginQueryParams(supabaseAnonKey);
-      writeOAuthRedirectTarget(redirectTarget, {
+      writeSignInReturnPath(redirectTarget, {
         durable: Capacitor.isNativePlatform() || (isDesktopShell() && desktopCanReceiveAuthCallback()),
       });
       if (Capacitor.isNativePlatform()) {

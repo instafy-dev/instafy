@@ -331,26 +331,27 @@ export function clearNativeAuthCallbackAttemptId() {
   writeNativeAuthCallbackAttemptId(null);
 }
 
-export const OAUTH_REDIRECT_TARGET_STORAGE_KEY = "instafy.login.oauthRedirectTarget";
-const DURABLE_OAUTH_REDIRECT_TARGET_STORAGE_KEY = "instafy.login.oauthRedirectTargetDurable";
+export const SIGN_IN_RETURN_PATH_STORAGE_KEY = "instafy.login.returnPath";
+const DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY = "instafy.login.returnPathDurable";
 
-function isInAppRedirectTarget(value: unknown): value is string {
+function isInAppPath(value: unknown): value is string {
   return typeof value === "string" && value.startsWith("/") && !value.startsWith("//");
 }
 
 /**
- * Where sign-in goes once it completes. A web sign-in comes back in the same
- * tab, so sessionStorage holds it. A native or desktop sign-in can come back in
- * a new process (Android ending the app behind the custom tab), so `durable`
- * also keeps a copy in localStorage beside the attempt, read back only while
- * it is as fresh as an attempt may be.
+ * The in-app path sign-in goes to once it completes. A web sign-in comes back
+ * in the same tab, so sessionStorage holds it. A native or desktop sign-in can
+ * come back in a new process (Android ending the app behind the custom tab),
+ * so `durable` also keeps a copy in localStorage beside the attempt. The path
+ * can carry an invite's token, so that copy is read back only while it is as
+ * fresh as an attempt may be, and removed once it is older.
  */
-export function writeOAuthRedirectTarget(target: string, options: { durable: boolean }) {
-  if (typeof window === "undefined" || !isInAppRedirectTarget(target)) {
+export function writeSignInReturnPath(path: string, options: { durable: boolean }) {
+  if (typeof window === "undefined" || !isInAppPath(path)) {
     return;
   }
   try {
-    window.sessionStorage?.setItem(OAUTH_REDIRECT_TARGET_STORAGE_KEY, target);
+    window.sessionStorage?.setItem(SIGN_IN_RETURN_PATH_STORAGE_KEY, path);
   } catch {
     // ignore storage failures
   }
@@ -359,50 +360,54 @@ export function writeOAuthRedirectTarget(target: string, options: { durable: boo
   }
   try {
     window.localStorage?.setItem(
-      DURABLE_OAUTH_REDIRECT_TARGET_STORAGE_KEY,
-      JSON.stringify({ target, savedAt: new Date().toISOString() }),
+      DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY,
+      JSON.stringify({ path, savedAt: new Date().toISOString() }),
     );
   } catch {
     // ignore storage failures
   }
 }
 
-export function readOAuthRedirectTarget(): string | null {
+export function readSignInReturnPath(): string | null {
   if (typeof window === "undefined") {
     return null;
   }
   try {
-    const target = window.sessionStorage?.getItem(OAUTH_REDIRECT_TARGET_STORAGE_KEY);
-    if (isInAppRedirectTarget(target)) {
-      return target;
+    const path = window.sessionStorage?.getItem(SIGN_IN_RETURN_PATH_STORAGE_KEY);
+    if (isInAppPath(path)) {
+      return path;
     }
   } catch {
     // fall back to the durable copy
   }
   try {
-    const raw = window.localStorage?.getItem(DURABLE_OAUTH_REDIRECT_TARGET_STORAGE_KEY);
-    const stored = raw ? (JSON.parse(raw) as { target?: unknown; savedAt?: unknown }) : null;
+    const raw = window.localStorage?.getItem(DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const stored = JSON.parse(raw) as { path?: unknown; savedAt?: unknown } | null;
     const savedAt = typeof stored?.savedAt === "string" ? Date.parse(stored.savedAt) : Number.NaN;
     if (
-      isInAppRedirectTarget(stored?.target) &&
+      isInAppPath(stored?.path) &&
       Number.isFinite(savedAt) &&
       Math.abs(Date.now() - savedAt) <= PENDING_NATIVE_AUTH_ATTEMPT_MAX_AGE_MS
     ) {
-      return stored.target;
+      return stored.path;
     }
+    window.localStorage?.removeItem(DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY);
   } catch {
     // ignore storage failures
   }
   return null;
 }
 
-export function clearOAuthRedirectTarget() {
+export function clearSignInReturnPath() {
   if (typeof window === "undefined") {
     return;
   }
   try {
-    window.sessionStorage?.removeItem(OAUTH_REDIRECT_TARGET_STORAGE_KEY);
-    window.localStorage?.removeItem(DURABLE_OAUTH_REDIRECT_TARGET_STORAGE_KEY);
+    window.sessionStorage?.removeItem(SIGN_IN_RETURN_PATH_STORAGE_KEY);
+    window.localStorage?.removeItem(DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY);
   } catch {
     // A blocked storage API must not prevent completing sign-in.
   }

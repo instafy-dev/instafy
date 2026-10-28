@@ -18,7 +18,7 @@ import { hasSupabaseConfig } from "../lib/supabaseClient";
 import { showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
 import { AppVersionLabel } from "../components/AppVersionLabel";
 import { useAuth } from "../providers/AuthProvider";
-import { clearOAuthRedirectTarget, readOAuthRedirectTarget, readPendingNativeAuthAttempt } from "../auth/nativeAuth";
+import { clearSignInReturnPath, readSignInReturnPath, readPendingNativeAuthAttempt } from "../auth/nativeAuth";
 import {
   OAUTH_PROVIDER_LABELS,
   useNativeGithubAuth,
@@ -176,7 +176,7 @@ export function LoginPage() {
   );
 
   const redirectTarget = useMemo(() => {
-    const storedRedirect = readOAuthRedirectTarget();
+    const storedRedirect = readSignInReturnPath();
     try {
       const params = new URLSearchParams(location.search);
       const redirect = params.get("redirect");
@@ -195,7 +195,7 @@ export function LoginPage() {
   }, [location.search]);
 
   const finishLogin = useCallback(() => {
-    clearOAuthRedirectTarget();
+    clearSignInReturnPath();
     navigate(redirectTarget, { replace: true });
   }, [navigate, redirectTarget]);
 

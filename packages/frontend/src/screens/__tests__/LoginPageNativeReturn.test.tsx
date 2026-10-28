@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createPendingNativeAuthAttempt,
-  writeOAuthRedirectTarget,
+  writeSignInReturnPath,
   writePendingNativeAuthAttempt,
 } from "../../auth/nativeAuth";
 import { LoginPage } from "../LoginPage";
@@ -66,7 +66,7 @@ describe("LoginPage after a native sign-in returns in a new process", () => {
     return container.querySelector('[data-testid="destination"]')?.textContent;
   };
   const startedFrom = (target: string) => {
-    writeOAuthRedirectTarget(target, { durable: true });
+    writeSignInReturnPath(target, { durable: true });
     writePendingNativeAuthAttempt(createPendingNativeAuthAttempt("google"));
     window.sessionStorage.clear();
   };
@@ -99,7 +99,7 @@ describe("LoginPage after a native sign-in returns in a new process", () => {
   });
 
   it("ignores a kept destination once no sign-in is pending", async () => {
-    writeOAuthRedirectTarget("/invite?token=T", { durable: true });
+    writeSignInReturnPath("/invite?token=T", { durable: true });
     window.sessionStorage.clear();
 
     expect(await signInCompletes("/login?redirect=%2Fstudio")).toBe("/studio");

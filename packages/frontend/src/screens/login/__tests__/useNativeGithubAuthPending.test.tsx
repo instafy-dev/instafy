@@ -9,7 +9,7 @@ import {
   NATIVE_AUTH_ERROR_EVENT,
   NATIVE_AUTH_ERROR_STORAGE_KEY,
   parseNativeAuthCallbackUrl,
-  readOAuthRedirectTarget,
+  readSignInReturnPath,
 } from "../../../auth/nativeAuth";
 
 const supabaseMock = vi.hoisted(() => ({
@@ -251,7 +251,7 @@ describe("useNativeGithubAuth pending status", () => {
     await act(async () => handlers?.handleGoogleLogin());
     window.sessionStorage.clear();
 
-    expect(readOAuthRedirectTarget()).toBe("/studio");
+    expect(readSignInReturnPath()).toBe("/studio");
   });
 
   it("shows an error the app-wide handler reported once, not again on the next visit", async () => {
