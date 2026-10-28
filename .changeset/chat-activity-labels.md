@@ -1,4 +1,0 @@
----
----
-
-Each step a turn streams now carries a plain-language label from trusted data only, for a chat turn's activity line ("Looking up places" while it runs, "looked up 14 places" once done). A skill pack installed with the runtime can label its commands in `.instafy-pack.json` (`bin` and `activity`); Instafy's own CLI (`instafy web read`, `instafy preview open` and others), package installs, tests, builds, `git clone`, web searches, file edits, browser and other tool calls and the runtime's own saving and retrying statuses have built-in labels. The runtime matches a command by its argv alone (parsed with tree-sitter-bash, never its output), the controller checks every label against shared rules (short plain words, no links or markup) and lifts a valid one to the message's top-level `activity`, and a recorded or dispatched message can never carry one. A pack whose labels break a rule still installs and loads, without its labels. No package changes.
