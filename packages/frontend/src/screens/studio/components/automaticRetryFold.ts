@@ -2,11 +2,14 @@
 // turn: the resent prompt repeats the person's own words, so the chat leaves
 // it out, and the failed attempt moves into the Details of the turn that
 // replaced it. Only an automatic resend folds; one the person asked for with
-// "Try again" stays as they sent it.
+// "Try again" stays as they sent it. The mark is the sender's word, so the
+// chat leaves a prompt out only when it can see the failed turn and the
+// prompt repeats, from the same person, the words that turn answered.
 
 import {
   hasFailedRunMetadata,
   readAutomaticRunFailureRetryOf,
+  resolveRunFailureRetrySource,
 } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
 import { getMessageType } from "./chatMessageMetadata";
@@ -67,6 +70,8 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
   const pendingJobIds = new Set<string>();
   const failures = new Map<string, ChatMessage>();
   const jobByRunId = new Map<string, string>();
+  // Runs that failed before any job ran them (the controller refused them).
+  const failedRunsWithoutJob = new Set<string>();
   const resends: Array<{ prompt: ChatMessage; failureId: string }> = [];
   for (const message of messages) {
     const failureId = readAutomaticRunFailureRetryOf(message);
@@ -77,33 +82,50 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
     if (message.role !== "assistant") {
       continue;
     }
-    if (isFailureMessage(message)) {
-      failures.set(message.id, message);
-    }
     const jobId = jobIdOf(message);
     const runId = runIdOf(message);
+    if (isFailureMessage(message)) {
+      failures.set(message.id, message);
+      if (!jobId && runId) {
+        failedRunsWithoutJob.add(runId);
+      }
+    }
     if (jobId && runId && !jobByRunId.has(runId)) {
       jobByRunId.set(runId, jobId);
     }
   }
   for (const { prompt, failureId } of resends) {
-    hiddenPromptIds.add(prompt.id);
     const failure = failures.get(failureId);
-    if (!failure) {
+    if (!failure || !repeatsFailedPrompt(messages, prompt, failure)) {
       continue;
     }
+    hiddenPromptIds.add(prompt.id);
     const failedJobId = jobIdOf(failure) || null;
     const retryRunId = runIdOf(prompt);
     const retryJobId = retryRunId ? jobByRunId.get(retryRunId) : undefined;
     if (retryJobId && retryJobId !== failedJobId) {
       earlierAttemptByJobId.set(retryJobId, { jobId: failedJobId, failureId });
-    } else if (retryRunId && failedJobId) {
+    } else if (retryRunId && failedJobId && !failedRunsWithoutJob.has(retryRunId)) {
       // The controller took the resend and started its run, which has
       // written nothing yet.
       pendingJobIds.add(failedJobId);
     }
   }
   return { hiddenPromptIds, earlierAttemptByJobId, pendingJobIds };
+}
+
+/**
+ * True when `prompt` repeats, from the same person, the prompt the failed turn
+ * answered: the words the automatic retry sends again.
+ */
+function repeatsFailedPrompt(messages: readonly ChatMessage[], prompt: ChatMessage, failure: ChatMessage): boolean {
+  const source = resolveRunFailureRetrySource({ conversationMessages: [...messages], failureMessage: failure });
+  return (
+    source !== null &&
+    source.id !== prompt.id &&
+    source.content.trim() === prompt.content.trim() &&
+    (source.authorId ?? null) === (prompt.authorId ?? null)
+  );
 }
 
 /** The earlier attempts a turn carries in its Details, oldest first. */

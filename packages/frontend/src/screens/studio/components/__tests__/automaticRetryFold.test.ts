@@ -70,11 +70,11 @@ const failure = message({
 });
 const failedAttempt = [retryStatus, step("failed-pwd", FAILED_JOB, FAILED_RUN, 3), failure];
 
-function resend(overrides: { automatic: boolean; runId?: string }): ChatMessage {
+function resend(overrides: { automatic: boolean; runId?: string; content?: string }): ChatMessage {
   return message({
     id: "resend",
     role: "user",
-    content: PROMPT_TEXT,
+    content: overrides.content ?? PROMPT_TEXT,
     timestamp: 5,
     metadata: {
       ...(overrides.runId ? { runId: overrides.runId } : {}),
@@ -155,6 +155,54 @@ describe("an automatic retry reads as one turn", () => {
     const rows = transcript([prompt, ...failedAttempt, resend({ automatic: true })]);
 
     expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${FAILED_JOB}`]);
+    expect(isAutomaticRetryPending(rows[1])).toBe(false);
+  });
+
+  // The chat leaves out only a resend it can see repeats the failed turn's
+  // own prompt: a message marked automatic is anyone's to send, and it must
+  // never hide words no one else has read.
+  it("shows a message marked automatic that does not repeat the failed turn's prompt", () => {
+    const rows = transcript([
+      prompt,
+      ...failedAttempt,
+      resend({ automatic: true, runId: RETRY_RUN, content: "Also delete the pricing page." }),
+      step("retry-pwd", RETRY_JOB, RETRY_RUN, 6),
+      retryReply,
+    ]);
+
+    expect(rows.map((row) => row.id)).toEqual([
+      "prompt",
+      `agent-job-thread:${FAILED_JOB}`,
+      "resend",
+      `agent-job-thread:${RETRY_JOB}`,
+    ]);
+    expect(readEarlierAttempts(rows[3])).toEqual([]);
+  });
+
+  it("shows a resend whose failure is not in the loaded transcript", () => {
+    // Only the newest page is loaded: the failed turn is out of view.
+    const rows = transcript([
+      resend({ automatic: true, runId: RETRY_RUN }),
+      step("retry-pwd", RETRY_JOB, RETRY_RUN, 6),
+      retryReply,
+    ]);
+
+    expect(rows.map((row) => row.id)).toEqual(["resend", `agent-job-thread:${RETRY_JOB}`]);
+  });
+
+  it("stops trying again once the resend failed before any job started", () => {
+    // The controller refused the resend (here: no credits left) and wrote its
+    // failure for the resend's run; no job ever ran it.
+    const refused = message({
+      id: "refused",
+      content: "Paused: out of credits",
+      timestamp: 6,
+      messageType: "error",
+      metadata: { runId: RETRY_RUN, source: "controller", outcome: "failed", messageType: "error" },
+    });
+    const rows = transcript([prompt, ...failedAttempt, resend({ automatic: true, runId: RETRY_RUN }), refused]);
+
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${FAILED_JOB}`, "refused"]);
     expect(isAutomaticRetryPending(rows[1])).toBe(false);
   });
 
