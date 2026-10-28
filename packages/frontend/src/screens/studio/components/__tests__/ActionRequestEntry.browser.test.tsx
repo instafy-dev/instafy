@@ -57,6 +57,7 @@ describe("a request_browser card", () => {
       opening: text("browser-request-opening"),
       openingNote: text("browser-request-opening-note"),
       opened: text("browser-request-opened"),
+      notOpened: text("browser-request-not-opened"),
       reason: text("browser-request-reason"),
       button: container.querySelector<HTMLButtonElement>('[data-testid="browser-request-continue"]'),
     };
@@ -151,9 +152,15 @@ describe("a request_browser card", () => {
     expect(card.button).toBeNull();
     expect(card.destination).toBeNull();
     expect(card.opened).toBeNull();
+    // It never opened, and it no longer promises to: a plain "Not opened" in
+    // place of "Studio opens the browser and continues this task there."
+    expect(card.notOpened).toBe("Not opened");
+    expect(container.textContent).not.toContain("Studio opens the browser");
     card = await render(task, { ...web, newestCardKey: "job:job-1" });
     expect(card.button?.disabled).toBe(false);
     expect(card.destination).toBe("For dashboard.stripe.com");
+    expect(card.notOpened).toBeNull();
+    expect(container.textContent).toContain("Studio opens the browser and continues this task there.");
     // No reason or warning on a card that offers nothing to press.
     card = await render(task, { ...web, sharedUnavailable: true, newestCardKey: "job:job-2", cardStates: new Map([[
       "job:job-1", { kind: "button", reason: "This starts a second cloud machine for this space." } as const,

@@ -386,10 +386,12 @@ export function ActionRequestEntry({
       icon={icon}
       overline={parsed.overline}
       title={fallbackTitle}
-      description={parsed.description}
+      // A card a newer card followed no longer offers to open anything, so it
+      // no longer says what pressing it does.
+      description={browserPhase === "superseded" ? null : parsed.description}
       children={
-        parsed.input || parsed.context || (browserPhase !== "superseded" && browserDestinations.length > 0) ||
-          browserUnavailableNote || browserPhase === "opening" || browserPhase === "opened" || browserReason ? (
+        parsed.input || parsed.context || (browserPhase === "button" && browserDestinations.length > 0) ||
+          browserUnavailableNote || browserPhase !== "button" || browserReason ? (
           <div className="space-y-2">
             {browserPhase === "opening" ? (
               <Text as="div" variant="caption" tone="muted" className="flex items-center gap-2 break-all" data-testid="browser-request-opening">
@@ -403,6 +405,10 @@ export function ActionRequestEntry({
             ) : browserPhase === "opened" ? (
               <div className="flex items-center gap-2" data-testid="browser-request-opened">
                 <Badge tone="success">Opened</Badge>
+              </div>
+            ) : browserPhase === "superseded" ? (
+              <div className="flex items-center gap-2" data-testid="browser-request-not-opened">
+                <Badge tone="neutral">Not opened</Badge>
               </div>
             ) : browserPhase === "button" && browserDestinations.length > 0 ? (
               <Text as="div" variant="caption" tone="muted" className="break-all" data-testid="browser-request-destination">

@@ -436,11 +436,8 @@ import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
 import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
-import {
-  sharedBrowserAgentPageIds,
-  sharedBrowserConversationRunIds,
-  sharedBrowserFollowUp,
-} from "./browserHandoffRouting";
+import { sharedBrowserAgentPageIds, sharedBrowserConversationRunIds } from "./browserHandoffRouting";
+import { useSharedBrowserFollowUp } from "./useSharedBrowserFollowUp";
 import { BROWSER_AGENT_DEFAULT_NAME } from "./browserAgentTabs";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
@@ -4598,28 +4595,33 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   // A message from the chat right after this person's turn in Instafy's
   // browser goes on there while that browser is still open, without another
-  // card or press (sharedBrowserFollowUp).
-  const resolveSharedBrowserFollowUp = useCallback(
-    () =>
-      browserTransport === "shared" && (browserSessionOpen || hasHiddenBrowserSession)
-        ? sharedBrowserFollowUp(Object.values(runs ?? {}), {
-            conversationId: activeConversationEntry?.controllerId ?? null,
-            runtimeId: resolvedBrowserRuntimeId,
-            userId: currentUserId,
-            pages: sharedBrowserChromePages,
-          })
-        : null,
-    [
-      activeConversationEntry?.controllerId,
-      browserSessionOpen,
-      browserTransport,
-      currentUserId,
-      hasHiddenBrowserSession,
-      resolvedBrowserRuntimeId,
-      runs,
-      sharedBrowserChromePages,
-    ],
-  );
+  // card or press (sharedBrowserFollowUp). The composer says so, and the
+  // person can keep the message in the chat instead.
+  const followUpRuns = useMemo(() => Object.values(runs ?? {}), [runs]);
+  const sharedBrowserFollowUpState = useSharedBrowserFollowUp({
+    enabled: browserTransport === "shared" && (browserSessionOpen || hasHiddenBrowserSession),
+    runs: followUpRuns,
+    conversationId: activeConversationEntry?.controllerId ?? null,
+    runtimeId: resolvedBrowserRuntimeId,
+    userId: currentUserId,
+    pages: sharedBrowserChromePages,
+  });
+  const resolveSharedBrowserFollowUp = sharedBrowserFollowUpState.resolve;
+  const dismissSharedBrowserFollowUp = sharedBrowserFollowUpState.dismiss;
+  const keepNextMessageInChat = useCallback(() => {
+    dismissSharedBrowserFollowUp();
+    focusInput();
+  }, [dismissSharedBrowserFollowUp, focusInput]);
+  // Shown only where a send would follow up in the browser (useChatSubmitFlow):
+  // the chat's own composer, with no picture and no new tab for the message.
+  const composerBrowserFollowUp =
+    sharedBrowserFollowUpState.followUp &&
+    !browserComposerActive &&
+    !skillSetupConversation &&
+    imageAttachments.length === 0 &&
+    pendingBrowserLaunchMode !== "new_page"
+      ? { onCancel: keepNextMessageInChat }
+      : null;
 
   const { submissionPending, submitMessage } = useChatSubmitFlow({
     activeConversationEntry,
@@ -6778,6 +6780,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         pendingNewTab={pendingBrowserLaunchMode === "new_page"
           ? { onCancel: handleClearPendingNewBrowserSession }
           : null}
+        browserFollowUp={composerBrowserFollowUp}
         composerOverlayRef={composerOverlayRef}
         composerAutoHidden={composerAutoHidden}
         touchLikeInput={touchLikeInput}

@@ -86,14 +86,21 @@ function runStartedAt(run: RunRecord): number {
   return Date.parse(run.createdAt ?? run.updatedAt ?? "") || 0;
 }
 
+/** The browser turn a chat message continues, its tab, and until when that applies. */
+export type SharedBrowserFollowUp<Page> = { runId: string; page: Page; endsAtMs: number };
+
 /**
  * The browser turn a message from the chat continues in Instafy's browser,
  * and the tab it continues in. Only when the conversation's newest run is
  * this person's Shared Browser run on this browser, it finished successfully
- * within {@link SHARED_BROWSER_FOLLOW_UP_WINDOW_MS}, and its tab is still
- * open. Studio sends such a message as a browser turn in that tab, naming the
- * run it continues (`browserContinuesRunId`), so the runtime carries the
- * run's approvals over and no card or press stands in between. Null
+ * within {@link SHARED_BROWSER_FOLLOW_UP_WINDOW_MS}, its tab is still open,
+ * and it did not continue a card Octo builds from (`browserHandsBack`): a
+ * browser turn has only the browser's tools, so after a building card's
+ * browser turn the building turn keeps the chat, as it does with the
+ * hand-back. Studio sends such a message as a browser turn in that tab,
+ * naming the run it continues (`browserContinuesRunId`), so the runtime
+ * carries the run's approvals over and no card or press stands in between;
+ * the composer says so while it applies (useSharedBrowserFollowUp). Null
  * otherwise: the message is an ordinary chat turn.
  */
 export function sharedBrowserFollowUp<Page extends { id: string }>(
@@ -105,7 +112,7 @@ export function sharedBrowserFollowUp<Page extends { id: string }>(
     pages: readonly Page[];
     nowMs?: number;
   },
-): { runId: string; page: Page } | null {
+): SharedBrowserFollowUp<Page> | null {
   if (!scope.conversationId || !scope.runtimeId || !scope.userId) return null;
   let newest: RunRecord | null = null;
   for (const run of runs) {
@@ -117,14 +124,16 @@ export function sharedBrowserFollowUp<Page extends { id: string }>(
     !newest || !UUID.test(newest.id) || newest.status !== "success" ||
     metadata?.browserTransport !== "shared" ||
     metadata.browserRuntimeId !== scope.runtimeId ||
-    metadata.initiatingUserId !== scope.userId
+    metadata.initiatingUserId !== scope.userId ||
+    metadata.browserHandsBack === true
   ) {
     return null;
   }
   const endedAt = runTimestamp(newest);
-  if (!endedAt || (scope.nowMs ?? Date.now()) - endedAt > SHARED_BROWSER_FOLLOW_UP_WINDOW_MS) return null;
+  const endsAtMs = endedAt + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS;
+  if (!endedAt || (scope.nowMs ?? Date.now()) > endsAtMs) return null;
   const page = scope.pages.find((candidate) => candidate.id === metadata.browserPageId);
-  return page ? { runId: newest.id, page } : null;
+  return page ? { runId: newest.id, page, endsAtMs } : null;
 }
 
 function activeSharedBrowserRuns(runs: readonly RunRecord[], runtimeId: string): RunRecord[] {

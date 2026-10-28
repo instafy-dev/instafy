@@ -265,12 +265,30 @@ describe("sharedBrowserFollowUp", () => {
   });
 
   it("continues the person's browser turn when it was the chat's last, in its own tab", () => {
-    expect(sharedBrowserFollowUp([earlierTurn, browserTurn()], scope)).toEqual({ runId: RUN_ID, page: { id: "page-1" } });
+    expect(sharedBrowserFollowUp([earlierTurn, browserTurn()], scope))
+      .toEqual(expect.objectContaining({ runId: RUN_ID, page: { id: "page-1" } }));
     // Within the time the runtime keeps that turn's approvals, and no longer.
     expect(sharedBrowserFollowUp([browserTurn()], { ...scope, nowMs: ENDED_AT + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS }))
-      .toEqual({ runId: RUN_ID, page: { id: "page-1" } });
+      .toEqual(expect.objectContaining({ runId: RUN_ID, page: { id: "page-1" } }));
     expect(sharedBrowserFollowUp([browserTurn()], { ...scope, nowMs: ENDED_AT + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS + 1 }))
       .toBeNull();
+  });
+
+  // A browser turn has only the browser's tools. After the browser turn of a
+  // card Octo builds from (a page, a map), the building turn owns the chat:
+  // "Build the comparison page now with what you can verify" must reach a
+  // turn that can build it, even when the browser read nothing and so handed
+  // nothing back.
+  it("leaves the message to the chat after the browser turn of a card Octo builds from", () => {
+    expect(sharedBrowserFollowUp([browserTurn({}, { browserRequestOf: `job:${JOB_ID}`, browserHandsBack: true })], scope))
+      .toBeNull();
+    // A question's card: the follow-up goes on in the browser.
+    expect(sharedBrowserFollowUp([browserTurn({}, { browserRequestOf: `job:${JOB_ID}` })], scope))
+      .toEqual(expect.objectContaining({ runId: RUN_ID, page: { id: "page-1" } }));
+  });
+
+  it("says until when the follow-up applies", () => {
+    expect(sharedBrowserFollowUp([browserTurn()], scope)?.endsAtMs).toBe(ENDED_AT + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS);
   });
 
   it("leaves the message to the chat when a later turn was not in the browser", () => {
