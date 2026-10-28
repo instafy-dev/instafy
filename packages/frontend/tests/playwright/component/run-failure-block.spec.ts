@@ -18,10 +18,7 @@ const REFRESH_424 =
 // it, beside "Run failed", "Ran a command" and "✓ Retried".
 const NO_CHANGES = "Codex did not apply any workspace changes for a file-modifying request.";
 
-async function mountFixture(
-  page: Page,
-  { dark = false, failureText = REFRESH_424 }: { dark?: boolean; failureText?: string } = {},
-): Promise<string[]> {
+async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {}): Promise<string[]> {
   const deps = await resolveViteReactDependencies(page);
   const main = `
     import "/src/styles/tailwind.css";
@@ -44,13 +41,15 @@ async function mountFixture(
     function Fixture() {
       const [aiAccessMode, setAiAccessMode] = React.useState("byoc");
       const [autoRetrying, setAutoRetrying] = React.useState(false);
+      const [failureText, setFailureText] = React.useState(${JSON.stringify(REFRESH_424)});
       window.__setAiAccessMode = setAiAccessMode;
       window.__setAutoRetrying = setAutoRetrying;
+      window.__setFailureText = setFailureText;
       const failure = {
-        id: "failure-" + aiAccessMode, role: "assistant", authorId: null, content: ${JSON.stringify(failureText)},
+        id: "failure-" + aiAccessMode, role: "assistant", authorId: null, content: failureText,
         timestamp: 0, files: null, messageType: "error",
         metadata: { source: "agent", outcome: "failed", messageType: "error", jobId,
-          errorMessage: ${JSON.stringify(failureText)}, aiAccessMode },
+          errorMessage: failureText, aiAccessMode },
       };
       const retry = {
         pendingRetryKey: null, autoRetryingKey: autoRetrying ? failure.id : null,
@@ -111,7 +110,7 @@ async function presses(page: Page): Promise<{ retry: number; manageAi: number }>
 
 for (const dark of [false, true]) {
   for (const width of [1280, 390]) {
-    test(`a turn the AI never answered offers its actions by keyboard at ${width}px (${dark ? "dark" : "light"})`, async ({ page }, testInfo) => {
+    test(`a failed turn offers its actions by keyboard, in plain words, and is one quiet line while it is tried again, at ${width}px (${dark ? "dark" : "light"})`, async ({ page }, testInfo) => {
       test.setTimeout(60_000);
       await page.setViewportSize({ width, height: 800 });
       const errors = await mountFixture(page, { dark });
@@ -161,35 +160,24 @@ for (const dark of [false, true]) {
       await expect(page.locator("main")).not.toContainText(/upstream|provider|credential|switch|sign in/i);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({ path: testInfo.outputPath(`instafy-ai-${width}-${dark ? "dark" : "light"}.png`) });
-      expect(errors, errors.join("; ")).toEqual([]);
-    });
-  }
-}
 
-for (const dark of [false, true]) {
-  for (const width of [1280, 390]) {
-    test(`a turn that made none of its changes reads in plain words, and calmly while it is tried again, at ${width}px (${dark ? "dark" : "light"})`, async ({ page }, testInfo) => {
-      test.setTimeout(60_000);
-      await page.setViewportSize({ width, height: 800 });
-      const errors = await mountFixture(page, { dark, failureText: NO_CHANGES });
+      // A turn that made none of its changes: one plain sentence and its
+      // actions; nothing technical, one status, no summary line above it.
       const main = page.locator("main");
-      const body = page.getByTestId("run-failure-body");
-      const retry = body.getByRole("button", { name: "Try again" });
-      const details = body.getByRole("button", { name: "Details" });
-
-      // One plain sentence and its actions; nothing technical, one status.
+      await page.evaluate(() => (window as unknown as { __setFailureText: (text: string) => void }).__setFailureText(
+        "Codex did not apply any workspace changes for a file-modifying request.",
+      ));
       await expect(body.locator("p").first()).toHaveText("Octo didn't finish the changes.");
       await expect(main).not.toContainText(/codex|workspace|request|Run failed|Ran a command|Retried/i);
       await expect(page.getByTestId("turn-activity-line")).toHaveCount(0);
       // The failure block's own tinted rule.
       await expect(main.locator(".border-l-2")).toHaveCount(1);
       await expect(details).toHaveAccessibleName("Details");
-      await expect(details).toHaveAttribute("aria-expanded", "false");
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({ path: testInfo.outputPath(`no-changes-${width}-${dark ? "dark" : "light"}.png`) });
-
-      // Keyboard: Try again, then Details, which opens the runtime's own words.
-      await page.keyboard.press("Tab");
+      // Keyboard, back from Details: Try again, then Details again.
+      await expect(details).toBeFocused();
+      await page.keyboard.press("Shift+Tab");
       await expect(retry).toBeFocused();
       await page.keyboard.press("Tab");
       await expect(details).toBeFocused();
@@ -203,12 +191,11 @@ for (const dark of [false, true]) {
 
       // Tried again by itself: one quiet line, no failure, no red, no actions.
       await page.evaluate(() => (window as unknown as { __setAutoRetrying: (on: boolean) => void }).__setAutoRetrying(true));
-      const quiet = page.getByTestId("run-failure-auto-retrying");
-      await expect(quiet).toContainText("Trying again…");
+      await expect(page.getByTestId("run-failure-auto-retrying")).toContainText("Trying again…");
       await expect(page.getByTestId("run-failure-body")).toHaveCount(0);
       await expect(main.getByRole("button")).toHaveCount(0);
-      await expect(main).not.toContainText(/didn't finish|Run failed|Retried|codex|workspace/i);
       await expect(main.locator(".border-l-2")).toHaveCount(0);
+      await expect(main).not.toContainText(/didn't finish|Run failed|Retried|codex|workspace/i);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({ path: testInfo.outputPath(`no-changes-retrying-${width}-${dark ? "dark" : "light"}.png`) });
       expect(errors, errors.join("; ")).toEqual([]);
