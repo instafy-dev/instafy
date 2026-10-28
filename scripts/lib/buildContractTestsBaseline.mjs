@@ -16,6 +16,7 @@ export const ADDED_BUILD_CONTRACT_TESTS = [
   "scripts/check-origin-git-compat-ci.test.mjs",
   "scripts/lib/localSecret.test.mjs",
   "scripts/lib/localTunnelBroker.test.mjs",
+  "scripts/lib/devStackProcesses.test.mjs",
   "scripts/octo-turn-grade.test.mjs",
   "scripts/fake-rate-limit-upstream.test.mjs",
   "scripts/octo-turn-release.test.mjs",

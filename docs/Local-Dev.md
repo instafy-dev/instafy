@@ -3,6 +3,12 @@
 ## Start the stack
 - Full stack (Supabase + controller + proxy + provider + git-canonical services): `pnpm stack:up`
 - Stop everything: `pnpm stack:down`
+- The stack stops only the controller and provider it started, by the pids it recorded in
+  `tmp/.controller.pid` and `tmp/.provider.pid` (and their process groups' listeners). It never looks a
+  process up by name, so another checkout's or project's controller keeps running, even on the same port.
+  A recorded pid counts only while it is still that process: one that started after the pid file was
+  written holds a reused pid (possibly another project's controller) and is left running.
+  A provider already on the port when the stack starts is used as it is and left running on `stack:down`.
 
 ## Git-canonical (local git service)
 Git-canonical services (git-edge + git-shard-0 + origin-gateway) are on by default; set
