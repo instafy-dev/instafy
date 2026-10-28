@@ -1,4 +1,0 @@
----
----
-
-The pinned `interactive-map` skill pack is now `instafy-dev/maps-skill-pack` v0.1.4, with the map fixes from the 27 Oct live test. `uw plan` takes one stop, so "3 days in Lisbon" is a stay whose days are loops from one base instead of a "Lisbon → Lisbon" travel day. A stop's places are grouped by area, and `uw plan` and `uw validate` warn when a day has a place far from its others or nearer another day's. `add-point` prefers a candidate whose own name is the query's over one named after it ("Padrão dos Descobrimentos", not its viewpoint). The departure day is marked and reads "Departure". `uw host --detach` prints the `instafy preview open … --serve-cmd …` line the skill now runs, so a stopped map comes back from its card. With `INSTAFY_CACHE_DIR`, a site's state and background jobs live in the space's folder, not in `.uwcache/` among the space's files. No package changes.
