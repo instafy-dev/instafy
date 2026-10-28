@@ -302,6 +302,16 @@ const special = {
     description: control("", { nameAttribute: "", idAttribute: "" }),
     nameHints: { sprite: "/assets/icons.svg#icon-search", position: "top right" },
   },
+  // The label of an element inside an unnamed control names it, but never
+  // feeds the step's category.
+  "inner-label": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { innerName: "Lupa", position: "top right" },
+  },
+  "inner-label-risky": {
+    description: control("", { nameAttribute: "", idAttribute: "" }),
+    nameHints: { innerName: "Delete account", position: "top right" },
+  },
 };
 // "<mode>-typeless": the same button with no type attribute, which the
 // browser reports as type "submit" even outside a form.
@@ -5259,6 +5269,7 @@ fn controls_are_named_by_what_they_draw_and_what_sits_beside_them() {
         ),
         ("image-input-alt", "Pesquisar"),
         ("sprite-icon", "search button in the top right"),
+        ("inner-label", "Lupa button in the top right"),
     ] {
         let fixture = EmbeddedControllerFixture::new();
         let snapshot = payload_of(&fixture.run(mode, "GET", "/v1/snapshot", None));
@@ -5288,6 +5299,32 @@ fn controls_are_named_by_what_they_draw_and_what_sits_beside_them() {
     assert!(label.ends_with("Pesquisa"), "{label}");
     assert!(!label.contains("image/svg+xml"), "{label}");
     assert!(!fixture.action_log().contains("image/svg+xml"));
+
+    // An inner element's label only names the control and never sets the
+    // step's category; like any name, its words can still make a routine step
+    // ask (the consequential floor), never let one go.
+    let mode = "inner-label-risky";
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let snapshot = payload_of(&fixture.call(mode, "GET", "/v1/snapshot", None));
+    assert_eq!(
+        snapshot["interactiveElements"][0]["label"],
+        "Delete account button in the top right"
+    );
+    let snapshot_id = snapshot["snapshotId"].as_str().expect("snapshot id");
+    let (output, requests) = fixture.call_deciding(
+        mode,
+        "POST",
+        "/v1/click",
+        Some(&json!({"index": 0, "snapshotId": snapshot_id}).to_string()),
+        &["deny"],
+    );
+    assert!(failure_of(&output).contains("approval_denied"));
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(
+        requests[0]["display"]["label"],
+        "Change something: Delete account button in the top right"
+    );
 }
 
 /// A page whose title is only a media type ("image/svg+xml") has no title:

@@ -532,7 +532,9 @@
     // An svg draws text only in these; its metadata, title, desc, defs,
     // style, symbols, masks and gradients draw none.
     const SVG_TEXT = new Set(["svg", "g", "a", "switch", "text", "tspan", "textPath"]);
-    const MAX_NODES = 2_000;
+    // A control's own text is short; a link around a whole card is cut here
+    // (its full text still reaches the step's risk words as textContent).
+    const MAX_NODES = 400;
     const CONTROL = "a[href], button, input, select, textarea, [role='button'], [role='link']";
     const clean = (value, max) =>
       (typeof value === "string" ? value : "").replace(/\s+/g, " ").trim().slice(0, max);

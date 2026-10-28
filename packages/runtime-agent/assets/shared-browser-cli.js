@@ -1139,19 +1139,22 @@ function describeInPage(rule, forms, names, element, sources) {
   try {
     const read = (node, name) =>
       node && typeof node.getAttribute === "function" ? node.getAttribute(name) : null;
-    // An image's alt text, an svg's title, or the label or title of an
-    // element inside the control (an icon's own name).
     const image = element.querySelector(
-      "img[alt], [role='img'][aria-label], svg title, svg[aria-label], [aria-label], [title]",
+      "img[alt], [role='img'][aria-label], svg title, svg[aria-label], i[aria-label], i[title], span[aria-hidden='true'][title]",
     );
     const imageTag = image && typeof image.tagName === "string" ? image.tagName.toLowerCase() : "";
     const imageText = !image
       ? ""
       : imageTag === "img"
-        ? read(image, "alt") || read(image, "title")
+        ? read(image, "alt")
         : imageTag === "title"
           ? image.textContent
           : read(image, "aria-label") || read(image, "title");
+    // The label or title of any other element inside the control: it only
+    // names an unnamed control and never feeds the step's category, so a
+    // page cannot turn a button into a menu toggle through a child's label.
+    const inner = element.querySelector("[aria-label], [title]");
+    const innerName = inner ? read(inner, "aria-label") || read(inner, "title") : "";
     const describedBy = bounded(read(element, "aria-describedby"))
       .split(/\s+/)
       .filter(Boolean)
@@ -1183,11 +1186,25 @@ function describeInPage(rule, forms, names, element, sources) {
           : "";
     // An svg sprite's symbol (`<use href="#icon-search">`) names its icon.
     const sprite = element.querySelector("use");
+    // The text beside it is read only for a control with no name of its own.
     let nearby = "";
-    try {
-      nearby = names.nearbyTextOf(element);
-    } catch (_) {
-      nearby = "";
+    const ownText = (() => {
+      try {
+        return names.shownTextOf(element, 80);
+      } catch (_) {
+        return "";
+      }
+    })();
+    if (
+      !ownText && !ownName && !imageText && !innerName &&
+      !read(element, "aria-label") && !read(element, "aria-labelledby") && !read(element, "title") &&
+      !read(element, "placeholder") && !(element.labels && element.labels.length)
+    ) {
+      try {
+        nearby = names.nearbyTextOf(element);
+      } catch (_) {
+        nearby = "";
+      }
     }
     nameHints = {
       tooltip: bounded(
@@ -1198,6 +1215,7 @@ function describeInPage(rule, forms, names, element, sources) {
       ),
       describedBy: bounded(describedBy, 120),
       image: bounded(imageText || "", 120),
+      innerName: bounded(innerName || "", 120),
       ownName: bounded(ownName || "", 120),
       sprite: bounded(read(sprite, "href") || read(sprite, "xlink:href") || "", 160),
       nearby: bounded(nearby, 40),
@@ -1311,6 +1329,7 @@ function nameHintsOf(raw) {
     tooltip: text(raw?.tooltip, 120),
     describedBy: text(raw?.describedBy, 120),
     image: text(raw?.image, 120),
+    innerName: text(raw?.innerName, 120),
     ownName: text(raw?.ownName, 120),
     sprite: text(raw?.sprite, 160),
     nearby: text(raw?.nearby, 40),
@@ -1326,8 +1345,8 @@ function nameHintsOf(raw) {
 function stableNameHints(description) {
   const hints = description.nameHints || nameHintsOf(null);
   return {
-    tooltip: hints.tooltip, image: hints.image, ownName: hints.ownName, sprite: hints.sprite,
-    hasImage: hints.hasImage,
+    tooltip: hints.tooltip, image: hints.image, innerName: hints.innerName, ownName: hints.ownName,
+    sprite: hints.sprite, hasImage: hints.hasImage,
   };
 }
 
@@ -1390,6 +1409,8 @@ async function describeElement(locator, index, hiddenNames) {
       role: attributes.role,
       type: attributes.inputType,
       ...nameHints,
+      // An inner element's label names an unnamed control like its image.
+      image: nameHints.image || nameHints.innerName,
       iconHint: [policy ? policy.iconHint : "", nameHints.sprite].filter(Boolean).join(" "),
     })
   ).slice(0, MAX_LABEL_CHARS);
