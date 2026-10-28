@@ -70,8 +70,10 @@ export default defineConfig({
   retries: 0,
   timeout: 30_000,
   // Required cases run serially. Leave room for startup and teardown while
-  // bounding the complete lane without extending any individual test.
-  globalTimeout: 1_200_000,
+  // bounding the complete lane without extending any individual test. At 227
+  // cases the serial run takes 17-20 min on hosted runners, so 20 min stopped
+  // passing runs short; 30 min still fits the job's 40.
+  globalTimeout: 1_800_000,
   outputDir: "test-results/browser-ci/browser-ui",
   reporter: [
     ["list"],
