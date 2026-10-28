@@ -2,7 +2,6 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSPropert
 import {
   Bell,
   ChatLines,
-  ClipboardCheck,
   Coins,
   Eye,
   GitBranch,
@@ -16,8 +15,6 @@ import {
   Send,
   SidebarCollapse,
   SidebarExpand,
-  Terminal,
-  Threads,
   Undo,
   Xmark,
 } from "iconoir-react";
@@ -48,7 +45,6 @@ import {
   type TurnBeatId,
   type TurnFile,
   type TurnStep,
-  type TurnStepKind,
 } from "./landingTurnScript";
 
 // Crew colours, one per participant in roster order, as inline styles
@@ -158,22 +154,6 @@ function SpeakerLabel({ name, time }: { name: string; time: string }) {
   );
 }
 
-function StepGlyph({ kind, ownerHandle }: { kind: TurnStepKind; ownerHandle?: string }) {
-  if (ownerHandle) {
-    return <span className={chrome.RAIL_CHIP_INITIAL}>{ownerHandle.charAt(0).toUpperCase()}</span>;
-  }
-  const className = "h-3.5 w-3.5";
-  switch (kind) {
-    case "tool":
-      return <Threads aria-hidden="true" className={className} />;
-    case "command":
-      return <Terminal aria-hidden="true" className={className} />;
-    case "plan":
-      return <ClipboardCheck aria-hidden="true" className={className} />;
-    default:
-      return <ChatLines aria-hidden="true" className={className} />;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Rail
@@ -667,43 +647,29 @@ function TeammateMessage({ text }: { text: string }) {
 interface RunTestIds {
   avatar: string;
   thread: string;
-  typing: string;
-  rail: string;
-  chip: string;
-  spinner: string;
-  caption: string;
-  owner: string;
+  line: string;
   summary: string;
 }
 
 const RUN_TEST_IDS: RunTestIds = {
   avatar: "landing-octo-working",
   thread: "landing-octo-thread",
-  typing: "landing-typing-line",
-  rail: "landing-run-rail",
-  chip: "landing-run-chip",
-  spinner: "landing-run-spinner",
-  caption: "landing-run-caption",
-  owner: "landing-owner-badge",
+  line: "landing-run-line",
   summary: "landing-summary",
 };
 
 const BROWSE_TEST_IDS: RunTestIds = {
   avatar: "landing-browse-working",
   thread: "landing-browse-thread",
-  typing: "landing-browse-typing",
-  rail: "landing-browse-rail",
-  chip: "landing-browse-chip",
-  spinner: "landing-browse-spinner",
-  caption: "landing-browse-caption",
-  owner: "landing-browse-owner",
+  line: "landing-browse-line",
   summary: "landing-browse-summary",
 };
 
 /**
- * One of Octo's runs, the agent job thread preview in its compact form (the
- * chat column is always under 760px, threadPreviewHelpers.tsx): the typing
- * line, the activity rail with one chip per step and the live step's caption,
+ * One of Octo's runs, the agent job thread preview as the studio draws it
+ * (AgentJobThreadPreviewLayout.tsx): one quiet activity line that says what
+ * the run does while it runs ("Thinking…", then each step's own label) and
+ * what it did once it ended, with Details beside it (TurnActivityLine.tsx),
  * then the summary and whatever the run left (sections), joined by the spine.
  */
 function OctoRun({
@@ -713,6 +679,7 @@ function OctoRun({
   doneBeat,
   beat,
   playing,
+  activity,
   summary,
   sections,
   completeBeat,
@@ -721,12 +688,14 @@ function OctoRun({
   messageAnchor,
 }: {
   steps: readonly TurnStep[];
-  /** The beat each step's chip lands on. */
+  /** The beat each step starts on. */
   stepBeats: readonly number[];
   thinkingBeat: number;
   doneBeat: number;
   beat: number;
   playing: boolean;
+  /** The done line ("Edited 3 files, ran tests"). */
+  activity: string;
   summary: ReactNode;
   sections?: ReactNode;
   /** The beat the run's last section is drawn on (the spine waits for it). */
@@ -740,35 +709,12 @@ function OctoRun({
   const started = beat >= thinkingBeat;
   const runLive = playing && started && !done;
   const octoMotion: OctoMarkMotion = runLive ? "thinking" : "idle";
-  const visibleChips = stepBeats.filter((at) => beat >= at).length;
-  const newestChip = visibleChips - 1;
-  const liveStep = playing && !done && visibleChips > 0 ? steps[newestChip] : null;
-  const commandLive = liveStep?.kind === "command";
-  const showTypingLine = runLive && visibleChips === 0;
+  const startedSteps = stepBeats.filter((at) => beat >= at).length;
+  const liveText = startedSteps > 0 ? steps[startedSteps - 1].live : "Thinking…";
+  const lineText = done ? activity : liveText;
+  const sweeping = runLive;
   const threadComplete = beat >= completeBeat;
   const testId = (name: string) => (withTestIds ? name : undefined);
-  const renderChips = (from: number, to: number) =>
-    steps.slice(from, to).map((step, offset) => {
-      const index = from + offset;
-      const shown = index < visibleChips;
-      const live = playing && shown && index === newestChip && !done && !commandLive;
-      return (
-        <span
-          key={index}
-          data-testid={testId(ids.chip)}
-          className={[
-            chrome.RAIL_CHIP,
-            playing && shown ? "instafy-compact-event-pill" : "",
-            live ? "instafy-compact-event-pill-live" : "",
-            shown ? "" : "invisible",
-          ]
-            .filter(Boolean)
-            .join(" ")}
-        >
-          <StepGlyph kind={step.kind} ownerHandle={step.ownerHandle} />
-        </span>
-      );
-    });
 
   return (
     <ChatBubbleRow
@@ -787,12 +733,10 @@ function OctoRun({
     >
       <div className={chrome.THREAD_ROOT} style={THREAD_ROOT_STYLE}>
         <div className={chrome.THREAD_BODY} data-testid={testId(ids.thread)} data-cub-anchor={messageAnchor ? "octo-message" : undefined}>
-          {/* The rail row and the live caption each draw their own
-              full-height stem, so while the run is live the line ends at the
-              caption. The bridging spine that joins summary, file rail and
-              artifact spans the body's full height, which is already the
-              run's final height, so it waits for the last section to be
-              drawn; otherwise it would run on down through the sections
+          {/* The bridging spine that joins the line, the summary, the file
+              rail and the artifact spans the body's full height, which is
+              already the run's final height, so it waits for the last section
+              to be drawn; otherwise it would run on down through the sections
               still laid out invisibly below. */}
           <ThreadSpine
             tone="primary"
@@ -800,79 +744,41 @@ function OctoRun({
             style={{ top: "32px", bottom: "16px" }}
           />
 
-          {/* Slot A: the typing line, then the chip rail in the same cell. */}
-          <div className="grid min-w-0">
-            {showTypingLine ? (
-              <div aria-hidden="true" data-pin="" className={`[grid-area:1/1] min-w-0 ${chrome.TYPING_LINE}`} data-testid={testId(ids.typing)}>
-                <span className={chrome.TYPING_LINE_TEXT} data-sweep-text="Thinking…">
-                  Thinking…
+          {/* The activity line: one line at every beat, so nothing moves as
+              its words change. */}
+          <Reveal visible={started}>
+            <div aria-hidden="true" data-pin="" className={chrome.ACTIVITY_SECTION}>
+              <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 9, maskLine: true }]} />
+              <div className={chrome.ACTIVITY_ROW}>
+                <span
+                  className={sweeping ? chrome.ACTIVITY_TEXT_LIVE : chrome.ACTIVITY_TEXT}
+                  data-sweep-text={sweeping ? lineText : undefined}
+                  data-testid={testId(ids.line)}
+                >
+                  {lineText}
                 </span>
-              </div>
-            ) : null}
-            <Reveal visible={visibleChips > 0} className="[grid-area:1/1]">
-              <div aria-hidden="true" className={chrome.RAIL_ROW}>
-                <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 16, maskLine: true }]} />
-                <div className={chrome.RAIL_ROW_INNER}>
-                  <div className={chrome.RAIL_ROW_TRACK}>
-                    {/* The rail is drawn in three parts so the in-flight
-                        spinner sits immediately after the last drawn chip, the
-                        way the studio's own rail appends it, while the chips
-                        still to come keep their width in reserve behind it.
-                        One extra reserved slot stands in for the spinner, so
-                        the rail is the same width at every beat whether or not
-                        a command is in flight. Chips arrive one at a time here,
-                        so none of them carries the studio's cascade delay: the
-                        newest chip and the spinner beside it appear together. */}
-                    <div className={chrome.RAIL_CHIPS} data-testid={testId(ids.rail)}>
-                      {renderChips(0, visibleChips)}
-                      {commandLive ? (
-                        <span
-                          data-testid={testId(ids.spinner)}
-                          className={`${chrome.RAIL_CHIP} instafy-compact-event-pill instafy-compact-event-pill-live`}
-                        >
-                          <Spinner size="xs" tone="slate" className="h-3.5 w-3.5" />
-                        </span>
-                      ) : (
-                        <span className={`${chrome.RAIL_CHIP} invisible`} aria-hidden="true" />
-                      )}
-                      {renderChips(visibleChips, steps.length)}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </Reveal>
-          </div>
-
-          {/* Slot B: the live caption, then the summary in the same cell. */}
-          <div className="grid min-w-0 items-start">
-            {liveStep ? (
-              <div aria-hidden="true" data-pin="" className={`[grid-area:1/1] min-w-0 ${chrome.CAPTION_SECTION}`}>
-                <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 9, maskLine: true }]} />
-                <div className={chrome.CAPTION_ROW}>
-                  {liveStep.ownerHandle ? (
-                    <span className={chrome.OWNER_BADGE} data-testid={testId(ids.owner)}>
-                      {liveStep.ownerHandle}
-                    </span>
-                  ) : null}
-                  <span className={chrome.CAPTION_TEXT} data-sweep-text={liveStep.caption} data-testid={testId(ids.caption)}>
-                    {liveStep.caption}
+                {done ? (
+                  <span className={chrome.ACTIVITY_DETAILS}>
+                    Details
+                    <NavArrowRight aria-hidden="true" className="h-3 w-3" />
                   </span>
-                </div>
+                ) : null}
               </div>
-            ) : null}
-            <Reveal visible={done} className="[grid-area:1/1]" testId={testId(ids.summary)}>
-              <div className={chrome.SUMMARY_SECTION}>
-                <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 9, maskLine: true }]} />
-                <div className="min-w-0">
-                  <div className={chrome.SUMMARY_STACK}>
-                    <div className={chrome.MESSAGE_CONTENT}>
-                      <p className={chrome.MESSAGE_PARAGRAPH}>{summary}</p>
-                    </div>
+            </div>
+          </Reveal>
+
+          <Reveal visible={done} testId={testId(ids.summary)}>
+            <div className={chrome.SUMMARY_SECTION}>
+              <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 9, maskLine: true }]} />
+              <div className="min-w-0">
+                <div className={chrome.SUMMARY_STACK}>
+                  <div className={chrome.MESSAGE_CONTENT}>
+                    <p className={chrome.MESSAGE_PARAGRAPH}>{summary}</p>
                   </div>
                 </div>
               </div>
-            </Reveal>
-          </div>
+            </div>
+          </Reveal>
 
           {sections}
 
@@ -1018,6 +924,7 @@ export function TurnColumn({
             doneBeat={BEAT.DONE}
             beat={beat}
             playing={playing}
+            activity={scenario.activity}
             summary={<MessageParts parts={scenario.summaryParts} referenceOpen={fileReferenceOpen} withTestIds={withTestIds} />}
             completeBeat={runOneComplete}
             ids={RUN_TEST_IDS}
@@ -1070,17 +977,18 @@ export function TurnColumn({
                 </Reveal>
               </ChatBubbleRow>
 
-              {/* Row 5: Octo's browser run. Every Shared Browser step is a
-                  tool call, so its rail shows tool chips captioned "Calling
-                  tool…"; what Octo does on the page is captioned in the
+              {/* Row 5: Octo's browser run. Its line waits on Ada while the
+                  site prompt is up, then names each step and the preview's
+                  site; what Octo does on the page is captioned in the
                   browser beside the chat. */}
               <OctoRun
                 steps={browser.steps}
-                stepBeats={[index("approve"), index("loaded"), index("scroll"), index("click")]}
+                stepBeats={[index("approve"), index("navigate"), index("loaded"), index("scroll"), index("click")]}
                 thinkingBeat={index("browse")}
                 doneBeat={index("browseDone")}
                 beat={beat}
                 playing={playing}
+                activity={browser.activity}
                 summary={browser.summary}
                 completeBeat={index("browseDone")}
                 ids={BROWSE_TEST_IDS}

@@ -253,6 +253,13 @@ const CODEX_STATE_PROVIDER_KEY: &str = "provider";
 const CODEX_STATE_VERSION_KEY: &str = "version";
 const CODEX_REQUIRED_TOOL_METADATA_KEY: &str = "codex.required_tool";
 const PERSONAL_BROWSER_MCP_SERVER_NAME: &str = "instafy_personal_browser";
+
+/// The browsers whose step results carry `activity: {step, url, approval}` from their own
+/// state: the Shared Browser's controller and the Desktop Personal Browser.
+fn is_browser_step_server(server: &str) -> bool {
+    server.eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME)
+        || server.eq_ignore_ascii_case(PERSONAL_BROWSER_MCP_SERVER_NAME)
+}
 const SHARED_BROWSER_MCP_SERVER_NAME: &str = "instafy_shared_browser";
 const BROWSER_MCP_TOOL_NAMES: [&str; 8] = [
     "request_human_input",
@@ -4688,11 +4695,8 @@ impl CodexEventStreamAdapter {
                     "status": "in_progress",
                 });
                 // What the browser step is, for the turn's activity line: only the step's kind
-                // and a host (docs/Chat-Activity.md).
-                if tool_call
-                    .invocation
-                    .server
-                    .eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME)
+                // and a host (docs/Chat-Activity.md). Both browsers report the same facts.
+                if is_browser_step_server(&tool_call.invocation.server)
                     && let Some(step) = crate::shared_browser_activity::browser_step_facts(
                         &tool_call.invocation.tool,
                         tool_call.invocation.arguments.as_ref(),
@@ -4743,21 +4747,17 @@ impl CodexEventStreamAdapter {
                 });
                 // The step's kind, host, page key and approval from the browser's own result,
                 // and nothing else of it (shared_browser_activity).
-                if tool_call
-                    .invocation
-                    .server
-                    .eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME)
-                {
+                if is_browser_step_server(&tool_call.invocation.server) {
                     let terminal_code = terminal_consent
                         .as_ref()
                         .and_then(|signal| signal.get("code"))
                         .and_then(JsonValue::as_str);
+                    // With a terminal code, only the step's kind is read from it.
                     let payload = tool_call
                         .result
                         .as_ref()
                         .ok()
-                        .and_then(|result| result.structured_content.as_ref())
-                        .filter(|_| terminal_code.is_none());
+                        .and_then(|result| result.structured_content.as_ref());
                     if let Some(step) = crate::shared_browser_activity::browser_step_facts(
                         &tool_call.invocation.tool,
                         tool_call.invocation.arguments.as_ref(),
@@ -9056,6 +9056,69 @@ required = true
             click[0]["item"]["browserStep"],
             json!({"step": "click", "host": "visitlisboa.com"})
         );
+    }
+
+    #[test]
+    fn mcp_end_names_a_refused_search_and_a_personal_browser_step() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let end = |server: &str, tool: &str, structured: JsonValue| Event {
+            id: "evt_mcp_end".to_string(),
+            msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                call_id: format!("call_{tool}"),
+                invocation: McpInvocation {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                    arguments: Some(json!({"index": 0, "text": "Belém", "submit": true})),
+                },
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                duration: Duration::from_millis(1),
+                result: Ok(CallToolResult {
+                    content: vec![json!({"type": "text", "text": "blocked"})],
+                    structured_content: Some(structured),
+                    is_error: Some(false),
+                    meta: None,
+                }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        // The Personal Browser names its step's site from its own result.
+        let read = adapter.collect(&end(
+            "instafy_personal_browser",
+            "snapshot",
+            json!({"snapshot": {"title": "Call 555"}, "activity": {"step": "snapshot", "url": "https://www.visitlisboa.com/en"}}),
+        ));
+        let read = &read[0]["item"]["browserStep"];
+        assert_eq!(read["step"], "snapshot");
+        assert_eq!(read["host"], "visitlisboa.com");
+        assert!(read["pageKey"].is_string());
+        // A search the person said no to: runtime-agent's own terminal answer
+        // names the step a search; nothing else of it is read.
+        let refused = adapter.collect(&end(
+            "instafy_shared_browser",
+            "type",
+            json!({
+                "terminalConsent": {"state": "blocked", "terminal": true, "retryable": false, "code": "approval_denied"},
+                "activity": {"step": "search", "url": "https://evil.example/x", "approval": "free"},
+            }),
+        ));
+        assert_eq!(
+            refused[0]["item"]["browserStep"],
+            json!({"step": "search", "host": "visitlisboa.com", "approval": "denied"})
+        );
+        // Without it, typing with submit is a form sent.
+        let form = adapter.collect(&end(
+            "instafy_shared_browser",
+            "type",
+            json!({"terminalConsent": {"state": "blocked", "terminal": true, "retryable": false, "code": "approval_denied"}}),
+        ));
+        assert_eq!(form[0]["item"]["browserStep"]["step"], "submit");
     }
 
     #[test]

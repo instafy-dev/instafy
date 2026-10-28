@@ -369,6 +369,24 @@ const STEP_DIALOG_DETAILS: Record<string, string> = {
   change: "This may change something on the site.",
 };
 
+type PersonalBrowserStepKind =
+  | "navigate" | "open_tab" | "snapshot" | "click" | "type" | "press" | "scroll" | "tabs" | "status";
+
+// The step kind of each tool, for the turn's activity line; manual input
+// handoff is no browser step.
+const PERSONAL_BROWSER_STEP_KINDS: Partial<Record<PersonalBrowserControlOperation, PersonalBrowserStepKind>> = {
+  navigate: "navigate",
+  open_tab: "open_tab",
+  snapshot: "snapshot",
+  click: "click",
+  type: "type",
+  press: "press",
+  scroll: "scroll",
+  list_tabs: "tabs",
+  select_tab: "tabs",
+  close_tab: "tabs",
+};
+
 // An approved step's navigation is not asked about again: one use, shortly after.
 const APPROVED_NAVIGATION_TTL_MS = 30_000;
 const MAX_TYPING_APPROVALS = 256;
@@ -494,6 +512,12 @@ export class PersonalBrowserHost {
   private currentBounds: PersonalBrowserBounds = { x: 0, y: 0, width: 1, height: 1 };
   private agentControlEnabled = false;
   private activeControlOperations = 0;
+  // What the running step is, for the turn's activity line: a search or a
+  // form sent, once the step's classification says so.
+  private stepKind: "search" | "submit" | null = null;
+  // The running step waited on a dialog (its site's or its own) and the
+  // person allowed it.
+  private stepAllowedAtPrompt = false;
   private humanControlDrainTimer: ReturnType<typeof setTimeout> | null = null;
   private approvalMode: PersonalBrowserApprovalMode = "ask";
   private humanNavigationInFlight = false;
@@ -2087,6 +2111,7 @@ export class PersonalBrowserHost {
       cancelId: 0,
       noLink: true,
     });
+    if (result.response === 1) this.stepAllowedAtPrompt = true;
     return result.response === 1;
   }
 
@@ -2124,6 +2149,7 @@ export class PersonalBrowserHost {
       cancelId: 0,
       noLink: true,
     });
+    if (result.response === 1 && epoch === this.controlEpoch) this.stepAllowedAtPrompt = true;
     return result.response === 1 && epoch === this.controlEpoch;
   }
 
@@ -2147,6 +2173,7 @@ export class PersonalBrowserHost {
       cancelId: 0,
       noLink: true,
     });
+    if (result.response === 1 && epoch === this.controlEpoch) this.stepAllowedAtPrompt = true;
     return result.response === 1 && epoch === this.controlEpoch;
   }
 
@@ -2506,17 +2533,57 @@ export class PersonalBrowserHost {
     }
   }
 
+  /**
+   * What a step was, for the turn's plain-language activity line
+   * (docs/Chat-Activity.md), from the browser's own state, never page text:
+   * its kind, the masked address of the page it left the tab on (only on a
+   * site the agent may use there) and how it was allowed: "once" when it
+   * waited on a dialog the person allowed, "routine" or "free" (a site
+   * search) when routine browsing took it without one. runtime-agent keeps
+   * only the kind, the address's host, a key of the address and the approval.
+   */
+  private stepActivity(kind: PersonalBrowserStepKind): Record<string, unknown> {
+    const step = (kind === "type" || kind === "press") && this.stepKind ? this.stepKind : kind;
+    let url: string | null = null;
+    try {
+      const current = this.getWebContents()?.getURL() || "";
+      const origin = current ? getPersonalBrowserOrigin(current) : null;
+      if (
+        origin &&
+        !PERSONAL_BROWSER_LINK_ONLY_GUARD.refusal(current) &&
+        !this.agentPageReachedPrivate(this.activeTab) &&
+        (this.siteSkipsPrompt(origin) || this.activeTab.approvedOrigins.has(origin))
+      ) {
+        url = redactUrl(current).text;
+      }
+    } catch {
+      url = null;
+    }
+    const acting = kind === "click" || kind === "type" || kind === "press";
+    // Only a step that can ask names how it was allowed.
+    const approval = this.stepAllowedAtPrompt && kind !== "status" && kind !== "tabs"
+      ? "once"
+      : acting && this.approvalMode === "routine"
+        ? step === "search" ? "free" : "routine"
+        : null;
+    return { step, url, ...(approval ? { approval } : {}) };
+  }
+
   private async handleControlOperation(
     operation: PersonalBrowserControlOperation,
     rawPayload: unknown,
   ): Promise<Record<string, unknown>> {
     if (operation === "status") {
-      return { status: this.getBrokerStatus() };
+      return { status: this.getBrokerStatus(), activity: this.stepActivity("status") };
     }
     this.assertAgentControlReady();
     this.activeControlOperations += 1;
+    this.stepKind = null;
+    this.stepAllowedAtPrompt = false;
     try {
-      return await this.performControlOperation(operation, rawPayload);
+      const result = await this.performControlOperation(operation, rawPayload);
+      const step = PERSONAL_BROWSER_STEP_KINDS[operation];
+      return step ? { ...result, activity: this.stepActivity(step) } : result;
     } finally {
       this.activeControlOperations -= 1;
       this.updateHumanControlDrain();
@@ -2773,6 +2840,8 @@ export class PersonalBrowserHost {
       let plannedSubmission: PersonalBrowserFormSubmission = null;
       if (payload.submit === true) {
         plannedSubmit = classifyPersonalBrowserStep("submit", resolvedTarget.descriptor, { pageUrl });
+        // Typing with submit into a search field is a search; into any other, it sends a form.
+        this.stepKind = plannedSubmit.category === "search" ? "search" : "submit";
         this.assertStepNotRefused(plannedSubmit);
         plannedSubmission = personalBrowserStepFormSubmission(resolvedTarget.descriptor, "submit");
         await this.requireFormSubmissionAllowed(plannedSubmission, pageUrl, operationEpoch);
@@ -2833,6 +2902,7 @@ export class PersonalBrowserHost {
         });
         this.assertNonSensitiveActivation(submitTarget.descriptor);
         let submitStep = classifyPersonalBrowserStep("submit", submitTarget.descriptor, { pageUrl });
+        this.stepKind = submitStep.category === "search" ? "search" : "submit";
         this.assertStepNotRefused(submitStep);
         // Typing can change where the form goes: the submission it now makes
         // is held to the form rules again.
@@ -2887,6 +2957,8 @@ export class PersonalBrowserHost {
     const key = normalizePersonalBrowserPressKey(payload.key);
     const pressPageUrl = contents.getURL() || "about:blank";
     let pressStep = classifyPersonalBrowserStep("press", resolvedTarget.descriptor, { key, pageUrl: pressPageUrl });
+    // Enter in a search field is a search.
+    if (key === "Enter" && pressStep.category === "search") this.stepKind = "search";
     const isImplicitFormSubmission =
       key === "Enter" && Boolean(resolvedTarget.descriptor.formActionText?.trim());
     if (

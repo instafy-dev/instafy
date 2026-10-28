@@ -368,6 +368,7 @@ import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
 import { BrowserApprovalRow } from "./BrowserApprovalRow";
 import { useChatSharedBrowserApproval } from "./useChatSharedBrowserApproval";
 import {
+  fallbackRowContinuesTail,
   TurnBrowserApprovalContext,
   TurnBrowserApprovalStateContext,
   useTurnBrowserApprovalProvider,
@@ -6497,7 +6498,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 frame={(row) => (
                   <ChatBubbleRow
                     align="left"
-                    avatar={renderAssistantAvatar(chatBrowserApprovalTarget.runMetadata)}
+                    // An avatar only when the row above is not the same run's.
+                    avatar={fallbackRowContinuesTail(
+                      displayedMessages[displayedMessages.length - 1],
+                      runs?.[chatBrowserApprovalTarget.runId] ??
+                        activeConversationRuns.find((run) => run.id === chatBrowserApprovalTarget.runId),
+                    )
+                      ? ASSISTANT_AVATAR_GUTTER_PLACEHOLDER
+                      : renderAssistantAvatar(chatBrowserApprovalTarget.runMetadata)}
                     testId="browser-approval-fallback"
                   >
                     {row}
