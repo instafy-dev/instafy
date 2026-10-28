@@ -216,6 +216,25 @@ Cancel remains the initial focus. Team settings errors and invitation conflicts 
 states use `LoadingStatus`; permissions and the scope of each recovery action stay with
 the owning screen.
 
+Browser permission prompts retain their in-pane overlay and focus behavior, while using
+`Surface`, `Checkbox`, and responsive `StudioDialogBody`/`StudioDialogFooter` spacing.
+Long destinations scroll with the body; Allow and Deny remain reachable in the footer.
+Participant control decisions use the inline action preset and shared body/caption
+typography. Keep identities and permission scope visible when those rows wrap.
+
+Use `InlineNotice appearance="inline"` for errors inside an existing toolbar, sharing
+popover or composer. It supplies the semantic icon and readable, wrapping text without
+adding another bordered panel. Standalone recovery guidance uses the default panel and
+its actions slot. Do not truncate actionable errors or make their explanation available
+only in a hover tooltip. Recovery actions retain their existing permission checks,
+destinations and pending behavior; shared presentation does not own that logic.
+
+The `/tests/fixtures/browser-approval-feedback/index.html` review mounts the actual
+approval, participant-control, handoff and recovery components with inert data. Its
+required browser checks cover 320px, 390px and desktop widths in both themes, including
+keyboard focus, pending decisions, long errors, touch targets and retry actions. These
+are component checks, not proof of a live browser transport or provider connection.
+
 Project invitations follow the same notice and action presets as team invitations,
 including pending-role conflicts and prepared email invitations. Notification settings
 use shared text and recovery notices while retaining their saving live region and
