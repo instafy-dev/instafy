@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { InlineNotice } from "../../../components/InlineNotice";
+import { Text } from "../../../components/Text";
 import { controllerClient } from "../../../sdk/instafy";
 import type { SharedBrowserProfileStatusResult } from "../../../services/runtimeController/browserProfiles";
 
@@ -59,20 +61,20 @@ export function SharedBrowserProfileStatus({
   return (
     <section
       aria-label="Shared Browser saved data"
-      className="min-w-0 space-y-1 rounded-lg bg-slate-500/5 p-3 text-xs text-slate-600 dark:text-slate-300"
+      className="min-w-0 space-y-2"
       data-testid="shared-browser-profile-status"
     >
-      <p className="font-medium" role="status">{heading}</p>
-      {!status && result ? <p>We cannot verify stored browser data. Do not rely on recovery after this session ends.</p> : null}
-      {status && !status.enabled ? <p>This running browser can still be shared across devices. New login data is not being backed up.</p> : null}
+      <Text variant="bodyStrong" tone="primary" role="status">{heading}</Text>
+      {!status && result ? <InlineNotice tone="warning" appearance="inline">We cannot verify stored browser data. Do not rely on recovery after this session ends.</InlineNotice> : null}
+      {status && !status.enabled ? <Text variant="caption" tone="muted">This running browser can still be shared across devices. New login data is not being backed up.</Text> : null}
       {status?.lastSavedAt ? (
-        <p>
+        <Text variant="caption" tone="muted">
           Last stored snapshot: <time dateTime={status.lastSavedAt}>{new Date(status.lastSavedAt).toLocaleString()}</time>.
           {status.savedByRuntimeId === runtimeId && runtimeId ? " Saved by this session." : " Not confirmed as a save from this session."}
-        </p>
-      ) : status?.enabled ? <p>No saved snapshot yet. Login recovery is not ready.</p> : null}
-      {status && !status.enabled && status.lastSavedAt ? <p>An older snapshot remains stored; recovery is disabled.</p> : null}
-      <p>Snapshots contain shared cookies and site data, not open tabs or unfinished forms. Changes since the last successful save may be lost.</p>
+        </Text>
+      ) : status?.enabled ? <Text variant="caption" tone="muted">No saved snapshot yet. Login recovery is not ready.</Text> : null}
+      {status && !status.enabled && status.lastSavedAt ? <Text variant="caption" tone="muted">An older snapshot remains stored; recovery is disabled.</Text> : null}
+      <Text variant="caption" tone="muted">Snapshots contain shared cookies and site data, not open tabs or unfinished forms. Changes since the last successful save may be lost.</Text>
     </section>
   );
 }

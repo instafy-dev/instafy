@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { StudioDialogBody } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
@@ -89,6 +90,6 @@ export function ChatRunStopControl({ controller, className, iconClassName = "h-[
 /** Keep feedback inside the composer, below its controls and above attachments. */
 export function ChatRunStopFeedback({ controller }: { controller: ChatRunStopController }) {
   if (!controller.visible || controller.phase !== "error" || !controller.error) return null;
-  return <Text as="div" variant="caption" tone="muted" role="alert" id={controller.feedbackId}
-    className="min-w-0 max-w-full break-words px-2 pb-1 pt-1" data-testid="chat-run-stop-error">{controller.error}</Text>;
+  return <InlineNotice appearance="inline" tone="danger" role="alert" id={controller.feedbackId}
+    className="px-2 py-1" data-testid="chat-run-stop-error">{controller.error}</InlineNotice>;
 }

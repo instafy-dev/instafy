@@ -321,12 +321,14 @@ test.describe("touch prompt", () => {
   test("a browser prompt wraps under its sentence on a phone and keeps 44px buttons", async ({ page }, testInfo) => {
     test.setTimeout(60_000);
     const errors = await mountFixture(page);
+    await expect.poll(() => page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
     await setLine(page, { approval: true });
     const row = page.getByTestId("browser-approval-row");
     await expect(row).toBeVisible();
     for (const id of ["browser-approval-deny", "browser-approval-allow"]) {
-      const box = await page.getByTestId(id).boundingBox();
-      expect(box?.height, id).toBeGreaterThanOrEqual(44);
+      await expect.poll(async () => (await page.getByTestId(id).boundingBox())?.height ?? 0, {
+        message: `${id} reaches its touch target after the prompt renders`,
+      }).toBeGreaterThanOrEqual(44);
     }
     const geometry = await row.evaluate((element) => {
       const sentence = element.querySelector('[data-testid="browser-approval-sentence"]')!.getBoundingClientRect();
