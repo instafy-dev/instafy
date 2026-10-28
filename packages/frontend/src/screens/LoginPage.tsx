@@ -14,7 +14,19 @@ import { Spinner } from "../components/Spinner";
 import { Text } from "../components/Text";
 import { TextLink } from "../components/TextLink";
 import { ToggleIconButton } from "../components/ToggleIconButton";
-import { hasSupabaseConfig } from "../lib/supabaseClient";
+import {
+  hasSupabaseConfig,
+  sessionPersistsAcrossLoads,
+  supabase,
+  supabaseAnonKey,
+  supabaseUrl,
+} from "../lib/supabaseClient";
+import {
+  dropOtherAccountLink,
+  type OtherAccountSwitch,
+  switchToOtherAccountLink,
+  useOtherAccountLink,
+} from "../auth/otherAccountLink";
 import { showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
 import { AppVersionLabel } from "../components/AppVersionLabel";
 import { useAuth } from "../providers/AuthProvider";
@@ -136,6 +148,64 @@ function OrDivider() {
   );
 }
 
+type OtherAccountLinkError = { message: string; canRetry: boolean };
+
+const OTHER_ACCOUNT_LINK_ERRORS: Record<Exclude<OtherAccountSwitch, "switched">, OtherAccountLinkError> = {
+  expired: { message: "This link has expired or was already used. Ask for a new one.", canRetry: false },
+  unavailable: { message: "Couldn't reach Instafy. Try again.", canRetry: true },
+  signedOut: {
+    message: "You're signed out here, but this link couldn't sign you in. Ask for a new link, or log in.",
+    canRetry: false,
+  },
+  failed: { message: "This link couldn't sign you in. Ask for a new one.", canRetry: false },
+};
+
+// Where to go after switching to a link's account: the address this page's own
+// ?redirect= names, when it is on this origin and not the login page, or else
+// Studio. A return path kept by an earlier sign-in belongs to that sign-in, so
+// it never steers a switch. Unlike the router's in-app navigation, a full load
+// goes wherever its target points, so the target is resolved here and only the
+// resolved absolute address is ever followed: javascript:, another site,
+// //host and /.//host (which resolves to the path //host) all lead to Studio
+// or stay on this origin.
+function switchDestination(search: string): URL {
+  const studio = new URL("/studio", window.location.origin);
+  try {
+    const target = new URLSearchParams(search).get("redirect");
+    if (!target || target.trim().length === 0) {
+      return studio;
+    }
+    const url = new URL(target, window.location.origin);
+    // The router decodes each segment and matches /Login, /login/, //login
+    // and /%6Cogin to the login page too, so the path is read the same way.
+    const path = url.pathname
+      .split("/")
+      .map((segment) => decodeURIComponent(segment))
+      .join("/")
+      .replace(/\/{2,}/g, "/")
+      .replace(/\/+$/, "")
+      .toLowerCase();
+    if (url.origin !== window.location.origin || path === "/login") {
+      return studio;
+    }
+    // Nothing but a password reset link opens the reset form: no recovery
+    // marker survives, in any repeat of the key or in the fragment.
+    const isRecoveryMarker = (value: string) => value.trim().toLowerCase() === "recovery";
+    for (const key of ["mode", "type"]) {
+      if (url.searchParams.getAll(key).some(isRecoveryMarker)) {
+        url.searchParams.delete(key);
+      }
+    }
+    const fragment = new URLSearchParams(url.hash.replace(/^#/, ""));
+    if (["mode", "type"].some((key) => fragment.getAll(key).some(isRecoveryMarker))) {
+      url.hash = "";
+    }
+    return url;
+  } catch {
+    return studio;
+  }
+}
+
 // Google OAuth ships dark: the button renders only once the provider is
 // configured in the Supabase dashboard AND this flag is flipped in the build.
 // Rendering it earlier would offer a button whose click can only produce
@@ -174,6 +244,9 @@ export function LoginPage() {
     () => parseRecoveryMode(location.hash ?? "", location.search ?? ""),
     [location.hash, location.search],
   );
+  // A link that signs in as another account than the one signed in here. The
+  // Supabase client never saw it; it waits for the person to choose it.
+  const otherAccountLink = useOtherAccountLink();
 
   const redirectTarget = useMemo(() => {
     const storedRedirect = readSignInReturnPath();
@@ -218,11 +291,14 @@ export function LoginPage() {
   // the form's default button, so Enter in a single-field form submits again,
   // possibly before React has re-rendered; the submit handlers check this.
   const pendingControlRef = useRef<PendingControl | null>(null);
+  // Set once this page has switched to a link's account and moved on.
+  const switchedToLinkRef = useRef(false);
   const setPendingControl = useCallback((control: PendingControl | null) => {
     pendingControlRef.current = control;
     setPendingControlState(control);
   }, []);
   const [awaitingBrowser, setAwaitingBrowser] = useState<LoginOAuthProvider | null>(null);
+  const [otherAccountLinkError, setOtherAccountLinkError] = useState<OtherAccountLinkError | null>(null);
   const submitting = pendingControl !== null;
   const isBlocked = (control: PendingControl) => pendingControl !== null && pendingControl !== control;
 
@@ -260,6 +336,9 @@ export function LoginPage() {
   const stepAutofocusReadyRef = useRef(false);
 
   const stepTitle = useMemo(() => {
+    if (otherAccountLink) {
+      return "Switch accounts?";
+    }
     if (recoveryMode) {
       return "Reset your password";
     }
@@ -276,9 +355,16 @@ export function LoginPage() {
       return "Check your inbox";
     }
     return intent === "signup" ? "Create your account" : "Log in to Instafy";
-  }, [intent, recoveryMode, step]);
+  }, [intent, otherAccountLink, recoveryMode, step]);
 
   const stepDescription = useMemo((): string | null => {
+    if (otherAccountLink) {
+      const linkAccount = otherAccountLink.email ?? "another account";
+      const link = otherAccountLink.recovery ? "This password reset link" : "This link";
+      return user?.email
+        ? `${link} is for ${linkAccount}. You're signed in as ${user.email}.`
+        : `${link} is for ${linkAccount}.`;
+    }
     if (recoveryMode) {
       return "Choose a new password to finish signing in.";
     }
@@ -303,7 +389,7 @@ export function LoginPage() {
     // the sentence that opens the door for them. "Your projects" named something
     // they do not have yet.
     return "Start with the AI that comes with Instafy, or bring the one you already pay for.";
-  }, [intent, normalizedEmail, recoveryMode, step]);
+  }, [intent, normalizedEmail, otherAccountLink, recoveryMode, step, user?.email]);
 
   useEffect(() => {
     applyPageMeta({
@@ -318,7 +404,7 @@ export function LoginPage() {
   }, [intent, recoveryMode]);
 
   useEffect(() => {
-    if (!loading && user && !recoveryMode && !awaitingSignupPassword) {
+    if (!loading && user && !recoveryMode && !awaitingSignupPassword && !otherAccountLink) {
       const nextEmail = user.email?.trim() || normalizedEmail;
       if (nextEmail) {
         setRememberedAccounts((current) => {
@@ -335,9 +421,13 @@ export function LoginPage() {
           return next;
         });
       }
-      finishLogin();
+      // A switch to a link's account picks its own destination, which the
+      // usual redirect must not replace.
+      if (!switchedToLinkRef.current) {
+        finishLogin();
+      }
     }
-  }, [loading, user, finishLogin, recoveryMode, normalizedEmail, awaitingSignupPassword]);
+  }, [loading, user, finishLogin, recoveryMode, normalizedEmail, awaitingSignupPassword, otherAccountLink]);
 
   useEffect(() => {
     if (recoveryMode) {
@@ -380,6 +470,67 @@ export function LoginPage() {
     setMessage(null);
     setAwaitingBrowser(null);
     setPendingControl(null);
+  };
+
+  const handleUseOtherAccountLink = async () => {
+    const link = otherAccountLink;
+    if (!link || pendingControlRef.current || !supabaseUrl || !supabaseAnonKey) {
+      return;
+    }
+    clearTransientState();
+    setOtherAccountLinkError(null);
+    setPendingControl("submit");
+    let leaving = false;
+    try {
+      const outcome = await switchToOtherAccountLink(link, {
+        client: supabase,
+        supabaseUrl,
+        anonKey: supabaseAnonKey,
+        signedIn: Boolean(user),
+      });
+      if (outcome === "switched") {
+        const destination = link.recovery
+          ? new URL("/login?mode=recovery", window.location.origin)
+          : switchDestination(location.search);
+        switchedToLinkRef.current = true;
+        // This is a completed sign-in, so a kept return path from an earlier
+        // one must not steer the next.
+        clearSignInReturnPath();
+        if (sessionPersistsAcrossLoads) {
+          // A full load, so nothing of the previous account stays in memory.
+          // The controls stay busy until it happens.
+          leaving = true;
+          window.location.assign(destination.href);
+          return;
+        }
+        // The session lives only in this page's memory (storage is blocked),
+        // so a full load would lose it: move within the app instead, and let
+        // the link go only once the move has started.
+        navigate(`/${destination.pathname.replace(/^\/+/, "")}${destination.search}${destination.hash}`, {
+          replace: true,
+        });
+        dropOtherAccountLink();
+        return;
+      }
+      if (outcome === "signedOut") {
+        // Nobody is signed in here any more, so the link and its question go,
+        // and the sign-in form says what happened.
+        dropOtherAccountLink();
+        setError(OTHER_ACCOUNT_LINK_ERRORS.signedOut.message);
+        return;
+      }
+      setOtherAccountLinkError(OTHER_ACCOUNT_LINK_ERRORS[outcome]);
+    } finally {
+      if (!leaving) {
+        setPendingControl(null);
+      }
+    }
+  };
+
+  const handleKeepCurrentAccount = () => {
+    clearTransientState();
+    setOtherAccountLinkError(null);
+    dropOtherAccountLink();
   };
 
 
@@ -692,6 +843,40 @@ export function LoginPage() {
   ) : null;
 
   const renderForm = () => {
+    if (otherAccountLink) {
+      return (
+        <div className="mt-8 space-y-3" data-testid="login-other-account-link">
+          {otherAccountLinkError ? (
+            <InlineNotice tone="danger" role="alert" data-testid="login-other-account-link-error">
+              {otherAccountLinkError.message}
+            </InlineNotice>
+          ) : null}
+          {!otherAccountLinkError || otherAccountLinkError.canRetry ? (
+            <Button
+              variant="primary"
+              size="lg"
+              radius="full"
+              className="w-full justify-center px-6 py-3 text-sm font-semibold"
+              onPress={() => void handleUseOtherAccountLink()}
+              isPending={pendingControl === "submit"}
+              isDisabled={isBlocked("submit")}
+            >
+              {user ? "Switch accounts" : "Continue with this link"}
+            </Button>
+          ) : null}
+          <Button
+            variant="ghost"
+            radius="full"
+            fullWidth
+            onPress={handleKeepCurrentAccount}
+            isDisabled={submitting}
+          >
+            {user ? "Stay signed in" : "Not now"}
+          </Button>
+        </div>
+      );
+    }
+
     if (step === "chooseAccount") {
       return (
         <div className="mt-8 space-y-6">
@@ -1195,8 +1380,9 @@ export function LoginPage() {
   );
 
   // Keep the sign-in form out of the handoff for an existing session. Password
-  // recovery and optional signup password setup remain available while signed in.
-  if (loading || (user && !recoveryMode && !awaitingSignupPassword)) {
+  // recovery, optional signup password setup and the choice to switch to a
+  // link's account remain available while signed in.
+  if (loading || (user && !recoveryMode && !awaitingSignupPassword && !otherAccountLink)) {
     return <EntryLoadingScreen />;
   }
 

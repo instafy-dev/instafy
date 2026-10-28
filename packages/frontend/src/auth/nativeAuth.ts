@@ -130,13 +130,12 @@ function storeClaimedCode(codeHash: string) {
  * attempt would otherwise be dropped.
  */
 export function claimNativeAuthCallback(callbackUrl: URL): boolean {
-  const hashParams = new URLSearchParams(callbackUrl.hash.replace(/^#/, ""));
-  const code = (callbackUrl.searchParams.get("code") ?? hashParams.get("code") ?? "").trim();
-  const key = code ? `code:${code}` : `url:${callbackUrl.href}`;
+  const key = nativeAuthCallbackClaimKey(callbackUrl);
   if (claimedNativeAuthCallbacks.has(key)) {
     return false;
   }
   claimedNativeAuthCallbacks.add(key);
+  const code = nativeAuthCallbackCode(callbackUrl);
   if (code) {
     const codeHash = hashCallbackCode(code);
     if (readStoredClaimedCodes().includes(codeHash)) {
@@ -145,6 +144,69 @@ export function claimNativeAuthCallback(callbackUrl: URL): boolean {
     storeClaimedCode(codeHash);
   }
   return true;
+}
+
+/**
+ * Whether a handler has already claimed this callback, without claiming it.
+ * A code claimed before a reload of this page is known only by the hash kept
+ * in sessionStorage, and counts as claimed too, as it does for the claim.
+ */
+export function isNativeAuthCallbackClaimed(callbackUrl: URL): boolean {
+  if (claimedNativeAuthCallbacks.has(nativeAuthCallbackClaimKey(callbackUrl))) {
+    return true;
+  }
+  const code = nativeAuthCallbackCode(callbackUrl);
+  return code.length > 0 && readStoredClaimedCodes().includes(hashCallbackCode(code));
+}
+
+// The code the handlers exchange, read by the same rule, so the claim, the
+// kept hash and the exchange agree on one code however the callback spells
+// it: a blank query value does not hide the fragment's code from any of them.
+function nativeAuthCallbackCode(callbackUrl: URL): string {
+  return readNativeAuthCallbackParams(callbackUrl).code ?? "";
+}
+
+function nativeAuthCallbackClaimKey(callbackUrl: URL): string {
+  const code = nativeAuthCallbackCode(callbackUrl);
+  return code ? `code:${code}` : `url:${callbackUrl.href}`;
+}
+
+export type NativeAuthCallbackParams = {
+  code: string | null;
+  accessToken: string | null;
+  refreshToken: string | null;
+  /** The provider's refusal: error_description, or else error. */
+  oauthError: string | null;
+};
+
+/** A callback's parameters, the query's before the fragment's, trimmed. */
+export function readNativeAuthCallbackParams(callbackUrl: URL): NativeAuthCallbackParams {
+  const hashParams = new URLSearchParams(callbackUrl.hash.replace(/^#/, ""));
+  const read = (key: string): string | null => {
+    for (const value of [callbackUrl.searchParams.get(key), hashParams.get(key)]) {
+      if (typeof value === "string" && value.trim().length > 0) {
+        return value.trim();
+      }
+    }
+    return null;
+  };
+  return {
+    code: read("code"),
+    accessToken: read("access_token"),
+    refreshToken: read("refresh_token"),
+    oauthError: read("error_description") ?? read("error"),
+  };
+}
+
+/**
+ * A callback that carries session tokens instead of a code or a refusal. Every
+ * sign-in the apps start is PKCE and comes back with a code, so such a
+ * callback was made by whoever opened the link, and acting on it would sign
+ * the app in to the account of their choosing or sign it out. Both handlers
+ * leave it unclaimed and say nothing.
+ */
+export function isTokenPairNativeAuthCallback(params: NativeAuthCallbackParams): boolean {
+  return Boolean((params.accessToken || params.refreshToken) && !params.code && !params.oauthError);
 }
 
 /** Called when a sign-in starts, so its callback can repeat the last one's URL. */
@@ -334,8 +396,21 @@ export function clearNativeAuthCallbackAttemptId() {
 export const SIGN_IN_RETURN_PATH_STORAGE_KEY = "instafy.login.returnPath";
 const DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY = "instafy.login.returnPathDurable";
 
+// A browser reads a backslash in an address as a slash, so /\host names
+// another host, and it drops tabs and newlines, so /<tab>/host does too. The
+// router refuses to go there, which would leave a signed-in login page on its
+// loading screen, so a path holding either, or any other ASCII control
+// character, is not kept.
+// eslint-disable-next-line no-control-regex
+const NOT_IN_AN_IN_APP_PATH = /[\\\u0000-\u001f\u007f]/;
+
 function isInAppPath(value: unknown): value is string {
-  return typeof value === "string" && value.startsWith("/") && !value.startsWith("//");
+  return (
+    typeof value === "string" &&
+    value.startsWith("/") &&
+    !value.startsWith("//") &&
+    !NOT_IN_AN_IN_APP_PATH.test(value)
+  );
 }
 
 /**
