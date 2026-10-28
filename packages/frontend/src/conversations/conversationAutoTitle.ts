@@ -8,11 +8,14 @@ import {
   parseSkillImportMessage,
 } from "./skillCommands";
 
-const DEFAULT_CONVERSATION_TITLE_PATTERN = /^Conversation\s+\d+$/i;
-// The controller's sanitizer caps model titles at the same length.
-const FALLBACK_TITLE_MAX_CHARS = 48;
-const FALLBACK_TITLE_MAX_WORDS = 6;
-// One word ("Hi", "Test", "Yes") tells chats apart worse than their numbers.
+export { NEW_CHAT_TITLE } from "./conversationState";
+// "New chat" until the first prompt names a chat; "Conversation 3" is how
+// older chats were stored before they had a name.
+const DEFAULT_CONVERSATION_TITLE_PATTERN = /^(?:Conversation\s+\d+|New chat)$/i;
+// About one line of a chat list or a tab.
+const FALLBACK_TITLE_MAX_CHARS = 40;
+const TITLE_CUT_MARK = "\u2026";
+// One word ("Hi", "Test", "Yes") says too little to tell chats apart.
 const FALLBACK_TITLE_MIN_WORDS = 2;
 // Where a clause of the opening message ends: at the end of a sentence, or
 // where something that is never echoed (a link, an address, a mention, a
@@ -29,6 +32,9 @@ const PATH_PATTERN = /(^|\s)(?:~?\.{0,2}\/(?=\S)|[^\s/]+\/[^\s/]+\/)\S*/g;
 // hyphens inside, and ending punctuation after.
 const PLAIN_WORD_PATTERN = /^[\p{L}\p{M}'\u2019-]*\p{L}[\p{L}\p{M}'\u2019-]*[.,?!:]*$/u;
 const PLAIN_WORD_MAX_CHARS = 20;
+// A count ("3 days", "10 places") or a year ("the 2025 budget"); never a longer
+// number, which may be a card, an account or a code.
+const SMALL_NUMBER_PATTERN = /^(?:\d{1,2}|(?:19|20)\d{2})[.,?!:]*$/;
 // Punctuation standing alone between words ("-", "..."), skipped, not a word.
 const SEPARATOR_PATTERN = /^[-'\u2019.,?!:]+$/;
 // A message that mentions a secret can hold one in words no pattern tells
@@ -303,24 +309,26 @@ export function isTrailingSmallWord(word: string): boolean {
 }
 
 function isPlainWord(word: string): boolean {
-  return PLAIN_WORD_PATTERN.test(word) &&
-    [...word.replace(/[.,?!:]+$/, "")].length <= PLAIN_WORD_MAX_CHARS;
+  return SMALL_NUMBER_PATTERN.test(word) || (PLAIN_WORD_PATTERN.test(word) &&
+    [...word.replace(/[.,?!:]+$/, "")].length <= PLAIN_WORD_MAX_CHARS);
 }
 
 /**
- * A title from the opening message alone, for when the controller has none to
- * give (its model path needs the person's own credential). A `/skills import`
- * line gets its structured title; any other slash command gets none.
+ * A chat's name from the first line of its opening message, given as soon as
+ * the message is sent, so a chat is never left with no name (or a number)
+ * while its first turn runs or after it fails. A `/skills import` line gets
+ * its structured title; any other slash command gets none.
  *
  * Links, addresses, mentions, paths and code are taken out first. The title is
- * then the first clause that says something, at most six words and 48
- * characters, made of plain words only: letters in any script, with
- * apostrophes and hyphens inside a word and . , ? ! : after it. It ends before
- * the first word with a digit or any other character, or longer than 20
- * characters, and when that leaves fewer than two words there is no title.
- * A message that mentions a password, PIN, login, secret, token or key, or
- * holds a known key prefix or a long run of mixed letters and digits, gets no
- * title at all.
+ * then the first clause that says something, cut to about 40 characters at a
+ * word, with "…" where it was cut. It is made of plain words: letters in any
+ * script, with apostrophes and hyphens inside a word and . , ? ! : after it,
+ * and small numbers (a count up to 99, or a year). It ends before the first
+ * other word (a longer number, a word with a digit or another character, or a
+ * word longer than 20 characters), and when that leaves fewer than two words
+ * there is no title. A message that mentions a password, PIN, login, secret,
+ * token or key, or holds a known key prefix or a long run of mixed letters and
+ * digits, gets no title at all.
  */
 export function getFallbackConversationTitle(message: string): string | null {
   const trimmed = message.trim();
@@ -357,7 +365,7 @@ export function getFallbackConversationTitle(message: string): string | null {
         endsAtOtherWord = true;
         break;
       }
-      if (words.length === FALLBACK_TITLE_MAX_WORDS || [...words, word].join(" ").length > FALLBACK_TITLE_MAX_CHARS) {
+      if ([...words, word].join(" ").length > FALLBACK_TITLE_MAX_CHARS) {
         cut = true;
         break;
       }
@@ -385,7 +393,11 @@ export function getFallbackConversationTitle(message: string): string | null {
     }
     const title = words.join(" ").replace(/[.!?:;,]+$/, "").trim();
     const sentenceCase = title.charAt(0).toUpperCase() + title.slice(1);
-    return isDefaultConversationTitle(sentenceCase) ? null : sentenceCase;
+    if (isDefaultConversationTitle(sentenceCase)) {
+      return null;
+    }
+    // Cut for length: say so, as a list cuts a long name.
+    return cut ? `${sentenceCase}${TITLE_CUT_MARK}` : sentenceCase;
   }
   return null;
 }

@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
 import { createPublicChatFromTopBar } from "../utils/chatUi.js";
-import { activeConversationId, openChats, selectConversation } from "../utils/conversationNavigation.js";
+import { activeConversationId, conversationRow, openChats, selectConversation } from "../utils/conversationNavigation.js";
 
 test.describe("Conversation history", () => {
   test.afterEach(async ({ page }) => {
@@ -23,11 +23,11 @@ test.describe("Conversation history", () => {
     await page.getByTestId(`conversation-history-menu-${parent}`).click();
     page.once("dialog", dialog => dialog.accept());
     await page.getByRole("menuitem", { name: "Delete…", exact: true }).click();
-    await expect(page.getByTestId("conversation-history-item").filter({ hasText: "Conversation 2" })).toHaveCount(0);
+    await expect(conversationRow(page, parent)).toHaveCount(0);
     await expect(page.getByTestId("conversation-history-item").filter({ hasText: "Thread 1" })).toHaveCount(0);
     await page.getByTestId("conversation-history-filter").click();
     await page.getByRole("menuitemradio", { name: /Trash/ }).click();
-    await expect(page.getByTestId("conversation-history-item").filter({ hasText: "Conversation 2" })).toBeVisible();
+    await expect(conversationRow(page, parent)).toBeVisible();
     const expand = page.getByTestId("conversation-history-toggle");
     if (await expand.getAttribute("aria-expanded") === "false") await expand.click();
     await expect(page.getByTestId("conversation-history-item").filter({ hasText: "Thread 1" })).toBeVisible();
@@ -50,7 +50,7 @@ test.describe("Conversation history", () => {
     await selectConversation(page, thread);
     await expect(page.getByTestId("conversation-workspace-title")).toHaveText("Thread 1");
     await selectConversation(page, parent);
-    await expect(page.getByTestId("conversation-workspace-title")).toHaveText("Conversation 2");
+    await expect(page.getByTestId("conversation-workspace-title")).toHaveText("New chat");
     await expect(page.getByTestId("workspace-tabs")).toHaveCount(0);
   });
 });

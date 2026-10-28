@@ -83,7 +83,7 @@ describe("resolveSpaceAutoName", () => {
     const loaded = { hasRemoteMessages: true };
     // A fallback or model title is someone's own words in the same shape.
     const ownWords = getFallbackConversationTitle("set up Google Ads for the shop");
-    expect(ownWords).toBe("Set up Google Ads");
+    expect(ownWords).toBe("Set up Google Ads for the shop");
     expect(resolveSpaceAutoName([conversation({ ...loaded, title: ownWords! })])).toBeNull();
     expect(resolveSpaceAutoName([conversation({ ...loaded, title: "Connect Google Ads" })])).toBeNull();
     // Another pack's import title cannot be told apart from such words, so

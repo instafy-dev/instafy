@@ -1,4 +1,4 @@
-import { openChats, returnToConversation } from "../utils/conversationNavigation.js";
+import { activeConversationId, conversationRow, openChats, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { loginAsGuest, prepareStudio, resetRuntimeUserState, waitForStoreProjectId } from "../utils/harness.js";
@@ -76,7 +76,10 @@ test.describe("Org multi-user conversations", () => {
     await ownerCreateConversation;
     await expect(ownerConversationRows).toHaveCount(2);
     await expect(guestConversationRows).toHaveCount(2, { timeout: 30_000 });
-    await ownerConversationRows.filter({ hasText: "Conversation 2" }).first().click();
+    // Untitled chats all read "New chat": rows are picked by their chat's id,
+    // which the chat's metadata carries to every member.
+    const ownerChat = await activeConversationId(page);
+    await conversationRow(page, ownerChat).click();
     await waitForConversationControllerId(page);
 
     const guestCreateConversation = guestPage.waitForResponse(
@@ -90,12 +93,11 @@ test.describe("Org multi-user conversations", () => {
     await expect(guestConversationRows).toHaveCount(3, { timeout: 30_000 });
     await expect(ownerConversationRows).toHaveCount(3, { timeout: 30_000 });
 
-    await guestConversationRows.filter({ hasText: "Conversation 3" }).first().click();
+    const guestChat = await activeConversationId(guestPage);
+    await conversationRow(guestPage, guestChat).click();
     await waitForConversationControllerId(guestPage);
     await disableAssistantIfPossible(guestPage);
-    // Open the chat on the owner's side first: once the guest's message lands
-    // the chat is titled from it, and these rows are found by numbered titles.
-    await ownerConversationRows.filter({ hasText: "Conversation 3" }).first().click();
+    await conversationRow(page, guestChat).click();
     const guestMessage = `hello from guest ${Date.now()}`;
     await guestPage.getByTestId("chat-input").fill(guestMessage);
     await guestPage.getByTestId("chat-send-button").click();

@@ -2489,7 +2489,7 @@ async function ensureWorkspaceConversationTab(page: Page): Promise<void> {
             : null;
       if (!conversationId && typeof conversationDebug.createConversation === "function") {
         conversationId = conversationDebug.createConversation({
-          title: "Conversation 1",
+          title: "New chat",
           select: true,
         });
       }

@@ -86,7 +86,7 @@ function isSharedRootChat(conversation: ConversationState): boolean {
     conversation.lifecycleStatus === "active";
 }
 
-// A chat nobody has written in yet (a fresh "Conversation 2") is not the
+// A chat nobody has written in yet (a fresh "New chat") is not the
 // space's first conversation, so it must not hold the name back.
 function hasStarted(conversation: ConversationState): boolean {
   return conversation.hasRemoteMessages === true ||

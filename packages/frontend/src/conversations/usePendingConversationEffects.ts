@@ -39,6 +39,7 @@ import {
   extractLastUserMessageContent,
   isEmptyConversationPlaceholder,
   makeConversationId,
+  NEW_CHAT_TITLE,
   type ConversationState,
   type ConversationsAction,
   type ConversationsState,
@@ -329,7 +330,7 @@ export function usePendingConversationEffects({
       }
       const conversation: ConversationState = {
         localId,
-        title: titleFromMetadata ?? `Conversation ${state.sequence}`,
+        title: titleFromMetadata ?? NEW_CHAT_TITLE,
         visibility,
         lifecycleStatus,
         controllerId,
@@ -616,7 +617,7 @@ export function usePendingConversationEffects({
       if (!conversationId) {
         const conversation: ConversationState = {
           localId: makeConversationId(),
-          title: `Conversation ${state.sequence}`,
+          title: NEW_CHAT_TITLE,
           visibility: recommendationDelivery ? "private" : "public",
           lifecycleStatus: "active",
           controllerId,

@@ -1,4 +1,4 @@
-import { openChats, activeConversationId, returnToConversation } from "../utils/conversationNavigation.js";
+import { openChats, activeConversationId, conversationRow, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import {
@@ -87,7 +87,8 @@ test.describe("Org multi-user conversation rename", () => {
     await ownerCreateConversation;
     await expect(ownerConversationRows).toHaveCount(2);
     await expect(guestConversationRows).toHaveCount(2, { timeout: 30_000 });
-    await ownerConversationRows.filter({ hasText: "Conversation 2" }).first().click();
+    // Untitled chats all read "New chat": the row is picked by its chat's id.
+    await conversationRow(page, await activeConversationId(page)).click();
     await waitForConversationControllerId(page);
 
     const newTitle = `Teammate sync ${Date.now()}`;

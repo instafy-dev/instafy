@@ -33,6 +33,7 @@ import {
 import {
   isAttachableConversation,
   isEmptyConversationPlaceholder,
+  NEW_CHAT_TITLE,
   type ConversationState,
   type ConversationsAction,
   type ConversationsState,
@@ -366,7 +367,6 @@ export function useConversationControllerSync({
           (conversation) => conversation.localId === latestState.activeId,
         ) ?? null;
 
-      let fallbackSequence = latestState.sequence;
       remoteConversations.forEach((remote) => {
         const controllerId = typeof remote?.id === "string" ? remote.id : "";
         if (!isUuid(controllerId)) {
@@ -561,13 +561,12 @@ export function useConversationControllerSync({
         }
         localIds.add(localId);
 
-        const fallbackTitle = titleFromMetadata ?? `Conversation ${fallbackSequence}`;
-        if (!titleFromMetadata) {
-          fallbackSequence += 1;
-        }
+        // An untitled chat is "New chat" until its first prompt names it, the
+        // same on every sync and in any order: never a number from its place
+        // in the list, which changed whenever the list did.
         const conversation: ConversationState = {
           localId,
-          title: fallbackTitle,
+          title: titleFromMetadata ?? NEW_CHAT_TITLE,
           visibility,
           lifecycleStatus,
           controllerId,

@@ -200,18 +200,17 @@ export function useConversationControllerDispatch({
     if (activeConversation) {
       return activeConversation;
     }
-    return createConversation({ title: `Conversation ${conversations.length + 1}`, select: true });
-  }, [activeConversation, conversations.length, createConversation]);
+    return createConversation({ select: true });
+  }, [activeConversation, createConversation]);
 
   const handleCreateConversation = useCallback(() => {
     const conversation = createConversation({
-      title: `Conversation ${conversations.length + 1}`,
       messages: [createConversationMessage("assistant", "How can I help with your project?")],
       select: true,
     });
     selectConversation(conversation.localId);
     markConversationRead(conversation.localId);
-  }, [conversations.length, createConversation, markConversationRead, selectConversation]);
+  }, [createConversation, markConversationRead, selectConversation]);
 
   const handleInputChange = useCallback(
     (conversationId: string | null, value: string, editorState: string | null = null) => {

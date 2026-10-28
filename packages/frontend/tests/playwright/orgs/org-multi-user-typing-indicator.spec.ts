@@ -1,4 +1,4 @@
-import { openChats, returnToConversation } from "../utils/conversationNavigation.js";
+import { activeConversationId, conversationRow, openChats, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { loginAsGuest, prepareStudio, resetRuntimeUserState, waitForStoreProjectId } from "../utils/harness.js";
@@ -77,9 +77,11 @@ test.describe("Org multi-user typing indicator", () => {
     await expect(ownerConversationRows).toHaveCount(2);
     await expect(guestConversationRows).toHaveCount(2, { timeout: 30_000 });
 
-    await ownerConversationRows.filter({ hasText: "Conversation 2" }).first().click();
+    // Untitled chats all read "New chat": the row is picked by its chat's id.
+    const ownerChat = await activeConversationId(page);
+    await conversationRow(page, ownerChat).click();
     await waitForConversationControllerId(page);
-    await guestConversationRows.filter({ hasText: "Conversation 2" }).first().click();
+    await conversationRow(guestPage, ownerChat).click();
     await waitForConversationControllerId(guestPage);
 
     await guestPage.getByTestId("chat-input").fill("typing…");

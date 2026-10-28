@@ -32,6 +32,7 @@ import {
   conversationsReducer,
   createInitialState,
   makeConversationId,
+  NEW_CHAT_TITLE,
   type ConversationState,
   type ConversationsState,
   type CreateConversationOptions,
@@ -315,7 +316,7 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
       const initialMessages = options?.messages ?? [];
       const conversation: ConversationState = {
         localId: options?.localId ?? makeConversationId(),
-        title: options?.title ?? `Conversation ${state.sequence}`,
+        title: options?.title ?? NEW_CHAT_TITLE,
         visibility: options?.visibility ?? "public",
         lifecycleStatus: "active",
         controllerId: options?.controllerId ?? null,
@@ -345,7 +346,7 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
       dispatch({ type: "CREATE", conversation, select: options?.select !== false });
       return conversation;
     },
-    [state.sequence]
+    []
   );
 
   const selectConversation = useCallback((conversationId: string) => {

@@ -264,7 +264,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
 
   // A space we have not opened before starts with a single local placeholder
   // while its real conversations are still being fetched. Giving that
-  // placeholder a tab puts a generic "Conversation 1" in the strip, which on
+  // placeholder a tab puts a generic "New chat" in the strip, which on
   // an org switch reads as the previous org's tab surviving. Hold the strip
   // until the real conversations land.
   const conversationHistoryPending =
