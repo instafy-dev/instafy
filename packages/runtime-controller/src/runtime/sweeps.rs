@@ -109,7 +109,7 @@ const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
 /// instead of silently re-running whenever a runtime next appears.
 pub(super) const REQUEUED_JOB_EXPIRY_SECONDS: i64 = 15 * 60;
 /// What an expired stop-requeued job tells the person who sent it.
-const REQUEUED_JOB_EXPIRED_MESSAGE: &str = "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
+pub(crate) const REQUEUED_JOB_EXPIRED_MESSAGE: &str = "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
 /// The `failureCode` of a run, and the `kind` of the chat message, when the
 /// requeued-job expiry gives up an interrupted turn.
 pub(super) const INTERRUPTED_RUN_EXPIRED_CODE: &str = "interrupted_run_expired";
@@ -232,6 +232,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     settle_plan_agents_out_of_team_time(state, &mut tick).await?;
     recover_worker_input_requests(state, &mut tick).await?;
     recover_deferred_plan_checkpoints(state, &mut tick).await?;
+    recover_lost_final_plan_checkpoints(state, &mut tick).await?;
     auto_recover_stuck_queued_runtimes(state, &mut tick).await?;
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
@@ -272,8 +273,10 @@ async fn recover_worker_input_requests(
 }
 
 /// Completion commits before its settlement queues the next lead. Recover that
-/// handoff after a restart, including early leads failed or canceled elsewhere.
-/// The group lock rechecks every candidate; this query grants no dispatch rights.
+/// handoff after a restart for a group with an ended early lead, including
+/// early leads failed or canceled elsewhere; `recover_lost_final_plan_checkpoints`
+/// recovers the groups without one. The group lock rechecks every candidate;
+/// this query grants no dispatch rights.
 pub(crate) async fn recover_deferred_plan_checkpoints(
     state: &AppState,
     tick: &mut TickConnection<'_>,
@@ -346,6 +349,168 @@ pub(crate) async fn recover_deferred_plan_checkpoints(
             .map_err(|(_, Json(error))| {
                 anyhow::anyhow!("deferred plan checkpoint: {}", error.message)
             })?;
+    }
+    Ok(())
+}
+
+/// How long a plan group's last worker end is left to its own settlement,
+/// which queues the final lead after billing, before the recovery below acts.
+const LOST_FINAL_CHECKPOINT_GRACE_SECONDS: i64 = 2 * 60;
+/// A lead the dispatch refuses (a 4xx) is given up once the group is this old.
+const LOST_FINAL_CHECKPOINT_GIVE_UP_SECONDS: i64 = 10 * 60;
+/// Any other failure, such as a pool or database error, is retried for longer.
+const LOST_FINAL_CHECKPOINT_TRANSIENT_GIVE_UP_SECONDS: i64 = 60 * 60;
+/// A group whose workers ended longer ago is never revived or reported.
+const LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS: i64 = 2 * 60 * 60;
+
+/// Whether a failed recovery of a group whose workers ended `ended_seconds`
+/// ago is given up: soon for a refusal, later for a failure that may pass.
+fn lost_final_checkpoint_gives_up(status: StatusCode, ended_seconds: i64) -> bool {
+    ended_seconds
+        >= if status.is_client_error() {
+            LOST_FINAL_CHECKPOINT_GIVE_UP_SECONDS
+        } else {
+            LOST_FINAL_CHECKPOINT_TRANSIENT_GIVE_UP_SECONDS
+        }
+}
+
+/// The final lead is queued after the last worker's end commits, by its
+/// settlement (or by the checkpoint a cancellation or a sweep starts), so a
+/// restart or a dispatch error, which is only logged, loses it. Retry each
+/// group whose workers all ended a while ago with no lead of any kind;
+/// `recover_deferred_plan_checkpoints` owns the groups with an early lead.
+/// The trigger is the group's last worker to end, as the lost settlement's
+/// was, and the group lock rechecks every candidate: this query grants no
+/// dispatch rights. It leaves out what ends a plan without a lead on purpose:
+/// a deleted space, a Stop, a refused or given-up lead, a question waiting
+/// for a person, a last worker a person's runtime stop expired (its expiry
+/// runs no checkpoint), and a last worker that planned again (its end never
+/// checkpoints its own group). When the conversation moved on after the
+/// workers ended (a person wrote, or another turn started), a late lead would
+/// answer out of turn, so the person is told instead; a recovery that keeps
+/// failing is given up the same way. Newest first, so groups that keep
+/// failing cannot crowd out new ones.
+pub(crate) async fn recover_lost_final_plan_checkpoints(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
+    let rows = tick
+        .client("lost final checkpoint recovery connection")
+        .await?
+        .query(
+            "select g.trigger_job_id,
+                    extract(epoch from now() - g.completed_at)::bigint as ended_seconds,
+                    exists (
+                        select 1 from conversation_messages turn
+                        where turn.conversation_id = g.conversation_id and turn.role = 'user'
+                          and turn.created_by is not null and turn.created_at > g.completed_at
+                    ) or exists (
+                        select 1 from agent_jobs turn
+                        where turn.conversation_id = g.conversation_id
+                          and turn.created_at > g.completed_at
+                          and turn.plan_group_id is distinct from g.plan_group_id
+                    ) as moved_on
+             from (
+                 select distinct on (w.plan_group_id) w.plan_group_id, w.id as trigger_job_id,
+                        w.project_id, w.conversation_id, w.completed_at, w.status, w.outcome,
+                        w.error_message, w.payload
+                 from agent_jobs w
+                 where w.agent_role = 'worker' and w.plan_group_id is not null
+                   and w.status in ('completed','failed','canceled','cancelled','expired')
+                   and w.completed_at > now() - ($3::bigint * interval '1 second')
+                   and w.payload #>> '{metadata,multiAgentPlan,groupId}' = w.plan_group_id::text
+                 order by w.plan_group_id, w.completed_at desc, w.id desc
+             ) g
+             join projects p on p.id = g.project_id and p.status <> 'deleted'
+             join conversations c on c.id = g.conversation_id and c.project_id = g.project_id
+             where g.completed_at < now() - ($2::bigint * interval '1 second')
+               and not exists (
+                   select 1 from agent_jobs j
+                   where j.plan_group_id = g.plan_group_id
+                     and (j.status not in ('completed','failed','canceled','cancelled','expired')
+                         or j.agent_role in ('lead_continuation','synthesis'))
+               )
+               and not exists (
+                   select 1 from agent_user_input_requests q
+                   where q.project_id = g.project_id and q.group_id = g.plan_group_id
+                     and q.status in ('pending','answered')
+               )
+               and not exists (
+                   select 1 from conversation_messages m
+                   where m.project_id = g.project_id and m.conversation_id = g.conversation_id
+                     and m.created_by is null and m.metadata->>'source' = 'controller'
+                     and ((m.metadata->>'kind' = 'run_cancellation'
+                           and m.metadata #> '{details,stopRequested}' = 'true'::jsonb
+                           and m.metadata #> '{details,suppressedPlanGroupIds}'
+                               @> jsonb_build_array(g.plan_group_id::text))
+                         or (m.metadata->>'kind' in ('managed_ai_hosted_runtime_required', $4)
+                             and m.metadata #>> '{multiAgentPlan,groupId}' = g.plan_group_id::text))
+               )
+               and not (g.status = 'failed' and g.outcome = 'expired'
+                   and g.error_message = $5 and g.payload->>'requeuedReason' = any($6))
+               and not exists (
+                   select 1 from agent_jobs child
+                   where child.parent_job_id = g.trigger_job_id
+                     and child.plan_group_id is distinct from g.plan_group_id
+               )
+             order by g.completed_at desc
+             limit $1",
+            &[
+                &32_i64,
+                &LOST_FINAL_CHECKPOINT_GRACE_SECONDS,
+                &LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS,
+                &crate::multi_agent_plan::LEAD_CHECKPOINT_FAILED_CODE,
+                &REQUEUED_JOB_EXPIRED_MESSAGE,
+                &person_reasons,
+            ],
+        )
+        .await
+        .context("load lost final plan checkpoints")?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    tick.release();
+    for row in rows {
+        let trigger_job_id: Uuid = row.get("trigger_job_id");
+        let ended_seconds: i64 = row.get("ended_seconds");
+        let give_up = if row.get::<_, bool>("moved_on") {
+            true
+        } else {
+            match crate::multi_agent_plan::recover_lost_final_checkpoint(state, trigger_job_id)
+                .await
+            {
+                Ok(true) => {
+                    info!(%trigger_job_id, "recovered a lost final lead checkpoint");
+                    false
+                }
+                Ok(false) => false,
+                Err((status, Json(error))) => {
+                    warn!(
+                        %trigger_job_id,
+                        status = status.as_u16(),
+                        error = %error.message,
+                        "failed to recover a lost final lead checkpoint"
+                    );
+                    // Otherwise the group stays a candidate and the next tick retries it.
+                    lost_final_checkpoint_gives_up(status, ended_seconds)
+                }
+            }
+        };
+        if give_up {
+            match crate::multi_agent_plan::give_up_lost_final_checkpoint(state, trigger_job_id)
+                .await
+            {
+                Ok(true) => info!(%trigger_job_id, "gave up a lost final lead checkpoint"),
+                Ok(false) => {}
+                Err((status, Json(error))) => warn!(
+                    %trigger_job_id,
+                    status = status.as_u16(),
+                    error = %error.message,
+                    "failed to give up a lost final lead checkpoint"
+                ),
+            }
+        }
     }
     Ok(())
 }
@@ -3001,12 +3166,40 @@ pub(super) async fn stop_runtimes_of_deleted_projects(
 #[cfg(test)]
 mod tests {
     use super::{
-        runtime_heartbeat_stale_for_queued_recovery, should_recover_stuck_queued_runtime,
-        should_request_runtime_recovery, AUTO_STOP_STALE_RUNTIMES_QUERY,
+        lost_final_checkpoint_gives_up, runtime_heartbeat_stale_for_queued_recovery,
+        should_recover_stuck_queued_runtime, should_request_runtime_recovery,
+        AUTO_STOP_STALE_RUNTIMES_QUERY,
     };
+    use axum::http::StatusCode;
     use chrono::Duration as ChronoDuration;
     use chrono::Utc;
     use uuid::Uuid;
+
+    #[test]
+    fn a_lost_final_lead_is_given_up_soon_when_refused_and_late_when_it_may_pass() {
+        let minutes = |m: i64| m * 60;
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::FORBIDDEN,
+            minutes(9)
+        ));
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::FORBIDDEN,
+            minutes(10)
+        ));
+        // A pool timeout or database error after an outage is retried, not reported.
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            minutes(10)
+        ));
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::SERVICE_UNAVAILABLE,
+            minutes(59)
+        ));
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            minutes(60)
+        ));
+    }
 
     #[tokio::test]
     async fn stale_runtime_selector_excludes_removed_rows() -> anyhow::Result<()> {

@@ -216,3 +216,157 @@ async fn final_checkpoint_waits_for_early_lead_and_recovers_every_terminal_hando
     }
     Ok(())
 }
+
+/// A last worker's end can commit without its settlement queuing the final
+/// lead: the controller restarted, or the dispatch failed and was only logged.
+/// The idle sweep queues that lead once the settlement has had its grace
+/// period, exactly once, from a fresh group snapshot with the last worker as
+/// its trigger. It leaves alone a group still settling, one too old to revive,
+/// a deleted space, a stopped group, one that already has a lead, one whose
+/// last worker a person's runtime stop expired, and one whose last worker
+/// planned again. When the conversation moved on, or a refused lead has been
+/// retried long enough, the person is told once instead, and nothing starts
+/// that lead afterwards; a lead refused for less long is retried.
+#[tokio::test]
+async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping lost final lead recovery: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    for case in [
+        "recovered",
+        "settling",
+        "too_old",
+        "deleted",
+        "stopped",
+        "led",
+        "person_stopped",
+        "nested",
+        "moved_on",
+        "failing",
+        "given_up",
+    ] {
+        let space = ManagedSpace::seed(pool.clone(), "lost-final-lead").await?;
+        let result: anyhow::Result<()> = async {
+            let state = build_test_state(pool.clone(), space.config("lost-final-lead"));
+            let tick = || {
+                let (state, pool) = (&state, &pool);
+                async move {
+                    crate::runtime::recover_lost_final_plan_checkpoints(state, &mut TickConnection::new(pool)).await
+                }
+            };
+            let group = Uuid::new_v4();
+            let plan = json!({"groupId":group,"role":"worker","mode":"read_only",
+                "parentJobId":Uuid::new_v4(),"parentRuntimeId":space.hosted_runtime_id,
+                "lead":{"leadHandle":"octo","continuationPrompt":"Summarize the verified results."}});
+            let (conversation, first, _) = insert_finished_plan_lane(&space, None, "alpha", plan.clone(), json!({})).await?;
+            let (_, last, _) = insert_finished_plan_lane(&space, Some(conversation), "beta", plan, json!({})).await?;
+            let ended_ago: i64 = match case { "settling" => 30, "too_old" => 3 * 3600, "given_up" => 20 * 60, _ => 5 * 60 };
+            let connection = pool.get().await?;
+            // The hierarchy columns the controller's dispatch fills for every worker.
+            connection.execute("update agent_jobs set agent_role='worker',plan_group_id=$2,
+                completed_at=now()-($3::bigint*interval '1 second') where id=$1", &[&first,&group,&(ended_ago+60)]).await?;
+            connection.execute("update agent_jobs set agent_role='worker',plan_group_id=$2,summary='LATEST VERIFIED RESULT',
+                completed_at=now()-($3::bigint*interval '1 second') where id=$1", &[&last,&group,&ended_ago]).await?;
+            match case {
+                "deleted" => { connection.execute("update projects set status='deleted' where id=$1", &[&space.project_id]).await?; }
+                "stopped" => { connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata)
+                    values(gen_random_uuid(),$1,$2,'assistant','Stopped.',$3)", &[&conversation,&space.project_id,&PgJson(json!({"source":"controller",
+                    "kind":"run_cancellation","details":{"stopRequested":true,"suppressedPlanGroupIds":[group]}}))]).await?; }
+                "led" => { connection.execute("insert into agent_jobs(project_id,conversation_id,status,completed_at,payload,plan_group_id,agent_role)
+                    values($1,$2,'failed',now(),$3,$4,'lead_continuation')", &[&space.project_id,&conversation,
+                    &PgJson(json!({"metadata":{"multiAgentPlan":{"groupId":group,"role":"lead_continuation"}}})),&group]).await?; }
+                "person_stopped" => { connection.execute("update agent_jobs set status='failed',outcome='expired',error_message=$2,
+                    payload=jsonb_set(payload,'{requeuedReason}','\"user_stop\"') where id=$1",
+                    &[&last,&crate::runtime::REQUEUED_JOB_EXPIRED_MESSAGE]).await?; }
+                "nested" => {
+                    // The last worker planned again: its own team is a different group.
+                    let inner = Uuid::new_v4();
+                    connection.execute("insert into agent_jobs(project_id,conversation_id,status,completed_at,payload,plan_group_id,agent_role,parent_job_id)
+                        values($1,$2,'completed',now(),$3,$4,'worker',$5)", &[&space.project_id,&conversation,
+                        &PgJson(json!({"metadata":{"multiAgentPlan":{"groupId":inner,"role":"worker"}}})),&inner,&last]).await?;
+                }
+                "moved_on" => { connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata,created_by)
+                    values(gen_random_uuid(),$1,$2,'user','Now wire it into the CLI.','{}',$3)",
+                    &[&conversation,&space.project_id,&space.owner_user_id]).await?; }
+                "failing" | "given_up" => {
+                    // A Personal Browser runtime refuses any other job: the lead pinned to it never starts.
+                    let pinned = Uuid::new_v4();
+                    insert_ready_runtime(&pool, &space.project_id, &pinned, "instafy-cloud",
+                        json!({"agent":true,"origin":true,"personalBrowser":{}})).await?;
+                    connection.execute("update agent_jobs set payload=jsonb_set(payload,'{metadata,runtimePreference}',$2) where id=$1",
+                        &[&last,&PgJson(json!({"runtimeId":pinned,"source":"multi_agent_plan_parent"}))]).await?;
+                }
+                _ => {}
+            }
+            drop(connection);
+            // Two ticks: a recovered or given-up group is not touched again.
+            tick().await?;
+            tick().await?;
+            let notices = || {
+                let pool = &pool;
+                async move {
+                    Ok::<_, anyhow::Error>(pool.get().await?.query("select content,metadata from conversation_messages
+                        where conversation_id=$1 and metadata->>'kind'=$2",
+                        &[&conversation,&crate::multi_agent_plan::LEAD_CHECKPOINT_FAILED_CODE]).await?)
+                }
+            };
+            let finals = final_checkpoints(&pool, conversation).await?;
+            let told = notices().await?;
+            match case {
+                "recovered" => {
+                    assert_eq!(finals.len(), 1);
+                    assert!(told.is_empty());
+                    let payload = finals[0].get::<_, PgJson<serde_json::Value>>("payload").0;
+                    assert!(payload["prompt_text"].as_str().unwrap().contains("LATEST VERIFIED RESULT"), "fresh group snapshot");
+                    assert_eq!(payload["metadata"]["multiAgentPlan"]["triggerJobId"], json!(last), "the last worker to end triggers");
+                    assert_eq!(payload["metadata"]["multiAgentPlan"]["lead"]["leadHandle"], json!("octo"));
+                }
+                "led" => {
+                    assert_eq!(finals.len(), 1, "the existing lead is the only one");
+                    assert!(told.is_empty());
+                }
+                "moved_on" | "given_up" => {
+                    assert!(finals.is_empty(), "{case}: no late lead");
+                    assert_eq!(told.len(), 1, "{case}: told once");
+                    assert_eq!(told[0].get::<_, String>("content"),
+                        "@octo could not continue the plan after its agents finished. Their results are in the plan.");
+                    let metadata = told[0].get::<_, PgJson<serde_json::Value>>("metadata").0;
+                    assert_eq!(metadata["multiAgentPlan"]["groupId"], json!(group.to_string()));
+                    assert_eq!(metadata["multiAgentPlan"]["role"], json!("lead_continuation"));
+                    assert_eq!(metadata["messageType"], json!("error"));
+                }
+                _ => {
+                    assert!(finals.is_empty(), "{case}: no lead");
+                    assert!(told.is_empty(), "{case}: no notice");
+                }
+            }
+            if matches!(case, "failing" | "given_up") {
+                // The failure is the pinned runtime's refusal, a 403.
+                let error = crate::multi_agent_plan::recover_lost_final_checkpoint(&state, last).await;
+                if case == "failing" {
+                    let (status, axum::Json(error)) = error.expect_err("the pinned lead cannot start");
+                    assert_eq!(status, StatusCode::FORBIDDEN);
+                    assert_eq!(error.message, "Personal Browser runtime is not available to the current user");
+                } else {
+                    assert!(!error.map_err(|e| controller_error("given-up recovery", e))?, "a given-up lead never starts");
+                }
+                // Once the pin is gone, a retried group starts its lead, and a given-up one does not:
+                // not by the sweep, nor by a replayed completion.
+                let payload: serde_json::Value = pool.get().await?.query_one(
+                    "update agent_jobs set payload=payload #- '{metadata,runtimePreference}' where id=$1 returning payload",
+                    &[&last]).await?.get::<_, PgJson<serde_json::Value>>(0).0;
+                tick().await?;
+                crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(&state, last, &payload).await
+                    .map_err(|e| controller_error("replayed completion", e))?;
+                assert_eq!(final_checkpoints(&pool, conversation).await?.len(), usize::from(case == "failing"), "{case}");
+                assert_eq!(notices().await?.len(), usize::from(case == "given_up"), "{case}");
+            }
+            Ok(())
+        }.await;
+        let cleanup = space.cleanup().await;
+        result.map_err(|error| error.context(case))?;
+        cleanup?;
+    }
+    Ok(())
+}

@@ -88,7 +88,8 @@ pub(crate) use stop::{
 };
 #[cfg(test)]
 pub(crate) use sweeps::{
-    recover_deferred_plan_checkpoints, settle_plan_agents_out_of_team_time,
+    recover_deferred_plan_checkpoints, recover_lost_final_plan_checkpoints,
+    settle_plan_agents_out_of_team_time, REQUEUED_JOB_EXPIRED_MESSAGE,
     STRANDED_PLATFORM_JOB_GRACE_SECONDS, TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE,
 };
 #[cfg(test)]
