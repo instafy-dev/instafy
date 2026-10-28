@@ -464,7 +464,9 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
         status={<>
           <LocationBarControl site={host.location.site} status={host.location.status} />
           <SitePreviewFollowControls follow={follow} supportsView={host.supportsView && frameOnScreen} />
-          <BrowserStatusPill state={chromeState(shown)} detail={detail} testId="site-preview-status" />
+          {/* While opening or starting, the pane's own line is the one loading signal on screen. */}
+          <BrowserStatusPill state={chromeState(shown)} detail={detail} testId="site-preview-status"
+            startingShownInView={shown === "opening" || shown === "starting"} />
         </>}
         actions={
           <IconButton aria-label="Open in new tab" title="Open in new tab" className="max-[540px]:h-10 max-[540px]:w-10" data-testid="site-preview-open-tab"

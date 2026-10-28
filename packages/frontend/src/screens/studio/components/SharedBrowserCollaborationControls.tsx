@@ -32,12 +32,6 @@ function participantById(
 
 /** How long a control action may wait for the browser's answer before it says so. */
 export const CONTROL_ACTION_ANSWER_MS = 5_000;
-const CONTROL_ACTION_PENDING_LABELS: Record<string, string> = {
-  release: "Releasing…",
-  take: "Taking control…",
-  grant: "Giving control…",
-  request: "Requesting…",
-};
 const CONTROL_ACTION_NO_ANSWER = "The browser didn't answer. Try again.";
 const CONTROL_ACTION_OFFLINE = "Not connected to the browser. Try again in a moment.";
 
@@ -87,18 +81,20 @@ export function SharedBrowserCollaborationControls({
   // Who controls the browser matters only when someone else could: another
   // person (or another of your devices) in this browser, or Octo driving it.
   // Alone, there is nothing to hand over, so neither the control chip nor
-  // Release shows. Take control still shows when control is free, so a person
-  // left alone is never locked out.
+  // Release shows. Take control still shows when control is free, and someone
+  // else holding control (even before the roster lists them) still shows with
+  // Request control, so a person left alone is never locked out.
   const othersPresent = Boolean(
     client.participantId && participants.some((participant) => participant.id !== client.participantId),
   );
-  const controlShown = othersPresent || Boolean(agentDisplayName);
+  const someoneElseControls = serverOwner?.kind === "human" && serverOwner.participantId !== client.participantId;
+  const controlShown = othersPresent || someoneElseControls || Boolean(agentDisplayName);
   const ownerKey = serverOwner === null
     ? "none"
     : serverOwner.kind === "agent" ? `agent:${serverOwner.displayName}` : `human:${serverOwner.participantId}`;
   // A pressed action waits for the browser's answer: the owner changes (or,
-  // for a request, the request is listed). Until then it reads "Releasing…";
-  // without an answer it says so instead of doing nothing.
+  // for a request, the request is listed). Until then it shows Studio's
+  // pending spinner; without an answer it says so instead of doing nothing.
   const [pending, setPending] = useState<{ kind: string; ownerKey: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const answered = pending !== null &&
@@ -271,12 +267,13 @@ export function SharedBrowserCollaborationControls({
       className={compact ? "max-w-full whitespace-normal text-left" : "max-w-36 shrink-0"}
       data-action={action.kind}
       data-testid="shared-browser-collaboration-control-action"
-      isDisabled={action.disabled || actionPending}
+      isDisabled={action.disabled}
+      // Pending keeps keyboard focus on the pressed control while it waits.
+      isPending={actionPending}
       onPress={() => {
-        // A pressed action waits disabled for the browser's answer, and
-        // granting moves it out of this row. Keep focus inside the popup
-        // before either change removes button focus.
-        if (compact) dialogRef.current?.focus();
+        // A request disables the action once listed; granting moves it out of
+        // this row. Keep focus inside the popup before either removes it.
+        if (compact && (action.kind === "request" || action.kind === "grant")) dialogRef.current?.focus();
         const kind = action.kind;
         if (action.run() === false) {
           setPending(null);
@@ -289,9 +286,7 @@ export function SharedBrowserCollaborationControls({
       title={action.label}
       type="button"
     >
-      <span className={compact ? "break-words" : "truncate"}>
-        {actionPending ? CONTROL_ACTION_PENDING_LABELS[action.kind] : compact && action.kind === "grant" ? "Give control" : action.label}
-      </span>
+      <span className={compact ? "break-words" : "truncate"}>{compact && action.kind === "grant" ? "Give control" : action.label}</span>
     </Button>
   ) : null;
   // In the popup, associate the short grant action with its complete recipient

@@ -376,6 +376,14 @@ describe("SharedBrowserCollaborationControls", () => {
       expect(props.onTakeControl).toHaveBeenCalledOnce();
     });
 
+    it("still says who controls, and offers a request, while someone not listed yet holds control", async () => {
+      await render({ compact: false, client: alone({ kind: "human", participantId: "not-yet-present" }) });
+      expect(status()?.textContent).toBe("Teammate controls");
+      expect(action()?.dataset.action).toBe("request");
+      await click(action()!);
+      expect(props.onRequestControl).toHaveBeenCalledOnce();
+    });
+
     it("shows who drives while Octo is driving", async () => {
       await render({ compact: false, client: alone({ kind: "agent", displayName: "Octo" }) });
       expect(status()?.textContent).toBe("Octo controls");
@@ -390,18 +398,28 @@ describe("SharedBrowserCollaborationControls", () => {
 
     it("waits for the browser's answer, then shows the new state", async () => {
       await render({ compact: false });
-      await click(action()!);
+      const pressed = action()!;
+      await click(pressed);
       expect(props.onReleaseControl).toHaveBeenCalledOnce();
-      expect(action()?.textContent).toBe("Releasing…");
-      expect(action()?.disabled).toBe(true);
-      await click(action()!);
+      // Studio's pending button: a spinner announced as "Loading" on the
+      // pressed control, which ignores presses but keeps keyboard focus
+      // (native disabled would drop it).
+      expect(action()).toBe(pressed);
+      expect(pressed.getAttribute("aria-disabled")).toBe("true");
+      expect(pressed.disabled).toBe(false);
+      expect(document.activeElement).toBe(pressed);
+      expect(pressed.querySelector('[role="progressbar"]')?.getAttribute("aria-label")).toBe("Loading");
+      expect(pressed.textContent).toContain("Release control");
+      await click(pressed);
       expect(props.onReleaseControl).toHaveBeenCalledOnce();
 
       await render({ client: client({ state: { ...client().state!, revision: 2, controlOwner: null } }) });
       expect(status()?.textContent).toBe("Control available");
+      expect(action()).toBe(pressed);
       expect(action()?.dataset.action).toBe("take");
       expect(action()?.textContent).toBe("Take control");
-      expect(action()?.disabled).toBe(false);
+      expect(action()?.hasAttribute("aria-disabled")).toBe(false);
+      expect(document.activeElement).toBe(pressed);
     });
 
     it.each([false, true])("says so when the browser does not answer, and can be pressed again (compact=%s)", async (compact) => {
@@ -409,12 +427,13 @@ describe("SharedBrowserCollaborationControls", () => {
       await render({ compact });
       if (compact) await openControls();
       await click(action()!);
-      expect(action()?.textContent).toBe("Releasing…");
+      expect(action()?.getAttribute("aria-disabled")).toBe("true");
       await act(async () => vi.advanceTimersByTime(CONTROL_ACTION_ANSWER_MS));
       const notice = find("shared-browser-collaboration-control-notice");
       expect(notice?.textContent).toBe("The browser didn't answer. Try again.");
       expect(notice?.getAttribute("role")).toBe("status");
       expect(action()?.textContent).toBe("Release control");
+      expect(action()?.hasAttribute("aria-disabled")).toBe(false);
       expect(action()?.disabled).toBe(false);
       await click(action()!);
       expect(props.onReleaseControl).toHaveBeenCalledTimes(2);

@@ -135,3 +135,61 @@ for (const hasTouch of [false, true]) {
     }
   });
 }
+
+// Production Shared Browser participant controls with two people and a local
+// owner the test answers by hand, as the browser's collaboration socket would.
+async function mountSharedControls(page: Page) {
+  const deps = await resolveViteReactDependencies(page);
+  const fixturePath = "/__shared-browser-control-focus__";
+  const main = `
+    import "/src/styles/tailwind.css";
+    import ReactNS from "${deps.react}";
+    import ReactDomClientNS from "${deps.reactDomClient}";
+    import { SharedBrowserCollaborationControls } from "/src/screens/studio/components/SharedBrowserCollaborationControls.tsx";
+    const React = ReactNS.default ?? ReactNS;
+    const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
+    const h = React.createElement;
+    const person = (id, displayName, color) => ({ id, displayName, color, pageId: "page-1", cursor: null, canControl: true });
+    window.__releases = 0;
+    function Fixture() {
+      const [controlOwner, setControlOwner] = React.useState({ kind: "human", participantId: "self" });
+      window.__answerRelease = () => setControlOwner(null);
+      const client = { connectionStatus: "connected", participantId: "self", error: null, state: {
+        revision: 1, participants: [person("self", "Taylor", "#0ea5e9"), person("peer", "Anna", "#8b5cf6")], controlOwner, requests: [],
+      } };
+      return h("div", { className: "flex items-center gap-2 p-4" },
+        h(SharedBrowserCollaborationControls, { client, compact: false, localControlOwner: { kind: "human" },
+          onGrantControl: () => true, onRequestControl: () => true, onTakeControl: () => true,
+          onReleaseControl: () => { window.__releases += 1; return true; } }));
+    }
+    createRoot(document.getElementById("root")).render(h(Fixture));`;
+  const html = `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1" />
+    <script type="module">import RefreshRuntime from "/@react-refresh";RefreshRuntime.injectIntoGlobalHook(window);window.$RefreshReg$=()=>{};window.$RefreshSig$=()=>(type)=>type;window.__vite_plugin_react_preamble_installed__=true;</script>
+    <script type="module" src="${fixturePath}/main.js"></script></head><body><div id="root"></div></body></html>`;
+  await page.route(`**${fixturePath}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.route(`**${fixturePath}/main.js`, (route) => route.fulfill({ contentType: "application/javascript", body: main }));
+  await page.goto(fixturePath);
+}
+
+test("a pressed Release keeps keyboard focus while the browser answers, then shows the new state", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await mountSharedControls(page);
+  const action = page.getByTestId("shared-browser-collaboration-control-action");
+  await expect(action).toHaveText("Release control");
+  await action.focus();
+  await page.keyboard.press("Enter");
+  // Studio's pending button: a spinner announced as "Loading" that ignores
+  // presses. Native `disabled` would move focus to the page body.
+  await expect(action.getByRole("progressbar", { name: "Loading" })).toBeVisible();
+  await expect(action).toHaveAttribute("aria-disabled", "true");
+  await expect(action).toBeFocused();
+  await page.keyboard.press("Enter");
+  expect(await page.evaluate(() => (window as { __releases?: number }).__releases)).toBe(1);
+  await page.evaluate(() => (window as unknown as { __answerRelease: () => void }).__answerRelease());
+  await expect(action).toHaveText("Take control");
+  await expect(action).not.toHaveAttribute("aria-disabled", "true");
+  await expect(action).toBeFocused();
+  await expect(page.getByTestId("shared-browser-collaboration-control-state")).toHaveText("Control available");
+  expect(errors).toEqual([]);
+});
