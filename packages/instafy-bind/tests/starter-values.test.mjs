@@ -237,6 +237,37 @@ test("ranked: a stated limit lists apart the rows whose price is unknown", async
   assert.match(document.getElementById("list").textContent, /1 hidden · Show all/);
 });
 
+// A price as its shop writes it: German, French and Swiss shops group thousands with ".", a space or "'" and write
+// cents after ",". "1.299,00 €" is over €600, never 1.299 € within it; "549,99 €" is within it, never 54,999 €.
+const WRITTEN = [
+  ["1.299,00 €", 1299], ["€1.099", 1099], ["1 199 €", 1199], ["1 249 €", 1249], ["1 049 €", 1049],
+  ["CHF 1'299.–", 1299], ["€1,149.00", 1149], ["$1,299", 1299], ["1.299.000 Ft", 1299000], ["549,99 €", 549.99],
+  ["€599.99", 599.99], ["8.000 Pa", 8000], ["6,000 Pa", 6000], ["4.6 of 5", 4.6], ["0.125 in", 0.125], ["10,5 cm", 10.5],
+  ["12345.678", 12345.678], ["2 3-year plans", 2], ["180 min", 180], ["-5 °C", -5],
+];
+
+test("a price as its shop writes it is that amount: 1.299,00 € and 1 199 € are over €600, 549,99 € is within it", async () => {
+  const priced = (ref, v) => item(ref, ref, { price: { v, src: "Shop", url: `https://shop.example/${ref}`, date: DAY } });
+  const data = compareData();
+  data.items = [priced("de", "1.299,00 €"), priced("dot", "€1.099"), priced("space", "1 199 €"), priced("narrow", "1 049 €"), priced("cents", "549,99 €"), priced("swiss", "CHF 1'299.–")];
+  for (const width of [1280, 390]) {
+    const { document } = await draw("compare", data, { width });
+    assert.deepEqual(rows(document), { within: ["option:cents"], apart: [], heading: null }, `${width}px`);
+    assert.match(document.getElementById("list").textContent, /5 more over €600 · Show/);
+  }
+  const ranked = { title: "Top two", lede: "", filter: { key: "price", max: 600, label: "€600 or less" }, items: [
+    { ref: "option:a", rank: 1, name: "Option A", price: { v: "1.299 €", src: "Shop", url: "https://shop.example/a", date: DAY } },
+    { ref: "option:b", rank: 2, name: "Option B", price: { v: "549,99 €", src: "Shop", url: "https://shop.example/b", date: DAY } },
+  ] };
+  assert.deepEqual(rows((await draw("ranked", ranked)).document), { within: ["option:b"], apart: [], heading: null });
+  // the page and `instafy bind check` read every number the same way
+  const { site } = await draw("compare", compareData());
+  for (const [v, n] of WRITTEN) {
+    assert.equal(site.num({ v }), n, `the page reads "${v}" as ${n}`);
+    assert.equal(knownNumber({ v, src: "Shop", url: "https://shop.example/x", date: DAY }), n, `the check reads "${v}" as ${n}`);
+  }
+});
+
 test("site.within: only a value the page shows is within a limit; everything unknown is 'unknown', never 'in'", async () => {
   const { site } = await draw("compare", compareData());
   const limit = { key: "price", max: 600 };

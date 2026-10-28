@@ -176,12 +176,36 @@ const httpsUrl = (url) => {
   }
 };
 
+/** The first number in a text, read the way shops write it (site.js: numberIn): a ".", ",", space or "'" before
+ *  exactly three digits groups thousands ("1.299", "1 299", "1,299" are 1299), and the last "." or "," is the decimal
+ *  mark otherwise ("1.299,00" is 1299, "549,99" is 549.99, "4.6" is 4.6). */
+export function numberIn(text) {
+  const m = /(-?)(\d+)((?:[.,'\u2019 \u00a0\u2009\u202f]\d+)*)/.exec(String(text ?? ""));
+  if (!m) return null;
+  const head = m[2];
+  const parts = m[3] ? m[3].match(/[.,'\u2019 \u00a0\u2009\u202f]\d+/g) : [];
+  const decimalMark = (p) => p[0] === "." || p[0] === ",";
+  let dec = -1;
+  parts.forEach((p, i) => {
+    if (decimalMark(p)) dec = i;
+  });
+  // the last "." or "," groups thousands when three digits follow it, one to three (not just 0) lead, and no other kind
+  // of decimal mark comes before it: "1.299", "1,299,000"
+  if (dec >= 0 && parts[dec].length === 4 && head.length <= 3 && head !== "0" && parts.slice(0, dec).every((p) => !decimalMark(p) || p[0] === parts[dec][0])) dec = -1;
+  let whole = head;
+  for (const part of parts.slice(0, dec >= 0 ? dec : parts.length)) {
+    // a mark that does not group thousands ends the number: "2 3-year plans" is 2
+    if (head.length > 3 || part.length !== 4) return Number(m[1] + whole);
+    whole += part.slice(1);
+  }
+  return Number(m[1] + whole + (dec >= 0 ? `.${parts[dec].slice(1)}` : ""));
+}
+
 /** The number a page shows for a seed fact (site.known): a value with its source, or an estimate; else null. */
 export function knownNumber(fact) {
   if (!hasValue(fact) || !(fact.src || fact.est)) return null;
   if (typeof fact.n === "number") return fact.n;
-  const m = /-?\d[\d,]*(?:\.\d+)?/.exec(valueOf(fact));
-  return m ? Number(m[0].replace(/,/g, "")) : null;
+  return numberIn(valueOf(fact));
 }
 
 /** Is this data.json a page of options: compare (columns of facts per item) or ranked (a price and specs per item)? */
@@ -242,8 +266,7 @@ function liveValue(records, key) {
   if (!newest) return null;
   if (newest.type === "offer") return newest.price.amount;
   if (["uncertain", "not_found", "error"].includes(newest.status) || newest.value == null) return null;
-  const m = /-?\d[\d,]*(?:\.\d+)?/.exec(String(newest.value));
-  return m ? Number(m[0].replace(/,/g, "")) : null;
+  return NO_VALUE.test(String(newest.value).trim()) ? null : numberIn(String(newest.value));
 }
 
 /** The values of a site's page of options: problems to fix before the card, and notes for the reply. */

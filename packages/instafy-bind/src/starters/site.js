@@ -170,13 +170,36 @@
     }
     return NO_VALUE.test(text.trim()) ? "" : text;
   }
-  /** A number to sort by: fact.n, an offer's amount, else the first number in the value text. */
+  /** The first number in a text, read the way shops write it: a ".", ",", space or "'" before exactly three digits
+   * groups thousands ("1.299", "1 299", "1'299", "1,299" are 1299), and the last "." or "," is the decimal mark
+   * otherwise ("1.299,00" and "1,299.00" are 1299, "549,99" is 549.99, "4.6" is 4.6, "0.125" is 0.125). */
+  function numberIn(text) {
+    var m = /(-?)(\d+)((?:[.,'’    ]\d+)*)/.exec(String(text == null ? "" : text));
+    if (!m) return null;
+    var head = m[2];
+    var parts = m[3] ? m[3].match(/[.,'’    ]\d+/g) : [];
+    var mark = function (p) { return p.charAt(0); };
+    var dec = -1;
+    parts.forEach(function (p, i) { if (mark(p) === "." || mark(p) === ",") dec = i; });
+    // the last "." or "," groups thousands when three digits follow it, one to three (not just 0) lead, and no other
+    // kind of decimal mark comes before it: "1.299", "1,299,000"
+    if (dec >= 0 && parts[dec].length === 4 && head.length <= 3 && head !== "0" &&
+      parts.slice(0, dec).every(function (p) { return (mark(p) !== "." && mark(p) !== ",") || mark(p) === mark(parts[dec]); })) dec = -1;
+    var whole = head;
+    var end = dec >= 0 ? dec : parts.length;
+    for (var i = 0; i < end; i++) {
+      // a mark that does not group thousands ends the number: "2 3-year plans" is 2
+      if (head.length > 3 || parts[i].length !== 4) return Number(m[1] + whole);
+      whole += parts[i].slice(1);
+    }
+    return Number(m[1] + whole + (dec >= 0 ? "." + parts[dec].slice(1) : ""));
+  }
+  /** A number to sort by: fact.n, an offer's amount, else the first number in the value text (numberIn). */
   function num(x) {
     if (!x) return null;
     if (isRecord(x) && x.type === "offer") return x.price && typeof x.price.amount === "number" ? x.price.amount : null;
     if (typeof x.n === "number") return x.n;
-    var m = /-?\d[\d,]*(?:\.\d+)?/.exec(valueText(x));
-    return m ? Number(m[0].replace(/,/g, "")) : null;
+    return numberIn(valueText(x));
   }
   /** The number of a value the page shows, else null. A value counts only when its trust line draws it: a live value,
    * an estimate, or a fact with its source. An unsourced fact (drawn "Not checked"), a check that could not read it,
