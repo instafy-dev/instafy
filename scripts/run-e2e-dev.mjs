@@ -35,6 +35,13 @@ import {
   resolvePrivateEnvPath,
   writePrivateEnvFileSync,
 } from "./lib/privateEnvPaths.mjs";
+import {
+  STACK_BROWSER_HOST_BUILD_TARGET,
+  STACK_BROWSER_HOST_IMAGE,
+  stackBrowserHostEnabled,
+  withStackBrowserHostControllerEnv,
+  withStackBrowserHostProviderEnv,
+} from "./lib/stackBrowserHost.mjs";
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
 import { computeGitServicesImageFingerprint } from "./lib/gitServicesImageFingerprint.mjs";
 import { resolveRustBinaryLaunch } from "./lib/prebuiltRustBinary.mjs";
@@ -2734,7 +2741,9 @@ export function providerEnv(baseEnv = {}) {
   }
   // Let runtime proxy bindings use random host ports to avoid conflicts with the host-level proxy.
   env.PROXY_PORT = env.PROXY_PORT || "0";
-  return env;
+  // STACK_BROWSER_HOST=1: space machines from the base image, which hosts the
+  // browser on demand, as users' do (lib/stackBrowserHost.mjs).
+  return withStackBrowserHostProviderEnv(env);
 }
 
 function providerLogFd() {
@@ -3218,6 +3227,9 @@ async function startControllerIfNeeded(
   if (!supabaseProjectUrl) {
     console.warn("[runtime-dev] SUPABASE project URL missing; controller will fail to verify JWTs.");
   }
+  // STACK_BROWSER_HOST=1: every space's own machine hosts the browser, as
+  // users' spaces do (lib/stackBrowserHost.mjs).
+  Object.assign(env, withStackBrowserHostControllerEnv(env, process.env));
 
   // ---- spawn detached with file-backed stdio so parent can exit ----
   ensureTmpDir();
@@ -3774,6 +3786,26 @@ function ensureRuntimeImage() {
         "build",
         "runtime"
       ]);
+    }
+
+    if (stackBrowserHostEnabled()) {
+      const hostInspect = tryCapture("docker", ["image", "inspect", STACK_BROWSER_HOST_IMAGE]);
+      if (hostInspect.code !== 0 || forceBuild) {
+        console.log(
+          `[runtime-dev] Building ${STACK_BROWSER_HOST_IMAGE}, the base image with the on-demand browser host (${hostInspect.code !== 0 ? "image missing" : "forced build"})...`
+        );
+        run(
+          "docker",
+          ["compose", "-p", composeProject, "-f", composeFile, "build", "runtime"],
+          {
+            env: {
+              ...process.env,
+              RUNTIME_AGENT_BUILD_TARGET: STACK_BROWSER_HOST_BUILD_TARGET,
+              RUNTIME_AGENT_IMAGE: STACK_BROWSER_HOST_IMAGE
+            }
+          }
+        );
+      }
     }
 
     const webdevInspect = tryCapture("docker", ["image", "inspect", "runtime-agent:webdev"]);

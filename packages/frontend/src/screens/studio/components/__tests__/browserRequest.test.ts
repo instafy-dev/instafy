@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../types";
 import {
+  BROWSER_CARD_SITES_METADATA_KEY,
+  pressedBrowserCardSites,
   browserRequestContinuation,
   browserRequestContinuedKeys,
   browserRequestDestinations,
@@ -143,5 +145,36 @@ describe("browserRequestFromContinuationPrompt", () => {
     expect(browserRequestFromContinuationPrompt(continuation({
       browserRequestOf: "job:job-1", dispatchContent: "Octo opened Instafy's browser for app.example.test",
     }))).toBeNull();
+  });
+});
+
+describe("pressedBrowserCardSites", () => {
+  const continuation = (id: string, task: string, extra: Record<string, unknown> = {}): ChatMessage => ({
+    id, role: "user", timestamp: 3, content: "Octo opened Instafy's browser",
+    metadata: { prompt_metadata: {
+      browserRequestOf: `job:${id}`, dispatchContent: browserRequestContinuation({ task, location: "workspace" }),
+      browserTransport: "shared", ...extra,
+    } },
+  });
+
+  it("names the sites of the cards the person pressed in the chat, for its later browser turns", () => {
+    // Drive, Oct 28: the follow-up asked for www.visitlisboa.com again, the
+    // site of the card pressed four minutes earlier in the same chat.
+    expect(pressedBrowserCardSites([
+      continuation("a", "Open https://www.visitlisboa.com and find Belém Tower's opening hours."),
+      { id: "o", role: "user", timestamp: 4, content: "Now find how to get there by tram.", metadata: {} },
+      continuation("b", "Open https://www.carris.pt/en/ and https://www.visitlisboa.com/en."),
+    ])).toEqual(["www.carris.pt", "www.visitlisboa.com"]);
+  });
+
+  it("never counts a card Studio opened by itself, or a task that names no site", () => {
+    expect(pressedBrowserCardSites([
+      continuation("a", "Open https://auto.example.test and read it.", { browserAutoStarted: true }),
+      continuation("b", "Research the three latest robot vacuums and compare them."),
+    ])).toEqual([]);
+  });
+
+  it("keeps the key the runtime reads", () => {
+    expect(BROWSER_CARD_SITES_METADATA_KEY).toBe("browserCardSites");
   });
 });

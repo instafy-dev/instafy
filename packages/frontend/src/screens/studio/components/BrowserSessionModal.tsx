@@ -453,11 +453,9 @@ export function BrowserSessionModal({
   sharedBrowserCapabilitiesAvailable = true,
   sharedBrowserCapabilitiesUnsupported = false,
   sharedBrowserAvailableViewerKinds = DEFAULT_SHARED_BROWSER_VIEWER_KINDS,
-  sharedBrowserRoutineApprovalAvailable = false,
   humanInputIdentityKey,
   humanInputRunIds = null,
   currentUserId = null,
-  activeBrowserRunId = null,
   onTakeOverAgent,
   onContinueAfterHumanInput,
   sharedBrowserRfbCapabilities = null,
@@ -518,11 +516,9 @@ export function BrowserSessionModal({
   sharedBrowserCapabilitiesAvailable?: boolean;
   sharedBrowserCapabilitiesUnsupported?: boolean;
   sharedBrowserAvailableViewerKinds?: SupportedSharedBrowserViewerKind[];
-  sharedBrowserRoutineApprovalAvailable?: boolean;
   humanInputIdentityKey?: string;
   humanInputRunIds?: ReadonlySet<string> | null;
   currentUserId?: string | null;
-  activeBrowserRunId?: string | null;
   /**
    * Take over. `agentHoldsBrowser`: the browser reports the agent's control,
    * which spans every tab, so the run is stopped from whichever tab is on
@@ -3420,11 +3416,6 @@ export function BrowserSessionModal({
           onTakeOver={() => void browserHumanInputState.takeOver()}
         />
       ) : null}
-      {sharedBrowserApproval.routineApprovedRunId && sharedBrowserApproval.routineApprovedRunId === activeBrowserRunId ? (
-        <div className="shrink-0 border-b border-slate-200 px-3 py-1 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400" role="status" data-testid="shared-browser-routine-status">
-          Routine browsing allowed for this turn · Take over or stop the turn to revoke.
-        </div>
-      ) : null}
       <div
         key="shared-browser-viewport"
         data-testid="browser-session-viewport"
@@ -3588,7 +3579,7 @@ export function BrowserSessionModal({
           {!shouldCollapseDocked && sharedBrowserApprovalRequest ? (
             <SharedBrowserApprovalPrompt
               active={transportActive}
-              routineApprovalAvailable={sharedBrowserRoutineApprovalAvailable}
+              agentName={effectiveAgentControlOwner?.displayName ?? "Octo"}
               error={sharedBrowserApproval.error}
               onDecision={(decision) => {
                 // The prompt this sheet shows, not whatever was polled since.

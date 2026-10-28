@@ -1000,6 +1000,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
     crate::user_input_requests::routing::strip_claims(&mut request.metadata);
     // Only a runtime's step carries an activity label (crate::chat_activity).
     crate::chat_activity::strip_activity_claims(&mut request.metadata);
+    // A pressed browser card's site is its person's OK, so only their own
+    // message may name one.
+    strip_browser_card_sites_unless_person(&mut request.metadata, context);
     // "Via a site" is the controller's to say: a client's claim is checked
     // against the previews this sender can see below, and refused otherwise.
     let site_intent_claim = crate::site_intent::take_site_intent_claim(&mut request.metadata);
@@ -4004,6 +4007,24 @@ fn shared_browser_runtime_id(
     Ok(Some(explicit_runtime_id))
 }
 
+/// `browserCardSites` names the sites of the browser cards a person pressed
+/// in the chat (Studio reads them from the chat's own continuations). The
+/// runtime starts a Shared Browser run with each one approved on the
+/// person's page, as an answered site prompt would leave it, so only that
+/// person's own signed-in message may carry it: a service, a runtime or an
+/// agent's scoped token never does.
+pub(crate) const BROWSER_CARD_SITES_METADATA_KEY: &str = "browserCardSites";
+
+fn strip_browser_card_sites_unless_person(metadata: &mut JsonValue, context: &RequestContext) {
+    let person =
+        context.user_id.is_some() && !context.is_service_role && context.scoped_claims.is_none();
+    if !person {
+        if let Some(metadata) = metadata.as_object_mut() {
+            metadata.remove(BROWSER_CARD_SITES_METADATA_KEY);
+        }
+    }
+}
+
 fn canonicalize_shared_browser_request(
     request: &mut DispatchPromptNormalized,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
@@ -5673,6 +5694,44 @@ async fn progress_callback(
 #[cfg(test)]
 #[path = "dispatch_security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+mod browser_card_sites_tests {
+    use super::*;
+
+    fn metadata() -> JsonValue {
+        json!({ "browserCardSites": ["www.example.com"], "browserTransport": "shared" })
+    }
+
+    #[test]
+    fn only_a_persons_own_message_names_pressed_card_sites() {
+        let person = RequestContext {
+            user_id: Some(Uuid::new_v4()),
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        let mut kept = metadata();
+        strip_browser_card_sites_unless_person(&mut kept, &person);
+        assert_eq!(kept["browserCardSites"], json!(["www.example.com"]));
+
+        let service = RequestContext {
+            user_id: Some(Uuid::new_v4()),
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        let anonymous = RequestContext {
+            user_id: None,
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        for context in [service, anonymous] {
+            let mut stripped = metadata();
+            strip_browser_card_sites_unless_person(&mut stripped, &context);
+            assert!(stripped.get("browserCardSites").is_none());
+            assert_eq!(stripped["browserTransport"], "shared");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

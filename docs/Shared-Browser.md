@@ -362,13 +362,42 @@ the page origin has been approved because it changes no remote state. Typing
 authentication, payment, or identity secrets remains blocked outright and is
 not made possible by approval.
 
-In Ask, the first site prompt also offers **Always allow routine browsing for this turn**
-when the runtime advertises `approvalModes: ["ask", "routine"]`. This is an
-explicit grant across HTTP(S) sites for the exact current run, initiating user,
-runtime generation and selected page—not permanent site trust, a project-wide
-default, or permission inherited by the next turn (only a run that continues it
-with **Let AI continue** keeps it, see "Manual input handoff"). A run on the space's own
-machine starts with the same grant, scoped the same way. Under routine browsing,
+Two steps never ask, in Ask too:
+
+- **A pressed card's site.** A browser card names the site its task opens ("For
+  www.example.com"), and the person's press on it is their OK for that site.
+  Studio names the sites of every card the person pressed in the chat
+  (`browserCardSites` in the turn's metadata: plain host names, at most eight,
+  never a card Studio opened by itself), and the runtime starts each later
+  Shared Browser run of that chat with those sites' `https` origins approved on
+  the person's page, as an answered site prompt leaves them. The controller
+  keeps the key only on the person's own signed-in message (never a service,
+  runtime or agent token), and the runtime takes only plain public host names
+  (no address, IP literal, port or local name). It approves the site only:
+  every step on it still asks as before, Octo's own tabs approve sites for
+  themselves, and link-only sites, private addresses and risky addresses are
+  refused or ask exactly as before.
+- **A cookie banner's refusal.** A click on a button with a refusal's words
+  ("Reject all", "Only necessary", "Alle ablehnen", "Rejeitar todos", …) inside
+  a cookie or consent banner (the page describer's `consentContext`: a
+  container named for it, a dialog titled for it, or a small container close
+  by that speaks of cookies) shares nothing, so it runs without a prompt. It
+  must not be a link or send a form, and its step lets no form post leave the
+  tab, not even to the page's own site. "Accept all", and the same words
+  outside a banner (a document editor's "Reject all"), still ask.
+
+The browser view's prompt asks in the chat row's words: "Octo wants to use
+example.com." with **Deny** and **Allow site** (or "Octo wants to click “Search”
+on example.com." with **Allow**), and the exact site or page it is about. It
+offers no routine-browsing choice: a run on the space's own machine starts in
+routine browsing, which is what users' spaces get.
+
+Routine browsing is a grant across HTTP(S) sites for the exact current run,
+initiating user, runtime generation and selected page—not permanent site
+trust, a project-wide default, or permission inherited by the next turn (only a
+run that continues it with **Let AI continue** keeps it, see "Manual input
+handoff"). A run on the space's own machine starts with it; the runtime still
+honours a decision of `allow_routine` on a site prompt from an older client. Under routine browsing,
 ordinary navigation, clicks, non-sensitive field filling and non-activation keys
 proceed without another site/action prompt, including an address typed for a
 site the run has not used yet. Steps in a named risk category (below), risky

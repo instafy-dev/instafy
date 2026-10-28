@@ -81,16 +81,10 @@ for (const [width, height] of [
 
       await untilBeat(page, "approve");
       await expectAboveFold(page, "landing-browser-allow", "approve");
-      // Ada's ticked choice is in view beside the Allow she presses: the
-      // prompt's content is scrolled so its checkbox shows, above the fold.
+      // Octo's one-sentence question is in view beside the Allow site she presses.
       await untilBeat(page, "allowPress");
-      await expectAboveFold(page, "landing-browser-routine-check", "allowPress");
-      const checkShown = await page.evaluate(() => {
-        const check = document.querySelector('[data-testid="landing-browser-routine-check"]')!.getBoundingClientRect();
-        const content = document.querySelector('[data-testid="landing-browser-approval-content"]')!.getBoundingClientRect();
-        return check.top >= content.top - 0.5 && check.bottom <= content.bottom + 0.5;
-      });
-      expect(checkShown, "allowPress: the ticked checkbox is inside the prompt's visible content").toBe(true);
+      await expectAboveFold(page, "landing-browser-approval-content", "allowPress");
+      await expectAboveFold(page, "landing-browser-allow", "allowPress");
       await untilBeat(page, "navigate");
       await expectAboveFold(page, "landing-browser-ticker", "navigate");
       await untilBeat(page, "click");

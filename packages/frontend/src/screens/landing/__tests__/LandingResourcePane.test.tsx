@@ -126,24 +126,16 @@ describe("the landing's resource pane", () => {
     expect(view.textContent).not.toContain("Starting…");
   });
 
-  it("asks for the preview's site, lets Ada tick routine browsing, then takes her press on Allow", async () => {
+  it("asks for the preview's site in Octo's words, then takes Ada's press on Allow site", async () => {
     let view = await browserAt("approve");
     expectPresentational();
     const approval = () => view.querySelector('[data-testid="landing-browser-approval"]') as HTMLElement;
     const allow = () => view.querySelector('[data-testid="landing-browser-allow"]')?.textContent;
-    expect(approval().textContent).toContain("Allow the AI agent to use this site?");
-    expect(approval().textContent).toContain(site.browser!.origin);
-    expect(approval().textContent).toContain("Always allow routine browsing for this turn");
-    // It opens as the studio's does: routine browsing unticked, Allow site.
-    expect(approval().getAttribute("data-routine")).toBe("false");
+    expect(approval().textContent).toContain(`Octo wants to use ${new URL(site.browser!.origin).hostname.replace(/^www\./u, "")}.`);
+    expect(approval().textContent).not.toContain("the AI agent");
+    expect(approval().textContent).not.toContain("routine browsing");
     expect(allow()).toBe("Allow site");
-    expect(approval().querySelector('[data-testid="landing-browser-routine-box"] svg')).toBeNull();
-    expect(approval().getAttribute("data-pressed")).toBe("false");
-    view = await browserAt("routine");
-    expect(approval().getAttribute("data-routine")).toBe("true");
-    expect(allow()).toBe("Allow routine browsing");
-    expect(approval().querySelector('[data-testid="landing-browser-routine-box"] svg')).not.toBeNull();
-    // Drawn scrolled, never a scroll container a visitor could tab to.
+    // Never a scroll container a visitor could tab to.
     for (const node of all('[data-testid="landing-browser-approval"] *')) expect(node.getAttribute("class") ?? "").not.toMatch(/overflow-(y-)?(auto|scroll)/);
     expect(approval().getAttribute("data-pressed")).toBe("false");
     view = await browserAt("allowPress");
@@ -151,9 +143,6 @@ describe("the landing's resource pane", () => {
     expect(view.querySelector('[data-testid="landing-browser-allow"]')?.className).toContain("scale-[0.98]");
     view = await browserAt("allowed");
     expect(approval()).toBeNull();
-    expect(view.querySelector('[data-testid="landing-browser-routine"]')?.textContent).toBe(
-      "Routine browsing allowed for this turn · Take over or stop the turn to revoke.",
-    );
     // The studio's own edge glow while Octo controls the page.
     expect(view.querySelector('[data-testid="landing-browser-glow"] .browser-agent-surface[data-working="true"] .browser-agent-glow')).not.toBeNull();
   });
