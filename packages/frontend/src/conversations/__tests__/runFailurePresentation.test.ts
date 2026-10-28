@@ -1067,6 +1067,8 @@ describe("resolveRunFailurePresentation", () => {
   it("keeps a reason that names the plumbing behind Details, with a plain sentence up front", () => {
     for (const reason of [
       "Codex run timed out",
+      // What a failed routing preflight said before it passed on its cause.
+      "agent routing preflight failed",
       "Workspace sync failed: origin apply rejected",
       "The request to the provider failed.",
       "Codex did not execute the dedicated Shared Browser tools after retry.",

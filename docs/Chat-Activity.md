@@ -53,12 +53,17 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   raw text behind Details keeps them all (`runFailurePresentation.ts`).
 - While Instafy tries a failed turn again by itself (`useRunFailureAutoRetry`), the turn is one
   quiet line, "Trying again…", with no failure sentence, no red and no actions; a countdown before
-  a rate-limited resend reads "Trying again in 20 s" with Cancel. The resent prompt is marked
-  `retryAutomatic` and the chat leaves it out, since it repeats the person's own words, and the
-  failed attempt moves into the Details of the turn that replaced it, under "First try"
-  (`automaticRetryFold.ts`). If that retry succeeds, the turn reads as a normal success; only if it
-  fails too does the failure block show. A resend the person asked for with "Try again" stays as
-  they sent it.
+  a rate-limited resend reads "Trying again in 20 s" with Cancel. Only a dropped reply and a short
+  rate limit are sent again by themselves: a turn that did not make its changes already had the
+  runtime's second try inside it, so its "Try again" is the person's to press, since each resend
+  is a turn they pay for. The resent prompt is marked `retryAutomatic` and the chat leaves it out,
+  since it repeats the person's own words, and the failed attempt moves into the Details of the
+  turn that replaced it, under "First try" (`automaticRetryFold.ts`). The mark is the sender's
+  word, so the chat leaves a prompt out only when the failed turn is in view and the prompt
+  repeats, from the same person, the words that turn answered. If that retry succeeds, the turn
+  reads as a normal success; only if it fails too does the failure block show. A resend the
+  controller refused before any job ran it ends "Trying again…", and both failures show. A
+  resend the person asked for with "Try again" stays as they sent it.
 - Details (`TurnActivityDetails.tsx`) lists the turn in order: each command with its label, the
   command without its shell wrapper (the full line is its title), its state and its output behind
   a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes,

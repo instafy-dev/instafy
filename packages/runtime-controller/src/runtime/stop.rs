@@ -179,10 +179,12 @@ impl RuntimeStopResponse {
     }
 }
 
+// What the person reads in chat when a browser turn's machine goes away,
+// beside its "Try again": plain words, never the plumbing.
 pub(crate) const PERSONAL_BROWSER_DISCONNECTED_ERROR: &str =
-    "Personal Browser disconnected. Reconnect the desktop app and retry this request.";
+    "Personal Browser disconnected. Reconnect the desktop app, then try again.";
 pub(crate) const SHARED_BROWSER_DISCONNECTED_ERROR: &str =
-    "Shared Browser disconnected because its runtime stopped. Reopen the Shared Browser and retry this request.";
+    "The Shared Browser closed when its machine stopped. Open it again, then try again.";
 const UNAVAILABLE_RUNTIME_INPUT_REJECTION: &str =
     "runtime stopped before active-turn input acknowledgement";
 
@@ -2862,6 +2864,23 @@ mod tests {
     use serde_json::json;
     use tokio::time::{timeout, Duration};
     use uuid::Uuid;
+
+    /// A browser turn's failure is the sentence the person reads in chat, next
+    /// to "Try again": plain words, never the plumbing. Chat hides a failure
+    /// sentence that says "request" behind Details, so it must not say it.
+    #[test]
+    fn browser_disconnect_failures_read_in_plain_words() {
+        for sentence in [
+            super::PERSONAL_BROWSER_DISCONNECTED_ERROR,
+            super::SHARED_BROWSER_DISCONNECTED_ERROR,
+        ] {
+            let lower = sentence.to_lowercase();
+            for word in ["request", "runtime", "retry"] {
+                assert!(!lower.contains(word), "{sentence:?} says {word:?}");
+            }
+            assert!(lower.ends_with("then try again."), "{sentence:?}");
+        }
+    }
 
     fn runtime_details(status: &str, active_lease_id: Option<Uuid>) -> RuntimeDetails {
         RuntimeDetails {

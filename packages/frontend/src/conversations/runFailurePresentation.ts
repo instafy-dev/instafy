@@ -72,7 +72,7 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
 // (The controller's own sentences, such as a team's cloud runtimes staying
 // busy, are written for the person and still show.)
 const TECHNICAL_FAILURE_WORDS =
-  /\b(?:codex|workspace|requests?|providers?|upstream|credentials?|mcp|json|https?|url|proxy|stderr|stdout|exit (?:code|status)|status \d{3})\b|[`{}<>]|::/i;
+  /\b(?:codex|workspace|requests?|providers?|upstream|credentials?|preflight|mcp|json|https?|url|proxy|stderr|stdout|exit (?:code|status)|status \d{3})\b|[`{}<>]|::/i;
 
 const MAX_AGENT_NAME_LENGTH = 40;
 
