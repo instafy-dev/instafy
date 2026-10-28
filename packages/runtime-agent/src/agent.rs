@@ -1656,6 +1656,9 @@ impl RuntimeAgent {
         job: &LeaseJob,
         mut execution: JobExecution,
     ) {
+        // A browser turn's finding lines are for Octo: the reply goes out
+        // without them, and a Details note keeps them.
+        crate::jobs::browser_hand_back::move_findings_into_details(job, &mut execution);
         let registration_result = async {
             if let Some((index, request)) =
                 crate::jobs::user_input_request::from_artifacts(job, &execution.artifacts)?

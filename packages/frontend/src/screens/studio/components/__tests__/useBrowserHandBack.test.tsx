@@ -35,7 +35,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../../../../../..");
 const fixtures = JSON.parse(readFileSync(
   resolve(repo, "packages/runtime-controller/src/browser_hand_back_fixtures.json"), "utf8",
-)) as { claimKey: string; recordKey: string; handBackPrompt: string; browserReply: string };
+)) as {
+  claimKey: string; recordKey: string; handBackPrompt: string; browserReply: string; postedReply: string;
+  findingLines: string[];
+};
 
 const CARD_JOB = "job-card";
 const BROWSER_JOB = "job-browser";
@@ -52,16 +55,26 @@ function reply(jobId: string, content: string, timestamp: number, metadata: Reco
   return { id: `reply-${jobId}-${timestamp}`, role: "assistant", content, timestamp, metadata: { jobId, ...metadata } };
 }
 
-/** Card, browser turn, reply: the chain as this page sent it. */
+/** The runtime's Details note with the finding lines it moved out of the reply. */
+function findingsNote(jobId: string, timestamp: number, pagesRead = 2): ChatMessage {
+  return reply(jobId, fixtures.findingLines.join("\n"), timestamp, {
+    messageType: "status",
+    details: { kind: "agent_message", browserFindings: { pages: fixtures.findingLines.length, pagesRead } },
+  });
+}
+
+/** Card, browser turn, its findings note and reply: the chain as this page sent it. */
 function chain(now: number, cardPrompt: Record<string, unknown> = {}): ChatMessage[] {
   return [
     sent(CARD_JOB, cardPrompt, now - 60_000),
     reply(CARD_JOB, "Continue this task in Instafy's browser.", now - 50_000, {
-      messageType: "action_request", details: { browserRequest: { task: "Read the timetable", location: "auto" } },
+      messageType: "action_request",
+      details: { browserRequest: { task: "Read the timetable", location: "auto", continueBuilding: true } },
     }),
-    sent(BROWSER_JOB, { browserRequestOf: `job:${CARD_JOB}`, browserTransport: "shared" }, now - 40_000,
-      "Octo opened Instafy's browser for rail.example.org"),
-    reply(BROWSER_JOB, fixtures.browserReply, now - 1_000),
+    sent(BROWSER_JOB, { browserRequestOf: `job:${CARD_JOB}`, browserTransport: "shared", browserHandsBack: true },
+      now - 40_000, "Opened Instafy's browser for rail.example.org"),
+    findingsNote(BROWSER_JOB, now - 1_100),
+    reply(BROWSER_JOB, fixtures.postedReply, now - 1_000),
   ];
 }
 
@@ -143,7 +156,21 @@ describe("browser hand-back: when Studio sends one", () => {
     ["the browser continuation was not a browser turn", () => {
       forgetPromptsSentFromThisPageForTests();
       sent(CARD_JOB, {}, now - 60_000);
-      sent(BROWSER_JOB, { browserRequestOf: `job:${CARD_JOB}` }, now - 40_000);
+      sent(BROWSER_JOB, { browserRequestOf: `job:${CARD_JOB}`, browserHandsBack: true }, now - 40_000);
+    }],
+    // Local drive, Oct 28: "find the opening hours" and "how do I get there
+    // by tram" were each answered twice, once by a turn nobody asked for.
+    ["the card was for a question: its browser turn answered it", () => {
+      forgetPromptsSentFromThisPageForTests();
+      sent(CARD_JOB, {}, now - 60_000);
+      sent(BROWSER_JOB, { browserRequestOf: `job:${CARD_JOB}`, browserTransport: "shared" }, now - 40_000);
+    }],
+    ["the browser turn read no page", () => {
+      input.messages = input.messages.map((message) =>
+        message.id === findingsNote(BROWSER_JOB, now - 1_100).id ? findingsNote(BROWSER_JOB, now - 1_100, 0) : message);
+    }],
+    ["the browser turn left no findings", () => {
+      input.messages = input.messages.filter((message) => message.id !== findingsNote(BROWSER_JOB, now - 1_100).id);
     }],
   ] as const)("sends nothing when %s", (_name, arrange) => {
     arrange();
