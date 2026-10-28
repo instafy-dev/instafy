@@ -1432,6 +1432,84 @@ async fn agent_control_guard_drop_removes_its_owned_marker() {
     assert!(!path.exists());
 }
 
+#[derive(Clone, Default)]
+struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn errors_while(run: impl FnOnce()) -> String {
+    let log = CapturedLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_max_level(tracing::Level::ERROR)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, run);
+    let text = String::from_utf8_lossy(&log.0.lock().unwrap()).to_string();
+    text
+}
+
+#[tokio::test]
+async fn an_unconfirmed_turn_end_logs_why_the_runtime_exits() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let path = directory.path().join("agent-control.json");
+    let cancel_signal = JobCancelSignal::new();
+    let run_id = Uuid::new_v4();
+    let guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        path.clone(),
+        directory.path().join("approvals"),
+        ApprovalStart::Ask,
+        run_id,
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire marker");
+    // The run's deadline passed before its tools were confirmed gone; a later
+    // reason does not replace the first.
+    cancel_signal.note_shared_browser_shutdown_failure("run_deadline_before_shutdown");
+    cancel_signal.note_shared_browser_shutdown_failure("mcp_processes_not_gone");
+
+    let log = errors_while(|| drop(guard));
+
+    let exit = log
+        .lines()
+        .find(|line| line.contains("event=\"runtime_exit\""))
+        .unwrap_or_else(|| panic!("no runtime_exit line in:\n{log}"));
+    for field in [
+        "cause=\"unconfirmed_tool_shutdown\"".to_string(),
+        "reason=\"run_deadline_before_shutdown\"".to_string(),
+        "exit_code=70".to_string(),
+        format!("run_id={run_id}"),
+        // The boot browser's watch is not running in this test.
+        "chromium=not supervised".to_string(),
+    ] {
+        assert!(exit.contains(&field), "{field} missing from: {exit}");
+    }
+    assert!(!log.contains("event=\"chromium_exited\""));
+
+    // A fresh attempt forgets the earlier reason.
+    cancel_signal.reset_shared_browser_shutdown_confirmation();
+    assert_eq!(cancel_signal.shared_browser_shutdown_failure(), None);
+}
+
 #[tokio::test]
 async fn confirmed_guard_drop_recycles_when_marker_cannot_be_verified() {
     RUNTIME_RECYCLE_REQUESTED.store(false, Ordering::SeqCst);

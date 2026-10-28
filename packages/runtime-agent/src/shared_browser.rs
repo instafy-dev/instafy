@@ -162,7 +162,6 @@ const BROWSER_UNAVAILABLE_STREAK_LIMIT: u32 = 2;
 pub(crate) const DEFAULT_APPROVAL_WAIT: Duration = Duration::from_secs(120);
 pub(crate) const MAX_APPROVAL_WAIT: Duration = Duration::from_secs(300);
 const MIN_APPROVAL_WAIT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
 const UNCONFIRMED_BROWSER_SHUTDOWN_EXIT_CODE: i32 = 70;
 const ALLOWED_PRESS_KEYS: [&str; 15] = [
     "Enter",
@@ -252,14 +251,40 @@ pub struct SharedBrowserAgentControlGuard {
 #[cfg(test)]
 static RUNTIME_RECYCLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-fn recycle_runtime_after_unconfirmed_browser_shutdown() {
+/// Fails closed after a Shared Browser run whose end could not be confirmed.
+/// `cause` names which check failed and `reason`, for an unconfirmed tool
+/// shutdown, why (both fixed tokens). The one log line it writes,
+/// `event = "runtime_exit"` with Chromium's state as the boot browser's watch
+/// last saw it, tells this exit apart from a Chromium that exited by itself
+/// (`event = "chromium_exited"`, `boot_browser`).
+fn recycle_runtime_after_unconfirmed_browser_shutdown(
+    cause: &'static str,
+    reason: Option<&'static str>,
+    run_id: Uuid,
+) {
     // A lazy browser host fails closed without ending the machine: the host
     // is killed and refuses to start again until the process exits, and the
     // marker stays in place, so origin keeps refusing human input.
     if crate::browser_host::lazy_mode() {
+        tracing::error!(
+            event = "browser_host_poisoned",
+            cause,
+            reason = reason.unwrap_or("none"),
+            %run_id,
+            "Shared Browser: a turn's end could not confirm its browser tools stopped; Instafy's browser stays closed until this machine restarts"
+        );
         crate::browser_host::poison();
         return;
     }
+    tracing::error!(
+        event = "runtime_exit",
+        cause,
+        reason = reason.unwrap_or("none"),
+        %run_id,
+        exit_code = UNCONFIRMED_BROWSER_SHUTDOWN_EXIT_CODE,
+        chromium = %crate::boot_browser::chromium_state_for_log(),
+        "Shared Browser: a turn's end could not confirm its browser tools stopped; runtime-agent exits so this machine restarts with a new browser"
+    );
     #[cfg(test)]
     {
         RUNTIME_RECYCLE_REQUESTED.store(true, Ordering::SeqCst);
@@ -272,6 +297,12 @@ fn recycle_runtime_after_unconfirmed_browser_shutdown() {
         // startup clears the old marker before a new origin can accept input.
         std::process::exit(UNCONFIRMED_BROWSER_SHUTDOWN_EXIT_CODE);
     }
+}
+
+/// Whether a Shared Browser run holds the browser now (its agent-control
+/// marker exists), for a log line.
+pub(crate) fn agent_control_marker_present() -> bool {
+    agent_control_file_path().exists()
 }
 
 fn agent_control_file_path() -> PathBuf {
@@ -1738,7 +1769,11 @@ impl Drop for SharedBrowserAgentControlGuard {
                 marker_path = %self.path.display(),
                 "Shared Browser agent-control marker lock was poisoned; preserving authority and recycling the runtime"
             );
-            recycle_runtime_after_unconfirmed_browser_shutdown();
+            recycle_runtime_after_unconfirmed_browser_shutdown(
+                "marker_lock_poisoned",
+                None,
+                self.run_id,
+            );
             return;
         };
         if self
@@ -1768,7 +1803,11 @@ impl Drop for SharedBrowserAgentControlGuard {
                     "Shared Browser shutdown was confirmed but approval revocation failed; preserving authority and recycling the runtime"
                 );
                 forget_ended_run_grants(&self.approval_dir);
-                recycle_runtime_after_unconfirmed_browser_shutdown();
+                recycle_runtime_after_unconfirmed_browser_shutdown(
+                    "approval_revocation_failed",
+                    None,
+                    self.run_id,
+                );
                 return;
             }
             if let Err(error) = remove_owned_agent_control_marker(
@@ -1784,17 +1823,30 @@ impl Drop for SharedBrowserAgentControlGuard {
                     "Shared Browser shutdown was confirmed but authority release failed; preserving fail-closed state and recycling the runtime"
                 );
                 forget_ended_run_grants(&self.approval_dir);
-                recycle_runtime_after_unconfirmed_browser_shutdown();
+                recycle_runtime_after_unconfirmed_browser_shutdown(
+                    "authority_release_failed",
+                    None,
+                    self.run_id,
+                );
                 return;
             }
             store_ended_run_grants(&self.approval_dir, ended);
         } else {
+            let reason = self
+                .shutdown_confirmation
+                .shared_browser_shutdown_failure()
+                .unwrap_or("run_ended_before_shutdown");
             tracing::error!(
                 marker_path = %self.path.display(),
+                reason,
                 "Shared Browser execution ended without confirmed tool shutdown; preserving authority and recycling the runtime"
             );
             forget_ended_run_grants(&self.approval_dir);
-            recycle_runtime_after_unconfirmed_browser_shutdown();
+            recycle_runtime_after_unconfirmed_browser_shutdown(
+                "unconfirmed_tool_shutdown",
+                Some(reason),
+                self.run_id,
+            );
         }
     }
 }

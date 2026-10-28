@@ -290,7 +290,7 @@ fn profile_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILE_DIR))
 }
 
-fn entrypoint_path() -> String {
+pub(crate) fn entrypoint_path() -> String {
     std::env::var(ENTRYPOINT_ENV)
         .ok()
         .map(|value| value.trim().to_string())
@@ -464,14 +464,46 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// Held while this process launches Chromium, so the profile restore and the
+/// boot browser's watch (`boot_browser`) never start two at once.
+static CHROMIUM_LAUNCH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Launch the headed Chromium daemon by re-invoking the bash entrypoint's
 /// `launch-chromium` subcommand. That reuses the exact flags/CDP-readiness
 /// checks entrypoint.sh already ships and starts the browser against the
 /// freshly-seeded profile dir. VNC/X/fluxbox are already running from boot; this
 /// only starts the browser process.
 async fn launch_chromium() -> Result<()> {
-    let entrypoint = entrypoint_path();
-    let mut command = tokio::process::Command::new(&entrypoint);
+    launch_chromium_unless_running(&entrypoint_path(), Path::new(CHROMIUM_PID_FILE)).await
+}
+
+/// Launches Chromium unless the pid file names a running one (something
+/// started it meanwhile). A pid file that names an exited process is removed
+/// first: the launcher's bare `kill -0` would take an unreaped zombie for a
+/// running browser and start nothing.
+pub(crate) async fn launch_chromium_unless_running(
+    entrypoint: &str,
+    pid_file: &Path,
+) -> Result<()> {
+    let _launching = CHROMIUM_LAUNCH.lock().await;
+    if let Ok(pid) = tokio::fs::read_to_string(pid_file).await {
+        let pid = pid.trim();
+        if !pid.is_empty() && process_alive(pid).await {
+            return Ok(());
+        }
+    }
+    match tokio::fs::remove_file(pid_file).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to remove {}", pid_file.display()));
+        }
+    }
+    run_launcher(entrypoint).await
+}
+
+async fn run_launcher(entrypoint: &str) -> Result<()> {
+    let mut command = tokio::process::Command::new(entrypoint);
     command.arg("launch-chromium");
     apply_allowlisted_tokio_environment(&mut command, BROWSER_HELPER_ENV_KEYS);
     let status = command

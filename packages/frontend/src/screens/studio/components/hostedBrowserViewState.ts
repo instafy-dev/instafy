@@ -52,6 +52,7 @@ const PROVIDER_NOT_CONFIGURED = /provider\s+['"][^'"]+['"]\s+is not configured/i
  * | connected, with a connection     | live     | none                             | none         |
  * | idle, selecting, connecting      | opening  | "Opening Instafy's browser…"     | none         |
  * | the same, machine start slow     | opening  | "Still starting this space's…"   | none         |
+ * | the same, its browser restarting | opening  | "Instafy's browser stopped. St…" | none         |
  * | error `off`                      | off      | "Instafy's browser is off."      | Open browser |
  * | error `failed`                   | failed   | "... did not open. Try again."   | Try again    |
  * | error `machine`                  | failed   | "This space's machine did not…"  | Try again    |
@@ -64,6 +65,8 @@ export function hostedBrowserViewState(input: {
   hasConnection: boolean;
   /** A press's start of the space's machine has taken over a minute so far. */
   machineStartSlow?: boolean;
+  /** The machine is starting its browser again after it stopped (a boot-time browser). */
+  browserRestarting?: boolean;
 }): HostedBrowserViewState {
   const { failure } = input;
   if (input.status === "error" || failure) {
@@ -91,7 +94,11 @@ export function hostedBrowserViewState(input: {
   }
   return {
     kind: "opening",
-    sentence: input.machineStartSlow ? SHARED_BROWSER_HOST_COPY.stillStartingMachine : SHARED_BROWSER_HOST_COPY.opening,
+    sentence: input.browserRestarting
+      ? SHARED_BROWSER_HOST_COPY.restarting
+      : input.machineStartSlow
+        ? SHARED_BROWSER_HOST_COPY.stillStartingMachine
+        : SHARED_BROWSER_HOST_COPY.opening,
     action: null,
   };
 }

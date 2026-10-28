@@ -4,7 +4,8 @@
 //! and hands the origin a [`BrowserHostHandle`] through
 //! [`crate::server::OriginHttpServer::set_browser_host`]. Without a handle
 //! (Desktop, the boot-time Shared Browser, the multi-tenant gateway) every
-//! route here answers 404 and the browser transports behave as before.
+//! route here answers 404 and the browser transports behave as before, apart
+//! from a boot-time browser's own guard ([`crate::boot_browser`]).
 //!
 //! - `GET /browser/host` (`browser.view`) reports the host's state and a few
 //!   facts relative to the caller, never anyone's identity.
@@ -156,8 +157,10 @@ impl AppState {
 /// host is not ready: 503 `browser_host_not_ready` with `Retry-After: 1`.
 /// Put it before every other extractor of a guarded handler, so the refusal
 /// comes before any CDP request or WebSocket upgrade. It also counts the
-/// request as the caller's use of the browser. Without a host it does
-/// nothing.
+/// request as the caller's use of the browser. Without a host it refuses only
+/// while a boot-time browser's Chromium is not running
+/// ([`crate::boot_browser`]: `browser_restarting` or `browser_stopped`), and
+/// otherwise does nothing.
 pub(crate) struct BrowserHostReady;
 
 #[axum::async_trait]
@@ -166,7 +169,15 @@ impl FromRequestParts<AppState> for BrowserHostReady {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, OriginError> {
         let Some(handle) = state.browser_host.as_ref() else {
-            return Ok(Self);
+            // A boot-time browser says when its Chromium is not running.
+            return match state
+                .boot_browser
+                .as_deref()
+                .and_then(crate::boot_browser::refusal)
+            {
+                Some(refusal) => Err(refusal),
+                None => Ok(Self),
+            };
         };
         if let Some(claims) = parts.extensions.get::<OriginClaims>() {
             handle.note_seen(&claims.sub);

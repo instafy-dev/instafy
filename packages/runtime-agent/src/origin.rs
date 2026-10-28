@@ -212,6 +212,11 @@ impl OriginService {
         if let Some(handle) = crate::browser_host::origin_handle() {
             server.set_browser_host(handle);
         }
+        // The boot-time browser's Chromium, which this process starts again
+        // when it exits: the browser transports say while it restarts.
+        if let Some(handle) = crate::boot_browser::origin_handle() {
+            server.set_boot_browser(handle);
+        }
         // Send page to Octo reads a page with the same redaction the agent's
         // Shared Browser snapshots use.
         server.set_browser_page_capture_script(

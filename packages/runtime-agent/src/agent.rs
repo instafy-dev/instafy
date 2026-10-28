@@ -709,6 +709,9 @@ impl RuntimeAgent {
         // A lazy browser host lives as long as this process, across
         // registration renewals; it is published only on an attested lease.
         crate::browser_host::install(client.clone());
+        // A browser session machine's boot-time Chromium is started again
+        // when it exits, for as long as this process runs.
+        crate::boot_browser::install(shutdown.clone());
 
         Self::run_registration_loop(
             config.clone(),
@@ -994,6 +997,10 @@ impl RuntimeAgent {
             // the runtime stops itself below. Origin and its git flush went
             // first, above.
             crate::browser_host::shutdown(BROWSER_HOST_SHUTDOWN_BUDGET).await;
+
+            // The shutdown save closes the boot-time Chromium itself: the
+            // watch must not start it again behind it.
+            crate::boot_browser::stop_watching();
 
             // Flag-gated: snapshot the browser profile back to the controller
             // before we tear the runtime down, so the next runtime restores it.

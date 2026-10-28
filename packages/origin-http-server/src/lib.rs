@@ -2,6 +2,7 @@ pub mod apply;
 mod apply_idempotency;
 mod apply_request;
 pub mod auth;
+pub mod boot_browser;
 pub mod browser;
 mod browser_approval;
 pub use browser_approval::MAX_APPROVAL_LIFETIME_MS as SHARED_BROWSER_MAX_APPROVAL_LIFETIME_MS;

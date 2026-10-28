@@ -1414,6 +1414,22 @@ impl CodexClient {
                 };
                 observation.finish(outcome);
             }
+            if let Some(signal) = shared_browser_shutdown_confirmation
+                .as_ref()
+                .filter(|signal| !signal.shared_browser_shutdown_is_confirmed())
+            {
+                // A run that ended before it reached the shutdown check never
+                // recorded why; say how it ended instead. Its deadline names
+                // itself first (`run_shared_browser_with_deadline`), and the
+                // first reason stands.
+                signal.note_shared_browser_shutdown_failure(if cleanup_result.is_err() {
+                    "codex_threads_not_drained"
+                } else if signal.is_canceled() {
+                    "run_cancelled_before_shutdown"
+                } else {
+                    "run_ended_before_shutdown"
+                });
+            }
             cleanup_result?;
             if shared_browser_shutdown_confirmation
                 .as_ref()
@@ -1473,6 +1489,9 @@ impl CodexClient {
         tokio::select! {
             output = &mut future => return output,
             _ = tokio::time::sleep(run_timeout) => {
+                // The deadline cancels the run itself: name it first, so a
+                // runtime exit that follows does not read as a person's Stop.
+                cancel_signal.note_shared_browser_shutdown_failure("run_deadline_before_shutdown");
                 cancel_signal.cancel();
             }
             _ = cancel_signal.cancelled() => {}
@@ -2624,15 +2643,25 @@ impl CodexClient {
                     "Shared Browser execution lost its shutdown confirmation signal"
                 ));
             };
-            confirm_shared_browser_shutdown(&conversation).await?;
+            if let Err(error) = confirm_shared_browser_shutdown(&conversation).await {
+                shutdown_confirmation
+                    .note_shared_browser_shutdown_failure("codex_shutdown_unconfirmed");
+                return Err(error);
+            }
             // Codex reports ShutdownComplete after only signalling its MCP processes. Authority
             // returns to the human once every recorded MCP process group is proven gone.
-            shared_browser_process_groups
-                .take()
-                .context("Shared Browser execution lost its MCP process-group registry")?
-                .terminate_and_confirm()
-                .await
-                .context("Shared Browser MCP processes could not be confirmed gone")?;
+            let Some(process_groups) = shared_browser_process_groups.take() else {
+                shutdown_confirmation.note_shared_browser_shutdown_failure("mcp_registry_lost");
+                return Err(anyhow!(
+                    "Shared Browser execution lost its MCP process-group registry"
+                ));
+            };
+            if let Err(error) = process_groups.terminate_and_confirm().await {
+                shutdown_confirmation
+                    .note_shared_browser_shutdown_failure("mcp_processes_not_gone");
+                return Err(error)
+                    .context("Shared Browser MCP processes could not be confirmed gone");
+            }
             shutdown_confirmation.confirm_shared_browser_shutdown();
         }
 
@@ -6186,6 +6215,39 @@ mod tests {
         );
         assert!(cancel_signal.is_canceled());
         assert!(cleanup_completed.load(Ordering::SeqCst));
+    }
+
+    /// The run deadline cancels the run itself, so the log line of a runtime
+    /// exit that follows must name the deadline, not a cancellation: a person's
+    /// Stop or a lost lease reads `run_cancelled_before_shutdown` instead.
+    #[tokio::test]
+    async fn shared_browser_deadline_is_named_as_why_the_tools_were_not_confirmed_gone() {
+        let cancel_signal = JobCancelSignal::new();
+        let result = CodexClient::run_shared_browser_with_deadline(
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            cancel_signal.clone(),
+            std::future::pending::<Result<()>>(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(cancel_signal.is_canceled());
+        assert_eq!(
+            cancel_signal.shared_browser_shutdown_failure(),
+            Some("run_deadline_before_shutdown")
+        );
+
+        let stopped = JobCancelSignal::new();
+        stopped.cancel();
+        let result = CodexClient::run_shared_browser_with_deadline(
+            Duration::from_secs(60),
+            Duration::from_millis(20),
+            stopped.clone(),
+            std::future::pending::<Result<()>>(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(stopped.shared_browser_shutdown_failure(), None);
     }
 
     #[tokio::test]

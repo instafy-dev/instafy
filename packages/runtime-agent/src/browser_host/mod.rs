@@ -121,6 +121,13 @@ pub(crate) fn admit_shared_browser_job(
     } else {
         None
     };
+    if explicit_shared_browser_execution && runtime_is_browser_session {
+        // The boot-time browser's watch gave up on its Chromium: say so now
+        // rather than let the turn's first step find no browser.
+        if let Some(reason) = crate::boot_browser::unavailable_reason() {
+            anyhow::bail!(reason);
+        }
+    }
     if explicit_shared_browser_execution && !runtime_is_browser_session && !is_ready() {
         anyhow::bail!(if lazy_mode() {
             "Instafy's browser is not open on this space's machine. Open it, then try again."
