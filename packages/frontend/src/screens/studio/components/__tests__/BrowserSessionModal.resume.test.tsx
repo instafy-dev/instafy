@@ -22,6 +22,7 @@ vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
 vi.mock("../../../../runtime/runtimeMenuShared", () => ({ writeClipboardText: mocks.writeClipboardText }));
 vi.mock("../SharedBrowserProfileStatus", () => ({ SharedBrowserProfileStatus: () => null }));
 import { BrowserSessionModal, CLEAR_SHARED_BROWSER_HOST_DATA_BUSY_NOTE, CLEAR_SHARED_BROWSER_HOST_DATA_CONFIRMATION } from "../BrowserSessionModal";
+import { BrowserLocationOptions } from "../PersonalBrowserSurface";
 import { isBrowserRuntimeClaimActive } from "../../../../runtime/browserRuntimeClaimRegistry";
 import { SHARED_BROWSER_HOST_COPY } from "../sharedBrowserHostAttach";
 import { RUNTIME_DEBUG_STORAGE_KEY } from "../../../../runtime/utils/runtimeDebug";
@@ -107,6 +108,25 @@ describe("production Shared modal resume selection", () => {
     expect(document.activeElement).toBe(trigger);
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
   });
+  it("offers where the browser runs in Browser options, not in the toolbar", async () => {
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
+    const onModeChange = vi.fn();
+    await act(async () => { root.render(<BrowserSessionModal isOpen onOpenChange={vi.fn()} projectId={projectId}
+      currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={firstId} onRuntimeIdResolved={onResolved}
+      presentation="docked" fillContainer transportActive canControlBrowser sharedBrowserCapabilitiesResolved={false}
+      locationOptions={<BrowserLocationOptions checked mode="shared" personalAvailable onModeChange={onModeChange} />} />); });
+    expect(document.querySelector('[data-testid="browser-transport-shared"]')).toBeNull();
+    expect(document.querySelector('[data-testid="browser-location-menu"]')).toBeNull();
+    // The toolbar keeps its room: no identity badge where the location menu was either.
+    expect(document.querySelector('[data-testid="browser-identity-badge"]')).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    const options = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Browser options"]')!;
+    expect(options.querySelector('[role="group"][aria-label="Browser location"]')).not.toBeNull();
+    expect(options.querySelector('[data-testid="browser-transport-shared"]')?.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => options.querySelector<HTMLButtonElement>('[data-testid="browser-transport-personal"]')!.click());
+    expect(onModeChange).toHaveBeenCalledExactlyOnceWith("personal");
+  });
+
   it("dismisses a portalled options menu when its retained Browser view becomes hidden", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
     await render(firstId);

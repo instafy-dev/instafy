@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { personalBrowserFixtureEnvironment } from "../../../scripts/browser-ci.mjs";
 import { captureElectronBrowserWindow } from "../utils/electronBrowserScreenshots";
+import { chooseBrowserLocation, openBrowserOptions } from "../utils/browserLocation.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../..");
 const desktop = path.join(root, "packages/desktop-app");
@@ -14,8 +15,7 @@ const origin = "http://127.0.0.1:5305";
 const nativeUrl = `${origin}/native-page`;
 
 async function choose(page: Page, mode: "shared" | "personal") {
-  await page.getByTestId("browser-location-menu").click();
-  await page.getByTestId(`browser-transport-${mode}`).click();
+  await chooseBrowserLocation(page, mode);
 }
 
 async function paint(page: Page) {
@@ -99,7 +99,7 @@ for (const width of [390, 1280]) {
             return image;
           };
         }, nativeUrl);
-        await page.getByTestId("browser-location-menu").click();
+        await openBrowserOptions(page);
         await expect.poll(() => app.evaluate(() => Boolean((globalThis as unknown as { switchCaptureStarted?: boolean }).switchCaptureStarted))).toBe(true);
         await app.evaluate(({ BrowserWindow }, width) => { BrowserWindow.getAllWindows()[0]!.setContentSize(width + 24, 900); }, width);
         // Wait for the ResizeObserver/native bounds path while capture is held.

@@ -81,7 +81,11 @@ can be retried. This is a read deadline, not a limit on runtime startup time.
 
 ## One browser shell, three pixel transports
 
-The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
+The Studio always owns the address bar, history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile. Enter in the address bar goes, as in every browser; only the phone's address editor keeps a Go button beside the field.
+
+On a wide pane the toolbar reads Back, Forward, Reload, the address, **Send page to Octo**, the participants, **Browser options** and Expand. Where the browser runs (**This device** or **Workspace**, under **Run browser on**) is a setting, so it is in **Browser options** (the Personal Browser's **Browser settings**) at every width, not in the toolbar.
+
+Who controls the browser shows only when someone else could: another participant (another person, or your own other device) is in the browser, or Octo is driving it. Alone there is nothing to hand over, so neither the control chip nor **Release control** shows; **Take control** still shows when control is free, so a person left alone is never locked out. A pressed control action waits, disabled, for the browser's answer ("Releasing…"), then shows the new state. When the browser does not answer within five seconds it says "The browser didn't answer. Try again." beside the action, and "Not connected to the browser. Try again in a moment." when the connection is down, instead of doing nothing.
 
 Connection failures show one plain sentence and at most one button (see
 [What the browser view shows](#what-the-browser-view-shows)). If the runtime provider is not
@@ -95,7 +99,8 @@ current controller. **Request control** appears below the list; this
 asks the current driver to hand over input, rather than sending a chat message.
 Pending requests show a badge for the current driver. A compact page-count picker
 beside the address switches browser tabs. **Browser options** contains history
-navigation, reload and **Expand browser** so the toolbar stays on one row. AI
+navigation, reload, **Expand browser** and where the browser runs, so the toolbar
+stays on one row. AI
 takeover and **Let AI continue** are in the same participant controls;
 clicking the shared page can still open the takeover confirmation.
 
@@ -1570,14 +1575,16 @@ unless the policy is `"covered"`.
 
 The view shows one state at a time, derived from its status and the kind of
 failure it stored with its error (`hostedBrowserViewState`): one sentence,
-at most one button, and a neutral status pill.
+at most one button, and a neutral status pill. While opening, the view's
+sentence is the one loading signal on screen; the pill says **Starting…** only
+to screen readers (`startingShownInView`).
 
 | State | Sentence | Button | Pill |
 |---|---|---|---|
 | live | none | none | Ready (screen readers only) |
-| opening | "Opening Instafy's browser…" | none | Starting… |
-| opening, after a minute of a press starting the space's machine | "Still starting this space's machine…" | none | Starting… |
-| opening, while a browser session machine starts its browser again | "Instafy's browser stopped. Starting it again…" | none | Starting… |
+| opening | "Opening Instafy's browser…" | none | Starting… (screen readers only) |
+| opening, after a minute of a press starting the space's machine | "Still starting this space's machine…" | none | Starting… (screen readers only) |
+| opening, while a browser session machine starts its browser again | "Instafy's browser stopped. Starting it again…" | none | Starting… (screen readers only) |
 | off | "Instafy's browser is off." | Open browser | Off |
 | failed | "Instafy's browser did not open. Try again." | Try again | Off |
 | failed (machine) | "This space's machine did not start. Try again." | Try again | Off |

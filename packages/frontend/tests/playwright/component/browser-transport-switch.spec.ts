@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { browserSwitchBoundaries } from "../../fixtures/browser-transport-switch/boundaries";
+import { chooseBrowserLocation, openBrowserOptions } from "../utils/browserLocation.js";
 
 test.use({ deviceScaleFactor: 2 });
 
@@ -65,8 +66,7 @@ async function paint(page: Page) {
 }
 
 async function choose(page: Page, mode: "shared" | "personal") {
-  await page.getByTestId("browser-location-menu").click();
-  await page.getByTestId(`browser-transport-${mode}`).click();
+  await chooseBrowserLocation(page, mode);
 }
 
 for (const width of [390, 1280]) {
@@ -81,8 +81,10 @@ for (const width of [390, 1280]) {
       for (let cycle = 0; cycle < 3; cycle += 1) {
         await choose(page, "personal");
         await expect(page.getByTestId("synthetic-native-page")).toBeVisible();
-        await expect(page.getByTestId("browser-location-menu")).toHaveAccessibleName("Browser location: This device");
-        await page.getByTestId("browser-location-menu").click();
+        // Where the browser runs is in its Options menu, not the toolbar.
+        await expect(page.getByTestId("browser-location-menu")).toHaveCount(0);
+        await openBrowserOptions(page);
+        await expect(page.getByTestId("browser-transport-personal")).toHaveAttribute("aria-pressed", "true");
         await expect(page.getByTestId("personal-browser-overlay-preview")).toBeVisible();
         await page.evaluate(() => {
           window.__browserSwitchReview.bounds.length = 0;

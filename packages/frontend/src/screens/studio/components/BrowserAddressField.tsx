@@ -216,7 +216,7 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
           }
         }}
         size="xs"
-        className={`h-8 min-w-0 pl-3 pr-9 aria-invalid:border-rose-400 aria-invalid:focus-visible:ring-rose-500/20 max-[540px]:h-10 max-[540px]:pr-11 pointer-coarse:h-11 pointer-coarse:pr-12 ${mobile ? "!h-11 !pr-24" : ""}`}
+        className={`h-8 min-w-0 px-3 aria-invalid:border-rose-400 aria-invalid:focus-visible:ring-rose-500/20 max-[540px]:h-10 pointer-coarse:h-11 ${mobile ? "!h-11 !pr-24" : ""}`}
         data-testid={`${testIdPrefix}-address`}
         onKeyDownCapture={event => {
           navigateSelection.current = event.key === "Enter" && !event.nativeEvent.isComposing;
@@ -230,8 +230,10 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
           }
         }}
       />
-      <span className="absolute inset-y-0 right-0 flex items-center">
-        {mobile && state.inputValue && <IconButton slot={null} aria-label="Clear address" variant="ghost"
+      {/* Enter goes, as in every browser's address bar. The phone's address
+          editor keeps Clear and Go beside the field for touch. */}
+      {mobile ? <span className="absolute inset-y-0 right-0 flex items-center">
+        {state.inputValue && <IconButton slot={null} aria-label="Clear address" variant="ghost"
           className="h-11 w-11" preventFocusOnPress onPress={() => { onClear(); focusInput(); state.open(); }}>
           <Xmark aria-hidden="true" className="h-4 w-4" />
         </IconButton>}
@@ -243,12 +245,12 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
           type="submit"
           size="xs"
           variant="ghost"
-          className={mobile ? "!h-11 !w-11" : "max-[540px]:h-10 max-[540px]:w-10"}
+          className="!h-11 !w-11"
           isDisabled={inputProps.disabled}
         >
           <NavArrowRight aria-hidden="true" className="h-3.5 w-3.5" />
         </IconButton>
-      </span>
+      </span> : null}
       {!mobile && menu}
     </form>
   );

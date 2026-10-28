@@ -115,6 +115,10 @@ describe("Shared modal while the space's machine starts slowly", () => {
     await render();
     await advanceTo(30_000);
     expect(sentence()).toBe(SHARED_BROWSER_HOST_COPY.opening);
+    // One loading signal on screen: the view's sentence. The pill only tells a screen reader.
+    const pill = document.querySelector('[data-testid="browser-session-status"]');
+    expect(pill?.textContent).toBe("Starting…");
+    expect(pill?.className).toBe("sr-only");
     await advanceTo(75_000);
     expect(sentence()).toBe("Still starting this space's machine…");
     expect(document.querySelector('[data-testid="browser-session-loading-notice"]')?.getAttribute("data-view-state")).toBe("opening");

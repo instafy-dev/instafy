@@ -17,7 +17,7 @@ async function mountCompactBrowserChrome(
     import { BrowserStatusPill } from "/src/screens/studio/components/BrowserChromeShell.tsx";
     import { BrowserExpandButton } from "/src/screens/studio/components/BrowserExpandButton.tsx";
     import { ConversationSurfaceTabs } from "/src/workspace/ConversationSurfaceLayout.tsx";
-    import { BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
+    import { BrowserLocationOptions } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
     import { RemoteBrowserMobileKeyboard } from "/src/screens/studio/components/RemoteBrowserMobileKeyboard.tsx";
     import { SharedBrowserSessionControl } from "/src/screens/studio/components/SharedBrowserSessionControl.tsx";
     import { SharedBrowserChrome } from "/src/screens/studio/components/SharedBrowserChrome.tsx";
@@ -74,9 +74,8 @@ async function mountCompactBrowserChrome(
       const localControlOwner = agentControls
         ? { kind: "agent", displayName: "Octo with a very long agent name" }
         : { kind: "human" };
-      const transport = h(BrowserTransportSelector, {
+      const location = h(BrowserLocationOptions, {
         checked: true,
-        compact,
         mode: "shared",
         onModeChange: () => {},
         personalAvailable: true,
@@ -113,7 +112,6 @@ async function mountCompactBrowserChrome(
           onReload: () => {},
           onFocusPage: () => {},
           onClearError: () => {},
-          toolbarLeading: transport,
           toolbarStatus: h(BrowserStatusPill, {
             compact,
             detail: "Shared Browser is connected and ready.",
@@ -123,6 +121,7 @@ async function mountCompactBrowserChrome(
           toolbarActions: (compactNavigation) => h(React.Fragment, null, collaboration, h(SharedBrowserSessionControl, {
             runtimeId: "fixture-runtime", resumeUrl: null, open: optionsOpen, onOpenChange: setOptionsOpen,
             busy: false, candidates: [], error: null, canStart: false, onChoose: () => {}, onStart: () => {}, onRefresh: () => {},
+            location,
             actions: compact ? h(React.Fragment, null, compactNavigation,
               h(BrowserExpandButton, { expanded, showLabel: true, onPress: () => setExpanded(!expanded) })) : null,
           }), compact ? null : h(BrowserExpandButton, { expanded, onPress: () => setExpanded(!expanded) })),
@@ -254,12 +253,14 @@ for (const width of [320, 360, 390]) {
     expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
     expect(geometry.collaboration!.left - geometry.address!.right).toBeCloseTo(4, 1);
     expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(8, 1);
-    for (const target of [geometry.address, geometry.collaboration, geometry.locationMenu, geometry.options]) {
+    // Where the browser runs is in Options, not the toolbar.
+    expect(geometry.locationMenu).toBeNull();
+    for (const target of [geometry.address, geometry.collaboration, geometry.options]) {
       expect(target!.top - geometry.chrome!.top).toBeGreaterThanOrEqual(4);
       expect(geometry.chrome!.bottom - target!.bottom).toBeGreaterThanOrEqual(4);
     }
     expect(Math.abs((geometry.collaboration!.top + geometry.collaboration!.bottom) / 2 - (geometry.address!.top + geometry.address!.bottom) / 2)).toBeLessThanOrEqual(1);
-    for (const target of [geometry.collaboration, geometry.browserTab, geometry.locationMenu, geometry.options]) {
+    for (const target of [geometry.collaboration, geometry.browserTab, geometry.options]) {
       expect(target).not.toBeNull();
       expect(target!.height).toBeGreaterThanOrEqual(32);
       expect(target!.left).toBeGreaterThanOrEqual(0);
@@ -367,7 +368,8 @@ for (const counts of [{ participantCount: 4, pageCount: 3 }, { participantCount:
       expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
       expect(geometry.collaboration!.left - geometry.address!.right).toBeCloseTo(4, 1);
       expect(geometry.options!.left - geometry.collaboration!.right).toBeCloseTo(8, 1);
-      for (const target of [geometry.address, geometry.collaboration, geometry.tabPicker, geometry.locationMenu, geometry.options]) {
+      expect(geometry.locationMenu).toBeNull();
+      for (const target of [geometry.address, geometry.collaboration, geometry.tabPicker, geometry.options]) {
         expect(target).not.toBeNull();
         expect(target!.height).toBeGreaterThanOrEqual(44);
         expect(target!.width).toBeGreaterThanOrEqual(44);
@@ -432,11 +434,17 @@ test("keeps the unified browser address usable at tablet portrait width", async 
 
   const chrome = page.getByTestId("shared-browser-chrome");
   const address = page.getByTestId("shared-browser-address");
-  const transport = page.getByTestId("browser-transport-selector");
 
-  await expect(transport).toHaveAttribute("data-compact", "true");
   await expect(chrome).toBeVisible();
   await expect(address).toBeVisible();
+  // Enter in the address goes; there is no Go button beside it.
+  await expect(chrome.getByTestId("shared-browser-go")).toHaveCount(0);
+  await expect(chrome.getByTestId("browser-location-menu")).toHaveCount(0);
+  await page.getByTestId("shared-browser-sessions-toggle").click();
+  const options = page.getByRole("dialog", { name: "Browser options" });
+  await expect(options.getByRole("group", { name: "Browser location" })).toBeVisible();
+  await expect(options.getByTestId("browser-transport-shared")).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("Escape");
 
   const geometry = await page.evaluate(() => {
     const chromeElement = document.querySelector<HTMLElement>(

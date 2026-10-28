@@ -3,10 +3,11 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SharedBrowserCollaborationControls } from "../SharedBrowserCollaborationControls";
+import { CONTROL_ACTION_ANSWER_MS, SharedBrowserCollaborationControls } from "../SharedBrowserCollaborationControls";
 import type {
   SharedBrowserCollaborationClientState,
   SharedBrowserCollaborationParticipant,
+  SharedBrowserCollaborationState,
 } from "../sharedBrowserCollaboration";
 
 function participant(id: string, displayName: string, canControl = true): SharedBrowserCollaborationParticipant {
@@ -329,15 +330,105 @@ describe("SharedBrowserCollaborationControls", () => {
     expect(props.onTakeControl).toHaveBeenCalledOnce();
   });
 
-  it.each([
-    { state: null, label: "Control syncing…" },
-    { state: { ...client().state!, controlOwner: { kind: "human" as const, participantId: "not-yet-present" } }, label: "Teammate controls" },
-  ])("keeps $label readable when there is no matching controller row", async ({ state, label }) => {
-    await render({ client: client({ state }) });
+  it("keeps 'Teammate controls' readable when there is no matching controller row", async () => {
+    await render({ client: client({ state: { ...client().state!, controlOwner: { kind: "human", participantId: "not-yet-present" } } }) });
     await openControls();
-    expect(status()?.textContent).toBe(label);
+    expect(status()?.textContent).toBe("Teammate controls");
     expect(status()?.classList.contains("sr-only")).toBe(false);
     expect(controller()).toBeNull();
+  });
+
+  it("says nothing about control until the roster is known", async () => {
+    await render({ client: client({ state: null }) });
+    expect(trigger().getAttribute("aria-label")).toBe("Browser participants: No participants connected");
+    await openControls();
+    expect(status()).toBeNull();
+    expect(action()).toBeNull();
+    expect(document.body.textContent).not.toContain("Control syncing");
+  });
+
+  describe("alone in the browser", () => {
+    const alone = (controlOwner: SharedBrowserCollaborationState["controlOwner"]) => client({ state: {
+      revision: 1, participants: [participant("self", "Taylor")], controlOwner, requests: [],
+    } });
+
+    it.each([false, true])("shows neither the control chip nor Release when there is nothing to hand over (compact=%s)", async (compact) => {
+      await render({ compact, client: alone({ kind: "human", participantId: "self" }) });
+      if (compact) {
+        expect(trigger().getAttribute("aria-label")).toBe("Browser participants: Taylor");
+        expect(container.querySelector('[role="status"]')).toBeNull();
+        await openControls();
+        expect(participantRow("self").textContent).toContain("Taylor (you)");
+      }
+      expect(find("shared-browser-participants")).not.toBeNull();
+      expect(status()).toBeNull();
+      expect(action()).toBeNull();
+      expect(document.body.textContent).not.toContain("You control");
+      expect(document.body.textContent).not.toContain("Release control");
+    });
+
+    it.each([false, true])("still offers Take control when control is free, so a person left alone can type (compact=%s)", async (compact) => {
+      await render({ compact, client: alone(null) });
+      if (compact) await openControls();
+      expect(status()).toBeNull();
+      expect(action()?.dataset.action).toBe("take");
+      await click(action()!);
+      expect(props.onTakeControl).toHaveBeenCalledOnce();
+    });
+
+    it("shows who drives while Octo is driving", async () => {
+      await render({ compact: false, client: alone({ kind: "agent", displayName: "Octo" }) });
+      expect(status()?.textContent).toBe("Octo controls");
+      expect(action()).toBeNull();
+    });
+  });
+
+  describe("a pressed control action", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("waits for the browser's answer, then shows the new state", async () => {
+      await render({ compact: false });
+      await click(action()!);
+      expect(props.onReleaseControl).toHaveBeenCalledOnce();
+      expect(action()?.textContent).toBe("Releasing…");
+      expect(action()?.disabled).toBe(true);
+      await click(action()!);
+      expect(props.onReleaseControl).toHaveBeenCalledOnce();
+
+      await render({ client: client({ state: { ...client().state!, revision: 2, controlOwner: null } }) });
+      expect(status()?.textContent).toBe("Control available");
+      expect(action()?.dataset.action).toBe("take");
+      expect(action()?.textContent).toBe("Take control");
+      expect(action()?.disabled).toBe(false);
+    });
+
+    it.each([false, true])("says so when the browser does not answer, and can be pressed again (compact=%s)", async (compact) => {
+      vi.useFakeTimers();
+      await render({ compact });
+      if (compact) await openControls();
+      await click(action()!);
+      expect(action()?.textContent).toBe("Releasing…");
+      await act(async () => vi.advanceTimersByTime(CONTROL_ACTION_ANSWER_MS));
+      const notice = find("shared-browser-collaboration-control-notice");
+      expect(notice?.textContent).toBe("The browser didn't answer. Try again.");
+      expect(notice?.getAttribute("role")).toBe("status");
+      expect(action()?.textContent).toBe("Release control");
+      expect(action()?.disabled).toBe(false);
+      await click(action()!);
+      expect(props.onReleaseControl).toHaveBeenCalledTimes(2);
+      expect(find("shared-browser-collaboration-control-notice")).toBeNull();
+    });
+
+    it("says why nothing happened when the browser cannot be reached", async () => {
+      await render({ compact: false, onReleaseControl: vi.fn(() => false) });
+      await click(action()!);
+      expect(find("shared-browser-collaboration-control-notice")?.textContent)
+        .toBe("Not connected to the browser. Try again in a moment.");
+      expect(action()?.textContent).toBe("Release control");
+      expect(action()?.disabled).toBe(false);
+    });
   });
 
 });

@@ -47,7 +47,8 @@ determines the winner. Arbitrary layout classes remain supported.
   Send/Stop/Voice, standalone image-overlay dismissal, avatar badges, identity
   chips and compound tab controls retain their purpose-specific shapes.
   Browser address fields use the shared input's 12px radius, including the mobile
-  address trigger. Their embedded Go/Clear utilities use the shared 8px corners.
+  address trigger. Enter in the field goes, with no Go button beside it; only the
+  phone address editor keeps its Go/Clear utilities, with the shared 8px corners.
 - Image attachment previews use `AttachmentThumbnail`: 48px in the composer and
   96px in messages, with shared quiet-button interaction, 8px corners and no
   decorative border or shadow. The image supplies the thumbnail's content; it is

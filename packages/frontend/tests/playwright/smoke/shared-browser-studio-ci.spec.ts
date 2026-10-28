@@ -169,12 +169,14 @@ async function openSharedBrowser(page: Page) {
   await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 90_000 });
   await page.getByTestId("composer-action-menu-trigger").click();
   await page.getByTestId("composer-action-menu-open-browser").click();
-  const location = page.getByTestId("browser-location-menu");
-  await expect(location).toBeVisible();
-  // Web already opens Workspace. Its chrome moves when the runtime attaches,
-  // so only open the location picker when a transport change is needed.
-  if (await location.getAttribute("aria-label") !== "Browser location: Workspace") {
-    await location.click();
+  // Web already opens Workspace. Where the browser runs is a setting in its
+  // Options menu; its chrome moves when the runtime attaches, so only open
+  // that menu when a change is needed.
+  const shared = page.getByTestId("browser-session-modal");
+  const personal = page.getByTestId("personal-browser-surface").filter({ visible: true });
+  await expect(shared.or(personal).first()).toBeVisible({ timeout: 60_000 });
+  if (await personal.count()) {
+    await page.getByRole("button", { name: "Browser settings" }).click();
     await page.getByTestId("browser-transport-shared").click();
   }
   await expectBrowserReady(page);

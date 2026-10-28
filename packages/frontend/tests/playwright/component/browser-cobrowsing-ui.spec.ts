@@ -10,7 +10,7 @@ async function mountPersonalControls(page: Page) {
     import "/src/styles/tailwind.css";
     import ReactNS from "${deps.react}";
     import ReactDomClientNS from "${deps.reactDomClient}";
-    import { PersonalBrowserSurface, BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
+    import { PersonalBrowserSurface, BrowserLocationOptions } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
     const React = ReactNS.default ?? ReactNS;
     const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
     const h = React.createElement;
@@ -40,7 +40,7 @@ async function mountPersonalControls(page: Page) {
       return h("main", { style:{ display:"flex", height:"100dvh", width:"100%", maxWidth:"900px" } },
         h(PersonalBrowserSurface, {
           active:true, compactChrome:true, model, humanInputIdentityKey:"user:project:conversation:personal",
-          transportSelector:h(BrowserTransportSelector,{ checked:true,compact:true,mode:"personal",personalAvailable:true,onModeChange:()=>{} }),
+          locationOptions:h(BrowserLocationOptions,{ checked:true,mode:"personal",personalAvailable:true,onModeChange:()=>{} }),
           onContinueAfterHumanInput:async(message)=> {
             window.__continuationAttempts = (window.__continuationAttempts ?? 0) + 1;
             if (window.__failNextContinuation) {

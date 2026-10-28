@@ -13,6 +13,7 @@ import {
 } from "../utils/harness.js";
 import { remoteSurfaceHasRenderedFrame } from "../utils/electronBrowserLiveHarness.js";
 import { captureElectronBrowserWindow } from "../utils/electronBrowserScreenshots.js";
+import { chooseBrowserLocation } from "../utils/browserLocation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -306,10 +307,7 @@ test.describe("Electron browser experience", () => {
         window.dispatchEvent(new CustomEvent("instafy:browser-open", { detail: {} }));
       });
 
-      await page.getByTestId("browser-location-menu").click();
-      const sharedButton = page.getByTestId("browser-transport-shared");
-      await expect(sharedButton).toBeVisible({ timeout: 30_000 });
-      await sharedButton.click();
+      await chooseBrowserLocation(page, "shared");
 
       const shared = page.getByTestId("browser-session-modal");
       await expect(shared).toBeVisible({ timeout: 60_000 });
@@ -361,10 +359,7 @@ test.describe("Electron browser experience", () => {
       ).toBeLessThanOrEqual(2);
       await captureDesktop("electron-shared-browser.png");
 
-      await page.getByTestId("browser-location-menu").click();
-      const personalButton = page.getByTestId("browser-transport-personal");
-      await expect(personalButton).toBeEnabled({ timeout: 30_000 });
-      await personalButton.click();
+      await chooseBrowserLocation(page, "personal");
 
       const personal = page.getByTestId("personal-browser-surface");
       await expect(personal).toBeVisible({ timeout: 30_000 });
@@ -403,7 +398,7 @@ test.describe("Electron browser experience", () => {
       expect(personalNavigation).toEqual({ loading: false, url: "https://example.com/" });
       await captureDesktop("electron-personal-browser.png", true);
 
-      await sharedButton.click();
+      await chooseBrowserLocation(page, "shared");
       await expect(shared).toBeVisible({ timeout: 30_000 });
       const originalSharedSurface = shared.locator(
         '[data-electron-browser-surface="original"]',
@@ -449,20 +444,18 @@ test.describe("Electron browser experience", () => {
         "cdp-screencast",
         { timeout: 45_000 },
       );
-      await expect(page.getByTestId("browser-transport-selector")).toHaveAttribute(
-        "data-compact",
-        "true",
-      );
+      // Compact chrome keeps Back, Forward and Reload in the Options menu.
+      await expect(page.getByTestId("shared-browser-reload")).toHaveCount(0);
       const splitCdpSurface = shared.getByTestId("shared-browser-cdp-screencast");
       await expect(splitCdpSurface).toHaveAttribute("data-active", "true");
       await splitCdpSurface.evaluate((element) => {
         element.setAttribute("data-electron-browser-surface", "split-cdp-original");
       });
 
-      await personalButton.click();
+      await chooseBrowserLocation(page, "personal");
       await expect(personal).toBeVisible({ timeout: 30_000 });
       await expect(splitCdpSurface).toHaveAttribute("data-active", "false");
-      await sharedButton.click();
+      await chooseBrowserLocation(page, "shared");
       await expect(shared).toBeVisible({ timeout: 30_000 });
       const originalSplitCdpSurface = shared.locator(
         '[data-electron-browser-surface="split-cdp-original"]',
@@ -509,10 +502,8 @@ test.describe("Electron browser experience", () => {
       await expect
         .poll(() => remoteSurfaceHasRenderedFrame(sharedSurface), { timeout: 45_000 })
         .toBe(true);
-      await expect(page.getByTestId("browser-transport-selector")).toHaveAttribute(
-        "data-compact",
-        "true",
-      );
+      // Compact chrome keeps Back, Forward and Reload in the Options menu.
+      await expect(page.getByTestId("shared-browser-reload")).toHaveCount(0);
       await captureDesktop("electron-shared-browser-narrow.png");
     } finally {
       await electronApp?.close().catch(() => undefined);

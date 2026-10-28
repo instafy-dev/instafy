@@ -362,6 +362,8 @@ function BrowserSessionStatusPill({
       compact={compact}
       detail={detail}
       state={state}
+      // While opening, the view shows its own centered "Opening Instafy's browser…".
+      startingShownInView
       testId="browser-session-status"
     />
   );
@@ -429,6 +431,7 @@ export function BrowserSessionModal({
   onViewStateChange = null,
   fillContainer = false,
   toolbarLeading,
+  locationOptions,
   transportActive = true,
   canControlBrowser = false,
   canClearBrowserData = false,
@@ -488,6 +491,8 @@ export function BrowserSessionModal({
   onViewStateChange?: ((state: HostedBrowserViewKind | null) => void) | null;
   fillContainer?: boolean;
   toolbarLeading?: ReactNode;
+  /** Where the browser runs (`BrowserLocationOptions`), shown in its Options menu. */
+  locationOptions?: ReactNode;
   transportActive?: boolean;
   canControlBrowser?: boolean;
   canClearBrowserData?: boolean;
@@ -3271,6 +3276,7 @@ export function BrowserSessionModal({
       runtimeId={selectedSessionRuntimeId ?? chosenRuntimeId ?? resumeRuntimeId}
       resumeUrl={sessionResumeUrl}
       actions={actions}
+      location={locationOptions}
       open={sessionControlsVisible && sessionChooserOpen}
       busy={sessionChoices.scope === selectionScope && sessionChoices.loading}
       candidates={sessionChoices.scope === selectionScope ? sessionChoices.candidates : []}
@@ -3313,18 +3319,10 @@ export function BrowserSessionModal({
       client={collaboration.client}
       compact={sharedBrowserChrome?.compact ?? false}
       localControlOwner={effectiveAgentControlOwner ?? controlOwner}
-      onGrantControl={(participantId) => {
-        collaboration.grantControl(participantId);
-      }}
-      onReleaseControl={() => {
-        collaboration.releaseControl();
-      }}
-      onRequestControl={() => {
-        collaboration.requestControl();
-      }}
-      onTakeControl={() => {
-        collaboration.takeControl();
-      }}
+      onGrantControl={(participantId) => collaboration.grantControl(participantId)}
+      onReleaseControl={() => collaboration.releaseControl()}
+      onRequestControl={() => collaboration.requestControl()}
+      onTakeControl={() => collaboration.takeControl()}
     >
       {controls}
     </SharedBrowserCollaborationControls>
@@ -3367,7 +3365,7 @@ export function BrowserSessionModal({
             ) : (
               <BrowserSessionStatusPill status={displayStatus} view={viewState} />
             )}
-            {toolbarLeading ? null : (
+            {toolbarLeading || locationOptions ? null : (
               <BrowserIdentityBadge className={fillContainer ? "inline-flex" : "hidden sm:inline-flex"} />
             )}
           </div>

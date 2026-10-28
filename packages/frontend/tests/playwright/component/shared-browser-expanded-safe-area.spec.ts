@@ -21,7 +21,7 @@ async function mountBrowserSession(page: Page, presentation: "docked" | "modal")
     import ReactNS from "${deps.react}";
     import ReactDomClientNS from "${deps.reactDomClient}";
     import { BrowserSessionModal } from "/src/screens/studio/components/BrowserSessionModal.tsx";
-    import { BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
+    import { BrowserLocationOptions } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
     const React = ReactNS.default ?? ReactNS;
     const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
     const h = React.createElement;
@@ -32,8 +32,8 @@ async function mountBrowserSession(page: Page, presentation: "docked" | "modal")
           isOpen: open, onOpenChange: setOpen, presentation: ${JSON.stringify(presentation)},
           fillContainer: true, projectId: null, preferRuntimeId: null,
           sharedBrowserViewerKind: "cdp-screencast", sharedBrowserAvailableViewerKinds: ["cdp-screencast"],
-          toolbarLeading: h(BrowserTransportSelector, {
-            checked: true, compact: true, mode: "shared", personalAvailable: true, onModeChange: () => {},
+          locationOptions: h(BrowserLocationOptions, {
+            checked: true, mode: "shared", personalAvailable: true, onModeChange: () => {},
           }),
           sharedBrowserChrome: {
             compact: true, resolved: true, pendingAction: null, error: null,

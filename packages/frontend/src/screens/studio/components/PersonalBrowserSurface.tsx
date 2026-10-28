@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import {
+  Check,
   Computer,
   Globe,
   NavArrowDown,
@@ -47,47 +48,68 @@ import type {
 
 type PersonalBrowserModel = ReturnType<typeof usePersonalBrowserBridge>;
 
-export function BrowserTransportSelector({
-  checked,
-  compact = false,
-  mode,
-  onModeChange,
-  personalAvailable,
-}: {
+type BrowserLocationProps = {
   checked: boolean;
-  compact?: boolean;
   mode: BrowserTransport;
   onModeChange: (mode: BrowserTransport) => void;
   personalAvailable: boolean;
-}) {
-  const [open, setOpen] = useState(false);
+};
+
+/**
+ * Where the browser runs: this device (the Personal Browser) or the
+ * workspace (Shared Browser). A setting, not navigation, so it sits in the
+ * browser's Options menu.
+ */
+export function BrowserLocationOptions({
+  checked,
+  mode,
+  onModeChange,
+  personalAvailable,
+  onChosen,
+}: BrowserLocationProps & { onChosen?: () => void }) {
   const descriptionId = useId();
-  const choose = (next: BrowserTransport) => { setOpen(false); onModeChange(next); };
-  const location = mode === "personal" ? "This device" : "Workspace";
+  const choose = (next: BrowserTransport) => { onChosen?.(); onModeChange(next); };
+  return <div className="space-y-3 text-sm" data-browser-session-safe-zone="true" data-testid="browser-location-options">
+    <h4 className="text-xs text-slate-500 dark:text-slate-400">Run browser on</h4>
+    <div className="space-y-2" role="group" aria-label="Browser location">
+      <Button variant="ghost" className="w-full justify-start" aria-label="This device" aria-pressed={mode === "personal"}
+        aria-describedby={`${descriptionId}-personal`} data-testid="browser-transport-personal"
+        isDisabled={!checked || !personalAvailable} onPress={() => choose("personal")}>
+        <Computer className="h-4 w-4" aria-hidden="true" />This device
+        {mode === "personal" ? <Check className="ml-auto h-4 w-4" aria-hidden="true" /> : null}
+      </Button>
+      <p id={`${descriptionId}-personal`} className="text-xs text-slate-500 dark:text-slate-400">
+        {!checked ? "Checking this device… " : !personalAvailable ? "Available in the Instafy desktop app. " : ""}
+        Your logins stay on this device and follow you across projects. They are not copied to Shared Browser or your other devices.
+      </p>
+      <Button variant="ghost" className="w-full justify-start" aria-label="Workspace browser" aria-pressed={mode === "shared"}
+        aria-describedby={`${descriptionId}-shared`} data-testid="browser-transport-shared" onPress={() => choose("shared")}>
+        <Globe className="h-4 w-4" aria-hidden="true" />Workspace
+        {mode === "shared" ? <Check className="ml-auto h-4 w-4" aria-hidden="true" /> : null}
+      </Button>
+      <p id={`${descriptionId}-shared`} className="text-xs text-slate-500 dark:text-slate-400">Project members see the same remote browser and logged-in pages. Your personal logins are not copied here.</p>
+    </div>
+  </div>;
+}
+
+/**
+ * The location choice on its own button, for a bar that has no Options menu
+ * yet. Browser toolbars put `BrowserLocationOptions` in their Options instead.
+ */
+export function BrowserTransportSelector({
+  compact = false,
+  ...location
+}: BrowserLocationProps & { compact?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const label = location.mode === "personal" ? "This device" : "Workspace";
   return <div data-browser-session-safe-zone="true" data-testid="browser-transport-selector" data-compact={compact ? "true" : "false"}>
     <BrowserToolsPopover placement="bottom start" label="Browser location" isOpen={open} onOpenChange={setOpen} trigger={
-      <Button variant="ghost" preset="toolbar" className="shrink-0" aria-label={`Browser location: ${location}`} data-testid="browser-location-menu" title={`Runs on ${location.toLowerCase()}`}>
-        {mode === "personal" ? <Computer className="h-3.5 w-3.5" aria-hidden="true" /> : <Globe className="h-3.5 w-3.5" aria-hidden="true" />}
+      <Button variant="ghost" preset="toolbar" className="shrink-0" aria-label={`Browser location: ${label}`} data-testid="browser-location-menu" title={`Runs on ${label.toLowerCase()}`}>
+        {location.mode === "personal" ? <Computer className="h-3.5 w-3.5" aria-hidden="true" /> : <Globe className="h-3.5 w-3.5" aria-hidden="true" />}
         <NavArrowDown className="h-3 w-3" aria-hidden="true" />
       </Button>
     }>
-      <p className="font-medium">Run browser on</p>
-      <div className="space-y-2" role="group" aria-label="Browser location">
-        <Button variant="ghost" className="w-full justify-start" aria-label="This device" aria-pressed={mode === "personal"}
-          aria-describedby={`${descriptionId}-personal`} data-testid="browser-transport-personal"
-          isDisabled={!checked || !personalAvailable} onPress={() => choose("personal")}>
-          <Computer className="h-4 w-4" aria-hidden="true" />This device
-        </Button>
-        <p id={`${descriptionId}-personal`} className="text-xs text-slate-500 dark:text-slate-400">
-          {!checked ? "Checking this device… " : !personalAvailable ? "Available in the Instafy desktop app. " : ""}
-          Your logins stay on this device and follow you across projects. They are not copied to Shared Browser or your other devices.
-        </p>
-        <Button variant="ghost" className="w-full justify-start" aria-label="Workspace browser" aria-pressed={mode === "shared"}
-          aria-describedby={`${descriptionId}-shared`} data-testid="browser-transport-shared" onPress={() => choose("shared")}>
-          <Globe className="h-4 w-4" aria-hidden="true" />Workspace
-        </Button>
-        <p id={`${descriptionId}-shared`} className="text-xs text-slate-500 dark:text-slate-400">Project members see the same remote browser and logged-in pages. Your personal logins are not copied here.</p>
-      </div>
+      <BrowserLocationOptions {...location} onChosen={() => setOpen(false)} />
     </BrowserToolsPopover>
   </div>;
 }
@@ -225,7 +247,7 @@ export function PersonalBrowserSurface({
   compactChrome = false,
   agentWorking = false,
   model,
-  transportSelector,
+  locationOptions,
   humanInputIdentityKey,
   historyUserId,
   onContinueAfterHumanInput,
@@ -238,7 +260,8 @@ export function PersonalBrowserSurface({
   compactChrome?: boolean;
   agentWorking?: boolean;
   model: PersonalBrowserModel;
-  transportSelector: ReactNode;
+  /** Where the browser runs (`BrowserLocationOptions`), shown in its Options menu. */
+  locationOptions?: ReactNode;
   humanInputIdentityKey?: string;
   historyUserId?: string | null;
   onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
@@ -293,7 +316,11 @@ export function PersonalBrowserSurface({
   const ownerTierApproval = personalBrowserOwnerTier(model.status);
 
   useEffect(() => {
-    if (!active) setFullscreen(false);
+    if (!active) {
+      setFullscreen(false);
+      // Choosing the workspace in Options hides this surface; its menu goes with it.
+      setSettingsOpen(false);
+    }
   }, [active]);
 
   useEffect(() => {
@@ -509,7 +536,6 @@ export function PersonalBrowserSurface({
     >
       <BrowserChromeShell
         label="Personal browser controls"
-        leading={transportSelector}
         navigation={
           <div className="flex items-center gap-2">
           {!compactChrome ? (<>
@@ -652,6 +678,7 @@ export function PersonalBrowserSurface({
                 </Button>
               </div>
             ) : null}
+            {locationOptions}
             {routineApprovalAvailable ? (
               <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
                 <Checkbox

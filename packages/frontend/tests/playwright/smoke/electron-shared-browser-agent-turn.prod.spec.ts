@@ -30,6 +30,7 @@ import {
   resolveElectronBrowserRecoveryJournalPath,
   writeElectronBrowserRecoveryJournal,
 } from "../utils/electronBrowserLiveRecovery.js";
+import { chooseBrowserLocation } from "../utils/browserLocation.js";
 import { focusLastConversationTab } from "../utils/chatUi.js";
 import { openSidebarSecondaryItem } from "../utils/sidebar.js";
 
@@ -831,10 +832,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
       await expect(page.getByTestId("composer-action-menu")).toBeVisible();
       await page.getByTestId("composer-action-menu-open-browser").click();
 
-      await page.getByTestId("browser-location-menu").click();
-      const sharedButton = page.getByTestId("browser-transport-shared");
-      await expect(sharedButton).toBeVisible({ timeout: 30_000 });
-      await sharedButton.click();
+      await chooseBrowserLocation(page, "shared");
 
       const shared = page.getByTestId("browser-session-modal");
       await expect(shared).toBeVisible({ timeout: 60_000 });
