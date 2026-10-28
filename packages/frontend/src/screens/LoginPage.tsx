@@ -18,9 +18,9 @@ import { hasSupabaseConfig } from "../lib/supabaseClient";
 import { showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
 import { AppVersionLabel } from "../components/AppVersionLabel";
 import { useAuth } from "../providers/AuthProvider";
+import { clearSignInReturnPath, readSignInReturnPath, readPendingNativeAuthAttempt } from "../auth/nativeAuth";
 import {
   OAUTH_PROVIDER_LABELS,
-  OAUTH_REDIRECT_TARGET_KEY,
   useNativeGithubAuth,
   type LoginOAuthProvider,
 } from "./login/useNativeGithubAuth";
@@ -176,34 +176,26 @@ export function LoginPage() {
   );
 
   const redirectTarget = useMemo(() => {
+    const storedRedirect = readSignInReturnPath();
     try {
       const params = new URLSearchParams(location.search);
       const redirect = params.get("redirect");
-      if (redirect && redirect.trim().length > 0) {
+      // A sign-in that Android or the desktop shell finishes in a new process
+      // reopens the app at its start page, which RequireAuth sends here as
+      // ?redirect=/studio. While that sign-in is still pending, the page it
+      // started from wins over the bounce.
+      const bouncedFromStart = redirect === "/studio" && storedRedirect !== null && readPendingNativeAuthAttempt() !== null;
+      if (redirect && redirect.trim().length > 0 && !bouncedFromStart) {
         return redirect;
       }
     } catch {
       // ignore malformed URLs
     }
-    if (typeof window !== "undefined") {
-      try {
-        const storedRedirect = window.sessionStorage?.getItem(OAUTH_REDIRECT_TARGET_KEY);
-        if (storedRedirect && storedRedirect.trim().length > 0) {
-          return storedRedirect;
-        }
-      } catch {
-        // ignore session storage failures
-      }
-    }
-    return "/studio";
+    return storedRedirect ?? "/studio";
   }, [location.search]);
 
   const finishLogin = useCallback(() => {
-    try {
-      window.sessionStorage?.removeItem(OAUTH_REDIRECT_TARGET_KEY);
-    } catch {
-      // A blocked storage API must not prevent completing sign-in.
-    }
+    clearSignInReturnPath();
     navigate(redirectTarget, { replace: true });
   }, [navigate, redirectTarget]);
 
