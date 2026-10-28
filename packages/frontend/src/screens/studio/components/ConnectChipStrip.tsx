@@ -31,6 +31,32 @@ type ConnectChipStripProps = {
   showMoreTools?: boolean;
 };
 
+/**
+ * Only a skill can be connected: importing a repo installs nothing, and a
+ * finished device session inside one import attempt is not durable knowledge,
+ * so GitHub never carries the glyph.
+ */
+export function isConnectorConnected(
+  connector: ProductConnector,
+  installedSkillNames: ReadonlySet<string>,
+): boolean {
+  return connector.kind === "skill" && installedSkillNames.has(connector.skillName);
+}
+
+/**
+ * The visible chip is mark plus name; the accessible name adds the verb, or
+ * the state in place of it, and always contains the visible name so a
+ * voice-control user can say what they read. The card's collapsed row uses
+ * the same names.
+ */
+export function connectChipAccessibleName(connector: ProductConnector, connected: boolean): string {
+  return connector.kind === "github"
+    ? `Import from ${connector.name}`
+    : connected
+      ? `${connector.name}, connected`
+      : `Connect ${connector.name}`;
+}
+
 export function ConnectChipStrip({
   installedSkillNames,
   onSelect,
@@ -48,20 +74,8 @@ export function ConnectChipStrip({
     >
       {connectors.map((connector) => {
         const Mark = connector.mark;
-        // Only a skill can be connected: importing a repo installs nothing,
-        // and a finished device session inside one import attempt is not
-        // durable knowledge, so GitHub never carries the glyph.
-        const connected =
-          connector.kind === "skill" && installedSkillNames.has(connector.skillName);
-        // The visible chip is mark plus name; the accessible name adds the
-        // verb, or the state in place of it, and always contains the visible
-        // name so a voice-control user can say what they read.
-        const accessibleName =
-          connector.kind === "github"
-            ? `Import from ${connector.name}`
-            : connected
-              ? `${connector.name}, connected`
-              : `Connect ${connector.name}`;
+        const connected = isConnectorConnected(connector, installedSkillNames);
+        const accessibleName = connectChipAccessibleName(connector, connected);
         return (
           // flex on the item, not just the list: an inline-flex Button in a
           // block li sits on a line box whose strut adds descender space, so

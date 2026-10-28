@@ -60,7 +60,7 @@ function buildConversation(
   return {
     localId: `conversation-${nextConversation}`,
     controllerId: `controller-${nextConversation}`,
-    title: "Conversation 1",
+    title: "New chat",
     parentConversationId: null,
     threadKind: null,
     hasRemoteMessages,
@@ -254,14 +254,59 @@ describe("useConversationAutoTitle", () => {
     expect(setConversationTitle).toHaveBeenCalledWith(conversation.localId, "Quarterly VAT filing");
   });
 
-  it("gives no fallback title when the request is refused or fails", async () => {
-    // A viewer is refused (403), and an outage is no answer either; neither
-    // means the controller has no title to give.
-    requestTitleMock.mockResolvedValue({ success: false, title: null, error: "Forbidden" });
+  // Local drive, Oct 28: Instafy AI could not answer, and the chat stayed
+  // "Conversation 1", renumbered whenever the chat list changed.
+  it("names the chat from its first line as soon as it is sent, before any title request answers", async () => {
+    let answerTitle!: (value: unknown) => void;
+    requestTitleMock.mockImplementation(() => new Promise((resolve) => { answerTitle = resolve; }));
+    const blank = buildConversation([]);
+    await renderAndSettle(blank);
+    act(() => queueAutoTitle(blank.localId, "Plan 3 days in Lisbon and make a map of the best places", {
+      content: "Plan 3 days in Lisbon and make a map of the best places", authorId: ME,
+    }));
+    // In the same tick as the send.
+    expect(setConversationTitle).toHaveBeenCalledExactlyOnceWith(blank.localId, "Plan 3 days in Lisbon and make a map…");
+    await settle();
+    expect(updateMetadataMock).toHaveBeenCalledExactlyOnceWith({
+      conversationId: blank.controllerId,
+      metadata: { title: "Plan 3 days in Lisbon and make a map…" },
+    });
+    // The title request still has no answer.
+    expect(requestTitleMock).toHaveBeenCalledTimes(1);
+    await act(async () => answerTitle({ success: true, title: null, error: null }));
+    await settle();
+    expect(setConversationTitle).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the first line's name when the title request is refused or fails", async () => {
+    requestTitleMock.mockResolvedValue({ success: false, title: null, error: "Upstream unavailable" });
     const conversation = buildConversation(["Draft the April newsletter"]);
     await renderAndSettle(conversation);
     expect(requestTitleMock).toHaveBeenCalled();
-    expect(setConversationTitle).not.toHaveBeenCalled();
-    expect(updateMetadataMock).not.toHaveBeenCalled();
+    expect(setConversationTitle).toHaveBeenCalledExactlyOnceWith(conversation.localId, "Draft the April newsletter");
+    expect(updateMetadataMock).toHaveBeenCalledExactlyOnceWith({
+      conversationId: conversation.controllerId,
+      metadata: { title: "Draft the April newsletter" },
+    });
+  });
+
+  it("lets a model title replace the first line's name once, unless someone renamed the chat meanwhile", async () => {
+    let answerTitle!: (value: unknown) => void;
+    requestTitleMock.mockImplementation(() => new Promise((resolve) => { answerTitle = resolve; }));
+    const conversation = buildConversation(["help me file my VAT return for March"]);
+    await renderAndSettle(conversation);
+    expect(setConversationTitle).toHaveBeenLastCalledWith(conversation.localId, "File my VAT return for March");
+    // Someone renames it before the model answers.
+    await render({ ...conversation, title: "VAT" });
+    await act(async () => answerTitle({ success: true, title: "Quarterly VAT filing", error: null }));
+    await settle();
+    expect(setConversationTitle).toHaveBeenCalledTimes(1);
+    expect(updateMetadataMock).not.toHaveBeenCalledWith(expect.objectContaining({ metadata: { title: "Quarterly VAT filing" } }));
+  });
+
+  it("names an older chat stored as \"Conversation 3\" the same way", async () => {
+    const legacy = buildConversation(["Book the March invoices"], false, { title: "Conversation 3" });
+    await renderAndSettle(legacy);
+    expect(setConversationTitle).toHaveBeenCalledWith(legacy.localId, "Book the March invoices");
   });
 });

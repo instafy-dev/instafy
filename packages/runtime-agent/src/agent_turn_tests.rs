@@ -177,6 +177,8 @@ impl Harness {
             workspace_token_scopes: None,
             workspace_token_expires_at: None,
             lease_attempts: 1,
+            grants: Vec::new(),
+            grant_token: None,
         }
     }
 }

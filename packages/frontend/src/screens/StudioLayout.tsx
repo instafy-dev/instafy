@@ -124,6 +124,7 @@ import { useHomeAttentionInbox } from "./useHomeAttentionInbox";
 import { NO_SPACE_OPEN_NAME } from "../projects/spaceName";
 import { useCreatePrivateConversation } from "./studio/hooks/useCreatePrivateConversation";
 import { useConversations } from "../conversations/ConversationsProvider";
+import { NEW_CHAT_TITLE } from "../conversations/conversationState";
 import { isUUID } from "../utils/uuid";
 import { writeClipboardText } from "../runtime/runtimeMenuShared";
 import { INSTAFY_CLI_URL } from "../config/externalLinks";
@@ -1154,9 +1155,8 @@ function StudioLayoutInner() {
       setLeftDrawer(null);
     }
     const projectId = activeProjectId && isUUID(activeProjectId) ? activeProjectId : null;
-    const conversationIndex = conversations.length + 1;
     const conversation = createConversation({
-      title: `Conversation ${conversationIndex}`,
+      title: NEW_CHAT_TITLE,
       messages: [
         {
           id: `assistant-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -1179,7 +1179,7 @@ function StudioLayoutInner() {
     void (async () => {
       const response = await controllerClient.conversations.createBlank({
         projectId,
-        metadata: { title: `Conversation ${conversationIndex}`, localId: conversation.localId }
+        metadata: { title: NEW_CHAT_TITLE, localId: conversation.localId }
       });
       if (!response?.conversationId) {
         return;
@@ -1188,7 +1188,6 @@ function StudioLayoutInner() {
     })();
   }, [
     activeProjectId,
-    conversations,
     createConversation,
     isLargeScreen,
     markConversationRead,
@@ -1790,6 +1789,7 @@ function StudioLayoutInner() {
     onSettings={navigationScope.orgKey === "personal" ? undefined : () => handleOpenOrgSettings(navigationScope.orgKey)}
     onSwitchTeam={() => openMobileContextDirectory("teams-and-spaces")}
     onBrowseSpaces={() => openMobileContextDirectory("spaces")}
+    onNewSpace={() => runStudioNavigation(() => handleNewProject(navigationScope.orgKey === "personal" ? null : navigationScope.orgKey))}
     onSpace={id => handleActivateProject(id, navigationScope.orgKey)}
   />;
 

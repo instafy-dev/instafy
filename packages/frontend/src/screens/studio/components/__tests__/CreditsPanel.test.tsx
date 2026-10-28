@@ -5,9 +5,10 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CreditsPanel } from "../CreditsPanel";
 
-const mocks = vi.hoisted(() => ({ checkout: vi.fn(), portal: vi.fn(), planChange: vi.fn(), showStatus: vi.fn() }));
+const mocks = vi.hoisted(() => ({ checkout: vi.fn(), portal: vi.fn(), planChange: vi.fn(), showStatus: vi.fn(),
+  billing: { creditBalance: 1000, creditLimit: 2000, subscription: null } }));
 vi.mock("../../../../credits/useCredits", () => ({ CREDITS_UPDATED_EVENT: "credits-updated", useCredits: () => ({
-  billing: { creditBalance: 1000, creditLimit: 2000, subscription: null }, controllerEnabled: false,
+  billing: mocks.billing, controllerEnabled: false,
   hasLoaded: true, lastError: null, ledger: [], ledgerError: null, refresh: async () => {},
 }) }));
 vi.mock("../../../../credits/creditService", () => ({ fetchCreditPolicy: vi.fn() }));
@@ -23,6 +24,7 @@ describe("Credits display choices", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    mocks.billing = { creditBalance: 1000, creditLimit: 2000, subscription: null };
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
   });
   afterEach(async () => {
@@ -48,5 +50,25 @@ describe("Credits display choices", () => {
     expect(mocks.checkout).not.toHaveBeenCalled();
     expect(mocks.portal).not.toHaveBeenCalled();
     expect(mocks.planChange).not.toHaveBeenCalled();
+  });
+
+  // Local drive, Oct 28: "897 / 800" read as a balance past its own limit, with
+  // "Starter resets to 200 credits daily · resets at 00:00 UTC" under it.
+  it("shows the balance as a number of credits and one line for the daily refill", async () => {
+    mocks.billing = { creditBalance: 897, creditLimit: 800, subscription: null };
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    const row = container.querySelector('[data-testid="credits-balance-row"]');
+    expect(row?.textContent).toBe("897credits");
+    expect(row?.textContent).not.toContain("/");
+    expect(row?.textContent).not.toContain("800");
+    const refill = container.querySelector('[data-testid="credits-starter-budget"]');
+    expect(refill?.textContent).toBe("Refills to 800 credits every day at 00:00 UTC");
+    // The refill names the team's own limit, which the payment checks read.
+    expect(container.querySelector('[data-testid="credits-limit"]')?.textContent).toBe("800");
+    expect(container.textContent).not.toMatch(/resets to|soft cap|managed AI/i);
+
+    await act(async () => radio("credits-amount-view-usd").click());
+    expect(row?.textContent).toBe("$0.90");
+    expect(refill?.textContent).toBe("Refills to $0.80 every day at 00:00 UTC");
   });
 });

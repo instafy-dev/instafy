@@ -361,7 +361,9 @@ async fn tombstone_team_spaces(
         let mut tombstoned = Vec::with_capacity(live.len());
         let mut deadlocked = None;
         for project_id in &live {
-            match cancel_project_work_in_transaction(&mut transaction, *project_id).await {
+            match cancel_project_work_in_transaction(&state.config, &mut transaction, *project_id)
+                .await
+            {
                 Ok(work) => tombstoned.push((*project_id, work)),
                 Err((status, Json(error)))
                     if error.code.as_deref() == Some(CANCEL_DEADLOCKED_CODE) =>

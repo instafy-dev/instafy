@@ -160,7 +160,9 @@ spaces that have never been visited in this browser. The same alphabetical picke
 appears in the top navigation drawer, the composer's bottom sheet and the desktop
 header. It names the team, marks the current space and shows unread counts. More
 than six spaces adds a name filter, and long lists scroll within the popover.
-**Browse all spaces** still opens the full directory for its management actions.
+**Browse all spaces** still opens the full directory for its management actions, and
+**New space**, the picker's last item, opens the same "Create a new space" dialog as the
+directory's New space. The rail's **+** is **New team**.
 Expanded inline sidebar shortcuts retain their bounded recent-space list.
 
 Desktop conversation shortcuts have a **+** after the last tab to start a chat
@@ -221,8 +223,8 @@ Mobile browsers show **Get the app · Soon** in the profile menu, linking to the
 availability section; iOS and Android downloads are marked coming soon. Native apps hide
 these acquisition actions and retain their existing update controls.
 
-The space chip opens an anchored picker of all accessible spaces in the selected team
-and **Browse all spaces**. Spaces appear alphabetically, with the current space highlighted
+The space chip opens an anchored picker of all accessible spaces in the selected team,
+**Browse all spaces** and **New space**. Spaces appear alphabetically, with the current space highlighted
 in its alphabetical position. More than six spaces adds a name filter. Expanded inline
 sidebar shortcuts keep up to six spaces selected by recent visits, remembered per account
 on this device, and display that set alphabetically.
@@ -247,21 +249,26 @@ names nothing. A newer chat never stands in for the first one, and a space whose
 are cut to 60 characters at a word. A name a person chose is never replaced, and a rename made on
 another device is read before writing.
 
-A chat that still has its numbered title and holds a `/skills import` line is titled after what
-it sets up: **Connect FreeFinance** for a built-in connector or **Set up Bookkeeping** for any
-other pack. Otherwise the controller's model titles the chat, but only when the person has a
-default AI credential of their own. Without one, the client of the person who wrote the chat's
-opening message titles it from that message: the first sentence that says something, without
-greetings or "can you help me" openers, links, email addresses, mentions, file paths or code, at
-most six words and 48 characters, and without a dangling small word such as "the" or "for" where
-it was cut. The title holds plain words only (letters in any script, apostrophes, hyphens and
-ending punctuation) and ends before the first word with a digit or any other character, or one
-longer than 20 characters. Other slash commands, messages that leave fewer than two such words,
-and messages that mention a password, PIN, login, secret, token or key, or hold a known key prefix
-or a long run of letters and digits, keep the numbered title.
-This fallback reads only the opening message, never a later reply, so a chat whose earlier
-messages are not loaded keeps its numbered title until they are. A chat this tab learns of from a
-single incoming message, or rebuilds from a saved draft, is not titled until the chat list has
+Every untitled chat is called **New chat**, in the chat list, its tab, Home and on every device:
+never a number taken from its place in the list, which changed whenever the list did. (Older chats
+stored as "Conversation 3" keep that name until they are titled.) Home's rows use a chat's real
+name, and a run that belongs to no chat is named after its space. A new chat holding a `/skills
+import` line is titled after what it sets up: **Connect FreeFinance** for a built-in connector or
+**Set up Bookkeeping** for any other pack. Otherwise the client of the person who wrote the chat's
+opening message names it from that message's first line as soon as it is sent, so the chat has a
+name while its first turn runs and after that turn fails: the first sentence that says something,
+without greetings or "can you help me" openers, links, email addresses, mentions, file paths or
+code, cut to about 40 characters at a word with "…" where it was cut, and without a dangling small
+word such as "the" or "for" there. The name holds plain words (letters in any script, apostrophes,
+hyphens and ending punctuation) and small numbers (a count up to 99, or a year), and ends before
+the first other word: a longer number, a word with a digit or another character, or one longer
+than 20 characters. Other slash commands, messages that leave fewer than two such words, and
+messages that mention a password, PIN, login, secret, token or key, or hold a known key prefix or
+a long run of letters and digits, stay **New chat**. When the person has a default AI credential
+of their own, the controller's model title then replaces that name once, unless someone renamed
+the chat meanwhile. Names come only from the opening message, never a later reply, so a chat whose
+earlier messages are not loaded stays **New chat** until they are. A chat this tab learns of from
+a single incoming message, or rebuilds from a saved draft, is not titled until the chat list has
 confirmed its title.
 
 ## Scoped search
@@ -474,8 +481,8 @@ Forward and Reload, keeping room for the address and page picker. A message goes
 browser's active tab, which that picker chooses; the chat does not repeat the tabs in a strip of
 its own. The Browser view tab names the active tab in its tooltip and accessible description, and
 shows a violet dot ("Octo is using the browser" to screen readers) while the agent uses the
-browser. The composer's **Ask AI for a new tab** action prepares the next AI request to ask for
-another page; it does not immediately create a blank browser tab. A removable **New tab for the
+browser. While a browser is open, the composer's **Ask AI for a new tab** action prepares the
+next AI request to ask for another page; it does not immediately create a blank browser tab. A removable **New tab for the
 next message** token above the input makes that pending intent visible.
 
 The workspace tab owner remembers each conversation's selected resource, open file references,
@@ -637,6 +644,13 @@ Home separates **Unread** conversations from **Recent activity**, using flat row
 shared panel surface. Failed runs retain a warning icon and a concise failure label while
 remaining markable as read. A completion or failure retires the matching running entry.
 
+Home lists each chat once. An unread chat is under **Unread** only, so **Continue working** does
+not repeat it, and comes first there when Continue working gave way to it; **Recent chats** leaves
+out both; and **Recent activity** leaves out every chat listed above it, stepping aside rather than
+reading "Quiet so far" when that leaves it empty. A chat listed above that is running says so on its
+own row ("Run in progress"), in place of its In progress row. Rows that follow each other for the
+same chat read as one row that counts their updates.
+
 Narrow panels initially show four unread rows with **View all**; wide panels show up to
 eight. Previews can wrap to two lines in narrow panels. When team filters are available,
 **All** consistently labels rows **Organization · Space**, even when the loaded page contains
@@ -695,20 +709,22 @@ Automations uses a flat empty state on the shared panel surface, with a labeled
 ## First run
 
 An empty space opens with the getting-started card in the chat, at message weight. Its AI step
-is one decision: **Choose your AI** with **Start free with Instafy AI** (the live allowance on the
-button) and **Connect AI**; when the free tier is paused the heading stays, the line reads "Free
-Instafy AI is paused right now. Connect your own AI to start; you pay your provider directly and
-Instafy adds nothing." and **Connect AI** is the one button. The same verb names the act
+is one decision: **Choose your AI** with **Start with Instafy AI** ("Uses credits.", or the prompts left
+today when there is a daily cap) and **Connect AI**. Instafy AI is paid for with credits, so the card
+never calls it free. When it is paused the heading stays, the line reads "Instafy AI is paused right
+now. Connect your own AI to start; you pay for it directly and Instafy adds nothing." and **Connect
+AI** is the one button. The same verb names the act
 everywhere: **Connect AI** on the card and in the gate, **Add AI connection** as the modal's
-title, **AI connections** as the AI panel's heading. When a free lane is offered the line ends
+title, **AI connections** as the AI panel's heading. When Instafy AI is offered the line ends
 "Next: pick a tool, or just type.", which is what the step below actually asks. Once settled, a
 status line above **Start with a tool you already use** names what will answer ("Using OpenAI
-API key" or "Using free Instafy AI: 20 prompts a day, 1 credit each") followed by **Change AI**,
-which reopens the AI step for the free choice and opens the AI panel for a saved connection.
+API key" or "Using Instafy AI · uses credits") followed by **Change AI**, which reopens the AI
+step for Instafy AI and opens the AI panel for a saved connection.
 
 Typing or sending with no AI connected shows one sentence in the chat, "Connect AI to send this.
 Your message is kept.", with a primary **Connect AI** that opens the Add AI connection modal and,
-while the free tier is available, **Use free Instafy AI (20 a day)**. "Just chatting with
+while Instafy AI is available, **Use Instafy AI** ("Use Instafy AI (20 a day)" when there is a daily
+cap), never "free", as on the card. "Just chatting with
 teammates? Turn the assistant off." appears as a quiet caption below only when the space has
 more than one member. The draft stays in the composer. Switching the assistant on with no AI
 connected, or an expired connection, shows the same hand-off in the chat: no provider list is
@@ -724,9 +740,9 @@ not published is not on the card at all. The card carries no action cards and no
 
 The blank path is the composer itself, which is already on screen asking "Ask for something…":
 the closing line points at it, the send button enables on the first character, and typing folds
-the card to one row, **Notion**, **Import a repo** and **More tools**, which unfolds when the draft
-is cleared; history and dismissal hide it as before. The collapsed row names the same tools in
-text form, in the same order, keeping the verb for the repo import.
+the card to one row, **Notion**, **GitHub** and **More tools**, which unfolds when the draft is
+cleared; history and dismissal hide it as before. The collapsed row is the full row's first tools
+in text form, under the same names and in the same order, so typing only drops tools from the end.
 
 A member without write access keeps the heading, the closing line and the **GitHub** chip,
 whose press opens the import form and sends nothing. The skill chips and **More tools** are
@@ -852,7 +868,9 @@ The composer exposes three one-shot actions instead of a persistent delivery mod
   immediately rather than leave an idle queue entry behind.
 - **Stash** saves a private draft without creating a transcript message, run, or job. Use
   `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` elsewhere, or choose **Stash draft** from the
-  composer actions. Stashes never auto-send, remain private to their author, and are capped per
+  composer actions. The composer's **+** menu lists only what can be done now: **Queue message**
+  and **Stash draft** appear once there is a draft they can take, never as disabled rows, and the
+  menu carries no keyboard tip (the send button's label says what `Enter` does). Stashes never auto-send, remain private to their author, and are capped per
   author and conversation at 50 drafts and 5 MiB of serialized draft data.
 
 `Shift+Enter` always inserts a newline. When no matching agent is active, ordinary `Enter` sends a

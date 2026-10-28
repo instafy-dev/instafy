@@ -93,6 +93,12 @@ const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/AGENTS.md"
 ));
+/// Earlier bundled copies of `AGENTS.md` a scaffold may replace. A team's own `AGENTS.md`, or an edited
+/// copy, is kept.
+const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
+    // From before it said how replies speak (no ports, process ids, paths, tool names or error codes).
+    include_str!("legacy/agents-doc-v1.md"),
+];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/CLAUDE.md"
@@ -136,8 +142,9 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // named a fixed tunnel domain for Vite's allowed hosts, and v9 the one from
 // before `instafy preview open --start` kept a site running after the turn (and
 // before the location, Present and tunnel material moved to references/),
-// v10 the one that said rerunning `instafy preview open` refreshes the card, and
-// v11 the one from before the card showed a picture and a summary of the site. A
+// v10 the one that said rerunning `instafy preview open` refreshes the card,
+// v11 the one from before the card showed a picture and a summary of the site, and
+// v12 the one that had the reply report exit codes and a stopped site's process. A
 // workspace still holding an unedited earlier bundled copy of this skill,
 // browser automation or skill import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -152,6 +159,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v9.md"),
     include_str!("legacy/frontend-previews-v10.md"),
     include_str!("legacy/frontend-previews-v11.md"),
+    include_str!("legacy/frontend-previews-v12.md"),
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -283,10 +291,11 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before a page of options cited each value and listed unknown values apart from a filter.
     include_str!("legacy/interactive-artifacts-v1.md"),
 ];
-const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[];
+const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[include_str!("legacy/research-team-v1.md")];
 const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
     // From before a lane read with the research skill and compared a product by its "Comparing items".
     include_str!("legacy/research-team-researcher-v1.md"),
+    include_str!("legacy/research-team-researcher-v2.md"),
 ];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -316,6 +325,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v8.md"),
     // From before it said to take another route after a declined site.
     include_str!("legacy/browser-automation-v9.md"),
+    // From before it said to give a failed step's plain reason, never a raw error code, and that
+    // a Shared page another chat left is not this task's work.
+    include_str!("legacy/browser-automation-v10.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -340,6 +352,9 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v4.md"),
     // From before it said how to compare items: a price per item or why not, and the reviews asked for.
     include_str!("legacy/web-research-v5.md"),
+    // From before a missing search key or a site that did not load never ended the task (pages read without a
+    // search, "www." added or removed once, the page built with what was read).
+    include_str!("legacy/web-research-v6.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -497,10 +512,13 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         }
     }
 
-    if !agents_doc_path.exists() {
-        if fs::write(&agents_doc_path, AGENTS_DOC_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &agents_doc_path,
+        LEGACY_AGENTS_DOC_TEMPLATES,
+        AGENTS_DOC_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
     if !claude_doc_path.exists() {
@@ -1980,6 +1998,43 @@ mod tests {
         assert!(BOUND_SITES_TEMPLATE.contains("## When someone asks from a site"));
     }
 
+    /// Replies speak the person's words (28 Oct drive: "Overpass place search was
+    /// unavailable", "net::ERR_TUNNEL_CONNECTION_FAILED", "recorded PID (1368)",
+    /// "index.html"): `AGENTS.md`, which every turn loads, says what a reply leaves
+    /// out and how a failure is said. An unedited earlier copy is upgraded; a
+    /// team's own `AGENTS.md` is kept.
+    #[test]
+    fn agents_doc_says_how_replies_speak_and_reaches_existing_spaces() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        for needle in [
+            "## Replies",
+            "Name a site, page or file by what it is (\"the hello page\", \"the map\"), not by its path or file name.",
+            "Leave out ports, process IDs, file names and paths, error codes, and the names of the tools, commands and services you used",
+            "Name one only when the person asks for it.",
+            "\"the map's place search was busy, so nearby suggestions may be missing\", not a service's name",
+            "\"Stopped the hello page.\", not a process ID",
+            "Name sources by who publishes them",
+        ] {
+            assert!(doc.contains(needle), "{needle}");
+        }
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+
+        let previous = include_str!("legacy/agents-doc-v1.md");
+        assert!(!previous.contains("## Replies"));
+        let workspace = tempdir().expect("workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+        let theirs = "# How we work\n\nReply in Swedish.\n";
+        fs::write(&path, theirs).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
+    }
+
     /// A page of options cites each value's page and day, and a stated limit lists a row whose value is unknown
     /// apart: the bound-sites skill and its cheat sheet say so, and unedited earlier copies are brought up to date.
     #[test]
@@ -2399,7 +2454,7 @@ mod tests {
             "their cards read Stopped and `instafy preview list` no longer lists them",
             "Open on a `restartable` card starts the site again with no turn",
             "its status says the preview is open, not that the site answers",
-            "Report what each command returned",
+            "Go by what each command returned",
             "--summary \"<facts>\"",
             "--thumbnail <file>",
             "it also takes a new picture for the card",
@@ -2449,7 +2504,8 @@ mod tests {
         let v8 = include_str!("legacy/frontend-previews-v8.md");
         let v9 = include_str!("legacy/frontend-previews-v9.md");
         let v10 = include_str!("legacy/frontend-previews-v10.md");
-        let previous = include_str!("legacy/frontend-previews-v11.md");
+        let v11 = include_str!("legacy/frontend-previews-v11.md");
+        let previous = include_str!("legacy/frontend-previews-v12.md");
         assert!(!v3.contains("instafy preview open"));
         assert!(v4.contains("instafy preview open"));
         assert!(!v4.contains("Allow the preview host before the person opens the card."));
@@ -2466,8 +2522,20 @@ mod tests {
         assert!(!v9.contains(".rt.instafy.dev"));
         assert!(v10.contains("--start"));
         assert!(v10.contains("refreshes the card"));
-        assert!(!previous.contains("refreshes the card"));
-        assert!(!previous.contains("--summary"));
+        assert!(!v11.contains("refreshes the card"));
+        assert!(!v11.contains("--summary"));
+        assert!(previous.contains("--summary"));
+        // v12 had the reply report exit codes and a stopped site's process:
+        // the person is told in plain words which site stopped.
+        assert!(previous.contains("Report what each command returned (exit code, `status`)"));
+        for needle in [
+            "tell the person in plain words (\"the page is up\", \"the page didn't start\"), without the port, exit code or log file",
+            "Then say which site stopped (\"Stopped the hello page.\"), never its process ID or port.",
+            "say in one plain line that the preview didn't open",
+        ] {
+            assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(needle), "{needle}");
+        }
+        assert!(!FRONTEND_PREVIEWS_TEMPLATE.contains("give the error in one line"));
         // Octo reports what a command returned: a rerun posts this turn's
         // card, it never refreshes an earlier one, and `instafy preview list`
         // does not say whether a site answers.
@@ -2498,7 +2566,7 @@ mod tests {
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&reference).unwrap(), edited);
         }
-        for old in [v3, v4, v5, v6, v7, v8, v9, v10, previous] {
+        for old in [v3, v4, v5, v6, v7, v8, v9, v10, v11, previous] {
             fs::write(&skill, old).unwrap();
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(

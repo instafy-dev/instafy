@@ -11,6 +11,7 @@ import {
   WarningTriangle,
 } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
+import { Text } from "../../../components/Text";
 import { OctoCoin } from "../../../components/OctoCoin";
 import { Spinner } from "../../../components/Spinner";
 import {
@@ -39,7 +40,7 @@ import {
 } from "../../../conversations/runFailurePresentation";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { agentJobThreadAcknowledgementIds, shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
-import { RunFailureMessageBody } from "./RunFailureNotice";
+import { RunFailureMessageBody, useRunFailureAutoRetryActive } from "./RunFailureNotice";
 import { isCompactionStatusText } from "./assistantStatusHeuristics";
 import type { AgentThreadBranchParticipant, AgentThreadBranchRow } from "./agentThreadBranchRows";
 import {
@@ -55,10 +56,13 @@ import {
 import { isTransientThreadUpdate } from "./threadPreviewProxyError";
 import { TurnActivityDetails } from "./TurnActivityDetails";
 import { TurnActivityLine } from "./TurnActivityLine";
-import { detailsOnlySummary, type TurnActivity } from "./turnActivity";
+import { detailsOnlySummary, type DetailItem, type TurnActivity } from "./turnActivity";
 import { TurnBrowserApprovalRow, type TurnBrowserApproval } from "./turnBrowserApproval";
 
 const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
+const NO_EARLIER_ATTEMPTS: EarlierAttemptDetails[] = [];
+/** The line of a turn that ran no step itself after Instafy tried it again. */
+const RETRIED_TURN_LINE = "Took two tries";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -211,6 +215,14 @@ export type MessageContentProps = {
   projectId?: string | null;
 };
 
+/** A failed attempt Instafy tried again by itself, as the retry's Details list it. */
+export type EarlierAttemptDetails = {
+  id: string;
+  details: DetailItem[];
+  /** The attempt's raw failure reason, shown only in Details. */
+  failureText: string | null;
+};
+
 export type ChatFileChangeListProps = {
   files: ChatMessageFileChange[];
   projectId?: string | null;
@@ -236,6 +248,10 @@ export type AgentJobThreadPreviewLayoutProps = {
   runStatusShownInEntryHeader?: boolean;
   /** The turn's plain-language line and the steps behind its Details (turnActivity). */
   activity: TurnActivity;
+  /** The failed attempt this turn replaced, when Instafy tried it again by itself. */
+  earlierAttempts?: EarlierAttemptDetails[];
+  /** This failed turn's automatic resend went out, and the retry has shown nothing yet. */
+  autoRetryPending?: boolean;
   /** The run's browser prompt, when this turn waits on the viewer's answer; shown under the line. */
   browserApproval?: TurnBrowserApproval["row"];
   detailsOpen: boolean;
@@ -283,6 +299,8 @@ export function AgentJobThreadPreviewLayout({
   showHeaderIdentity = true,
   runStatusShownInEntryHeader = false,
   activity,
+  earlierAttempts = NO_EARLIER_ATTEMPTS,
+  autoRetryPending = false,
   browserApproval = null,
   detailsOpen,
   cards,
@@ -358,20 +376,29 @@ export function AgentJobThreadPreviewLayout({
     finalSummaryLower.includes("retry later or switch credentials") ||
     finalSummaryLower.includes("credentials need reconnecting") ||
     finalSummaryLower.includes("quota");
-  // Failed runs render a short friendly sentence instead of the raw technical
-  // failure body; the raw text and the turn's steps stay behind its Details.
-  // Proxy/credential errors keep their existing curated guidance.
+  // Every failed turn renders one failure block: a short friendly sentence,
+  // "Try again", and the raw text and the turn's steps behind its Details. A
+  // proxy failure reads from its raw diagnostic, so the block can say whose
+  // AI it was and offer "Manage AI" when settings can fix it.
   const runFailurePresentation =
-    isCompleted &&
-    finalSpineTone === "danger" &&
-    finalSummaryMessage !== null &&
-    !finalSummaryCoversProxyError
+    isCompleted && finalSpineTone === "danger" && finalSummaryMessage !== null
       ? resolveRunFailurePresentation({
           metadata: finalSummaryMessage.metadata,
-          content: finalSummaryDisplayContent,
+          content: inheritedProxyGuidanceContent ?? finalSummaryDisplayContent,
           assumeFailed: true,
         })
       : null;
+  // While Instafy tries a failed turn again by itself, the turn is one quiet
+  // line: no failure block, no status and no red.
+  const quietRetry = useRunFailureAutoRetryActive(
+    runFailurePresentation ? finalSummaryMessage : null,
+    autoRetryPending,
+  );
+  // A turn reads its outcome once. A failed turn shows it in its failure
+  // block (or the quiet retry line), so its header carries no status; only a
+  // failure with nothing to show below keeps the marker.
+  const shownStatusMarker = runFailurePresentation === null ? terminalStatusMarker : null;
+  const spineTone: ThreadSpineTone = quietRetry ? "neutral" : finalSpineTone;
   // Octo's notes listed in Details, once each, never repeating the reply.
   const visibleUpdateIds = useMemo(() => {
     const keys = new Set<string>();
@@ -417,17 +444,23 @@ export function AgentJobThreadPreviewLayout({
   const hasDetails =
     detailItems.some(
       (item) => item.kind !== "update" || (getMessageType(item.message) ?? "").trim().toLowerCase() !== "reasoning",
-    ) || branchThreads.length > 0;
+    ) ||
+    branchThreads.length > 0 ||
+    earlierAttempts.length > 0;
   // A failed turn has one Details: the failure block's, which lists the steps.
   const activityLineOpensDetails = hasDetails && runFailurePresentation === null;
   // A done turn that ran no step but left notes, a plan or a thread still
-  // gets a line, so its Details can open: "Wrote 2 notes".
+  // gets a line, so its Details can open: "Wrote 2 notes". So does a retry
+  // whose earlier attempt Details lists.
   const activityText =
     activity.live ??
     activity.summary ??
     (activityLineOpensDetails ? detailsOnlySummary(detailItems, branchThreads.length) : null) ??
+    (activityLineOpensDetails && earlierAttempts.length > 0 ? RETRIED_TURN_LINE : null) ??
     "";
-  const showActivityLine = activityText.length > 0;
+  // A failed turn's one line is its failure block: a summary of its steps
+  // above it would read like a turn that went fine.
+  const showActivityLine = activityText.length > 0 && runFailurePresentation === null;
   const showDetailsPanel = detailsOpen && activityLineOpensDetails;
   const normalizeThreadPlaceholderText = (value: string) =>
     value
@@ -476,9 +509,9 @@ export function AgentJobThreadPreviewLayout({
   // row when it renders, else the outer row's speaker header when that
   // carries it; the content-level caption is the fallback for headerless
   // continuation entries (#145).
-  const showTerminalStatusInHeader = terminalStatusMarker !== null && showThreadPreviewHeader;
+  const showTerminalStatusInHeader = shownStatusMarker !== null && showThreadPreviewHeader;
   const showTerminalStatusCaption =
-    terminalStatusMarker !== null && !showTerminalStatusInHeader && !runStatusShownInEntryHeader;
+    shownStatusMarker !== null && !showTerminalStatusInHeader && !runStatusShownInEntryHeader;
   const terminalStatusTextClassName =
     finalSpineTone === "danger"
       ? "text-rose-700 dark:text-rose-200"
@@ -505,7 +538,7 @@ export function AgentJobThreadPreviewLayout({
   const renderThreadPreviewNotch = (offsetPx = THREAD_SPINE_DEFAULT_NOTCH_OFFSET_PX) =>
     hideThreadSpine || useTightThreadPreviewLayout ? null : (
       <ThreadSpine
-        tone={finalSpineTone}
+        tone={spineTone}
         className={`pointer-events-none absolute top-0 h-full ${threadSpineJunctionOffsetClass}`}
         notches={[{ offsetPx, maskLine: true }]}
       />
@@ -674,14 +707,52 @@ export function AgentJobThreadPreviewLayout({
         ))}
       </div>
     ) : null;
-  const stepsList = (
+  const latestSteps = (
     <TurnActivityDetails
-      id={detailsId}
+      id={earlierAttempts.length > 0 ? `${detailsId}-latest` : detailsId}
       items={detailItems}
       renderUpdate={renderUpdate}
       footer={branchThreadRows}
     />
   );
+  // A retry's Details lists the attempt it replaced first, then its own steps.
+  const stepsList =
+    earlierAttempts.length === 0 ? (
+      latestSteps
+    ) : (
+      <div id={detailsId} className="min-w-0 space-y-1 py-1" data-testid="turn-activity-attempts">
+        {earlierAttempts.map((attempt, index) => (
+          <section
+            key={attempt.id}
+            aria-labelledby={`${detailsId}-attempt-${index}-label`}
+            data-testid="turn-activity-earlier-attempt"
+            className="min-w-0"
+          >
+            <Text as="p" id={`${detailsId}-attempt-${index}-label`} variant="caption" tone="muted">
+              First try
+            </Text>
+            <TurnActivityDetails
+              id={`${detailsId}-attempt-${index}`}
+              items={attempt.details}
+              renderUpdate={renderUpdate}
+            />
+            {attempt.failureText ? (
+              <p className="whitespace-pre-wrap break-words text-xs text-slate-500 dark:text-slate-400">
+                {attempt.failureText}
+              </p>
+            ) : null}
+          </section>
+        ))}
+        {detailItems.length > 0 || branchThreads.length > 0 ? (
+          <section aria-labelledby={`${detailsId}-latest-label`} className="min-w-0">
+            <Text as="p" id={`${detailsId}-latest-label`} variant="caption" tone="muted">
+              Second try
+            </Text>
+            {latestSteps}
+          </section>
+        ) : null}
+      </div>
+    );
 
   return (
     // Clip only the horizontal axis: wide previews must not widen the chat,
@@ -706,7 +777,7 @@ export function AgentJobThreadPreviewLayout({
       <div data-testid="agent-job-thread-preview" ref={threadPreviewRef} className="relative flex flex-col">
         {showThreadPreviewSpine ? (
           <ThreadSpine
-            tone={finalSpineTone}
+            tone={spineTone}
             className={`pointer-events-none absolute top-0 ${threadSpineJunctionOffsetClass}`}
             style={threadPreviewRailRenderStyle}
           />
@@ -737,16 +808,16 @@ export function AgentJobThreadPreviewLayout({
                   <span className="truncate">{ownerBadge}</span>
                 </span>
               ) : null}
-              {showTerminalStatusInHeader && terminalStatusMarker ? (
+              {showTerminalStatusInHeader && shownStatusMarker ? (
                 <span
                   data-testid="agent-thread-terminal-status"
                   className={`inline-flex min-w-0 items-center gap-1 text-xxs font-semibold leading-none ${terminalStatusTextClassName}`}
                 >
                   <WarningTriangle
                     aria-hidden="true"
-                    className={`h-3 w-3 flex-none ${terminalStatusMarker.iconClassName}`}
+                    className={`h-3 w-3 flex-none ${shownStatusMarker.iconClassName}`}
                   />
-                  <span className="min-w-0 truncate">{terminalStatusMarker.label}</span>
+                  <span className="min-w-0 truncate">{shownStatusMarker.label}</span>
                 </span>
               ) : null}
             </div>
@@ -794,7 +865,7 @@ export function AgentJobThreadPreviewLayout({
             <div className="min-w-0">
               <div
                 className={
-                  terminalStatusMarker
+                  terminalStatusMarker && !quietRetry
                     ? `space-y-1.5 border-l-2 pl-3 ${
                         finalSpineTone === "danger"
                           ? "border-rose-200 dark:border-rose-400/30"
@@ -803,7 +874,7 @@ export function AgentJobThreadPreviewLayout({
                     : "space-y-1.5"
                 }
               >
-                {showTerminalStatusCaption && terminalStatusMarker ? (
+                {showTerminalStatusCaption && shownStatusMarker ? (
                   // Headerless fallback: when neither the preview header nor
                   // the outer speaker header carries the run status, it opens
                   // the failure block — an entry-level state label set off by
@@ -815,9 +886,9 @@ export function AgentJobThreadPreviewLayout({
                   >
                     <WarningTriangle
                       aria-hidden="true"
-                      className={`h-3.5 w-3.5 flex-none ${terminalStatusMarker.iconClassName}`}
+                      className={`h-3.5 w-3.5 flex-none ${shownStatusMarker.iconClassName}`}
                     />
-                    <span className="min-w-0 truncate">{terminalStatusMarker.label}</span>
+                    <span className="min-w-0 truncate">{shownStatusMarker.label}</span>
                   </div>
                 ) : null}
                 {runFailurePresentation && finalSummaryMessage ? (
@@ -825,6 +896,7 @@ export function AgentJobThreadPreviewLayout({
                     message={finalSummaryMessage}
                     presentation={runFailurePresentation}
                     steps={hasDetails ? stepsList : null}
+                    autoRetryPending={autoRetryPending}
                   />
                 ) : hasUsefulFinalSummary && finalSummaryMessage ? (
                   <MessageContent content={finalSummaryDisplayContent} projectId={projectId ?? null} />
@@ -856,7 +928,7 @@ export function AgentJobThreadPreviewLayout({
         {!isRunning && !isThreadUnresolved && showThreadPreviewSpine ? (
           <div className="relative h-4" data-testid="agent-thread-spine-end">
             <ThreadSpine
-              tone={finalSpineTone}
+              tone={spineTone}
               className={`pointer-events-none absolute top-0 h-full ${threadSpineJunctionOffsetClass}`}
               segments={[{ topPx: THREAD_SPINE_END_SEGMENT_TOP_PX, heightPx: THREAD_SPINE_END_SEGMENT_HEIGHT_PX }]}
             />

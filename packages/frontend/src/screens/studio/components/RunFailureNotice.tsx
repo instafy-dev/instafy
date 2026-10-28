@@ -3,15 +3,17 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
-import { Check } from "iconoir-react";
+import { Check, NavArrowDown, NavArrowRight } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import type { RunFailurePresentation } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
+import { TurnActivityLine } from "./TurnActivityLine";
 import type { ScheduledRunFailureAutoRetry } from "./useRunFailureAutoRetry";
 
 export type RunFailureRetryContextValue = {
@@ -138,6 +140,32 @@ function AutoRetryCountdown({ dueAt }: { dueAt: number }) {
   );
 }
 
+const NO_DETAILS = () => {};
+
+/** The words of the one line a turn shows while Instafy tries it again by itself. */
+export const AUTO_RETRY_LINE_TEXT = "Trying again…";
+
+/**
+ * True while Instafy tries this failed turn again by itself: a countdown runs
+ * for it, its resend is going out, or its resend went out and the retry has
+ * not shown anything yet (`autoRetryPending`, from the transcript). The turn
+ * then shows one quiet line instead of its failure.
+ */
+export function useRunFailureAutoRetryActive(
+  message: Pick<ChatMessage, "id"> | null,
+  autoRetryPending = false,
+): boolean {
+  const retryContext = useRunFailureRetry();
+  if (!message) {
+    return false;
+  }
+  return (
+    autoRetryPending ||
+    retryContext?.autoRetryingKey === message.id ||
+    retryContext?.scheduledAutoRetry?.key === message.id
+  );
+}
+
 /**
  * Friendly body for a failed-run assistant message: one plain sentence, a
  * quiet actions row ("Try again" + "Details"), and the raw technical text
@@ -148,20 +176,26 @@ export function RunFailureMessageBody({
   message,
   presentation,
   steps = null,
+  autoRetryPending = false,
 }: {
   message: ChatMessage;
   presentation: RunFailurePresentation;
   /** The turn's steps (TurnActivityDetails), listed under the error text. */
   steps?: ReactNode;
+  /** Its automatic resend went out, and the retry has shown nothing yet. */
+  autoRetryPending?: boolean;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = useId();
   const retryContext = useRunFailureRetry();
   const retryPending = retryContext !== null && retryContext.pendingRetryKey === message.id;
   const otherRetryInFlight =
     retryContext !== null && retryContext.pendingRetryKey !== null && !retryPending;
-  const autoRetrying = retryContext?.autoRetryingKey === message.id;
+  const autoRetrying = retryContext?.autoRetryingKey === message.id || autoRetryPending;
   const scheduledAutoRetry =
-    retryContext?.scheduledAutoRetry?.key === message.id ? retryContext.scheduledAutoRetry : null;
+    retryContext?.scheduledAutoRetry?.key === message.id && !autoRetrying
+      ? retryContext.scheduledAutoRetry
+      : null;
   const isRetrySuperseded = retryContext?.isRetrySuperseded;
   const superseded = useMemo(
     () => isRetrySuperseded?.(message) ?? false,
@@ -172,19 +206,25 @@ export function RunFailureMessageBody({
   // the same way. Instafy AI's own limit leaves the person nothing to do; on
   // their own account they can switch to another AI connection.
   const usageLimit = presentation.kind === "provider_usage_limit";
-  const usageLimitOnOwnAi = usageLimit && readAiAccessMode(message) === "byoc";
+  // The person's own AI connection can fix it in AI settings: a spent usage
+  // window, or a sign-in or account the AI refused (presentation.manageAi).
+  const offersManageAi =
+    (usageLimit && readAiAccessMode(message) === "byoc") || presentation.manageAi === true;
   const onConnectAi = retryContext?.onConnectAi;
   const cancelAutoRetry = retryContext?.cancelAutoRetry;
-  // Manual controls give way to the automatic states; a pressed "Try again"
-  // keeps its pending spinner until the request settles, then reads "Retried".
-  const showManualControls =
-    retryContext !== null && !autoRetrying && !scheduledAutoRetry && !needsAi && !usageLimit;
+  // While Instafy tries the turn again by itself it is one quiet line, with no
+  // failure sentence and no actions; a countdown keeps its Cancel. A pressed
+  // "Try again" keeps its pending spinner until the request settles, then
+  // reads "Retried".
+  const quiet = autoRetrying || scheduledAutoRetry !== null;
+  const showManualControls = retryContext !== null && !quiet && !needsAi && !usageLimit;
   const showRetry = showManualControls && (retryPending || !superseded);
   const showRetried = showManualControls && superseded && !retryPending;
 
   const retryButtonRef = useRef<HTMLButtonElement | null>(null);
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
   const detailsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const autoRetryLineRef = useRef<HTMLDivElement | null>(null);
   // When the press here retires its control (Try again turns into "Retried",
   // Cancel turns into Try again), focus follows to the replacement instead of
   // dropping to the page. The hand-off only settles that press: a press that
@@ -192,10 +232,10 @@ export function RunFailureMessageBody({
   // it, so a later change, such as a resend landing minutes after, never moves
   // focus.
   const focusHandOffRef = useRef<FocusHandOff | null>(null);
-  // Whether Cancel holds focus. When the countdown ends on its own (the resend
-  // goes out, or the countdown is dropped), Cancel goes away under a keyboard
-  // or screen reader user; focus then moves to Details, which every card
-  // keeps, instead of dropping to the page.
+  // Whether Cancel holds focus. When the countdown ends on its own, Cancel goes
+  // away under a keyboard or screen reader user; focus then moves to the
+  // "Trying again…" line that replaces it (or to Details, when the countdown
+  // was dropped), instead of dropping to the page.
   const cancelFocusedRef = useRef(false);
   useEffect(() => {
     const handOff = focusHandOffRef.current;
@@ -204,7 +244,7 @@ export function RunFailureMessageBody({
         cancelFocusedRef.current = false;
         const active = typeof document === "undefined" ? null : document.activeElement;
         if (!active || active === document.body) {
-          detailsButtonRef.current?.focus({ preventScroll: true });
+          (detailsButtonRef.current ?? autoRetryLineRef.current)?.focus({ preventScroll: true });
         }
       }
       return;
@@ -244,116 +284,137 @@ export function RunFailureMessageBody({
     cancelAutoRetry?.(message.id);
   }, [cancelAutoRetry, message.id]);
 
+  // The polite region stays mounted, first, in both states: a region that
+  // appears already filled is not announced by many screen readers.
   return (
-    <div className="min-w-0 space-y-1.5" data-testid="run-failure-body">
-      <p className="whitespace-pre-wrap break-words text-sm">{presentation.friendlyText}</p>
-      {autoRetrying ? (
-        <p
+    <div className="min-w-0" data-testid={quiet ? "run-failure-auto-retry" : "run-failure-body"}>
+      {retryContext !== null ? <AutoRetryAnnouncement dueAt={scheduledAutoRetry?.dueAt ?? null} /> : null}
+      {scheduledAutoRetry ? (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <AutoRetryCountdown dueAt={scheduledAutoRetry.dueAt} />
+          {cancelAutoRetry ? (
+            <Button
+              ref={cancelButtonRef}
+              variant="text"
+              tone="muted"
+              size="xs"
+              radius="xl"
+              data-testid="run-failure-auto-retry-cancel"
+              aria-label="Cancel automatic retry"
+              onPress={handleCancelAutoRetry}
+              onFocusChange={(focused) => {
+                // A blur caused by the button leaving the page keeps the
+                // flag, so the effect above can tell it held focus.
+                if (focused || cancelButtonRef.current?.isConnected) {
+                  cancelFocusedRef.current = focused;
+                }
+              }}
+            >
+              Cancel
+            </Button>
+          ) : null}
+        </div>
+      ) : autoRetrying ? (
+        <div
+          ref={autoRetryLineRef}
+          // Takes focus only from the Cancel it replaces; never a tab stop.
+          tabIndex={-1}
+          className="min-w-0 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:focus-visible:ring-primary-300/80"
           data-testid="run-failure-auto-retrying"
-          className="text-xs text-slate-500 dark:text-slate-400"
         >
-          Trying again automatically…
-        </p>
-      ) : null}
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        {needsAi && onConnectAi && !autoRetrying ? (
-          <Button
-            variant="primary"
-            size="sm"
-            radius="xl"
-            data-testid="run-failure-connect-ai"
-            onPress={onConnectAi}
-          >
-            Connect AI
-          </Button>
-        ) : null}
-        {usageLimitOnOwnAi && onConnectAi ? (
-          <Button
-            variant="secondary"
-            size="sm"
-            radius="xl"
-            data-testid="run-failure-manage-ai"
-            onPress={onConnectAi}
-          >
-            Manage AI
-          </Button>
-        ) : null}
-        {scheduledAutoRetry && !autoRetrying ? (
-          <>
-            <AutoRetryCountdown dueAt={scheduledAutoRetry.dueAt} />
-            {cancelAutoRetry ? (
+          <TurnActivityLine
+            text={AUTO_RETRY_LINE_TEXT}
+            live
+            animate
+            interactive={false}
+            detailsOpen={false}
+            detailsId={detailsId}
+            onToggleDetails={NO_DETAILS}
+          />
+        </div>
+      ) : (
+        <div className="min-w-0 space-y-1.5">
+          <p className="whitespace-pre-wrap break-words text-sm">{presentation.friendlyText}</p>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            {needsAi && onConnectAi ? (
               <Button
-                ref={cancelButtonRef}
-                variant="text"
-                tone="muted"
-                size="xs"
+                variant="primary"
+                size="sm"
                 radius="xl"
-                data-testid="run-failure-auto-retry-cancel"
-                aria-label="Cancel automatic retry"
-                onPress={handleCancelAutoRetry}
-                onFocusChange={(focused) => {
-                  // A blur caused by the button leaving the page keeps the
-                  // flag, so the effect above can tell it held focus.
-                  if (focused || cancelButtonRef.current?.isConnected) {
-                    cancelFocusedRef.current = focused;
-                  }
-                }}
+                data-testid="run-failure-connect-ai"
+                onPress={onConnectAi}
               >
-                Cancel
+                Connect AI
               </Button>
             ) : null}
-          </>
-        ) : null}
-        {showRetry ? (
-          <Button
-            ref={retryButtonRef}
-            variant="secondary"
-            size="sm"
-            radius="xl"
-            data-testid="run-failure-retry"
-            onPress={handleRetry}
-            isPending={retryPending}
-            isDisabled={otherRetryInFlight}
-          >
-            Try again
-          </Button>
-        ) : null}
-        {showRetried ? (
-          <span
-            data-testid="run-failure-retried"
-            className="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400"
-          >
-            <Check aria-hidden="true" className="h-3.5 w-3.5 flex-none" />
-            Retried
-          </span>
-        ) : null}
-        <Button
-          ref={detailsButtonRef}
-          variant="text"
-          tone="muted"
-          size="xs"
-          radius="xl"
-          data-testid="run-failure-details-toggle"
-          onPress={() => setDetailsOpen((current) => !current)}
-          aria-expanded={detailsOpen}
-        >
-          Details
-        </Button>
-      </div>
-      {retryContext !== null ? (
-        <AutoRetryAnnouncement
-          dueAt={scheduledAutoRetry && !autoRetrying ? scheduledAutoRetry.dueAt : null}
-        />
-      ) : null}
-      {detailsOpen ? (
-        <div
-          data-testid="run-failure-details"
-          className="whitespace-pre-wrap break-words text-xs text-slate-500 dark:text-slate-400"
-        >
-          {presentation.rawText}
+            {offersManageAi && onConnectAi ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                radius="xl"
+                data-testid="run-failure-manage-ai"
+                onPress={onConnectAi}
+              >
+                Manage AI
+              </Button>
+            ) : null}
+            {showRetry ? (
+              <Button
+                ref={retryButtonRef}
+                variant="secondary"
+                size="sm"
+                radius="xl"
+                data-testid="run-failure-retry"
+                onPress={handleRetry}
+                isPending={retryPending}
+                isDisabled={otherRetryInFlight}
+              >
+                Try again
+              </Button>
+            ) : null}
+            {showRetried ? (
+              <span
+                data-testid="run-failure-retried"
+                className="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400"
+              >
+                <Check aria-hidden="true" className="h-3.5 w-3.5 flex-none" />
+                Retried
+              </span>
+            ) : null}
+            <Button
+              ref={detailsButtonRef}
+              variant="text"
+              tone="muted"
+              size="xs"
+              radius="xl"
+              data-testid="run-failure-details-toggle"
+              onPress={() => setDetailsOpen((current) => !current)}
+              aria-expanded={detailsOpen}
+              aria-controls={detailsOpen ? detailsId : undefined}
+            >
+              <span className="inline-flex items-center gap-0.5">
+                {detailsOpen ? "Hide details" : "Details"}
+                {detailsOpen ? (
+                  <NavArrowDown aria-hidden="true" className="h-3 w-3" />
+                ) : (
+                  <NavArrowRight aria-hidden="true" className="h-3 w-3" />
+                )}
+              </span>
+            </Button>
+          </div>
+          {detailsOpen ? (
+            <div id={detailsId} className="min-w-0 space-y-1.5">
+              <div
+                data-testid="run-failure-details"
+                className="whitespace-pre-wrap break-words text-xs text-slate-500 dark:text-slate-400"
+              >
+                {presentation.rawText}
+              </div>
+              {steps ? <div className="min-w-0">{steps}</div> : null}
+            </div>
+          ) : null}
         </div>
-      ) : null}
-      {detailsOpen && steps ? <div className="min-w-0">{steps}</div> : null}
+      )}
     </div>
   );
 }

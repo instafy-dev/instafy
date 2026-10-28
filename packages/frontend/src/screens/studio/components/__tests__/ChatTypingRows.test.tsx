@@ -931,6 +931,23 @@ describe("the typing row after a job thread's reply", () => {
     expect(resolveJobThreadTypingCoverage(undefined, [run("run-1", JOB_ID)], [])).toBe("none");
   });
 
+  it("lets a failed turn Instafy is trying again by itself cover the retry's typing row", () => {
+    // Its row reads "Trying again…" until the retry shows something; a typing
+    // row under it would say the same thing twice.
+    const failure: ChatMessage = {
+      id: "failure-1",
+      role: "assistant",
+      content: "Codex did not apply any workspace changes for a file-modifying request.",
+      timestamp: 3,
+      messageType: "error",
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: JOB_ID },
+    };
+    const failed = threadRow([reasoning, failure]);
+    expect(resolveJobThreadTypingCoverage(failed, [run("run-2", "job-retry")], [])).toBe("none");
+    const pending = { ...failed, metadata: { ...(failed.metadata as Record<string, unknown>), autoRetryPending: true } };
+    expect(resolveJobThreadTypingCoverage(pending, [run("run-2", "job-retry")], [])).toBe("live");
+  });
+
   it("lets a plain reply cover its own run when the turn posted no job thread", () => {
     // A turn with no tool use posts its reply as a plain row. While the run
     // record caught up, the typing row said "Thinking…" under that answer and

@@ -36,10 +36,8 @@ async function mountCards(page: Page, dark: boolean): Promise<void> {
         status: { text: "Stopped · only people who can edit this space can start it" } },
       { ...base, id: "starting", title: "Lisbon weekend", picture, pictureTone: "dim", state: "stopped", wake: "waking", pressable: false, busy: true,
         status: { text: "Starting…", busy: true } },
-      { ...base, id: "presenting", title: "Lisbon weekend", picture, state: "not_responding", status: { text: "Not responding", title: "Nothing answers on port 4173" },
-        followLine: "Kim is presenting · 2 watching",
-        actions: [{ id: "follow", label: "Follow Kim", testId: "preview-ready-follow", onPress: () => window.__opened.push("follow") },
-                  { id: "restart", label: "Start again", testId: "preview-ready-restart", onPress: () => window.__opened.push("restart") }] },
+      { ...base, id: "presenting", title: "Lisbon weekend", picture, followLine: "Kim is presenting · 2 watching",
+        actions: [{ id: "follow", label: "Follow Kim", testId: "preview-ready-follow", onPress: () => window.__opened.push("follow") }] },
     ];
     createRoot(document.getElementById("root")).render(
       h("main", { className: "min-h-dvh bg-white p-4 dark:bg-[var(--color-studio-dark-canvas)]" },
@@ -122,10 +120,12 @@ test("opens on a press anywhere on the card and from the keyboard, rings the who
   const picture = (await card(page, "live").getByTestId("preview-card-picture").boundingBox())!;
   await page.mouse.click(picture.x + picture.width / 2, picture.y + picture.height / 2);
   expect(await opened()).toEqual(["live", "live"]);
-  // A card that cannot be pressed does nothing, and does not look pressable.
+  // A card that cannot be pressed does nothing, and does not look pressable: no chevron, no pointer.
   await card(page, "blocked").click();
   expect(await opened()).toEqual(["live", "live"]);
   expect(await card(page, "blocked").locator("[data-preview-card-open]").evaluate((el) => getComputedStyle(el).cursor)).toBe("default");
+  for (const id of ["blocked", "starting"]) await expect(card(page, id).getByTestId("preview-card-open-icon")).toHaveCount(0);
+  for (const id of ["live", "stopped"]) await expect(card(page, id).getByTestId("preview-card-open-icon")).toBeVisible();
   // Secondary buttons sit above the card's own and press on their own.
   await card(page, "presenting").getByTestId("preview-ready-follow").click();
   expect(await opened()).toEqual(["live", "live", "follow"]);

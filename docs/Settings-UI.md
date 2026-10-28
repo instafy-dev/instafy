@@ -47,7 +47,8 @@ determines the winner. Arbitrary layout classes remain supported.
   Send/Stop/Voice, standalone image-overlay dismissal, avatar badges, identity
   chips and compound tab controls retain their purpose-specific shapes.
   Browser address fields use the shared input's 12px radius, including the mobile
-  address trigger. Their embedded Go/Clear utilities use the shared 8px corners.
+  address trigger. Enter in the field goes, with no Go button beside it; only the
+  phone address editor keeps its Go/Clear utilities, with the shared 8px corners.
 - Image attachment previews use `AttachmentThumbnail`: 48px in the composer and
   96px in messages, with shared quiet-button interaction, 8px corners and no
   decorative border or shadow. The image supplies the thumbnail's content; it is
@@ -433,7 +434,11 @@ opening navigation keeps Home, team and space identities at the same leading pos
 
 The space picker uses the same compact list on desktop, mobile and inline navigation. Each row
 has a small identity icon, a name, an optional unread count and a trailing current-space checkmark.
-Recent spaces stay alphabetically ordered; **Browse all spaces** remains below the list.
+Recent spaces stay alphabetically ordered; **Browse all spaces** remains below the list, and
+**New space** is the last item. New team and Create a new space end in the shared
+`StudioDialogFooter` with the actions the Stop and Take over confirmations use: a quiet `ghost`
+`form`-preset Cancel beside the `primary` `form`-preset action, so Cancel looks the same in every
+dialog. Create a new space suggests the team on screen only where this person can add spaces.
 On mobile, browsing all spaces replaces the navigation sheet’s root toolbar with one Spaces
 header: Back, Search spaces, current-space settings and New space. Back restores the root
 toolbar and its chat actions; the two scopes do not show competing search/plus controls.
@@ -680,6 +685,21 @@ Content and toolbar boundaries have one owner:
 Use the neutral divider and panel helpers in `theme/darkSurfaces.ts`; do not
 substitute slate-ramp borders or unrelated dark fills on one page. These rules
 describe container boundaries, not input outlines or semantic warning borders.
+
+Browser connection feedback follows the same rules. `BrowserSessionRecovery` owns
+the shared surface, typography and inline actions for expanded and compact recovery;
+the browser modal still owns connection state, permissions and retry/takeover callbacks.
+Compact recovery sizes to its content so long workspace names and touch-sized actions
+remain visible. Expanded recovery scrolls within the available browser pane on short
+screens. Keep normal Off states neutral and show technical failure details only when
+runtime debugging is enabled. The reconnect indicator uses the shared surface and
+loading status above the retained page. It must not clear the page or add another
+connection sentence.
+
+`/tests/fixtures/browser-recovery/index.html` mounts the real browser modal with inert
+controller and viewer boundaries. It covers reconnecting, disconnected and runtime-limit
+states, compact/expanded layouts, long blocker names and busy actions in both themes.
+The fixture verifies presentation and callback wiring, not a live remote browser.
 
 On macOS Desktop, the outer organization rail reaches the top of the window and
 widens from 64px to a 92px cap around the native window controls. The cap's shoulder

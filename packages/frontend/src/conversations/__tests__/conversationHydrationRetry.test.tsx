@@ -129,6 +129,39 @@ describe("conversation hydration recovery", () => {
     expect(vi.getTimerCount()).toBeGreaterThan(0);
   });
 
+  // Local drive, Oct 28: a chat listed as "Conversation 5" became
+  // "Conversation 1" once opened, and the others were renumbered.
+  it("names every untitled chat from the list \"New chat\", never by its place in the list", async () => {
+    const remote = (id: string, title?: string): ControllerProjectConversation => ({
+      id, projectId: PROJECT_ID, sessionId: null, createdBy: "77777777-6666-4555-8444-333333333333",
+      metadata: title ? { title } : {}, createdAt: "2026-10-28T08:00:00Z", updatedAt: "2026-10-28T08:00:00Z",
+    });
+    const first = "aaaaaaaa-1111-4111-8111-111111111111";
+    const second = "bbbbbbbb-2222-4222-8222-222222222222";
+    const named = "cccccccc-3333-4333-8333-333333333333";
+    const dispatch = vi.fn<(action: ConversationsAction) => void>();
+    const titles = () => Object.fromEntries(dispatch.mock.calls
+      .map(([action]) => action)
+      .filter((action): action is Extract<ConversationsAction, { type: "CREATE" }> => action.type === "CREATE")
+      .map((action) => [action.conversation.controllerId, action.conversation.title]));
+
+    const fetchProjectConversations = vi.fn().mockResolvedValue([remote(first), remote(named, "Plan 3 days in Lisbon…"), remote(second)]);
+    await act(async () => {
+      root.render(<Harness fetchProjectConversations={fetchProjectConversations} bump={vi.fn()} dispatch={dispatch} />);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(titles()).toEqual({ [first]: "New chat", [second]: "New chat", [named]: "Plan 3 days in Lisbon…" });
+
+    // The same chats in another order, as a later sync lists them.
+    dispatch.mockClear();
+    fetchProjectConversations.mockResolvedValue([remote(second), remote(first)]);
+    await act(async () => {
+      root.render(<Harness fetchProjectConversations={fetchProjectConversations} bump={vi.fn()} dispatch={dispatch} epoch={1} />);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(titles()).toEqual({ [first]: "New chat", [second]: "New chat" });
+  });
+
   it("does not schedule a retry when hydration succeeds", async () => {
     const fetchProjectConversations = vi.fn().mockResolvedValue([]);
     const bump = vi.fn();

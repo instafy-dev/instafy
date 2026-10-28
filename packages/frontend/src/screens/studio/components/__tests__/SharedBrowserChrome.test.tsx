@@ -47,6 +47,11 @@ function setInputValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+/** Enter in the address field goes, as in every browser; there is no Go button. */
+function pressEnter(input: HTMLInputElement) {
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+}
+
 describe("normalizeSharedBrowserAddress", () => {
   it.each([
     ["example.com", "https://example.com/"],
@@ -291,11 +296,8 @@ describe("SharedBrowserChrome", () => {
       inputs[1].focus();
       setInputValue(inputs[1], "instafy.dev/docs");
     });
-    await act(async () => {
-      const submit = inputs[1].form!.querySelector<HTMLButtonElement>('button[type="submit"]')!;
-      submit.focus();
-      submit.click();
-    });
+    expect(inputs[1].form!.querySelector('button[type="submit"]')).toBeNull();
+    await act(async () => pressEnter(inputs[1]));
     expect(first.onNavigate).not.toHaveBeenCalled();
     expect(second.onNavigate).toHaveBeenCalledExactlyOnceWith("page-2", "https://instafy.dev/docs");
     expect(inputs[0].value).toBe("https://example.com/");
@@ -342,7 +344,7 @@ describe("SharedBrowserChrome", () => {
     }
   });
 
-  it("falls back to the first page and navigates from the in-field Go button", async () => {
+  it("falls back to the first page and navigates on Enter, with no Go button", async () => {
     const onNavigate = vi.fn();
     const model = props({
       pages: [page({ id: "fallback", isActive: false })],
@@ -350,19 +352,14 @@ describe("SharedBrowserChrome", () => {
     });
     await act(async () => root.render(<SharedBrowserChrome {...model} />));
     const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
-    const go = container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-go"]')!;
-    expect(go.classList.contains("pointer-coarse:min-h-11")).toBe(true);
-    expect(go.classList.contains("pointer-coarse:min-w-11")).toBe(true);
+    expect(container.querySelector('[data-testid="shared-browser-go"]')).toBeNull();
 
     await act(async () => {
       input.focus();
       setInputValue(input, "instafy.dev/docs");
     });
-    await act(async () => {
-      go.focus();
-    });
     expect(input.value).toBe("instafy.dev/docs");
-    await act(async () => go.click());
+    await act(async () => pressEnter(input));
 
     expect(onNavigate).toHaveBeenCalledWith("fallback", "https://instafy.dev/docs");
     expect(input.value).toBe("https://instafy.dev/docs");
@@ -548,9 +545,6 @@ describe("SharedBrowserChrome", () => {
     expect(select.title).toBe("First");
     expect(select.disabled).toBe(true);
     expect(address.disabled).toBe(true);
-    expect(
-      container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-go"]')?.disabled,
-    ).toBe(true);
     expect(container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-back"]')?.disabled).toBe(true);
     expect(container.querySelector('[data-testid="shared-browser-pending"]')?.textContent).toContain("reload");
   });
@@ -578,9 +572,7 @@ describe("SharedBrowserChrome", () => {
     expect(
       container.querySelector('[data-testid="shared-browser-address"]')?.className,
     ).toContain("max-[540px]:h-10");
-    expect(
-      container.querySelector('[data-testid="shared-browser-go"]')?.getAttribute("aria-label"),
-    ).toBe("Go");
+    expect(container.querySelector('[data-testid="shared-browser-go"]')).toBeNull();
     expect(
       container.querySelector('[data-testid="shared-browser-page-select"]')?.getAttribute(
         "aria-label",
@@ -732,7 +724,6 @@ describe("SharedBrowserChrome", () => {
       "shared-browser-back",
       "shared-browser-forward",
       "shared-browser-reload",
-      "shared-browser-go",
     ]) {
       expect(
         container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)?.disabled,

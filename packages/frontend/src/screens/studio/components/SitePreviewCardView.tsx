@@ -11,8 +11,6 @@ export type SitePreviewCardStatus = {
   text: string;
   /** a spinner dot (Starting…) */
   busy?: boolean;
-  /** more on hover, e.g. the port that does not answer */
-  title?: string;
 };
 
 export type SitePreviewCardAction = { id: string; label: string; onPress: () => void; testId: string };
@@ -26,7 +24,7 @@ export type SitePreviewCardViewProps = {
    * space is kept, so nothing moves when it arrives.
    */
   picture: { url: string | null } | null;
-  /** a site that is starting or not answering is dimmed; a stopped one grey */
+  /** a site that is starting is dimmed; a stopped one grey */
   pictureTone: "normal" | "dim" | "gray";
   /** who may open it, as the controller recorded it; only `private` is known today */
   visibility: "private" | null;
@@ -149,14 +147,14 @@ export function SitePreviewCardView({
               <Lock className="h-3 w-3" aria-hidden="true" />
             </span>
           ) : null}
-          <NavArrowRight
-            className={[
-              "ml-auto h-4 w-4 shrink-0 text-slate-400 transition-colors dark:text-slate-500",
-              pressable ? "group-hover:text-slate-600" : "opacity-50",
-            ].join(" ")}
-            aria-hidden="true"
-            data-testid="preview-card-open-icon"
-          />
+          {/* The chevron promises a press, so a card that cannot be pressed has none. */}
+          {pressable ? (
+            <NavArrowRight
+              className="ml-auto h-4 w-4 shrink-0 text-slate-400 transition-colors group-hover:text-slate-600 dark:text-slate-500 dark:group-hover:text-slate-300"
+              aria-hidden="true"
+              data-testid="preview-card-open-icon"
+            />
+          ) : null}
         </div>
         {facts ? (
           <Text as="div" variant="caption" tone="muted" className="truncate" title={facts} data-testid="preview-card-facts">
@@ -171,7 +169,6 @@ export function SitePreviewCardView({
           role="status"
           aria-live="polite"
           className={status ? "mt-0.5 flex min-w-0 items-start gap-1.5" : undefined}
-          title={status?.title}
           data-testid="preview-ready-status"
           data-state={state}
           data-wake={wake}

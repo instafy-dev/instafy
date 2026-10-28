@@ -67,7 +67,7 @@ test.describe.serial("Org credits", () => {
     await expect(page.getByTestId("credits-amount-view-units")).toBeVisible();
     await expect(page.getByTestId("credits-amount-view-usd")).toBeVisible();
     await expect(page.getByTestId("credits-balance")).not.toContainText("$");
-    await expect(page.getByTestId("credits-starter-budget")).toContainText("credits daily");
+    await expect(page.getByTestId("credits-starter-budget")).toContainText("credits every day at 00:00 UTC");
 
     await page.getByTestId("credits-amount-view-usd").click();
     await expect(page.getByTestId("credits-balance")).toContainText("$");

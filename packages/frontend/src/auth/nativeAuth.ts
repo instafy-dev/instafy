@@ -69,6 +69,102 @@ function isSupportedNativeAuthScheme(rawScheme: string): boolean {
   );
 }
 
+const claimedNativeAuthCallbacks = new Set<string>();
+
+// App.getLaunchUrl() returns the URL that launched the process for as long as
+// the process lives, so a reload of the WebView (a controller-requested reload,
+// a live update, iOS restarting a crashed web content process) used to hand the
+// spent code of the launch URL to a fresh page, which exchanged it again and
+// reported a failure. Claimed codes are therefore also kept in sessionStorage,
+// which survives a reload and starts empty in a new process with a new launch
+// URL. Only a hash of each code is kept, and only the newest few.
+const NATIVE_AUTH_CLAIMED_CODES_STORAGE_KEY = "instafy.login.nativeAuthClaimedCodes";
+const MAX_STORED_CLAIMED_CODES = 20;
+
+function hashCallbackCode(code: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let index = 0; index < code.length; index += 1) {
+    const char = code.charCodeAt(index);
+    h1 = Math.imul(h1 ^ char, 2654435761);
+    h2 = Math.imul(h2 ^ char, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
+function readStoredClaimedCodes(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(window.sessionStorage?.getItem(NATIVE_AUTH_CLAIMED_CODES_STORAGE_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function storeClaimedCode(codeHash: string) {
+  try {
+    const next = [...readStoredClaimedCodes().filter((value) => value !== codeHash), codeHash];
+    window.sessionStorage?.setItem(
+      NATIVE_AUTH_CLAIMED_CODES_STORAGE_KEY,
+      JSON.stringify(next.slice(-MAX_STORED_CLAIMED_CODES)),
+    );
+  } catch {
+    // ignore storage failures; the in-memory claim still holds for this page
+  }
+}
+
+/**
+ * Claims a parsed callback for the one handler that acts on it. The app-wide
+ * handler (AuthProvider) and the login page's handler both listen for
+ * instafy://auth, and on Android both receive the same deep link. Each used to
+ * keep its own record of handled URLs, so both exchanged the code: the first
+ * signed in, the second found the code spent and reported a failure over the
+ * good sign-in. Claim synchronously, before any await, and act only on true.
+ *
+ * A code is keyed by itself, since it can be exchanged once, so a remounted
+ * login page replaying the launch URL cannot spend it again. Any other
+ * callback is keyed by its URL until the next sign-in starts: a refusal
+ * carries nothing unique to its attempt, so a second refusal of a later
+ * attempt would otherwise be dropped.
+ */
+export function claimNativeAuthCallback(callbackUrl: URL): boolean {
+  const hashParams = new URLSearchParams(callbackUrl.hash.replace(/^#/, ""));
+  const code = (callbackUrl.searchParams.get("code") ?? hashParams.get("code") ?? "").trim();
+  const key = code ? `code:${code}` : `url:${callbackUrl.href}`;
+  if (claimedNativeAuthCallbacks.has(key)) {
+    return false;
+  }
+  claimedNativeAuthCallbacks.add(key);
+  if (code) {
+    const codeHash = hashCallbackCode(code);
+    if (readStoredClaimedCodes().includes(codeHash)) {
+      return false;
+    }
+    storeClaimedCode(codeHash);
+  }
+  return true;
+}
+
+/** Called when a sign-in starts, so its callback can repeat the last one's URL. */
+export function releaseNativeAuthCallbackUrlClaims(): void {
+  for (const key of claimedNativeAuthCallbacks) {
+    if (key.startsWith("url:")) {
+      claimedNativeAuthCallbacks.delete(key);
+    }
+  }
+}
+
+export function forgetNativeAuthCallbackClaimsForTests(): void {
+  claimedNativeAuthCallbacks.clear();
+  try {
+    window.sessionStorage?.removeItem(NATIVE_AUTH_CLAIMED_CODES_STORAGE_KEY);
+  } catch {
+    // ignore storage failures
+  }
+}
+
 export function parseNativeAuthCallbackUrl(rawUrl: string): URL | null {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
@@ -153,16 +249,33 @@ export function createPendingNativeAuthAttempt(provider: string): PendingNativeA
   };
 }
 
+/**
+ * How long a started sign-in still names the callback that comes back: long
+ * enough for a slow provider sign-in, after which an abandoned attempt is
+ * ignored rather than labelling an unrelated callback.
+ */
+const PENDING_NATIVE_AUTH_ATTEMPT_MAX_AGE_MS = 30 * 60 * 1000;
+
+// The attempt lives in localStorage, not sessionStorage. Android can end the
+// app's process while the provider's custom tab is in front; the deep link then
+// starts a new process with an empty sessionStorage. The PKCE verifier is in
+// localStorage, so the sign-in still completes, and the attempt has to survive
+// with it or the callback names the wrong provider.
 export function readPendingNativeAuthAttempt(): PendingNativeAuthAttempt | null {
   if (typeof window === "undefined") {
     return null;
   }
   try {
-    const raw = window.sessionStorage?.getItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY);
+    const raw = window.localStorage?.getItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY);
     if (!raw) {
       return null;
     }
-    return normalizePendingNativeAuthAttempt(JSON.parse(raw));
+    const attempt = normalizePendingNativeAuthAttempt(JSON.parse(raw));
+    const startedAt = attempt ? Date.parse(attempt.startedAt) : Number.NaN;
+    if (!Number.isFinite(startedAt) || Math.abs(Date.now() - startedAt) > PENDING_NATIVE_AUTH_ATTEMPT_MAX_AGE_MS) {
+      return null;
+    }
+    return attempt;
   } catch {
     return null;
   }
@@ -174,10 +287,10 @@ export function writePendingNativeAuthAttempt(attempt: PendingNativeAuthAttempt 
   }
   try {
     if (!attempt) {
-      window.sessionStorage?.removeItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY);
+      window.localStorage?.removeItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY);
       return;
     }
-    window.sessionStorage?.setItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY, JSON.stringify(attempt));
+    window.localStorage?.setItem(NATIVE_AUTH_ATTEMPT_STORAGE_KEY, JSON.stringify(attempt));
   } catch {
     // ignore storage failures
   }
@@ -216,6 +329,88 @@ export function writeNativeAuthCallbackAttemptId(attemptId: string | null) {
 
 export function clearNativeAuthCallbackAttemptId() {
   writeNativeAuthCallbackAttemptId(null);
+}
+
+export const SIGN_IN_RETURN_PATH_STORAGE_KEY = "instafy.login.returnPath";
+const DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY = "instafy.login.returnPathDurable";
+
+function isInAppPath(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("/") && !value.startsWith("//");
+}
+
+/**
+ * The in-app path sign-in goes to once it completes. A web sign-in comes back
+ * in the same tab, so sessionStorage holds it. A native or desktop sign-in can
+ * come back in a new process (Android ending the app behind the custom tab),
+ * so `durable` also keeps a copy in localStorage beside the attempt. The path
+ * can carry an invite's token, so that copy is read back only while it is as
+ * fresh as an attempt may be, and removed once it is older.
+ */
+export function writeSignInReturnPath(path: string, options: { durable: boolean }) {
+  if (typeof window === "undefined" || !isInAppPath(path)) {
+    return;
+  }
+  try {
+    window.sessionStorage?.setItem(SIGN_IN_RETURN_PATH_STORAGE_KEY, path);
+  } catch {
+    // ignore storage failures
+  }
+  if (!options.durable) {
+    return;
+  }
+  try {
+    window.localStorage?.setItem(
+      DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY,
+      JSON.stringify({ path, savedAt: new Date().toISOString() }),
+    );
+  } catch {
+    // ignore storage failures
+  }
+}
+
+export function readSignInReturnPath(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const path = window.sessionStorage?.getItem(SIGN_IN_RETURN_PATH_STORAGE_KEY);
+    if (isInAppPath(path)) {
+      return path;
+    }
+  } catch {
+    // fall back to the durable copy
+  }
+  try {
+    const raw = window.localStorage?.getItem(DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const stored = JSON.parse(raw) as { path?: unknown; savedAt?: unknown } | null;
+    const savedAt = typeof stored?.savedAt === "string" ? Date.parse(stored.savedAt) : Number.NaN;
+    if (
+      isInAppPath(stored?.path) &&
+      Number.isFinite(savedAt) &&
+      Math.abs(Date.now() - savedAt) <= PENDING_NATIVE_AUTH_ATTEMPT_MAX_AGE_MS
+    ) {
+      return stored.path;
+    }
+    window.localStorage?.removeItem(DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY);
+  } catch {
+    // ignore storage failures
+  }
+  return null;
+}
+
+export function clearSignInReturnPath() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.sessionStorage?.removeItem(SIGN_IN_RETURN_PATH_STORAGE_KEY);
+    window.localStorage?.removeItem(DURABLE_SIGN_IN_RETURN_PATH_STORAGE_KEY);
+  } catch {
+    // A blocked storage API must not prevent completing sign-in.
+  }
 }
 
 export function readNativeAuthError(): string | null {

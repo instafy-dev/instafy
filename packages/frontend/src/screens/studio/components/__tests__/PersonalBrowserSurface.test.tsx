@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  BrowserLocationOptions,
   BrowserTransportSelector,
   PersonalBrowserSurface,
 } from "../PersonalBrowserSurface";
@@ -22,6 +23,11 @@ function deferredBoundsBridge() {
   );
   window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
   return { setBounds, requests, latest: () => requests.at(-1)! };
+}
+
+/** Enter in the address field goes, as in every browser; there is no Go button. */
+function pressEnter(input: HTMLInputElement) {
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 }
 
 function setInputValue(input: HTMLInputElement, value: string) {
@@ -146,7 +152,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     const setBounds = vi.fn(async (bounds: InstafyDesktopPersonalBrowserBounds) => ({...model.status!, ...(bounds.occluded ? {previewDataUrl:"data:image/jpeg;base64,AQID"} : {})}));
     window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     const original = setBounds.mock.calls.at(-1);
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(setBounds).toHaveBeenLastCalledWith({ x:10, y:20, width:400, height:300, ownerId:"owner-1", visible:true, occluded:true, agentWorking:false });
@@ -173,7 +179,7 @@ describe("PersonalBrowserSurface", () => {
     HTMLElement.prototype.getBoundingClientRect = () => hidden
       ? { ...visibleRect, x: 0, y: 0, left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
       : visibleRect;
-    const render = (active: boolean) => root.render(<PersonalBrowserSurface active={active} model={model} transportSelector={null} />);
+    const render = (active: boolean) => root.render(<PersonalBrowserSurface active={active} model={model} />);
 
     await act(async () => render(true));
     expect(setBounds).toHaveBeenCalledWith(expect.objectContaining({ visible: true, width: 400, height: 300 }));
@@ -201,7 +207,7 @@ describe("PersonalBrowserSurface", () => {
   it("retains the menu preview until deferred native restoration completes", async () => {
     const model = createModel();
     const bridge = deferredBoundsBridge();
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     await act(async () => bridge.latest().resolve(model.status!));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(bridge.latest().bounds.occluded).toBe(true);
@@ -220,7 +226,7 @@ describe("PersonalBrowserSurface", () => {
   it("accepts the sole native preview after later geometry reports in the same open menu", async () => {
     const model = createModel();
     const bridge = deferredBoundsBridge();
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     await act(async () => bridge.latest().resolve(model.status!));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     const openingCapture = bridge.latest();
@@ -233,7 +239,7 @@ describe("PersonalBrowserSurface", () => {
     expect(resize).not.toBe(openingCapture);
     expect(resize.bounds.occluded).toBe(true);
     await act(async () => resize.resolve(model.status!));
-    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} />));
     await act(async () => bridge.latest().resolve(model.status!));
     await act(async () => openingCapture.resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,AQID" }));
     expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')?.getAttribute("src")).toBe("data:image/jpeg;base64,AQID");
@@ -242,7 +248,7 @@ describe("PersonalBrowserSurface", () => {
   it("rejects an old opening capture after the menu closes and reopens before either capture completes", async () => {
     const model = createModel();
     const bridge = deferredBoundsBridge();
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     await act(async () => bridge.latest().resolve(model.status!));
     const toggle = () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click();
     await act(async () => toggle());
@@ -262,7 +268,7 @@ describe("PersonalBrowserSurface", () => {
   it("retains a matching preview across hiding and returning to Personal while native restoration is pending", async () => {
     const model = createModel();
     const bridge = deferredBoundsBridge();
-    const render = (active: boolean) => root.render(<PersonalBrowserSurface active={active} model={model} transportSelector={null} />);
+    const render = (active: boolean) => root.render(<PersonalBrowserSurface active={active} model={model} />);
     await act(async () => render(true));
     await act(async () => bridge.latest().resolve(model.status!));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
@@ -289,7 +295,7 @@ describe("PersonalBrowserSurface", () => {
   it("ignores late capture and restoration replies after a newer menu snapshot arrives", async () => {
     const model = createModel();
     const bridge = deferredBoundsBridge();
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     await act(async () => bridge.latest().resolve(model.status!));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     const oldCapture = bridge.latest();
@@ -307,7 +313,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     model.status = { ...model.status!, activeTabId: "tab-1" };
     const bridge = deferredBoundsBridge();
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     await act(async () => bridge.latest().resolve(model.status!));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(bridge.latest().bounds.occluded).toBe(true);
@@ -323,7 +329,7 @@ describe("PersonalBrowserSurface", () => {
   it.each(["owner", "tab", "url"] as const)("clears retained previews and ignores old captures when the %s changes", async (change) => {
     const model = createModel();
     const bridge = deferredBoundsBridge();
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     await act(async () => bridge.latest().resolve(model.status!));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     await act(async () => bridge.latest().resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,AQID" }));
@@ -340,7 +346,7 @@ describe("PersonalBrowserSurface", () => {
         ...(change === "url" ? { url: "https://another.example/" } : {}),
       },
     };
-    await act(async () => root.render(<PersonalBrowserSurface active model={next} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={next} />));
     expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
     await act(async () => oldCapture.resolve({ ...model.status!, previewDataUrl: "data:image/jpeg;base64,BAUG" }));
     expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
@@ -356,7 +362,7 @@ describe("PersonalBrowserSurface", () => {
     // browser (another conversation's turn, or resumed between turns): the
     // row and its Take over are there all the same.
     const onPauseAgentControl = vi.fn();
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} onPauseAgentControl={onPauseAgentControl} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} onPauseAgentControl={onPauseAgentControl} />));
     const row = document.querySelector('[data-testid="browser-reading-row"]')!;
     expect([...row.querySelectorAll('[data-testid="browser-reading-page"]')].map((item) => item.textContent))
       .toEqual(["example.com· Example Domain"]);
@@ -369,12 +375,12 @@ describe("PersonalBrowserSurface", () => {
     expect(onPauseAgentControl).toHaveBeenCalledTimes(1);
 
     // The same row while a turn of this conversation works.
-    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={{ ...model }} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={{ ...model }} />));
     expect(document.querySelectorAll('[data-testid="browser-reading-row"]')).toHaveLength(1);
 
     // Once control is off, the row is gone, also while a turn works.
     model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
-    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={{ ...model }} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={{ ...model }} />));
     expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
   });
 
@@ -390,12 +396,12 @@ describe("PersonalBrowserSurface", () => {
       ],
     };
     window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
-    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={model} />));
     expect([...document.querySelectorAll('[data-testid="browser-reading-page"]')].map((item) => item.textContent))
       .toEqual(["opened.example· Opened", "current.example· Current"]);
 
     const foreign = { ...model, status: { ...model.status!, ownerId: "another-owner" } };
-    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={foreign} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active agentWorking model={foreign} />));
     expect(document.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
   });
 
@@ -411,7 +417,7 @@ describe("PersonalBrowserSurface", () => {
       maxAgentTabs: 3,
     };
     window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     const tabs = [...document.querySelectorAll<HTMLElement>('[data-testid="personal-browser-tab"]')];
     expect(tabs.map((tab) => [tab.dataset.openedBy, tab.dataset.active])).toEqual([["person", "false"], ["agent", "true"]]);
     expect(tabs[1]!.textContent).toContain("Octo");
@@ -424,7 +430,7 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector<HTMLButtonElement>('[aria-label="Close Guide"]')!.disabled).toBe(true);
 
     model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
-    await act(async () => root.render(<PersonalBrowserSurface active model={{ ...model }} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={{ ...model }} />));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="My page"]')!.click());
     expect(model.selectTab).toHaveBeenCalledWith("tab-1");
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close Guide"]')!.click());
@@ -435,7 +441,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     model.status = { ...model.status!, tabs: [{ id: "tab-1", openedBy: "person", active: true, url: "https://example.com/" }], activeTabId: "tab-1" };
     window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     expect(document.querySelector('[data-testid="personal-browser-tabs"]')).toBeNull();
   });
 
@@ -443,7 +449,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
     const onSendPage = vi.fn();
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} onSendPage={onSendPage} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} onSendPage={onSendPage} />));
     const button = document.querySelector<HTMLButtonElement>('[data-testid="browser-send-page"]')!;
     expect(button.getAttribute("aria-label")).toBe("Send page to Octo");
     expect(onSendPage).not.toHaveBeenCalled();
@@ -455,9 +461,9 @@ describe("PersonalBrowserSurface", () => {
     // A tab with no web page has nothing to send; without the callback there is no button.
     const blank = createModel();
     blank.status = { ...blank.status!, url: "about:blank" };
-    await act(async () => root.render(<PersonalBrowserSurface active model={blank} transportSelector={null} onSendPage={onSendPage} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={blank} onSendPage={onSendPage} />));
     expect(document.querySelector<HTMLButtonElement>('[data-testid="browser-send-page"]')!.disabled).toBe(true);
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     expect(document.querySelector('[data-testid="browser-send-page"]')).toBeNull();
   });
 
@@ -473,11 +479,12 @@ describe("PersonalBrowserSurface", () => {
       personalBrowserSetBounds: setBounds,
     };
     const model = createModel();
-    const transportSelector = (
-      <BrowserTransportSelector
+    const onModeChange = vi.fn();
+    const locationOptions = (
+      <BrowserLocationOptions
         checked
         mode="personal"
-        onModeChange={vi.fn()}
+        onModeChange={onModeChange}
         personalAvailable
       />
     );
@@ -487,7 +494,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={model}
-          transportSelector={transportSelector}
+          locationOptions={locationOptions}
           sharingControls={<div data-testid="sharing-controls">Share this tab</div>}
         />,
       );
@@ -501,7 +508,8 @@ describe("PersonalBrowserSurface", () => {
       occluded: false, agentWorking: false,
       ownerId: "owner-1",
     });
-    expect(document.querySelector('[data-testid="browser-location-menu"]')?.getAttribute("aria-label")).toBe("Browser location: This device");
+    // Where the browser runs is a setting: it is in Options, not the toolbar.
+    expect(document.querySelector('[data-testid="browser-location-menu"]')).toBeNull();
     expect(document.querySelector('[data-testid="browser-transport-personal"]')).toBeNull();
     expect(container.textContent).toContain("Ready");
     const chrome = document.querySelector('[data-testid="personal-browser-chrome"]')!;
@@ -525,7 +533,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active={false}
           model={model}
-          transportSelector={transportSelector}
+          locationOptions={locationOptions}
         />,
       );
     });
@@ -533,6 +541,34 @@ describe("PersonalBrowserSurface", () => {
     expect(hiddenBounds?.visible).toBe(false);
     expect(hiddenBounds?.width).toBeGreaterThanOrEqual(1);
     expect(hiddenBounds?.height).toBeGreaterThanOrEqual(1);
+  });
+
+  it("offers where the browser runs in its Options menu and closes that menu when it switches away", async () => {
+    const model = createModel();
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: vi.fn(async () => model.status!) };
+    const onModeChange = vi.fn();
+    const surface = (active: boolean) => (
+      <PersonalBrowserSurface
+        active={active}
+        model={model}
+        locationOptions={<BrowserLocationOptions checked mode="personal" onModeChange={onModeChange} personalAvailable />}
+      />
+    );
+    await act(async () => root.render(surface(true)));
+    expect(document.querySelector('[data-testid="browser-location-menu"]')).toBeNull();
+    expect(document.querySelector('[data-testid="browser-transport-shared"]')).toBeNull();
+
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Browser settings"]')!.click());
+    const settings = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Browser settings"]')!;
+    expect(settings.querySelector('[role="group"][aria-label="Browser location"]')).not.toBeNull();
+    expect(settings.textContent).toContain("Run browser on");
+    expect(settings.querySelector('[data-testid="browser-transport-personal"]')?.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => settings.querySelector<HTMLButtonElement>('[data-testid="browser-transport-shared"]')!.click());
+    expect(onModeChange).toHaveBeenCalledExactlyOnceWith("shared");
+
+    // The workspace browser takes over: this surface hides, and its menu with it.
+    await act(async () => root.render(surface(false)));
+    expect(document.querySelector('[role="dialog"][aria-label="Browser settings"]')).toBeNull();
   });
 
   it("keeps Personal disabled when the desktop bridge is unavailable", async () => {
@@ -571,7 +607,7 @@ describe("PersonalBrowserSurface", () => {
   it("expands compact Personal browsing without closing or pausing its native page", async () => {
     const model = createModel();
     await act(async () => root.render(
-      <PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />,
+      <PersonalBrowserSurface active compactChrome model={model} />,
     ));
     expect(container.querySelector('[aria-label="Back"]')).toBeNull();
     expect(container.querySelector('[aria-label="Forward"]')).toBeNull();
@@ -599,7 +635,7 @@ describe("PersonalBrowserSurface", () => {
       ...(bounds.occluded ? { previewDataUrl: "data:image/jpeg;base64,AQID" } : {}),
     }));
     window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
-    await act(async () => root.render(<PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active compactChrome model={model} />));
     expect(container.querySelector('[aria-label="Back"]')).toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     const history = document.querySelector('[role="group"][aria-label="Page history"]')!;
@@ -624,7 +660,7 @@ describe("PersonalBrowserSurface", () => {
   ])("disables compact history during %s", async (_label, status) => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false, canGoForward: true, ...status };
-    await act(async () => root.render(<PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active compactChrome model={model} />));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="group"][aria-label="Page history"] button'));
     expect(buttons).toHaveLength(2);
@@ -638,7 +674,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false, approvalMode: "ask", approvalModes: ["ask", "routine"] };
     await act(async () => root.render(
-      <PersonalBrowserSurface active model={model} transportSelector={null} />,
+      <PersonalBrowserSurface active model={model} />,
     ));
     const resume = document.querySelector<HTMLButtonElement>('[data-testid="personal-browser-agent-status"]');
     expect(resume?.tagName).toBe("BUTTON");
@@ -652,12 +688,12 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => checkbox?.click());
     expect(model.setPreferredApprovalMode).toHaveBeenCalledWith("ask");
     model.preferredApprovalMode = "ask";
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.click());
     expect(model.setAgentControlEnabled).toHaveBeenLastCalledWith(true, "ask");
     const legacyModel = createModel();
     await act(async () => root.render(
-      <PersonalBrowserSurface active model={legacyModel} transportSelector={null} />,
+      <PersonalBrowserSurface active model={legacyModel} />,
     ));
     expect(document.querySelector('[data-testid="personal-browser-routine-approval"]')).toBeNull();
   });
@@ -669,7 +705,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false, approvalMode: "ask", approvalModes: ["ask", "routine"],
       ...(policy ? { approvalPolicyVersion: policy } : {}) };
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     const checkbox = document.querySelector<HTMLInputElement>('[data-testid="personal-browser-routine-approval"]');
     const row = checkbox?.closest('[data-browser-session-safe-zone="true"]');
@@ -711,7 +747,7 @@ describe("PersonalBrowserSurface", () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     await act(async () => {
       root.render(
-        <PersonalBrowserSurface active model={model} transportSelector={<span>Personal</span>} />,
+        <PersonalBrowserSurface active model={model} locationOptions={<span>Personal</span>} />,
       );
     });
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
@@ -735,7 +771,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={model}
-          transportSelector={<span data-testid="transport">Personal</span>}
+          locationOptions={<span data-testid="transport">Personal</span>}
         />,
       );
     });
@@ -752,7 +788,7 @@ describe("PersonalBrowserSurface", () => {
     expect(alert?.textContent).toContain("blocks privileged address types");
   });
 
-  it("navigates from the in-field Go button", async () => {
+  it("navigates on Enter, with no Go button beside the address", async () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false };
     await act(async () => {
@@ -760,27 +796,22 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={model}
-          transportSelector={<span>Personal</span>}
+          locationOptions={<span>Personal</span>}
         />,
       );
     });
     const address = document.querySelector<HTMLInputElement>(
       '[data-testid="personal-browser-address"]',
     )!;
-    const go = document.querySelector<HTMLButtonElement>(
-      '[data-testid="personal-browser-go"]',
-    )!;
     expect(container.querySelectorAll('[data-testid="personal-browser-address"]')).toHaveLength(1);
     expect(container.querySelectorAll('[data-testid="personal-browser-address-form"]')).toHaveLength(1);
-    expect(go.classList.contains("pointer-coarse:min-h-11")).toBe(true);
-    expect(go.classList.contains("pointer-coarse:min-w-11")).toBe(true);
+    expect(document.querySelector('[data-testid="personal-browser-go"]')).toBeNull();
 
     await act(async () => {
       address.focus();
       setInputValue(address, "https://instafy.dev/docs");
-      go.focus();
     });
-    await act(async () => go.click());
+    await act(async () => pressEnter(address));
 
     expect(model.navigate).toHaveBeenCalledWith("https://instafy.dev/docs");
     expect(address.value).toBe("https://instafy.dev/docs");
@@ -795,17 +826,15 @@ describe("PersonalBrowserSurface", () => {
       selected: "duckduckgo",
     };
     await act(async () => {
-      root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />);
+      root.render(<PersonalBrowserSurface active model={model} />);
     });
     const address = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
-    const go = container.querySelector<HTMLButtonElement>('[data-testid="personal-browser-go"]')!;
     expect(address.placeholder).toBe("Search or enter an address");
     await act(async () => {
       address.focus();
       setInputValue(address, "best ramen tokyo");
-      go.focus();
     });
-    await act(async () => go.click());
+    await act(async () => pressEnter(address));
     expect(model.navigate).toHaveBeenCalledWith("best ramen tokyo");
     expect(document.activeElement).not.toBe(address);
 
@@ -820,7 +849,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false };
     await act(async () => {
-      root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />);
+      root.render(<PersonalBrowserSurface active model={model} />);
     });
     const address = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
     expect(address.placeholder).toBe("Enter an address");
@@ -836,7 +865,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false };
     await act(async () => root.render(
-      <PersonalBrowserSurface active historyUserId="reader" model={model} transportSelector={null} />,
+      <PersonalBrowserSurface active historyUserId="reader" model={model} />,
     ));
     const input = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
     await act(async () => {
@@ -855,7 +884,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false, title: "Example page" };
     const render = (active: boolean) => root.render(
-      <PersonalBrowserSurface active={active} historyUserId="reader" model={model} transportSelector={null} />,
+      <PersonalBrowserSurface active={active} historyUserId="reader" model={model} />,
     );
     await act(async () => render(false));
     expect(localStorage.getItem(historyKey)).toBeNull();
@@ -888,7 +917,7 @@ describe("PersonalBrowserSurface", () => {
     const model = createModel();
     model.status = { ...model.status!, ...status };
     await act(async () => root.render(
-      <PersonalBrowserSurface active={active} model={model} transportSelector={null} />,
+      <PersonalBrowserSurface active={active} model={model} />,
     ));
     await act(async () => {
       container.querySelector<HTMLFormElement>('[data-testid="personal-browser-address-form"]')!
@@ -904,7 +933,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={model}
-          transportSelector={<span>Personal</span>}
+          locationOptions={<span>Personal</span>}
         />,
       );
     });
@@ -912,12 +941,8 @@ describe("PersonalBrowserSurface", () => {
     const address = document.querySelector<HTMLInputElement>(
       '[data-testid="personal-browser-address"]',
     );
-    const go = document.querySelector<HTMLButtonElement>(
-      '[data-testid="personal-browser-go"]',
-    );
     expect(address?.disabled).toBe(true);
     expect(address?.placeholder).toBe("Pause agent control to navigate");
-    expect(go?.disabled).toBe(true);
     expect(document.querySelector<HTMLButtonElement>('[aria-label="Back"]')?.disabled).toBe(true);
     expect(document.querySelector<HTMLButtonElement>('[aria-label="Reload"]')?.disabled).toBe(true);
     expect(document.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]')).toBeTruthy();
@@ -940,7 +965,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={errorModel}
-          transportSelector={<span>Personal</span>}
+          locationOptions={<span>Personal</span>}
         />,
       );
     });
@@ -970,7 +995,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={agentErrorModel}
-          transportSelector={<span>Personal</span>}
+          locationOptions={<span>Personal</span>}
         />,
       );
     });
@@ -1000,7 +1025,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={model}
-          transportSelector={<span data-testid="transport">Personal</span>}
+          locationOptions={<span data-testid="transport">Personal</span>}
         />,
       );
     });
@@ -1019,7 +1044,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={model}
-          transportSelector={<span>Personal</span>}
+          locationOptions={<span>Personal</span>}
         />,
       );
     });
@@ -1041,7 +1066,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={model}
-          transportSelector={<span>Personal</span>}
+          locationOptions={<span>Personal</span>}
         />,
       );
     });
@@ -1051,7 +1076,7 @@ describe("PersonalBrowserSurface", () => {
         <PersonalBrowserSurface
           active
           model={model}
-          transportSelector={<span>Personal</span>}
+          locationOptions={<span>Personal</span>}
         />,
       );
     });
@@ -1065,7 +1090,7 @@ describe("PersonalBrowserSurface", () => {
     window.instafyDesktop = { personalBrowserSetBounds: setBounds } as unknown as typeof window.instafyDesktop;
     const onContinue = vi.fn(async () => true);
     const render = async () => act(async () => root.render(
-      <PersonalBrowserSurface active agentWorking model={model} transportSelector={null}
+      <PersonalBrowserSurface active agentWorking model={model}
         humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
@@ -1093,7 +1118,7 @@ describe("PersonalBrowserSurface", () => {
       humanInputRequest: { version: 1, handoffId: "previous-conversation", origin: "https://example.com", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] } };
     const onContinue = vi.fn(async () => true);
     const render = async () => act(async () => root.render(
-      <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-b" onContinueAfterHumanInput={onContinue} />,
+      <PersonalBrowserSurface active model={model} humanInputIdentityKey="conversation-b" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
     expect(container.textContent).not.toContain("Let AI continue");
@@ -1108,7 +1133,7 @@ describe("PersonalBrowserSurface", () => {
   it("describes participant control without claiming an agent operation is still stopping", async () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: false, tabControlActive: true };
-    await act(async () => root.render(<PersonalBrowserSurface active model={model} transportSelector={null} />));
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
     const status = document.querySelector('[data-testid="personal-browser-agent-status"]');
     expect(status?.getAttribute("title")).toContain("participant controls this tab");
     expect(status?.textContent).toBe("Resume");
@@ -1121,7 +1146,7 @@ describe("PersonalBrowserSurface", () => {
     model.setAgentControlEnabled = vi.fn(async () => ({ ...model.status!, agentControlEnabled: false, humanControlReady: true }));
     const onContinue = vi.fn(async () => true);
     const render = async () => act(async () => root.render(
-      <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
+      <PersonalBrowserSurface active model={model} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-request"]')!.click());
@@ -1154,7 +1179,7 @@ describe("PersonalBrowserSurface", () => {
     model.setAgentControlEnabled = vi.fn(async () => ({ ...model.status!, agentControlEnabled: false, humanControlReady: true }));
     const onContinue = vi.fn(async () => true);
     const render = async () => act(async () => root.render(
-      <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
+      <PersonalBrowserSurface active model={model} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-request"]')?.click());
@@ -1182,7 +1207,7 @@ describe("PersonalBrowserSurface", () => {
     let finish!: (sent: boolean) => void;
     const onContinue = vi.fn().mockResolvedValueOnce(false).mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve; }));
     const render = async () => act(async () => root.render(
-      <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
+      <PersonalBrowserSurface active model={model} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
     expect(document.querySelector('[aria-label="Resume agent control"]')).toBeNull();

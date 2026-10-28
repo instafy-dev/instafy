@@ -533,7 +533,9 @@ async fn completed_questions_expire_on_chat_group_and_space_stop() -> anyhow::Re
                 let mut tx = db.transaction().await?;
                 let canceled =
                     crate::project_work_cancellation::cancel_project_work_in_transaction(
-                        &mut tx, f.project,
+                        &f.state.config,
+                        &mut tx,
+                        f.project,
                     )
                     .await
                     .map_err(|(_, e)| anyhow::anyhow!(e.0.message))?;
@@ -731,7 +733,7 @@ async fn space_deletion_does_not_deadlock_with_answer_redispatch() -> anyhow::Re
         drop(observer);
         tx.execute("update projects set status='deleted' where id=$1", &[&f.project]).await?;
         tokio::time::timeout(std::time::Duration::from_secs(3),
-            crate::project_work_cancellation::cancel_project_work_in_transaction(&mut tx,f.project))
+            crate::project_work_cancellation::cancel_project_work_in_transaction(&f.state.config,&mut tx,f.project))
             .await?.map_err(|(_,error)|anyhow::anyhow!(error.0.message))?;
         tx.commit().await?;
         drop(deleting);

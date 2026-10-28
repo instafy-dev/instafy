@@ -12,6 +12,7 @@
         "label": "Tokyo",
         "prompt": "Research Tokyo and write handoff/japan/tokyo.json.",
         "scopeSummary": "Tokyo",
+        "requiresTools": true,
         "writeScope": {
           "mode": "owned",
           "readOnlyPaths": null,
@@ -25,6 +26,7 @@
         "label": "Kyoto",
         "prompt": "Research Kyoto and write handoff/japan/kyoto.json.",
         "scopeSummary": "Kyoto",
+        "requiresTools": true,
         "writeScope": {
           "mode": null,
           "readOnlyPaths": null,
@@ -38,6 +40,7 @@
         "label": "Brief",
         "prompt": "Check the brief and report what it asks for.",
         "scopeSummary": "Brief",
+        "requiresTools": null,
         "writeScope": {
           "mode": "read_only",
           "readOnlyPaths": ["docs/brief.md"],
@@ -73,6 +76,7 @@
         "label": "Tokyo",
         "prompt": "Research Tokyo and write handoff/japan/tokyo.json.",
         "scopeSummary": "Tokyo",
+        "requiresTools": true,
         "writeScope": {
           "mode": "owned",
           "ownedPaths": ["handoff/japan/tokyo.json"]
@@ -83,6 +87,7 @@
         "label": "Kyoto",
         "prompt": "Research Kyoto and write handoff/japan/kyoto.json.",
         "scopeSummary": "Kyoto",
+        "requiresTools": true,
         "writeScope": {
           "ownedPaths": ["handoff/japan/kyoto.json"],
           "rationale": "Kyoto's file only"

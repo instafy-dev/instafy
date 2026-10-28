@@ -3,7 +3,7 @@ import { Button } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
-import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { controllerClient, type ControllerOrgSummary } from "../../../sdk/instafy";
 import { TeamAccentPicker } from "./TeamAccentPicker";
@@ -103,15 +103,17 @@ function NewTeamDialogForm({ onClose, onCreated, allowCustomSlug = false }: Omit
           <TeamAccentPicker value={created ? created.accentColor : color} onChange={setColor} disabled={pending || Boolean(created)} />
           {notice ? <Text as="p" role="status" variant="body" data-testid="new-team-existing-notice">{notice}</Text> : null}
           {error ? <Text as="p" role="alert" variant="body" tone="danger">{error}</Text> : null}
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button type="button" variant="ghost" size="sm" radius="xl" onPress={close} isDisabled={pending}>
+          {/* The footer every Studio dialog uses: a quiet Cancel beside the main action. */}
+          <StudioDialogFooter className="flex flex-wrap items-center justify-end gap-2">
+            <Button type="button" variant="ghost" preset="form" onPress={close} isDisabled={pending}
+              data-testid="sidebar-new-team-cancel">
               {created ? "Continue without picture" : "Cancel"}
             </Button>
-            <Button type="submit" variant="primary" size="sm" radius="xl"
+            <Button type="submit" variant="primary" preset="form"
               isDisabled={!name.trim() || pending} data-testid="sidebar-new-team-create">
               {pending ? (created ? "Saving picture…" : "Creating…") : created ? (file ? "Retry picture" : "Continue") : "Create team"}
             </Button>
-          </div>
+          </StudioDialogFooter>
         </form>
       </StudioDialogBody>
     </StudioDialogModal>

@@ -46,7 +46,7 @@ async function mountSharedSessionPanel(page: Page) {
     import ReactNS from "${deps.react}";
     import ReactDomClientNS from "${deps.reactDomClient}";
     import { BrowserSessionModal } from "/src/screens/studio/components/BrowserSessionModal.tsx";
-    import { BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
+    import { BrowserLocationOptions } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
     const React = ReactNS.default ?? ReactNS;
     const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
     const h = React.createElement;
@@ -58,8 +58,8 @@ async function mountSharedSessionPanel(page: Page) {
         preferRuntimeId: null, resumeRuntimeId: ${JSON.stringify(RUNTIME_IDS[0])},
         canControlBrowser: true, sharedBrowserCapabilitiesResolved: false,
         sharedBrowserViewerKind: "cdp-screencast", sharedBrowserAvailableViewerKinds: ["cdp-screencast"],
-        toolbarLeading: h(BrowserTransportSelector, {
-          checked: true, compact: true, mode: "shared", personalAvailable: true, onModeChange: () => {},
+        locationOptions: h(BrowserLocationOptions, {
+          checked: true, mode: "shared", personalAvailable: true, onModeChange: () => {},
         }),
         sharedBrowserChrome: {
           compact: true, resolved: true, pendingAction: null, error: null,

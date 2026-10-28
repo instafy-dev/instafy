@@ -561,7 +561,7 @@ pull requests and manual runs retain always-run, fail-closed aggregation.
 | Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
 | Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
 | Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
-| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `own-ai-default` (the own-AI default, `OWN_AI_DEFAULT_MODEL_ID`) and to `gpt-5.5`, plus `proxy_integration codex_read_reference_`, `proxy_integration native_compaction::` and `proxy_integration native_images::`, each with `--test-threads=1` | `public-rust-test-agent` |
+| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test provider_mcp --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `own-ai-default` (the own-AI default, `OWN_AI_DEFAULT_MODEL_ID`) and to `gpt-5.5`, plus `proxy_integration codex_read_reference_`, `proxy_integration native_compaction::`, `proxy_integration native_images::` and `proxy_integration granted_turns::`, each with `--test-threads=1` | `public-rust-test-agent` |
 | Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
 | Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
 | Rust test git service | Complete git-service suite | `public-rust-test-git` |
@@ -1714,6 +1714,32 @@ from the current checkout. Confirm that the same conversation syncs across web, 
 selected mobile clients, and use `scripts/android-debug-ota-proof.mjs` before trusting Android UI
 evidence. Hosted smoke accounts, production endpoints, and release sign-off orchestration are
 maintained outside the public repository.
+
+## Provider Requests
+
+`pnpm test:controller provider_request` runs the provider request queue's database tests: held
+dispatches on a small pool, the claim window, late answers, a request's age, device targeting, a
+job's requests being its requester's alone, and a job's open requests being canceled when a
+person interrupts it, its runtime reports it failed, its plan group is canceled or its space is
+deleted, and when a device claims one whose job has ended, while a job that holds no grant ends
+without locking the request table. They act as the device and the runtime
+through the controller's routes, with no hardware and no model, and check that only the
+controller reaches the provider tables. They, `tests_job_trigger` and `device_grants` share the
+space in `tests_provider_space.rs`.
+
+`pnpm test:controller tests_job_trigger` runs what started a job and an owned device's rules,
+with device grants off and on for a list of people (`DEVICE_GRANTS_USER_IDS`), and for a person
+the list leaves out.
+
+`pnpm test:controller device_grants` runs device grants on and off, a granted turn leased once,
+only within its minute and only by a runtime that says `grantedTurns`, a stopped device serving no grant and what its stop and resume pause, a
+stop that ends a granted turn or pauses its grant while one of its calls waits on it, a stop
+taking the grants before their requests, a Stop or cancel by any route that pauses the grants
+whatever it finds, a new grant replacing those it could not work beside, even one made at the
+same moment, and a steer,
+which cancels that call and answers it once the turn took the new words. The runtime half runs without a model key, and CI runs it: `cargo test --manifest-path
+packages/runtime-agent/Cargo.toml --test provider_mcp` (the broker) and `--test proxy_integration
+granted_turns:: -- --test-threads=1` (a granted turn through the real proxy and a scripted model).
 
 ## Local Tri-Client Camera Smoke
 - Run: `pnpm test:camera:tri-client:smoke`

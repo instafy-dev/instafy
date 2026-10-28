@@ -108,7 +108,7 @@ describe("ChatGettingStartedCard", () => {
     );
     expect(connectButton?.textContent).toContain("Connect AI");
     expect(connectButton?.textContent).toContain(
-      "Use the Codex login on this computer, sign in with ChatGPT, or use a key from another AI provider.",
+      "Use the Codex login on this computer, sign in with ChatGPT, or use a key from another AI company.",
     );
   });
 
@@ -135,8 +135,8 @@ describe("ChatGettingStartedCard", () => {
     const connectButton = container.querySelector<HTMLButtonElement>(
       '[data-testid="onboarding-connect-own-ai"]',
     );
-    expect(managedButton?.textContent).toContain("Start free with Instafy AI");
-    expect(managedButton?.textContent).toContain("7 of 20 free prompts left today");
+    expect(managedButton?.textContent).toContain("Start with Instafy AI");
+    expect(managedButton?.textContent).toContain("7 of 20 prompts left today");
     expect(container.textContent).not.toContain("~20 prompts");
     // One verb for the act, on the card as in the gate, the modal and the panel.
     expect(connectButton?.textContent).toContain("Connect AI");
@@ -144,13 +144,15 @@ describe("ChatGettingStartedCard", () => {
     expect(container.textContent).not.toContain("Bring your own AI");
     // Four unexplained product names plus "API keys" is not first-run copy.
     expect(connectButton?.textContent).toContain(
-      "Sign in with ChatGPT, or use a key from another AI provider.",
+      "Sign in with ChatGPT, or use a key from another AI company.",
     );
     expect(container.textContent).not.toContain("DeepSeek");
     // The forward reference names what the next step actually offers.
     expect(container.textContent).toContain(
-      "Start free now, or connect an AI account you already pay for. Next: pick a tool, or just type.",
+      "Use Instafy AI, or connect an AI account you already pay for. Next: pick a tool, or just type.",
     );
+    // Instafy AI is paid for with credits: nothing on the card calls it free.
+    expect(container.textContent).not.toMatch(/\bfree\b/i);
     expect(container.textContent).not.toContain("Next: pick what to work on.");
     expect(container.textContent).not.toContain(EM_DASH);
     expect(container.querySelector('[data-testid="onboarding-path-coding"]')).toBeNull();
@@ -167,6 +169,45 @@ describe("ChatGettingStartedCard", () => {
       connectButton?.click();
     });
     expect(onConnectOwnAi).toHaveBeenCalledTimes(1);
+  });
+
+  it("says nothing about a daily cap that does not exist, and never calls Instafy AI free", async () => {
+    await act(async () => {
+      root.render(
+        <ChatGettingStartedCard
+          {...baseProps({
+            managedAiOffer: managedAiOfferFixture({ dailyPromptLimit: 0, remainingPrompts: null }),
+            aiViewState: "choice",
+            personalAiConnectionState: "missing",
+          })}
+        />,
+      );
+    });
+
+    const managedButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="onboarding-use-managed-ai"]',
+    );
+    // No "No daily prompt cap." under the name: what it costs instead.
+    expect(managedButton?.textContent).toBe("Start with Instafy AIUses credits.");
+    expect(container.textContent).not.toMatch(/cap/i);
+    expect(container.textContent).not.toMatch(/\bfree\b/i);
+
+    // Once chosen, the line says what answers and what it costs, and nothing else.
+    await act(async () => {
+      root.render(
+        <ChatGettingStartedCard
+          {...baseProps({
+            managedAiOffer: managedAiOfferFixture({ dailyPromptLimit: 0, remainingPrompts: null }),
+            selectedAi: "managed",
+            canChangeAiChoice: true,
+          })}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-testid="onboarding-ai-status"]')?.textContent).toBe(
+      "Using Instafy AI · uses credits·Change AI",
+    );
+    expect(container.textContent).not.toMatch(/\bfree\b/i);
   });
 
   it("offers one row of live tools once the AI choice is settled", async () => {
@@ -447,11 +488,10 @@ describe("ChatGettingStartedCard", () => {
       );
     });
 
-    // The free lane states its allowance at the point of decision, then the
-    // switch, joined by a middle dot (never an em-dash).
+    // The Instafy AI lane says what answers and that it uses credits, then the
+    // switch, joined by middle dots (never an em-dash).
     const status = container.querySelector<HTMLElement>('[data-testid="onboarding-ai-status"]');
-    // The reserve is not the price: a turn is charged by usage after it runs.
-    expect(status?.textContent).toBe("Using free Instafy AI: 20 prompts a day, credits charged by usage·Change AI");
+    expect(status?.textContent).toBe("Using Instafy AI · uses credits·Change AI");
     expect(container.textContent).not.toContain("Using your connected AI");
     expect(container.textContent).not.toContain(EM_DASH);
     const changeButton = container.querySelector<HTMLButtonElement>(
@@ -628,15 +668,16 @@ describe("ChatGettingStartedCard", () => {
       );
     });
 
-    // Heading and line explain the free tier and the cost of the other route;
-    // there is one primary button, and it carries the one verb.
+    // Heading and line explain the paused tier and the cost of the other
+    // route; there is one primary button, and it carries the one verb.
     expect(container.querySelector("h3")?.textContent).toBe("Choose your AI");
     expect(container.querySelector('[data-testid="onboarding-ai-choice-line"]')?.textContent).toBe(
-      "Free Instafy AI is paused right now. Connect your own AI to start; you pay your provider directly and Instafy adds nothing.",
+      "Instafy AI is paused right now. Connect your own AI to start; you pay for it directly and Instafy adds nothing.",
     );
     expect(container.querySelector('[data-testid="onboarding-use-managed-ai"]')).toBeNull();
-    expect(container.textContent).not.toContain("Start free");
-    expect(container.textContent).not.toContain("free prompts");
+    expect(container.textContent).not.toContain("Start with Instafy AI");
+    expect(container.textContent).not.toMatch(/\bfree\b/i);
+    expect(container.textContent).not.toContain("provider");
     const connectButton = container.querySelector<HTMLButtonElement>(
       '[data-testid="onboarding-connect-own-ai"]',
     );
@@ -667,7 +708,7 @@ describe("ChatGettingStartedCard", () => {
     });
 
     expect(container.querySelector('[data-testid="onboarding-ai-choice-line"]')?.textContent).toBe(
-      "Today's free prompts are used. Connect your own AI to keep going, or come back tomorrow.",
+      "Today's Instafy AI prompts are used. Connect your own AI to keep going, or come back tomorrow.",
     );
     expect(
       container.querySelector<HTMLButtonElement>('[data-testid="onboarding-use-managed-ai"]')?.disabled,
@@ -708,15 +749,20 @@ describe("ChatGettingStartedCard", () => {
     const row = container.querySelector<HTMLElement>('[data-testid="onboarding-collapsed-row"]');
     expect(row?.tagName).toBe("UL");
     const buttons = Array.from(row!.querySelectorAll<HTMLButtonElement>("button"));
-    // The same tools as the full row, in the same order, in text form. The
-    // repo import keeps its verb, which is the one place a bare "GitHub"
-    // would lose it; names carry the rest.
+    // The full row's first tools, in the same order, under the same names, in
+    // text form. The accessible names are the chips' own, so the repo import
+    // keeps its verb for a screen reader.
     expect(buttons.map((button) => button.textContent)).toEqual([
       "Notion",
-      "Import a repo",
+      "GitHub",
       "More tools",
     ]);
-    expect(row?.textContent).toBe("Notion·Import a repo·More tools");
+    expect(row?.textContent).toBe("Notion·GitHub·More tools");
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Connect Notion",
+      "Import from GitHub",
+      null,
+    ]);
     expect(buttons.map((button) => button.dataset.testid)).toEqual([
       "onboarding-collapsed-notion",
       "onboarding-collapsed-import-github-repo",
@@ -762,6 +808,35 @@ describe("ChatGettingStartedCard", () => {
     );
   });
 
+  it("keeps the tools' names and order when typing collapses the card, dropping only from the end", async () => {
+    const props = baseProps({ selectedAi: "connected", connectedAiLabel: "My OpenAI key", canChangeAiChoice: true });
+    await act(async () => {
+      root.render(<ChatGettingStartedCard {...props} />);
+    });
+    const chips = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid^="connect-chip-"]'),
+    ).filter((chip) => chip instanceof HTMLButtonElement);
+    // A chip's visible name is its text without the mark (FreeFinance's mark draws "FF").
+    const fullNames = chips.map((chip) => chip.querySelector("span.font-medium")?.textContent);
+    const fullAccessibleNames = chips.map((chip) => chip.getAttribute("aria-label"));
+    expect(fullNames).toEqual(["Notion", "GitHub", "FreeFinance"]);
+
+    await act(async () => {
+      root.render(<ChatGettingStartedCard {...props} collapsed />);
+    });
+    const buttons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid="onboarding-collapsed-row"] button'),
+    );
+    const tools = buttons.slice(0, -1);
+    expect(tools.length).toBeGreaterThan(0);
+    // A prefix of the full row: nothing renamed, nothing reordered.
+    expect(tools.map((button) => button.textContent)).toEqual(fullNames.slice(0, tools.length));
+    expect(tools.map((button) => button.getAttribute("aria-label"))).toEqual(
+      fullAccessibleNames.slice(0, tools.length),
+    );
+    expect(buttons.at(-1)?.textContent).toBe("More tools");
+  });
+
   it("leaves the read-only collapsed row the repo import alone", async () => {
     await act(async () => {
       root.render(
@@ -771,9 +846,9 @@ describe("ChatGettingStartedCard", () => {
 
     const row = container.querySelector<HTMLElement>('[data-testid="onboarding-collapsed-row"]');
     expect(Array.from(row!.querySelectorAll("button")).map((button) => button.textContent)).toEqual([
-      "Import a repo",
+      "GitHub",
     ]);
-    expect(row?.textContent).toBe("Import a repo");
+    expect(row?.textContent).toBe("GitHub");
   });
 
   it("keeps the GitHub mode full even when collapsed is requested", async () => {

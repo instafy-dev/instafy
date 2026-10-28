@@ -9,7 +9,7 @@ import { ControllerApiError } from "../../../../services/runtimeController/core"
 import type { ControllerSitePreview } from "../../../../services/runtimeController/previews";
 import { mapTunnelGrantFromPayload } from "../../../../services/runtimeController/runtimes";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../../workspace/ConversationPreviewContext";
-import { SitePreviewCard, shareSitePreviewRecord } from "../SitePreviewCard";
+import { SitePreviewCard, registerSitePreviewPaneCheck, shareSitePreviewRecord } from "../SitePreviewCard";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const mocks = vi.hoisted(() => ({
@@ -147,17 +147,96 @@ describe("SitePreviewCard", () => {
     expect(card().className).toContain("hover:shadow-md");
   });
 
+  // Local drive, Oct 28: after "stop the preview server" the card stayed as if live, and a press opened a pane that
+  // said "Not responding on port 4173". To the person the site is stopped, and a press starts it where it can.
   it.each([
     ["nothing listens", { listening: false, status: null }],
     ["the site answers 502", { listening: true, status: 502 }],
-  ])("reads Not responding when %s, with the port on hover, and still opens", async (_name, health) => {
-    mocks.getSitePreview.mockResolvedValue(server({ health }));
+  ])("reads Stopped when %s, says how to get it back, and names no port", async (_name, health) => {
+    mocks.getSitePreview.mockResolvedValue(server({ health, restartable: true }));
     await render();
     expect(status().dataset.state).toBe("not_responding");
-    expect(status().textContent).toBe("Not responding");
-    expect(status().getAttribute("title")).toBe("Nothing answers on port 4173");
+    expect(status().textContent).toBe("Stopped · opening restarts it");
     expect(disabled()).toBe(false);
-    expect(openButton()?.getAttribute("aria-label")).toBe("Open Site preview, not responding");
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).not.toBeNull();
+    expect(openButton()?.getAttribute("aria-label")).toBe("Open Site preview, stopped, opening restarts it");
+    // One press starts it: no second button on the card.
+    expect(container.querySelector("[data-testid=preview-ready-restart]")).toBeNull();
+    expect(card().innerHTML).not.toContain("4173");
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    mocks.getSitePreview.mockResolvedValue(server({ health }));
+    await render();
+    // Nothing recorded how to start it: the line says who can, and a press would do nothing.
+    expect(status().textContent).toBe("Stopped · ask Octo to start it again");
+    expect(disabled()).toBe(true);
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).toBeNull();
+    await act(async () => openButton()!.click());
+    expect(opener!.openPreview).not.toHaveBeenCalled();
+  });
+
+  it("reads Stopped as soon as a turn that stopped its server ends, from a new probe", async () => {
+    const run = (status: string) => ({ "run-1": { id: "run-1", status } });
+    mocks.runtime = { tunnelGrants: {}, runtimeStatuses: [], runs: run("in_progress") };
+    mocks.getSitePreview.mockResolvedValue(server({ restartable: true }));
+    await render();
+    expect(status().dataset.state).toBe("live");
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(1);
+
+    // Octo stops the server inside the turn: nothing tells Studio until the turn ends.
+    mocks.getSitePreview.mockResolvedValue(server({ restartable: true, health: { listening: false, status: null } }));
+    mocks.runtime = { ...mocks.runtime, runs: run("in_progress") };
+    await render();
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(1);
+    mocks.runtime = { ...mocks.runtime, runs: run("success") };
+    await render();
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
+    // Not the controller's answer of a few seconds ago: a new probe.
+    expect(mocks.getSitePreview).toHaveBeenLastCalledWith("project-1", PREVIEW_ID, expect.any(AbortSignal), { fresh: true });
+    expect(status().textContent).toBe("Stopped · opening restarts it");
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).not.toBeNull();
+
+    // The same ended turn is no news the next time the store changes.
+    mocks.runtime = { ...mocks.runtime, runs: run("success") };
+    await render();
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks once per ended turn for all cards of a site, and through the pane when it is on screen", async () => {
+    const runs = (status: string) => ({ "run-1": { id: "run-1", status }, "run-0": { id: "run-0", status: "success" } });
+    // Three cards Octo posted for the site, in three runs.
+    const render3 = async () => {
+      await act(async () => root.render(
+        <ConversationPreviewContext.Provider value={opener}>
+          {[1, 2, 3].map((n) => <SitePreviewCard key={n} preview={preview} projectId="project-1" postedAt={n} messageKey={`card-${n}`} />)}
+        </ConversationPreviewContext.Provider>,
+      ));
+      await act(async () => { await Promise.resolve(); });
+    };
+    mocks.runtime = { tunnelGrants: {}, runtimeStatuses: [], runs: runs("in_progress") };
+    mocks.getSitePreview.mockResolvedValue(server());
+    await render3();
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(3);
+    // A turn that had already ended when the cards were drawn is no news.
+    mocks.runtime = { ...mocks.runtime, runs: runs("success") };
+    await render3();
+    expect(mocks.getSitePreview).toHaveBeenCalledTimes(4);
+
+    // With its pane on screen, the pane checks: the cards read its answer instead of asking the same thing.
+    const paneCheck = vi.fn();
+    const unregister = registerSitePreviewPaneCheck(PREVIEW_ID, paneCheck);
+    try {
+      opener = { ...opener!, visiblePreviewId: PREVIEW_ID };
+      mocks.runtime = { ...mocks.runtime, runs: { ...runs("success"), "run-2": { id: "run-2", status: "in_progress" } } };
+      await render3();
+      mocks.runtime = { ...mocks.runtime, runs: { ...runs("success"), "run-2": { id: "run-2", status: "failed" } } };
+      await render3();
+      expect(paneCheck).toHaveBeenCalledOnce();
+      expect(mocks.getSitePreview).toHaveBeenCalledTimes(4);
+    } finally {
+      unregister();
+    }
   });
 
   // Live needs proof: a probe that saw the site answer on an active tunnel.
@@ -188,15 +267,18 @@ describe("SitePreviewCard", () => {
       mocks.getSitePreview.mockResolvedValue(server());
       mocks.runtime = { tunnelGrants: {}, runtimeStatuses: [{ runtimeId: "runtime-1", status: "stopped" }] };
     }],
-  ])("reads Stopped, and does not look pressable, when %s and nothing records how to start it", async (_name, arrange) => {
+  ])("reads Stopped with who can start it, and does not look pressable, when %s and nothing records how to start it", async (_name, arrange) => {
     arrange();
     await render();
     expect(status().dataset.state).toBe("stopped");
-    expect(status().textContent).toBe("Stopped");
+    // Nothing on the card can start it: the line says who can, as the pane does.
+    expect(status().textContent).toBe("Stopped · ask Octo to start it again");
     expect(disabled()).toBe(true);
     expect(card().className).not.toContain("hover:shadow-md");
     expect(openButton()?.className).toContain("cursor-default");
-    expect(openButton()?.getAttribute("aria-label")).toBe("Open Site preview, stopped");
+    // No chevron: it would promise a press that does nothing.
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).toBeNull();
+    expect(openButton()?.getAttribute("aria-label")).toBe("Open Site preview, stopped, ask Octo to start it again");
     await act(async () => openButton()!.click());
     expect(opener!.openPreview).not.toHaveBeenCalled();
     // A stopped site's pane may still be selected; the card never says Showing for it.
@@ -205,12 +287,20 @@ describe("SitePreviewCard", () => {
     expect(card().textContent).not.toContain("Showing");
   });
 
-  it("reads Stopped, not pressable, while the controller has not said whether it can start the site", async () => {
-    mocks.getSitePreview.mockReturnValue(new Promise(() => {}));
+  it("reads plain Stopped, not pressable, until the controller says whether a press can start the site", async () => {
+    let answer: (value: ControllerSitePreview) => void = () => {};
+    mocks.getSitePreview.mockReturnValue(new Promise<ControllerSitePreview>((resolve) => { answer = resolve; }));
     mocks.runtime = { tunnelGrants: { [PREVIEW_ID]: { id: PREVIEW_ID, tunnelId: "tunnel-1", status: "revoked" } }, runtimeStatuses: [] };
     await render();
+    // Not known yet: "ask Octo" would send the reader off to spend a turn on a
+    // site a press may start, which is what the answer below says.
     expect(status().textContent).toBe("Stopped");
     expect(disabled()).toBe(true);
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).toBeNull();
+    await act(async () => answer(server({ status: "revoked", restartable: true })));
+    expect(status().textContent).toBe("Stopped · opening restarts it");
+    expect(disabled()).toBe(false);
+    expect(container.querySelector("[data-testid=preview-card-open-icon]")).not.toBeNull();
   });
 
   it("reads Stopped from a revoked tunnel event even when asking again fails", async () => {
@@ -230,7 +320,7 @@ describe("SitePreviewCard", () => {
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(2);
     expect(status().dataset.state).toBe("stopped");
     // Its last record recorded no start command: Stopped, and nothing to press.
-    expect(status().textContent).toBe("Stopped");
+    expect(status().textContent).toBe("Stopped · ask Octo to start it again");
     expect(disabled()).toBe(true);
   });
 
@@ -404,7 +494,7 @@ describe("SitePreviewCard", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(1);
     await act(async () => shareSitePreviewRecord(PREVIEW_ID, server({ health: { listening: false, status: null } })));
-    expect(status().textContent).toBe("Not responding");
+    expect(status().textContent).toBe("Stopped · ask Octo to start it again");
   });
 
   it("tells every card of a preview what its pane found, while none of them asks", async () => {
@@ -418,7 +508,7 @@ describe("SitePreviewCard", () => {
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(3);
     await act(async () => shareSitePreviewRecord(PREVIEW_ID, server({ health: { listening: false, status: null } })));
     const states = [...container.querySelectorAll<HTMLElement>("[data-testid=preview-ready-status]")].map((element) => element.textContent);
-    expect(states).toEqual(Array(3).fill("Not responding"));
+    expect(states).toEqual(Array(3).fill("Stopped · ask Octo to start it again"));
   });
 
   it("follows a site that is not responding a bounded number of times for all its cards together", async () => {

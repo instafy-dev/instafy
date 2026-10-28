@@ -153,7 +153,7 @@ describe("auto-title for a chat this tab learns of from one incoming message", (
   ])("never titles that chat from %s", async (_case, placeholderActive, author) => {
     await run(placeholderActive, author);
     const chat = unloadedChat();
-    expect(chat?.title).toMatch(/^Conversation \d+$/);
+    expect(chat?.title).toBe("New chat");
     expect(chat?.remoteSummaryPending).toBe(true);
     expect(requestTitleMock).not.toHaveBeenCalled();
     expect(updateMetadataMock).not.toHaveBeenCalled();
@@ -170,6 +170,6 @@ describe("auto-title for a chat this tab learns of from one incoming message", (
     // The local list holds only the reply, so the opening message is unknown.
     expect(requestTitleMock).toHaveBeenCalledWith({ projectId: PROJECT_ID, message: "Yes, that one" });
     expect(updateMetadataMock).not.toHaveBeenCalled();
-    expect(unloadedChat()?.title).toMatch(/^Conversation \d+$/);
+    expect(unloadedChat()?.title).toBe("New chat");
   });
 });

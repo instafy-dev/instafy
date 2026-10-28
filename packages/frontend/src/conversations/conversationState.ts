@@ -182,6 +182,13 @@ function resolveInitialConversationParamsFromQuery(requireProjectId?: string | n
   }
 }
 
+/**
+ * What a chat is called until its first prompt names it. Every untitled chat
+ * has this one name, never a number: a number taken from a chat's place in the
+ * list changed whenever the list did, so a chat could not be found again by it.
+ */
+export const NEW_CHAT_TITLE = "New chat";
+
 export function createInitialConversation(prefilled?: {
   localId?: string | null;
   controllerId?: string | null;
@@ -191,7 +198,7 @@ export function createInitialConversation(prefilled?: {
       prefilled?.localId && prefilled.localId.length > 0
         ? prefilled.localId
         : makeConversationId(),
-    title: "Conversation 1",
+    title: NEW_CHAT_TITLE,
     visibility: "public",
     lifecycleStatus: "active",
     controllerId: prefilled?.controllerId ?? null,

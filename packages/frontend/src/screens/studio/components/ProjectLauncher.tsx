@@ -8,6 +8,7 @@ import { Select } from "../../../components/Select";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { Surface } from "../../../components/Surface";
+import { StudioDialogFooter } from "../../../components/aria/StudioDialogLayout";
 import { PROJECT_ACCESS_REFRESH_EVENT, readDeletedOrgId } from "../../../projects/projectAccessEvents";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
@@ -30,6 +31,11 @@ export interface ProjectLauncherProps {
     org: { orgId?: string | null; orgSlug?: string | null; orgName?: string | null },
     github: { repo: string; ref?: string | null; githubDeviceAuthSessionId?: string | null },
   ) => Promise<{ success: boolean; error?: string | null }> | { success: boolean; error?: string | null };
+}
+
+/** Team roles that can add spaces. An unknown role is left to the server to judge. */
+function canAddSpaces(role: string | null | undefined): boolean {
+  return !role || ["owner", "admin", "builder"].includes(role);
 }
 
 export function ProjectLauncher({
@@ -111,7 +117,9 @@ export function ProjectLauncher({
       controllerClient.organizations.list()
         .then((list) => {
           setOrgs(list);
-          if (preferredOrgId && list.some((org) => org.id === preferredOrgId)) {
+          // Suggest the team on screen only where this person can add
+          // spaces; a viewer picks a team of their own instead.
+          if (preferredOrgId && list.some((org) => org.id === preferredOrgId && canAddSpaces(org.role))) {
             setSelectedOrgId(preferredOrgId);
           } else if (list.length === 1) {
             setSelectedOrgId(list[0].id);
@@ -523,12 +531,13 @@ export function ProjectLauncher({
             </Text>
           ) : null}
 
-          <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:items-center sm:justify-end">
+          {/* The footer every Studio dialog uses: a quiet Cancel beside the main action. */}
+          <StudioDialogFooter className="flex flex-wrap items-center justify-end gap-2 pt-1">
             <Button
               onPress={onClose}
-              variant="outline"
-              size="sm"
-              radius="lg"
+              variant="ghost"
+              preset="form"
+              data-testid="project-launcher-cancel"
             >
               Cancel
             </Button>
@@ -540,8 +549,7 @@ export function ProjectLauncher({
                 (mode === "github" && githubRepo.trim().length === 0)
               }
               variant="primary"
-              size="sm"
-              radius="lg"
+              preset="form"
               data-testid={
                 mode === "github"
                   ? "project-launcher-create-github"
@@ -559,7 +567,7 @@ export function ProjectLauncher({
                 "Create"
               )}
             </Button>
-          </div>
+          </StudioDialogFooter>
           {isProcessing && mode === "github" ? (
             <Text as="p" variant="caption" tone="muted" className="text-right text-xs">
               Import in progress{processingStartedAt ? ` (${processingElapsedSeconds}s)` : ""}. Large repositories can take a few minutes.

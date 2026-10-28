@@ -2243,6 +2243,7 @@ async fn delete_project(
         // `cancel_deleted_project_work`.
         let canceled_work = if tombstoned {
             match crate::project_work_cancellation::cancel_project_work_in_transaction(
+                &state.config,
                 &mut transaction,
                 project_id,
             )

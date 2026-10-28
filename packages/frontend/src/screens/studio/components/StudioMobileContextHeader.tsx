@@ -39,6 +39,8 @@ export interface StudioMobileContextHeaderProps {
   onSettings?: () => void;
   onSwitchTeam: () => void;
   onBrowseSpaces?: () => void;
+  /** Opens the "Create a new space" dialog from the space switcher. */
+  onNewSpace?: () => void;
   onSpace: (id: string) => void;
 }
 
@@ -68,6 +70,7 @@ export function StudioMobileContextHeader({
   onSettings,
   onSwitchTeam,
   onBrowseSpaces,
+  onNewSpace,
   onSpace,
 }: StudioMobileContextHeaderProps) {
   const { user } = useAuth();
@@ -135,7 +138,7 @@ export function StudioMobileContextHeader({
           presentation="path"
           rowClassName="!min-h-12 !px-2 [&>[data-testid=sidebar-current-space-attention]]:!static [&>[data-testid=sidebar-current-space-attention]]:order-1 [&>[data-testid=sidebar-current-space-attention]]:shrink-0"
           iconClassName=""
-          onSelectSpace={onSpace} onBrowseAll={onBrowseSpaces ?? onSwitchTeam}
+          onSelectSpace={onSpace} onBrowseAll={onBrowseSpaces ?? onSwitchTeam} onNewSpace={onNewSpace}
         />
       </div>
       </>}

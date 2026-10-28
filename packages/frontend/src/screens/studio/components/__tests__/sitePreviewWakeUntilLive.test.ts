@@ -40,11 +40,17 @@ describe("wakeUntilLive", () => {
     expect(time.sleep).toHaveBeenCalledWith(2_000, undefined);
   });
 
-  it("fails with the controller's reason", async () => {
-    const get = vi.fn().mockResolvedValue(down({ wake: { state: "failed", startedAt: "t", error: "no such command: uw" } }));
+  // Local drive, Oct 28: no port or other internals in the stopped pane. The failure line is the machine's own words
+  // (a port, a command, an exit status); the person reads what to do next.
+  it.each([
+    "no such command: uw",
+    "the site did not answer on port 4173 within 60 s",
+    "could not run \"npm\" in /workspace/22c0ee76/site",
+  ])("fails in plain words, never with the machine's own line (%s)", async (line) => {
+    const get = vi.fn().mockResolvedValue(down({ wake: { state: "failed", startedAt: "t", error: line } }));
     const error = await wakeUntilLive({ wake: async () => ({ state: "waking" }), get, ...clock() }).catch(cause => cause);
     expect(error).toBeInstanceOf(PreviewWakeError);
-    expect(error.message).toBe("Couldn't start: no such command: uw");
+    expect(error.message).toBe("Couldn't start it. Ask Octo to start it again.");
     expect(error.gone).toBe(false);
   });
 

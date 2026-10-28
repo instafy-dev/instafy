@@ -302,6 +302,14 @@ describe("summarizeTurnActivity", () => {
     expect(summarize([finished], "stale").live).toBe("Status unavailable");
   });
 
+  it("starts a turn Instafy is trying again by itself with Trying again", () => {
+    expect(summarizeTurnActivity([], { jobId: JOB, phase: "starting", retry: true }).live).toBe("Trying again…");
+    // Once it runs, it reads like any turn.
+    expect(summarizeTurnActivity([command(ADD_POINT)], { jobId: JOB, phase: "running", retry: true }).live).toBe(
+      "Thinking…",
+    );
+  });
+
   it("shows a runtime status the runtime labelled while it is the newest thing", () => {
     const saving = note("Syncing workspace changes…", "status", {
       v: 1,

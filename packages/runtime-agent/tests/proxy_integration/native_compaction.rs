@@ -445,6 +445,8 @@ fn job(project_id: Uuid, conversation_id: Uuid, previous: Option<Value>) -> Leas
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
         lease_attempts: 1,
+        grants: Vec::new(),
+        grant_token: None,
     }
 }
 

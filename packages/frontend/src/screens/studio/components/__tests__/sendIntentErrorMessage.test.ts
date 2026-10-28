@@ -7,9 +7,9 @@ import { describe, expect, it } from "vitest";
 import { describeSendIntentError } from "../sendIntentErrorMessage";
 
 describe("describeSendIntentError", () => {
-  it("tells a teammate to queue instead of steering someone else's browser task", () => {
+  it("tells a teammate to queue instead of steering someone else's browser or granted turn", () => {
     expect(describeSendIntentError("browser_turn_steer_forbidden", "forbidden")).toBe(
-      "Only the person who started this browser task can steer it. Queue your message instead.",
+      "Only the person who started this turn can steer it. Queue your message instead.",
     );
   });
 

@@ -19,7 +19,6 @@ const auth = vi.hoisted(() => ({
 
 vi.mock("../../providers/AuthProvider", () => ({ useAuth: () => auth }));
 vi.mock("../login/useNativeGithubAuth", () => ({
-  OAUTH_REDIRECT_TARGET_KEY: "instafy.oauth.redirectTarget",
   OAUTH_PROVIDER_LABELS: { github: "GitHub", google: "Google" },
   useNativeGithubAuth: () => ({
     handleGithubLogin: vi.fn(),

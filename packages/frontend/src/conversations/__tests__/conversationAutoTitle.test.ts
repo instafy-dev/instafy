@@ -67,9 +67,13 @@ function createConversation(overrides: Partial<ConversationState> = {}): Convers
 
 describe("conversationAutoTitle", () => {
   it("recognizes generated default conversation titles", () => {
+    // "New chat" for every untitled chat; "Conversation 42" as older chats were stored.
+    expect(isDefaultConversationTitle("New chat")).toBe(true);
+    expect(isDefaultConversationTitle(" new chat ")).toBe(true);
     expect(isDefaultConversationTitle("Conversation 1")).toBe(true);
     expect(isDefaultConversationTitle("Conversation 42")).toBe(true);
     expect(isDefaultConversationTitle("Build launch plan")).toBe(false);
+    expect(isDefaultConversationTitle("New chat about taxes")).toBe(false);
   });
 
   it("only auto-titles root conversations before the first user turn", () => {
@@ -342,11 +346,27 @@ describe("conversationAutoTitle", () => {
     expect(getFallbackConversationTitle("Book the March invoices")).toBe("Book the March invoices");
     expect(getFallbackConversationTitle("Plan the launch.")).toBe("Plan the launch");
     expect(getFallbackConversationTitle("Yes, that one")).toBe("Yes, that one");
+    // About 40 characters, cut at a word, and "…" says where.
     expect(getFallbackConversationTitle("Kannst du mir bei meiner Steuererklärung helfen?"))
-      .toBe("Kannst du mir bei meiner Steuererklärung");
+      .toBe("Kannst du mir bei meiner Steuererklärung…");
     const long = getFallbackConversationTitle("Internationalization considerations for multilingual onboarding documentation");
-    expect(long).toBe("Internationalization considerations");
-    expect(long!.length).toBeLessThanOrEqual(48);
+    expect(long).toBe("Internationalization considerations…");
+    expect(long!.length).toBeLessThanOrEqual(41);
+    expect(getFallbackConversationTitle("draft a launch plan for the spring sale")).toBe("Draft a launch plan for the spring sale");
+  });
+
+  // Local drive, Oct 28: "Plan 3 days in Lisbon" left the chat unnamed,
+  // because a count ended the title before it had two words.
+  it("keeps counts and years in the first line, but never a longer number", () => {
+    expect(getFallbackConversationTitle("Plan 3 days in Lisbon and make a map of the best places"))
+      .toBe("Plan 3 days in Lisbon and make a map…");
+    expect(getFallbackConversationTitle("Find 10 cafes near the office with wifi and plugs"))
+      .toBe("Find 10 cafes near the office with wifi…");
+    expect(getFallbackConversationTitle("Make the 2025 budget for the shop")).toBe("Make the 2025 budget for the shop");
+    // A longer number may be a card, an account or a code: the title ends before it.
+    expect(getFallbackConversationTitle("Compare 3 robot vacuums under 600 euros")).toBe("Compare 3 robot vacuums under");
+    expect(getFallbackConversationTitle("Order 100 more labels for the shop")).toBeNull();
+    expect(getFallbackConversationTitle("Call 0664 1234567 about the delivery")).toBeNull();
   });
 
   it("starts after greetings and requests for help, and ends at the first sentence", () => {
@@ -356,7 +376,7 @@ describe("conversationAutoTitle", () => {
       .toBe("Reconcile the bank statements");
     expect(getFallbackConversationTitle("Thanks! Now book the March invoices")).toBe("Now book the March invoices");
     expect(getFallbackConversationTitle("Bitte erstelle eine Rechnung für die Firma Müller"))
-      .toBe("Erstelle eine Rechnung für die Firma");
+      .toBe("Erstelle eine Rechnung für die Firma…");
     expect(getFallbackConversationTitle("Bitte erstelle die Rechnung für März")).toBe("Erstelle die Rechnung für März");
     // The sum is not a plain word, and "What" alone is too short.
     expect(getFallbackConversationTitle("What is 1+1? Reply with just the number.")).toBeNull();
@@ -433,8 +453,10 @@ describe("conversationAutoTitle", () => {
   });
 
   it("does not end a cut title on a dangling small word", () => {
-    expect(getFallbackConversationTitle("plan our spring launch with the design team")).toBe("Plan our spring launch");
-    expect(getFallbackConversationTitle("draft a launch plan for the spring sale")).toBe("Draft a launch plan");
+    expect(getFallbackConversationTitle("Plan our spring launch with the team and the agency"))
+      .toBe("Plan our spring launch with the team…");
+    expect(getFallbackConversationTitle("Write a short note to the team about the move to the new office"))
+      .toBe("Write a short note to the team…");
     // A whole message is kept as written.
     expect(getFallbackConversationTitle("what are you waiting for")).toBe("What are you waiting for");
   });
@@ -448,6 +470,7 @@ describe("conversationAutoTitle", () => {
     expect(getFallbackConversationTitle("https://example.com/a/b")).toBeNull();
     expect(getFallbackConversationTitle("  ...  ")).toBeNull();
     expect(getFallbackConversationTitle("conversation 7")).toBeNull();
+    expect(getFallbackConversationTitle("new chat")).toBeNull();
     expect(getFallbackConversationTitle(FREEFINANCE_IMPORT)).toBe("Connect FreeFinance");
   });
 

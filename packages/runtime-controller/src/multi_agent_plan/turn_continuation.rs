@@ -368,6 +368,7 @@ pub(crate) fn redispatch_seed(
                 "prompt": prompt,
                 "scopeSummary": agent.scope_summary,
                 "writeScope": agent.write_scope,
+                "requiresTools": agent.requires_tools,
             }]),
         );
         map.insert("rationale".to_string(), json!(rationale));
@@ -572,7 +573,7 @@ mod tests {
                 "type": "multi_agent_plan", "mode": "read_only",
                 "lanes": [
                     {"handle": "tokyo", "prompt": "Research Tokyo."},
-                    {"handle": "kyoto", "prompt": "Research Kyoto.", "scopeSummary": "Kyoto"},
+                    {"handle": "kyoto", "prompt": "Research Kyoto.", "scopeSummary": "Kyoto", "requiresTools":true},
                 ],
                 "lead": {"leadHandle": "octo", "continuationPrompt": "Report.", "expectedReportFormat": "text"},
                 "runtimeRouting": {"strategy": "spread"},
@@ -594,6 +595,8 @@ mod tests {
         assert_eq!(plan.agents.len(), 1);
         assert_eq!(plan.agents[0].handle, "kyoto");
         assert!(plan.agents[0].prompt.contains("two sources left"));
+        assert!(plan.agents[0].requires_tools);
+        assert_eq!(seed["agents"][0]["requiresTools"], true);
         assert_eq!(plan.lead.lead_handle, "octo");
         assert_eq!(seed["runtimeRouting"]["strategy"], "reuse");
         assert!(plan_job_agent(

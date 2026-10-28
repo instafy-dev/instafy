@@ -25,15 +25,22 @@ export function BrowserStatusPill({
   testId,
   compact = false,
   resume,
+  startingShownInView = false,
 }: {
   state: BrowserChromeState;
   detail?: string | null;
   testId?: string;
   compact?: boolean;
   resume?: { onPress: () => void; disabled?: boolean };
+  /**
+   * The view says it is starting itself (a centered "Opening Instafy's
+   * browser…"), so `starting` only tells a screen reader, as `ready` does:
+   * one loading signal on screen, not two.
+   */
+  startingShownInView?: boolean;
 }) {
   const label = BROWSER_CHROME_STATE_LABELS[state];
-  if (state === "ready") {
+  if (state === "ready" || (state === "starting" && startingShownInView)) {
     return (
       <span
         className="sr-only"

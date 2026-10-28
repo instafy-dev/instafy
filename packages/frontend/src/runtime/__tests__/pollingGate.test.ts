@@ -292,6 +292,73 @@ describe("polling gate", () => {
     });
   });
 
+  describe("inputs that flip quickly", () => {
+    async function withPoll(run: (render: (props: { enabled: boolean; fast: boolean }) => Promise<void>, callback: ReturnType<typeof vi.fn>) => Promise<void>) {
+      const container = document.createElement("div");
+      const root = createRoot(container);
+      const callback = vi.fn(async () => true);
+      function Harness({ enabled, fast }: { enabled: boolean; fast: boolean }) {
+        useAdaptivePoll(callback, { enabled, fast, fastMs: 2_500, slowMs: 2_500, quietMaxMs: 5_000 });
+        return null;
+      }
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      try {
+        await run(async (props) => {
+          await act(async () => {
+            root.render(createElement(Harness, props));
+            await vi.advanceTimersByTimeAsync(10);
+          });
+        }, callback);
+      } finally {
+        await act(async () => root.unmount());
+        delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+      }
+    }
+
+    it("reads at most once a second while it is enabled and disabled again and again", async () => {
+      await withPoll(async (render, callback) => {
+        await render({ enabled: true, fast: true });
+        expect(callback).toHaveBeenCalledTimes(1);
+        // Oct 28: the tab list was switched off and on ten times a second.
+        for (let flip = 0; flip < 100; flip += 1) await render({ enabled: flip % 2 === 1, fast: true });
+        expect(callback.mock.calls.length).toBeLessThanOrEqual(3);
+      });
+    });
+
+    it("reads at once for a first change of fast, and at most once a second while it keeps changing", async () => {
+      await withPoll(async (render, callback) => {
+        await render({ enabled: true, fast: true });
+        await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+        callback.mockClear();
+        await render({ enabled: true, fast: false });
+        expect(callback).toHaveBeenCalledTimes(1);
+        for (let flip = 0; flip < 100; flip += 1) await render({ enabled: true, fast: flip % 2 === 0 });
+        expect(callback.mock.calls.length).toBeLessThanOrEqual(3);
+      });
+    });
+
+    it("keeps reading about once a second while fast keeps changing, instead of waiting for it to settle", async () => {
+      await withPoll(async (render, callback) => {
+        await render({ enabled: true, fast: false });
+        await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+        const readAt: number[] = [];
+        callback.mockClear();
+        callback.mockImplementation(async () => { readAt.push(Date.now()); return true; });
+        // `fast` changes every 300 ms for six seconds: each change may not
+        // read at once, but the reads it owes still happen, once a second.
+        for (let flip = 0; flip < 20; flip += 1) {
+          await render({ enabled: true, fast: flip % 2 === 0 });
+          await act(async () => { await vi.advanceTimersByTimeAsync(290); });
+        }
+        expect(readAt.length).toBeGreaterThanOrEqual(5);
+        expect(readAt.length).toBeLessThanOrEqual(7);
+        for (let index = 1; index < readAt.length; index += 1) {
+          expect(readAt[index]! - readAt[index - 1]!).toBeGreaterThanOrEqual(1_000);
+        }
+      });
+    });
+  });
+
   describe("startGatedInterval", () => {
     it("re-anchors on markRun and stops cleanly", () => {
       const callback = vi.fn();

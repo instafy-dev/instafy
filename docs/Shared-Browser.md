@@ -81,7 +81,11 @@ can be retried. This is a read deadline, not a limit on runtime startup time.
 
 ## One browser shell, three pixel transports
 
-The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
+The Studio always owns the address bar, history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile. Enter in the address bar goes, as in every browser; only the phone's address editor keeps a Go button beside the field.
+
+On a wide pane the toolbar reads Back, Forward, Reload, the address, **Send page to Octo**, the participants, **Browser options** and Expand. Where the browser runs (**This device** or **Workspace**, under **Run browser on**) is a setting, so it is in **Browser options** (the Personal Browser's **Browser settings**) at every width, not in the toolbar.
+
+Who controls the browser shows only when someone else could: another participant (another person, or your own other device) is in the browser, someone else holds control, or Octo is driving it. Alone there is nothing to hand over, so neither the control chip nor **Release control** shows; **Take control** still shows when control is free, so a person left alone is never locked out. A pressed control action shows the shared pending spinner (`isPending`, so keyboard focus stays on it) until the browser answers, then shows the new state. When the browser does not answer within five seconds it says "The browser didn't answer. Try again." beside the action, and "Not connected to the browser. Try again in a moment." when the connection is down, instead of doing nothing.
 
 Connection failures show one plain sentence and at most one button (see
 [What the browser view shows](#what-the-browser-view-shows)). If the runtime provider is not
@@ -95,7 +99,8 @@ current controller. **Request control** appears below the list; this
 asks the current driver to hand over input, rather than sending a chat message.
 Pending requests show a badge for the current driver. A compact page-count picker
 beside the address switches browser tabs. **Browser options** contains history
-navigation, reload and **Expand browser** so the toolbar stays on one row. AI
+navigation, reload, **Expand browser** and where the browser runs, so the toolbar
+stays on one row. AI
 takeover and **Let AI continue** are in the same participant controls;
 clicking the shared page can still open the takeover confirmation.
 
@@ -147,7 +152,7 @@ Studio Shared Browser shell
 
 `GET /browser/capabilities` returns a versioned, `Cache-Control: no-store` contract. Studio waits for that authoritative response before opening a pixel transport, so runtime discovery cannot briefly connect RFB and then tear it down to upgrade. A WebRTC-enabled runtime advertises `webrtc`, `cdp-screencast`, and `rfb` in that order. A CDP-only runtime advertises `cdp-screencast` and `rfb`; RFB is always the safety lane. Runtime capabilities are authoritative—the Vite flags provision transports on new runtimes, while the runtime flags are the operational kill switches.
 
-Fallback stays on the same runtime and profile. A fatal WebRTC error moves to CDP; a fatal CDP error moves to RFB. During reconnect the UI captures a bounded frozen frame, keeps the prior page visible, and shows an explicit **Reconnecting…** state. CDP is ready after its first painted JPEG. WebRTC controllers wait for both a decoded video frame and the separate input WebSocket; view-only participants are ready from video alone and never open the input socket. CDP has a bounded first-frame startup watchdog; WebRTC also monitors active, visible video for frame stalls.
+Fallback stays on the same runtime and profile. A fatal WebRTC error moves to CDP; a fatal CDP error moves to RFB. During reconnect the UI captures a bounded frozen frame, keeps the prior page visible, and shows an explicit **Reconnecting…** state once the picture has been gone for 1.5 s (`RECONNECTING_GRACE_MS`); a reconnect that is back sooner shows nothing, so the note never flickers with the live view. CDP is ready after its first painted JPEG. WebRTC controllers wait for both a decoded video frame and the separate input WebSocket; view-only participants are ready from video alone and never open the input socket. CDP has a bounded first-frame startup watchdog; WebRTC also monitors active, visible video for frame stalls.
 
 ## Multi-user presence and exclusive control
 
@@ -206,7 +211,15 @@ RFB cannot safely separate pixels from arbitrary raw input without parsing the
 RFB client protocol. It therefore remains driver-exclusive: non-drivers use
 WebRTC or CDP, and the origin rechecks the exact owner before forwarding every
 client packet (with a one-second idle poll to close a quiet revoked bridge). It
-is not presented as a view-only collaboration lane.
+is not presented as a view-only collaboration lane. On a runtime whose only
+viewer is RFB, a person who may control the browser while Octo or someone else
+drives it keeps a live view without a picture: the last frame, and who has
+control with **Take over** (or the request controls). When nobody holds control
+the view says to request it.
+
+The collaboration roster belongs to the browser, not to a tab: its socket stays
+connected while Studio's tab list is empty or reloading, and the participant's
+page follows by heartbeat.
 
 Agent control uses the same runtime-wide authority. A Shared Browser job writes
 a strict, mode-0600 heartbeat marker under the protected runtime directory
@@ -489,6 +502,19 @@ site already approved in that tab, an address that is not on the risky-address
 list opens without a prompt, so such an address with side effects can act
 without one, as under routine browsing. A run on the space's own machine cannot
 be switched to Ask yet (see "Remaining work").
+
+### A page another chat left
+
+The Shared Browser is shared by the space's chats, and Studio binds a browser
+task to the browser's current tab, which another chat's run may have left on
+its own page. runtime-agent remembers, per page, which conversation's run held
+it last (in memory, the newest 32 pages). When a run starts on a page a run of
+another conversation held last, its browser policy gets one more line: the page
+was left by a task in another chat, it is not this task's earlier work, so Octo
+does not describe it as resuming there. When the person's message is about that
+page, Octo uses it as it is; otherwise it starts this task's own step
+(`navigate` that page, or a tab of its own). The first run on a page, a later
+run of the same chat, and a runtime that restarted say nothing.
 
 ### Octo's own tabs
 
@@ -843,6 +869,19 @@ model to end the turn, and the person reads "Instafy's browser closed or
 stopped responding, so I stopped there. Open the browser again and send a
 message to continue." One failed call followed by any other answer starts the
 count over, so a single slow connect does not end a turn.
+A page that did not load (a Chromium `net::ERR_…` code in the controller's
+error) fails with a plain reason as the result's text, and the code only in
+`structuredContent.error.details`: "Instafy's browser couldn't reach that
+site: …" for a connection that did not happen or did not last (the proxy
+answers a denied, refused or silent site alike), "couldn't find that site",
+"That site's secure connection failed…" or "kept redirecting". `ERR_ABORTED`,
+which a file to download (downloads are blocked) or a replaced navigation
+ends with, says the page stopped loading before it opened; any other code says
+only that the page didn't load, so no reason claims the site was unreachable
+when it answered. The browser policy and the
+`instafy-browser-automation` skill tell Octo to give the person that reason in
+plain words and never to paste a raw error code into a reply. Any other failed
+call keeps the controller's masked error text.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
@@ -874,7 +913,16 @@ action log every second while it keeps finding new actions; each read that
 finds none doubles the wait up to 4 s (the agent spends most of a turn
 thinking between actions), and the next action found brings back the 1 s tail.
 It reads the pending prompt 1.5 s after each answer (every 400 ms while a
-prompt is shown). With neither, it reads the action log every
+prompt is shown). Reads that fail in a row wait twice as long each time, up to
+10 s, and the prompt says "Approval connection interrupted. Reconnecting…"
+only once reads have kept failing for 2 s. Two reads are never closer than
+400 ms when the poll stops and starts again, or comes back to a machine, page
+or grant it read recently (one it has not read yet reads at once), so a page
+that changes back and forth costs no read per change. The tab list and action
+log polls likewise read "at once" at most once a second while they are
+switched off and on, or while their pace keeps changing: a change soon after
+the read for the change before it owes one read a second after that read, and
+later changes neither add reads nor put it off. With neither, it reads the action log every
 10 s and the prompt every 15 s, 30 s each once nobody has touched the tab for
 three minutes. A run starting, or the agent taking control, reads both at once;
 a run ending takes one more read of the action log, so a human-input request
@@ -1570,14 +1618,16 @@ unless the policy is `"covered"`.
 
 The view shows one state at a time, derived from its status and the kind of
 failure it stored with its error (`hostedBrowserViewState`): one sentence,
-at most one button, and a neutral status pill.
+at most one button, and a neutral status pill. While opening, the view's
+sentence is the one loading signal on screen; the pill says **Starting…** only
+to screen readers (`startingShownInView`).
 
 | State | Sentence | Button | Pill |
 |---|---|---|---|
 | live | none | none | Ready (screen readers only) |
-| opening | "Opening Instafy's browser…" | none | Starting… |
-| opening, after a minute of a press starting the space's machine | "Still starting this space's machine…" | none | Starting… |
-| opening, while a browser session machine starts its browser again | "Instafy's browser stopped. Starting it again…" | none | Starting… |
+| opening | "Opening Instafy's browser…" | none | Starting… (screen readers only) |
+| opening, after a minute of a press starting the space's machine | "Still starting this space's machine…" | none | Starting… (screen readers only) |
+| opening, while a browser session machine starts its browser again | "Instafy's browser stopped. Starting it again…" | none | Starting… (screen readers only) |
 | off | "Instafy's browser is off." | Open browser | Off |
 | failed | "Instafy's browser did not open. Try again." | Try again | Off |
 | failed (machine) | "This space's machine did not start. Try again." | Try again | Off |
@@ -1677,7 +1727,16 @@ Browser access is separate from workspace file access:
 The high-level facade rejects privileged schemes, credential-bearing URLs,
 unknown fields, oversized values, arbitrary CDP, and raw JavaScript. CDP and
 the WebRTC sender remain loopback-only. The egress proxy blocks runtime-local
-and control-plane destinations for Chromium navigation. The per-origin plus
+and control-plane destinations for Chromium navigation. Chromium reports every
+CONNECT the proxy does not complete as `net::ERR_TUNNEL_CONNECTION_FAILED`,
+whether the policy denied the address, its name did not resolve, or the site
+refused or never answered, so the proxy logs each failed destination to its log
+(`browser-egress-proxy.log` in the runtime's state directory) as
+`browser egress tunnel failed (port 443): the site did not answer in time`: the
+request kind, port and a fixed reason, never the host, path or address. A
+request Chromium gave up on itself (it navigated away or dropped a speculative
+connection) is not a failed destination and is not logged. At most 30 lines a
+minute are written; the next minute's first line says how many were left out. The per-origin plus
 one-shot confirmation policy above is the sensitive-site action policy for
 otherwise public sites; a future denylist may reduce prompt volume but is not
 an authorization substitute.

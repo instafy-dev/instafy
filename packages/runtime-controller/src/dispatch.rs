@@ -25,6 +25,7 @@ use crate::ai_metering::job_record::{insert_platform_job_record, PlatformJobReco
 use crate::auth::{authenticate_request, RequestContext};
 use crate::bug_reports::{record_system_bug_report, SystemBugReportInput};
 use crate::credentials;
+use crate::job_trigger::JobTrigger;
 use crate::model_defaults::DEFAULT_MANAGED_AI_PROVIDER_ID;
 use crate::state::publish_controller_event_to_user;
 use crate::{
@@ -221,6 +222,13 @@ pub(crate) struct DispatchPromptNormalized {
     /// deliberately absent from the public dispatch request shape.
     pub(crate) allow_silent_automation_decline: bool,
     pub(crate) allow_internal_review: bool,
+    /// What started the jobs this dispatch queues. Set only by the code that
+    /// authenticated the cause, never from a request body
+    /// ([`crate::job_trigger`]).
+    pub(crate) trigger: Option<JobTrigger>,
+    /// The device grants its one job holds. Set only by dispatch itself
+    /// ([`crate::device_grants::grants_for_dispatch`]).
+    pub(crate) grant_ids: Vec<Uuid>,
 }
 
 fn normalize_agent_handle(raw: &str) -> Option<String> {
@@ -930,6 +938,7 @@ async fn dispatch_prompt(
 ) -> Result<Json<DispatchPromptResponse>, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, &headers).await?;
     let mut request = normalize_dispatch_request(payload)?;
+    request.trigger = JobTrigger::of_send(&state.config, &context, &request.metadata);
 
     if !state.config.dev_mode && !context.is_service_role {
         if let Some(user_id) = context.user_id {
@@ -1235,6 +1244,49 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 existing_recorded_message = Some(existing);
             }
         }
+    }
+
+    // In a conversation a device grant names, only the grant's person's own
+    // messages start agent turns. Anyone else's is recorded and starts
+    // nothing, so their words never become a turn there.
+    if !crate::device_grants::starts_agent_turns(
+        &state.config,
+        &transaction,
+        &conversation.id,
+        context,
+        request.trigger.as_ref(),
+    )
+    .await?
+    {
+        let user_message = if existing_recorded_message.is_some()
+            || should_suppress_dispatch_user_message(&request.metadata)
+        {
+            None
+        } else {
+            Some(
+                conversations::record_conversation_message_without_dispatch(
+                    &transaction,
+                    &project,
+                    &conversation,
+                    &request,
+                    context,
+                )
+                .await?,
+            )
+        };
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!(
+                "failed to record a message that starts no turn: {error}"
+            ))
+        })?;
+        if let Some(message) = user_message.as_ref() {
+            conversations::publish_conversation_message_event(&state.events, message);
+            crate::notifications::enqueue_message_push_notifications(
+                state.clone(),
+                message.clone(),
+            );
+        }
+        return Ok(recorded_dispatch_response(conversation.id));
     }
 
     // Idempotent retries must win before the optimistic lane comparison. A
@@ -1597,6 +1649,29 @@ pub(crate) async fn process_dispatch_prompt_timed(
         default_credential_id,
     )
     .await?;
+    // A plain one-agent turn that its person's own message started may hold
+    // their device grants. It is then delivered once, and only soon.
+    let plain_turn = strict_browser_runtime_id.is_none()
+        && !metadata_uses_personal_browser(&request.metadata)
+        && !metadata_uses_shared_browser(&request.metadata)
+        && !metadata_allows_runtime_spread(&request.metadata)
+        && !skill_mode_ambient_evaluation
+        && request.plan_seed.is_none();
+    request.grant_ids = match agent_targets.as_slice() {
+        [target] if plain_turn => {
+            crate::device_grants::grants_for_dispatch(
+                &state.config,
+                &transaction,
+                context,
+                request.trigger.as_ref(),
+                project.id,
+                conversation.id,
+                target.agent_id,
+            )
+            .await?
+        }
+        _ => Vec::new(),
+    };
 
     let mut runtime_id = request.runtime_id;
     let mut runtime_source = request.runtime_source.clone();
@@ -2269,6 +2344,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
         let mut agent_request = request.clone();
         apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
         inject_agent_target_metadata(&mut agent_request.metadata, target);
+        crate::multi_agent_plan::apply_worker_tool_requirement(
+            &mut agent_request.metadata,
+            &target.handle,
+        )?;
         apply_agent_write_scope_metadata(
             &mut agent_request.metadata,
             write_scope_plan.get(&target.handle),
@@ -2319,7 +2398,13 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 &target.handle,
             )
             .await?;
-        let provider_conversation_state = if supports_provider_state {
+        // A granted turn resumes no provider thread. The conversation's holds
+        // other people's words, and a thread of its own would replay every
+        // earlier granted turn's tool calls and results, which nothing here
+        // can cap. So each granted turn starts afresh from the history its
+        // lease carries: its person's words and the granted turns' replies.
+        let resumes_provider_thread = supports_provider_state && agent_request.grant_ids.is_empty();
+        let provider_conversation_state = if resumes_provider_thread {
             if let Some(conversation_id) = request.conversation_id {
                 load_provider_conversation_state_for_job(
                     &transaction,
@@ -3115,6 +3200,8 @@ pub(crate) fn normalize_dispatch_request(
         dispatch_queue_entry_id: None,
         allow_silent_automation_decline: false,
         allow_internal_review: false,
+        trigger: None,
+        grant_ids: Vec::new(),
     })
 }
 

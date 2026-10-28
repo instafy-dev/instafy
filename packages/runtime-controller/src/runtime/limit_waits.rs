@@ -1134,7 +1134,8 @@ async fn fail_waiting_jobs(
                    and ($2::double precision is null
                         or {} < now() - $2::double precision * interval '1 second')
                  returning j.id, j.project_id, j.run_id, j.conversation_id, j.session_id,
-                           j.prompt_id, j.payload, j.error_message, j.lease_attempts",
+                           j.prompt_id, j.payload, j.error_message, j.lease_attempts,
+                           j.grant_ids",
                 unserved_job_predicate("j", "$1"),
                 // This controller holds the wait's claim, so the row is there;
                 // were it gone, nothing would count as overdue.

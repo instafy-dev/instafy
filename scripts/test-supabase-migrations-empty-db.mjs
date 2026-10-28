@@ -90,13 +90,22 @@ const REQUIRED_PUBLIC_RELATIONS = [
 // origin_instances, while a stop releases origin_instances before its event.
 // Delivering a notification updates notification_delivery_jobs and then its
 // notification_delivery_attempts row, while leasing a job whose lease expired
-// updates the attempt first. A migration that holds a conflicting lock on two
-// of the tables until it commits can therefore deadlock a live request, or a
-// chain of requests that each hold one of the tables while they wait for the
-// next, whichever table it locks first. After the lane boundary a change to
-// two of them is split into migrations that commit separately, or, when one
-// statement locks both, goes in as a reviewed exception. The list comes
-// from a code audit of the controller's transactions, so it is best effort;
+// updates the attempt first. Completion and cancel of a job that holds device
+// grants update agent_jobs and agent_job_inputs before they cancel the job's
+// open project_provider_requests rows, and then update the run; a steer of one
+// locks agent_jobs and cancels them before it inserts the message and its
+// agent_job_inputs row and updates the conversation, while the expired-job sweep fails the run, records its
+// activity_events row and refunds the ledger before it cancels them. Every
+// request that writes both agent_device_grants and project_provider_requests
+// writes agent_device_grants first, but a stop locks the jobs it cancels in
+// agent_jobs before it pauses the grants, and updates agent_jobs, the run and
+// the notice message after. A migration that holds a conflicting lock on
+// two of the tables until it commits can therefore deadlock a live request, or
+// a chain of requests that each hold one of the tables while they wait for the
+// next, whichever table it locks first. After the lane boundary a change to two
+// of them is split into migrations that commit separately, or, when one
+// statement locks both, goes in as a reviewed exception. The list comes from a
+// code audit of the controller's transactions, so it is best effort;
 // MIGRATIONS.md describes the backstop for a table it misses. Worker answer
 // transactions lock agent_user_input_requests before checking their source job
 // and updating its run; job invalidation locks agent_jobs before its trigger
@@ -125,11 +134,23 @@ const BOTH_ORDER_TABLES = [
   "notification_delivery_attempts",
   "user_agents",
   "agent_user_input_requests",
+  "project_provider_requests",
+  "agent_device_grants",
 ];
+// Controllers before RUN_TIME_TABLES.before made project_provider_requests and
+// project_provider_devices at run time, so production has them before the
+// migrations that bring them to the new shape. The test makes them so first,
+// with the DDL those controllers ran, so that its probe counts the locks the
+// migrations take on them.
+const RUN_TIME_TABLES = {
+  before: 20261028140000n,
+  source: path.join(MODULE_DIR, "fixtures", "provider-tables-made-at-run-time.sql"),
+};
 // The tables of BOTH_ORDER_TABLES that a migration after the lane boundary
-// created, by the version of that migration. Every other table of the list
-// existed by the lane boundary. A table is expected among the public tables
-// before every migration after the one that created it.
+// created, by the version of that migration, or, for one RUN_TIME_TABLES
+// makes, of the migration before it. Every other table of the list existed by
+// the lane boundary. A table is expected among the public tables before every
+// migration after the one that created it.
 const BOTH_ORDER_TABLES_CREATED_BY = new Map([
   ["agent_user_input_requests", 20261024120000n],
   ["agent_job_inputs", 20260816213318n],
@@ -139,6 +160,8 @@ const BOTH_ORDER_TABLES_CREATED_BY = new Map([
   ["notification_recipients", 20260906120000n],
   ["notification_delivery_jobs", 20260906120000n],
   ["notification_delivery_attempts", 20260906120000n],
+  ["project_provider_requests", 20261028120002n],
+  ["agent_device_grants", 20261028140008n],
 ]);
 // Migrations already on main that the rules below reject only because tables
 // after the first three joined the list after them. History is append-only,
@@ -728,6 +751,17 @@ function runEmptyDatabaseMigrationTest({
           `${migration.track}:${migration.fileName} is larger than the ${MAX_COMMAND_BYTES} bytes one psql --command can carry; split it`,
         );
       }
+      if (version === RUN_TIME_TABLES.before) {
+        commandResult(
+          dockerCommand,
+          [
+            "exec", "--interactive", containerName, "psql", "--no-psqlrc", "--set",
+            "ON_ERROR_STOP=1", "--single-transaction", "--username", "postgres",
+            "--dbname", "postgres",
+          ],
+          { input: readFileSync(RUN_TIME_TABLES.source) },
+        );
+      }
       // With --single-transaction, psql runs its commands in order inside one
       // transaction: the id query, the migration, then the probe.
       const applied = commandResult(
@@ -933,6 +967,7 @@ export {
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
   REVIEWED_LOCK_EXCEPTIONS,
+  RUN_TIME_TABLES,
   TRANSACTION_QUERY,
   bothOrderLockViolations,
   heldLockProbeProblem,

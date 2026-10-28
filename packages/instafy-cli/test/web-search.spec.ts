@@ -278,6 +278,9 @@ describe("searching with the space's own key (fixtures)", () => {
     const report = JSON.parse(out[0]!) as WebSearchReport;
     expect(report).toMatchObject({ status: "not_found", count: 0, results: [] });
     expect(report.tell).toMatch(/never words from a page.*Send page to Octo/);
+    // No results never end the task: official sites through the open reference search, then what was read.
+    expect(report.tell).toMatch(/Go on without it: find official sites with `instafy web search "<name>" --chain reference-search` \(no key\)/);
+    expect(report.tell).toMatch(/each missing fact marked unknown with why/);
   });
 
   it("refuses a 5th search in a turn without sending it", async () => {
@@ -551,13 +554,20 @@ describe("the person's own key (secret-request card)", () => {
         "Brave Search API key for Octo's web searches. Everyone in this space can search with this key, up to 100 searches a day. Brave bills the key's owner.",
       agentHandles: ["octo"],
     });
-    expect(first.tell).toMatch(/Offer the person the card in `offer` once.*never ask for the key in chat.*Send page to Octo/);
+    // No key never ends the task: the open routes first, a page with what was read, the card at most once and optional.
+    expect(first.tell).toBe(
+      "This space has no search key. Go on without it: find official sites with `instafy web search \"<name>\" --chain reference-search` (no key) and read them, " +
+        "and the pages of publishers you know cover this, with `instafy web read`. Then answer or build the page with what you read, each missing fact " +
+        "marked unknown with why. The person may send more pages with Send page to Octo. The card in `offer` (a `request_secret` action) may go in " +
+        "your reply once, as a way to find more next time; never ask for the key in chat, and never wait for it.",
+    );
     // A later turn in the same space: no card again, the person searches.
     await runWebSearchCli(["noodles"], { json: true }, io, transportDeps(turnEnv(caseNo + 1), transport));
     const later = JSON.parse(out.pop()!) as WebSearchReport;
     expect(later.status).toBe("no_provider");
     expect(later.offer).toBeUndefined();
-    expect(later.tell).toMatch(/the key card was already offered\. Ask the person to search in their own browser and press Send page to Octo/);
+    expect(later.tell).toMatch(/^This space has no search key, and the key card was already offered: never ask for it again\. Go on without it: find official sites with `instafy web search "<name>" --chain reference-search` \(no key\)/);
+    expect(later.tell).not.toMatch(/Ask the person to search/);
     // Another space gets its own offer.
     await runWebSearchCli(["noodles"], { json: true }, io, transportDeps(turnEnv(caseNo + 2, { INSTAFY_PROJECT_ID: "project-2" }), transport));
     expect((JSON.parse(out.pop()!) as WebSearchReport).offer?.name).toBe("BRAVE_SEARCH_API_KEY");

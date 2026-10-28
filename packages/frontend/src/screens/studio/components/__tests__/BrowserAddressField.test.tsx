@@ -238,11 +238,19 @@ describe("BrowserAddressField", () => {
     expect(released).toHaveBeenCalled();
   });
 
-  it("disables both navigation entry points and closes an open list when authority is lost", async () => {
+  it("goes on Enter, with no Go button beside the field, as in every browser", async () => {
+    expect(container.querySelector('[aria-label="Go"]')).toBeNull();
+    expect(container.querySelector('[data-testid="test-browser-go"]')).toBeNull();
+    await type("example.com");
+    await key("Enter");
+    expect(navigate).toHaveBeenCalledExactlyOnceWith("example.com");
+  });
+
+  it("disables the field and closes an open list when authority is lost", async () => {
     await type("");
     await act(async () => root.render(<Fixture disabled />));
     expect(input().disabled).toBe(true);
-    expect(container.querySelector<HTMLButtonElement>('[aria-label="Go"]')!.disabled).toBe(true);
+    expect(container.querySelector('[aria-label="Go"]')).toBeNull();
     expect(options()).toHaveLength(0);
     expect(released).toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();

@@ -1011,6 +1011,8 @@ async fn execute_automation_once(
             dispatch_queue_entry_id: None,
             allow_silent_automation_decline: record.silent_when_nothing_to_report,
             allow_internal_review: record.mode == MODE_SPACE_REVIEW,
+            trigger: None,
+            grant_ids: Vec::new(),
         },
     )
     .await;

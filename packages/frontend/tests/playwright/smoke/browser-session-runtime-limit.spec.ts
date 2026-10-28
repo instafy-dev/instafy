@@ -856,7 +856,8 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     const menu = page.getByTestId("composer-action-menu");
     await expect(menu).toBeVisible();
     await expect(page.getByTestId("composer-action-menu-open-browser")).toBeVisible();
-    await expect(page.getByTestId("composer-action-menu-open-new-browser")).toBeVisible();
+    // "Ask AI for a new tab" adds a tab to an open browser; none is open yet.
+    await expect(page.getByTestId("composer-action-menu-open-new-browser")).toHaveCount(0);
     await expect(page.getByTestId("composer-action-menu-invite")).toBeVisible();
 
     await page.getByTestId("composer-action-menu-commands").click();
@@ -1042,7 +1043,8 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     await expect(page.getByRole("dialog", { name: "Browser session" })).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Browser session" })).toBeVisible();
     await expect(browserTab).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByTestId("browser-location-menu")).toHaveAccessibleName("Browser location: Workspace");
+    // Where the browser runs is in its Options menu, not the toolbar.
+    await expect(page.getByTestId("browser-location-menu")).toHaveCount(0);
     await expect(page.getByTestId("browser-identity-badge")).toHaveCount(0);
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),

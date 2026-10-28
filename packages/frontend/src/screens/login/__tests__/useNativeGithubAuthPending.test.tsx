@@ -3,7 +3,14 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NATIVE_AUTH_ERROR_EVENT, NATIVE_AUTH_ERROR_STORAGE_KEY } from "../../../auth/nativeAuth";
+import {
+  claimNativeAuthCallback,
+  forgetNativeAuthCallbackClaimsForTests,
+  NATIVE_AUTH_ERROR_EVENT,
+  NATIVE_AUTH_ERROR_STORAGE_KEY,
+  parseNativeAuthCallbackUrl,
+  readSignInReturnPath,
+} from "../../../auth/nativeAuth";
 
 const supabaseMock = vi.hoisted(() => ({
   signInWithOAuth: vi.fn(),
@@ -98,6 +105,7 @@ describe("useNativeGithubAuth pending status", () => {
     setPendingProvider.mockReset();
     setAwaitingBrowser.mockReset();
     handlers = null;
+    forgetNativeAuthCallbackClaimsForTests();
     window.localStorage.clear();
     window.sessionStorage.clear();
     container = document.createElement("div");
@@ -114,6 +122,27 @@ describe("useNativeGithubAuth pending status", () => {
 
   const mount = async () => {
     await act(async () => root.render(<Harness />));
+  };
+
+  // The Capacitor plugins the hook reads directly; returns the deep-link listener.
+  const installNativePlugins = () => {
+    const listeners: { appUrlOpen: ((event?: { url?: string | null }) => void) | null } = { appUrlOpen: null };
+    (window as { Capacitor?: unknown }).Capacitor = {
+      Plugins: {
+        App: {
+          addListener: (eventName: string, listener: (event?: { url?: string | null }) => void) => {
+            if (eventName === "appUrlOpen") listeners.appUrlOpen = listener;
+            return { remove: () => undefined };
+          },
+          getLaunchUrl: async () => null,
+        },
+        InstafyAuthBridge: {
+          addListener: () => ({ remove: () => undefined }),
+          consumePendingUrl: async () => null,
+        },
+      },
+    };
+    return listeners;
   };
 
   it("keeps the provider pending through a web redirect and reports no browser wait", async () => {
@@ -192,6 +221,74 @@ describe("useNativeGithubAuth pending status", () => {
     ]);
   });
 
+  // Android can end the app's process while the custom tab is in front; the
+  // deep link then starts a new one, with an empty sessionStorage.
+  it("still names Google when the callback reaches a new process", async () => {
+    platform.native = true;
+    installNativePlugins();
+    await mount();
+    await act(async () => handlers?.handleGoogleLogin());
+    await act(async () => root.unmount());
+    window.sessionStorage.clear();
+    telemetry.post.mockClear();
+    root = createRoot(container);
+    const listeners = installNativePlugins();
+    await mount();
+
+    await act(async () => listeners.appUrlOpen?.({ url: "instafy://auth" }));
+
+    expect(setError).toHaveBeenLastCalledWith("Google sign-in returned to the app without completing. Try again.");
+    expect(telemetry.post.mock.calls.map(([event]) => event.kind)).toEqual([
+      "auth.login.google.callback_received",
+      "auth.login.google.callback_incomplete",
+    ]);
+  });
+
+  it("keeps a native sign-in's destination where a new process finds it", async () => {
+    platform.native = true;
+    await mount();
+
+    await act(async () => handlers?.handleGoogleLogin());
+    window.sessionStorage.clear();
+
+    expect(readSignInReturnPath()).toBe("/studio");
+  });
+
+  it("shows an error the app-wide handler reported once, not again on the next visit", async () => {
+    platform.native = true;
+    await mount();
+    const message = "Google sign-in was cancelled or refused. Try again.";
+
+    await act(async () => {
+      window.sessionStorage.setItem(NATIVE_AUTH_ERROR_STORAGE_KEY, message);
+      window.dispatchEvent(new CustomEvent(NATIVE_AUTH_ERROR_EVENT, { detail: message }));
+    });
+    expect(setError).toHaveBeenLastCalledWith(message);
+    expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
+
+    await act(async () => root.unmount());
+    setError.mockClear();
+    root = createRoot(container);
+    await mount();
+    expect(setError).not.toHaveBeenCalledWith(message);
+  });
+
+  it("leaves a callback alone that the app-wide handler already took", async () => {
+    platform.native = true;
+    const listeners = installNativePlugins();
+    await mount();
+    await act(async () => handlers?.handleGoogleLogin());
+    // AuthProvider hears the same deep link first and claims it.
+    expect(claimNativeAuthCallback(parseNativeAuthCallbackUrl("instafy://auth?code=auth-code")!)).toBe(true);
+    setError.mockClear();
+
+    await act(async () => listeners.appUrlOpen?.({ url: "instafy://auth?code=auth-code" }));
+
+    expect(supabaseMock.exchangeCodeForSession).not.toHaveBeenCalled();
+    expect(setError).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
+  });
+
   it("clears the pending state when the native bridge reports a failed sign-in", async () => {
     platform.native = true;
     await mount();
@@ -225,16 +322,51 @@ describe("useNativeGithubAuth pending status", () => {
     await act(async () => platform.desktopListener?.("instafy://auth?error_description=access_denied"));
 
     expect(setAwaitingBrowser).toHaveBeenLastCalledWith(null);
-    // The callback is a deep link any app can open: the screen and the stored
-    // error show a fixed message, and only telemetry records the URL's text.
+    // The callback is a deep link any app can open: the screen shows a fixed
+    // message, and only telemetry records the URL's text. The page shows the
+    // error now, so no copy is kept for its next visit.
     expect(setError).toHaveBeenLastCalledWith("GitHub sign-in was cancelled or refused. Try again.");
-    expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBe(
-      "GitHub sign-in was cancelled or refused. Try again.",
-    );
+    expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
     expect(telemetry.post).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "auth.login.github.callback_error", message: "access_denied" }),
     );
     expect(setPendingProvider).toHaveBeenLastCalledWith(null);
+  });
+
+  it("names Google when a desktop Google sign-in comes back refused", async () => {
+    platform.desktop = true;
+    await mount();
+    await act(async () => handlers?.handleGoogleLogin());
+
+    await act(async () => platform.desktopListener?.("instafy://auth?error_description=access_denied"));
+
+    expect(setError).toHaveBeenLastCalledWith("Google sign-in was cancelled or refused. Try again.");
+    expect(telemetry.post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "auth.login.google.callback_error",
+        metadata: expect.objectContaining({ provider: "google" }),
+      }),
+    );
+  });
+
+  it("reports a second refusal after the login page comes back", async () => {
+    platform.desktop = true;
+    const refusal = "instafy://auth?error=access_denied&error_description=The+user+denied+the+request";
+    await mount();
+    await act(async () => handlers?.handleGoogleLogin());
+    await act(async () => platform.desktopListener?.(refusal));
+    expect(setError).toHaveBeenLastCalledWith("Google sign-in was cancelled or refused. Try again.");
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await mount();
+    setError.mockClear();
+    setAwaitingBrowser.mockClear();
+
+    await act(async () => handlers?.handleGoogleLogin());
+    await act(async () => platform.desktopListener?.(refusal));
+
+    expect(setError).toHaveBeenLastCalledWith("Google sign-in was cancelled or refused. Try again.");
+    expect(setAwaitingBrowser).toHaveBeenLastCalledWith(null);
   });
 
   it("ends the desktop browser wait when the callback completes sign-in", async () => {

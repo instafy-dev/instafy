@@ -169,12 +169,14 @@ async function openSharedBrowser(page: Page) {
   await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 90_000 });
   await page.getByTestId("composer-action-menu-trigger").click();
   await page.getByTestId("composer-action-menu-open-browser").click();
-  const location = page.getByTestId("browser-location-menu");
-  await expect(location).toBeVisible();
-  // Web already opens Workspace. Its chrome moves when the runtime attaches,
-  // so only open the location picker when a transport change is needed.
-  if (await location.getAttribute("aria-label") !== "Browser location: Workspace") {
-    await location.click();
+  // Web already opens Workspace. Where the browser runs is a setting in its
+  // Options menu; its chrome moves when the runtime attaches, so only open
+  // that menu when a change is needed.
+  const shared = page.getByTestId("browser-session-modal");
+  const personal = page.getByTestId("personal-browser-surface").filter({ visible: true });
+  await expect(shared.or(personal).first()).toBeVisible({ timeout: 60_000 });
+  if (await personal.count()) {
+    await page.getByRole("button", { name: "Browser settings" }).click();
     await page.getByTestId("browser-transport-shared").click();
   }
   await expectBrowserReady(page);
@@ -183,19 +185,17 @@ async function openSharedBrowser(page: Page) {
 async function expectHumanBrowserControl(page: Page) {
   const collaboration = page.getByTestId("shared-browser-collaboration");
   await expect(collaboration).toBeVisible();
+  // Alone in the browser there is nothing to hand over, so neither the
+  // control chip nor Release shows (a compact trigger names only the people).
+  // This person drives it: the page takes their input.
   const compactToggle = collaboration.getByTestId("shared-browser-collaboration-toggle");
-  // Compact chrome reports ownership on its trigger while the participant
-  // menu is closed. Opening that portal just to read status obscures the
-  // remote surface that this journey needs to drive next.
   if (await compactToggle.count()) {
-    await expect(compactToggle).toHaveAccessibleName(
-      /^Browser participants and control: You control\./,
-      { timeout: 30_000 },
-    );
-  } else {
-    await expect(collaboration.getByTestId("shared-browser-collaboration-control-state"))
-      .toHaveText("You control", { timeout: 30_000 });
+    await expect(compactToggle).toHaveAccessibleName(/^Browser participants: /, { timeout: 30_000 });
   }
+  await expect(collaboration.getByTestId("shared-browser-collaboration-control-state")).toHaveCount(0);
+  await expect(collaboration.getByTestId("shared-browser-collaboration-control-action")).toHaveCount(0);
+  await expect(page.getByTestId("shared-browser-cdp-screencast"))
+    .toHaveAttribute("data-input-enabled", "true", { timeout: 30_000 });
 }
 
 async function expectBrowserReady(page: Page) {

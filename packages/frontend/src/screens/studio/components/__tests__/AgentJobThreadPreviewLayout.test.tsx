@@ -81,6 +81,8 @@ const CONTROLLER_CREDENTIAL_REFRESH_TOKEN_REUSED_ERROR = `unexpected status 401 
   "message": "Codex OAuth refresh failed: Your refresh token has already been used to generate a new access token. Please try signing in again."
 }`;
 
+const SIGN_IN = "Your AI connection needs you to sign in again.";
+
 const CONTROLLER_CREDENTIAL_REFRESH_INVALID_ERROR =
   'unexpected status 401 Unauthorized: controller credential fetch failed: controller credentials returned 500 Internal Server Error: {"message":"Codex OAuth refresh failed: Could not validate your refresh token. Please try signing in again."}, url: http://proxy:8789/v1/responses';
 
@@ -551,10 +553,10 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    const line = container.querySelector('[data-testid="turn-activity-line"]');
-    expect(line?.tagName).toBe("DIV");
-    expect(line?.textContent).toBe("Looked up a place");
-    expect(line?.hasAttribute("aria-expanded")).toBe(false);
+    // The failure block is the turn's one line: a summary of its steps above
+    // it would read like a turn that went fine.
+    expect(container.querySelector('[data-testid="turn-activity-line"]')).toBeNull();
+    expect(container.textContent).not.toContain("Looked up a place");
     expect(container.querySelectorAll('[data-testid="run-failure-details-toggle"]')).toHaveLength(1);
     expect(container.querySelector('[data-testid="turn-activity-details"]')).toBeNull();
 
@@ -566,6 +568,181 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(failureBody?.querySelector('[data-testid="run-failure-details"]')).not.toBeNull();
     expect(failureBody?.querySelector('[data-testid="turn-activity-details"]')).not.toBeNull();
     expect(failureBody?.querySelectorAll('[data-testid="turn-activity-command"]')).toHaveLength(1);
+  });
+
+  describe("a turn Instafy tried again by itself", () => {
+    const FAILED_JOB = "a00e3297-00b0-42d2-b168-40115fccf8ea";
+    const RAW_FAILURE = "Codex did not apply any workspace changes for a file-modifying request.";
+
+    function failedAttempt(now: number): ChatMessage[] {
+      return [
+        {
+          id: "first-retry-status",
+          role: "assistant",
+          authorId: null,
+          content: "Retrying: accepted execution evidence is still missing.",
+          timestamp: now - 20_000,
+          files: null,
+          messageType: "status",
+          metadata: { jobId: FAILED_JOB, source: "agent", messageType: "status", kind: "codex_retry" },
+        },
+        {
+          ...commandStep("first-pwd", null, { timestamp: now - 19_000, output: "/workspace" }),
+          metadata: {
+            ...(commandStep("first-pwd", null).metadata as Record<string, unknown>),
+            jobId: FAILED_JOB,
+          },
+        },
+        {
+          id: "first-failure",
+          role: "assistant",
+          authorId: null,
+          content: RAW_FAILURE,
+          timestamp: now - 18_000,
+          files: null,
+          messageType: "error",
+          metadata: { jobId: FAILED_JOB, source: "agent", outcome: "failed", messageType: "error" },
+        },
+      ];
+    }
+
+    function retriedTurn(threadMessages: ChatMessage[], now: number): ChatMessage {
+      const base = createMessage();
+      return createMessage({
+        metadata: { ...base.metadata, threadMessages, earlierAttempts: [failedAttempt(now)] },
+      });
+    }
+
+    const reply = (now: number): ChatMessage => ({
+      id: "retry-reply",
+      role: "assistant",
+      authorId: null,
+      content: "I can't try www.roborock.com in this run, so I left the comparison page unbuilt.",
+      timestamp: now - 1_000,
+      files: null,
+      metadata: { jobId: JOB_ID, source: "agent", kind: "result", outcome: "success" },
+    });
+
+    it("reads as a normal success, with the first try in Details", async () => {
+      const now = Date.now();
+      const message = retriedTurn([commandStep("retry-pwd", null, { timestamp: now - 2_000 }), reply(now)], now);
+
+      await act(async () => {
+        root.render(<LiveAgentJobThreadPreview message={message} />);
+      });
+
+      // One plain line and the reply: no failure, no status, no retry chip.
+      const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
+      expect(line?.textContent).toBe("Ran a command" + "Details");
+      expect(container.textContent).toContain("I can't try www.roborock.com in this run");
+      for (const absent of ["run-failure-body", "run-failure-auto-retry", "agent-thread-terminal-status", "run-failure-retried"]) {
+        expect(container.querySelector(`[data-testid="${absent}"]`), absent).toBeNull();
+      }
+      expect(container.textContent).not.toMatch(/Run failed|Retried|codex|workspace|request/i);
+
+      await act(async () => {
+        line?.click();
+      });
+      const attempts = container.querySelector('[data-testid="turn-activity-attempts"]');
+      expect(line?.getAttribute("aria-controls")).toBe(attempts?.id);
+      const firstTry = attempts?.querySelector('[data-testid="turn-activity-earlier-attempt"]');
+      expect(firstTry?.textContent).toContain("First try");
+      expect(firstTry?.querySelectorAll('[data-testid="turn-activity-command"]')).toHaveLength(1);
+      expect(firstTry?.textContent).toContain("Trying again…");
+      // The runtime's own sentence lives only here.
+      expect(firstTry?.textContent).toContain(RAW_FAILURE);
+      expect(attempts?.textContent).toContain("Second try");
+      expect(attempts?.querySelectorAll('[data-testid="turn-activity-command"]')).toHaveLength(2);
+    });
+
+    it("gives a retry that only replied a line that opens the first try", async () => {
+      const now = Date.now();
+      const message = retriedTurn([reply(now)], now);
+
+      await act(async () => {
+        root.render(<LiveAgentJobThreadPreview message={message} />);
+      });
+
+      const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
+      expect(line?.textContent).toBe("Took two tries" + "Details");
+      await act(async () => {
+        line?.click();
+      });
+      expect(container.querySelector('[data-testid="turn-activity-earlier-attempt"]')?.textContent).toContain(
+        "First try",
+      );
+      expect(container.textContent).not.toContain("Second try");
+    });
+
+    it("shows the failure block only when the retry fails too, with both tries behind its Details", async () => {
+      const now = Date.now();
+      const message = retriedTurn(
+        [
+          {
+            id: "retry-failure",
+            role: "assistant",
+            authorId: null,
+            content: RAW_FAILURE,
+            timestamp: now - 1_000,
+            files: null,
+            messageType: "error",
+            metadata: { jobId: JOB_ID, source: "agent", outcome: "failed", messageType: "error" },
+          },
+        ],
+        now,
+      );
+
+      await act(async () => {
+        root.render(<LiveAgentJobThreadPreview message={message} />);
+      });
+
+      expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+        "Octo didn't finish the changes.",
+      );
+      expect(container.querySelector('[data-testid="turn-activity-line"]')).toBeNull();
+      expect(container.textContent).not.toContain("Run failed");
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('[data-testid="run-failure-details-toggle"]')?.click();
+      });
+      expect(container.querySelector('[data-testid="turn-activity-earlier-attempt"]')?.textContent).toContain(
+        "First try",
+      );
+    });
+
+    it("is one quiet line while its resend is out and the retry has shown nothing", async () => {
+      const now = Date.now();
+      const base = createMessage();
+      const message = createMessage({
+        metadata: { ...base.metadata, threadMessages: failedAttempt(now).map((entry) => ({
+          ...entry,
+          metadata: { ...(entry.metadata as Record<string, unknown>), jobId: JOB_ID },
+        })), autoRetryPending: true },
+      });
+
+      await act(async () => {
+        root.render(
+          <RunFailureRetryProvider value={{ pendingRetryKey: null, requestRetry: vi.fn(), autoRetryingKey: null }}>
+            <LiveAgentJobThreadPreview message={message} />
+          </RunFailureRetryProvider>,
+        );
+      });
+
+      expect(container.querySelector('[data-testid="run-failure-auto-retrying"]')?.textContent).toContain(
+        "Trying again…",
+      );
+      for (const absent of [
+        "run-failure-body",
+        "run-failure-retry",
+        "run-failure-retried",
+        "run-failure-details-toggle",
+        "agent-thread-terminal-status",
+      ]) {
+        expect(container.querySelector(`[data-testid="${absent}"]`), absent).toBeNull();
+      }
+      // No failure styling: no red rule beside the line.
+      expect(container.querySelector(".border-rose-200")).toBeNull();
+      expect(container.textContent).not.toMatch(/Run failed|didn't finish|codex|workspace/i);
+    });
   });
 
   it("keeps cards in the turn's default view, outside Details", async () => {
@@ -681,7 +858,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     expect(container.textContent).not.toContain("Status unavailable");
     expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
-      "The AI provider is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, the provider account may have reached its usage limit.",
+      "The AI is busy right now, so this turn stopped. Wait a little, then try again. If it keeps happening, its usage limit may have been reached.",
     );
     const retryButton = container.querySelector(
       '[data-testid="run-failure-retry"]',
@@ -735,9 +912,9 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
-      "Run failed",
-    );
+    // The failure block says what happened; no second "Run failed" status.
+    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
+    expect(container.textContent).not.toContain("Run failed");
     expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
       "This turn was stopped and didn't pick up again in time. Try again to continue.",
     );
@@ -795,35 +972,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.textContent).toContain("Completed step.");
     expect(container.querySelector('button[aria-label*="Stop"], [data-testid="chat-command-stop-button"]')).toBeNull();
   });
-  it("marks failed completed run traces with an explicit terminal status", async () => {
-    await act(async () => {
-      root.render(
-        <AgentJobThreadPreviewLayout
-          {...createProps({
-            finalSpineTone: "danger",
-            finalSummaryMessage: createMessage({
-              id: "error-summary",
-              content: "Codex completed without returning a final assistant message after retry.",
-            }),
-          })}
-        />,
-      );
-    });
-
-    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
-      "Run failed",
-    );
-    expect(container.textContent).toContain(
-      "The reply didn't come through — this is usually a temporary provider hiccup.",
-    );
-    expect(container.textContent).not.toContain(
-      "Codex completed without returning a final assistant message after retry.",
-    );
-    expect(container.querySelector('[data-testid="agent-thread-preview-header"]')).toBeNull();
-    expect(container.querySelector('[data-testid="thread-spine"]')).toBeNull();
-  });
-
-  it("folds the terminal status into the preview header when the header renders", async () => {
+  it("reads a failed turn's outcome once, in its failure block", async () => {
     await act(async () => {
       root.render(
         <AgentJobThreadPreviewLayout
@@ -839,6 +988,36 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
+    // No "Run failed" beside the failure block, and no summary line above it.
+    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
+    expect(container.textContent).not.toContain("Run failed");
+    expect(container.querySelector('[data-testid="turn-activity-line"]')).toBeNull();
+    expect(container.textContent).toContain(
+      "The reply didn't come through. This is usually temporary.",
+    );
+    expect(container.textContent).not.toContain(
+      "Codex completed without returning a final assistant message after retry.",
+    );
+    expect(container.querySelector('[data-testid="agent-thread-preview-header"]')).toBeNull();
+    expect(container.querySelector('[data-testid="thread-spine"]')).toBeNull();
+  });
+
+  it("keeps the run status in the header for a failed turn with no failure block to show", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            finalSpineTone: "danger",
+            activity: activityWithUpdates([]),
+            finalSummaryMessage: null,
+            hasPreview: false,
+            previewText: "",
+          })}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="run-failure-body"]')).toBeNull();
     const statusMarkers = container.querySelectorAll('[data-testid="agent-thread-terminal-status"]');
     expect(statusMarkers).toHaveLength(1);
     expect(statusMarkers[0]?.textContent).toBe("Run failed");
@@ -867,7 +1046,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
     expect(container.textContent).toContain(
-      "The reply didn't come through — this is usually a temporary provider hiccup.",
+      "The reply didn't come through. This is usually temporary.",
     );
   });
 
@@ -887,7 +1066,9 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.textContent).toContain("The file changes didn't come through.");
+    // Plain words up front; the runtime's own sentence only behind Details.
+    expect(container.textContent).toContain("Octo didn't finish the changes.");
+    expect(container.textContent).not.toMatch(/codex|workspace|request/i);
     expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
     // Without a retry provider (read-only surfaces) the resend affordance stays hidden.
     expect(container.querySelector('[data-testid="run-failure-retry"]')).toBeNull();
@@ -896,12 +1077,20 @@ describe("AgentJobThreadPreviewLayout", () => {
       '[data-testid="run-failure-details-toggle"]',
     ) as HTMLButtonElement | null;
     expect(detailsToggle).not.toBeNull();
+    expect(detailsToggle?.textContent).toBe("Details");
     expect(detailsToggle?.getAttribute("aria-expanded")).toBe("false");
     await act(async () => {
       detailsToggle?.click();
     });
 
+    // The toggle says it is open, and names what it opened.
+    expect(detailsToggle?.textContent).toBe("Hide details");
     expect(detailsToggle?.getAttribute("aria-expanded")).toBe("true");
+    const controlled = detailsToggle?.getAttribute("aria-controls") ?? "";
+    expect(controlled).not.toBe("");
+    expect(container.querySelector(`[id="${controlled}"]`)?.contains(
+      container.querySelector('[data-testid="run-failure-details"]'),
+    )).toBe(true);
     expect(container.querySelector('[data-testid="run-failure-details"]')?.textContent).toBe(
       "Codex did not apply any workspace changes for a file-modifying request.",
     );
@@ -909,6 +1098,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     await act(async () => {
       detailsToggle?.click();
     });
+    expect(detailsToggle?.textContent).toBe("Details");
     expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
   });
 
@@ -984,7 +1174,7 @@ describe("AgentJobThreadPreviewLayout", () => {
             finalSpineTone: "danger",
             finalSummaryMessage: createMessage({
               id: "error-summary",
-              content: "Codex run hit an unexpected internal state.",
+              content: "The map service stopped answering.",
               metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: JOB_ID },
             }),
           })}
@@ -993,13 +1183,11 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     // The uninformative canned sentence is gone; the actual failure reason is
-    // shown inline instead of only behind Details.
-    expect(container.textContent).toContain("Codex run hit an unexpected internal state.");
-    expect(container.textContent).not.toContain("Something went wrong finishing this run.");
-    // Status stays present as the entry-level header.
-    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
-      "Run failed",
+    // shown inline instead of only behind Details, and is the turn's one status.
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+      "The map service stopped answering.",
     );
+    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
   });
 
   it("keeps reconnect guidance for a terminal credential-refresh failure", async () => {
@@ -1024,11 +1212,79 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.textContent).toContain(
-      "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-    );
-    expect(container.textContent).not.toContain("Something went wrong finishing this run.");
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(SIGN_IN);
+    expect(container.textContent).not.toContain("Something went wrong");
     expect(container.textContent).not.toContain("controller credential fetch failed");
+  });
+
+  describe("the proxy's 424 when its sign-in could not be renewed", () => {
+    // What Codex stores for the proxy's 424: the status and the envelope's
+    // message, without its code.
+    const REFRESH_424 =
+      "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses";
+
+    async function renderFailure(aiAccessMode: string | null) {
+      const requestRetry = vi.fn();
+      const onConnectAi = vi.fn();
+      await act(async () => {
+        root.render(
+          <RunFailureRetryProvider
+            value={{ pendingRetryKey: null, requestRetry, autoRetryingKey: null, onConnectAi }}
+          >
+            <AgentJobThreadPreviewLayout
+              {...createProps({
+                finalSpineTone: "danger",
+                finalSummaryMessage: createMessage({
+                  id: "refresh-424",
+                  content: REFRESH_424,
+                  messageType: "error",
+                  metadata: {
+                    source: "agent",
+                    outcome: "failed",
+                    messageType: "error",
+                    jobId: JOB_ID,
+                    errorMessage: REFRESH_424,
+                    ...(aiAccessMode ? { aiAccessMode } : {}),
+                  },
+                }),
+              })}
+            />
+          </RunFailureRetryProvider>,
+        );
+      });
+      return { requestRetry, onConnectAi };
+    }
+
+    it("shows the failure block on Instafy AI, without sign-in talk", async () => {
+      const { requestRetry } = await renderFailure("managed");
+      const body = container.querySelector('[data-testid="run-failure-body"]');
+      expect(body?.querySelector("p")?.textContent).toBe("Instafy AI isn't answering right now.");
+      expect(container.querySelector('[data-testid="run-failure-manage-ai"]')).toBeNull();
+      expect(container.textContent).not.toMatch(/upstream|provider|credential|switch|sign in/i);
+      const retry = container.querySelector<HTMLButtonElement>('[data-testid="run-failure-retry"]');
+      expect(retry?.textContent).toBe("Try again");
+      await act(async () => retry?.click());
+      expect(requestRetry).toHaveBeenCalledTimes(1);
+
+      // The raw diagnostic sits behind Details only.
+      expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('[data-testid="run-failure-details-toggle"]')?.click();
+      });
+      expect(container.querySelector('[data-testid="run-failure-details"]')?.textContent).toBe(REFRESH_424);
+    });
+
+    it.each(["byoc", null])("asks the person to sign in again on their own AI (%s)", async (aiAccessMode) => {
+      const { onConnectAi } = await renderFailure(aiAccessMode);
+      expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(SIGN_IN);
+      const manageAi = container.querySelector<HTMLButtonElement>('[data-testid="run-failure-manage-ai"]');
+      expect(manageAi?.textContent).toBe("Manage AI");
+      expect(container.querySelector('[data-testid="run-failure-retry"]')?.textContent).toBe("Try again");
+      expect(container.querySelector('[data-testid="run-failure-details-toggle"]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Upstream credentials");
+      await act(async () => manageAi?.click());
+      expect(onConnectAi).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("proxy errors from the live thread", () => {
@@ -1120,12 +1376,9 @@ describe("AgentJobThreadPreviewLayout", () => {
       ]);
 
       expect(state?.finalSpineTone).toBe("danger");
-      expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
-        "Run failed",
-      );
-      expect(container.textContent).toContain(
-        "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-      );
+      // The failure block is the turn's one status.
+      expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
+      expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(SIGN_IN);
     });
 
     it("shows a run that ran out of retries on a proxy 502 as failed, without blaming credentials", async () => {
@@ -1145,13 +1398,11 @@ describe("AgentJobThreadPreviewLayout", () => {
       ]);
 
       expect(state?.finalSpineTone).toBe("danger");
-      expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
-        "Run failed",
+      // The failure block is the turn's one status.
+      expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
+      expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+        "The connection to the AI dropped. This is usually temporary.",
       );
-      expect(container.textContent).toContain(
-        "Connection to the AI provider dropped. This is usually temporary.",
-      );
-      expect(container.textContent).not.toContain("switch credentials");
     });
   });
 
@@ -1189,7 +1440,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.textContent).toContain("Taking another pass…");
+    expect(container.textContent).toContain("Trying again…");
     expect(container.textContent).not.toContain(rawRetryLine);
     expect(container.querySelector(`[title="${rawRetryLine}"]`)).not.toBeNull();
   });
@@ -1220,8 +1471,11 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.textContent).toContain("Run failed");
-    expect(container.textContent).toContain("Upstream 429 rejected the AI request (insufficient_quota).");
+    // The failure block is the turn's one status.
+    expect(container.textContent).not.toContain("Run failed");
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+      "Your AI account has reached its limit.",
+    );
     expect(container.textContent).not.toContain(
       "The upstream provider rejected the AI request. Retry later or switch credentials.",
     );
@@ -1275,9 +1529,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.textContent).toContain(
-      "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-    );
+    expect(container.textContent).toContain(SIGN_IN);
     expect(container.textContent).not.toContain("controller credential fetch failed");
   });
 
@@ -1313,7 +1565,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     const renderedText = container.textContent ?? "";
-    const summary = "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.";
+    const summary = SIGN_IN;
     expect(renderedText.split(summary)).toHaveLength(2);
     expect(renderedText).toContain("Codex run timed out");
     expect(container.querySelector('[data-testid="agent-thread-inline-update-row"]')?.className).toContain(
@@ -1346,7 +1598,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     const renderedText = container.textContent ?? "";
-    const summary = "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.";
+    const summary = SIGN_IN;
     expect(renderedText.split(summary)).toHaveLength(2);
     expect(renderedText).not.toContain("controller credential fetch failed");
   });

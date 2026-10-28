@@ -56,6 +56,15 @@ function safeProxyError(status: number, code: string, message: string, type = "u
   return `unexpected status ${status}: ${JSON.stringify({ error: { type, code, message } })}, url: http://proxy:8789/v1/responses`;
 }
 
+// What Codex stores when the proxy refuses: the status and the envelope's
+// message, without its JSON code.
+function plainProxyError(status: string, message: string) {
+  return `unexpected status ${status}: ${message}, url: http://proxy:8789/v1/responses`;
+}
+
+const SIGN_IN = "Your AI connection needs you to sign in again.";
+const JARGON = /upstream|provider|credential|switch/i;
+
 describe("proxyError", () => {
   it.each([
     [401, "upstream_authentication_error", "The upstream provider rejected authentication."],
@@ -66,12 +75,33 @@ describe("proxyError", () => {
       expect(parseProxyUpstreamError(content)?.upstreamCode).toBe(code);
       expect(isExpiredCredentialProxyError(content)).toBe(true);
       const guidance = resolveProxyUpstreamErrorGuidance(content);
-      expect(guidance?.summary).toBe(
-        "AI credentials need reconnecting. Reconnect AI credentials, then retry the message.",
-      );
+      expect(guidance?.summary).toBe(SIGN_IN);
       expect(guidance?.actionKind).toBe("open_ai_settings");
-      expect(guidance?.actionLabel).toBe("Open AI settings");
-      expect(guidance?.summary).not.toContain("ChatGPT");
+      expect(guidance?.actionLabel).toBe("Manage AI");
+    }
+  });
+
+  it.each([
+    ["424 Failed Dependency", "Upstream credentials could not be refreshed."],
+    ["401 Unauthorized", "The upstream provider rejected authentication."],
+  ] as const)("reads the proxy's plain %s sentence as a sign-in to renew", (status, message) => {
+    const diagnostic = plainProxyError(status, message);
+    expect(isExpiredCredentialProxyError(diagnostic)).toBe(true);
+    expect(resolveProxyUpstreamErrorGuidance(diagnostic)).toMatchObject({
+      summary: SIGN_IN,
+      actionLabel: "Manage AI",
+      actionKind: "open_ai_settings",
+    });
+  });
+
+  it("needs the proxy's own status beside its sentence", () => {
+    for (const diagnostic of [
+      plainProxyError("502 Bad Gateway", "Upstream credentials could not be refreshed."),
+      plainProxyError("424 Failed Dependency", "The upstream request configuration is invalid."),
+      plainProxyError("401 Unauthorized", "proxy token missing credential_id for BYOC request"),
+    ]) {
+      expect(isExpiredCredentialProxyError(diagnostic), diagnostic).toBe(false);
+      expect(resolveProxyUpstreamErrorGuidance(diagnostic)?.summary, diagnostic).not.toBe(SIGN_IN);
     }
   });
 
@@ -88,7 +118,7 @@ describe("proxyError", () => {
   ] as const)("does not reconnect for %s %s", (status, code) => {
     const diagnostic = safeProxyError(status, code, "Safe failure message.");
     expect(isExpiredCredentialProxyError(diagnostic)).toBe(false);
-    expect(resolveProxyUpstreamErrorGuidance(diagnostic)?.actionLabel).not.toBe("Open AI settings");
+    expect(resolveProxyUpstreamErrorGuidance(diagnostic)?.summary).not.toBe(SIGN_IN);
   });
 
   it("requires the proxy envelope type for safe credential codes", () => {
@@ -98,40 +128,38 @@ describe("proxyError", () => {
   });
 
   it("keeps safe quota failures separate from reconnectable credentials", () => {
-    const diagnostic = safeProxyError(402, "upstream_insufficient_quota", "The upstream provider has no available quota.");
-    const guidance = resolveProxyUpstreamErrorGuidance(diagnostic);
-    expect(guidance?.detail).toContain("separate from Instafy workspace credits");
-    expect(guidance?.actionLabel).toBe("Manage AI");
+    for (const diagnostic of [
+      safeProxyError(402, "upstream_insufficient_quota", "The upstream provider has no available quota."),
+      plainProxyError("402 Payment Required", "The upstream provider has no available quota."),
+    ]) {
+      const guidance = resolveProxyUpstreamErrorGuidance(diagnostic);
+      expect(guidance?.summary).toBe("Your AI account has reached its limit.");
+      expect(guidance?.detail).toContain("not on your Instafy credits");
+      expect(guidance?.actionLabel).toBe("Manage AI");
+      expect(isExpiredCredentialProxyError(diagnostic)).toBe(false);
+    }
   });
 
   it("detects expired credential proxy responses", () => {
     expect(isExpiredCredentialProxyError(TOKEN_EXPIRED_ERROR)).toBe(true);
-    expect(formatProxyUpstreamErrorSummary(TOKEN_EXPIRED_ERROR)).toContain(
-      "Reconnect AI credentials",
-    );
+    expect(formatProxyUpstreamErrorSummary(TOKEN_EXPIRED_ERROR)).toBe(SIGN_IN);
   });
 
   it("detects reused ChatGPT refresh tokens as reconnectable credentials", () => {
     expect(isExpiredCredentialProxyError(REFRESH_TOKEN_REUSED_ERROR)).toBe(true);
-    expect(formatProxyUpstreamErrorSummary(REFRESH_TOKEN_REUSED_ERROR)).toBe(
-      "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-    );
+    expect(formatProxyUpstreamErrorSummary(REFRESH_TOKEN_REUSED_ERROR)).toBe(SIGN_IN);
   });
 
   it("detects controller credential refresh failures as reconnectable credentials", () => {
     expect(isExpiredCredentialProxyError(CONTROLLER_CREDENTIAL_REFRESH_TOKEN_REUSED_ERROR)).toBe(
       true,
     );
-    expect(formatProxyUpstreamErrorSummary(CONTROLLER_CREDENTIAL_REFRESH_TOKEN_REUSED_ERROR)).toBe(
-      "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-    );
+    expect(formatProxyUpstreamErrorSummary(CONTROLLER_CREDENTIAL_REFRESH_TOKEN_REUSED_ERROR)).toBe(SIGN_IN);
   });
 
   it("detects ended ChatGPT sessions after forced refresh as reconnectable credentials", () => {
     expect(isExpiredCredentialProxyError(CONTROLLER_CREDENTIAL_SESSION_ENDED_ERROR)).toBe(true);
-    expect(formatProxyUpstreamErrorSummary(CONTROLLER_CREDENTIAL_SESSION_ENDED_ERROR)).toBe(
-      "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-    );
+    expect(formatProxyUpstreamErrorSummary(CONTROLLER_CREDENTIAL_SESSION_ENDED_ERROR)).toBe(SIGN_IN);
   });
 
   it("extracts structured upstream metadata for rate limits", () => {
@@ -146,32 +174,54 @@ describe("proxyError", () => {
 
   it("explains insufficient upstream quota separately from Instafy credits", () => {
     const guidance = resolveProxyUpstreamErrorGuidance(INSUFFICIENT_QUOTA_ERROR);
-    expect(guidance?.summary).toBe("Upstream 429 rejected the AI request (insufficient_quota).");
-    expect(guidance?.detail).toContain("upstream AI credential/account");
-    expect(guidance?.detail).toContain("separate from Instafy workspace credits");
+    expect(guidance?.summary).toBe("Your AI account has reached its limit.");
+    expect(guidance?.detail).toBe("This is a limit on your AI account, not on your Instafy credits.");
     expect(guidance?.actionKind).toBe("open_ai_settings");
     expect(formatProxyUpstreamErrorSummary(INSUFFICIENT_QUOTA_ERROR)).toBe(guidance?.summary);
   });
 
   it("recognizes already summarized insufficient quota messages", () => {
-    const guidance = resolveProxyUpstreamErrorGuidance(
+    for (const summary of [
+      "Your AI account has reached its limit.",
       "Upstream 429 rejected the AI request (insufficient_quota). Retry later or switch credentials.",
-    );
-    expect(guidance?.summary).toBe("Upstream 429 rejected the AI request (insufficient_quota).");
-    expect(guidance?.detail).toContain("separate from Instafy workspace credits");
-    expect(guidance?.actionLabel).toBe("Manage AI");
+    ]) {
+      const guidance = resolveProxyUpstreamErrorGuidance(summary);
+      expect(guidance?.summary).toBe("Your AI account has reached its limit.");
+      expect(guidance?.actionLabel).toBe("Manage AI");
+    }
   });
 
   it("recognizes already summarized reconnectable credential messages", () => {
-    const guidance = resolveProxyUpstreamErrorGuidance(
+    for (const summary of [
+      SIGN_IN,
       "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-    );
-    expect(guidance?.summary).toBe(
-      "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-    );
-    expect(guidance?.detail).toContain("The saved AI login is stale");
-    expect(guidance?.actionLabel).toBe("Open AI settings");
-    expect(guidance?.actionKind).toBe("open_ai_settings");
+    ]) {
+      const guidance = resolveProxyUpstreamErrorGuidance(summary);
+      expect(guidance?.summary).toBe(SIGN_IN);
+      expect(guidance?.detail).toBe("Sign in again under Manage AI, then send your message again.");
+      expect(guidance?.actionLabel).toBe("Manage AI");
+      expect(guidance?.actionKind).toBe("open_ai_settings");
+    }
+  });
+
+  it("never names the plumbing in what a person reads", () => {
+    for (const diagnostic of [
+      TOKEN_EXPIRED_ERROR,
+      RATE_LIMIT_ERROR,
+      INSUFFICIENT_QUOTA_ERROR,
+      REFRESH_TOKEN_REUSED_ERROR,
+      plainProxyError("424 Failed Dependency", "Upstream credentials could not be refreshed."),
+      plainProxyError("424 Failed Dependency", "The upstream request configuration is invalid."),
+      plainProxyError("403 Forbidden", "The upstream provider denied access."),
+      plainProxyError("429 Too Many Requests", "The upstream provider rate limit was reached."),
+      plainProxyError("502 Bad Gateway", "The upstream request failed."),
+      `Retrying: ${plainProxyError("504 Gateway Timeout", "The upstream request timed out.")}`,
+    ]) {
+      const guidance = resolveProxyUpstreamErrorGuidance(diagnostic);
+      expect(guidance, diagnostic).not.toBeNull();
+      expect(guidance?.summary, diagnostic).not.toMatch(JARGON);
+      expect(guidance?.detail ?? "", diagnostic).not.toMatch(JARGON);
+    }
   });
 
   describe("transient provider failures", () => {
@@ -182,27 +232,25 @@ describe("proxyError", () => {
 
     it("reads a retried 502 transport failure as a dropped connection, not a rejection", () => {
       const guidance = resolveProxyUpstreamErrorGuidance(`Retrying: ${TRANSPORT_DIAGNOSTIC}`);
-      expect(guidance?.summary).toBe("Connection to the AI provider dropped; retrying.");
-      expect(guidance?.summary).not.toContain("rejected");
-      expect(guidance?.summary).not.toContain("switch credentials");
+      expect(guidance?.summary).toBe("The connection to the AI dropped. Trying again.");
       expect(guidance?.actionKind).toBeNull();
       expect(guidance?.actionLabel).toBeNull();
     });
 
     it("reads a final 502 transport failure as a temporary dropped connection", () => {
       const guidance = resolveProxyUpstreamErrorGuidance(TRANSPORT_DIAGNOSTIC);
-      expect(guidance?.summary).toBe("Connection to the AI provider dropped. This is usually temporary.");
+      expect(guidance?.summary).toBe("The connection to the AI dropped. This is usually temporary.");
       expect(guidance?.detail).toContain("send your message again");
       expect(guidance?.actionKind).toBeNull();
       expect(isExpiredCredentialProxyError(TRANSPORT_DIAGNOSTIC)).toBe(false);
     });
 
     it.each([
-      [502, "upstream_transport_error", "The upstream request failed.", "Connection to the AI provider dropped"],
-      [502, "upstream_stream_error", "The upstream provider reported a stream failure.", "Connection to the AI provider dropped"],
-      [502, "upstream_invalid_response", "The upstream provider returned an invalid response.", "Connection to the AI provider dropped"],
-      [503, "upstream_http_error", "The upstream provider is unavailable.", "Connection to the AI provider dropped"],
-      [504, "upstream_timeout", "The upstream request timed out.", "The AI provider took too long to respond"],
+      [502, "upstream_transport_error", "The upstream request failed.", "The connection to the AI dropped"],
+      [502, "upstream_stream_error", "The upstream provider reported a stream failure.", "The connection to the AI dropped"],
+      [502, "upstream_invalid_response", "The upstream provider returned an invalid response.", "The connection to the AI dropped"],
+      [503, "upstream_http_error", "The upstream provider is unavailable.", "The connection to the AI dropped"],
+      [504, "upstream_timeout", "The upstream request timed out.", "The AI took too long to answer"],
     ] as const)("maps the %s %s envelope to transient wording", (status, code, message, headline) => {
       const summary = formatProxyUpstreamErrorSummary(safeProxyError(status, code, message));
       expect(summary).toBe(`${headline}. This is usually temporary.`);
@@ -211,34 +259,39 @@ describe("proxyError", () => {
     it("maps a provider 5xx behind the proxy to transient wording", () => {
       const diagnostic = `unexpected status 502 Bad Gateway: upstream request failed (credential_source=claim, endpoint=api.openai.com/v1/responses): backend responded with 500 Internal Server Error: {"error":{"message":"Server error","type":"server_error"},"status":500}`;
       expect(formatProxyUpstreamErrorSummary(diagnostic)).toBe(
-        "Connection to the AI provider dropped. This is usually temporary.",
+        "The connection to the AI dropped. This is usually temporary.",
       );
     });
 
     it.each([
-      [401, "upstream_authentication_error", "The upstream provider rejected authentication."],
-      [403, "upstream_access_denied", "The upstream provider denied access."],
-      [402, "upstream_insufficient_quota", "The upstream provider has no available quota."],
-      [429, "upstream_rate_limit", "The upstream provider rate limit was reached."],
-    ] as const)("keeps credential guidance for %s %s", (status, code, message) => {
-      const summary = formatProxyUpstreamErrorSummary(safeProxyError(status, code, message)) ?? "";
-      expect(summary).not.toContain("Connection to the AI provider dropped");
-      expect(summary).toMatch(/rejected the AI request|Reconnect AI credentials/);
+      [401, "upstream_authentication_error", "The upstream provider rejected authentication.", SIGN_IN],
+      [403, "upstream_access_denied", "The upstream provider denied access.", "Your AI connection couldn't answer this message."],
+      [402, "upstream_insufficient_quota", "The upstream provider has no available quota.", "Your AI account has reached its limit."],
+      [
+        429,
+        "upstream_rate_limit",
+        "The upstream provider rate limit was reached.",
+        "Your AI connection is busy right now. Wait a little, then try again.",
+      ],
+    ] as const)("keeps account guidance for %s %s", (status, code, message, summary) => {
+      const guidance = resolveProxyUpstreamErrorGuidance(safeProxyError(status, code, message));
+      expect(guidance?.summary).toBe(summary);
+      expect(guidance?.actionLabel).toBe("Manage AI");
     });
 
-    it("keeps the rejection wording for a provider 403 behind a 502", () => {
+    it("keeps the refusal wording for a provider 403 behind a 502", () => {
       const diagnostic = `unexpected status 502 Bad Gateway: upstream request failed (endpoint=api.openai.com/v1/responses): backend responded with 403 Forbidden: {"error":{"message":"Project does not have access to model","type":"invalid_request_error"},"status":403}`;
       expect(formatProxyUpstreamErrorSummary(diagnostic)).toBe(
-        "Upstream 403 rejected the AI request (invalid_request_error). Retry later or switch credentials.",
+        "Your AI connection couldn't answer this message.",
       );
     });
 
     it("keeps the quota and rate-limit wording when the proxy itself returned 502", () => {
       expect(formatProxyUpstreamErrorSummary(INSUFFICIENT_QUOTA_ERROR)).toBe(
-        "Upstream 429 rejected the AI request (insufficient_quota).",
+        "Your AI account has reached its limit.",
       );
-      expect(formatProxyUpstreamErrorSummary(RATE_LIMIT_ERROR)).toContain(
-        "Upstream 429 rejected the AI request (rate_limit_error). Retry later or switch credentials.",
+      expect(formatProxyUpstreamErrorSummary(RATE_LIMIT_ERROR)).toBe(
+        "Your AI connection is busy right now. Try again in 2m.",
       );
     });
   });

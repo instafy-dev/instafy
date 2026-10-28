@@ -390,7 +390,9 @@ import { previewTabLocation } from "./previewHost/PreviewLocation";
 import { useLocationSitesVersion } from "./previewHost/locationSites";
 import type { OpenWorkspaceFileEventDetail } from "./useFilesPanelViewerState";
 import { FilesPanel } from "../StudioLazyPanels";
+import { composerBrowserActions } from "./composerBrowserActions";
 import {
+  BrowserLocationOptions,
   BrowserTransportSelector,
   PersonalBrowserSurface,
 } from "./PersonalBrowserSurface";
@@ -5517,6 +5519,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     autoScrollPendingRef,
     composerAutoHidden,
     composerOverlayHeight,
+    composerScrollPaddingBottom: chatScrollPaddingBottom,
     credentialGateStateForBubble: presentedCredentialGateStateForBubble,
     displayedMessages,
     isAssistantTyping,
@@ -5850,7 +5853,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [credentialsReady, inputValue, onboardingInputLocked, sendingAttachment, submitMessage]);
 
   // Managed AI is available and send is already unblocked (credentialsReady is
-  // true), so the connect wizard's "Use free managed AI" button just dismisses
+  // true), so the connect wizard's "Use Instafy AI" button just dismisses
   // the wizard and fires whatever prompt the user already typed. The draft is
   // still in the composer (openAiOnboarding never clears it), so there is no
   // stashed draft to restore, and the false→true auto-submit effect above
@@ -6200,15 +6203,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     );
   }
 
-  const browserTransportSelector = (
-    <BrowserTransportSelector
-      checked={personalBrowser.checked}
-      compact={compactBrowserBar}
-      mode={browserTransport}
-      onModeChange={handleBrowserTransportChange}
-      personalAvailable={personalBrowser.available}
-    />
-  );
+  const browserLocation = {
+    checked: personalBrowser.checked,
+    mode: browserTransport,
+    onModeChange: handleBrowserTransportChange,
+    personalAvailable: personalBrowser.available,
+  };
+  // Where the browser runs is a setting: each browser's Options menu has it.
+  const browserLocationOptions = <BrowserLocationOptions {...browserLocation} />;
 
   const sitePreviewPanelId = conversationWorkspace ? "conversation-workspace-preview" : `${chatPanelId}-preview`;
   const resourceTabs: ConversationSurface[] = [
@@ -6550,7 +6552,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   className="flex items-center border-b border-slate-200 bg-white px-2 py-0.5 dark:border-slate-800 dark:bg-slate-950 sm:px-3"
                   data-browser-session-safe-zone="true"
                 >
-                  {browserTransportSelector}
+                  <BrowserTransportSelector {...browserLocation} compact={compactBrowserBar} />
                 </div>
               ) : null}
               <PersonalBrowserSurface
@@ -6576,7 +6578,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 onPauseAgentControl={declineBrowserAutoStart}
                 onSendPage={canSendPages ? sendPersonalPage : undefined}
                 sendPagePending={sendPagePendingViewer === "personal"}
-                transportSelector={browserTransport === "personal" ? browserTransportSelector : null}
+                locationOptions={browserTransport === "personal" ? browserLocationOptions : null}
               />
               {sharedBrowserActivated ? (
                 <div className={browserTransport === "shared" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
@@ -6596,7 +6598,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     fillContainer
                     onBackToChat={handleBackToChat}
                     onApprovalPendingChange={setSharedBrowserApprovalPending}
-                    toolbarLeading={browserTransport === "shared" ? browserTransportSelector : null}
+                    locationOptions={browserTransport === "shared" ? browserLocationOptions : null}
                     transportActive={
                       browserTransport === "shared" && browserVisible
                     }
@@ -6839,8 +6841,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           // it enabled here is what makes repo import reachable before setup.
           disabled: sendingAttachment,
           mutationDisabled: projectWriteDisabled,
-          showBrowserAction: !(browserSessionOpen || hasHiddenBrowserSession),
-          showNewBrowserAction: browserTransport === "shared",
+          ...composerBrowserActions({
+            transport: browserTransport,
+            browserOpen: browserSessionOpen || hasHiddenBrowserSession,
+          }),
           showInviteAction:
             canOpenProjectDeviceHandoff(activeProjectId, projectCapabilitiesResolved),
           inviteActionLabel: projectReadOnly ? "Open on another device" : "Invite or open elsewhere",

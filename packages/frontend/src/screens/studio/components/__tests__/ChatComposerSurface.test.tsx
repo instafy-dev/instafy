@@ -542,8 +542,23 @@ describe("ChatComposerSurface", () => {
     expect(overlay.style.transform).toBe("");
   });
 
+  it("offers Expand draft only once there is a draft to expand", async () => {
+    const props = createProps();
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    expect(container.querySelector('[aria-label="Expand draft"]')).toBeNull();
+    await act(async () => root.render(<ChatComposerSurface {...props} chatInputProps={{ ...props.chatInputProps, value: "  \n " }} />));
+    expect(container.querySelector('[aria-label="Expand draft"]')).toBeNull();
+    await act(async () => root.render(<ChatComposerSurface {...props} chatInputProps={{ ...props.chatInputProps, value: "A longer plan" }} />));
+    expect(container.querySelector('[aria-label="Expand draft"]')).not.toBeNull();
+    // Pictures alone are a draft too.
+    await act(async () => root.render(<ChatComposerSurface {...props}
+      imageAttachments={[{ id: "image-1", previewUrl: "data:image/png;base64,AA==", file: new File(["image"], "photo.png") }] as never} />));
+    expect(container.querySelector('[aria-label="Expand draft"]')).not.toBeNull();
+  });
+
   it("expands in place and collapses with Escape without remounting the editor or attachments", async () => {
-    const props = createProps({ imageAttachments: [{ id: "image-1", previewUrl: "data:image/png;base64,AA==", file: new File(["image"], "photo.png") }] as never });
+    const base = createProps({ imageAttachments: [{ id: "image-1", previewUrl: "data:image/png;base64,AA==", file: new File(["image"], "photo.png") }] as never });
+    const props = { ...base, chatInputProps: { ...base.chatInputProps, value: "A longer plan" } };
     await act(async () => root.render(<ChatComposerSurface {...props} />));
     const input = container.querySelector('[data-testid="chat-input"]');
     const preview = container.querySelector('[data-testid="chat-image-upload-preview"]');
@@ -558,7 +573,8 @@ describe("ChatComposerSurface", () => {
   });
 
   it("keeps expansion scoped to the current draft", async () => {
-    const props = createProps();
+    const base = createProps();
+    const props = { ...base, chatInputProps: { ...base.chatInputProps, value: "A longer plan" } };
     await act(async () => root.render(<ChatComposerSurface {...props} />));
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Expand draft"]')!.click());
     expect(container.querySelector('[aria-label="Collapse draft"]')).not.toBeNull();

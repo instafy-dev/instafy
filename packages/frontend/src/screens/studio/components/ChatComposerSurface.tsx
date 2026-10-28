@@ -1003,7 +1003,8 @@ export function ChatComposerSurface({
       {...composerActionMenuProps}
       queueDisabled={editingQueueMessage || composerActionMenuProps.queueDisabled}
       stashDisabled={editingQueueMessage || composerActionMenuProps.stashDisabled}
-      onExpandDraft={draftExpanded ? undefined : () => setDraftExpanded(true)}
+      // An empty draft (no words, no pictures) has nothing to expand.
+      onExpandDraft={draftExpanded || !composerHasUsablePayload ? undefined : () => setDraftExpanded(true)}
       mutationDisabled={mutationDisabled}
       onUploadImage={onOpenImagePicker}
       uploadImageDisabled={imageUploadDisabled}

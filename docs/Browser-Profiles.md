@@ -13,11 +13,12 @@ and Personal Browser uses a runtime-agent that runs locally on your device.
 | **Workspace browser** | Chromium in the managed project runtime | Project members viewing that same browser, including from web, mobile, and Desktop. Input still requires control permission. |
 | **Fresh — no saved logins** | A fresh headless Chromium context on an explicitly enabled self-hosted Linux runtime | Nobody inherits a previous login. The owner-local observation tool starts fresh for each call. |
 
-Studio's location menu offers **This device** and **Workspace** behind one
-computer or globe icon. The local tab starts private; **Private** opens its
+The browser's Options menu (**Browser options**, or the Personal Browser's
+**Browser settings**) offers **This device** and **Workspace** under **Run
+browser on**; it is a setting, not a toolbar control. The local tab starts private; **Private** opens its
 audience picker and becomes **Sharing** while shared. These labels describe who
 can view the tab; private does not mean incognito or erase saved logins.
-The location menu explains which profile and account state each option uses.
+That choice explains which profile and account state each option uses.
 Fresh is a tool capability, not an interactive browser option in that selector.
 
 Personal is separate from installed Chrome, Safari, and the system browser used

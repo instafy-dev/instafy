@@ -557,6 +557,117 @@ async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> an
     fixture.cleanup().await
 }
 
+/// What Codex stores when the proxy cannot renew the managed sign-in: its 424
+/// and the envelope's fixed sentence, without the JSON code.
+const PROXY_REFRESH_FAILED_ERROR: &str = "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses";
+
+/// The provider's 400 as the proxy passes it on: refused as sent.
+const PROVIDER_400_ERROR: &str = "unexpected status 400 Bad Request: The upstream provider rejected the request., url: http://proxy:8789/v1/responses";
+
+/// The proxy's 424 for a sign-in it could not renew, and a request the AI
+/// refused as sent, are decided before any model call, so the reserve and the
+/// daily slot come back, once: the same completion delivered again writes no
+/// second refund. A usage receipt that shows an answered call keeps the
+/// charge, and so does one whose failed call had a response complete first.
+#[tokio::test]
+async fn managed_ai_prompt_refunds_a_sign_in_the_proxy_could_not_renew() -> anyhow::Result<()> {
+    let answered_call = crate::task_usage::tests::receipt_fixture();
+    let mut answered_then_failed = crate::task_usage::tests::receipt_fixture();
+    answered_then_failed["calls"][0]["outcome"] = json!("error");
+    answered_then_failed["calls"][0]["usageStatus"] = json!("partial");
+    for (label, error_message, artifacts, refund_reason) in [
+        (
+            "refund-on-424",
+            PROXY_REFRESH_FAILED_ERROR,
+            json!([]),
+            Some("proxy_auth_rejected"),
+        ),
+        (
+            "refund-on-400",
+            PROVIDER_400_ERROR,
+            json!([]),
+            Some("request_rejected"),
+        ),
+        (
+            "keep-after-an-answered-call",
+            PROXY_REFRESH_FAILED_ERROR,
+            json!([answered_call]),
+            None,
+        ),
+        (
+            "keep-after-an-answer-in-a-failed-call",
+            PROXY_REFRESH_FAILED_ERROR,
+            json!([answered_then_failed]),
+            None,
+        ),
+    ] {
+        let Some(fixture) = seed_reserved_managed_ai_prompt(label).await? else {
+            eprintln!("skipping managed AI 424 refund test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let completion = json!({
+            "job_id": fixture.job_id,
+            "outcome": "failed",
+            "error_message": error_message,
+            "artifacts": artifacts,
+        });
+        for delivery in 1..=2 {
+            let status = post_agent_complete(&fixture, completion.clone()).await?;
+            assert_eq!(status, StatusCode::OK, "{label}: delivery {delivery}");
+
+            let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+            let refunds: Vec<_> = rows
+                .iter()
+                .filter(|(reason, _, _)| reason == "managed_ai_refund")
+                .collect();
+            let prompt = prompt_metadata(&fixture.pool, &fixture.prompt_id).await?;
+            if let Some(refund_reason) = refund_reason {
+                assert_eq!(
+                    refunds,
+                    vec![&(
+                        "managed_ai_refund".to_string(),
+                        fixture.burn_amount,
+                        Some(format!("managed-ai-refund:{}", fixture.prompt_id))
+                    )],
+                    "{label}: delivery {delivery} got {rows:?}"
+                );
+                assert_eq!(
+                    credit_balance(&fixture.pool, &fixture.org_id).await?,
+                    fixture.reserved_balance + fixture.burn_amount,
+                    "{label}: delivery {delivery}"
+                );
+                let reserve_metadata = ledger_metadata_by_key(
+                    &fixture.pool,
+                    &fixture.project_id,
+                    &format!("managed-ai-prompt:{}", fixture.prompt_id),
+                )
+                .await?;
+                assert_eq!(
+                    reserve_metadata["refundReason"],
+                    json!(refund_reason),
+                    "{label}"
+                );
+                assert_eq!(prompt["managedAiUsed"], json!(false), "{label}");
+                assert_eq!(
+                    daily_prompts_used(&fixture.pool, &fixture.owner_user_id).await?,
+                    0,
+                    "{label}: the daily prompt slot is released"
+                );
+            } else {
+                assert!(refunds.is_empty(), "{label}: got {rows:?}");
+                assert_eq!(
+                    credit_balance(&fixture.pool, &fixture.org_id).await?,
+                    fixture.reserved_balance,
+                    "{label}"
+                );
+                assert_eq!(prompt["managedAiUsed"], json!(true), "{label}");
+            }
+        }
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
 /// A command execution as the runtime streams it. The routing
 /// pre-observation is one the runtime runs itself before Codex's first model
 /// call, and says so in its `source`.

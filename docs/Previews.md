@@ -24,16 +24,21 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    holds the preview's id and port, and no URL. Each run that opens a site posts its own card, so a conversation can
    hold several for one site. Studio draws only the latest one in full; an earlier one shrinks to a line ("Hello ·
    opened again further down"), so a conversation shows one card per site, at its latest place. The card looks like a
-   link preview: a picture of the site, its title with a lock (private) and a chevron, and one line of facts (see
+   link preview: a picture of the site, its title with a lock (private) and, when a press does something, a chevron,
+   and one line of facts (see
    [The card's picture and facts](#the-cards-picture-and-facts)).
 4. A member presses the card. Studio asks the controller for a viewer session and shows the site as a tab in the
    conversation's side pane, next to Chat, Browser and files, under the same browser bar (title, Reload, Open in new
    tab). The card never opens by itself, and cards in history never open anything.
-5. The tab's × closes the pane and revokes its session. The card says nothing while the site is live; if the server
-   stops answering it says "Not responding" (the port on hover), and if the preview is closed or the machine stops,
-   "Stopped". While the pane is on screen it checks the site every 15 s and the cards of that preview read its answers,
-   so they ask nothing themselves. A pane whose session the controller refuses because the site stopped asks for a new
-   one only once a later check says the site answers again.
+5. The tab's × closes the pane and revokes its session. The card says nothing while the site is live. If the preview
+   is closed, the machine stops, or the server stops answering (Octo stopped it, say), the card reads "Stopped", with
+   how to get it back (see [Waking a stopped site](#waking-a-stopped-site)), and the pane says "This site is stopped."
+   in place of the site, with **Start again** where a press can start it. Neither names a port. When a turn in the
+   space ends, the latest card of each preview asks for a new probe at once (the pane does, while it is on screen),
+   since a server that stopped sends no event. While the pane is on screen it checks the site every 15 s and the cards
+   of that preview read its answers, so they ask nothing themselves. A pane whose site stopped answering drops its frame
+   and loads the site again once a check says it answers; a pane whose session the controller refuses because the site
+   stopped asks for a new one only once a later check says the site answers again.
 6. While the pane shows the site, its heartbeat (about once a minute) counts as activity in the space, so the idle
    sweep does not stop a machine someone is looking at. This counts only for members who may change the space, the
    same rule as Studio's own activity ping and as starting a stopped machine: the space pays for the machine, so a
@@ -129,8 +134,8 @@ controller-owned metadata, where no tunnel route can change it and no listing sh
 preview on purpose (`instafy preview close`, the close route) keeps the command: the card reads "Stopped · opening
 restarts it", and pressing it starts the site again for someone who may change the space.
 
-When a member presses the card of a stopped, restartable site (or **Start again** on the card or the pane when it
-stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
+When a member presses the card of a stopped, restartable site, including one that stopped answering (or **Start
+again** in its pane), Studio calls `POST /projects/:id/previews/:pid/wake`, then opens the site once it answers:
 
 - If the machine is up and the site answers, the answer is `200 {state: "live"}` and nothing else happens.
 - Otherwise the controller records one wake (one open wake per preview; asking again joins it) and answers
@@ -140,8 +145,9 @@ stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
   someone who may change the space, machine up or not. A person's `GET` of the preview says `canStart: false` when
   their wake could not go ahead (they may not change the space, and the machine is not up or the preview was closed),
   so the card reads "Stopped · only people who can edit this space can start it" and cannot be pressed. A stopped
-  preview that cannot be woken (no recorded command, or replaced by a newer one) reads "Stopped" and cannot be pressed
-  either; Octo can start it again in a turn. A self-hosted machine that is offline fails with `409 runtime_offline`
+  preview that cannot be woken (no recorded command, or replaced by a newer one) reads "Stopped · ask Octo to start it
+  again" and cannot be pressed either, since Octo can start it again in a turn. Until the controller has answered
+  whether a press can start it, a stopped card reads just "Stopped". A card that cannot be pressed draws no chevron. A self-hosted machine that is offline fails with `409 runtime_offline`
   ("The computer this space runs on is offline.").
 - The runtime agent polls `POST /agent/preview-restarts/claim` with its agent token. A claim reconnects the same
   preview tunnel on the machine's current lease and hands the agent the recorded command and the tunnel client
@@ -152,10 +158,11 @@ stopped answering), Studio calls `POST /projects/:id/previews/:pid/wake`:
   wake done; when the broker cannot be asked, the wake ends on the agent's word but the `preview.wake` event says
   `unverified`, not `live`, and Studio's own `GET` decides what it shows.
 - `GET` on the preview shows the wake as `wake: {state: "idle" | "waking" | "failed", startedAt?, error?}`. Studio
-  follows it until the site answers, then opens it. A failed wake shows its reason: a fixed plain line ("the start
-  command exited (exit status: 1) before the site answered on port 4173", "the space could not start; try again in a
-  few minutes"), never a local path, user name or command line, since every member who may view the preview reads
-  it. The details stay in the agent's and the controller's logs.
+  follows it until the site answers, then opens it. A failed wake records a fixed line ("the start command exited
+  (exit status: 1) before the site answered on port 4173", "the space could not start; try again in a few minutes"),
+  never a local path, user name or command line. Studio does not show that line, since it names ports and exit
+  statuses: the card reads "Couldn't start · Ask Octo to start it again" (a press tries again) and the pane says
+  "Couldn't start it. Ask Octo to start it again." The details stay in the agent's and the controller's logs.
 
 No agent job, run, chat message or model call is involved. Limits: 6 new wakes per preview per 10 minutes and 30 per
 person per space per hour (`429`); a wake not claimed within 10 minutes fails, and a claim without a result is retried

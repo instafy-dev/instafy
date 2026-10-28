@@ -35,6 +35,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-cursor-overlay.spec.ts",
   "browser-live-proof.spec.ts",
   "browser-transport-switch.spec.ts",
+  "browser-recovery.spec.ts",
   "conversation-surfaces.spec.ts",
   "composer-panels.spec.ts",
   "suggestion-browser-menus.spec.ts",
@@ -46,6 +47,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "notification-preferences.spec.ts",
   "organization-rail-reorder.spec.ts",
   "preview-card-responsive.spec.ts",
+  "run-failure-block.spec.ts",
   "run-stop-control.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
   "shared-browser-expanded-safe-area.spec.ts",
@@ -69,8 +71,10 @@ export default defineConfig({
   retries: 0,
   timeout: 30_000,
   // Required cases run serially. Leave room for startup and teardown while
-  // bounding the complete lane without extending any individual test.
-  globalTimeout: 1_200_000,
+  // bounding the complete lane without extending any individual test. At 227
+  // cases the serial run takes 17-20 min on hosted runners, so 20 min stopped
+  // passing runs short; 30 min still fits the job's 40.
+  globalTimeout: 1_800_000,
   outputDir: "test-results/browser-ci/browser-ui",
   reporter: [
     ["list"],

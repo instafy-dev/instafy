@@ -38,6 +38,9 @@ describe("instafy sdk controller client", () => {
     expect(typeof controllerClient.skills.discover).toBe("function");
     expect(typeof controllerClient.secrets.createForProject).toBe("function");
     expect(typeof controllerClient.runs.subscribe).toBe("function");
+    expect(typeof controllerClient.events.subscribe).toBe("function");
+    expect(typeof controllerClient.deviceGrants.create).toBe("function");
+    expect(typeof controllerClient.deviceGrants.revoke).toBe("function");
     expect(typeof controllerClient.browserSessions.fetchPages).toBe("function");
     expect(typeof controllerClient.browserSessions.fetchPendingApproval).toBe("function");
     expect(typeof controllerClient.browserSessions.decideApproval).toBe("function");

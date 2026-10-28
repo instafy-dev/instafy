@@ -1140,3 +1140,73 @@ describe("useChatScrollController", () => {
     expect(scrollContainer.scrollTop).toBe(300);
   });
 });
+
+describe("useChatAutoScrollSync", () => {
+  function PaddingHarness({ padding, scrollToBottom, following = true }: {
+    padding: string | undefined;
+    scrollToBottom: () => void;
+    following?: boolean;
+  }) {
+    const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+    const shouldAutoScrollRef = useRef(following);
+    const autoScrollSuspendedRef = useRef(false);
+    const autoScrollPendingRef = useRef(true);
+    const lastScrollHeightRef = useRef(0);
+    const messages = useRef([createMessage("newest")]).current;
+    useChatAutoScrollSync({
+      aiOnboardingOpen: false,
+      autoScrollSuspendedRef,
+      autoScrollPendingRef,
+      composerAutoHidden: false,
+      composerOverlayHeight: 120,
+      composerScrollPaddingBottom: padding,
+      credentialGateStateForBubble: null,
+      displayedMessages: messages,
+      isAssistantTyping: false,
+      lastScrollHeightRef,
+      notificationsNudgeAnchorTimestamp: null,
+      notificationsNudgeOpen: false,
+      peerTypingLabel: null,
+      scrollContainerRef,
+      scrollToBottom,
+      shouldAutoScrollRef,
+    });
+    return <div ref={scrollContainerRef} style={{ paddingBottom: padding }} />;
+  }
+
+  let container: HTMLDivElement;
+  let root: Root;
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  // Local drive, Oct 28: the newest message sat under the composer on load,
+  // once on a phone until the reader scrolled. The padding that clears the
+  // composer lands a frame after the composer is measured, and growing
+  // padding does not scroll by itself.
+  it("pins the newest message again once the composer's padding settles", async () => {
+    const scrollToBottom = vi.fn();
+    await act(async () => root.render(<PaddingHarness padding={undefined} scrollToBottom={scrollToBottom} />));
+    const before = scrollToBottom.mock.calls.length;
+    await act(async () => root.render(<PaddingHarness padding="132px" scrollToBottom={scrollToBottom} />));
+    expect(scrollToBottom.mock.calls.length).toBe(before + 1);
+    // Padding that does not change asks for nothing.
+    await act(async () => root.render(<PaddingHarness padding="132px" scrollToBottom={scrollToBottom} />));
+    expect(scrollToBottom.mock.calls.length).toBe(before + 1);
+  });
+
+  it("leaves a reader who scrolled up where they are when the padding changes", async () => {
+    const scrollToBottom = vi.fn();
+    await act(async () => root.render(<PaddingHarness padding={undefined} scrollToBottom={scrollToBottom} following={false} />));
+    await act(async () => root.render(<PaddingHarness padding="132px" scrollToBottom={scrollToBottom} following={false} />));
+    expect(scrollToBottom).not.toHaveBeenCalled();
+  });
+});

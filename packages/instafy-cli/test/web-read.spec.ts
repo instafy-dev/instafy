@@ -32,6 +32,7 @@ import {
   turnScope,
   webRead,
   wrapUntrusted,
+  wwwSibling,
   type PageResult,
   type WebReadDeps,
 } from "../src/web-read.js";
@@ -751,6 +752,65 @@ describe("private addresses, checked on what DNS returns, at every hop", () => {
   it("does not treat an unknown host as a refused address", async () => {
     const result = await one("http://nowhere.example.com/");
     expect(result).toMatchObject({ status: "failed", code: "unreachable" });
+  });
+});
+
+// 28 Oct drive: a maker's bare domain timed out while its "www." host answered, and Octo tried the bare one three
+// times because the failure said "use another source rather than retrying".
+describe("a site that answers only with or without www.", () => {
+  it("names the www. address once when the bare domain does not answer, and reads it", async () => {
+    dns["www.maker.example"] = [PUBLIC_A];
+    routes["www.maker.example/models"] = { body: ARTICLE };
+    const bare = await one("http://maker.example/models?ref=1");
+    expect(bare).toMatchObject({ status: "failed", code: "unreachable" });
+    expect(bare.tell).toBe(
+      'The site did not answer at maker.example. Some sites answer only with or without "www.": read http://www.maker.example/models?ref=1 once instead, and if that fails too, use another source.',
+    );
+    expect(await one("http://www.maker.example/models")).toMatchObject({ status: "read" });
+  });
+
+  it("names the bare domain when the www. host does not answer, and nothing for another host or a later hop", async () => {
+    expect((await one("https://www.gone.example.co.uk/a")).tell).toContain("read https://gone.example.co.uk/a once instead");
+    // a subdomain or an address that is not a site's own: the usual failure
+    const sub = await one("http://shop.nowhere.example.com/");
+    expect(sub).toMatchObject({ status: "failed", code: "unreachable" });
+    expect(sub.tell).toBe("The site did not answer. Use another source rather than retrying.");
+    // a redirect that leads to a host that does not answer: the address asked for answered, so no other address
+    routes["news.example.org/moved"] = { status: 302, headers: { location: "http://gone.example/" } };
+    const moved = await one("http://news.example.org/moved");
+    expect(moved).toMatchObject({ status: "failed", code: "unreachable" });
+    expect(moved.tell).toBe("The site did not answer. Use another source rather than retrying.");
+  });
+
+  it("names the other address only while it has not failed this turn, so the two never send the turn back and forth", async () => {
+    const PLAIN = "The site did not answer. Use another source rather than retrying.";
+    // neither answers: the bare domain names www. once, and www. (its failure now the second) names nothing
+    const bare = await one("https://down.example/models");
+    expect(bare.tell).toContain("read https://www.down.example/models once instead");
+    const www = await one("https://www.down.example/models");
+    expect(www).toMatchObject({ status: "failed", code: "unreachable" });
+    expect(www.tell).toBe(PLAIN);
+    expect((await one("https://down.example/models")).tell).toBe(PLAIN);
+    // the same in one call, www. first
+    const both = await read(["https://www.gone.example/", "https://gone.example/"]);
+    expect(both.pages[0]!.tell).toContain("read https://gone.example/ once instead");
+    expect(both.pages[1]!.tell).toBe(PLAIN);
+    // another turn starts afresh
+    const next = await one("https://www.down.example/models", {}, { env: { INSTAFY_TURN_STARTED_AT: "2026-10-26T11:00:00Z", INSTAFY_PROJECT_ID: "project-1" } });
+    expect(next.tell).toContain("read https://down.example/models once instead");
+  });
+
+  it("pairs only a site's own address with its www. form", () => {
+    const sib = (url: string) => wwwSibling(new URL(url))?.href ?? null;
+    expect(sib("https://maker.example/a?b=1#c")).toBe("https://www.maker.example/a?b=1");
+    expect(sib("https://www.maker.example/")).toBe("https://maker.example/");
+    expect(sib("https://maker.co.uk/")).toBe("https://www.maker.co.uk/");
+    expect(sib("https://maker.com.au/x")).toBe("https://www.maker.com.au/x");
+    expect(sib("https://shop.maker.example/")).toBeNull();
+    expect(sib("https://a.b.maker.example/")).toBeNull();
+    expect(sib("http://93.184.216.34/")).toBeNull();
+    expect(sib("http://[2001:db8::1]/")).toBeNull();
+    expect(sib("http://localhost/")).toBeNull();
   });
 });
 

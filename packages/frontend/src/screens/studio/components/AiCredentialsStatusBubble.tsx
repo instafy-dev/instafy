@@ -98,10 +98,11 @@ interface AiCredentialsStatusBubbleProps {
   onClose?: () => void;
 }
 
+// Instafy AI is paid for with credits, so the offer never calls it free.
 function formatManagedAiOfferLabel(managedAi: { label: string; dailyPromptLimit: number }): string {
   return managedAi.dailyPromptLimit > 0
-    ? `Use free ${managedAi.label} (${managedAi.dailyPromptLimit} a day)`
-    : `Use free ${managedAi.label}`;
+    ? `Use ${managedAi.label} (${managedAi.dailyPromptLimit} a day)`
+    : `Use ${managedAi.label}`;
 }
 
 export function AiCredentialsStatusBubble({

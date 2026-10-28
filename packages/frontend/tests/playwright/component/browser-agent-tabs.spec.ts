@@ -65,7 +65,7 @@ for (const { width, dark } of [{ width: 390, dark: false }, { width: 390, dark: 
             const next={...status,agentControlEnabled:enabled,humanControlReady:!enabled};setStatus(next);return next;},
           status};
         return h("section",{"data-testid":"personal-fixture","aria-label":"Personal browser",style:{height:320,display:"flex",flexDirection:"column"}},
-          h(PersonalBrowserSurface,{active:true,agentWorking:true,model,transportSelector:null,compactChrome:${width < 600}}));
+          h(PersonalBrowserSurface,{active:true,agentWorking:true,model,compactChrome:${width < 600}}));
       }
       window.instafyDesktop = {notify:async()=>undefined,personalBrowserSetBounds:async()=>null};
       createRoot(document.getElementById("root")).render(h("main",null,h(Shared),h(Personal)));

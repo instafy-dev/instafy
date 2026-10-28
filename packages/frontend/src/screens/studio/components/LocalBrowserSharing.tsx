@@ -211,6 +211,12 @@ export function LocalBrowserTabPublisher({ projectId, userId, ownerId, canShare,
 
 export const INCOMING_SHARES_POLL_ACTIVE_MS = 5_000;
 export const INCOMING_SHARES_POLL_IDLE_MS = 60_000;
+/**
+ * Showing the chat again reads the list at once only when the last read is
+ * at least this old, so a surface that is shown and hidden quickly does not
+ * read it on every change.
+ */
+export const INCOMING_SHARES_SHOW_MIN_GAP_MS = INCOMING_SHARES_POLL_ACTIVE_MS;
 
 /** Incoming shares belong to the conversation, not the device/browser selector. */
 export function LocalBrowserSharing({ projectId, userId, active = true }: { projectId: string; userId: string; active?: boolean }) {
@@ -222,12 +228,16 @@ export function LocalBrowserSharing({ projectId, userId, active = true }: { proj
     setShares(current => current.filter(share => share.id !== id));
   }, []);
   const refreshRef = useRef<(() => void) | null>(null);
+  // When the list was last asked for (0: not yet for this project and account).
+  const lastReadAtRef = useRef(0);
   useEffect(() => {
     let disposed = false;
     let inFlight = false;
+    lastReadAtRef.current = 0;
     async function refresh() {
       if (disposed || inFlight) return;
       inFlight = true;
+      lastReadAtRef.current = Date.now();
       try {
         const entries = await (await browserShareClient(projectId)).list();
         if (!disposed) setShares(entries.filter(share => !retired.current.has(share.id)));
@@ -242,7 +252,7 @@ export function LocalBrowserSharing({ projectId, userId, active = true }: { proj
   // kept running in hidden chats, background tabs and idle windows, which made
   // it the single largest source of Studio requests.
   useEffect(() => {
-    if (active) refreshRef.current?.();
+    if (active && Date.now() - lastReadAtRef.current >= INCOMING_SHARES_SHOW_MIN_GAP_MS) refreshRef.current?.();
   }, [active, projectId, userId]);
   // Every 5 s while someone is using the tab, every minute once idle, never
   // while hidden or while the chat surface is not shown; once on wake.

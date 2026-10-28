@@ -161,7 +161,8 @@ describe("Shared modal reconnects", () => {
     const url = latest().wsUrl;
     mocks.fetchStatus.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ runtimes: [session] }), 400)));
     await act(async () => { latest().onDisconnected({ connected: true, reason: "WebSocket closed (1006)" }); });
-    expect(reconnecting()).toBe(true);
+    // The note waits for the grace period; this picture is back before it.
+    expect(reconnecting()).toBe(false);
     await advance(1_000);
     await advance(100);
     await act(async () => { latest().onConnected(); });

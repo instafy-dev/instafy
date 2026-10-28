@@ -124,6 +124,10 @@ state, and endpoint ownership. Revoked access also hides existing center entries
 Displaying an in-app toast, reading, or archiving before a job is delivered
 cancels its pending external presentation. A queued toast is acknowledged only
 when it actually becomes visible; the center entry remains unread until read.
+A notification about the conversation open on screen (its target names that
+`conversationControllerId`: a reply, a failed run, an automation outcome) shows no
+toast while the app is in the foreground; the chat already shows it, so the
+center marks it seen instead.
 
 The worker's `NotificationTransport` interface accepts an account-bound, static
 envelope and returns a classified delivery result. Its registered implementation

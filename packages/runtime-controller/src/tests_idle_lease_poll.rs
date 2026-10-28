@@ -333,6 +333,53 @@ async fn an_idle_lease_poll_still_leases_every_job_the_runtime_may_take() -> any
     .await
 }
 
+/// A queued job holding device grants that can no longer start, one a lease
+/// of which ended or one past its minute to start, is no work: the poll still
+/// answers from one read, without waiting on the runtime row, and leases
+/// nothing.
+#[tokio::test]
+async fn an_idle_lease_poll_counts_no_granted_job_that_can_no_longer_start() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("an_idle_lease_poll_counts_no_undeliverable_job").await?;
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..SharedDbFixture::default()
+    };
+    with_shared_db_fixture(fixture, async {
+        seed_project(&pool, &project_id).await?;
+        let runtime_id = add_runtime(&pool, &project_id, Some(5)).await?;
+        let state = build_test_state(pool.clone(), hosted_config("idle-lease-poll-delivery"));
+
+        for (lease_attempts, waited_s) in [(1, 0), (0, 61)] {
+            let job = queue_job(&pool, &project_id, None, json!({})).await?;
+            pool.get()
+                .await?
+                .execute(
+                    "update agent_jobs
+                        set grant_ids = array[gen_random_uuid()], lease_attempts = $2,
+                            trigger_received_at = now() - $3::int * interval '1 second'
+                      where id = $1",
+                    &[&job, &lease_attempts, &waited_s],
+                )
+                .await?;
+        }
+
+        let mut stop_connection = pool.get().await?;
+        let stop = stop_connection.transaction().await?;
+        stop.query_one(
+            "select id from runtimes where id = $1 for update",
+            &[&runtime_id],
+        )
+        .await?;
+        let (status, body) = lease(&state, &project_id, &runtime_id, None).await?;
+        stop.rollback().await?;
+        drop(stop_connection);
+        assert_eq!((status, body), (StatusCode::OK, json!({ "jobs": [] })));
+        Ok(())
+    })
+    .await
+}
+
 /// A runtime that may not lease is refused with the leasing transaction's own
 /// answer, idle or not.
 #[tokio::test]

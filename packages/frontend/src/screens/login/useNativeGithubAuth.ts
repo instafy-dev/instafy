@@ -8,6 +8,7 @@ import {
 } from "../../lib/desktopShell";
 import { Capacitor } from "@capacitor/core";
 import {
+  claimNativeAuthCallback,
   clearNativeAuthCallbackAttemptId,
   clearPendingNativeAuthAttempt,
   createPendingNativeAuthAttempt,
@@ -21,17 +22,17 @@ import {
   readNativeAuthCallbackAttemptId,
   readPendingNativeAuthAttempt,
   readNativeAuthError,
+  releaseNativeAuthCallbackUrlClaims,
   resolveSupabaseRedirectTo,
   type PendingNativeAuthAttempt,
   writeNativeAuthCallbackAttemptId,
+  writeSignInReturnPath,
   writePendingNativeAuthAttempt,
   writeNativeAuthError,
 } from "../../auth/nativeAuth";
 import { hasSupabaseConfig, supabase, supabaseAnonKey } from "../../lib/supabaseClient";
 import { describeExchangeError } from "../../auth/pkce";
 import { postAuthTelemetryEvent } from "../../services/runtimeController/authTelemetry";
-
-export const OAUTH_REDIRECT_TARGET_KEY = "instafy.login.oauthRedirectTarget";
 
 // The OAuth providers the login page offers. Everything downstream of the
 // entry function -- pending attempts, deep links, telemetry metadata -- is
@@ -137,7 +138,9 @@ export function useNativeGithubAuth({
       clearNativeAuthCallbackAttemptId();
       clearPendingNativeAuthAttempt();
       clearNativeAuthLaunchState();
-      writeNativeAuthError(nextMessage);
+      // This page shows the error now; a stored copy would show it again on the
+      // next visit to the login page, after any later sign-in.
+      writeNativeAuthError(null);
       setAwaitingBrowser(null);
       setError(nextMessage);
       setPendingProvider(null);
@@ -241,6 +244,9 @@ export function useNativeGithubAuth({
       clearNativeAuthCallbackAttemptId();
       clearPendingNativeAuthAttempt();
       clearNativeAuthLaunchState();
+      // AuthProvider stores the error for a login page that is not open; this
+      // one is, and shows it now.
+      writeNativeAuthError(null);
       setAwaitingBrowser(null);
       setError(message);
       setPendingProvider(null);
@@ -334,7 +340,6 @@ export function useNativeGithubAuth({
     const nativePluginsAvailable = Boolean(appPlugin && nativeAuthBridgePlugin);
 
     let cancelled = false;
-    const handled = new Set<string>();
     let inFlight = false;
     let bridgeListener: DirectPluginListenerHandle | null = null;
     let appUrlListener: DirectPluginListenerHandle | null = null;
@@ -362,12 +367,12 @@ export function useNativeGithubAuth({
         return;
       }
       const trimmed = (rawUrl ?? "").trim();
-      if (!trimmed || handled.has(trimmed) || inFlight) {
+      if (!trimmed || inFlight) {
         return;
       }
 
       const parsed = parseNativeAuthCallbackUrl(trimmed);
-      if (!parsed) {
+      if (!parsed || !claimNativeAuthCallback(parsed)) {
         return;
       }
 
@@ -379,7 +384,6 @@ export function useNativeGithubAuth({
       const kind = (event: string) => `auth.login.${provider}.${event}`;
 
       inFlight = true;
-      handled.add(trimmed);
       try {
         const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
         const hashParams = new URLSearchParams(hash);
@@ -568,6 +572,7 @@ export function useNativeGithubAuth({
       return;
     }
     resetNativeAuthState();
+    releaseNativeAuthCallbackUrlClaims();
     setError(null);
     setAwaitingBrowser(null);
     setPendingProvider(provider);
@@ -575,13 +580,9 @@ export function useNativeGithubAuth({
     try {
       const redirectTo = resolveSupabaseRedirectTo("/login");
       const queryParams = oauthLoginQueryParams(supabaseAnonKey);
-      if (redirectTarget.startsWith("/") && !redirectTarget.startsWith("//")) {
-        try {
-          window.sessionStorage?.setItem(OAUTH_REDIRECT_TARGET_KEY, redirectTarget);
-        } catch {
-          // ignore session storage failures
-        }
-      }
+      writeSignInReturnPath(redirectTarget, {
+        durable: Capacitor.isNativePlatform() || (isDesktopShell() && desktopCanReceiveAuthCallback()),
+      });
       if (Capacitor.isNativePlatform()) {
         const nativePlatform = Capacitor.getPlatform();
         nativeAttempt = createPendingNativeAuthAttempt(provider);
@@ -638,6 +639,10 @@ export function useNativeGithubAuth({
         if (!url) {
           throw new Error(`Unable to start ${providerLabel} login.`);
         }
+        // The callback returns through the handler above, which names its
+        // provider from the attempt; with none, Google was reported as GitHub.
+        nativeAttempt = createPendingNativeAuthAttempt(provider);
+        writePendingNativeAuthAttempt(nativeAttempt);
         await openDesktopExternalUrl(url);
         setAwaitingBrowser(provider);
         setPendingProvider(null);
