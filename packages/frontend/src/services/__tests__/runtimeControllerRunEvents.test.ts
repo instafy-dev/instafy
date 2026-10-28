@@ -1563,4 +1563,49 @@ describe("runtime controller run event streaming", () => {
     await flushAsyncWork();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("streams exactly the kinds a subscriber names, with the session's credential", async () => {
+    const { subscribeToControllerEvents } = await import("../runtimeController/runs");
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const kinds = ["provider.request.created", "provider.request.updated", "events.resync"];
+    const onEvent = vi.fn();
+    const onOpen = vi.fn();
+    const unsubscribe = subscribeToControllerEvents({
+      projectId,
+      kinds,
+      quietErrors: true,
+      onEvent,
+      onOpen,
+    });
+
+    await vi.waitFor(() => expect(onOpen).toHaveBeenCalledOnce());
+    expect(streamingRequests).toHaveLength(1);
+    const request = streamingRequests[0];
+    const url = new URL(request.url);
+    expect(url.origin + url.pathname).toBe("https://controller.example.test/events");
+    expect([...new Set(url.searchParams.keys())]).toEqual(["projectId", "kinds[]"]);
+    expect(url.searchParams.get("projectId")).toBe(projectId);
+    expect(url.searchParams.getAll("kinds[]")).toEqual(kinds);
+    expect(request.url).not.toContain("test-access-token");
+    expect(new Headers(request.init.headers).get("authorization")).toBe(
+      "Bearer test-access-token",
+    );
+
+    // Each event is handed on as the controller sent it.
+    const created = {
+      kind: "provider.request.created",
+      project_id: projectId,
+      timestamp: "2026-10-14T05:00:00Z",
+      data: { requestId: "req-1", providerId: "device:kit", status: "pending" },
+    };
+    const resync = { kind: "events.resync", project_id: projectId, data: { reason: "lagged" } };
+    request.write(`data: ${JSON.stringify(created)}\n\n`);
+    request.write(`data: ${JSON.stringify(resync)}\n\n`);
+
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2));
+    expect(onEvent.mock.calls.map(([event]) => event)).toEqual([created, resync]);
+
+    unsubscribe();
+    expect((request.init.signal as AbortSignal).aborted).toBe(true);
+  });
 });

@@ -692,36 +692,20 @@ async fn recommendations_http_evidence_access_and_browser_rls_fail_closed() -> a
     );
     let private = f.submit(0, proposal(f.private)).await?;
     assert_eq!(f.list(&f.tokens[0]).await?.len(), 1);
-    {
-        let db = f.state.pool.get().await?;
-        db.execute(
+    f.state
+        .pool
+        .get()
+        .await?
+        .execute(
             "delete from conversation_participants where conversation_id=$1 and user_id=$2",
             &[&f.private, &f.users[0]],
         )
         .await?;
-        for table in ["space_recommendations", "space_review_conversations"] {
-            let row = db
-                .query_one(
-                    "select relrowsecurity from pg_class where oid=$1::text::regclass",
-                    &[&format!("public.{table}")],
-                )
-                .await?;
-            assert!(row.get::<_, bool>(0));
-            for role in ["anon", "authenticated"] {
-                let privilege: bool = db
-                    .query_one(
-                        "select has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE')",
-                        &[&role, &format!("public.{table}")],
-                    )
-                    .await?
-                    .get(0);
-                assert!(
-                    !privilege,
-                    "{role} must not bypass the controller via {table}"
-                );
-            }
-        }
-    }
+    crate::tests::assert_controller_only(
+        &f.state.pool,
+        &["space_recommendations", "space_review_conversations"],
+    )
+    .await?;
     assert!(
         f.list(&f.tokens[0]).await?.is_empty(),
         "revoked evidence hides the entire finding"

@@ -198,6 +198,14 @@ pub struct LeaseJob {
     /// included.
     #[serde(default, rename = "lease_attempts")]
     pub lease_attempts: i32,
+    /// The device grants the job holds; empty for every other job. Such a job runs only as a
+    /// granted turn (`provider_mcp`), and once: the controller leases it once, so what it did
+    /// must not happen again.
+    #[serde(default)]
+    pub grants: Vec<LeasedGrant>,
+    /// The token the granted turn's broker alone makes its device calls with.
+    #[serde(default)]
+    pub grant_token: Option<GrantToken>,
 }
 
 impl LeaseJob {
@@ -205,6 +213,33 @@ impl LeaseJob {
     /// lease that expired) requeued it mid-turn, and this lease resumes it.
     pub fn resumes_an_interrupted_attempt(&self) -> bool {
         self.lease_attempts > 1
+    }
+}
+
+/// A device grant a leased job holds (the controller's `device_grants.rs`): the tools its person
+/// granted, as the device published them in MCP `tools/list` shape. One the turn may no longer
+/// use comes with only why.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeasedGrant {
+    pub provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<JsonValue>,
+    /// Why, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+}
+
+/// A granted job's broker-only token, which `Debug` never prints.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct GrantToken(pub String);
+
+impl std::fmt::Debug for GrantToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted>")
     }
 }
 

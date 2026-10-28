@@ -235,6 +235,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     auto_recover_stuck_queued_runtimes(state, &mut tick).await?;
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
+    fail_jobs_that_can_no_longer_start(state, &mut tick).await?;
     // Last: each of its stops may wait out a provider release.
     stop_runtimes_of_deleted_projects(state, &mut tick).await?;
     // Runtimes the providers still run for spaces the database no longer
@@ -604,15 +605,18 @@ pub(crate) async fn refund_managed_ai_reserve_for_expired_job(
 pub(super) struct SettledExpiredJobs {
     pub(super) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
     pub(super) refunded_org_ids: std::collections::BTreeSet<Uuid>,
+    pub(super) canceled_provider_requests: Vec<crate::provider_requests::ProviderRequestRecord>,
 }
 
 /// Finish jobs a sweep has just moved from `queued` to `failed` without a
-/// runtime ever running them: reject their unacknowledged inputs, fail their
+/// runtime running them now: reject their unacknowledged inputs, fail their
 /// runs (without this a run stays "in_progress" forever and Home lists it as
-/// live work), and give back a managed-AI reserve no model ever used.
+/// live work), cancel the open provider requests an earlier lease left, and
+/// give back a managed-AI reserve no model ever used.
 ///
 /// `rows` must carry `id, project_id, run_id, conversation_id, payload,
-/// error_message, lease_attempts` from the failing `update ... returning`, and
+/// error_message, lease_attempts, grant_ids` from the failing
+/// `update ... returning`, and
 /// this must run in that update's transaction. `kind` only labels errors.
 pub(super) async fn settle_expired_queued_jobs(
     transaction: &mut tokio_postgres::Transaction<'_>,
@@ -690,9 +694,28 @@ pub(super) async fn settle_expired_queued_jobs(
             refunded_org_ids.insert(org_id);
         }
     }
+    let granted_job_ids: Vec<Uuid> = rows
+        .iter()
+        .filter(|row| row.get::<_, Option<Vec<Uuid>>>("grant_ids").is_some())
+        .map(|row| row.get("id"))
+        .collect();
+    let canceled_provider_requests =
+        crate::provider_requests::cancel_open_provider_requests_for_jobs(
+            transaction,
+            &granted_job_ids,
+            false,
+        )
+        .await
+        .map_err(|(status, Json(error))| {
+            anyhow::anyhow!(
+                "failed to cancel the provider requests of expired {kind} jobs ({status}): {}",
+                error.message
+            )
+        })?;
     Ok(SettledExpiredJobs {
         job_input_state_updates,
         refunded_org_ids,
+        canceled_provider_requests,
     })
 }
 
@@ -805,6 +828,10 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
         &failed.settled.job_input_state_updates,
     );
     publish_credits_updated_for_orgs(state, failed.settled.refunded_org_ids).await;
+    crate::provider_requests::publish_canceled_provider_requests(
+        state,
+        &failed.settled.canceled_provider_requests,
+    );
     for message_row in &failed.conversation_messages {
         crate::conversations::publish_conversation_message_event(&state.events, message_row);
         crate::notifications::enqueue_message_push_notifications(
@@ -1128,7 +1155,8 @@ async fn fail_stranded_platform_jobs(
                and aj.credential_id is null
                and lower(btrim(coalesce(aj.intent, ''))) <> 'terminal_command'
              returning aj.id, aj.project_id, aj.run_id, aj.conversation_id, aj.session_id,
-                       aj.prompt_id, aj.payload, aj.error_message, aj.lease_attempts",
+                       aj.prompt_id, aj.payload, aj.error_message, aj.lease_attempts,
+                       aj.grant_ids",
             &[&job_ids, &target_runtime_ids, &message],
         )
         .await
@@ -1155,6 +1183,97 @@ async fn fail_stranded_platform_jobs(
         .await
         .context("failed to commit failing stranded platform jobs")?;
     Ok(Some(failed))
+}
+
+const START_BY_PASSED_CODE: &str = "start_by_passed";
+const START_BY_PASSED_MESSAGE: &str = "This turn did not run: it had to start by a set time, and no runtime started it in time. Send it again if you still want it.";
+const RUN_ONCE_INTERRUPTED_CODE: &str = "run_once_interrupted";
+const RUN_ONCE_INTERRUPTED_MESSAGE: &str = "This turn stopped and will not run again: it may run only once, and its runtime stopped while it ran. Send it again if you still want it.";
+
+/// Fails the queued jobs holding device grants that the lease will never hand
+/// out (`device_grants.rs`): one a lease of which ended, as
+/// `run_once_interrupted`, and one past its minute to start, as
+/// `start_by_passed`. Their open provider requests are canceled with them. A
+/// tick with nothing to fail runs one update, on the tick's connection.
+async fn fail_jobs_that_can_no_longer_start(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let mut transaction = tick
+        .client("failed to acquire connection for jobs that can no longer start")
+        .await?
+        .transaction()
+        .await
+        .context("failed to start failing jobs that can no longer start")?;
+    let rows = transaction
+        .query(
+            concat!(
+                "update agent_jobs
+             set status = 'failed',
+                 outcome = 'failed',
+                 error_message = case when lease_attempts > 0 then $1 else $2 end,
+                 completed_at = now(),
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
+                 updated_at = now()
+             where status = 'queued' and ",
+                crate::device_grants::granted_job_cannot_start!("$3"),
+                "
+             returning id, project_id, run_id, conversation_id, session_id, prompt_id,
+                       payload, error_message, lease_attempts, grant_ids"
+            ),
+            &[
+                &RUN_ONCE_INTERRUPTED_MESSAGE,
+                &START_BY_PASSED_MESSAGE,
+                &crate::device_grants::GRANTED_TURN_START_WITHIN_SECONDS,
+            ],
+        )
+        .await
+        .context("failed to fail jobs that can no longer start")?;
+    if rows.is_empty() {
+        transaction
+            .rollback()
+            .await
+            .context("failed to close an empty failing of jobs that can no longer start")?;
+        return Ok(());
+    }
+    let (interrupted, late): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .partition(|row| row.get::<_, i32>("lease_attempts") > 0);
+    let mut failed = Vec::new();
+    for (rows, code, message) in [
+        (
+            interrupted,
+            RUN_ONCE_INTERRUPTED_CODE,
+            RUN_ONCE_INTERRUPTED_MESSAGE,
+        ),
+        (late, START_BY_PASSED_CODE, START_BY_PASSED_MESSAGE),
+    ] {
+        if !rows.is_empty() {
+            failed.push(
+                settle_failed_queued_jobs_with_message(
+                    &mut transaction,
+                    &rows,
+                    "undeliverable",
+                    code,
+                    "failed",
+                    message,
+                )
+                .await?,
+            );
+        }
+    }
+    transaction
+        .commit()
+        .await
+        .context("failed to commit failing jobs that can no longer start")?;
+    // Publishing reads runs and credits on connections of its own.
+    tick.release();
+    for failed in failed {
+        publish_failed_queued_jobs(state, failed).await;
+    }
+    Ok(())
 }
 
 /// Jobs requeued by a runtime stop expire if nothing resumes them promptly.
@@ -1238,7 +1357,7 @@ pub(crate) async fn expire_stale_requeued_jobs(
                    )
                    {skip_work_waiting_on_the_limit}
                  returning id, project_id, run_id, conversation_id, session_id, prompt_id,
-                           payload, error_message, lease_attempts,
+                           payload, error_message, lease_attempts, grant_ids,
                            (payload ->> 'requeuedAt')::timestamptz as requeued_at"
             ),
             &[
@@ -1365,7 +1484,8 @@ pub(crate) async fn settle_plan_agents_out_of_team_time(
                    and coalesce(aj.agent_role, aj.payload #>> '{{metadata,multiAgentPlan,role}}', '') = 'worker'
                    and {out_of_time}
                  returning aj.id, aj.project_id, aj.run_id, aj.conversation_id, aj.session_id,
-                           aj.prompt_id, aj.payload, aj.error_message, aj.lease_attempts",
+                           aj.prompt_id, aj.payload, aj.error_message, aj.lease_attempts,
+                           aj.grant_ids",
                 out_of_time = crate::multi_agent_plan::team_clock::out_of_time_sql("aj"),
             ),
             &[&TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE],

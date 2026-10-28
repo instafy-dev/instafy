@@ -1,27 +1,29 @@
-//! Proof that every Shared Browser MCP process is gone before browser authority returns to the
-//! human.
+//! Proof that every broker MCP process of a turn is gone when the turn ends: the Shared Browser
+//! MCP, before browser authority returns to the human, and a granted turn's `provider-mcp`, which
+//! holds the turn's grant token.
 //!
 //! Upstream Codex (rust-v0.159) reports `ShutdownComplete` after a best-effort MCP shutdown: it
 //! sends SIGTERM to each MCP process group and schedules SIGKILL from a detached thread, without
-//! waiting for either. A Shared Browser MCP (or the `node` controller it runs, which shares its
-//! process group) could therefore still drive the page after runtime-agent released the page to
-//! the human. runtime-agent closes that gap itself:
+//! waiting for either. A broker (or a process it started, which shares its process group) could
+//! therefore still act after runtime-agent ended the turn. runtime-agent closes that gap itself:
 //!
-//! 1. Each run creates a registry directory and passes it to the Shared Browser MCP.
-//! 2. The MCP, before it serves anything, checks that it leads its own process group (Codex
+//! 1. Each run creates a registry directory and passes it to the broker.
+//! 2. The broker, before it serves anything, checks that it leads its own process group (Codex
 //!    spawns MCP servers in a new group) and records that group with an exclusive create.
-//! 3. After `ShutdownComplete`, runtime-agent seals the registry (an atomic rename, so a late
-//!    MCP can no longer register and refuses to serve), sends SIGKILL to every recorded group and
-//!    waits until each is gone. Otherwise it fails, and the caller keeps the authority marker and
-//!    recycles the runtime.
+//! 3. After the turn, runtime-agent seals the registry (an atomic rename, so a late broker can no
+//!    longer register and refuses to serve), sends SIGKILL to every recorded group and waits
+//!    until each is gone. Otherwise it fails: the Shared Browser caller keeps the authority
+//!    marker and recycles the runtime, and a granted turn fails its job.
+//! 4. A registry dropped without that (an early error, a run cut off by its deadline) still
+//!    seals and SIGKILLs what registered, without waiting for proof.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-/// Environment variable naming the directory a Shared Browser MCP registers its group in.
-pub const REGISTRY_ENV: &str = "INSTAFY_SHARED_BROWSER_PROCESS_GROUP_REGISTRY";
+/// Environment variable naming the directory a broker registers its group in.
+pub const REGISTRY_ENV: &str = "INSTAFY_MCP_PROCESS_GROUP_REGISTRY";
 
 /// How long the recorded groups get to disappear after SIGKILL.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(2);
@@ -29,7 +31,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const OPEN_DIR: &str = "groups";
 const SEALED_DIR: &str = "sealed";
 
-/// One run's registry of Shared Browser MCP process groups.
+/// One run's registry of broker MCP process groups.
 pub(crate) struct McpProcessGroupRegistry {
     root: tempfile::TempDir,
 }
@@ -39,13 +41,13 @@ impl McpProcessGroupRegistry {
         let root = tempfile::Builder::new()
             .prefix("instafy-mcp-groups-")
             .tempdir()
-            .context("failed to create the Shared Browser MCP process-group registry")?;
+            .context("failed to create the MCP process-group registry")?;
         std::fs::create_dir(root.path().join(OPEN_DIR))
-            .context("failed to create the Shared Browser MCP process-group registry")?;
+            .context("failed to create the MCP process-group registry")?;
         Ok(Self { root })
     }
 
-    /// The directory the MCP registers in; passed to it as `REGISTRY_ENV`.
+    /// The directory the broker registers in; passed to it as `REGISTRY_ENV`.
     pub(crate) fn registration_dir(&self) -> PathBuf {
         self.root.path().join(OPEN_DIR)
     }
@@ -59,10 +61,10 @@ impl McpProcessGroupRegistry {
     fn seal(&self) -> Result<Vec<i32>> {
         let sealed = self.root.path().join(SEALED_DIR);
         std::fs::rename(self.registration_dir(), &sealed)
-            .context("failed to seal the Shared Browser MCP process-group registry")?;
+            .context("failed to seal the MCP process-group registry")?;
         let mut groups = Vec::new();
-        for entry in std::fs::read_dir(&sealed)
-            .context("failed to read the Shared Browser MCP process-group registry")?
+        for entry in
+            std::fs::read_dir(&sealed).context("failed to read the MCP process-group registry")?
         {
             let name = entry?.file_name();
             let group = name
@@ -70,9 +72,7 @@ impl McpProcessGroupRegistry {
                 .and_then(|name| name.parse::<i32>().ok())
                 .filter(|group| *group > 1)
                 .with_context(|| {
-                    format!(
-                        "unexpected entry {name:?} in the Shared Browser MCP process-group registry"
-                    )
+                    format!("unexpected entry {name:?} in the MCP process-group registry")
                 })?;
             groups.push(group);
         }
@@ -81,12 +81,28 @@ impl McpProcessGroupRegistry {
     }
 }
 
-/// Records this process's group in the registry named by `REGISTRY_ENV`. The Shared Browser MCP
-/// calls it before serving, so a process that cannot be recorded never acts on the browser.
+impl Drop for McpProcessGroupRegistry {
+    fn drop(&mut self) {
+        // After `terminate_and_confirm` the registry is already sealed and this does nothing.
+        let Ok(groups) = self.seal() else {
+            return;
+        };
+        let system = SystemProcessGroups;
+        let own_group = system.own_group();
+        for group in groups.into_iter().filter(|group| *group != own_group) {
+            if let Err(error) = system.kill(group) {
+                tracing::warn!(group, %error, "failed to kill an MCP broker's process group");
+            }
+        }
+    }
+}
+
+/// Records this process's group in the registry named by `REGISTRY_ENV`. A broker calls it
+/// before serving, so a process that cannot be recorded never acts.
 pub fn register_current_process_group() -> Result<()> {
     let directory = std::env::var_os(REGISTRY_ENV)
         .map(PathBuf::from)
-        .context("Shared Browser MCP requires the runtime's process-group registry")?;
+        .context("the MCP broker requires the runtime's process-group registry")?;
     register_process_group(&directory, current_process_ids()?)
 }
 
@@ -105,7 +121,7 @@ fn current_process_ids() -> Result<ProcessIds> {
     let parent_group = unsafe { libc::getpgid(parent) };
     if parent_group < 0 {
         return Err(std::io::Error::last_os_error())
-            .context("failed to read the Shared Browser MCP parent's process group");
+            .context("failed to read the MCP broker parent's process group");
     }
     Ok(ProcessIds {
         pid,
@@ -116,7 +132,7 @@ fn current_process_ids() -> Result<ProcessIds> {
 
 #[cfg(not(unix))]
 fn current_process_ids() -> Result<ProcessIds> {
-    bail!("Shared Browser MCP requires POSIX process groups")
+    bail!("an MCP broker requires POSIX process groups")
 }
 
 fn register_process_group(directory: &Path, ids: ProcessIds) -> Result<()> {
@@ -124,7 +140,7 @@ fn register_process_group(directory: &Path, ids: ProcessIds) -> Result<()> {
     // or a manual launch) could make the later SIGKILL hit the wrong group, so refuse to start.
     if ids.group != ids.pid || ids.group == ids.parent_group || ids.group <= 1 {
         bail!(
-            "Shared Browser MCP must lead its own process group (pid {}, group {}, parent group {})",
+            "an MCP broker must lead its own process group (pid {}, group {}, parent group {})",
             ids.pid,
             ids.group,
             ids.parent_group
@@ -136,7 +152,7 @@ fn register_process_group(directory: &Path, ids: ProcessIds) -> Result<()> {
         .open(directory.join(ids.group.to_string()))
         .with_context(|| {
             format!(
-                "failed to register Shared Browser MCP process group {} (the turn's registry is sealed or already lists it)",
+                "failed to register MCP broker process group {} (the turn's registry is sealed or already lists it)",
                 ids.group
             )
         })?;
@@ -232,7 +248,7 @@ async fn confirm_groups_gone(
     for group in groups {
         system
             .kill(*group)
-            .with_context(|| format!("failed to kill Shared Browser MCP process group {group}"))?;
+            .with_context(|| format!("failed to kill MCP broker process group {group}"))?;
     }
     let deadline = tokio::time::Instant::now() + timeout;
     let mut remaining = groups.to_vec();
@@ -240,9 +256,10 @@ async fn confirm_groups_gone(
         let mut alive = Vec::new();
         for group in remaining {
             system.reap(group);
-            if system.exists(group).with_context(|| {
-                format!("failed to probe Shared Browser MCP process group {group}")
-            })? {
+            if system
+                .exists(group)
+                .with_context(|| format!("failed to probe MCP broker process group {group}"))?
+            {
                 alive.push(group);
             }
         }
@@ -251,7 +268,7 @@ async fn confirm_groups_gone(
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "Shared Browser MCP process groups {alive:?} survived SIGKILL for {} ms",
+                "MCP broker process groups {alive:?} survived SIGKILL for {} ms",
                 timeout.as_millis()
             );
         }
@@ -368,6 +385,52 @@ mod tests {
         assert!(started.elapsed() < CONFIRM_TIMEOUT);
         assert!(!pid_exists(server_pid), "MCP server survived");
         assert!(!pid_exists(child_pid), "MCP server's child survived");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_registry_dropped_without_confirmation_still_kills_what_registered() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server_pid_file = temp.path().join("server.pid");
+        let child_pid_file = temp.path().join("child.pid");
+        let script = format!(
+            "trap '' TERM; echo $$ > '{}'; sleep 300 & echo $! > '{}'; wait",
+            server_pid_file.display(),
+            child_pid_file.display()
+        );
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-c").arg(script).process_group(0);
+        let mut server = command.spawn().expect("spawn group leader");
+        let server_pid = wait_for_pid_file(&server_pid_file).await;
+        let child_pid = wait_for_pid_file(&child_pid_file).await;
+
+        let registry = McpProcessGroupRegistry::create().expect("registry");
+        let directory = registry.registration_dir();
+        register_process_group(
+            &directory,
+            ids(server_pid, server_pid, SystemProcessGroups.own_group()),
+        )
+        .expect("register");
+        drop(registry);
+
+        let deadline = std::time::Instant::now() + CONFIRM_TIMEOUT;
+        while server.try_wait().expect("wait for the broker").is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the broker survived its dropped registry"
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        while pid_exists(child_pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the broker's child survived its dropped registry"
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        assert!(
+            register_process_group(&directory, ids(4321, 4321, 1)).is_err(),
+            "a dropped registry is sealed"
+        );
     }
 
     #[tokio::test]

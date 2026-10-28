@@ -581,6 +581,60 @@ export class ServerSentEventParser {
 export function subscribeToRunsFromController(
   params: SubscribeControllerRunsParams,
 ): () => void {
+  return subscribeToControllerEvents({
+    projectId: params.projectId,
+    sessionId: params.sessionId,
+    runId: params.runId,
+    kinds: [...RUN_EVENT_KINDS, ...FORWARD_EVENT_KINDS],
+    accessToken: params.accessToken,
+    quietErrors: params.quietErrors,
+    onEvent: (event) =>
+      handleControllerEvent(
+        event,
+        params.onRun,
+        params.onRunPatch,
+        params.onEvent,
+      ),
+    onAccessDenied: params.onAccessDenied,
+    onError: params.onError,
+    onRefused: params.onRefused,
+    onOpen: params.onOpen,
+  });
+}
+
+export interface SubscribeControllerEventsParams {
+  /** The space whose events to stream, reported as not found on a 404. */
+  projectId?: string;
+  sessionId?: string | null;
+  runId?: string;
+  /**
+   * The kinds of event to stream (none: every kind). The controller checks
+   * the caller's access to every event before it sends it, and sends
+   * `events.resync`, which says the stream dropped events, only to a stream
+   * that asks for it.
+   */
+  kinds: readonly string[];
+  accessToken?: string | null;
+  quietErrors?: boolean;
+  /** Each event the stream carries, parsed. */
+  onEvent: (event: ControllerEventPayload) => void;
+  onAccessDenied?: (denial: ControllerStreamAccessDenied) => void;
+  onError?: (message: string) => void;
+  /** As `SubscribeControllerRunsParams.onRefused`. */
+  onRefused?: (message: string) => void;
+  onOpen?: () => void;
+}
+
+/**
+ * Opens the controller's event stream with the credential the app's own
+ * consumers use (the signed-in session, or `accessToken`), reconnects after a
+ * dropped stream, waits out a refusal (429) on its backoff, stops for good on
+ * a credential the controller refuses, and hands each event to `onEvent`.
+ * Returns the unsubscribe.
+ */
+export function subscribeToControllerEvents(
+  params: SubscribeControllerEventsParams,
+): () => void {
   if (!runtimeControllerEnabled) {
     return () => {};
   }
@@ -604,11 +658,7 @@ export function subscribeToRunsFromController(
   if (params.runId) {
     baseSearch.set("runId", params.runId);
   }
-  const desiredKinds = new Set<string>([
-    ...RUN_EVENT_KINDS,
-    ...FORWARD_EVENT_KINDS,
-  ]);
-  desiredKinds.forEach((kind) => {
+  params.kinds.forEach((kind) => {
     baseSearch.append("kinds[]", kind);
   });
 
@@ -791,12 +841,7 @@ export function subscribeToRunsFromController(
           }
           try {
             const parsed = JSON.parse(event.data) as ControllerEventPayload;
-            handleControllerEvent(
-              parsed,
-              params.onRun,
-              params.onRunPatch,
-              params.onEvent,
-            );
+            params.onEvent(parsed);
           } catch (parseError) {
             const message =
               parseError instanceof Error

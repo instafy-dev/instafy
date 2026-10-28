@@ -14,7 +14,7 @@ export function describeSendIntentError(code: string | null, fallback: string): 
     case "active_turn_input_unavailable":
       return "This agent cannot accept Steer during its current turn. Queue the message instead.";
     case "browser_turn_steer_forbidden":
-      return "Only the person who started this browser task can steer it. Queue your message instead.";
+      return "Only the person who started this turn can steer it. Queue your message instead.";
     case "send_intent_idempotency_conflict":
       return "This message conflicts with an earlier send attempt. Edit it slightly and try again.";
     default:

@@ -29,6 +29,7 @@ import {
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
   REVIEWED_LOCK_EXCEPTIONS,
+  RUN_TIME_TABLES,
   TRANSACTION_QUERY,
   bothOrderLockViolations,
   heldLockProbeProblem,
@@ -148,6 +149,8 @@ const EXISTING_RELATIONS = [
   ["16425", "notification_delivery_attempts"],
   ["16426", "user_agents"],
   ["16427", "agent_user_input_requests"],
+  ["16428", "project_provider_requests"],
+  ["16429", "agent_device_grants"],
 ];
 
 // A probe row names a relation by its oid. A test names it by table, or by oid
@@ -568,7 +571,8 @@ test("only relations that existed before the migration count, an index as its ta
 
 test("each table of the list is expected from the migration after the one that created it", () => {
   // The checked-in migration that first creates each table: one at or before
-  // the lane boundary, or the one BOTH_ORDER_TABLES_CREATED_BY names.
+  // the lane boundary, or the one BOTH_ORDER_TABLES_CREATED_BY names, or, for a
+  // table RUN_TIME_TABLES makes before it, the one before that.
   const track = validatePublicMigrationTrack();
   for (const table of BOTH_ORDER_TABLES) {
     const creates = new RegExp(
@@ -578,7 +582,9 @@ test("each table of the list is expected from the migration after the one that c
     const creator = track.find(({ source }) => creates.test(readFileSync(source, "utf8")));
     assert.ok(creator, table);
     if (BOTH_ORDER_TABLES_CREATED_BY.has(table)) {
-      assert.equal(creator.version, BOTH_ORDER_TABLES_CREATED_BY.get(table), table);
+      const made =
+        creator.version === RUN_TIME_TABLES.before ? track[track.indexOf(creator) - 1] : creator;
+      assert.equal(made.version, BOTH_ORDER_TABLES_CREATED_BY.get(table), table);
     } else {
       assert.ok(creator.version <= LANE_BOUNDARY, `${table} ${creator.version}`);
     }
@@ -831,7 +837,7 @@ test("runtimes, the notification tables, job inputs, activity and runtime events
 });
 
 test("participants, leases, automations, support reports, origins, attempts, agents and worker questions pair with the list", () => {
-  assert.deepEqual(BOTH_ORDER_TABLES.slice(14), [
+  assert.deepEqual(BOTH_ORDER_TABLES.slice(14, 23), [
     "conversation_participants",
     "runtime_leases",
     "automations",
@@ -842,7 +848,6 @@ test("participants, leases, automations, support reports, origins, attempts, age
     "user_agents",
     "agent_user_input_requests",
   ]);
-  assert.equal(BOTH_ORDER_TABLE_PAIRS.length, 253);
   // Each migration below holds only SHARE or SHARE ROW EXCLUSIVE on the first
   // table, which the rule for other tables allowed. Raced in both orders
   // against a live request that writes the two tables in the other order,
@@ -955,6 +960,49 @@ test("participants, leases, automations, support reports, origins, attempts, age
     ),
     [],
   );
+});
+
+test("provider requests and device grants pair with the list", () => {
+  assert.deepEqual(BOTH_ORDER_TABLES.slice(23), [
+    "project_provider_requests",
+    "agent_device_grants",
+  ]);
+  assert.equal(BOTH_ORDER_TABLE_PAIRS.length, 300);
+  // Completion and cancel update the job and its inputs before they cancel the
+  // job's open requests, and the run after them, while the expired-job sweep
+  // fails the run, records its activity and refunds the ledger before them.
+  // Each migration below holds only SHARE or SHARE ROW EXCLUSIVE on the
+  // requests, which the rule for other tables allowed.
+  for (const [rows, expected] of [
+    // alter table project_provider_requests add constraint hyp_job
+    //   foreign key (job_id) references agent_jobs(id) not valid;
+    [
+      ["project_provider_requests ShareRowExclusiveLock", "agent_jobs ShareRowExclusiveLock"],
+      [["agent_jobs", "project_provider_requests"]],
+    ],
+    // create index on project_provider_requests (created_at);
+    // alter table runs add column y text;
+    [
+      ["project_provider_requests ShareLock", "runs AccessExclusiveLock"],
+      [["runs", "project_provider_requests"]],
+    ],
+    // create index on project_provider_requests (created_at);
+    // alter table org_credit_ledger add column y text;
+    [
+      ["project_provider_requests ShareLock", "org_credit_ledger AccessExclusiveLock"],
+      [["org_credit_ledger", "project_provider_requests"]],
+    ],
+    // A stop cancels a granted job's requests before it pauses its grants,
+    // while a revoke updates the grants before it cancels their requests.
+    // create index on agent_device_grants (created_at);
+    // create index on project_provider_requests (created_at);
+    [
+      ["agent_device_grants ShareLock", "project_provider_requests ShareLock"],
+      [["project_provider_requests", "agent_device_grants"]],
+    ],
+  ]) {
+    assert.deepEqual(bothOrderLockViolations(probeOutput(...rows)), expected, rows.join(", "));
+  }
 });
 
 test("migrations on main that only the longer list rejects are checked against the first three", () => {

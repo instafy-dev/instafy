@@ -149,6 +149,7 @@ struct Spaces {
     stuck_queued: Uuid,
     terminal: Uuid,
     stranded: Uuid,
+    undeliverable: Uuid,
     deleted: Uuid,
 }
 
@@ -164,6 +165,7 @@ impl Spaces {
             stuck_queued: Uuid::new_v4(),
             terminal: Uuid::new_v4(),
             stranded: Uuid::new_v4(),
+            undeliverable: Uuid::new_v4(),
             deleted: Uuid::new_v4(),
         }
     }
@@ -179,6 +181,7 @@ impl Spaces {
             self.stuck_queued,
             self.terminal,
             self.stranded,
+            self.undeliverable,
             self.deleted,
         ]
     }
@@ -197,6 +200,8 @@ struct Seeded {
     terminal_runtime: Uuid,
     stranded_job: Uuid,
     stranded_run: Uuid,
+    undeliverable_job: Uuid,
+    undeliverable_run: Uuid,
     deleted_runtime: Uuid,
 }
 
@@ -495,6 +500,29 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
     )
     .await?;
 
+    // A job holding device grants that a stop requeued after its lease.
+    let undeliverable_run = insert_run(client, spaces.undeliverable).await?;
+    let undeliverable_job = insert_job(
+        client,
+        spaces.undeliverable,
+        "queued",
+        "feature",
+        Some(undeliverable_run),
+        None,
+        json!({}),
+        60,
+    )
+    .await?;
+    client
+        .execute(
+            "update agent_jobs
+                set grant_ids = array[gen_random_uuid()], lease_attempts = 1,
+                    trigger_received_at = now()
+              where id = $1",
+            &[&undeliverable_job],
+        )
+        .await?;
+
     // A hosted runtime still up in a space deleted five minutes ago.
     let deleted_runtime = insert_runtime(
         client,
@@ -527,6 +555,8 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
         terminal_runtime,
         stranded_job,
         stranded_run,
+        undeliverable_job,
+        undeliverable_run,
         deleted_runtime,
     })
 }
@@ -706,6 +736,11 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
             ("failed".to_string(), Some("failed".to_string())),
             "the stranded platform job did not fail"
         );
+        assert_eq!(
+            job_status(&client, seeded.undeliverable_job).await?,
+            ("failed".to_string(), Some("failed".to_string())),
+            "the job that can no longer start did not fail"
+        );
 
         // Each failed run is published with the run it read on a connection
         // of its own.
@@ -717,7 +752,11 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
                 }
             }
         }
-        for run_id in [seeded.requeued_run, seeded.stranded_run] {
+        for run_id in [
+            seeded.requeued_run,
+            seeded.stranded_run,
+            seeded.undeliverable_run,
+        ] {
             assert_eq!(
                 published.get(&run_id),
                 Some(&json!(run_id)),

@@ -88,8 +88,9 @@ pub(crate) use stop::{
 };
 #[cfg(test)]
 pub(crate) use sweeps::{
-    recover_deferred_plan_checkpoints, settle_plan_agents_out_of_team_time,
-    STRANDED_PLATFORM_JOB_GRACE_SECONDS, TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE,
+    expire_stale_requeued_jobs, recover_deferred_plan_checkpoints,
+    settle_plan_agents_out_of_team_time, STRANDED_PLATFORM_JOB_GRACE_SECONDS,
+    TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE,
 };
 #[cfg(test)]
 pub(crate) use token::RuntimeTokenResponse;

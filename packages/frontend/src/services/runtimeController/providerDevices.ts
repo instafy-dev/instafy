@@ -32,9 +32,34 @@ interface HeartbeatProviderDeviceParams {
   deviceId: string;
   deviceLabel?: string | null;
   platform?: "android" | "ios" | null;
+  /**
+   * `ready` by default. `stopped` is the device's own stop: while it says so, the device serves
+   * no grant, and the change into it cancels the turns holding its grants.
+   */
   status?: string | null;
   connectionType?: string | null;
   metadata?: Record<string, unknown> | null;
+  /**
+   * Publishes the device's tools, replacing its catalog, and makes the device the caller's own if
+   * it is nobody else's. Absent: both stay as they are.
+   */
+  catalog?: ControllerProviderDeviceCatalog | null;
+  /**
+   * What the device says of its own state now, plain text of at most 1,200 characters, which
+   * its granted turns read as the device's words. Each heartbeat replaces it: absent clears it.
+   */
+  context?: string | null;
+}
+
+/** A device's tools as MCP `tools/list` returns them, with MCP `initialize` instructions. */
+export interface ControllerProviderDeviceCatalog {
+  instructions?: string;
+  tools: Array<{
+    name: string;
+    title?: string;
+    description?: string;
+    inputSchema: Record<string, unknown>;
+  }>;
 }
 
 function normalizeRecord(value: unknown): Record<string, unknown> | null {
@@ -134,6 +159,8 @@ export async function heartbeatControllerProviderDevice(
       status: params.status ?? undefined,
       connectionType: params.connectionType ?? undefined,
       metadata: params.metadata ?? {},
+      catalog: params.catalog ?? undefined,
+      context: params.context ?? undefined,
     },
     fallbackError: "Unable to heartbeat provider device",
   });

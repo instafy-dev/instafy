@@ -207,6 +207,8 @@ struct ActiveJobTarget {
     /// `prompts.user_id` of the prompt that started the job: the signed-in
     /// caller recorded by dispatch, never client-supplied metadata.
     prompt_author_id: Option<Uuid>,
+    /// The job holds device grants (`device_grants.rs`).
+    holds_grants: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -421,9 +423,9 @@ fn active_job_uses_browser(payload: &JsonValue) -> bool {
         .any(|value| matches!(value.as_str(), "desktop-personal" | "shared"))
 }
 
-/// Steering a browser turn requires a signed-in caller who is the recorded
-/// author of the prompt that started it. A turn with no recorded author
-/// cannot be steered by anyone.
+/// Steering a browser or granted turn requires a signed-in caller who is the
+/// recorded author of the prompt that started it. A turn with no recorded
+/// author cannot be steered by anyone.
 fn browser_turn_steer_allowed(prompt_author_id: Option<Uuid>, caller_id: Option<Uuid>) -> bool {
     matches!((prompt_author_id, caller_id), (Some(author), Some(caller)) if author == caller)
 }
@@ -677,7 +679,8 @@ pub(crate) async fn apply_steer_send_intent(
                     jobs.active_input_ready_turn_id,
                     jobs.payload,
                     runtimes.capabilities,
-                    prompts.user_id as prompt_author_id
+                    prompts.user_id as prompt_author_id,
+                    coalesce(cardinality(jobs.grant_ids), 0) > 0 as holds_grants
              from agent_jobs jobs
              join runtimes on runtimes.id = jobs.leased_by_runtime_id
              left join prompts on prompts.id = jobs.prompt_id
@@ -708,6 +711,7 @@ pub(crate) async fn apply_steer_send_intent(
             payload: row.get::<_, PgJson<JsonValue>>("payload").0,
             capabilities: row.get::<_, PgJson<JsonValue>>("capabilities").0,
             prompt_author_id: row.get("prompt_author_id"),
+            holds_grants: row.get("holds_grants"),
         })
         .collect::<Vec<_>>();
 
@@ -750,15 +754,16 @@ pub(crate) async fn apply_steer_send_intent(
     };
     let target = &active_jobs[target_index];
 
-    // A browser turn acts inside one person's signed-in browser session, and
-    // steer text reaches the model without an author. Only the person whose
-    // prompt started the turn may add to it; everyone else can still queue.
-    if active_job_uses_browser(&target.payload)
+    // A browser turn acts inside one person's signed-in browser session, a
+    // granted turn with one person's device, and steer text reaches the model
+    // without an author. Only the person whose prompt started the turn may
+    // add to it; everyone else can still queue.
+    if (target.holds_grants || active_job_uses_browser(&target.payload))
         && !browser_turn_steer_allowed(target.prompt_author_id, context.user_id)
     {
         return Err(send_intent_error(
             StatusCode::FORBIDDEN,
-            "only the person who started this browser task can steer it",
+            "only the person who started this turn can steer it",
             BROWSER_TURN_STEER_FORBIDDEN_CODE,
             Some(json!({ "jobId": target.id })),
         ));
@@ -772,6 +777,21 @@ pub(crate) async fn apply_steer_send_intent(
             Some(json!({ "jobId": target.id, "runtimeId": target.runtime_id })),
         ));
     }
+
+    // The turn goes on with the steered words in place of what it was doing,
+    // so a device call it is waiting on is no longer wanted. Canceled before
+    // the message and the conversation are written, as a stop and a
+    // completion take a job's requests before its conversation.
+    let steered_requests = if target.holds_grants {
+        crate::provider_requests::cancel_open_provider_requests_for_jobs(
+            &transaction,
+            &[target.id],
+            true,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
 
     let command_id = Uuid::new_v4();
     let message_id = Uuid::new_v4();
@@ -790,8 +810,10 @@ pub(crate) async fn apply_steer_send_intent(
         Some(JsonValue::Object(map)) => JsonValue::Object(map),
         _ => json!({}),
     };
+    let trigger = crate::job_trigger::JobTrigger::of_send(&state.config, &context, &metadata);
     metadata = sanitize_client_recorded_message_metadata(metadata, context.is_service_role);
     let metadata_map = metadata.as_object_mut().unwrap_or_else(|| unreachable!());
+    crate::job_trigger::stamp_message(metadata_map, trigger.as_ref());
     metadata_map.insert(
         "clientMessageId".to_string(),
         JsonValue::String(client_send_id.clone()),
@@ -911,6 +933,7 @@ pub(crate) async fn apply_steer_send_intent(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit steer send intent: {error}")))?;
+    crate::provider_requests::publish_canceled_provider_requests(state, &steered_requests);
 
     publish_conversation_message_event(&state.events, &persisted_message);
     crate::notifications::enqueue_message_push_notifications(
@@ -1619,6 +1642,7 @@ mod tests {
             payload: json!({ "metadata": { "agent": { "handle": handle } } }),
             capabilities: json!({ "activeTurnInput": true }),
             prompt_author_id: None,
+            holds_grants: false,
         }
     }
 

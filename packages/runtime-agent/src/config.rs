@@ -290,6 +290,9 @@ impl Config {
             // This runtime downloads the chat attachments the controller signs
             // into `.instafy/attachments/` before a turn (jobs/chat_attachments.rs).
             map.insert("attachmentDownloads".to_string(), serde_json::json!(true));
+            // This runtime runs a job holding device grants as a bounded granted turn
+            // (`provider_mcp`); the controller leases such a job to no other runtime.
+            map.insert("grantedTurns".to_string(), serde_json::json!(true));
             let conversations = map
                 .entry("conversations".to_string())
                 .or_insert_with(|| serde_json::json!({}));
@@ -791,6 +794,8 @@ mod tests {
             config.metadata["env"]["INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"],
             json!("turn-secret")
         );
+        // Without it the controller leases this runtime no job holding device grants.
+        assert_eq!(config.capabilities["grantedTurns"], json!(true));
         assert_eq!(
             config.runtime_access_token.as_deref(),
             Some("launch-RUNTIME_ACCESS_TOKEN")

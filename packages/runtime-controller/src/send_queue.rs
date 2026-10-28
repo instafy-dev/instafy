@@ -25,6 +25,7 @@ use crate::dispatch::{
     ensure_project_prompt_access, normalize_dispatch_request, process_dispatch_prompt,
     DispatchPromptResponse,
 };
+use crate::job_trigger::JobTrigger;
 use crate::state::ControllerEvent;
 use crate::{bad_request, ensure_project_access, internal_error, not_found, ApiError, AppState};
 
@@ -1110,6 +1111,7 @@ pub(crate) async fn dispatch_send_queue_entry_now(
         session_id: access.session_id,
         entry_id,
         user_id: Some(actor_user_id),
+        queued_at: row.get("created_at"),
         message: message.clone(),
         entry: entry_row_to_json(&row),
     };
@@ -1124,6 +1126,7 @@ pub(crate) async fn dispatch_send_queue_entry_now(
         entry_id,
         message,
         true,
+        None,
     )
     .await
     {
@@ -1376,6 +1379,7 @@ async fn dispatch_stored_message(
     queue_entry_id: Uuid,
     message: JsonValue,
     require_lane_idle: bool,
+    queued_at: Option<DateTime<Utc>>,
 ) -> Result<DispatchPromptResponse, (StatusCode, Json<ApiError>)> {
     let mut body: ConversationPromptBody = serde_json::from_value(message)
         .map_err(|error| bad_request(format!("queued message is invalid: {error}")))?;
@@ -1396,6 +1400,15 @@ async fn dispatch_stored_message(
     request.conversation_is_new = false;
     request.expected_lane_idle = require_lane_idle;
     request.dispatch_queue_entry_id = Some(queue_entry_id);
+    // The queue takes entries only from their person's own session. A drain
+    // sends one as received when it was queued (`queued_at`); Send now, which
+    // the person presses, as received now.
+    request.trigger = JobTrigger::of_send(&state.config, context, &request.metadata).map(
+        |trigger| match queued_at {
+            Some(queued_at) => trigger.received_at(queued_at),
+            None => trigger,
+        },
+    );
     if let Some(conversation_id) = request.conversation_id {
         inject_conversation_metadata(&mut request.metadata, &conversation_id);
     }
@@ -1545,6 +1558,7 @@ async fn drain_send_queue_with_reclaim_after(
             claim.entry_id,
             claim.message.clone(),
             true,
+            Some(claim.queued_at),
         )
         .await
         {
@@ -1655,6 +1669,8 @@ struct ClaimedSendQueueEntry {
     session_id: Option<Uuid>,
     entry_id: Uuid,
     user_id: Option<Uuid>,
+    /// When the queue took the entry from its person's own session.
+    queued_at: DateTime<Utc>,
     message: JsonValue,
     entry: JsonValue,
 }
@@ -1864,6 +1880,7 @@ async fn claim_next_send_queue_entry_with_reclaim_after(
         session_id,
         entry_id,
         user_id,
+        queued_at: claimed.get("created_at"),
         message,
         entry: entry_row_to_json(&claimed),
     }))
@@ -2891,6 +2908,7 @@ mod tests {
             claim.entry_id,
             claim.message,
             true,
+            None,
         )
         .await
         .map_err(|(status, Json(error))| {
@@ -3003,6 +3021,7 @@ mod tests {
             claim.entry_id,
             claim.message,
             true,
+            None,
         )
         .await
         .map_err(|(status, Json(error))| {
@@ -3108,6 +3127,7 @@ mod tests {
             entry_id,
             first_claim.message,
             true,
+            None,
         )
         .await
         .map_err(|(status, Json(error))| {
@@ -3149,6 +3169,7 @@ mod tests {
             entry_id,
             second_claim.message,
             true,
+            None,
         )
         .await
         .map_err(|(status, Json(error))| {

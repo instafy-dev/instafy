@@ -34,9 +34,9 @@ Live requests write `agent_jobs`, `org_credit_ledger`, `org_credit_balances`, `r
 `prompts`, `conversations`, `conversation_messages`, `runtimes`, `notification_events`,
 `notification_recipients`, `notification_delivery_jobs`, `agent_job_inputs`, `activity_events`,
 `runtime_events`, `conversation_participants`, `runtime_leases`, `automations`, `bug_reports`,
-`bug_report_messages`, `origin_instances`, `notification_delivery_attempts`, `user_agents` and
-`agent_user_input_requests`
-in one transaction, each of them in both orders with another of them. Dispatch records a new
+`bug_report_messages`, `origin_instances`, `notification_delivery_attempts`, `user_agents`,
+`agent_user_input_requests`, `project_provider_requests` and `agent_device_grants` in one
+transaction, each of them in both orders with another of them. Dispatch records a new
 conversation's `activity_events` row, inserts the prompt, the run and the user's message, which
 updates its conversation and whose insert trigger writes the three notification tables, ensures
 the runtime in `runtimes` with a `runtime_events` row for a new one, then burns credits and
@@ -65,12 +65,23 @@ event. Delivering a notification updates `notification_delivery_jobs` and then i
 `notification_delivery_attempts` row, while leasing a job whose lease expired updates the
 attempt first. A worker answer locks `agent_user_input_requests` before checking its source
 job and updating its run; job invalidation locks `agent_jobs` before its trigger expires
-questions and updates their run and message presentation. Every insert into the ledger locks
-the ledger and then runs a trigger that
-writes and locks the org's balance row, while a credit burn locks that balance row for its
-daily refill before it writes the ledger. Around those writes the same requests read and lock
-other tables, also in both orders: a refill locks the balance row and then inserts into the
-ledger, whose foreign-key check row-locks the organization; credit status reads
+questions and updates their run and message presentation. Completion and cancel of a job that
+holds device grants update `agent_jobs` and `agent_job_inputs` before they cancel the job's
+open `project_provider_requests` rows, and then update the run; a steer of one locks
+`agent_jobs` and cancels them before it inserts the message and its `agent_job_inputs` row and
+updates the conversation, while the expired-job sweep fails the run, records its `activity_events` row and refunds the ledger
+before it cancels them. Every request that writes both `agent_device_grants` and
+`project_provider_requests` writes `agent_device_grants` first: making, revoking or pausing a
+grant updates it before it cancels the grant's requests, and a granted call locks its job, then
+its grant, before it inserts its request. A stop locks the jobs it cancels in `agent_jobs`, then
+pauses the grants and cancels their requests, and only then updates `agent_jobs`, the run and
+the notice message, so it locks `agent_jobs` both before and after `agent_device_grants`.
+Every insert into the
+ledger locks the ledger and then runs a trigger that writes and locks the org's balance row,
+while a credit burn locks that balance row for its daily refill before it writes the ledger.
+Around those writes the same requests read and lock other tables, also in both orders: a
+refill locks the balance row and then inserts into the ledger, whose foreign-key check
+row-locks the organization; credit status reads
 `org_subscriptions` after that balance lock; completion updates `agent_jobs` and then reads
 `projects`. A migration that holds, on two tables, locks that such a request waits on can
 deadlock it: the migration waits for the request on one table while the request waits for the
@@ -214,13 +225,23 @@ keys to `projects` and `organizations` is safe against both, and a migration tha
 both can at worst abort a service-role dispatch that creates its project. Reads count too: an
 `ALTER TABLE` waits for its `ACCESS EXCLUSIVE` lock behind a request that has only read that
 table, so the order to match includes requests that read the altered table before they write
-the other one.
+the other one. Only a device's heartbeat writes `project_provider_devices`, before any listed
+table: its stop locks the device's row, then `agent_jobs`, `agent_device_grants`,
+`project_provider_requests`, `agent_jobs` again, the run and the notice message, while a granted
+call locks `agent_jobs` and then `agent_device_grants` before it inserts its request, and the
+lease reads devices and grants after it locks `agent_jobs`, so take `SHARE` or
+`SHARE ROW EXCLUSIVE` on `project_provider_devices` before the lock on a listed table, never
+after it.
 
 The empty-database test (`pnpm test:migrations:empty-db`) enforces the rules above for every
 migration after `20260000000063`. It lists the public relations that exist before the
 migration, and after it, before it commits, the locks the migration holds on them. Postgres
 takes the table locks of `SELECT ... FOR UPDATE`, `INSERT`, `UPDATE` and `DELETE` even when a
-statement matches no rows, so the empty database still shows them. The test passes the
+statement matches no rows, so the empty database still shows them. Before `20261028140000` the
+test makes `project_provider_requests` and `project_provider_devices` with the DDL controllers
+before it ran the first time a route used them
+(`scripts/fixtures/provider-tables-made-at-run-time.sql`), so the migrations meet them, and their
+locks on them count, as in production. The test passes the
 migration to psql as one `--command`, which psql sends to the server without reading it, so a
 psql meta-command in it is a syntax error there as in production, and its probe queries resolve
 every name in `pg_catalog`, so a table, view, function or operator the migration creates cannot

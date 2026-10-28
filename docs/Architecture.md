@@ -78,6 +78,166 @@ deploying the controller that reads these columns.
   Studio modal before writing provider state into the project.
 - The remaining host gap is generic provider-context injection into provider `initialize`; the binding record, approval flow, and one real caller exist now.
 
+## Provider Request Queue
+
+`POST /projects/:id/provider-tools/call` and `/provider-resources/read` queue a request for the
+device a provider is attached on and hold the call open (`timeoutMs`, 5-120 s) until the device
+answers through `/projects/:id/provider-requests` (list, claim, complete).
+
+- A held-open dispatch holds no database connection while it waits. It wakes on the request's
+  `provider.request.updated` event and rereads the row at least once a second.
+- Each request has `expiresAt`, set on the database clock when it is queued. A device may claim a
+  request, or claim one it holds again, only before then, and listings stop offering pending and
+  claimed requests after it. Every copy of a request carries `ageMs`, its age on the database
+  clock, which a device trusts over its own clock. A job's request also carries `triggerAgeMs`:
+  the age, on the database clock, of what started its job (`agent_jobs.trigger_received_at`).
+- When the wait ends, only an unclaimed request expires. A claimed one stays claimed, and its
+  device's later answer is still recorded. A reply that is not the device's own says in its
+  `error` what became of the request, then whether a device may act on it: one that ended before
+  any device claimed it did not run and never will; one a device claimed may have run, or may
+  still.
+- A person's own session or the service role dispatches, with project write access. The only
+  scoped token that dispatches is a device grant's (below), and only a tool call.
+- A request may name one device (`targetDeviceId`) and belong to an agent job (`jobId`). Only a
+  device grant's call sets them (below), never a request body. Only the device a request names
+  may claim it (403 for any other). `?deviceId=` lists only what that device may act on: requests
+  targeted at it or at no device, and not claimed by another.
+- A job's request is its requester's alone: other callers do not see it in listings or events,
+  and claim or complete it as not found. When the job ends (its runtime's report, a cancel, a
+  stop, an expiry sweep, a deleted space) or is steered, its open requests are canceled in the
+  same transaction. Those a steer canceled carry `cancelReason` `steered`: a person's words went
+  into the job, which goes on. A steered call answers once the runtime took the new words, at
+  most 3 s later. A claim of a request whose job has ended cancels the job's open requests
+  instead.
+- A device may have an owner. The controller applies a device's heartbeats
+  (`POST /projects/:id/provider-devices/heartbeat`) in the order they arrive, so a device sends them
+  one at a time. A heartbeat may carry the device's tool `catalog` in MCP `tools/list` shape with
+  its `initialize` instructions (at most 64 tools, named with letters, digits, `_`, `-`, `.` and
+  `/` and distinct with `-`, `.` and `/` read as `_`, as a model reads them; each input schema a
+  JSON Schema object; 64 KiB in all); one without keeps the stored catalog. A heartbeat with a
+  catalog from a person's own session makes the device theirs, if it is nobody else's. Only a
+  person device grants are on for (`DEVICE_GRANTS_USER_IDS`, below) takes a device or publishes a
+  catalog; anyone else's are ignored. An owned device answers only to its owner, whoever device
+  grants are on for: only their session heartbeats it, lists its requests (`deviceId`) or claims
+  and completes requests as it, it takes only their requests, and only they write its catalog and
+  `context` (below). Ownership ends only when the owner may no longer write to the space (they
+  left it, lost write access or deleted their account): then anyone in the space may use the
+  device under the space's rules, and it keeps its owner's catalog and context until someone takes
+  it, with a catalog of their own. Taking it revokes the previous owner's grants of it (below).
+- In the app, `controllerClient.events.subscribe({projectId, kinds, onEvent})` opens one `/events`
+  stream for the kinds it names, with the stream's usual reconnect and refusal backoff. A device
+  asks for `provider.request.created`, `provider.request.updated` and `events.resync`. A request
+  event's `data` carries `requestId`, `providerId`, `requestKind`, `toolName`, `resourceUri`,
+  `status`, `cancelReason` and `targetDeviceId`, never its arguments or result; `events.resync`
+  says the stream dropped events, so the device lists its requests again.
+
+## Agent Job Trigger
+
+Each agent job records when the controller received what started it, on the database clock, and
+never from a request body (`agent_jobs.trigger_received_at`).
+
+- The message routes count a send as its person's (`person`) only when their own signed-in
+  session says `metadata.input: {"kind": "person"}`, and as input one of their devices relayed
+  (`device`) for `{"kind": "device", "deviceId": ...}`, all from the caller's own credential. A
+  resend (`retryOfMessageId`), a goal's next turn (`goalContinuation`), a send that says neither,
+  and a job token's, the service role's, an automation's and an agent plan's sends have no kind.
+- Web chat's composer sends `{"kind": "person"}`. What the app sends on the person's behalf, an
+  automatic retry or its local fallback queue's drain, says nothing.
+- A queued message is received when it was queued; Send now, when it is pressed. Any other job
+  is received when it is queued.
+- Where device grants are on for its sender, a user message also keeps its kind as
+  `metadata.trigger`, over any value a client wrote; anywhere else, and for a send with no kind,
+  it keeps no such key. Device grants are on for the users `DEVICE_GRANTS_USER_IDS` lists
+  (comma-separated ids), for everyone with `*`, and for nobody when it is unset or empty. Any
+  other value logs an error and means nobody, so the switch never keeps the controller from
+  starting.
+
+## Device Grants
+
+A device grant is a person's revocable consent that one of their agents may call named tools of
+one of their own devices in turns that person starts in one conversation (`agent_device_grants`).
+It exists only where device grants are on for that person (`DEVICE_GRANTS_USER_IDS`, above); for
+anyone else nothing below happens, and its routes answer them 404.
+
+- `GET`/`POST /projects/:id/device-grants` and `DELETE .../:grantId` list, make and revoke the
+  caller's grants. A grant names their own agent, their own owned device and tools its catalog
+  publishes, none named like the broker's own `instafy.messages.search` as a model reads it, and a
+  conversation they started. Its turns get the granted tools the catalog publishes when they are
+  leased; a device that is no longer its person's gives them nothing until it is theirs again, and
+  one someone else took revokes the grant. A new grant replaces their grants to the same agent
+  that it could not work beside: those of the same device, and those in the same conversation
+  that name one of its tools, of which a turn holding both would serve neither. Their grants to
+  one agent are made one at a time, so two made at once cannot both stand.
+- Dispatch gives a grant only to a plain one-agent turn in its conversation that its person's own
+  message started (`person`, or `device` relayed by the granted device itself), received after
+  the grant's `not_before` and less than a minute ago. Such a job holds it in `grant_ids` and runs
+  where its person's other turns may: never on another member's own machine. A granted turn
+  resumes no provider thread, and its history holds only what its person typed or their devices
+  relayed and the replies of their granted turns.
+- A job holding grants is leased once, and only within a minute of `trigger_received_at`: never
+  again after its lease ends (a runtime stop or a lapsed lease), and the runtime neither replays
+  nor retries its turn, since it holds grants: one that ends without its answer fails, saying it
+  was not run again. A short rate limit does not requeue it. Only a runtime whose capabilities say
+  `grantedTurns: true` leases it: on any other, such as an older build that would run it as an
+  ordinary turn, it stays queued. The idle poll's one-read check counts no such job that can no
+  longer start, and the idle sweep fails it (`run_once_interrupted`, `start_by_passed`), tells its
+  conversation why and cancels its open provider requests.
+- The lease gives each grant's tools and one grant token for the job (`device_grant.call`), which
+  only `provider-tools/call` and message search take. It lives 600 s, so a granted turn calls and
+  searches at most ten minutes after its lease, however long it runs. Each call is checked in
+  order: the job is still leased by the token's runtime at its generation, exactly one of its
+  grants is of the call's provider and names the tool, that grant still holds, and the turn has
+  calls left (120 to the device in all). The request is stamped with the grant's person, device
+  and job. A refused call or search answers 403 `grant_not_held`, its message saying why, and a
+  call past the cap 429 `grant_budget_exhausted`. A grant the turn may no longer use comes on the
+  lease with no tools, only `refused`: why, in words.
+- A heartbeat from a person grants are on for may also carry `context`: what the device says of
+  its own state now, plain text (no control character but line breaks and tabs) of at most 1,200
+  characters. Each heartbeat replaces it, so one without clears it. A grant's instructions are
+  the catalog's, then this report, labelled as the device's own with its age and quoted line by
+  line. It adds no tool.
+- With the grant token and `projectId`, message search checks the token's job as a call's first
+  step does, and that one of its grants still holds, in a transaction of its own. It then searches
+  as the turn's person, in the turn's space, and only their own words (`metadata.trigger`
+  `person` or `device`): no private conversation outside the turn's thread tree. The broker serves
+  it as `instafy.messages.search`.
+- In a grant's conversation only its person's own messages start turns (anyone else's is
+  recorded), and the team plans those turns started go on without the grant. Only they steer a
+  granted turn, under the steer rule of browser turns below. Any member may stop one. A stop there
+  by any route (a chat Stop, `/stop` or `/interrupt`, or a cancel of a turn or plan group), whether
+  or not the turns it names still run, moves the `not_before` of the conversation's live grants to
+  the stop and cancels every turn's calls asked before it: a turn asked before then is refused,
+  "the device was stopped or resumed after this turn was asked for". Its notices and canceled turns
+  say only its cancel reason; the stopper's own words stay only on the plan worker questions it
+  ends (`expired_reason`), which no granted turn reads.
+- A device's heartbeat status `stopped` is its own stop, the one device status the controller acts
+  on. While its last heartbeat says `stopped`, the device serves no grant: the lease, a granted call
+  and a grant token's search refuse its grants with `grant_not_held`, "the device is stopped".
+  Dispatch still gives a turn the grant, so the turn is the bounded granted turn, which fails
+  saying why it has no device: "this turn may use none of its device grants: the device is
+  stopped". The heartbeat that changes a device into `stopped` also does two things. It
+  cancels the queued and leased turns that hold the person's grants of the device. It also pauses
+  every live grant naming a conversation those grants name, exactly as a stop in that conversation
+  does, whether or not a turn was running. The heartbeat that changes it out of `stopped` pauses the
+  device's own grants, so nothing asked while it was stopped runs with it afterwards. A device that
+  stays stopped needs nothing more, since nothing can use its grants meanwhile.
+- A grant binds anyone but its person only while it is in force: its person may still write to the
+  space and owns the device, and its agent exists. Once they leave the space, lose write access or
+  delete their account, its conversation starts anyone's turns again. Only its person revokes it,
+  apart from the revocation when someone takes its device; nobody else needs to.
+- runtime-agent runs a job holding grants as a bounded turn whose only tool server is
+  `runtime-agent provider-mcp`: the granted tools, called with the job's grant token, which only
+  the broker's environment holds. It has no workspace, shell, web search or project defaults,
+  loads none of the workspace's user or project Codex config (a turn whose config fails to load
+  fails), answers in strict JSON, heartbeats every second, and ends only once the broker's process
+  group is gone. It registers with the capability `grantedTurns: true`.
+- Apply the migrations `20261028140000` to `20261028140008` before deploying the controller that
+  reads them. Keep `DEVICE_GRANTS_USER_IDS` empty until the previous controller pool is retired and
+  no load balancer still sends it requests: an older controller follows none of these rules and
+  acts on no device's stop. To roll back past this release, empty it first and wait more than
+  120 s, so that the sweep fails the queued granted jobs and the targeted requests' windows close,
+  then roll back.
+
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:
 
@@ -141,7 +301,8 @@ The controller is authoritative for explicit composer delivery intent:
 - A **steer** intent is bound to one expected active job. The controller persists an ordered job
   input and the owning runtime acknowledges it only after submitting the input to that same active
   model turn. Steering never aliases to conversation-wide cancellation. Only the person whose
-  prompt started a Shared or Personal Browser turn may steer it; see
+  prompt started a Shared or Personal Browser turn, or a granted turn (Device Grants), may steer it
+  (`browser_turn_steer_forbidden` for anyone else); see
   [Shared-Browser-Authorization.md](Shared-Browser-Authorization.md#steering-an-active-browser-turn).
 - A **stash** is owner-private draft state. It is not conversation history and cannot enter the
   job or send-queue state machines. Per-owner/conversation row and serialized-byte quotas bound

@@ -27,6 +27,7 @@ pub mod origin;
 pub mod personal_browser;
 pub mod preview_restarts;
 pub mod process_hardening;
+pub mod provider_mcp;
 mod required_execution;
 pub mod resources;
 pub mod shared_browser;

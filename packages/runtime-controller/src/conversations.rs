@@ -20,6 +20,7 @@ use crate::dispatch::{
     process_dispatch_prompt, process_dispatch_prompt_timed, DispatchPhaseTimings,
     DispatchPromptNormalized, DispatchPromptRequest, DispatchPromptResponse,
 };
+use crate::provider_requests::ProviderRequestRecord;
 use crate::workspace::{endpoint_matches_local, runtime_is_recent, status_is_viable};
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, internal_error, not_found,
@@ -761,6 +762,8 @@ pub(crate) async fn create_project_conversation(
     }
 
     request.conversation_is_new = true;
+    request.trigger =
+        crate::job_trigger::JobTrigger::of_send(&state.config, &context, &request.metadata);
 
     if let Some(conversation_id) = request.conversation_id {
         inject_conversation_metadata(&mut request.metadata, &conversation_id);
@@ -1365,8 +1368,12 @@ pub(crate) async fn record_conversation_message_only(
         Some(JsonValue::Object(map)) => JsonValue::Object(map),
         _ => json!({}),
     };
+    let trigger = crate::job_trigger::JobTrigger::of_send(&state.config, &context, &metadata_value);
     let mut metadata_value =
         sanitize_client_recorded_message_metadata(metadata_value, context.is_service_role);
+    if let Some(map) = metadata_value.as_object_mut().filter(|_| role == "user") {
+        crate::job_trigger::stamp_message(map, trigger.as_ref());
+    }
     normalize_human_mention_metadata(&mut metadata_value)?;
     strip_client_internal_metadata(&mut metadata_value);
     let client_message_id = body
@@ -1828,11 +1835,18 @@ pub(crate) async fn interrupt_conversation_runs(
     .await?;
 
     if rows.is_empty() && expired_questions.is_empty() {
+        let canceled = crate::device_grants::pause_conversation_grants(
+            &state.config,
+            &transaction,
+            &conversation.id,
+        )
+        .await?;
         transaction.commit().await.map_err(|error| {
             internal_error(format!(
                 "failed to finalize interruption transaction: {error}"
             ))
         })?;
+        crate::provider_requests::publish_canceled_provider_requests(&state, &canceled);
         return Ok(Json(ConversationInterruptResponse {
             ok: true,
             canceled_run_ids: Vec::new(),
@@ -1853,6 +1867,7 @@ pub(crate) async fn interrupt_conversation_runs(
     notice.metadata["details"]["stopRequested"] = json!(true);
     notice.metadata["details"]["suppressedPlanGroupIds"] = json!(group_ids);
     let cancellation = cancel_jobs_with_notice(
+        &state.config,
         &transaction,
         &conversation.project_id,
         &conversation.id,
@@ -1875,7 +1890,6 @@ pub(crate) async fn interrupt_conversation_runs(
         conversation.project_id,
         conversation.id,
         &cancellation,
-        reason,
     )
     .await;
 
@@ -1897,13 +1911,19 @@ pub(crate) async fn interrupt_conversation_runs(
 }
 
 pub(crate) struct JobCancellationSet {
+    /// The reason the stop recorded: the stopper's own words, except where a
+    /// device grant is involved ([`cancel_jobs_with_notice`]).
+    pub(crate) reason: String,
     pub(crate) job_ids: Vec<Uuid>,
     pub(crate) pairs: Vec<(Uuid, Uuid)>,
     pub(crate) notice: ConversationMessageRow,
     pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    pub(crate) provider_requests: Vec<ProviderRequestRecord>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn cancel_jobs_within_transaction(
+    config: &crate::config::AppConfig,
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     conversation_id: &Uuid,
@@ -1912,6 +1932,7 @@ pub(crate) async fn cancel_jobs_within_transaction(
     reason: &str,
 ) -> Result<JobCancellationSet, (StatusCode, Json<ApiError>)> {
     cancel_jobs_with_notice(
+        config,
         transaction,
         project_id,
         conversation_id,
@@ -1923,8 +1944,18 @@ pub(crate) async fn cancel_jobs_within_transaction(
     .await
 }
 
+/// Cancels `jobs` of `conversation_id` ([`cancel_jobs_and_runs`]) and records
+/// the stop in the conversation, with `notice` or one built from `reason`.
+///
+/// Where a device grant is involved (a job holds one, or a grant names the
+/// conversation), any member may still stop the jobs, but the stop records
+/// only what its cancel reason says, never the stopper's own words, which a
+/// granted turn would otherwise read; and the grants are paused
+/// (`device_grants.rs`), so nothing asked before the stop, such as a queued
+/// message, runs with the device after it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn cancel_jobs_with_notice(
+    config: &crate::config::AppConfig,
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     conversation_id: &Uuid,
@@ -1933,15 +1964,35 @@ pub(crate) async fn cancel_jobs_with_notice(
     reason: &str,
     notice: Option<InterruptionNotice>,
 ) -> Result<JobCancellationSet, (StatusCode, Json<ApiError>)> {
+    let stopped: Vec<Uuid> = jobs.iter().map(|(job_id, _)| *job_id).collect();
+    let paused_grants =
+        crate::device_grants::grants_a_stop_pauses(config, transaction, conversation_id, &stopped)
+            .await?;
+    let grants_involved = !paused_grants.is_empty();
+    let reason = if grants_involved { "Canceled" } else { reason };
+    // First, after the jobs the callers locked and before any request: a
+    // granted call locks its job, then its grant, then queues its request.
+    let mut provider_requests =
+        crate::device_grants::pause_grants(transaction, &paused_grants).await?;
     let CanceledJobs {
         job_ids,
         run_ids,
         pairs,
         job_input_state_updates,
+        provider_requests: job_requests,
     } = cancel_jobs_and_runs(transaction, jobs, reason).await?;
+    provider_requests.extend(job_requests);
 
-    let interruption_notice =
-        notice.unwrap_or_else(|| build_interruption_notice(reason, &job_ids, &run_ids));
+    let plain_notice = build_interruption_notice(reason, &job_ids, &run_ids);
+    let interruption_notice = match notice {
+        Some(mut notice) if grants_involved => {
+            notice.content = plain_notice.content;
+            notice.metadata["details"]["reason"] = json!(reason);
+            notice
+        }
+        Some(notice) => notice,
+        None => plain_notice,
+    };
     let notice = record_controller_assistant_message(
         transaction,
         project_id,
@@ -1955,10 +2006,12 @@ pub(crate) async fn cancel_jobs_with_notice(
     .await?;
 
     Ok(JobCancellationSet {
+        reason: reason.to_string(),
         job_ids,
         pairs,
         notice,
         job_input_state_updates,
+        provider_requests,
     })
 }
 
@@ -1968,12 +2021,15 @@ pub(crate) struct CanceledJobs {
     pub(crate) run_ids: Vec<Uuid>,
     pub(crate) pairs: Vec<(Uuid, Uuid)>,
     pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    /// The jobs' pending and claimed provider requests, canceled; publish
+    /// them once the transaction commits.
+    pub(crate) provider_requests: Vec<ProviderRequestRecord>,
 }
 
-/// Cancel `jobs` and their runs with `reason` as the summary, and reject the
-/// inputs the jobs never acknowledged, without writing a notice. The update
-/// has no status guard: pass only jobs the caller locked while they were
-/// still queued or leased.
+/// Cancel `jobs` and their runs with `reason` as the summary, reject the
+/// inputs the jobs never acknowledged, and cancel their open provider
+/// requests, without writing a notice. The update has no status guard: pass
+/// only jobs the caller locked while they were still queued or leased.
 pub(crate) async fn cancel_jobs_and_runs(
     transaction: &tokio_postgres::Transaction<'_>,
     jobs: &[(Uuid, Option<Uuid>)],
@@ -1992,8 +2048,8 @@ pub(crate) async fn cancel_jobs_and_runs(
 
     let summary_ref: Option<&str> = Some(reason);
 
-    transaction
-        .execute(
+    let granted_job_ids: Vec<Uuid> = transaction
+        .query(
             "update agent_jobs
              set status = 'canceled',
                  outcome = 'canceled',
@@ -2004,11 +2060,16 @@ pub(crate) async fn cancel_jobs_and_runs(
                  active_input_ready_expires_at = null,
                  active_input_ready_turn_id = null,
                  heartbeat_at = now()
-             where id = any($1)",
+             where id = any($1)
+             returning id, grant_ids is not null as holds_grants",
             &[&job_ids, &summary_ref],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to cancel agent jobs: {error}")))?;
+        .map_err(|error| internal_error(format!("failed to cancel agent jobs: {error}")))?
+        .iter()
+        .filter(|row| row.get("holds_grants"))
+        .map(|row| row.get("id"))
+        .collect();
 
     let mut job_input_state_updates = Vec::new();
     for job_id in &job_ids {
@@ -2021,6 +2082,12 @@ pub(crate) async fn cancel_jobs_and_runs(
             .await?,
         );
     }
+    let provider_requests = crate::provider_requests::cancel_open_provider_requests_for_jobs(
+        transaction,
+        &granted_job_ids,
+        false,
+    )
+    .await?;
 
     if !run_ids.is_empty() {
         transaction
@@ -2042,6 +2109,7 @@ pub(crate) async fn cancel_jobs_and_runs(
         run_ids,
         pairs,
         job_input_state_updates,
+        provider_requests,
     })
 }
 
@@ -2051,7 +2119,6 @@ pub(crate) async fn publish_job_cancellation_events<C>(
     project_id: Uuid,
     conversation_id: Uuid,
     cancellation: &JobCancellationSet,
-    reason: &str,
 ) -> Vec<String>
 where
     C: tokio_postgres::GenericClient + Send,
@@ -2062,7 +2129,7 @@ where
         project_id,
         conversation_id,
         &cancellation.pairs,
-        reason,
+        &cancellation.reason,
     )
     .await;
 
@@ -2074,6 +2141,10 @@ where
     crate::send_intents::publish_job_input_state_updates(
         state,
         &cancellation.job_input_state_updates,
+    );
+    crate::provider_requests::publish_canceled_provider_requests(
+        state,
+        &cancellation.provider_requests,
     );
 
     canceled_run_ids
@@ -2180,7 +2251,8 @@ pub(crate) async fn cancel_agent_job(
         .query_opt(
             "select id, project_id, run_id, status, conversation_id, payload, plan_group_id
              from agent_jobs
-             where id = $1",
+             where id = $1
+             for update",
             &[&job_id],
         )
         .await
@@ -2232,10 +2304,17 @@ pub(crate) async fn cancel_agent_job(
 
     let status: String = row.get("status");
     if !matches!(status.as_str(), "queued" | "leased") {
+        let canceled = crate::device_grants::pause_conversation_grants(
+            &state.config,
+            &transaction,
+            &conversation.id,
+        )
+        .await?;
         transaction
             .commit()
             .await
             .map_err(|error| internal_error(format!("failed to finalize cancel: {error}")))?;
+        crate::provider_requests::publish_canceled_provider_requests(&state, &canceled);
         return Ok(Json(ConversationInterruptResponse {
             ok: true,
             canceled_run_ids: Vec::new(),
@@ -2245,6 +2324,7 @@ pub(crate) async fn cancel_agent_job(
 
     let run_id: Option<Uuid> = row.get("run_id");
     let cancellation = cancel_jobs_within_transaction(
+        &state.config,
         &transaction,
         &conversation.project_id,
         &conversation.id,
@@ -2265,7 +2345,6 @@ pub(crate) async fn cancel_agent_job(
         conversation.project_id,
         conversation.id,
         &cancellation,
-        reason.as_str(),
     )
     .await;
 
@@ -2407,12 +2486,19 @@ pub(crate) async fn cancel_plan_group_jobs(
             &reason,
         )
         .await?;
+        let canceled = crate::device_grants::pause_conversation_grants(
+            &state.config,
+            &transaction,
+            &conversation.id,
+        )
+        .await?;
 
         transaction
             .commit()
             .await
             .map_err(|error| internal_error(format!("commit stopped questions: {error}")))?;
         drop(connection);
+        crate::provider_requests::publish_canceled_provider_requests(&state, &canceled);
         for request_id in expired_questions {
             crate::user_input_requests::publish_request_run_event(&state, request_id).await;
         }
@@ -2461,6 +2547,7 @@ pub(crate) async fn cancel_plan_group_jobs(
     // Record intent even if the last worker just finished: its pending callback
     // must not start new compute after the user canceled the whole group.
     let cancellation = cancel_jobs_with_notice(
+        &state.config,
         &transaction,
         &conversation.project_id,
         &conversation.id,
@@ -2482,7 +2569,6 @@ pub(crate) async fn cancel_plan_group_jobs(
         conversation.project_id,
         conversation.id,
         &cancellation,
-        reason.as_str(),
     )
     .await;
 
@@ -2720,6 +2806,10 @@ pub(crate) async fn post_conversation_message(
 
     request.conversation_is_new = false;
     request.expected_lane_idle = expected_lane_idle;
+    // From the caller's own credential, never `access_context`: a job token
+    // acts as its subject there, but is no person typing.
+    request.trigger =
+        crate::job_trigger::JobTrigger::of_send(&state.config, &context, &request.metadata);
 
     if let Some(conversation_id) = request.conversation_id {
         inject_conversation_metadata(&mut request.metadata, &conversation_id);
@@ -4139,6 +4229,7 @@ fn build_conversation_message_metadata(request: &DispatchPromptNormalized) -> Js
         map.insert(crate::browser_hand_back::HAND_BACK_KEY.to_string(), copy);
     }
     map.insert("prompt_metadata".to_string(), prompt_metadata);
+    crate::job_trigger::stamp_message(&mut map, request.trigger.as_ref());
     // Prompt metadata is otherwise nested for the runtime. Persist the validated
     // human identities at the same canonical message key as record-only sends.
     if let Some(mentions) = request.metadata.get("mentionedUserIds") {
