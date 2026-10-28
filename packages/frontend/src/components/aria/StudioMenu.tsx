@@ -9,10 +9,9 @@ import {
   type MenuItemProps,
   type SeparatorProps,
 } from "react-aria-components";
+import { STUDIO_MENU_ARIA_ROW_CLASS } from "./studioMenuStyles";
 
 const MENU_BASE = "outline-none";
-const MENU_ITEM_BASE =
-  "flex w-full cursor-pointer select-none items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-sm leading-5 text-slate-600 outline-none transition pointer-coarse:min-h-11 data-[focus-visible]:ring-2 data-[focus-visible]:ring-inset data-[focus-visible]:ring-primary-400/40 data-[hovered]:bg-slate-100 data-[focused]:bg-slate-100 data-[pressed]:bg-slate-100 data-[selected]:text-slate-900 data-[selected]:font-medium data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50 dark:text-slate-300 dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[focused]:bg-[var(--color-studio-dark-control-hover)] dark:data-[pressed]:bg-[var(--color-studio-dark-control-hover)] dark:data-[selected]:text-slate-50";
 // React Aria renders an hr. Its preflight border would cover the divider fill
 // with currentColor, so the shared one-pixel surface supplies the whole line.
 const MENU_SEPARATOR_BASE = "my-1.5 h-px border-0 bg-slate-200 dark:bg-[var(--color-studio-dark-divider)]";
@@ -37,7 +36,7 @@ export function StudioMenuItem<T extends object>({ className, ...props }: MenuIt
   return (
     <MenuItem
       {...props}
-      className={composeRenderProps(className, (value) => mergeClassName(MENU_ITEM_BASE, value))}
+      className={composeRenderProps(className, (value) => mergeClassName(STUDIO_MENU_ARIA_ROW_CLASS, value))}
     />
   );
 }
@@ -50,7 +49,7 @@ export function StudioMenuAction({ className, ...props }: ButtonProps) {
     <Button
       type="button"
       {...props}
-      className={composeRenderProps(className, (value) => mergeClassName(MENU_ITEM_BASE, value))}
+      className={composeRenderProps(className, (value) => mergeClassName(STUDIO_MENU_ARIA_ROW_CLASS, value))}
     />
   );
 }

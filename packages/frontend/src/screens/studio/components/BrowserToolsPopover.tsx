@@ -9,7 +9,7 @@ export const BrowserToolsOverlayContext = createContext<(() => () => void) | nul
 function ToolsDialog({ label, children }: { label: string; children: ReactNode }) {
   const register = useContext(BrowserToolsOverlayContext);
   useLayoutEffect(() => register?.(), [register]);
-  return <Dialog aria-label={label} className="space-y-3 p-3 text-sm outline-none">{children}</Dialog>;
+  return <Dialog aria-label={label} className="space-y-2 outline-none">{children}</Dialog>;
 }
 
 export function BrowserToolsPopover({ label, trigger, children, isOpen, onOpenChange, placement = "bottom end" }: {
@@ -22,7 +22,7 @@ export function BrowserToolsPopover({ label, trigger, children, isOpen, onOpenCh
 }) {
   return <DialogTrigger isOpen={isOpen} onOpenChange={onOpenChange}>
     {trigger}
-    <StudioPopover placement={placement} className="z-[90] w-80 max-w-[calc(100vw-1rem)]" offset={6}>
+    <StudioPopover layout="menu" placement={placement} className="z-[90] w-80">
       <ToolsDialog label={label}>{children}</ToolsDialog>
     </StudioPopover>
   </DialogTrigger>;

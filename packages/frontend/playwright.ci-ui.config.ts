@@ -36,6 +36,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-transport-switch.spec.ts",
   "conversation-surfaces.spec.ts",
   "composer-panels.spec.ts",
+  "suggestion-browser-menus.spec.ts",
   "queue-composer.spec.ts",
   "mobile-sidebar-keyboard.spec.ts",
   "mobile-editor-dialogs.spec.ts",
@@ -66,8 +67,7 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 30_000,
-  // The 163 required cases run serially; hosted timings project about
-  // fifteen minutes in total. Leave room for startup and teardown while
+  // Required cases run serially. Leave room for startup and teardown while
   // bounding the complete lane without extending any individual test.
   globalTimeout: 1_200_000,
   outputDir: "test-results/browser-ci/browser-ui",
