@@ -7,6 +7,12 @@ import type { BrowserTransport } from "./usePersonalBrowserBridge";
 export type BrowserRequest = {
   task: string;
   location: "auto" | "device" | "workspace";
+  /**
+   * Octo builds something (a page, a map) from what the browser finds, so
+   * the browser turn hands its findings back (browserHandBack.ts). A card
+   * for a question leaves it out: the browser turn's reply is the answer.
+   */
+  continueBuilding?: boolean;
 };
 
 /**
@@ -59,7 +65,11 @@ export function browserRequestFromMessage(message: ChatMessage): BrowserRequest 
   const value = details?.browserRequest as Record<string, unknown> | undefined;
   if (!value || typeof value.task !== "string" || !value.task.trim() || value.task.length > 8_000) return null;
   if (value.location !== "auto" && value.location !== "device" && value.location !== "workspace") return null;
-  return { task: value.task.trim(), location: value.location };
+  return {
+    task: value.task.trim(),
+    location: value.location,
+    ...(value.continueBuilding === true ? { continueBuilding: true } : {}),
+  };
 }
 
 type BrowserRequestHostAvailability = Pick<BrowserRequestHost, "personalAvailable" | "sharedUnavailable" | "personalTurnsAllowed">;
@@ -150,6 +160,12 @@ export const BROWSER_AUTO_STARTED_METADATA_KEY = "browserAutoStarted";
  */
 export const BROWSER_CARD_SITES_METADATA_KEY = "browserCardSites";
 const MAX_BROWSER_CARD_SITES = 8;
+/**
+ * Prompt metadata on a continuation of a card that continues building: the
+ * browser turn ends with labelled findings for the hand-back (runtime-agent
+ * `browser_hand_back.rs`), and only such a turn is handed back.
+ */
+export const BROWSER_HANDS_BACK_METADATA_KEY = "browserHandsBack";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -288,7 +304,9 @@ export function browserRequestFromContinuationPrompt(
     if (!task || task.length > 8_000) continue;
     const transport = record["browserTransport"] ?? record["browser_transport"];
     const location = transport === "shared" ? "workspace" : transport === "desktop-personal" ? "device" : "auto";
-    return { task, location };
+    const continueBuilding = promptMetadataRecords(message.metadata)
+      .some((entry) => entry[BROWSER_HANDS_BACK_METADATA_KEY] === true);
+    return { task, location, ...(continueBuilding ? { continueBuilding: true } : {}) };
   }
   return null;
 }

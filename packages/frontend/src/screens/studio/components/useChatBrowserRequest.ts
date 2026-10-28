@@ -20,6 +20,7 @@ import {
 import { browserHandBackOfPromptMetadata } from "./browserHandBack";
 import {
   BROWSER_AUTO_STARTED_METADATA_KEY,
+  BROWSER_HANDS_BACK_METADATA_KEY,
   BROWSER_REQUEST_OF_METADATA_KEY,
   browserRequestContinuation,
   BROWSER_CARD_SITES_METADATA_KEY,
@@ -493,6 +494,7 @@ export function useChatBrowserRequest(options: Options) {
               // their OK for the site. A card Studio opened by itself is not.
               ...(autoStarted ? { [BROWSER_AUTO_STARTED_METADATA_KEY]: true } : {}),
               ...(!autoStarted && destinations.length > 0 ? { [BROWSER_CARD_SITES_METADATA_KEY]: destinations } : {}),
+              ...(request.continueBuilding ? { [BROWSER_HANDS_BACK_METADATA_KEY]: true } : {}),
             },
             knownHosts: destinations,
           });
