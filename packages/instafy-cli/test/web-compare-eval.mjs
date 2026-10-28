@@ -93,7 +93,7 @@ export const OFFICIAL_DOWN_CASE = {
   official: { url: `${MAKER}/`, down: true },
   items: CASE.items.map((item) => ({ ...item, page: { url: item.page.url, down: true } })),
   // the maker's own "review" is on its site too, which never answers
-  reviews: CASE.reviews.map((review) => (review.url.startsWith(MAKER) ? { ...review, down: true } : review)),
+  reviews: CASE.reviews.map((review) => (host(review.url) === host(MAKER) ? { ...review, down: true } : review)),
   shops: [],
   searches: {},
 };

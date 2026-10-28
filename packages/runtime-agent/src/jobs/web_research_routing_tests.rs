@@ -747,7 +747,8 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
 /// without a price is listed as "price unknown", two failures on the official site send the turn to at least one
 /// independent source, and a page of options has a row per candidate. Unedited earlier copies are upgraded.
 #[test]
-fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_official_site_fails() {
+fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_official_site_fails()
+{
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     let new_rules = [
@@ -759,10 +760,17 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
     let previous = include_str!("legacy/web-research-v7.md");
     for needle in new_rules {
         assert!(research.contains(needle), "{needle}");
-        assert!(!flat(previous).contains(needle), "new in this version: {needle}");
+        assert!(
+            !flat(previous).contains(needle),
+            "new in this version: {needle}"
+        );
     }
     assert!(!research.contains("never listed or described as within it"));
-    assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES, "{} bytes", RESEARCH_SKILL.len());
+    assert!(
+        RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        RESEARCH_SKILL.len()
+    );
 
     let hub = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -776,7 +784,11 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
     let tmp = scaffolded_space();
     for (relative, previous, current) in [
         (learn::WEB_RESEARCH_RELATIVE_PATH, previous, RESEARCH_SKILL),
-        (learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH, previous_hub, hub),
+        (
+            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+            previous_hub,
+            hub,
+        ),
     ] {
         let skill = tmp.path().join(relative);
         fs::write(&skill, previous).unwrap();
