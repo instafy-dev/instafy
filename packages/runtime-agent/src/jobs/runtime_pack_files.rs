@@ -681,6 +681,7 @@ mod tests {
         InstalledPack {
             name: name.to_string(),
             version: "0.1.0".into(),
+            description: None,
             dir,
             skill: "SKILL.md".into(),
             cli: with_cli.then(|| PackCli {

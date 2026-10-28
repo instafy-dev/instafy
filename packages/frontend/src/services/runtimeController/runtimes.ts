@@ -82,6 +82,47 @@ export interface ControllerRuntimeStatusEntry {
    * controllers and images.
    */
   sharedBrowserHost?: ControllerSharedBrowserHost | null;
+  /**
+   * The skill packs this runtime writes into every space it serves (installed
+   * with the runtime, never saved with the space). Absent from older
+   * controllers and runtimes, and when the runtime has none.
+   */
+  skillPacks?: ControllerRuntimeSkillPack[] | null;
+}
+
+/** A skill pack installed with a runtime, as its status entry names it. */
+export interface ControllerRuntimeSkillPack {
+  name: string;
+  version: string;
+  title: string | null;
+  summary: string | null;
+}
+
+const RUNTIME_SKILL_PACK_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/** `skillPacks` of a status entry: well-formed entries only, at most 16, each name once. */
+export function mapControllerRuntimeSkillPacks(value: unknown): ControllerRuntimeSkillPack[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const text = (raw: unknown, max: number): string | null => {
+    if (typeof raw !== "string") return null;
+    const line = raw.replace(/\p{Cc}+/gu, " ").replace(/\s+/g, " ").trim();
+    return line ? line.slice(0, max) : null;
+  };
+  const seen = new Set<string>();
+  const packs: ControllerRuntimeSkillPack[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name : "";
+    const version = typeof record.version === "string" ? record.version.trim() : "";
+    if (!RUNTIME_SKILL_PACK_NAME.test(name) || !version || version.length > 32 || seen.has(name)) continue;
+    seen.add(name);
+    packs.push({ name, version, title: text(record.title, 80), summary: text(record.summary, 200) });
+    if (packs.length === 16) break;
+  }
+  return packs.length ? packs : null;
 }
 
 /** The only browser-host shape this client understands. */
@@ -178,6 +219,7 @@ export async function fetchRuntimeStatus(
             const record = entry as ControllerRuntimeStatusEntry & {
               runtimeImage?: unknown;
               sharedBrowserHost?: unknown;
+              skillPacks?: unknown;
             };
             const runtimeImage =
               typeof record.runtimeImage === "string" && record.runtimeImage.trim().length > 0
@@ -186,6 +228,7 @@ export async function fetchRuntimeStatus(
             return {
               ...record,
               runtimeImage,
+              skillPacks: mapControllerRuntimeSkillPacks(record.skillPacks) ?? undefined,
               // Anything but the exact known shape reads as no host, and so
               // does every host outside a covered space: Studio attaches only
               // where the policy says the host routes are open.

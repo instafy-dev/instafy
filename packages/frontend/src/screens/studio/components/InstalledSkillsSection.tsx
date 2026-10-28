@@ -23,10 +23,20 @@ type InstalledSkillsSectionSkill = {
   disabledPath: string;
 };
 
+/** A skill pack installed with the space's runtime: shown, but the runtime manages it. */
+type IncludedSkill = {
+  id: string;
+  slug: string;
+  title: string;
+  description: string | null;
+  version: string | null;
+};
+
 type InstalledSkillsSectionProps = {
   hasProject: boolean;
   loading: boolean;
   skills: InstalledSkillsSectionSkill[];
+  includedSkills?: IncludedSkill[];
   error: string | null;
   workspaceUnavailable?: boolean;
   bootstrapPending: boolean;
@@ -47,6 +57,7 @@ export function InstalledSkillsSection({
   hasProject,
   loading,
   skills,
+  includedSkills = [],
   error,
   workspaceUnavailable = false,
   bootstrapPending,
@@ -134,9 +145,9 @@ export function InstalledSkillsSection({
             Retry
           </Button>
         </div>
-      ) : workspaceUnavailable && skills.length === 0 ? null : loading && skills.length === 0 ? (
+      ) : workspaceUnavailable && skills.length === 0 && includedSkills.length === 0 ? null : loading && skills.length === 0 ? (
         <LoadingStatus>Loading skills…</LoadingStatus>
-      ) : skills.length === 0 ? (
+      ) : skills.length === 0 && includedSkills.length === 0 ? (
         <div className="space-y-3">
           <Text variant="caption" tone="muted">
             No installed skills yet.
@@ -285,6 +296,32 @@ export function InstalledSkillsSection({
               </div>
             );
           })}
+          {includedSkills.map((skill) => (
+            <div
+              key={skill.id}
+              className="space-y-2 py-3 first:pt-0 last:pb-0"
+              data-testid={`skills-included-${skill.slug}`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-start gap-3">
+                  <span className="mt-0.5 inline-flex h-9 w-9 flex-none items-center justify-center rounded-lg border border-slate-200 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                    <Puzzle className="h-4 w-4" aria-hidden="true" />
+                  </span>
+                  <div className="min-w-0 space-y-1">
+                    <Text variant="bodyStrong" tone="primary" className="line-clamp-2 break-words @min-[36rem]/settings-content:line-clamp-1">
+                      {skill.title}
+                    </Text>
+                    <Text variant="bodyCompact" tone="secondary" className="line-clamp-2">
+                      {skill.description ?? skill.slug}
+                    </Text>
+                  </div>
+                </div>
+                <Text variant="caption" tone="muted" className="ml-2 shrink-0 pt-0.5 text-right" data-testid={`skills-included-label-${skill.slug}`}>
+                  {skill.version ? `Included with Instafy · ${skill.version}` : "Included with Instafy"}
+                </Text>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </section>
