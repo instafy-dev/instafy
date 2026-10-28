@@ -463,6 +463,8 @@ type Group = {
 // Browser groups that count pages, not steps: reading the same page twice is
 // "read a page". A search counts each time it ran.
 const PAGE_COUNTED_KEYS = new Set(["browser/read", "browser/open"]);
+// A browser step taken before any site was known ("used the browser").
+const BROWSER_WITHOUT_SITE = "browser/use";
 
 function groupCount(group: Group): number | null {
   if (group.unknown) {
@@ -570,8 +572,12 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
   });
   const all = [...groups.values()];
   const weight = (group: Group) => groupCount(group) ?? group.members;
+  // "Used the browser" is a browser step before any site was known. Once a
+  // step names its site it says nothing more: "Opened 2 pages on
+  // visitlisboa.com", not "Used the browser, opened 2 pages on visitlisboa.com".
+  const namesASite = all.some((group) => group.entry.key.startsWith("browser/") && group.entry.host);
   const content = all
-    .filter((group) => group.entry.role === "content")
+    .filter((group) => group.entry.role === "content" && !(namesASite && group.entry.key === BROWSER_WITHOUT_SITE))
     .sort((a, b) => weight(b) - weight(a) || a.first - b.first)
     .slice(0, 2)
     .sort((a, b) => a.first - b.first);

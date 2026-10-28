@@ -212,6 +212,9 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
 - **Studio** groups browser steps by key and host. Pages opened and read count by distinct
   `pageKey`, so reading a page twice is "read a page"; searches count each time. After a group on
   the same site, a group's trailing " on {host}" goes: "Searched visitlisboa.com, read 2 pages".
+  "Used the browser" (a step taken before any site was known, such as listing the tabs) leaves the
+  line once a browser step names its site: "Opened 2 pages on visitlisboa.com, read a page", not
+  "Used the browser, opened 2 pages on visitlisboa.com". Its row in Details keeps it.
   A host in punycode shows in Unicode when all its letters are of one script (or one of the CJK
   sets written with Latin, Unicode's "highly restrictive" profile), so "münchen.de" reads as
   itself and a name that mixes scripts stays in punycode (`activityHost.ts`).

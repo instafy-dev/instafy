@@ -570,6 +570,27 @@ describe("browser steps", () => {
     expect(summarize(messages.slice(0, 2)).summary).toBe("Read a page on visitlisboa.com");
   });
 
+  // A local test: "Used the browser, opened 2 pages on visitlisboa.com", where
+  // the browser step with no site was the one that listed the browser's tabs.
+  it("leave out Used the browser once a step names its site", () => {
+    const tabs = browserStep(
+      { key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" },
+      { step: "tabs" },
+    );
+    const messages = [
+      tabs,
+      browserStep(BROWSER_OPEN, { host: "visitlisboa.com", pageKey: PAGE_A, step: "navigate" }),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+      browserStep(BROWSER_OPEN, { host: "visitlisboa.com", pageKey: PAGE_B, step: "navigate" }),
+    ];
+    expect(summarize(messages).summary).toBe("Opened 2 pages on visitlisboa.com, read a page");
+    // Its row in Details keeps it.
+    const first = summarize(messages).details[0];
+    expect(first.kind === "step" && first.step.label).toBe("Used the browser");
+    // With no site named, it is what the line can say.
+    expect(summarize([tabs]).summary).toBe("Used the browser");
+  });
+
   it("drop a group's trailing site when the group before it named the same one", () => {
     const messages = [
       browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", pageKey: PAGE_A, step: "search" }),
