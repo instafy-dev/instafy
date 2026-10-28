@@ -1,4 +1,5 @@
 import { isPersonRuntimeStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
+import { resolveProxyUpstreamErrorGuidance } from "../screens/studio/components/proxyError";
 import type { ChatMessage } from "../screens/studio/types";
 
 /**
@@ -20,12 +21,15 @@ export type RunFailureKind =
   | "response_incomplete"
   | "browser_page_missing"
   | "interrupted_run_expired"
+  | "ai_unavailable"
   | "generic";
 
 export type RunFailurePresentation = {
   kind: RunFailureKind;
   friendlyText: string;
   rawText: string;
+  /** The failure block offers "Manage AI": the person's own AI connection can fix it. */
+  manageAi?: boolean;
 };
 
 const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
@@ -52,6 +56,8 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
   // Used when the stop was not a person's; see interruptedRunExpiredFriendlyText.
   interrupted_run_expired:
     "This turn lost its machine and didn't pick up again in time. Try again to continue.",
+  // Used for Instafy AI; see aiUnavailablePresentation for the person's own.
+  ai_unavailable: "Instafy AI isn't answering right now.",
   // Only used as a last-resort fallback now: an unclassified failure surfaces
   // its real reason inline (see inlineGenericFailureText) rather than this
   // uninformative sentence.
@@ -167,8 +173,8 @@ const NEEDS_AI_PATTERNS = [
 // The model provider answered 429 and the run stopped. Codex reports it as
 // "exceeded retry limit, last status: 429 Too Many Requests" even though no
 // retry happened, and the Instafy proxy labels it upstream_rate_limit. Proxy
-// errors that still read "unexpected status 429" keep their curated guidance,
-// because callers check for that before classifying the failure here.
+// errors that still read "unexpected status 429" are `ai_unavailable`
+// instead (resolveRunFailurePresentation reads them before this list).
 // A bare "429 Too Many Requests" is not enough: a throttled skill import or the
 // scoped worker proxy fail with that same phrase, and neither is the AI
 // provider.
@@ -278,6 +284,9 @@ const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
  * controller refuses one whose page is not open before anything runs.
  * `interrupted_run_expired` is excluded because the turn may have been
  * stopped on purpose, and a resend would ask for a machine again.
+ * `ai_unavailable` is excluded because the AI service refused or dropped the
+ * request: sent again at once it would most likely fail the same way, so the
+ * person decides when to press "Try again".
  */
 export const AUTO_RETRY_ELIGIBLE_KINDS = [
   "missing_final_message",
@@ -687,11 +696,37 @@ export function classifyRunFailureText(rawText: string): Exclude<RunFailureKind,
 }
 
 /**
+ * A run the AI service refused or never answered: the Instafy proxy's
+ * "unexpected status …" diagnostic, read by proxyError. On Instafy AI the
+ * person has nothing to fix, so it names no sign-in or account. On their own
+ * AI it says what to do, in plain words, with "Manage AI" when settings can
+ * fix it. Every proxy failure keeps "Try again" and its raw text behind
+ * Details.
+ */
+function aiUnavailablePresentation(
+  rawText: string,
+  metadata: Record<string, unknown> | null,
+): RunFailurePresentation | null {
+  const guidance = resolveProxyUpstreamErrorGuidance(rawText);
+  if (!guidance) {
+    return null;
+  }
+  if (normalizedStringField(metadata, "aiAccessMode") === "managed") {
+    return { kind: "ai_unavailable", friendlyText: RUN_FAILURE_FRIENDLY_TEXT.ai_unavailable, rawText };
+  }
+  return {
+    kind: "ai_unavailable",
+    friendlyText: guidance.summary,
+    rawText,
+    manageAi: guidance.actionKind === "open_ai_settings",
+  };
+}
+
+/**
  * Resolve the friendly presentation for a failed-run message body.
  *
  * Returns null when the message should keep its current rendering (unknown
- * text without failed-run metadata, or empty content). Callers that already
- * surface curated guidance (proxy/credential errors) must gate before calling.
+ * text without failed-run metadata, or empty content).
  *
  * `assumeFailed` lets surfaces that already display a failure signal (the
  * rose "Run failed" chip, the danger error bubble) opt into the specific
@@ -716,10 +751,20 @@ export function resolveRunFailurePresentation(params: {
   if (!failedByMetadata && !params.assumeFailed) {
     return null;
   }
+  const classified = classifyRunFailureText(rawText);
+  if (normalizedStringField(metadata, "kind") !== INTERRUPTED_RUN_EXPIRED_KIND) {
+    // A proxy diagnostic reads as the AI not answering, unless it is a spent
+    // usage window, whose copy says when it reopens and offers no resend.
+    const aiUnavailable =
+      classified === "provider_usage_limit" ? null : aiUnavailablePresentation(rawText, metadata);
+    if (aiUnavailable) {
+      return aiUnavailable;
+    }
+  }
   const kind =
     normalizedStringField(metadata, "kind") === INTERRUPTED_RUN_EXPIRED_KIND
       ? INTERRUPTED_RUN_EXPIRED_KIND
-      : classifyRunFailureText(rawText) ?? (failedByMetadata ? "generic" : null);
+      : classified ?? (failedByMetadata ? "generic" : null);
   if (!kind) {
     return null;
   }

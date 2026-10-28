@@ -358,17 +358,15 @@ export function AgentJobThreadPreviewLayout({
     finalSummaryLower.includes("retry later or switch credentials") ||
     finalSummaryLower.includes("credentials need reconnecting") ||
     finalSummaryLower.includes("quota");
-  // Failed runs render a short friendly sentence instead of the raw technical
-  // failure body; the raw text and the turn's steps stay behind its Details.
-  // Proxy/credential errors keep their existing curated guidance.
+  // Every failed turn renders one failure block: a short friendly sentence,
+  // "Try again", and the raw text and the turn's steps behind its Details. A
+  // proxy failure reads from its raw diagnostic, so the block can say whose
+  // AI it was and offer "Manage AI" when settings can fix it.
   const runFailurePresentation =
-    isCompleted &&
-    finalSpineTone === "danger" &&
-    finalSummaryMessage !== null &&
-    !finalSummaryCoversProxyError
+    isCompleted && finalSpineTone === "danger" && finalSummaryMessage !== null
       ? resolveRunFailurePresentation({
           metadata: finalSummaryMessage.metadata,
-          content: finalSummaryDisplayContent,
+          content: inheritedProxyGuidanceContent ?? finalSummaryDisplayContent,
           assumeFailed: true,
         })
       : null;

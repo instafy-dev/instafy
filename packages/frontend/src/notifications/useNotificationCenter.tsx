@@ -22,14 +22,18 @@ function unreadSignature(page: NotificationPage): string {
   return `${page.unreadCount}|${page.items.map(item => `${item.id}:${item.seenAt ?? ""}:${item.readAt ?? ""}:${item.archivedAt ?? ""}`).join(",")}`;
 }
 
-/** The conversation a `conversation.reply` notification points at, from its canonical Studio URL. */
-export function replyConversationId(item: ProductNotification): string | null {
-  if (item.eventName !== "conversation.reply") return null;
+/** The conversation a notification is about (a reply, a failed run), from its canonical Studio URL. */
+export function notificationConversationId(item: ProductNotification): string | null {
   try {
     const id = new URL(item.url, "https://instafy.invalid").searchParams.get("conversationControllerId");
     if (id) return id.toLowerCase();
   } catch { /* canonical URLs always parse */ }
   return item.resourceType === "conversation" && item.resourceId ? item.resourceId.toLowerCase() : null;
+}
+
+/** The conversation a `conversation.reply` notification points at. */
+export function replyConversationId(item: ProductNotification): string | null {
+  return item.eventName === "conversation.reply" ? notificationConversationId(item) : null;
 }
 
 export interface HomeNotifications {
@@ -211,10 +215,11 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
         const prefs = preferencesRef.current?.session === session ? preferencesRef.current.value : null;
         if (!prefs || prefs.preferences.some((pref) => pref.category === item.category && pref.channel === "local" && !pref.enabled)) continue;
         const foreground = isAppInForeground();
-        if (foreground && isConversationOpen(replyConversationId(item))) {
-          // The open chat is the presentation for its own replies; a banner
-          // here reads as "the chat missed it". Mark it seen so it does not
-          // toast later from another view; the chat's read hook marks it read.
+        if (foreground && isConversationOpen(notificationConversationId(item))) {
+          // The open chat is the presentation for its own replies and failed
+          // runs; a banner here repeats what is on screen and its View only
+          // reopens the same chat. Mark it seen so it does not toast later
+          // from another view; the chat's read hook marks a reply read.
           void controllerClient.notifications.updateState({ id: item.id, action: "seen", accessToken, expectedUserId: userId, isCurrent: current }).catch(() => {});
           continue;
         }

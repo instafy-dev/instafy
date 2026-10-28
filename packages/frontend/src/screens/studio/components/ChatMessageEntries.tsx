@@ -41,7 +41,6 @@ import { TimelineEntry } from "./ChatTimelineEntry";
 import { resolveRunFailurePresentation } from "../../../conversations/runFailurePresentation";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
-import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
 import { RunFailureMessageBody } from "./RunFailureNotice";
 import { isRuntimeAlertSupersededByStart } from "./runtimeAlertPresentation";
 import {
@@ -1125,17 +1124,16 @@ export function AssistantMessageEntry({
   const isError = messageType === "error";
   const singleMessageSpineTone: ThreadSpineTone =
     resolveSpineToneFromStatus(extractThreadRunStatus(message)) ?? (isError ? "danger" : "primary");
-  // Failed-run error bubbles show a short friendly sentence with the raw
-  // technical text behind a Details toggle; curated proxy/credential guidance
-  // keeps its existing rendering inside MessageContent.
-  const runFailurePresentation =
-    isError && !resolveProxyUpstreamErrorGuidance(message.content)
-      ? resolveRunFailurePresentation({
-          metadata: metadataRecord,
-          content: message.content,
-          assumeFailed: true,
-        })
-      : null;
+  // Failed-run error bubbles show the same failure block as a failed turn: a
+  // short friendly sentence, its actions, and the raw technical text behind
+  // Details.
+  const runFailurePresentation = isError
+    ? resolveRunFailurePresentation({
+        metadata: metadataRecord,
+        content: message.content,
+        assumeFailed: true,
+      })
+    : null;
 
   if (!isError) {
     return (

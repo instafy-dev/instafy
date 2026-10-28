@@ -81,6 +81,8 @@ const CONTROLLER_CREDENTIAL_REFRESH_TOKEN_REUSED_ERROR = `unexpected status 401 
   "message": "Codex OAuth refresh failed: Your refresh token has already been used to generate a new access token. Please try signing in again."
 }`;
 
+const SIGN_IN = "Your AI connection needs you to sign in again.";
+
 const CONTROLLER_CREDENTIAL_REFRESH_INVALID_ERROR =
   'unexpected status 401 Unauthorized: controller credential fetch failed: controller credentials returned 500 Internal Server Error: {"message":"Codex OAuth refresh failed: Could not validate your refresh token. Please try signing in again."}, url: http://proxy:8789/v1/responses';
 
@@ -1024,11 +1026,79 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.textContent).toContain(
-      "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-    );
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(SIGN_IN);
     expect(container.textContent).not.toContain("Something went wrong finishing this run.");
     expect(container.textContent).not.toContain("controller credential fetch failed");
+  });
+
+  describe("the proxy's 424 when its sign-in could not be renewed", () => {
+    // What Codex stores for the proxy's 424: the status and the envelope's
+    // message, without its code.
+    const REFRESH_424 =
+      "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses";
+
+    async function renderFailure(aiAccessMode: string | null) {
+      const requestRetry = vi.fn();
+      const onConnectAi = vi.fn();
+      await act(async () => {
+        root.render(
+          <RunFailureRetryProvider
+            value={{ pendingRetryKey: null, requestRetry, autoRetryingKey: null, onConnectAi }}
+          >
+            <AgentJobThreadPreviewLayout
+              {...createProps({
+                finalSpineTone: "danger",
+                finalSummaryMessage: createMessage({
+                  id: "refresh-424",
+                  content: REFRESH_424,
+                  messageType: "error",
+                  metadata: {
+                    source: "agent",
+                    outcome: "failed",
+                    messageType: "error",
+                    jobId: JOB_ID,
+                    errorMessage: REFRESH_424,
+                    ...(aiAccessMode ? { aiAccessMode } : {}),
+                  },
+                }),
+              })}
+            />
+          </RunFailureRetryProvider>,
+        );
+      });
+      return { requestRetry, onConnectAi };
+    }
+
+    it("shows the failure block on Instafy AI, without sign-in talk", async () => {
+      const { requestRetry } = await renderFailure("managed");
+      const body = container.querySelector('[data-testid="run-failure-body"]');
+      expect(body?.querySelector("p")?.textContent).toBe("Instafy AI isn't answering right now.");
+      expect(container.querySelector('[data-testid="run-failure-manage-ai"]')).toBeNull();
+      expect(container.textContent).not.toMatch(/upstream|provider|credential|switch|sign in/i);
+      const retry = container.querySelector<HTMLButtonElement>('[data-testid="run-failure-retry"]');
+      expect(retry?.textContent).toBe("Try again");
+      await act(async () => retry?.click());
+      expect(requestRetry).toHaveBeenCalledTimes(1);
+
+      // The raw diagnostic sits behind Details only.
+      expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('[data-testid="run-failure-details-toggle"]')?.click();
+      });
+      expect(container.querySelector('[data-testid="run-failure-details"]')?.textContent).toBe(REFRESH_424);
+    });
+
+    it.each(["byoc", null])("asks the person to sign in again on their own AI (%s)", async (aiAccessMode) => {
+      const { onConnectAi } = await renderFailure(aiAccessMode);
+      expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(SIGN_IN);
+      const manageAi = container.querySelector<HTMLButtonElement>('[data-testid="run-failure-manage-ai"]');
+      expect(manageAi?.textContent).toBe("Manage AI");
+      expect(container.querySelector('[data-testid="run-failure-retry"]')?.textContent).toBe("Try again");
+      expect(container.querySelector('[data-testid="run-failure-details-toggle"]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Upstream credentials");
+      await act(async () => manageAi?.click());
+      expect(onConnectAi).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("proxy errors from the live thread", () => {
@@ -1123,9 +1193,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
         "Run failed",
       );
-      expect(container.textContent).toContain(
-        "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-      );
+      expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(SIGN_IN);
     });
 
     it("shows a run that ran out of retries on a proxy 502 as failed, without blaming credentials", async () => {
@@ -1148,10 +1216,9 @@ describe("AgentJobThreadPreviewLayout", () => {
       expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
         "Run failed",
       );
-      expect(container.textContent).toContain(
-        "Connection to the AI provider dropped. This is usually temporary.",
+      expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+        "The connection to the AI dropped. This is usually temporary.",
       );
-      expect(container.textContent).not.toContain("switch credentials");
     });
   });
 
@@ -1221,7 +1288,9 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     expect(container.textContent).toContain("Run failed");
-    expect(container.textContent).toContain("Upstream 429 rejected the AI request (insufficient_quota).");
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+      "Your AI account has reached its limit.",
+    );
     expect(container.textContent).not.toContain(
       "The upstream provider rejected the AI request. Retry later or switch credentials.",
     );
@@ -1275,9 +1344,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.textContent).toContain(
-      "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
-    );
+    expect(container.textContent).toContain(SIGN_IN);
     expect(container.textContent).not.toContain("controller credential fetch failed");
   });
 
@@ -1313,7 +1380,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     const renderedText = container.textContent ?? "";
-    const summary = "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.";
+    const summary = SIGN_IN;
     expect(renderedText.split(summary)).toHaveLength(2);
     expect(renderedText).toContain("Codex run timed out");
     expect(container.querySelector('[data-testid="agent-thread-inline-update-row"]')?.className).toContain(
@@ -1346,7 +1413,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     const renderedText = container.textContent ?? "";
-    const summary = "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.";
+    const summary = SIGN_IN;
     expect(renderedText.split(summary)).toHaveLength(2);
     expect(renderedText).not.toContain("controller credential fetch failed");
   });

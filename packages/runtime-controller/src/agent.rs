@@ -2846,25 +2846,47 @@ const PROVIDER_LIMIT_REJECTED_REFUND_REASON: &str = "provider_limit_rejected";
 /// already have consumed tokens upstream; those settle through usage
 /// reconciliation instead.
 ///
-/// - The proxy refused the request outright (auth, configuration).
+/// - The proxy refused the request outright (auth, configuration), or the
+///   provider refused the sign-in or access before any generation.
 /// - The provider refused it for a spent plan window or quota. Such a 429 is
 ///   decided before any generation, unlike a throttle or a 5xx, which may
-///   have cut a paid answer short. The caller still refuses the refund when
-///   anything shows a model call succeeded.
+///   have cut a paid answer short.
+///
+/// The caller still refuses the refund when anything shows a model call
+/// succeeded.
+///
+/// The proxy's own refusals are its safe envelopes
+/// (openai-proxy-server/src/upstream_error.rs). A JSON body carries the code;
+/// Codex quotes only the envelope's message ("unexpected status 424 Failed
+/// Dependency: Upstream credentials could not be refreshed., url: …"), so
+/// each code's fixed sentence stands in for it.
 fn managed_ai_failure_refund_reason(error_message: Option<&str>) -> Option<&'static str> {
     const PROXY_REJECTED: &[&str] = &[
         "proxy token missing credential_id",
         "unexpected status 401",
         "401 unauthorized",
         "proxy controller integration is not configured",
+        // A sign-in the proxy could not renew (424).
+        "upstream_credential_refresh_failed",
+        "upstream credentials could not be refreshed",
+        // A request the proxy could not build or send (424).
+        "upstream_configuration_error",
+        "the upstream request configuration is invalid",
+        // The provider refused access before answering (403).
+        "upstream_access_denied",
+        "the upstream provider denied access",
     ];
     // Codex's own text for a spent ChatGPT plan window (with a straight or a
-    // curly apostrophe), and the provider and proxy codes for a spent limit.
+    // curly apostrophe), the provider and proxy codes for a spent limit, and
+    // the proxy's sentences for them.
     const LIMIT_REJECTED: &[&str] = &[
         "hit your usage limit",
         "usage_limit_reached",
         "usage_not_included",
         "insufficient_quota",
+        "the upstream plan usage limit was reached",
+        "the upstream plan does not include this usage",
+        "the upstream provider has no available quota",
     ];
     let normalized = error_message?.trim().to_lowercase();
     if normalized.is_empty() {
@@ -2903,11 +2925,12 @@ fn artifacts_show_a_model_call_that_did_not_fail(artifacts: &JsonValue) -> bool 
 /// A managed-AI run that failed before reaching a model still holds the
 /// prompt reserve burned at dispatch and the daily prompt slot that goes with
 /// it. Give both back, once, when nothing shows the model was ever called:
-/// no completed Codex turn in the artifacts, no visible assistant message, no tool updates
+/// no completed Codex turn in the artifacts, no call in the job's usage
+/// receipt that did not fail, no visible assistant message, no tool updates
 /// other than the routing pre-observation the runtime ran before the model,
-/// and an error that the proxy rejected the request outright. Returns the
-/// org id when this call wrote the refund, for a post-commit
-/// `credits.updated`.
+/// and an error that the request was refused before any model answered
+/// (`managed_ai_failure_refund_reason`). Returns the org id when this call
+/// wrote the refund, for a post-commit `credits.updated`.
 #[allow(clippy::too_many_arguments)]
 async fn refund_managed_ai_reserve_on_failed_completion(
     transaction: &mut tokio_postgres::Transaction<'_>,
@@ -2932,9 +2955,9 @@ async fn refund_managed_ai_reserve_on_failed_completion(
     let Some(refund_reason) = managed_ai_failure_refund_reason(error_message) else {
         return Ok(None);
     };
-    if refund_reason == PROVIDER_LIMIT_REJECTED_REFUND_REASON
-        && artifacts_show_a_model_call_that_did_not_fail(artifacts_value)
-    {
+    // A call that did not fail may have been answered and paid, whatever
+    // refusal ended the turn after it.
+    if artifacts_show_a_model_call_that_did_not_fail(artifacts_value) {
         return Ok(None);
     }
     let Some(prompt_uuid) = prompt_id else {
@@ -6329,6 +6352,44 @@ mod tests {
         )));
         assert!(!managed_ai_failure_reaches_no_model(Some("   ")));
         assert!(!managed_ai_failure_reaches_no_model(None));
+    }
+
+    #[test]
+    fn the_proxys_own_refusals_never_reached_a_model() {
+        // As Codex stores them: the status and the envelope's message, no code.
+        for text in [
+            "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses",
+            "unexpected status 424 Failed Dependency: The upstream request configuration is invalid., url: http://proxy:8789/v1/responses",
+            "unexpected status 403 Forbidden: The upstream provider denied access., url: http://proxy:8789/v1/responses",
+            "unexpected status 424: {\"error\":{\"type\":\"upstream_error\",\"code\":\"upstream_credential_refresh_failed\",\"message\":\"Safe.\"}}",
+        ] {
+            assert_eq!(
+                managed_ai_failure_refund_reason(Some(text)),
+                Some(PROXY_AUTH_REJECTED_REFUND_REASON),
+                "{text}"
+            );
+        }
+        for text in [
+            "unexpected status 402 Payment Required: The upstream provider has no available quota., url: http://proxy:8789/v1/responses",
+            "unexpected status 429 Too Many Requests: The upstream plan usage limit was reached., url: http://proxy:8789/v1/responses",
+            "unexpected status 429 Too Many Requests: The upstream plan does not include this usage., url: http://proxy:8789/v1/responses",
+        ] {
+            assert_eq!(
+                managed_ai_failure_refund_reason(Some(text)),
+                Some(PROVIDER_LIMIT_REJECTED_REFUND_REASON),
+                "{text}"
+            );
+        }
+        // A throttle, a 5xx and a dropped connection may have cut a paid
+        // answer short.
+        for text in [
+            "unexpected status 429 Too Many Requests: The upstream provider rate limit was reached., url: http://proxy:8789/v1/responses",
+            "unexpected status 503 Service Unavailable: The upstream provider rejected the request., url: http://proxy:8789/v1/responses",
+            "unexpected status 502 Bad Gateway: The upstream request failed., url: http://proxy:8789/v1/responses",
+            "unexpected status 504 Gateway Timeout: The upstream request timed out., url: http://proxy:8789/v1/responses",
+        ] {
+            assert_eq!(managed_ai_failure_refund_reason(Some(text)), None, "{text}");
+        }
     }
 
     #[test]

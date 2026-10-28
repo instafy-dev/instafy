@@ -167,6 +167,35 @@ describe("RunFailureMessageBody", () => {
     expect(onConnectAi).toHaveBeenCalledTimes(1);
   });
 
+  it("offers Manage AI beside Try again when the person's own AI refused the sign-in", async () => {
+    const onConnectAi = vi.fn();
+    const refused =
+      "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses";
+    const own = createMessage({
+      ...FAILURE,
+      content: refused,
+      metadata: { ...FAILURE.metadata, aiAccessMode: "byoc" },
+    });
+    await render(contextValue({ onConnectAi }), own);
+    expect(container.querySelector("p")?.textContent).toBe("Your AI connection needs you to sign in again.");
+    expect(query("run-failure-retry")?.textContent).toBe("Try again");
+    expect(query("run-failure-manage-ai")?.className.split(/\s+/)).toContain("pointer-coarse:min-h-11");
+    await act(async () => {
+      query("run-failure-manage-ai")?.click();
+    });
+    expect(onConnectAi).toHaveBeenCalledTimes(1);
+
+    const managed = createMessage({
+      ...FAILURE,
+      content: refused,
+      metadata: { ...FAILURE.metadata, aiAccessMode: "managed" },
+    });
+    await render(contextValue({ onConnectAi }), managed);
+    expect(container.querySelector("p")?.textContent).toBe("Instafy AI isn't answering right now.");
+    expect(query("run-failure-retry")?.textContent).toBe("Try again");
+    expect(query("run-failure-manage-ai")).toBeNull();
+  });
+
   it("shows a pending spinner on Try again while its resend is in flight", async () => {
     const requestRetry = vi.fn();
     await render(contextValue({ requestRetry, pendingRetryKey: "failure-1" }));

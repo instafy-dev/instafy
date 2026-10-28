@@ -307,4 +307,37 @@ describe("notification center", () => {
     }
   });
 
+  it("leaves a failed run in the open chat to the chat, and toasts one elsewhere", async () => {
+    const PROJECT = "55555555-5555-4555-8555-555555555555";
+    const OPEN = "66666666-6666-4666-8666-666666666666";
+    const ELSEWHERE = "77777777-7777-4777-8777-777777777777";
+    const C = "88888888-8888-4888-8888-888888888888";
+    const D = "99999999-9999-4999-8999-999999999999";
+    const failed = (id: string, conversation: string) => ({
+      ...event(id), eventName: "run.failed", category: "runs", resourceType: "run", resourceId: id,
+      body: "A run could not finish.", url: `/studio?projectId=${PROJECT}&conversationControllerId=${conversation}`,
+    });
+    const announced: string[][] = [];
+    const listener = (e: Event) => announced.push((e as CustomEvent<{ conversationIds: string[] }>).detail.conversationIds);
+    window.addEventListener(CONVERSATION_REPLY_NOTIFIED_EVENT, listener);
+    const release = registerOpenConversation(OPEN);
+    try {
+      mocks.foreground = true;
+      mocks.list.mockResolvedValue(page([failed(C, OPEN), failed(D, ELSEWHERE)]));
+      await act(async () => {
+        window.dispatchEvent(new Event(RECEIVED));
+        await vi.dynamicImportSettled();
+      });
+      expect(mocks.show).toHaveBeenCalledTimes(1);
+      expect(mocks.show).toHaveBeenCalledWith("A run could not finish.", "info", 10_000, expect.objectContaining({ id: `notification:${A}:${D}` }));
+      expect(mocks.state).toHaveBeenCalledWith(expect.objectContaining({ id: C, action: "seen", expectedUserId: A }));
+      // Only replies ask the open chat to re-read.
+      expect(announced).toEqual([]);
+    } finally {
+      release();
+      resetOpenConversationsForTests();
+      window.removeEventListener(CONVERSATION_REPLY_NOTIFIED_EVENT, listener);
+    }
+  });
+
 });

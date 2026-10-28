@@ -130,6 +130,31 @@ describe("useChatCredentialGate cache seeding across spaces", () => {
     expect(captured?.aiOnboardingOpen).toBe(opens);
   });
 
+  it.each([
+    ["byoc", true],
+    [null, true],
+    ["managed", false],
+  ] as const)(
+    "opens credential setup for the proxy's plain 424 sentence only off Instafy AI: %s",
+    async (aiAccessMode, opens) => {
+      resolvedRequirements();
+      const options = baseOptions({
+        messages: [
+          {
+            id: "refresh-424",
+            role: "assistant",
+            content:
+              "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses",
+            timestamp: Date.now(),
+            metadata: { source: "agent", outcome: "failed", ...(aiAccessMode ? { aiAccessMode } : {}) },
+          },
+        ],
+      });
+      await act(async () => root.render(<Harness options={options} />));
+      expect(captured?.aiOnboardingOpen).toBe(opens);
+    },
+  );
+
   it("opens a new space on the same user's resolved answer instead of a cold check", async () => {
     resolvedRequirements();
     await act(async () => root.render(<Harness options={baseOptions()} />));

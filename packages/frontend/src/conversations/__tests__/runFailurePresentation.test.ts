@@ -278,6 +278,67 @@ describe("provider usage limit", () => {
   });
 });
 
+describe("the AI not answering", () => {
+  const FAILED = { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" };
+  // What Codex stores when the proxy refuses: its status and message, no code.
+  const REFRESH_424 =
+    "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses";
+  const REFUSED_403 =
+    "unexpected status 403 Forbidden: The upstream provider denied access., url: http://proxy:8789/v1/responses";
+  const DROPPED_502 =
+    "unexpected status 502 Bad Gateway: The upstream request failed., url: http://proxy:8789/v1/responses";
+
+  it("tells an Instafy AI run only that Instafy AI isn't answering", () => {
+    for (const content of [REFRESH_424, REFUSED_403, DROPPED_502]) {
+      const presentation = resolveRunFailurePresentation({
+        metadata: { ...FAILED, aiAccessMode: "managed" },
+        content,
+      });
+      expect(presentation, content).toEqual({
+        kind: "ai_unavailable",
+        friendlyText: "Instafy AI isn't answering right now.",
+        rawText: content,
+      });
+    }
+  });
+
+  it("tells a run on the person's own AI what to do, with Manage AI when settings can fix it", () => {
+    for (const aiAccessMode of ["byoc", undefined]) {
+      const metadata = { ...FAILED, aiAccessMode };
+      expect(resolveRunFailurePresentation({ metadata, content: REFRESH_424 })).toEqual({
+        kind: "ai_unavailable",
+        friendlyText: "Your AI connection needs you to sign in again.",
+        rawText: REFRESH_424,
+        manageAi: true,
+      });
+      expect(resolveRunFailurePresentation({ metadata, content: REFUSED_403 })).toMatchObject({
+        friendlyText: "Your AI connection couldn't answer this request.",
+        manageAi: true,
+      });
+      expect(resolveRunFailurePresentation({ metadata, content: DROPPED_502 })).toMatchObject({
+        friendlyText: "The connection to the AI dropped. This is usually temporary.",
+        manageAi: false,
+      });
+    }
+  });
+
+  it("reads the raw diagnostic, never resends on its own, and leaves a spent usage window its own copy", () => {
+    const presentation = resolveRunFailurePresentation({
+      metadata: { ...FAILED, errorMessage: REFRESH_424 },
+      content: "Agent job finished with status failed",
+    });
+    expect(presentation?.kind).toBe("ai_unavailable");
+    expect(presentation?.rawText).toBe(REFRESH_424);
+    expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentation! })).toBeNull();
+    const usageLimit = `unexpected status 429 Too Many Requests: ${JSON.stringify({
+      error: { type: "usage_limit_reached", code: "upstream_usage_limit_reached", message: "Limit." },
+    })}`;
+    expect(resolveRunFailurePresentation({ metadata: FAILED, content: usageLimit })?.kind).toBe(
+      "provider_usage_limit",
+    );
+  });
+});
+
 describe("hasFailedRunMetadata", () => {
   it("accepts agent failure metadata emitted by the controller", () => {
     expect(
