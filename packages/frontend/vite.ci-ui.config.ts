@@ -29,8 +29,10 @@ export default defineConfig({
     // the dependencies used by each synthetic fixture. Button-based browser
     // chrome also reaches use-sync-external-store's CommonJS shim through
     // react-aria-components, so optimize that package boundary as a unit.
+    // The icon barrel otherwise loads over 1,600 individual modules on each
+    // fixture navigation, exhausting the serial suite's budget on CI.
     entries: [],
-    include: ["react", "react-dom/client", "react-aria-components", "react-router-dom"],
+    include: ["react", "react-dom/client", "react-aria-components", "react-router-dom", "iconoir-react"],
     noDiscovery: true,
   },
   server: {

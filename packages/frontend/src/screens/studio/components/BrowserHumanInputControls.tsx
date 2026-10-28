@@ -2,6 +2,7 @@ import { useContext, useLayoutEffect, type ReactNode } from "react";
 import { CursorPointer, Play } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { StudioDialogBody } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { BrowserToolsOverlayContext } from "./BrowserToolsPopover";
@@ -31,16 +32,16 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
     ? "Continuing the AI task. Input remains locked."
     : "Waiting for agent control to stop. Input remains locked.";
   const controls = (
-    <div className="flex min-w-0 max-w-full shrink-0 items-center gap-2 text-xs" data-testid="browser-human-input-controls" data-browser-session-safe-zone="true">
+    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2" data-testid="browser-human-input-controls" data-browser-session-safe-zone="true">
       {state.active && props.humanControlConfirmed ? (
-        <Button type="button" size="sm" variant="primary" className="shrink-0"
-          isDisabled={state.busy !== null || props.canContinue === false} title={state.error ?? manualGuidance}
+        <Button type="button" preset="inline" variant="primary" className="shrink-0"
+          isDisabled={state.busy !== null || props.canContinue === false} title={manualGuidance}
           onPress={() => void state.continueTask()} data-testid="browser-human-input-continue">
           <Play className="h-3.5 w-3.5" aria-hidden="true" />
           {state.busy === "continue" ? "Continuing…" : "Let AI continue"}
         </Button>
       ) : state.active && !state.error ? (
-        <span role="status" className="text-slate-500 dark:text-slate-400">{state.busy === "continue" ? "Continuing…" : "Stopping AI…"}</span>
+        <Text as="span" variant="caption" tone="muted" role="status">{state.busy === "continue" ? "Continuing…" : "Stopping AI…"}</Text>
       ) : props.canTakeOver ? (
         <IconButton type="button" size="sm" variant="ghost"
           aria-label="Take over browser" title="Take over browser" onPress={state.requestTakeOver} data-testid="browser-human-input-request">
@@ -48,7 +49,7 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
         </IconButton>
       ) : null}
       {state.active ? <span className="sr-only" role="status">{props.humanControlConfirmed ? manualGuidance : waitingGuidance}</span> : null}
-      {state.error ? <span role="alert" className="max-w-48 truncate text-rose-600 dark:text-rose-300" title={state.error}>{state.error}</span> : null}
+      {state.error ? <InlineNotice tone="danger" appearance="inline" role="alert" className="basis-full">{state.error}</InlineNotice> : null}
     </div>
   );
   return (
@@ -60,7 +61,7 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
         <StudioDialogBody scrollable>
           <Text as="h2" variant="subtitle" tone="primary">Take over the browser?</Text>
           <Text as="p" variant="body" tone="muted" className="mt-2">The AI will pause so you can use the page. When you’re ready, choose <strong>Let AI continue</strong> in the browser controls.</Text>
-          {state.error ? <Text as="p" variant="body" tone="danger" role="alert" className="mt-3 break-words">{state.error}</Text> : null}
+          {state.error ? <InlineNotice tone="danger" appearance="inline" role="alert" className="mt-3">{state.error}</InlineNotice> : null}
           <div className="mt-5 flex flex-wrap justify-end gap-2">
             <Button type="button" preset="form" variant="ghost" isDisabled={state.busy !== null} onPress={state.dismissTakeOver} data-testid="browser-human-input-cancel">Keep AI working</Button>
             <Button type="button" preset="form" variant="primary" isDisabled={state.busy !== null} onPress={() => void state.takeOver()} data-testid="browser-human-input-takeover">{state.busy === "takeover" ? "Stopping AI…" : "Take over"}</Button>

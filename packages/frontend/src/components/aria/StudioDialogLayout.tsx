@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 import { Xmark } from "iconoir-react";
 import { IconButton } from "../Button";
 import { Text } from "../Text";
@@ -89,16 +89,16 @@ export function StudioDialogHeader({
   );
 }
 
-type StudioDialogBodyProps = {
+type StudioDialogBodyProps = HTMLAttributes<HTMLDivElement> & {
   children: ReactNode;
   className?: string;
   scrollable?: boolean;
   padding?: "default" | "none";
 };
 
-export function StudioDialogBody({ children, className, scrollable = false, padding = "default" }: StudioDialogBodyProps) {
+export function StudioDialogBody({ children, className, scrollable = false, padding = "default", ...props }: StudioDialogBodyProps) {
   const gutterClass = useStudioDialogGutterClass();
-  return <div className={[
+  return <div {...props} className={[
     padding === "default" ? `${gutterClass} py-4` : "",
     scrollable ? "min-h-0 flex-1 overflow-y-auto overscroll-contain" : "",
     className,
