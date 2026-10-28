@@ -986,15 +986,19 @@ describe("ConversationMessageRows", () => {
 
     const speaker = container.querySelector('[data-testid="chat-speaker-inline"]');
     expect(speaker?.textContent).toContain("octo");
-    expect(container.textContent).toContain("Upstream 400 rejected the AI request.");
+    // A reason that names the plumbing stays behind Details.
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+      "Something went wrong, so this turn stopped.",
+    );
+    expect(container.textContent).not.toContain("Upstream 400 rejected the AI request.");
     expect(container.querySelector('[data-testid="agent-thread-preview-header"]')).toBeNull();
     expect(container.querySelector('[data-testid="agent-thread-owner-badge"]')).toBeNull();
     expect(container.querySelector('[data-testid="agent-job-thread-avatar"]')).toBeNull();
-    // Run status folds into the speaker header beside author and timestamp,
-    // and the preview drops its duplicate content-level caption (#145).
-    const runStatus = speaker?.querySelector('[data-testid="chat-speaker-run-status"]');
-    expect(runStatus?.textContent).toBe("Run failed");
+    // The failure block is the turn's one status: no "Run failed" beside the
+    // author, and no content-level caption (#145).
+    expect(speaker?.querySelector('[data-testid="chat-speaker-run-status"]')).toBeNull();
     expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
+    expect(container.textContent).not.toContain("Run failed");
   });
 
   it("shows a controller-written run failure under its speaker row", async () => {
@@ -1062,9 +1066,7 @@ describe("ConversationMessageRows", () => {
 
     const speaker = container.querySelector('[data-testid="chat-speaker-inline"]');
     expect(speaker?.textContent).toContain("octo");
-    expect(
-      speaker?.querySelector('[data-testid="chat-speaker-run-status"]')?.textContent,
-    ).toBe("Run failed");
+    expect(speaker?.querySelector('[data-testid="chat-speaker-run-status"]')).toBeNull();
     expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
       "This turn was stopped and didn't pick up again in time. Try again to continue.",
     );
@@ -2251,15 +2253,14 @@ describe("ConversationMessageRows", () => {
       );
     });
 
-    // Calm auto state: friendly sentence + quiet "trying again automatically",
-    // Details still available, no manual "Try again" button.
-    expect(container.textContent).toContain(
-      "The reply didn't come through. This is usually temporary.",
+    // While Instafy tries the turn again by itself it is one quiet line: no
+    // failure sentence, no status, no actions.
+    expect(container.querySelector('[data-testid="run-failure-auto-retrying"]')?.textContent).toContain(
+      "Trying again…",
     );
-    expect(container.querySelector('[data-testid="run-failure-auto-retrying"]')?.textContent).toBe(
-      "Trying again automatically…",
-    );
+    expect(container.textContent).not.toContain("The reply didn't come through.");
+    expect(container.textContent).not.toContain("Run failed");
     expect(container.querySelector('[data-testid="run-failure-retry"]')).toBeNull();
-    expect(container.querySelector('[data-testid="run-failure-details-toggle"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="run-failure-details-toggle"]')).toBeNull();
   });
 });

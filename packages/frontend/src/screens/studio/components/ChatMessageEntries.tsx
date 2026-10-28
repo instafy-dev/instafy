@@ -1,6 +1,7 @@
 import { ChatRunStopNotice } from "./ChatRunStopNotice";
 import {
   type ClipboardEvent as ReactClipboardEvent,
+  type ComponentProps,
   type MouseEvent,
   type PointerEvent,
   type ReactNode,
@@ -41,7 +42,7 @@ import { TimelineEntry } from "./ChatTimelineEntry";
 import { resolveRunFailurePresentation } from "../../../conversations/runFailurePresentation";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
-import { RunFailureMessageBody } from "./RunFailureNotice";
+import { RunFailureMessageBody, useRunFailureAutoRetryActive } from "./RunFailureNotice";
 import { isRuntimeAlertSupersededByStart } from "./runtimeAlertPresentation";
 import {
   resolveControllerNoticeActionHandler,
@@ -600,6 +601,27 @@ function PersonMessageBubble({
         </div>
       ) : null}
     </NotchedMessageShell>
+  );
+}
+
+/**
+ * An error bubble: red while it shows a failure, plain while Instafy tries the
+ * failed turn again by itself, when it is one quiet line.
+ */
+function ErrorBubbleSurface({
+  failureMessage,
+  className,
+  ...props
+}: ComponentProps<typeof Surface> & { failureMessage: ChatMessage | null }) {
+  const quiet = useRunFailureAutoRetryActive(failureMessage);
+  return (
+    <Surface
+      {...props}
+      tone={quiet ? "subtle" : "danger"}
+      radius="2xl"
+      shadow={quiet ? "none" : "sm"}
+      className={`${className ?? ""} ${quiet ? "" : "text-rose-700"}`}
+    />
   );
 }
 
@@ -1198,13 +1220,11 @@ export function AssistantMessageEntry({
         className={`pointer-events-none absolute top-0 h-full ${CHAT_LEFT_SPINE_OFFSET_CLASS}`}
         notches={[{ maskLine: true }]}
       />
-      <Surface
-        tone="danger"
-        radius="2xl"
-        shadow="sm"
+      <ErrorBubbleSurface
+        failureMessage={runFailurePresentation ? message : null}
         data-testid="chat-bubble-assistant"
         data-message-type={messageType ?? undefined}
-        className={`${CHAT_BUBBLE_MAX_WIDTH.alert} px-4 py-3 text-sm text-rose-700`}
+        className={`${CHAT_BUBBLE_MAX_WIDTH.alert} px-4 py-3 text-sm`}
       >
         {runFailurePresentation ? (
           <RunFailureMessageBody message={message} presentation={runFailurePresentation} />
@@ -1221,7 +1241,7 @@ export function AssistantMessageEntry({
             <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} unsavedReason={message.unsavedReason ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
           </div>
         ) : null}
-      </Surface>
+      </ErrorBubbleSurface>
       {onRequestActions ? (
         <Button
           ref={actionAnchorRef}

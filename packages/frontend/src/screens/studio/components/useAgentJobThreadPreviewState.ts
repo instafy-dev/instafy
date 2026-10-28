@@ -31,6 +31,12 @@ import { resolveThreadPreviewSafeInsetPx } from "./threadPreviewGeometry";
 import { resolveSpineToneFromStatus } from "./ThreadSpine";
 import { summarizeTurnActivity, type TurnActivityPhase } from "./turnActivity";
 import { useTurnBrowserApproval } from "./turnBrowserApproval";
+import { isAutomaticRetryPending, readEarlierAttempts } from "./automaticRetryFold";
+import type { EarlierAttemptDetails } from "./AgentJobThreadPreviewLayout";
+import {
+  hasFailedRunMetadata,
+  resolveRunFailurePresentation,
+} from "../../../conversations/runFailurePresentation";
 
 const CHAT_SPINE_GUTTER_PX = 26;
 // Steps are the activity line's and Details'; they are never update rows.
@@ -46,6 +52,69 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function messageType(message: ChatMessage): string {
   return (getMessageType(message) ?? "").trim().toLowerCase();
+}
+
+/**
+ * Everything between the person's message and the reply that is not a step:
+ * cards (shown in the turn) and Octo's notes, reasoning titles, statuses and
+ * plan updates (listed in Details).
+ */
+function listIntermediateUpdates(threadMessages: readonly ChatMessage[], excludedIds: ReadonlySet<string>): ChatMessage[] {
+  return threadMessages.filter((candidate) => {
+    if (!candidate.content?.trim()) {
+      return false;
+    }
+    if (excludedIds.has(candidate.id)) {
+      return false;
+    }
+    const type = messageType(candidate);
+    // Octo's reasoning titles and notes are listed in Details (never on the
+    // line), as long as they say something.
+    if (type === "status" || type === "reasoning") {
+      const normalized = normalizeAssistantStatusText(candidate.content);
+      if (!normalized) {
+        return false;
+      }
+      if (normalized.toLowerCase() === "completed") {
+        return false;
+      }
+      if (isGenericProgressLabel(normalized) || looksLikeTerminalProgressLabel(normalized)) {
+        return false;
+      }
+    }
+    return !["token_usage", "runtime_switch", ...STEP_MESSAGE_TYPES].includes(type);
+  });
+}
+
+function jobIdOf(message: ChatMessage): string | null {
+  const jobId = isRecord(message.metadata) ? message.metadata.jobId : null;
+  return typeof jobId === "string" && jobId.trim() ? jobId.trim() : null;
+}
+
+/** A failed attempt this turn replaced, as its Details list it: its steps and notes, then why it failed. */
+function earlierAttemptDetails(attemptMessages: readonly ChatMessage[], index: number): EarlierAttemptDetails {
+  const attemptJobId = attemptMessages.map(jobIdOf).find((id): id is string => id !== null) ?? null;
+  const failure =
+    [...attemptMessages]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.role === "assistant" &&
+          (messageType(candidate) === "error" || hasFailedRunMetadata(candidate.metadata)),
+      ) ?? null;
+  const updates = listIntermediateUpdates(attemptMessages, new Set(failure ? [failure.id] : [])).filter(
+    (update) => !CARD_MESSAGE_TYPES.has(messageType(update)),
+  );
+  const { details } = summarizeTurnActivity(attemptMessages, { jobId: attemptJobId, phase: "failed", updates });
+  const failureText = failure
+    ? (resolveRunFailurePresentation({ metadata: failure.metadata, content: failure.content, assumeFailed: true })
+        ?.rawText ?? failure.content.trim())
+    : "";
+  return {
+    id: `attempt:${attemptJobId ?? failure?.id ?? index}`,
+    details,
+    failureText: failureText || null,
+  };
 }
 
 export type AgentJobThreadPreviewState = Omit<
@@ -399,9 +468,6 @@ export function useAgentJobThreadPreviewState({
     setDetailsOpen(false);
   }, [jobId]);
 
-  // Everything between the person's message and the reply that is not a step:
-  // cards (shown in the turn) and Octo's notes, reasoning titles, statuses and
-  // plan updates (listed in Details).
   const intermediateUpdates = useMemo(() => {
     const excludedIds = new Set<string>();
     if (finalSummaryMessage?.id) {
@@ -410,31 +476,13 @@ export function useAgentJobThreadPreviewState({
     if (latestFileMessage?.id) {
       excludedIds.add(latestFileMessage.id);
     }
-    return threadMessages.filter((candidate) => {
-      if (!candidate.content?.trim()) {
-        return false;
-      }
-      if (excludedIds.has(candidate.id)) {
-        return false;
-      }
-      const type = messageType(candidate);
-      // Octo's reasoning titles and notes are listed in Details (never on the
-      // line), as long as they say something.
-      if (type === "status" || type === "reasoning") {
-        const normalized = normalizeAssistantStatusText(candidate.content);
-        if (!normalized) {
-          return false;
-        }
-        if (normalized.toLowerCase() === "completed") {
-          return false;
-        }
-        if (isGenericProgressLabel(normalized) || looksLikeTerminalProgressLabel(normalized)) {
-          return false;
-        }
-      }
-      return !["token_usage", "runtime_switch", ...STEP_MESSAGE_TYPES].includes(type);
-    });
+    return listIntermediateUpdates(threadMessages, excludedIds);
   }, [finalSummaryMessage?.id, latestFileMessage?.id, threadMessages]);
+  // The failed attempt Instafy tried again by itself, listed in this turn's Details.
+  const earlierAttempts = useMemo(
+    () => readEarlierAttempts(message).map((attempt, index) => earlierAttemptDetails(attempt, index)),
+    [message],
+  );
   const cards = useMemo(
     () => intermediateUpdates.filter((update) => CARD_MESSAGE_TYPES.has(messageType(update))),
     [intermediateUpdates],
@@ -465,8 +513,17 @@ export function useAgentJobThreadPreviewState({
         updates: detailUpdates,
         viewerCanAnswer: browserApproval.viewerCanAnswer,
         approvals: browserApproval.settled,
+        retry: earlierAttempts.length > 0,
       }),
-    [activityPhase, browserApproval.settled, browserApproval.viewerCanAnswer, detailUpdates, jobId, threadMessages],
+    [
+      activityPhase,
+      browserApproval.settled,
+      browserApproval.viewerCanAnswer,
+      detailUpdates,
+      earlierAttempts.length,
+      jobId,
+      threadMessages,
+    ],
   );
 
   useEffect(() => {
@@ -603,6 +660,8 @@ export function useAgentJobThreadPreviewState({
     showHeaderAvatar,
     assistantAvatarMotion,
     activity,
+    earlierAttempts,
+    autoRetryPending: isAutomaticRetryPending(message),
     browserApproval: browserApproval.row,
     detailsOpen,
     cards,

@@ -265,13 +265,13 @@ describe("proxyError", () => {
 
     it.each([
       [401, "upstream_authentication_error", "The upstream provider rejected authentication.", SIGN_IN],
-      [403, "upstream_access_denied", "The upstream provider denied access.", "Your AI connection couldn't answer this request."],
+      [403, "upstream_access_denied", "The upstream provider denied access.", "Your AI connection couldn't answer this message."],
       [402, "upstream_insufficient_quota", "The upstream provider has no available quota.", "Your AI account has reached its limit."],
       [
         429,
         "upstream_rate_limit",
         "The upstream provider rate limit was reached.",
-        "Your AI connection is limiting requests right now. Wait a little, then try again.",
+        "Your AI connection is busy right now. Wait a little, then try again.",
       ],
     ] as const)("keeps account guidance for %s %s", (status, code, message, summary) => {
       const guidance = resolveProxyUpstreamErrorGuidance(safeProxyError(status, code, message));
@@ -282,7 +282,7 @@ describe("proxyError", () => {
     it("keeps the refusal wording for a provider 403 behind a 502", () => {
       const diagnostic = `unexpected status 502 Bad Gateway: upstream request failed (endpoint=api.openai.com/v1/responses): backend responded with 403 Forbidden: {"error":{"message":"Project does not have access to model","type":"invalid_request_error"},"status":403}`;
       expect(formatProxyUpstreamErrorSummary(diagnostic)).toBe(
-        "Your AI connection couldn't answer this request.",
+        "Your AI connection couldn't answer this message.",
       );
     });
 
@@ -291,7 +291,7 @@ describe("proxyError", () => {
         "Your AI account has reached its limit.",
       );
       expect(formatProxyUpstreamErrorSummary(RATE_LIMIT_ERROR)).toBe(
-        "Your AI connection is limiting requests right now. Try again in 2m.",
+        "Your AI connection is busy right now. Try again in 2m.",
       );
     });
   });

@@ -46,7 +46,7 @@ const MISSING_MCP_TOOL =
 // Codex's wording when the model provider answers 429. No retry actually ran.
 const PROVIDER_RATE_LIMITED = "exceeded retry limit, last status: 429 Too Many Requests";
 const PROVIDER_RATE_LIMITED_TEXT =
-  "The AI is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, its usage limit may have been reached.";
+  "The AI is busy right now, so this turn stopped. Wait a little, then try again. If it keeps happening, its usage limit may have been reached.";
 // 429s that name an exhausted quota or plan window. Retrying soon will not help.
 const PROVIDER_INSUFFICIENT_QUOTA =
   'backend responded with 429 Too Many Requests: {"error":{"type":"insufficient_quota","code":"insufficient_quota"}}';
@@ -312,7 +312,7 @@ describe("the AI not answering", () => {
         manageAi: true,
       });
       expect(resolveRunFailurePresentation({ metadata, content: REFUSED_403 })).toMatchObject({
-        friendlyText: "Your AI connection couldn't answer this request.",
+        friendlyText: "Your AI connection couldn't answer this message.",
         manageAi: true,
       });
       expect(resolveRunFailurePresentation({ metadata, content: DROPPED_502 })).toMatchObject({
@@ -349,6 +349,7 @@ describe("plain words in every failure sentence", () => {
     MISSING_FINAL_MESSAGE,
     STOPPED_AFTER_PROGRESS,
     NO_WORKSPACE_CHANGES,
+    "Codex reported file changes but no workspace files were written (reported_files=2)",
     MISSING_COMMAND_OBSERVATION,
     MISSING_MCP_TOOL,
     "No AI provider is connected for this project.",
@@ -371,7 +372,7 @@ describe("plain words in every failure sentence", () => {
     PROXY("502 Bad Gateway", "The upstream request failed."),
     PROXY("504 Gateway Timeout", "The upstream request timed out."),
   ];
-  const JARGON = /upstream|provider|credential|switch|runtime/i;
+  const JARGON = /upstream|provider|credential|switch|runtime|codex|workspace|request/i;
 
   it.each(["managed", "byoc", undefined])("never names the plumbing (aiAccessMode %s)", (aiAccessMode) => {
     for (const content of RAW_FAILURES) {
@@ -426,7 +427,6 @@ describe("hasFailedRunMetadata", () => {
 describe("isAutoRetryEligibleFailureKind", () => {
   it("is true for the transient kinds", () => {
     expect(isAutoRetryEligibleFailureKind("missing_final_message")).toBe(true);
-    expect(isAutoRetryEligibleFailureKind("no_workspace_changes")).toBe(true);
     // Codex already retried the 429 inside the turn; one more resend after a
     // visible countdown usually gets through (see resolveRunFailureAutoRetryDelayMs).
     expect(isAutoRetryEligibleFailureKind("provider_rate_limited")).toBe(true);
@@ -434,6 +434,9 @@ describe("isAutoRetryEligibleFailureKind", () => {
 
   it("is false for deterministic/unhelpful kinds and nullish input", () => {
     expect(isAutoRetryEligibleFailureKind("missing_verification")).toBe(false);
+    // The runtime already tried the missing changes a second time inside the
+    // turn; a resend would charge the person for a third.
+    expect(isAutoRetryEligibleFailureKind("no_workspace_changes")).toBe(false);
     expect(isAutoRetryEligibleFailureKind("needs_ai")).toBe(false);
     // The provider billed the cut-short answer; the same request would stop the same way.
     expect(isAutoRetryEligibleFailureKind("response_incomplete")).toBe(false);
@@ -473,9 +476,9 @@ describe("resolveRunFailureAutoRetryDelayMs", () => {
     return presentation;
   };
 
-  it("resends the hiccup kinds at once", () => {
+  it("resends a dropped reply at once, and never a turn that did not make its changes", () => {
     expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(MISSING_FINAL_MESSAGE) })).toBe(0);
-    expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(NO_WORKSPACE_CHANGES) })).toBe(0);
+    expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentationFor(NO_WORKSPACE_CHANGES) })).toBeNull();
   });
 
   it("keeps Codex's bare 429 manual, because a spent plan window reads the same", () => {
@@ -991,22 +994,44 @@ describe("resolveRunFailurePresentation", () => {
     });
   });
 
-  it("maps missing workspace changes to the file-changes sentence", () => {
+  it("says in plain words, naming the agent, that the changes were not finished", () => {
     expect(
       resolveRunFailurePresentation({ content: NO_WORKSPACE_CHANGES, assumeFailed: true })
         ?.friendlyText,
-    ).toBe("The file changes didn't come through.");
+    ).toBe("Octo didn't finish the changes.");
+    const failed = { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" };
+    expect(
+      resolveRunFailurePresentation({
+        metadata: { ...failed, agent: { handle: "mapper", displayName: "Mapper" } },
+        content: NO_WORKSPACE_CHANGES,
+      })?.friendlyText,
+    ).toBe("Mapper didn't finish the changes.");
+    // A name that is not a short plain one is left out.
+    expect(
+      resolveRunFailurePresentation({
+        metadata: { ...failed, agent: { displayName: "<b>Mapper</b>" } },
+        content: NO_WORKSPACE_CHANGES,
+      })?.friendlyText,
+    ).toBe("Octo didn't finish the changes.");
+    // A reply that listed files it never wrote reads the same, with the
+    // runtime's own sentence behind Details.
+    const claimed = "Codex reported file changes but no workspace files were written (reported_files=1)";
+    expect(resolveRunFailurePresentation({ metadata: failed, content: claimed })).toEqual({
+      kind: "no_workspace_changes",
+      friendlyText: "Octo didn't finish the changes.",
+      rawText: claimed,
+    });
   });
 
   it("maps missing command/MCP observations to the verification sentence", () => {
     expect(
       resolveRunFailurePresentation({ content: MISSING_COMMAND_OBSERVATION, assumeFailed: true })
         ?.friendlyText,
-    ).toBe("The run ended before it could verify its work.");
+    ).toBe("The turn ended before it could check its work.");
     expect(
       resolveRunFailurePresentation({ content: MISSING_MCP_TOOL, assumeFailed: true })
         ?.friendlyText,
-    ).toBe("The run ended before it could verify its work.");
+    ).toBe("The turn ended before it could check its work.");
   });
 
   it("prefers the errorMessage metadata field over the message content", () => {
@@ -1026,17 +1051,40 @@ describe("resolveRunFailurePresentation", () => {
   it("surfaces the real reason inline for an unclassified failure, only with failed-run metadata", () => {
     const presentation = resolveRunFailurePresentation({
       metadata: { source: "agent", outcome: "failed", jobId: "job-1" },
-      content: "Codex run timed out",
+      content: "The site took too long to answer.",
     });
     // #145: the actual reason belongs inline, not the uninformative canned sentence.
     expect(presentation?.kind).toBe("generic");
-    expect(presentation?.friendlyText).toBe("Codex run timed out");
-    expect(presentation?.rawText).toBe("Codex run timed out");
+    expect(presentation?.friendlyText).toBe("The site took too long to answer.");
+    expect(presentation?.rawText).toBe("The site took too long to answer.");
     // A generic failure still requires failed-run metadata; assumeFailed alone
     // must never rewrite ordinary assistant text.
     expect(
-      resolveRunFailurePresentation({ content: "Codex run timed out", assumeFailed: true }),
+      resolveRunFailurePresentation({ content: "The site took too long to answer.", assumeFailed: true }),
     ).toBeNull();
+  });
+
+  it("keeps a reason that names the plumbing behind Details, with a plain sentence up front", () => {
+    for (const reason of [
+      "Codex run timed out",
+      // What a failed routing preflight said before it passed on its cause.
+      "agent routing preflight failed",
+      "Workspace sync failed: origin apply rejected",
+      "The request to the provider failed.",
+      "Codex did not execute the dedicated Shared Browser tools after retry.",
+      'backend responded with 500: {"error":"boom"}',
+      "exit code 2 from `uw validate`",
+    ]) {
+      const presentation = resolveRunFailurePresentation({
+        metadata: { source: "agent", outcome: "failed", jobId: "job-1" },
+        content: reason,
+      });
+      expect(presentation, reason).toEqual({
+        kind: "generic",
+        friendlyText: "Something went wrong, so this turn stopped.",
+        rawText: reason,
+      });
+    }
   });
 
   it("shows the controller's runtime-limit give-up reason in full, with a manual retry only", () => {
@@ -1193,11 +1241,11 @@ describe("resolveRunFailurePresentation", () => {
     expect(failed(RESPONSE_INCOMPLETE("max_output_tokens"))).toEqual({
       kind: "response_incomplete",
       friendlyText:
-        "The answer hit the model's length limit before it was finished, so this turn stopped. Try asking for less at once, or split the request into smaller steps.",
+        "The answer hit the model's length limit before it was finished, so this turn stopped. Try asking for less at once, or in smaller steps.",
       rawText: RESPONSE_INCOMPLETE("max_output_tokens"),
     });
     expect(failed(RESPONSE_INCOMPLETE("content_filter"))?.friendlyText).toBe(
-      "The AI's content filter stopped this answer before it was finished, so this turn stopped. Try rephrasing the request.",
+      "The AI's content filter stopped this answer before it was finished, so this turn stopped. Try asking in different words.",
     );
     // A reason the copy does not name, or none, still reads as a stopped answer.
     for (const reason of ["unknown", "interrupted", ""]) {
@@ -1244,9 +1292,10 @@ describe("resolveRunFailurePresentation", () => {
       content: PROVIDER_INSUFFICIENT_QUOTA,
       assumeFailed: true,
     });
+    // The raw reason is technical, so it stays behind Details.
     expect(quota).toEqual({
       kind: "generic",
-      friendlyText: PROVIDER_INSUFFICIENT_QUOTA,
+      friendlyText: "Something went wrong, so this turn stopped.",
       rawText: PROVIDER_INSUFFICIENT_QUOTA,
     });
     // A spent usage window says so, and keeps the raw reason behind Details.

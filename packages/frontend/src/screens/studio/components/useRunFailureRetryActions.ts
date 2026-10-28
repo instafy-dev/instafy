@@ -124,7 +124,7 @@ export function useRunFailureRetryActions({
         {
           message: promptText,
           editorState: null,
-          metadata: buildRunFailureRetryMetadata(failureMessage),
+          metadata: buildRunFailureRetryMetadata(failureMessage, { automatic }),
         },
         {
           automatic,

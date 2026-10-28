@@ -69,9 +69,11 @@ function extractThreadMessages(message: ChatMessage): ChatMessage[] {
   return Array.isArray(threadMessages) ? (threadMessages as ChatMessage[]) : [];
 }
 
-// Terminal run state belongs to the entry header — beside author and
-// timestamp — not to a content-level chip (#145). Derived from the same
-// thread messages the preview layout reads, so header and body agree.
+// A turn that needs attention says so in the entry header, beside author and
+// timestamp, not in a content-level chip (#145). Derived from the same thread
+// messages the preview layout reads, so header and body agree. A failed turn
+// reads its outcome once, in its failure block (the preview's own caption when
+// it has none), so its header carries no second status.
 function resolveThreadTerminalStatusMarker(message: ChatMessage): SpeakerStatusMarker | null {
   if ((getMessageType(message) ?? "").trim().toLowerCase() !== "agent_job_thread") {
     return null;
@@ -80,14 +82,9 @@ function resolveThreadTerminalStatusMarker(message: ChatMessage): SpeakerStatusM
   if (runStatus.phase !== "completed") {
     return null;
   }
-  const tone = resolveSpineToneFromStatus(runStatus.status);
-  if (tone !== "danger" && tone !== "warning") {
-    return null;
-  }
-  return {
-    label: tone === "danger" ? "Run failed" : "Run needs attention",
-    tone,
-  };
+  return resolveSpineToneFromStatus(runStatus.status) === "warning"
+    ? { label: "Run needs attention", tone: "warning" }
+    : null;
 }
 
 function shouldShowSpeakerIdentityForMessage(message: ChatMessage): boolean {

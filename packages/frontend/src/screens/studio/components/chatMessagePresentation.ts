@@ -6,6 +6,7 @@ import { isRecoverableRuntimeStartAlert as runtimeStartAlertIsRecoverable } from
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { isGenericProgressLabel, THREAD_ACTION_CARD_TYPES } from "./threadPreviewHelpers";
+import { readEarlierAttempts, resolveAutomaticRetryFold } from "./automaticRetryFold";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -399,8 +400,16 @@ export function synthesizeAgentJobThreadMessages(
     }
   });
 
+  // A turn Instafy sent again by itself folds into the turn that replaced it.
+  const retryFold = resolveAutomaticRetryFold(collapsedAll);
+  const visible =
+    retryFold.hiddenPromptIds.size > 0
+      ? collapsedVisible.filter((message) => !retryFold.hiddenPromptIds.has(message.id))
+      : collapsedVisible;
+
   const threadStartMessageIdByJobId = new Map<string, string>();
-  collapsedVisible.forEach((message) => {
+  const firstVisibleMessageIdByJobId = new Map<string, string>();
+  visible.forEach((message) => {
     if (isWorkerInputQuestion(message)) return;
     const jobId = extractAgentJobId(message);
     if (!jobId) {
@@ -408,6 +417,9 @@ export function synthesizeAgentJobThreadMessages(
     }
     if (multiAgentWorkerJobIds.has(jobId)) {
       return;
+    }
+    if (!firstVisibleMessageIdByJobId.has(jobId)) {
+      firstVisibleMessageIdByJobId.set(jobId, message.id);
     }
     if (threadStartMessageIdByJobId.has(jobId)) {
       return;
@@ -418,9 +430,33 @@ export function synthesizeAgentJobThreadMessages(
       threadStartMessageIdByJobId.set(jobId, message.id);
     }
   });
+  // The retry is a turn of its own, whatever it did, so its Details can hold
+  // the attempt it replaced.
+  const foldedJobIds = new Set<string>();
+  const foldedFailureIds = new Set<string>();
+  const pendingJobIds = new Set(retryFold.pendingJobIds);
+  for (const [retryJobId, earlier] of retryFold.earlierAttemptByJobId) {
+    const firstMessageId = firstVisibleMessageIdByJobId.get(retryJobId);
+    if (!firstMessageId) {
+      // The retry has written only what the chat does not show (its usage):
+      // the failed turn keeps saying it is trying again.
+      if (earlier.jobId) {
+        pendingJobIds.add(earlier.jobId);
+      }
+      continue;
+    }
+    if (!threadStartMessageIdByJobId.has(retryJobId)) {
+      threadStartMessageIdByJobId.set(retryJobId, firstMessageId);
+    }
+    if (earlier.jobId) {
+      foldedJobIds.add(earlier.jobId);
+    } else {
+      foldedFailureIds.add(earlier.failureId);
+    }
+  }
 
   if (threadStartMessageIdByJobId.size === 0 && multiAgentWorkerJobIds.size === 0) {
-    return collapsedVisible;
+    return visible;
   }
 
   const threadMessagesByJobId = new Map<string, ChatMessage[]>();
@@ -452,14 +488,25 @@ export function synthesizeAgentJobThreadMessages(
   // leaves it out rather than drawing it a second time.
   const cardsShownBeforeThread = new Set<string>();
 
-  collapsedVisible.forEach((message) => {
+  visible.forEach((message) => {
     if (isWorkerInputQuestion(message)) {
       output.push(message);
+      return;
+    }
+    if (foldedFailureIds.has(message.id)) {
       return;
     }
     const jobId = extractAgentJobId(message);
     if (!jobId) {
       output.push(message);
+      return;
+    }
+    if (foldedJobIds.has(jobId)) {
+      // The failed attempt lives in its retry's Details. A card it left asks
+      // the person for something, so it stays where it was.
+      if (THREAD_ACTION_CARD_TYPES.has((getMessageType(message) ?? "").trim().toLowerCase())) {
+        output.push(message);
+      }
       return;
     }
     if (multiAgentWorkerJobIds.has(jobId)) {
@@ -497,6 +544,12 @@ export function synthesizeAgentJobThreadMessages(
       return Math.min(minTimestamp, candidate.timestamp);
     }, message.timestamp);
 
+    const earlier = retryFold.earlierAttemptByJobId.get(jobId);
+    const earlierMessages = earlier
+      ? earlier.jobId
+        ? (threadMessagesByJobId.get(earlier.jobId) ?? [])
+        : collapsedAll.filter((candidate) => candidate.id === earlier.failureId)
+      : [];
     output.push({
       id: `agent-job-thread:${jobId}`,
       role: "assistant",
@@ -507,6 +560,8 @@ export function synthesizeAgentJobThreadMessages(
         messageType: "agent_job_thread",
         jobId,
         threadMessages,
+        ...(earlierMessages.length > 0 ? { earlierAttempts: [earlierMessages] } : {}),
+        ...(pendingJobIds.has(jobId) ? { autoRetryPending: true } : {}),
       },
     });
   });
@@ -538,7 +593,10 @@ const AGENT_JOB_THREAD_TIMELINE_TYPES = new Set([
  */
 export function agentJobThreadAcknowledgementIds(message: ChatMessage): string[] {
   const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
-  const threadMessages = Array.isArray(metadata?.threadMessages) ? (metadata.threadMessages as ChatMessage[]) : [];
+  const threadMessages = [
+    ...readEarlierAttempts(message).flat(),
+    ...(Array.isArray(metadata?.threadMessages) ? (metadata.threadMessages as ChatMessage[]) : []),
+  ];
   const ids: string[] = [];
   for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
     const candidate = threadMessages[index];

@@ -223,10 +223,11 @@ const SAVING: BuiltinLabel = BuiltinLabel {
     live: "Saving your changes",
     done: None,
 };
+// The words Studio uses for every retry Instafy makes by itself.
 const RETRYING: BuiltinLabel = BuiltinLabel {
     key: "runtime/retry",
     role: ActivityRole::Quiet,
-    live: "Retrying",
+    live: "Trying again",
     done: None,
 };
 
@@ -1444,7 +1445,7 @@ mod tests {
         );
         assert_eq!(
             runtime_status_activity("codex_stream_retry").unwrap()["live"],
-            json!("Retrying")
+            json!("Trying again")
         );
         assert_eq!(runtime_status_activity("agent_message"), None);
     }

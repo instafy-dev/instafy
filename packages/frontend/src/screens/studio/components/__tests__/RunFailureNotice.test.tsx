@@ -305,6 +305,33 @@ describe("RunFailureMessageBody", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  it("is one quiet line while Instafy tries the turn again by itself", async () => {
+    // Even once the resend counts as a retry of this failure, no "Retried".
+    await render(contextValue({ autoRetryingKey: "failure-1", isRetrySuperseded: () => true }));
+
+    expect(query("run-failure-auto-retrying")?.textContent).toContain("Trying again…");
+    expect(query("run-failure-body")).toBeNull();
+    expect(query("run-failure-retry")).toBeNull();
+    expect(query("run-failure-retried")).toBeNull();
+    expect(query("run-failure-details-toggle")).toBeNull();
+    expect(container.textContent).not.toContain("The AI is busy right now");
+  });
+
+  it("stays one quiet line once the transcript shows the resend went out", async () => {
+    // After a reload nothing in memory knows the retry: the transcript does.
+    await act(async () => {
+      root.render(
+        <RunFailureRetryProvider value={contextValue({ isRetrySuperseded: () => true })}>
+          <RunFailureMessageBody message={FAILURE} presentation={presentationFor(FAILURE)} autoRetryPending />
+        </RunFailureRetryProvider>,
+      );
+    });
+
+    expect(query("run-failure-auto-retrying")?.textContent).toContain("Trying again…");
+    expect(query("run-failure-retried")).toBeNull();
+    expect(query("run-failure-body")).toBeNull();
+  });
+
   describe("automatic retry countdown", () => {
     beforeEach(() => {
       vi.useFakeTimers();
@@ -338,8 +365,12 @@ describe("RunFailureMessageBody", () => {
       expect(query("run-failure-auto-retry-countdown-text")?.textContent).toBe(
         "Trying again in 20 s",
       );
+      // While it counts down the turn is one quiet line: no failure
+      // sentence, no Try again, no Details.
       expect(query("run-failure-retry")).toBeNull();
-      expect(query("run-failure-details-toggle")).not.toBeNull();
+      expect(query("run-failure-details-toggle")).toBeNull();
+      expect(query("run-failure-body")).toBeNull();
+      expect(container.textContent).not.toContain("The AI is busy right now");
       // The countdown appearing never takes focus.
       expect(document.activeElement).toBe(outside);
 
@@ -391,7 +422,7 @@ describe("RunFailureMessageBody", () => {
       expect(document.activeElement).toBe(query("run-failure-retry"));
     });
 
-    it("moves focus from Cancel to Details when the countdown ends on its own", async () => {
+    it("moves focus from Cancel to the Trying again line when the countdown ends on its own", async () => {
       // A keyboard user resting on Cancel when the resend goes out: Cancel
       // goes away, and focus must not drop to the page.
       const cancelAutoRetry = vi.fn();
@@ -409,8 +440,9 @@ describe("RunFailureMessageBody", () => {
       await render(contextValue({ scheduledAutoRetry: null, autoRetryingKey: "failure-1", cancelAutoRetry }));
 
       expect(query("run-failure-auto-retry-cancel")).toBeNull();
-      expect(query("run-failure-auto-retrying")).not.toBeNull();
-      expect(document.activeElement).toBe(query("run-failure-details-toggle"));
+      expect(query("run-failure-auto-retrying")?.textContent).toContain("Trying again…");
+      expect(query("run-failure-auto-retrying")?.getAttribute("tabindex")).toBe("-1");
+      expect(document.activeElement).toBe(query("run-failure-auto-retrying"));
       expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
       focusSpy.mockRestore();
       expect(cancelAutoRetry).not.toHaveBeenCalled();

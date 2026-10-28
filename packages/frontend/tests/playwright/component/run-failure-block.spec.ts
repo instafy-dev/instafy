@@ -13,6 +13,10 @@ import { RUN_STOP_FIXTURE_STUBS } from "../../fixtures/run-stop-control/dataStub
 const FIXTURE_PATH = "/__run-failure-block-fixture__";
 const REFRESH_424 =
   "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses";
+// Local drive, 2026-10-28: a turn that made none of the changes it was asked
+// for read "The file changes didn't come through." with this sentence under
+// it, beside "Run failed", "Ran a command" and "✓ Retried".
+const NO_CHANGES = "Codex did not apply any workspace changes for a file-modifying request.";
 
 async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {}): Promise<string[]> {
   const deps = await resolveViteReactDependencies(page);
@@ -36,15 +40,19 @@ async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {
     window.__presses = { retry: 0, manageAi: 0 };
     function Fixture() {
       const [aiAccessMode, setAiAccessMode] = React.useState("byoc");
+      const [autoRetrying, setAutoRetrying] = React.useState(false);
+      const [failureText, setFailureText] = React.useState(${JSON.stringify(REFRESH_424)});
       window.__setAiAccessMode = setAiAccessMode;
+      window.__setAutoRetrying = setAutoRetrying;
+      window.__setFailureText = setFailureText;
       const failure = {
-        id: "failure-" + aiAccessMode, role: "assistant", authorId: null, content: ${JSON.stringify(REFRESH_424)},
+        id: "failure-" + aiAccessMode, role: "assistant", authorId: null, content: failureText,
         timestamp: 0, files: null, messageType: "error",
         metadata: { source: "agent", outcome: "failed", messageType: "error", jobId,
-          errorMessage: ${JSON.stringify(REFRESH_424)}, aiAccessMode },
+          errorMessage: failureText, aiAccessMode },
       };
       const retry = {
-        pendingRetryKey: null, autoRetryingKey: null,
+        pendingRetryKey: null, autoRetryingKey: autoRetrying ? failure.id : null,
         requestRetry() { window.__presses.retry += 1; },
         onConnectAi() { window.__presses.manageAi += 1; },
       };
@@ -102,7 +110,7 @@ async function presses(page: Page): Promise<{ retry: number; manageAi: number }>
 
 for (const dark of [false, true]) {
   for (const width of [1280, 390]) {
-    test(`a turn the AI never answered offers its actions by keyboard at ${width}px (${dark ? "dark" : "light"})`, async ({ page }, testInfo) => {
+    test(`a failed turn offers its actions by keyboard, in plain words, and is one quiet line while it is tried again, at ${width}px (${dark ? "dark" : "light"})`, async ({ page }, testInfo) => {
       test.setTimeout(60_000);
       await page.setViewportSize({ width, height: 800 });
       const errors = await mountFixture(page, { dark });
@@ -111,8 +119,10 @@ for (const dark of [false, true]) {
       const retry = body.getByRole("button", { name: "Try again" });
       const details = body.getByRole("button", { name: "Details" });
 
-      // The person's own AI: what to do, and where.
-      await expect(page.getByTestId("agent-thread-terminal-status")).toHaveText("Run failed");
+      // The person's own AI: what to do, and where. The block is the turn's
+      // one status: no "Run failed" beside it.
+      await expect(page.getByTestId("agent-thread-terminal-status")).toHaveCount(0);
+      await expect(page.locator("main")).not.toContainText("Run failed");
       await expect(body.locator("p").first()).toHaveText("Your AI connection needs you to sign in again.");
       await expect(manageAi).toBeVisible();
       await expect(retry).toBeVisible();
@@ -133,6 +143,7 @@ for (const dark of [false, true]) {
       await expect(details).toBeFocused();
       await page.keyboard.press("Enter");
       await expect(details).toHaveAttribute("aria-expanded", "true");
+      await expect(details).toHaveAccessibleName("Hide details");
       await expect(page.getByTestId("run-failure-details")).toHaveText(REFRESH_424);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({ path: testInfo.outputPath(`own-ai-details-${width}-${dark ? "dark" : "light"}.png`) });
@@ -149,6 +160,44 @@ for (const dark of [false, true]) {
       await expect(page.locator("main")).not.toContainText(/upstream|provider|credential|switch|sign in/i);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({ path: testInfo.outputPath(`instafy-ai-${width}-${dark ? "dark" : "light"}.png`) });
+
+      // A turn that made none of its changes: one plain sentence and its
+      // actions; nothing technical, one status, no summary line above it.
+      const main = page.locator("main");
+      await page.evaluate(() => (window as unknown as { __setFailureText: (text: string) => void }).__setFailureText(
+        "Codex did not apply any workspace changes for a file-modifying request.",
+      ));
+      await expect(body.locator("p").first()).toHaveText("Octo didn't finish the changes.");
+      await expect(main).not.toContainText(/codex|workspace|request|Run failed|Ran a command|Retried/i);
+      await expect(page.getByTestId("turn-activity-line")).toHaveCount(0);
+      // The failure block's own tinted rule.
+      await expect(main.locator(".border-l-2")).toHaveCount(1);
+      await expect(details).toHaveAccessibleName("Details");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      await page.screenshot({ path: testInfo.outputPath(`no-changes-${width}-${dark ? "dark" : "light"}.png`) });
+      // Keyboard, back from Details: Try again, then Details again.
+      await expect(details).toBeFocused();
+      await page.keyboard.press("Shift+Tab");
+      await expect(retry).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(details).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(details).toHaveAccessibleName("Hide details");
+      const controlled = await details.getAttribute("aria-controls");
+      expect(controlled).toBeTruthy();
+      await expect(page.locator(`[id="${controlled}"]`).getByTestId("run-failure-details")).toHaveText(NO_CHANGES);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      await page.screenshot({ path: testInfo.outputPath(`no-changes-details-${width}-${dark ? "dark" : "light"}.png`) });
+
+      // Tried again by itself: one quiet line, no failure, no red, no actions.
+      await page.evaluate(() => (window as unknown as { __setAutoRetrying: (on: boolean) => void }).__setAutoRetrying(true));
+      await expect(page.getByTestId("run-failure-auto-retrying")).toContainText("Trying again…");
+      await expect(page.getByTestId("run-failure-body")).toHaveCount(0);
+      await expect(main.getByRole("button")).toHaveCount(0);
+      await expect(main.locator(".border-l-2")).toHaveCount(0);
+      await expect(main).not.toContainText(/didn't finish|Run failed|Retried|codex|workspace/i);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      await page.screenshot({ path: testInfo.outputPath(`no-changes-retrying-${width}-${dark ? "dark" : "light"}.png`) });
       expect(errors, errors.join("; ")).toEqual([]);
     });
   }
