@@ -180,8 +180,14 @@ enum AgentRoutingPreflightRoute {
     WriteCoordinationRequired,
 }
 
+/// Recorded on a turn whose request was read as needing file changes and whose
+/// recovery pass still changed and claimed none: the reply stood as the result.
+const REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND: &str = "codex/required-changes-not-made";
+
 // A completion requirement, never permission to write. Conditional work may
-// legitimately finish after inspection without producing a patch.
+// legitimately finish after inspection without producing a patch. A required
+// change gets one recovery pass; a reply that still changes and claims nothing
+// then stands, and only a claimed file missing from disk fails the turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceFileChangeRequirement {
     None,
@@ -6813,6 +6819,8 @@ impl JobProcessor {
             expects_workspace_file_changes,
             final_output_mode,
         );
+        let records_workspace_change_receipts =
+            records_workspace_change_receipts(commit_to_workspace, read_only_workspace);
         let final_output_schema = if is_explicit_team_planning_job(job) && !granted_execution {
             CodexFinalOutputSchema::MultiAgentPlan
         } else {
@@ -7360,7 +7368,7 @@ impl JobProcessor {
         let own_files_empty = collect_workspace_change_receipts(
             &workspace_dir,
             &mut outcome.files,
-            tracks_workspace_file_changes,
+            records_workspace_change_receipts,
             git_status_before.as_ref(),
             earlier_attempt_status.as_ref(),
         )
@@ -7994,7 +8002,7 @@ impl JobProcessor {
             let retry_own_files_len = collect_workspace_change_receipts(
                 &workspace_dir,
                 &mut retry_outcome.files,
-                tracks_workspace_file_changes,
+                records_workspace_change_receipts,
                 git_status_before.as_ref(),
                 earlier_attempt_status.as_ref(),
             )
@@ -8445,13 +8453,22 @@ impl JobProcessor {
                         "accepting successful apply_patch events as workspace file-change evidence after retry"
                     );
                 } else {
-                    return Err(JobFailureWithArtifacts {
-                        message:
-                            "Codex did not apply any workspace changes for a file-modifying request."
-                                .to_string(),
-                        artifacts: retry_artifacts,
-                    }
-                    .into());
+                    // The routing preflight read the request as needing file
+                    // changes before anything ran. The recovery pass asked
+                    // again for the changes or the concrete blocker, and the
+                    // agent changed nothing and claimed no file (a claimed
+                    // file missing from disk failed above). Its reply answers,
+                    // asks or says what blocks the work, so it is the turn's
+                    // result: failing the turn would hide it and invite a
+                    // resend that cannot do more.
+                    tracing::info!(
+                        job_id = %job_id,
+                        "no file change after the recovery pass and none claimed; keeping the reply"
+                    );
+                    retry_artifacts.push(json!({
+                        "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
+                        "metadata": { "reason": "no_change_after_recovery" },
+                    }));
                 }
             }
 
@@ -10121,6 +10138,16 @@ fn tracks_workspace_file_changes(
     commit_to_workspace
         && !read_only_workspace
         && (required || mode == RuntimeFinalOutputMode::PlainTextWrite)
+}
+
+/// Whether a turn lists the files it changed on disk among its receipts. Every
+/// turn that saves to the workspace does, whatever the routing preflight read
+/// into the request: a tool can write files on a turn no one expected to edit
+/// any (a skill pack's command that builds a site folder), and the turn's
+/// checkpoint saves them either way. Only the claims check
+/// ([`reported_workspace_file_changes_missing`]) stays with tracked turns.
+fn records_workspace_change_receipts(commit_to_workspace: bool, read_only_workspace: bool) -> bool {
+    commit_to_workspace && !read_only_workspace
 }
 
 fn reported_workspace_file_changes_missing(
@@ -24645,6 +24672,68 @@ mod tests {
                 .join(".instafy/agent/logs/preview-4173.log")
                 .exists()
         );
+    }
+
+    /// Live test, Oct 28: "Plan 3 days in Lisbon" was read as needing no file
+    /// change, and the skill pack's `uw new` and `uw add-point` built a site
+    /// folder. The checkpoint saved the folder, but the turn listed no file.
+    #[tokio::test]
+    async fn receipts_list_what_a_tool_wrote_on_a_turn_read_as_needing_no_change() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&workspace)
+            .output()
+            .expect("initialize isolated fixture repository");
+        assert!(initialized.status.success());
+        let before = collect_git_status_porcelain(&workspace).await.unwrap();
+        fs::create_dir_all(workspace.join("lisbon-first-visit/data")).unwrap();
+        fs::write(
+            workspace.join("lisbon-first-visit/index.html"),
+            "<h1>Lisbon</h1>\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("lisbon-first-visit/data/sights.geojson"),
+            "{}\n",
+        )
+        .unwrap();
+        // The claims check stays with turns expected to edit.
+        assert!(!tracks_workspace_file_changes(
+            true,
+            false,
+            WorkspaceFileChangeRequirement::None.requires_changes(),
+            RuntimeFinalOutputMode::StrictStructured,
+        ));
+
+        let mut files = Vec::new();
+        let count = collect_workspace_change_receipts(
+            &workspace,
+            &mut files,
+            records_workspace_change_receipts(true, false),
+            Some(&before),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut listed = files
+            .iter()
+            .map(|file| file.workspace_path.as_str())
+            .collect::<Vec<_>>();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                "lisbon-first-visit/data/sights.geojson",
+                "lisbon-first-visit/index.html"
+            ]
+        );
+        assert_eq!(count, 2);
+        // A read-only turn, and one that does not save, list nothing.
+        assert!(!records_workspace_change_receipts(true, true));
+        assert!(!records_workspace_change_receipts(false, false));
     }
 
     #[test]

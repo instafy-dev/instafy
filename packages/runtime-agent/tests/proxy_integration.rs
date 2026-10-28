@@ -793,15 +793,16 @@ impl ReadReferenceCase {
         self != Self::ResumedRequiredWriteWithoutAFinalAnswer
     }
 
-    /// How the job fails, when it does.
+    /// How the job fails, when it does. A required write that its recovery
+    /// pass still did not make, with no file claimed, ends with the reply.
     fn failure(self) -> Option<&'static str> {
-        if self == Self::ResumedRequiredWriteWithoutAFinalAnswer {
-            Some("without returning a final assistant message")
-        } else if self.required_write() && !self.saves_the_cut_off_attempts_file() {
-            Some("did not apply any workspace changes")
-        } else {
-            None
-        }
+        (self == Self::ResumedRequiredWriteWithoutAFinalAnswer)
+            .then_some("without returning a final assistant message")
+    }
+
+    /// The reply stood although the required write was not made.
+    fn reply_stands_without_the_write(self) -> bool {
+        self.required_write() && self.failure().is_none() && !self.saves_the_cut_off_attempts_file()
     }
 
     /// Why the job's last attempt retried, where the case checks it.
@@ -850,12 +851,13 @@ fn codex_read_reference_preserves_file_bytes_after_recovery_via_proxy() -> Resul
 }
 
 #[test]
-fn codex_read_reference_does_not_satisfy_required_write_via_proxy() -> Result<()> {
+fn codex_read_reference_reply_stands_after_one_recovery_pass_without_the_required_write_via_proxy()
+-> Result<()> {
     run_read_reference_proxy_case(ReadReferenceCase::RequiredWrite)
 }
 
 #[test]
-fn codex_read_reference_beside_unpublished_file_does_not_satisfy_required_write_via_proxy()
+fn codex_read_reference_beside_unpublished_file_does_not_count_as_the_required_write_via_proxy()
 -> Result<()> {
     run_read_reference_proxy_case(ReadReferenceCase::RequiredWriteBesideUnpublishedFile)
 }
@@ -877,7 +879,7 @@ fn codex_read_reference_on_resumed_job_without_a_final_answer_fails_via_proxy() 
 }
 
 #[test]
-fn codex_read_reference_on_resumed_job_with_nothing_new_does_not_satisfy_required_write_via_proxy()
+fn codex_read_reference_on_resumed_job_with_nothing_new_does_not_count_a_write_via_proxy()
 -> Result<()> {
     run_read_reference_proxy_case(ReadReferenceCase::ResumedRequiredWriteWithNothingNew)
 }
@@ -1230,6 +1232,13 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         );
         execution.artifacts
     };
+    assert_eq!(
+        artifacts.iter().any(|artifact| {
+            artifact.get("kind").and_then(Value::as_str) == Some("codex/required-changes-not-made")
+        }),
+        case.reply_stands_without_the_write(),
+        "result={result_diagnostics}"
+    );
     if case.reads_the_reference() {
         let files = artifacts
             .iter()

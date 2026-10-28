@@ -335,8 +335,16 @@ Before a normal root turn enters detailed planning, the runtime asks for one sma
 Write permission and completion requirements are separate. Controller `writeIntent` and
 `writeScope` authorize and constrain mutations; routing cannot grant permission. A conditional
 review must still perform its required observations and tests, but may explain why no edit is
-warranted. It can also make justified edits within its existing scope. Required writes retain
-their missing-change retry and failure checks; a no-change explanation does not waive them.
+warranted. It can also make justified edits within its existing scope. A required write that
+ends without a change gets one recovery pass, which asks again for the change or the concrete
+blocker. The preflight reads the request before anything runs, so when the recovery pass still
+changes nothing and claims no file, its reply (an answer, a question for the person, or what
+blocks the work) is the turn's result, recorded as a `codex/required-changes-not-made` artifact.
+A reply that lists a file missing from disk still fails the turn.
+
+Every turn that saves to the workspace lists the files it changed on disk in its receipts,
+whatever the requirement: a tool such as a skill pack's command can write files on a turn read
+as needing none, and the turn's checkpoint saves them either way.
 
 New preflight responses use the three-state field. The runtime accepts the legacy Boolean
 `requiresWorkspaceFileChanges` when that field is absent (`true` maps to `required`, `false`
