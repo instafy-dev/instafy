@@ -8,7 +8,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -382,6 +382,56 @@ fn clear_stale_agent_control_marker_at_startup(
     prepare_clean_approval_directory(approval_dir)?;
     close_agent_tabs_and_settle_leftovers(approval_dir, cdp_base, run_tabs);
     Ok(())
+}
+
+/// Pages remembered; the oldest go first.
+const MAX_PAGE_CONVERSATIONS: usize = 32;
+
+/// Which conversation's run last held each page of a browser, newest last,
+/// at most [`MAX_PAGE_CONVERSATIONS`] pages.
+#[derive(Debug, Default)]
+pub(crate) struct PageConversations {
+    pages: Vec<(String, Uuid)>,
+}
+
+impl PageConversations {
+    /// Records that a run of `conversation_id` starts on `page_id`, and
+    /// returns whether a run of another conversation held that page last.
+    pub(crate) fn record(&mut self, page_id: &str, conversation_id: Uuid) -> bool {
+        let previous = self
+            .pages
+            .iter()
+            .position(|(page, _)| page == page_id)
+            .map(|index| self.pages.remove(index).1);
+        self.pages.push((page_id.to_string(), conversation_id));
+        if self.pages.len() > MAX_PAGE_CONVERSATIONS {
+            let excess = self.pages.len() - MAX_PAGE_CONVERSATIONS;
+            self.pages.drain(..excess);
+        }
+        previous.is_some_and(|previous| previous != conversation_id)
+    }
+}
+
+/// This machine's browser. Page ids are CDP target ids, so a restarted
+/// browser has new ones; a restarted runtime knows none and says nothing.
+static PAGE_CONVERSATIONS: LazyLock<Mutex<PageConversations>> =
+    LazyLock::new(|| Mutex::new(PageConversations::default()));
+
+/// Records that a run of `conversation_id` starts on `page_id`, and returns
+/// whether a run of another conversation held that page last. Studio binds a
+/// browser task to the browser's current tab, which another chat may have
+/// left on its own page: that page is not this task's earlier work.
+pub(crate) fn page_left_by_another_conversation(
+    page_id: &str,
+    conversation_id: Option<Uuid>,
+) -> bool {
+    let Some(conversation_id) = conversation_id else {
+        return false;
+    };
+    PAGE_CONVERSATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .record(page_id, conversation_id)
 }
 
 /// The run a marker or a record is bound to.
@@ -2105,12 +2155,108 @@ impl ServerHandler for SharedBrowserMcpServer {
                 Ok(terminal_consent_call_result_with_step(code, step))
             }
             Err(SharedBrowserMcpExecutionFailure::Other(error)) => {
-                Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Shared Browser action failed: {error:#}"
-                ))]))
+                Ok(failed_tool_result(&format!("{error:#}")))
             }
         }
     }
+}
+
+/// A page that did not load because of the network: one of Chromium's
+/// `net::ERR_…` codes, which Playwright puts in its error text. The person
+/// should hear what happened in plain words, never the code.
+#[derive(Debug, PartialEq, Eq)]
+struct NetworkFailure {
+    /// The plain sentence the result leads with.
+    reason: &'static str,
+    /// The browser's own code (`net::ERR_TUNNEL_CONNECTION_FAILED`), for
+    /// diagnosis only.
+    code: String,
+}
+
+const SITE_UNREACHABLE_REASON: &str = "Instafy's browser couldn't reach that site: it did not answer, refused the connection, or is an address the browser does not open (a private or local address, or a port that is not a web port).";
+const SITE_NOT_FOUND_REASON: &str = "Instafy's browser couldn't find that site. Check the address.";
+const SITE_INSECURE_REASON: &str =
+    "That site's secure connection failed, so Instafy's browser didn't open it.";
+const SITE_REDIRECT_LOOP_REASON: &str =
+    "That site kept redirecting, so Instafy's browser couldn't open it.";
+/// `net::ERR_ABORTED`: the site answered, but the load stopped. Downloads are
+/// denied in this browser, and a navigation another one replaced ends so too.
+const PAGE_LOAD_STOPPED_REASON: &str = "That page stopped loading before it opened: it was a file to download (downloads are blocked in Instafy's browser), or another navigation replaced it.";
+/// Any other code: the page did not load, without a guess at why.
+const PAGE_NOT_LOADED_REASON: &str = "That page didn't load in Instafy's browser.";
+/// Codes for a connection to the site that did not happen or did not last
+/// (the browser's proxy answers a denied, refused or silent site alike).
+const CONNECTION_FAILURE_CODE_PREFIXES: &[&str] = &[
+    "ERR_CONNECTION_",
+    "ERR_TUNNEL_",
+    "ERR_PROXY_",
+    "ERR_SOCKS_",
+    "ERR_ADDRESS_",
+];
+const CONNECTION_FAILURE_CODES: &[&str] = &[
+    "ERR_TIMED_OUT",
+    "ERR_EMPTY_RESPONSE",
+    "ERR_UNSAFE_PORT",
+    "ERR_INTERNET_DISCONNECTED",
+    "ERR_NETWORK_CHANGED",
+    "ERR_NETWORK_ACCESS_DENIED",
+];
+/// Longest code kept; Chromium's names are far shorter.
+const MAX_NETWORK_ERROR_CODE_CHARS: usize = 64;
+
+/// The network failure in a failed command's error text, if any.
+fn network_failure(message: &str) -> Option<NetworkFailure> {
+    let start = message.find("net::ERR_")?;
+    let rest = &message[start + "net::".len()..];
+    let length = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+        .count();
+    if length <= "ERR_".len() || length > MAX_NETWORK_ERROR_CODE_CHARS {
+        return None;
+    }
+    let code = &rest[..length];
+    let reason = match code {
+        "ERR_NAME_NOT_RESOLVED" | "ERR_NAME_RESOLUTION_FAILED" => SITE_NOT_FOUND_REASON,
+        "ERR_TOO_MANY_REDIRECTS" => SITE_REDIRECT_LOOP_REASON,
+        "ERR_ABORTED" => PAGE_LOAD_STOPPED_REASON,
+        _ if code.starts_with("ERR_CERT_") || code.starts_with("ERR_SSL_") => SITE_INSECURE_REASON,
+        _ if CONNECTION_FAILURE_CODES.contains(&code)
+            || CONNECTION_FAILURE_CODE_PREFIXES
+                .iter()
+                .any(|prefix| code.starts_with(prefix)) =>
+        {
+            SITE_UNREACHABLE_REASON
+        }
+        _ => PAGE_NOT_LOADED_REASON,
+    };
+    Some(NetworkFailure {
+        reason,
+        code: format!("net::{code}"),
+    })
+}
+
+/// A failed call's result. A page the network did not deliver says so in
+/// plain words, with the browser's code only in `error.details`; any other
+/// failure keeps the controller's own (masked) error text.
+fn failed_tool_result(message: &str) -> CallToolResult {
+    match network_failure(message) {
+        Some(failure) => network_failure_tool_result(&failure),
+        None => CallToolResult::error(vec![Content::text(format!(
+            "Shared Browser action failed: {message}"
+        ))]),
+    }
+}
+
+fn network_failure_tool_result(failure: &NetworkFailure) -> CallToolResult {
+    let mut result = CallToolResult::error(vec![Content::text(failure.reason)]);
+    result.structured_content = Some(json!({
+        "error": {
+            "reason": failure.reason,
+            "details": failure.code,
+        }
+    }));
+    result
 }
 
 /// A successful call's result. The text is compact JSON: a code-mode model

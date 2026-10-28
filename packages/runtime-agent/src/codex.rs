@@ -121,7 +121,7 @@ const MAX_COMMAND_OUTPUT_BUFFER_CHARS: usize = 8192;
 const BROWSER_MODE_DEVELOPER_INSTRUCTIONS: &str = r#"Browser/UI execution run:
 - Use project memory, pinned skills, and loaded learned blocks as the source of task behavior. This prompt only defines run-level invariants.
 - Use the dedicated browser tools configured for this turn when browser execution was requested. Every site and action approval the browser asks for still applies, and ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the user's current message named it.
-- Keep the visible page open and focused. Report only concrete observed state or exact execution errors."#;
+- Keep the visible page open and focused. Report only concrete observed state. When a step fails, say in plain words what did not work (a failed result's plain reason); never paste raw error codes or error text such as `net::ERR_…` into your reply."#;
 /// The Shared Browser policy, around the one line that says how the run's
 /// approvals start (see `crate::shared_browser::run_approval_start`).
 macro_rules! shared_browser_developer_instructions {
@@ -143,7 +143,8 @@ macro_rules! shared_browser_developer_instructions {
             r#"- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
 - An error ending in `[step_refused_secret]`, `[step_refused_sign_in]` or `[step_refused_upload]` is final in every approval mode: revealing or copying a credential, signing in, and choosing files are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields.
 - Downloads are blocked in this browser. Do not try to download or export files through it.
-- A denial, timeout, stale target, changed page, or replayed approval is final for that attempted action. Do not retry it automatically; report the exact returned error and wait for a new user instruction.
+- A denial, timeout, stale target, changed page, or replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction.
+- A page the network did not deliver fails with a plain reason, such as "Instafy's browser couldn't reach that site", and the browser's code only in `error.details`. Tell the person that reason in your own words; the code is for diagnosis, never for your reply.
 - Approval is never a model-visible tool. Do not search for, inspect, edit, or simulate runtime approval files."#
         )
     };
@@ -579,12 +580,16 @@ fn multi_agent_plan_final_output_json_schema() -> JsonValue {
                     "items": {
                       "type": "object",
                       "additionalProperties": false,
-                      "required": ["handle", "label", "prompt", "scopeSummary", "writeScope"],
+                      "required": ["handle", "label", "prompt", "scopeSummary", "writeScope", "requiresTools"],
                       "properties": {
                         "handle": { "type": "string" },
                         "label": { "type": "string" },
                         "prompt": { "type": "string" },
                         "scopeSummary": { "type": "string" },
+                        "requiresTools": {
+                          "type": ["boolean", "null"],
+                          "description": "True when this worker must execute tools for live observations, commands or tests. This is a requirement, not permission or an opt-in to isolated execution."
+                        },
                         "writeScope": {
                           "type": ["object", "null"],
                           "additionalProperties": false,
@@ -873,6 +878,10 @@ pub struct CodexRunOptions {
     pub personal_browser: bool,
     pub shared_browser: bool,
     pub shared_browser_page_id: Option<String>,
+    /// A run of another chat held the Shared Browser page last: this turn
+    /// starts on that chat's page (see
+    /// `crate::shared_browser::page_left_by_another_conversation`).
+    pub shared_browser_page_left_by_other_chat: bool,
     pub expect_mcp_tools: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub suppress_contextual_instructions: bool,
@@ -1710,11 +1719,15 @@ impl CodexClient {
             )
         };
         let mode_developer_instructions = mode_developer_instructions.map(|instructions| {
-            append_browser_developer_instructions_for_turn(
+            let instructions = append_browser_developer_instructions_for_turn(
                 instructions,
                 shared_browser_mode,
                 personal_browser_mode,
                 local_browser_mode,
+            );
+            append_shared_browser_page_start_instructions(
+                instructions,
+                shared_browser_mode && options.shared_browser_page_left_by_other_chat,
             )
         });
         let base_instructions = runtime_base_instructions(
@@ -4210,6 +4223,17 @@ fn append_shared_browser_developer_instructions(
     format!("{base}\n\n{policy}")
 }
 
+/// Said when this turn's Shared Browser page was last used by a run of
+/// another chat (the browser is shared across the space's chats).
+const SHARED_BROWSER_PAGE_FROM_OTHER_CHAT_INSTRUCTIONS: &str = "- The page this turn starts on was left open by a task in another chat. What it shows is not this task's earlier work: do not describe it as resuming or continuing there. When the person's message is about that page, use it as it is. Otherwise start this task's own step: `navigate` that page to what this task needs, or open a tab of your own.";
+
+fn append_shared_browser_page_start_instructions(base: String, left_by_other_chat: bool) -> String {
+    if !left_by_other_chat {
+        return base;
+    }
+    format!("{base}\n{SHARED_BROWSER_PAGE_FROM_OTHER_CHAT_INSTRUCTIONS}")
+}
+
 fn append_personal_browser_developer_instructions(base: String, enabled: bool) -> String {
     if !enabled {
         return base;
@@ -6130,6 +6154,65 @@ mod tests {
         own.start_attempt();
         assert!(own.retries_a_timed_out_run(0, 1));
         assert!(!own.retries_a_timed_out_run(1, 1));
+    }
+
+    #[test]
+    fn a_shared_turn_on_a_page_another_chat_left_is_told_so() {
+        let base = "Base".to_string();
+        assert_eq!(
+            append_shared_browser_page_start_instructions(base.clone(), false),
+            base
+        );
+        let told = append_shared_browser_page_start_instructions(base.clone(), true);
+        assert!(told.starts_with(
+            "Base\n- The page this turn starts on was left open by a task in another chat."
+        ));
+        assert!(told.contains("do not describe it as resuming or continuing there"));
+        assert!(
+            told.contains(
+                "`navigate` that page to what this task needs, or open a tab of your own"
+            )
+        );
+        // A person who asks about the page on screen still gets that page.
+        assert!(
+            told.contains("When the person's message is about that page, use it as it is"),
+            "{told}"
+        );
+    }
+
+    /// Live drive, Oct 28: Octo pasted "net::ERR_TUNNEL_CONNECTION_FAILED"
+    /// into its reply, as the browser policy asked ("exact execution errors").
+    #[test]
+    fn browser_turns_give_a_failed_step_in_plain_words_never_a_raw_code() {
+        assert!(
+            BROWSER_MODE_DEVELOPER_INSTRUCTIONS.contains("say in plain words what did not work")
+        );
+        assert!(BROWSER_MODE_DEVELOPER_INSTRUCTIONS.contains("never paste raw error codes"));
+        for policy in [
+            BROWSER_MODE_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
+        ] {
+            assert!(!policy.contains("exact execution error"), "{policy}");
+            assert!(
+                !policy.contains("report the exact returned error"),
+                "{policy}"
+            );
+        }
+        for policy in [
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
+        ] {
+            assert!(policy.contains("only in `error.details`"), "{policy}");
+            assert!(policy.contains("never for your reply"), "{policy}");
+        }
+        let skill = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md"
+        ));
+        assert!(skill.contains("never paste raw error codes"));
+        assert!(!skill.contains("exact error"));
+        assert!(!skill.contains("exact execution error"));
     }
 
     /// Octo opens Instafy's browser without a press, but nothing in a browser

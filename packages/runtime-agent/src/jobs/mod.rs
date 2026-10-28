@@ -180,8 +180,27 @@ enum AgentRoutingPreflightRoute {
     WriteCoordinationRequired,
 }
 
+/// Recorded on a turn whose request was read as needing file changes and whose
+/// recovery pass changed none and said so: the reply stood as the result.
+const REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND: &str = "codex/required-changes-not-made";
+
+/// The line a recovery pass for a required change ends its reply with when it
+/// changed no file on purpose (an answer, a question for the person, or what
+/// blocks the work). The runtime removes it before anyone reads the reply.
+/// Without it, a reply that changed nothing reads as one that promised a change
+/// it did not make, and the turn fails.
+const NO_FILE_CHANGES_MARKER: &str = "NO_FILE_CHANGES";
+
+/// Added to the recovery prompt of a required change that is still missing.
+const NO_FILE_CHANGES_REPORT_REQUIREMENT: &str = "\n\nIMPORTANT NO-CHANGE REPORT REQUIREMENT:\n\
+- If you end this attempt without changing any file, say in plain words what you found, what you need from the person, or what blocks the change, and end that reply with a separate last line that is exactly `NO_FILE_CHANGES` (as the last line of the `summary` text when you answer in JSON). The runtime removes that line before the person reads your reply.\n\
+- Never add that line when you changed files, and never say a change was made when it was not.\n";
+
 // A completion requirement, never permission to write. Conditional work may
-// legitimately finish after inspection without producing a patch.
+// legitimately finish after inspection without producing a patch. A required
+// change gets one recovery pass; a reply that still changes nothing stands
+// only when it says so (`NO_FILE_CHANGES_MARKER`), and any other, or one that
+// lists a file missing from disk, fails the turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceFileChangeRequirement {
     None,
@@ -2653,6 +2672,23 @@ fn format_terminal_failure_message(
     }
 }
 
+/// Studio binds a browser task to the browser's current tab. When a run of
+/// another chat held that tab last, the turn is told it starts on that chat's
+/// page, not on its own earlier work. Records this job's chat for the page.
+fn shared_browser_page_left_by_other_chat(job: &LeaseJob, page_id: Option<&str>) -> bool {
+    page_id.is_some_and(|page_id| {
+        crate::shared_browser::page_left_by_another_conversation(
+            page_id,
+            job.conversation_id.or_else(|| {
+                job.payload
+                    .get("conversation_id")
+                    .and_then(JsonValue::as_str)
+                    .and_then(|value| Uuid::parse_str(value.trim()).ok())
+            }),
+        )
+    })
+}
+
 fn terminal_base_scope_key(job: &LeaseJob, project_id: Uuid) -> String {
     if let Some(conversation_id) = job.conversation_id.or_else(|| {
         job.payload
@@ -5089,6 +5125,7 @@ impl JobProcessor {
         job: &LeaseJob,
     ) -> bool {
         self.parallel_scoped_scope_paths(job).is_some()
+            && !scoped_worker_requires_tools(job)
             && self
                 .parallel_direct_worker_proxy_config(
                     job.proxy.as_ref().or(registration.proxy.as_ref()),
@@ -5137,6 +5174,8 @@ impl JobProcessor {
         {
             bail!("lease lost before parallel write-scoped worker execution");
         }
+
+        ensure_tool_free_worker_compatible(job)?;
 
         // Parallel workers use per-job proxy configuration and must not mutate
         // process-wide credentials, but still validate the same job scope before
@@ -6245,6 +6284,11 @@ impl JobProcessor {
                 "Experimental scoped tool workers require the isolated worker dispatch path; this task has unsupported inputs, capabilities, or scope."
             );
         }
+        if is_multi_agent_worker_job(job)
+            && metadata_requests_write_scoped_workspace(job.payload.get("metadata"))
+        {
+            ensure_tool_free_worker_compatible(job)?;
+        }
         let task_usage = TaskUsage::default();
         let turn_files = turn_continuation::TurnFiles::for_job(job);
         let result = self
@@ -6418,6 +6462,8 @@ impl JobProcessor {
         } else {
             None
         };
+        let shared_browser_page_left_by_other_chat =
+            shared_browser_page_left_by_other_chat(job, shared_browser_page_id.as_deref());
         // Browser and granted turns have one trusted MCP server and no command lanes.
         let bounded_execution = explicit_personal_browser_execution
             || explicit_shared_browser_execution
@@ -6749,6 +6795,7 @@ impl JobProcessor {
         let runtime_expectations =
             runtime_job_expectations_for_execution(&job.payload, bounded_execution);
         let scoped_worker_has_precollected_observations = is_multi_agent_worker_job(job)
+            && !scoped_worker_requires_tools(job)
             && scoped_worker_path_observation
                 .as_ref()
                 .is_some_and(|observation| observation.complete);
@@ -6813,6 +6860,8 @@ impl JobProcessor {
             expects_workspace_file_changes,
             final_output_mode,
         );
+        let records_workspace_change_receipts =
+            records_workspace_change_receipts(commit_to_workspace, read_only_workspace);
         let final_output_schema = if is_explicit_team_planning_job(job) && !granted_execution {
             CodexFinalOutputSchema::MultiAgentPlan
         } else {
@@ -6834,6 +6883,7 @@ impl JobProcessor {
             personal_browser: explicit_personal_browser_execution,
             shared_browser: explicit_shared_browser_execution,
             shared_browser_page_id,
+            shared_browser_page_left_by_other_chat,
             expect_mcp_tools: expects_generic_mcp_tool_execution,
             reasoning_effort: sequential_job_reasoning_effort(
                 job,
@@ -7360,12 +7410,18 @@ impl JobProcessor {
         let own_files_empty = collect_workspace_change_receipts(
             &workspace_dir,
             &mut outcome.files,
-            tracks_workspace_file_changes,
+            records_workspace_change_receipts,
             git_status_before.as_ref(),
             earlier_attempt_status.as_ref(),
         )
         .await?
             == 0;
+        // A turn's provider thread keeps an earlier recovery prompt, so a
+        // first answer can end with the runtime's no-change line too; the
+        // person never reads it.
+        if let Some(summary) = take_no_file_changes_marker(&outcome.summary) {
+            outcome.summary = summary;
+        }
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -7645,6 +7701,7 @@ impl JobProcessor {
                 match kind {
                     CodexFallbackSummaryKind::MissingFinalAssistantMessage => {
                         if is_multi_agent_worker_job(job)
+                            && !scoped_worker_requires_tools(job)
                             && scoped_worker_path_observation
                                 .as_ref()
                                 .is_some_and(|observation| observation.complete)
@@ -7727,6 +7784,11 @@ impl JobProcessor {
                 {
                     retry_codex_run_options.disable_shell_tool = true;
                 }
+            }
+            // A required change is still missing: the recovery pass may end
+            // without one only by saying so.
+            if workspace_file_changes_missing {
+                retry_prompt.push_str(NO_FILE_CHANGES_REPORT_REQUIREMENT);
             }
             let mut retry_prompt_context = prompt_context.clone();
             if let (Some(pending), Some(reply)) = (&pending_worker_input, &worker_question_reply) {
@@ -7994,7 +8056,7 @@ impl JobProcessor {
             let retry_own_files_len = collect_workspace_change_receipts(
                 &workspace_dir,
                 &mut retry_outcome.files,
-                tracks_workspace_file_changes,
+                records_workspace_change_receipts,
                 git_status_before.as_ref(),
                 earlier_attempt_status.as_ref(),
             )
@@ -8310,6 +8372,16 @@ impl JobProcessor {
                     }));
                 }
             }
+            // The recovery pass's own report that it changed nothing on
+            // purpose; the person reads the reply without it.
+            let retry_reported_no_file_changes =
+                match take_no_file_changes_marker(&retry_outcome.summary) {
+                    Some(summary) => {
+                        retry_outcome.summary = summary;
+                        true
+                    }
+                    None => false,
+                };
             let retry_final_messages = with_runtime_metadata_vec(
                 build_final_messages_from_outcome(&retry_outcome, Some(&workspace_dir)),
                 &registration.runtime_id,
@@ -8444,7 +8516,26 @@ impl JobProcessor {
                         job_id = %job_id,
                         "accepting successful apply_patch events as workspace file-change evidence after retry"
                     );
+                } else if retry_reported_no_file_changes {
+                    // The routing preflight read the request as needing file
+                    // changes before anything ran. The recovery pass asked
+                    // again for the changes or the concrete blocker, and the
+                    // agent changed nothing and said so (a claimed file
+                    // missing from disk failed above). Its reply answers,
+                    // asks or says what blocks the work, so it is the turn's
+                    // result: failing the turn would hide it and invite a
+                    // resend that cannot do more.
+                    tracing::info!(
+                        job_id = %job_id,
+                        "no file change after the recovery pass, and the reply says so; keeping it"
+                    );
+                    retry_artifacts.push(json!({
+                        "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
+                        "metadata": { "reason": "no_change_after_recovery" },
+                    }));
                 } else {
+                    // Nothing changed, and the reply did not say so: it reads
+                    // as a promise of a change that was not made.
                     return Err(JobFailureWithArtifacts {
                         message:
                             "Codex did not apply any workspace changes for a file-modifying request."
@@ -8454,6 +8545,15 @@ impl JobProcessor {
                     .into());
                 }
             }
+
+            ensure_worker_tool_evidence(
+                job,
+                &retry_outcome,
+                retry_observed_command_execution,
+                has_mcp_tool_call_message(&interim_messages)
+                    || has_mcp_tool_call_message(&retry_messages),
+                &mut retry_artifacts,
+            )?;
 
             // The retry's result is settled: its cards go out now, right
             // behind its answer, not after the workspace sync and the
@@ -8575,6 +8675,14 @@ impl JobProcessor {
                 final_messages: retry_final_messages,
             });
         }
+
+        ensure_worker_tool_evidence(
+            job,
+            &outcome,
+            observed_command_execution,
+            has_mcp_tool_call_message(&interim_messages),
+            &mut artifacts,
+        )?;
 
         // No retry: the turn's result is settled, so its cards go out now,
         // right behind its answer, not after the workspace sync and the
@@ -8967,6 +9075,7 @@ impl JobProcessor {
         let mut prompt_section_metrics = JsonMap::new();
 
         if multi_agent_worker
+            && !scoped_worker_requires_tools(job)
             && let Some(observation) = scoped_worker_path_observation
             && observation.complete
         {
@@ -9673,7 +9782,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
             - For recommendation-seeking browser tasks, prefer map/listing/review pages over repeating search-result links. If needed, inspect a few likely candidates and summarize the strongest observed option with concrete details.\n\
             - Use loaded skills and learned blocks for workflow behavior. Treat Rust/runtime prompts as execution invariants only, not as the source of task-specific strategy.\n\
-            - If a browser tool fails, report its exact error and stop; do not claim success without real execution. No browser tools on this turn is not a failure: emit `request_browser`.\n\
+            - If a browser tool fails, say in plain words what did not work and stop (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution. No browser tools on this turn is not a failure: emit `request_browser`.\n\
             - Ask for clarification if you lack enough information to act.
             "
         );
@@ -10121,6 +10230,30 @@ fn tracks_workspace_file_changes(
     commit_to_workspace
         && !read_only_workspace
         && (required || mode == RuntimeFinalOutputMode::PlainTextWrite)
+}
+
+/// Whether a turn lists the files it changed on disk among its receipts. Every
+/// turn that saves to the workspace does, whatever the routing preflight read
+/// into the request: a tool can write files on a turn no one expected to edit
+/// any (a skill pack's command that builds a site folder), and the turn's
+/// checkpoint saves them either way. Only the claims check
+/// ([`reported_workspace_file_changes_missing`]) stays with tracked turns.
+fn records_workspace_change_receipts(commit_to_workspace: bool, read_only_workspace: bool) -> bool {
+    commit_to_workspace && !read_only_workspace
+}
+
+/// The reply without its last line when that line is
+/// [`NO_FILE_CHANGES_MARKER`] (bare, or in backticks, brackets or bold) and
+/// something else says why nothing changed; otherwise `None`.
+fn take_no_file_changes_marker(text: &str) -> Option<String> {
+    let trimmed = text.trim_end();
+    let (rest, last) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
+    let bare = last
+        .trim()
+        .trim_matches(|c: char| matches!(c, '`' | '*' | '_' | '[' | ']' | '(' | ')' | '.' | ' '));
+    let rest = rest.trim_end();
+    (bare.eq_ignore_ascii_case(NO_FILE_CHANGES_MARKER) && !rest.trim().is_empty())
+        .then(|| rest.to_string())
 }
 
 fn reported_workspace_file_changes_missing(
@@ -10884,6 +11017,11 @@ fn parse_codex_multi_agent_plan_action(
             && let Some(read_only_paths) = read_only_paths_from_agent_paths(agent, source_root)
         {
             agent_out.insert("writeScope".to_string(), read_only_paths);
+        }
+        // Preserve the requirement through normalization, including malformed values:
+        // the controller rejects those rather than silently dispatching without tools.
+        if let Some(required) = agent.get("requiresTools").filter(|value| !value.is_null()) {
+            agent_out.insert("requiresTools".to_string(), required.clone());
         }
         agents.push(JsonValue::Object(agent_out));
     }
@@ -13569,6 +13707,54 @@ fn runtime_job_expectations(payload: &JsonValue) -> RuntimeJobExpectations {
     }
 
     overrides.into_expectations()
+}
+
+/// Requirements cannot grant tools, but must prevent a tool-free optimization
+/// from silently dropping live observations. Retain older explicit expectations too.
+fn scoped_worker_requires_tools(job: &LeaseJob) -> bool {
+    let required = job
+        .payload
+        .pointer("/metadata/multiAgentPlan/requiresTools");
+    required.is_some_and(|value| !value.is_null() && value != &JsonValue::Bool(false))
+        || runtime_job_expectations(&job.payload).command_execution
+        || runtime_job_expectations(&job.payload).generic_mcp_tool_execution
+}
+
+fn ensure_tool_free_worker_compatible(job: &LeaseJob) -> Result<()> {
+    anyhow::ensure!(
+        !scoped_worker_requires_tools(job),
+        "This worker requires tools, but scoped file generation has no execution tools. Use an admitted tool-capable worker or available native helpers; required observations were not performed."
+    );
+    Ok(())
+}
+
+/// Tool-capable execution still needs a receipt before a required worker can
+/// complete. MCP observations count without imposing a shell command, and a
+/// structured human question may defer the work. Keep evidence on rejection.
+fn ensure_worker_tool_evidence(
+    job: &LeaseJob,
+    outcome: &CodexOutcome,
+    observed_command: bool,
+    observed_mcp: bool,
+    artifacts: &mut Vec<JsonValue>,
+) -> Result<()> {
+    if !is_multi_agent_worker_job(job)
+        || !scoped_worker_requires_tools(job)
+        || observed_command
+        || observed_mcp
+        || outcome
+            .actions
+            .iter()
+            .any(|action| matches!(action, CodexAction::RequestUserInput(_)))
+    {
+        return Ok(());
+    }
+    Err(JobFailureWithArtifacts {
+        message: "This worker requires tools, but no tool execution was observed; required observations were not performed."
+            .to_string(),
+        artifacts: std::mem::take(artifacts),
+    }
+    .into())
 }
 
 /// A bounded turn writes no files and runs no commands, whatever its metadata says.
@@ -18290,6 +18476,9 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             if text.is_empty() || !should_surface_agent_text(text) {
                                 continue;
                             }
+                            // The note repeats the reply, without the runtime's marker.
+                            let unmarked = take_no_file_changes_marker(text);
+                            let text = unmarked.as_deref().unwrap_or(text);
                             let key = format!("agent_message::{text}");
                             push_message(
                                 key,
@@ -19180,6 +19369,58 @@ mod tests {
                 "the origin's git child inherited launch credential {key}"
             );
         }
+    }
+
+    /// Live drive, Oct 28: a new chat's Roborock browser turn started on the
+    /// tab another chat had left on Visit Lisboa, and Octo said it "resumed on
+    /// Visit Lisboa rather than Roborock".
+    #[test]
+    fn a_browser_turn_knows_when_its_page_was_left_by_another_chat() {
+        let page = format!("PAGE_{}", Uuid::new_v4().simple());
+        let lisbon = Uuid::new_v4();
+        let roborock = Uuid::new_v4();
+        let job_in = |conversation_id: Uuid| {
+            let mut job = test_lease_job(None, json!({}));
+            job.conversation_id = Some(conversation_id);
+            job
+        };
+        // The first run on a page, and later runs of the same chat, continue it.
+        assert!(!shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            Some(&page)
+        ));
+        assert!(!shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            Some(&page)
+        ));
+        // Another chat's run on that tab starts on Roborock's page, and the
+        // first chat coming back starts on Lisbon's.
+        assert!(shared_browser_page_left_by_other_chat(
+            &job_in(lisbon),
+            Some(&page)
+        ));
+        assert!(shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            Some(&page)
+        ));
+        assert!(!shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            Some(&page)
+        ));
+        // The chat can come from the payload; a job with none, or no page, says nothing.
+        let from_payload = test_lease_job(None, json!({ "conversation_id": lisbon.to_string() }));
+        assert!(shared_browser_page_left_by_other_chat(
+            &from_payload,
+            Some(&page)
+        ));
+        assert!(!shared_browser_page_left_by_other_chat(
+            &test_lease_job(None, json!({})),
+            Some(&page)
+        ));
+        assert!(!shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            None
+        ));
     }
 
     pub(super) fn test_lease_job(intent: Option<&str>, payload: JsonValue) -> LeaseJob {
@@ -24645,6 +24886,68 @@ mod tests {
                 .join(".instafy/agent/logs/preview-4173.log")
                 .exists()
         );
+    }
+
+    /// Live test, Oct 28: "Plan 3 days in Lisbon" was read as needing no file
+    /// change, and the skill pack's `uw new` and `uw add-point` built a site
+    /// folder. The checkpoint saved the folder, but the turn listed no file.
+    #[tokio::test]
+    async fn receipts_list_what_a_tool_wrote_on_a_turn_read_as_needing_no_change() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&workspace)
+            .output()
+            .expect("initialize isolated fixture repository");
+        assert!(initialized.status.success());
+        let before = collect_git_status_porcelain(&workspace).await.unwrap();
+        fs::create_dir_all(workspace.join("lisbon-first-visit/data")).unwrap();
+        fs::write(
+            workspace.join("lisbon-first-visit/index.html"),
+            "<h1>Lisbon</h1>\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("lisbon-first-visit/data/sights.geojson"),
+            "{}\n",
+        )
+        .unwrap();
+        // The claims check stays with turns expected to edit.
+        assert!(!tracks_workspace_file_changes(
+            true,
+            false,
+            WorkspaceFileChangeRequirement::None.requires_changes(),
+            RuntimeFinalOutputMode::StrictStructured,
+        ));
+
+        let mut files = Vec::new();
+        let count = collect_workspace_change_receipts(
+            &workspace,
+            &mut files,
+            records_workspace_change_receipts(true, false),
+            Some(&before),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut listed = files
+            .iter()
+            .map(|file| file.workspace_path.as_str())
+            .collect::<Vec<_>>();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                "lisbon-first-visit/data/sights.geojson",
+                "lisbon-first-visit/index.html"
+            ]
+        );
+        assert_eq!(count, 2);
+        // A read-only turn, and one that does not save, list nothing.
+        assert!(!records_workspace_change_receipts(true, true));
+        assert!(!records_workspace_change_receipts(false, false));
     }
 
     #[test]
@@ -32348,6 +32651,35 @@ mod tests {
                 .and_then(|value| value.get("kind"))
                 .and_then(JsonValue::as_str),
             Some("agent_message")
+        );
+    }
+
+    /// A recovery pass that changed no file on purpose ends its reply with the
+    /// runtime's marker line. The person reads the reply without it: in the
+    /// answer, and in the note that repeats the answer among the turn's steps.
+    #[test]
+    fn the_no_change_marker_never_reaches_the_person() {
+        let reply = "I can't open www.roborock.com from this turn, so I left the page unbuilt.";
+        for marked in [
+            format!("{reply}\n\nNO_FILE_CHANGES"),
+            format!("{reply}\n`NO_FILE_CHANGES`\n"),
+            format!("{reply}\n**no_file_changes.**"),
+        ] {
+            assert_eq!(take_no_file_changes_marker(&marked).as_deref(), Some(reply));
+            let messages = extract_codex_messages(&[json!({
+                "type": "item.completed",
+                "item": { "type": "agent_message", "text": marked },
+            })]);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].content, reply);
+        }
+        // A reply without the line, the line alone, or the words inside a
+        // sentence is not a report that nothing changed on purpose.
+        assert_eq!(take_no_file_changes_marker(reply), None);
+        assert_eq!(take_no_file_changes_marker("NO_FILE_CHANGES"), None);
+        assert_eq!(
+            take_no_file_changes_marker("I built the page.\nNO_FILE_CHANGES were needed elsewhere"),
+            None
         );
     }
 

@@ -33,7 +33,7 @@ Use this whenever a site or server runs in this space (or should) and someone sh
    - Exit `2`: nothing answers on 127.0.0.1 at that port, the site answers with a server error, or the command `--start` ran exited or stayed silent (the message names its log: read it, fix the cause, run it again). If the message says the site answers only on [::1], do not start a second one; bind it to 127.0.0.1 or 0.0.0.0, restart it, run it again.
    - Exit `3`: the port is not allowed. Serve on another port from 1024 to 65535.
    - Exit `5` ("Previews are not available on this server"), or `instafy preview` is not a command here: previews are off. Post the local URL; create a public tunnel only when the person asks for a shareable link, after consent.
-   - Exit `1` (any other error): run it once more. If it fails again, give the error in one line and post the local URL. No public tunnel unless asked.
+   - Exit `1` (any other error): run it once more. If it fails again, say in one plain line that the preview didn't open, and post the local URL. No public tunnel unless asked.
 7. If the person reports "Blocked request" or "host is not allowed" on the card's page, do step 3 for that server.
 
 ## Keep it running after your turn
@@ -74,8 +74,8 @@ Only when the person wants a shareable, public or phone link, or previews are no
 - Run `instafy preview check --port <port>` for page errors (framework config, base paths, env vars).
 - For a tunnel, see `references/tunnels.md`.
 
-Report what each command returned (exit code, `status`), not what you expect a card to show.
+Go by what each command returned (its exit code and `status`), not by what you expect a card to show, and tell the person in plain words ("the page is up", "the page didn't start"), without the port, exit code or log file.
 
 ## Cleanup
 
-When asked to stop previews: stop the site by its `startedPid` (never by a name pattern), close the card's preview (`instafy preview close <previewId>`) and stop any tunnel.
+When asked to stop previews: stop the site by its `startedPid` (never by a name pattern), close the card's preview (`instafy preview close <previewId>`) and stop any tunnel. Then say which site stopped ("Stopped the hello page."), never its process ID or port.

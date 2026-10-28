@@ -503,6 +503,19 @@ list opens without a prompt, so such an address with side effects can act
 without one, as under routine browsing. A run on the space's own machine cannot
 be switched to Ask yet (see "Remaining work").
 
+### A page another chat left
+
+The Shared Browser is shared by the space's chats, and Studio binds a browser
+task to the browser's current tab, which another chat's run may have left on
+its own page. runtime-agent remembers, per page, which conversation's run held
+it last (in memory, the newest 32 pages). When a run starts on a page a run of
+another conversation held last, its browser policy gets one more line: the page
+was left by a task in another chat, it is not this task's earlier work, so Octo
+does not describe it as resuming there. When the person's message is about that
+page, Octo uses it as it is; otherwise it starts this task's own step
+(`navigate` that page, or a tab of its own). The first run on a page, a later
+run of the same chat, and a runtime that restarted say nothing.
+
 ### Octo's own tabs
 
 Besides the page the person chose for the run, Octo may open up to three tabs
@@ -856,6 +869,19 @@ model to end the turn, and the person reads "Instafy's browser closed or
 stopped responding, so I stopped there. Open the browser again and send a
 message to continue." One failed call followed by any other answer starts the
 count over, so a single slow connect does not end a turn.
+A page that did not load (a Chromium `net::ERR_…` code in the controller's
+error) fails with a plain reason as the result's text, and the code only in
+`structuredContent.error.details`: "Instafy's browser couldn't reach that
+site: …" for a connection that did not happen or did not last (the proxy
+answers a denied, refused or silent site alike), "couldn't find that site",
+"That site's secure connection failed…" or "kept redirecting". `ERR_ABORTED`,
+which a file to download (downloads are blocked) or a replaced navigation
+ends with, says the page stopped loading before it opened; any other code says
+only that the page didn't load, so no reason claims the site was unreachable
+when it answered. The browser policy and the
+`instafy-browser-automation` skill tell Octo to give the person that reason in
+plain words and never to paste a raw error code into a reply. Any other failed
+call keeps the controller's masked error text.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
@@ -1701,7 +1727,16 @@ Browser access is separate from workspace file access:
 The high-level facade rejects privileged schemes, credential-bearing URLs,
 unknown fields, oversized values, arbitrary CDP, and raw JavaScript. CDP and
 the WebRTC sender remain loopback-only. The egress proxy blocks runtime-local
-and control-plane destinations for Chromium navigation. The per-origin plus
+and control-plane destinations for Chromium navigation. Chromium reports every
+CONNECT the proxy does not complete as `net::ERR_TUNNEL_CONNECTION_FAILED`,
+whether the policy denied the address, its name did not resolve, or the site
+refused or never answered, so the proxy logs each failed destination to its log
+(`browser-egress-proxy.log` in the runtime's state directory) as
+`browser egress tunnel failed (port 443): the site did not answer in time`: the
+request kind, port and a fixed reason, never the host, path or address. A
+request Chromium gave up on itself (it navigated away or dropped a speculative
+connection) is not a failed destination and is not logged. At most 30 lines a
+minute are written; the next minute's first line says how many were left out. The per-origin plus
 one-shot confirmation policy above is the sensitive-site action policy for
 otherwise public sites; a future denylist may reduce prompt volume but is not
 an authorization substitute.

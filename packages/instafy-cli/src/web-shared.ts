@@ -351,6 +351,8 @@ export type TurnState<Code extends string = string> = {
   hosts: Record<string, { loads: number; lastAt: number }>;
   stops: Record<string, StopRecord<Code>>;
   hostStops: Record<string, StopRecord<Code>>;
+  /** Hosts asked for first that did not answer this turn (hashed), so "www." added or removed is named only once. */
+  unanswered?: Record<string, number>;
 };
 
 /** The site a host belongs to for caps and site-wide stops: lower case, no trailing dot, no leading "www.". */

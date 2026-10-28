@@ -170,6 +170,9 @@ describe("reference search (Wikipedia, Wikivoyage, Wikidata)", () => {
     const none = wikimedia({ "en.wikipedia.org": 503, "en.wikivoyage.org": 503, "query.wikidata.org": 503 });
     const report = await reference("Belém Tower", turnEnv(caseNo + 1), none.transport);
     expect(report).toMatchObject({ status: "unavailable", code: "provider_error" });
+    // Never the end of the task, and never back to this same search: official sites read directly, then the answer.
+    expect(report.tell).toMatch(/Go on without it: read the official sites you know of, and the pages of publishers you know cover this, with `instafy web read`\. Then answer or build the page with what you read/);
+    expect(report.tell).not.toMatch(/--chain reference-search/);
   });
 
   it("asks at most one request at a time of each source, so at most 3 at once", async () => {

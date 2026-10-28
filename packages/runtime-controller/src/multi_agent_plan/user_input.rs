@@ -343,6 +343,37 @@ mod tests {
         assert!(text.contains("not an execution approval"));
     }
 
+    #[test]
+    fn answered_worker_keeps_its_tool_requirement_and_owned_scope() {
+        let scope = json!({"mode":"owned", "ownedPaths":["handoff/kyoto.json"]});
+        let payload = json!({
+            "metadata":{"agent":{"handle":"kyoto"}},
+            "plan_seed":{"type":"multi_agent_plan", "mode":"write_scoped", "agents":[{
+                "handle":"kyoto", "prompt":"Read the sources and save the handoff.",
+                "requiresTools":true, "writeScope":scope
+            }]}
+        });
+        let agent = plan_job_agent(&payload).unwrap();
+        let prompt = continuation_prompt(
+            &agent.prompt,
+            "Wait for the requested topic.",
+            &json!([{"id":"topic", "question":"Which topic?"}]),
+            &json!({"topic":["Museums"]}),
+        );
+        let seed = turn_continuation::redispatch_seed(
+            &payload["plan_seed"],
+            &agent,
+            &prompt,
+            "Human input received",
+        );
+        let plan = parse_skill_multi_agent_plan(&seed).unwrap();
+        let mut metadata =
+            build_worker_dispatch_metadata(&plan, Uuid::nil(), Uuid::nil(), None, None);
+        apply_worker_tool_requirement(&mut metadata, "kyoto").unwrap();
+        assert_eq!(metadata["multiAgentPlan"]["requiresTools"], true);
+        assert_eq!(metadata["agentSelection"]["writeScopes"]["kyoto"], scope);
+    }
+
     #[tokio::test]
     async fn failed_resume_recovery_is_delayed_bounded_and_cannot_revive_expired_input(
     ) -> anyhow::Result<()> {

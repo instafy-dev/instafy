@@ -8269,3 +8269,166 @@ fn a_space_copy_too_large_to_read_or_that_is_a_pipe_is_left_out_and_the_bundled_
         );
     }
 }
+
+/// Live drive, Oct 28: Octo's reply quoted "net::ERR_TUNNEL_CONNECTION_FAILED",
+/// the raw text of a navigation the network did not deliver. The result now
+/// leads with a plain reason and keeps the code only in `error.details`.
+#[test]
+fn a_page_the_network_did_not_deliver_fails_with_a_plain_reason_and_the_code_only_in_details() {
+    use std::os::unix::process::ExitStatusExt;
+    // The exact stderr of that run's failed navigation.
+    let stderr = "Shared Browser command failed: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://roborock.com/\nCall log:\n  - navigating to \"https://roborock.com/\", waiting until \"domcontentloaded\"\n";
+    let error = controller_failure(
+        std::process::ExitStatus::from_raw(1 << 8),
+        stderr.as_bytes(),
+        b"",
+    );
+    let result = failed_tool_result(&format!("{error:#}"));
+    assert_eq!(result.is_error, Some(true));
+    let text = &result.content[0].raw.as_text().expect("text content").text;
+    assert!(
+        text.starts_with("Instafy's browser couldn't reach that site"),
+        "{text}"
+    );
+    assert!(!text.contains("net::"), "{text}");
+    assert!(!text.contains("ERR_"), "{text}");
+    assert!(!text.contains("page.goto"), "{text}");
+    assert_eq!(
+        result.structured_content,
+        Some(json!({
+            "error": {
+                "reason": SITE_UNREACHABLE_REASON,
+                "details": "net::ERR_TUNNEL_CONNECTION_FAILED",
+            }
+        }))
+    );
+}
+
+#[test]
+fn network_codes_map_to_a_few_plain_reasons() {
+    let reason =
+        |message: &str| network_failure(message).map(|failure| (failure.reason, failure.code));
+    assert_eq!(
+        reason("page.goto: net::ERR_NAME_NOT_RESOLVED at https://nowhere.example/"),
+        Some((
+            SITE_NOT_FOUND_REASON,
+            "net::ERR_NAME_NOT_RESOLVED".to_string()
+        ))
+    );
+    assert_eq!(
+        reason("page.goto: net::ERR_CERT_DATE_INVALID at https://old.example/"),
+        Some((
+            SITE_INSECURE_REASON,
+            "net::ERR_CERT_DATE_INVALID".to_string()
+        ))
+    );
+    assert_eq!(
+        reason("net::ERR_SSL_PROTOCOL_ERROR"),
+        Some((
+            SITE_INSECURE_REASON,
+            "net::ERR_SSL_PROTOCOL_ERROR".to_string()
+        ))
+    );
+    assert_eq!(
+        reason("page.goto: net::ERR_TOO_MANY_REDIRECTS at https://loop.example/"),
+        Some((
+            SITE_REDIRECT_LOOP_REASON,
+            "net::ERR_TOO_MANY_REDIRECTS".to_string()
+        ))
+    );
+    for code in [
+        "ERR_CONNECTION_TIMED_OUT",
+        "ERR_CONNECTION_REFUSED",
+        "ERR_PROXY_CONNECTION_FAILED",
+        "ERR_ADDRESS_UNREACHABLE",
+    ] {
+        assert_eq!(
+            reason(&format!("page.goto: net::{code} at https://down.example/")),
+            Some((SITE_UNREACHABLE_REASON, format!("net::{code}"))),
+        );
+    }
+    // Not a network code: the controller's own error text stays.
+    assert_eq!(reason("page.goto: Timeout 30000ms exceeded"), None);
+    assert_eq!(reason("net::ERR_"), None);
+    assert_eq!(reason(&format!("net::ERR_{}", "X".repeat(80))), None);
+    let other =
+        failed_tool_result("Shared Browser command exited with exit status: 1: stale snapshot");
+    assert_eq!(
+        other.content[0].raw.as_text().expect("text content").text,
+        "Shared Browser action failed: Shared Browser command exited with exit status: 1: stale snapshot"
+    );
+    assert_eq!(other.structured_content, None);
+}
+
+#[test]
+fn remembers_which_chat_last_held_each_page_within_a_bound() {
+    let first = format!("PAGE_{}", Uuid::new_v4().simple());
+    let chat_a = Uuid::new_v4();
+    let chat_b = Uuid::new_v4();
+    assert!(!page_left_by_another_conversation(&first, Some(chat_a)));
+    assert!(!page_left_by_another_conversation(&first, Some(chat_a)));
+    assert!(page_left_by_another_conversation(&first, Some(chat_b)));
+    // A run with no chat neither asks nor records.
+    assert!(!page_left_by_another_conversation(&first, None));
+    assert!(page_left_by_another_conversation(&first, Some(chat_a)));
+    // Only the newest pages are kept: an old page is forgotten, not misread.
+    // (On a value of its own: the machine's memory is shared with other tests.)
+    let mut pages = PageConversations::default();
+    assert!(!pages.record(&first, chat_a));
+    for _ in 0..MAX_PAGE_CONVERSATIONS {
+        let other = format!("PAGE_{}", Uuid::new_v4().simple());
+        assert!(!pages.record(&other, Uuid::new_v4()));
+    }
+    assert!(!pages.record(&first, chat_b));
+}
+
+/// Downloads are denied in this browser, so `goto` on a file to download fails
+/// with `net::ERR_ABORTED`, as does a navigation another one replaced. The
+/// site answered both times: the reason must not say it could not be reached,
+/// nor may a code that is not about the connection.
+#[test]
+fn a_stopped_or_refused_page_load_does_not_say_the_site_was_unreachable() {
+    let aborted = network_failure("page.goto: net::ERR_ABORTED at https://example.test/report.pdf")
+        .expect("a network code");
+    assert!(
+        !aborted.reason.contains("couldn't reach"),
+        "{}",
+        aborted.reason
+    );
+    assert!(aborted.reason.contains("download"), "{}", aborted.reason);
+    assert_eq!(aborted.code, "net::ERR_ABORTED");
+    for code in [
+        "ERR_BLOCKED_BY_RESPONSE",
+        "ERR_BLOCKED_BY_CLIENT",
+        "ERR_INVALID_URL",
+        "ERR_HTTP_RESPONSE_CODE_FAILURE",
+    ] {
+        let failure = network_failure(&format!("page.goto: net::{code} at https://example.test/"))
+            .expect("a network code");
+        assert!(
+            !failure.reason.contains("couldn't reach"),
+            "{code}: {}",
+            failure.reason
+        );
+        assert!(
+            !failure.reason.contains("ERR_"),
+            "{code}: {}",
+            failure.reason
+        );
+        assert_eq!(failure.code, format!("net::{code}"));
+    }
+    // Failures of the connection itself still say so.
+    for code in [
+        "ERR_TUNNEL_CONNECTION_FAILED",
+        "ERR_CONNECTION_RESET",
+        "ERR_CONNECTION_CLOSED",
+        "ERR_EMPTY_RESPONSE",
+        "ERR_TIMED_OUT",
+        "ERR_UNSAFE_PORT",
+        "ERR_INTERNET_DISCONNECTED",
+    ] {
+        let failure = network_failure(&format!("page.goto: net::{code} at https://example.test/"))
+            .expect("a network code");
+        assert_eq!(failure.reason, SITE_UNREACHABLE_REASON, "{code}");
+    }
+}

@@ -44,6 +44,21 @@ const SET_IT_UP_REQUEST: &str = "Please just set up FreeFinance for me.";
 /// file change can stand in for.
 const SETUP_STEP_ANSWER: &str =
     "In FreeFinance, open Mein Profil, then Verbundene Apps. Do you see an API row there?";
+/// Oct 28: "roborock.com doesn't load, try www.roborock.com instead, then build
+/// the comparison page with what you can verify." The preflight read it as a
+/// required change; with no browser tools on the turn the agent could verify
+/// nothing, so it built nothing and said so.
+const BLOCKED_REQUEST: &str = "roborock.com doesn't load, try www.roborock.com instead, then build the comparison page with what you can verify.";
+const BLOCKED_ANSWER: &str = "I can't open www.roborock.com from this turn, so there is nothing verified to build the comparison page from yet. I left the page unbuilt rather than guess.";
+/// A reply that says it wrote a file the turn never wrote.
+const CLAIMED_FILE_ANSWER: &str = "I created notes/plan.md with the plan.";
+/// A plain reply, as a workspace-change turn ends, that says the page was
+/// built when the turn wrote nothing and listed no file.
+const UNMADE_CHANGE_ANSWER: &str =
+    "I built the comparison page in compare.html with the verified specs.";
+/// What a skill pack's command does on a turn read as needing no change: it
+/// builds a site folder.
+const SITE_BUILD_CMD: &str = "mkdir -p trip-map/data && printf '<h1>Trip</h1>' > trip-map/index.html && printf '{}' > trip-map/data/sights.geojson && printf SITE_BUILT";
 /// Tools a bounded browser turn must never offer: shell, file, image, agent and user-input tools.
 const BOUNDED_BROWSER_FORBIDDEN_TOOLS: &[&str] = &[
     "exec_command",
@@ -358,7 +373,8 @@ async fn responses(
             };
         }
         // The routing preflight reads a follow-up as a file write, and every
-        // answer is a step for the person with no file.
+        // answer is a step for the person with no file. Once the recovery
+        // prompt asks for it, the answer reports that it changed nothing.
         "skill_setup_write_guess" | "chat_write_guess" => {
             if ordinal == 1 {
                 return answer(
@@ -372,7 +388,96 @@ async fn responses(
                     .to_string(),
                 );
             }
-            return answer(&json!({"summary":SETUP_STEP_ANSWER, "files":[]}).to_string());
+            return answer(
+                &json!({"summary":no_change_reply(&body, SETUP_STEP_ANSWER), "files":[]})
+                    .to_string(),
+            );
+        }
+        // The routing preflight reads the request as a required change that
+        // needs a fresh observation. The agent first answers without a
+        // command, and after the recovery pass's `pwd` gives the same blocker.
+        "chat_write_blocked" => {
+            return match ordinal {
+                1 => answer(
+                    &json!({
+                        "summary":"The user asks to verify a site and build a page.",
+                        "route":"direct", "reason":"Verify the site, then build the page.",
+                        "selectedSkills":[], "confidence":0.97,
+                        "requiresContextLookup":false, "requiresCommandExecution":true,
+                        "requiresWorkspaceFileChanges":true, "observationCommands":[]
+                    })
+                    .to_string(),
+                ),
+                3 => match workspace_command_call(&state, &body, "call-local-pwd", "pwd") {
+                    Some(call) => sse(call),
+                    None => StatusCode::BAD_REQUEST.into_response(),
+                },
+                _ => answer(
+                    &json!({"summary":no_change_reply(&body, BLOCKED_ANSWER), "files":[]})
+                        .to_string(),
+                ),
+            };
+        }
+        // A required change whose every answer lists a file it never wrote.
+        "chat_write_claimed_files" => {
+            if ordinal == 1 {
+                return answer(
+                    &json!({
+                        "summary":"The user asks for a plan file.",
+                        "route":"direct", "reason":"Write the plan file.",
+                        "selectedSkills":[], "confidence":0.9,
+                        "requiresContextLookup":false, "requiresCommandExecution":false,
+                        "requiresWorkspaceFileChanges":true, "observationCommands":[]
+                    })
+                    .to_string(),
+                );
+            }
+            return answer(
+                &json!({"summary":CLAIMED_FILE_ANSWER, "files":[
+                    {"path":"notes/plan.md", "workspacePath":"notes/plan.md",
+                        "change":{"type":"created"}}
+                ]})
+                .to_string(),
+            );
+        }
+        // A required change whose every plain reply says the page was built,
+        // though the turn writes nothing and lists no file.
+        "chat_write_unmade_change" => {
+            if ordinal == 1 {
+                return answer(
+                    &json!({
+                        "summary":"The user asks for a comparison page.",
+                        "route":"direct", "reason":"Build the page.",
+                        "selectedSkills":[], "confidence":0.9,
+                        "requiresContextLookup":false, "requiresCommandExecution":false,
+                        "requiresWorkspaceFileChanges":true, "observationCommands":[]
+                    })
+                    .to_string(),
+                );
+            }
+            return answer(UNMADE_CHANGE_ANSWER);
+        }
+        // A turn read as needing no change runs a command that builds a site
+        // folder, the way a skill pack's command does, then answers.
+        "tool_write_on_no_change_turn" => {
+            return match ordinal {
+                1 => answer(
+                    &json!({
+                        "summary":"The user asks for a trip map.",
+                        "route":"direct", "reason":"Answer directly.",
+                        "selectedSkills":[], "confidence":0.9,
+                        "requiresContextLookup":false, "requiresCommandExecution":false,
+                        "requiresWorkspaceFileChanges":false, "observationCommands":[]
+                    })
+                    .to_string(),
+                ),
+                2 => match workspace_command_call(&state, &body, "call-local-site", SITE_BUILD_CMD)
+                {
+                    Some(call) => sse(call),
+                    None => StatusCode::BAD_REQUEST.into_response(),
+                },
+                _ => answer(&json!({"summary":FINAL_TEXT, "files":[]}).to_string()),
+            };
         }
         "transient" | "persistent" | "routing" => 503,
         "terminal_400" => 400,
@@ -555,6 +660,18 @@ fn offers_hosted_web_search(request: &Value) -> bool {
             .any(|item| item["type"] == "additional_tools" && carries(&item["tools"]))
 }
 
+/// The reply of a turn that changed no file on purpose: once the request asks
+/// for the runtime's no-change line, the reply ends with it.
+fn no_change_reply(body: &Value, reply: &str) -> String {
+    let mut lines = Vec::new();
+    request_text_lines(body, &mut lines);
+    if lines.iter().any(|line| line.contains("`NO_FILE_CHANGES`")) {
+        format!("{reply}\n\nNO_FILE_CHANGES")
+    } else {
+        reply.to_string()
+    }
+}
+
 /// Collects every line of every string in a request. The prompt travels as `instructions`, or
 /// for a Responses Lite model (gpt-6-luna, gpt-6-sol) as a developer input item.
 fn request_text_lines(value: &Value, output: &mut Vec<String>) {
@@ -717,6 +834,15 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
     } else {
         origin.clone()
     };
+    if scenario == "tool_write_on_no_change_turn" {
+        // A space's folder is a git checkout: the turn reads what it changed
+        // from git's status.
+        let initialized = Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&workspace)
+            .output()?;
+        anyhow::ensure!(initialized.status.success(), "git init failed");
+    }
     let output_path = temp.path().join("child.log");
     let output = fs::File::create(&output_path)?;
     let mut command = Command::new(std::env::current_exe()?);
@@ -1119,11 +1245,42 @@ scenario_test!(
     "skill_setup_write_guess",
     2
 );
-// The same request, verdict and answer outside a skill setup is still retried
-// once for its missing file change, then fails.
+// The same request, verdict and answer outside a skill setup is retried once
+// for its missing file change. The answer, a question for the person, then
+// stands instead of failing the turn.
 scenario_test!(
-    chat_without_a_file_change_still_fails_on_the_preflight_write_guess,
+    chat_answer_without_a_file_change_stands_after_one_recovery_pass,
     "chat_write_guess",
+    3
+);
+// Oct 28: a turn read as a required change could verify nothing, built
+// nothing and said why. Its recovery pass ran the observation and said the
+// same. The reply stands; the turn is not failed and resent.
+scenario_test!(
+    blocked_write_turn_reply_stands_after_one_recovery_pass,
+    "chat_write_blocked",
+    4
+);
+// A reply that claims a file it never wrote is still caught: one recovery
+// pass, then the turn fails.
+scenario_test!(
+    reply_claiming_an_unwritten_file_still_fails,
+    "chat_write_claimed_files",
+    3
+);
+// A plain reply that says the page was built, on a turn that wrote nothing and
+// listed no file, still fails after its one recovery pass: the turn promised a
+// change it did not make.
+scenario_test!(
+    reply_promising_a_change_it_did_not_make_still_fails,
+    "chat_write_unmade_change",
+    3
+);
+// Oct 28: a skill pack's command built a site folder on a turn read as needing
+// no change; the folder was saved, but the turn listed no file.
+scenario_test!(
+    files_a_command_wrote_are_listed_on_a_turn_read_as_needing_no_change,
+    "tool_write_on_no_change_turn",
     3
 );
 scenario_test!(
@@ -1224,6 +1381,10 @@ async fn isolated_retry_child() -> Result<()> {
             | "failed_recovery_usage"
             | "skill_setup_write_guess"
             | "chat_write_guess"
+            | "chat_write_blocked"
+            | "chat_write_claimed_files"
+            | "chat_write_unmade_change"
+            | "tool_write_on_no_change_turn"
     ) {
         return run_routing_job(&scenario).await;
     }
@@ -1681,6 +1842,16 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
             "metadata":{"writeIntent":true}
         });
     }
+    let request = match scenario {
+        "chat_write_blocked" => Some(BLOCKED_REQUEST),
+        "chat_write_claimed_files" => Some("Write the plan to notes/plan.md."),
+        "chat_write_unmade_change" => Some("Build the comparison page."),
+        "tool_write_on_no_change_turn" => Some("Make me a trip map of Lisbon."),
+        _ => None,
+    };
+    if let Some(request) = request {
+        payload = json!({"prompt_text":request, "metadata":{"writeIntent":true}});
+    }
     let job: LeaseJob = serde_json::from_value(json!({
         "id":Uuid::new_v4(), "intent":"feature", "project_id":config.project_id,
         "run_id":Uuid::new_v4(), "conversation_id":Uuid::new_v4(), "payload":payload
@@ -1692,10 +1863,12 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         sender,
         status: Arc::new(AtomicBool::new(true)),
     });
-    // The write-guess scenarios commit to the workspace, as a chat turn does:
-    // only then does a turn expected to change files retry and fail without.
+    // These scenarios commit to the workspace, as a chat turn does: only then
+    // does a turn expected to change files retry without one, and only then
+    // does a turn list the files it changed.
+    let commits = write_guess || request.is_some();
     let result = processor
-        .run_apply_job(&registration, &job, write_guess, progress, None, None)
+        .run_apply_job(&registration, &job, commits, progress, None, None)
         .await;
     // Count from completed artifacts and from failed-job artifacts through the same public
     // API. A later failure must not discard earlier completed calls or turn absent usage
@@ -1709,7 +1882,12 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
     let phases: Vec<_> = calls.iter().map(|call| call["phase"].as_str()).collect();
     let expected_phases = match scenario {
         "routing" => vec![Some("routing")],
-        "retry_usage" | "failed_recovery_usage" | "chat_write_guess" => {
+        "retry_usage"
+        | "failed_recovery_usage"
+        | "chat_write_guess"
+        | "chat_write_blocked"
+        | "chat_write_claimed_files"
+        | "chat_write_unmade_change" => {
             vec![Some("routing"), Some("main"), Some("recovery")]
         }
         "finalization_usage" => vec![
@@ -1785,8 +1963,54 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         );
         return Ok(());
     }
-    if scenario == "chat_write_guess" {
-        let error = result.expect_err("an ordinary chat turn keeps the file-change contract");
+    // A required change the recovery pass still did not make, and the reply
+    // said so: the reply stands without the runtime's line, and the turn
+    // records that it stood.
+    if let Some(expected) = match scenario {
+        "chat_write_guess" => Some(SETUP_STEP_ANSWER),
+        "chat_write_blocked" => Some(BLOCKED_ANSWER),
+        _ => None,
+    } {
+        let execution = match result {
+            Ok(execution) => execution,
+            Err(error) => {
+                let message = runtime_agent::jobs::extract_job_failure_message(&error)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| error.to_string());
+                bail!("{scenario}: the reply must stand, but the turn failed: {message}");
+            }
+        };
+        assert_eq!(execution.summary, expected);
+        assert!(
+            execution
+                .artifacts
+                .iter()
+                .any(|artifact| artifact["kind"] == "codex/required-changes-not-made"),
+            "{scenario}: the turn must record that its reply stood without the change"
+        );
+        return Ok(());
+    }
+    // A reply that claims a file it never wrote still fails the turn.
+    if scenario == "chat_write_claimed_files" {
+        let error = result.expect_err("a claimed file missing from disk fails the turn");
+        let message = runtime_agent::jobs::extract_job_failure_message(&error)
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string());
+        assert!(
+            message.contains("reported file changes but no workspace files were written"),
+            "{message}"
+        );
+        return Ok(());
+    }
+    // A reply that says it made a change the turn never made still fails.
+    if scenario == "chat_write_unmade_change" {
+        let error = match result {
+            Ok(execution) => bail!(
+                "a reply that promises an unmade change must fail the turn, but it stood: {}",
+                execution.summary
+            ),
+            Err(error) => error,
+        };
         let message = runtime_agent::jobs::extract_job_failure_message(&error)
             .map(str::to_owned)
             .unwrap_or_else(|| error.to_string());
@@ -1794,6 +2018,25 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
             message.contains("did not apply any workspace changes"),
             "{message}"
         );
+        return Ok(());
+    }
+    // The files a command wrote are the turn's, though no change was expected.
+    if scenario == "tool_write_on_no_change_turn" {
+        let execution = result?;
+        assert_eq!(execution.summary, FINAL_TEXT);
+        let listed: Vec<&str> = execution
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact["kind"] == "apply/files")
+            .flat_map(|artifact| artifact["files"].as_array().into_iter().flatten())
+            .filter_map(|file| file["workspacePath"].as_str())
+            .collect();
+        for path in ["trip-map/index.html", "trip-map/data/sights.geojson"] {
+            assert!(
+                listed.contains(&path),
+                "the turn must list {path} its command wrote; listed {listed:?}"
+            );
+        }
         return Ok(());
     }
     if matches!(scenario, "direct_usage" | "finalization_usage") {

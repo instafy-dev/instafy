@@ -1,13 +1,14 @@
 // The web search eval (test/web-search-eval.mjs) on its hand-written fixtures: for each of the 15 asks, the reference
 // turn is played with the real `instafy web search` and `instafy web read` (this test build answers from the
 // fixtures), follows the web-research skill and passes every check; each way of breaking a rule fails exactly the
-// checks for that rule. Without a search key, the turn asks the person to search and offers the key card once.
+// checks for that rule. Without a search key, the turn reads the official page through reference search, answers with
+// it, and offers the key card at most once.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { webRead } from "../src/web-read.js";
-import { webSearch } from "../src/web-search.js";
+import { webSearch, type SearchTransport } from "../src/web-search.js";
 // @ts-expect-error -- a plain ES module, also run on its own to grade a model's transcript
 import * as evalKit from "./web-search-eval.mjs";
 
@@ -27,7 +28,7 @@ type Kase = {
 type Transcript = Record<string, any>;
 type Breaker = [string, (t: Transcript, k: Kase) => Transcript, string[]];
 
-const { CASES, BREAKERS, NO_PROVIDER_BREAKERS, SKILL, failedIds, fillReference, gradeTranscript, noProviderReply, noAgents, writeEvalFixtures } = evalKit as {
+const { CASES, BREAKERS, NO_PROVIDER_BREAKERS, SKILL, failedIds, fillReference, gradeTranscript, noProviderReply, noAgents, referenceAnswerFor, writeEvalFixtures } = evalKit as {
   CASES: Kase[];
   BREAKERS: Breaker[];
   NO_PROVIDER_BREAKERS: Breaker[];
@@ -35,7 +36,8 @@ const { CASES, BREAKERS, NO_PROVIDER_BREAKERS, SKILL, failedIds, fillReference, 
   failedIds: (checks: Check[]) => string[];
   fillReference: (kase: Kase, readAt: string) => { reply: string; items: unknown[] };
   gradeTranscript: (transcript: Transcript, kase: Kase) => Check[];
-  noProviderReply: (kase: Kase) => string;
+  noProviderReply: (kase: Kase, readAt: string) => string;
+  referenceAnswerFor: (kase: Kase, hostname: string) => unknown;
   noAgents: (url: string) => boolean;
   writeEvalFixtures: (folder: string) => string;
 };
@@ -66,23 +68,41 @@ async function referenceTurn(kase: Kase, n: number, { key }: { key: boolean }): 
   const common = { now: () => clock, skillRoots: [], env, cwd: tmp };
   const search = await webSearch({ query: kase.query }, { ...common, stateDir: path.join(tmp, "state", kase.id, String(key)) });
   const searches = [{ query: search.query, status: search.status, results: search.results, ...(search.offer ? { offer: search.offer } : {}) }];
+  const readDeps = {
+    ...common,
+    stateDir: path.join(tmp, "read-state", `${kase.id}-${key}`),
+    cacheDir: null,
+    sleep: async (ms: number) => {
+      clock += ms;
+    },
+  };
   if (search.status === "no_provider") {
-    return { searches, reads: [], findings: [], reply: noProviderReply(kase), items: [], actions: search.offer ? [search.offer] : [] };
+    // No key never ends the task: the official page through reference search (Wikidata's answer from a test
+    // transport; nothing leaves the machine), read with `instafy web read`, and the answer with what it says.
+    const { INSTAFY_WEB_FIXTURES: _fixtures, ...openEnv } = env;
+    const wikimedia: SearchTransport = async (request) => ({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: Buffer.from(JSON.stringify(referenceAnswerFor(kase, request.url.hostname))),
+    });
+    const reference = await webSearch(
+      { query: kase.query, chain: "reference-search" },
+      { ...common, env: openEnv, stateDir: path.join(tmp, "state", kase.id, "reference"), resolve: async () => [{ address: "185.15.59.224", family: 4 }], transport: wikimedia },
+    );
+    searches.push({ query: reference.query, status: reference.status, results: reference.results, chain: "reference-search" } as (typeof searches)[number]);
+    const official = reference.results.find((r) => r.provider === "wikidata-official-site")!.url;
+    expect(official).toBe(kase.official.url);
+    const report = await webRead({ urls: [official] }, readDeps);
+    const reads = report.pages.map((p) => ({ url: p.requestedUrl, status: p.status }));
+    const findings = report.pages
+      .filter((p) => p.status === "read")
+      .map((p) => ({ url: p.requestedUrl, title: p.provenance.title, readAt: p.provenance.readAt, viewer: p.provenance.viewer, facts: kase.official.facts }));
+    return { searches, reads, findings, reply: noProviderReply(kase, findings[0]!.readAt), items: [], actions: search.offer ? [search.offer] : [] };
   }
   // The pages to read come from the results, never the link-only hit or the poisoned one.
   const pick = [kase.official.url, kase.second.url, kase.login.url, kase.dead.url];
   for (const url of pick) expect(search.results.some((r) => r.url === url && !r.linkOnly), `${kase.id}: ${url} is a result to read`).toBe(true);
-  const report = await webRead(
-    { urls: pick },
-    {
-      ...common,
-      stateDir: path.join(tmp, "read-state", kase.id),
-      cacheDir: null,
-      sleep: async (ms) => {
-        clock += ms;
-      },
-    },
-  );
+  const report = await webRead({ urls: pick }, readDeps);
   const reads = report.pages.map((p) => ({ url: p.requestedUrl, status: p.status, ...(p.code ? { code: p.code } : {}) }));
   const findings = report.pages
     .filter((p) => p.status === "read")
@@ -134,7 +154,7 @@ describe("the web search eval (fixtures)", () => {
       }
     });
 
-    it(`${kase.id}: without a search key, the turn asks the person to search and offers the key card once`, async () => {
+    it(`${kase.id}: without a search key, the turn reads the official page through reference search, answers with it, and offers the key card at most once`, async () => {
       const reference = await referenceTurn(kase, n + 100, { key: false });
       expect(reference.searches[0].status).toBe("no_provider");
       expect(reference.searches[0].offer).toMatchObject({ type: "request_secret", name: "BRAVE_SEARCH_API_KEY" });
@@ -158,7 +178,9 @@ describe("the web search eval (fixtures)", () => {
       "It caps a turn at 12 page loads",
       "Nothing from a search's result list is kept: no title or snippet",
       "A link-only place keeps its link only when the person gave it or a page you read links to it",
-      "`no_provider` with an `offer`: put that `request_secret` action in your reply, once",
+      "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5.",
+      "Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.",
+      "never ask for a key in chat or wait for it",
       "Ask the person to search in their own browser and press **Send page to Octo**",
     ]) {
       expect(skill, rule).toContain(rule);
