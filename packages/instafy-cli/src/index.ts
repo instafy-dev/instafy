@@ -321,7 +321,7 @@ function registerSpaceCommand(command: Command) {
 
   addServerUrlOptions(spaceInitCommand);
 
-  addSpaceTypeOption(spaceInitCommand, "Space type (customer|sandbox)")
+  addSpaceTypeOption(spaceInitCommand, "Space type (customer, or sandbox with a service-role token)")
     .option("--access-token <token>", "Instafy or Supabase access token")
     .option("--profile <name>", "CLI profile to use when running commands in this folder")
     .option("--owner-user-id <uuid>", "Explicit owner user id (defaults to caller)")
