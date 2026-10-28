@@ -1895,11 +1895,16 @@ async fn retire_superseded_previews(
     })?;
     drop(connection);
 
-    let retired_tunnels: Vec<String> = retired
-        .iter()
-        .map(|grant| grant.tunnel_id.clone())
-        .collect();
-    thumbnail::delete_preview_thumbnails(&state.pool, project_id, &retired_tunnels).await;
+    // The grants closed just now, and earlier ones closed before the broker
+    // replaced their tunnel, which kept their pictures for a wake that can no
+    // longer bring them back.
+    thumbnail::delete_replaced_preview_thumbnails(
+        &state.pool,
+        project_id,
+        tunnel_key,
+        successor_tunnel_id,
+    )
+    .await;
     for grant in &retired {
         tracing::info!(
             %project_id,

@@ -111,8 +111,8 @@ A member can **Present** a site whose page says it can share its view, and the o
   CLI takes a new picture once that site is live), when the preview is replaced (`supersededBy`) or closed for good,
   and with its space. A preview stopped by a sleeping machine keeps its picture. One closed on purpose whose card can
   start it again keeps its picture and page description, unshown while it is closed, so the card shows both again
-  once a press brings the site back. A card whose record now names another site shows neither that site's picture
-  nor its facts.
+  once a press brings the site back; once a newer tunnel takes its port, no press can, and the picture goes then. A
+  card whose record now names another site shows neither that site's picture nor its facts.
 - **Reading it.** `GET /projects/:id/previews/:pid/thumbnail?v=<version>` applies the rule `GET` of the preview uses:
   members who may open the preview (a private runtime's preview is a 404 to others). The answer is
   `cache-control: private, no-store`, `x-content-type-options: nosniff`, `content-security-policy: default-src 'none';

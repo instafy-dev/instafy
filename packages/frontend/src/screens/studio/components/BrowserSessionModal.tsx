@@ -147,6 +147,7 @@ type DockedBrowserLayoutMetrics = {
 type BrowserSessionRfbLike = {
   _canvas?: HTMLCanvasElement;
   addEventListener?: (type: "connect" | "disconnect", listener: () => void) => void;
+  background?: string;
   clipViewport?: boolean;
   disconnect?: () => void;
   dragViewport?: boolean;
@@ -2681,6 +2682,10 @@ export function BrowserSessionModal({
         }
         const RFB = resolveBrowserSessionRfbConstructor(mod);
         rfb = new RFB(container, wsUrl, {});
+        // noVNC fills its screen with dark grey around the page; the stage
+        // under it follows the theme (BROWSER_LIVE_STAGE_CLASS), so the bands
+        // a page leaves above and below it on a phone are light in light mode.
+        rfb.background = "transparent";
         rfbRef.current = rfb;
         const markFrameConnected = () => {
           setHasConnectedOnce(true);

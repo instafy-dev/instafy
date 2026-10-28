@@ -897,6 +897,56 @@ async fn a_closed_preview_shows_its_picture_and_facts_again_once_a_wake_brings_i
     .await
 }
 
+/// A preview closed on purpose keeps its picture only for a wake. Once the
+/// broker gives its port to another tunnel (a newer site opened on it), no
+/// wake can bring it back, so the retirement, which skips a closed preview,
+/// still forgets its picture, as it does a replaced open preview's: kept, it
+/// stayed in the database, never shown, until the space was deleted.
+#[tokio::test]
+async fn a_closed_preview_that_a_newer_one_replaced_forgets_its_picture() -> anyhow::Result<()> {
+    use super::super::thumbnail_tests::{jpeg, upload_body};
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let closed = f.open_restartable(&job).await?;
+            f.ready(&job.token, &closed).await?;
+            let (status, body) = f
+                .upload(
+                    &job.token,
+                    &closed,
+                    upload_body(&jpeg(640, 400), "image/jpeg"),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let (status, _) = f
+                .request(
+                    &job.token,
+                    "POST",
+                    &f.path(&format!("/{closed}/close")),
+                    json!({}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            assert_eq!(f.thumbnail_rows(&closed).await?, 1);
+
+            f.broker.remint(&preview_tunnel_key(&job.runtime_id, 4173));
+            let (status, created) = f
+                .request(&job.token, "POST", &f.path(""), f.open_body(&job, 4173))
+                .await?;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            let newer = created["previewId"]
+                .as_str()
+                .context("previewId")?
+                .to_string();
+            assert_ne!(newer, closed);
+            assert_eq!(f.get_preview(&closed).await?["restartable"], json!(false));
+            assert_eq!(f.thumbnail_rows(&closed).await?, 0);
+            Ok(())
+        })
+    })
+    .await
+}
+
 /// A preview someone closed, whose port the broker later gave another tunnel
 /// when a newer site opened on it, is replaced as surely as one that was
 /// still open: the retirement skips a closed preview, so it carries no
