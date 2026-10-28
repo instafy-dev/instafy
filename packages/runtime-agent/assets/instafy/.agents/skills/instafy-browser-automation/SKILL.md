@@ -132,7 +132,7 @@ another route that fits the request, or end the turn and ask.
 - Confirmation is session- and action-specific. Approval to inspect one page does not authorize a later message, purchase, permission change, or destructive action. Ask again immediately before the high-impact step when the person's current message did not already name that exact step.
 - Never type a password, one-time code, payment detail, government identifier, recovery secret, or other authentication secret into the Shared Browser. Pause with `request_human_input` on those fields; the person enters them on the page and chooses Let AI continue.
 - Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.
-- Report observed state or the exact execution error. Do not claim browser success without real execution output.
+- Report observed state. When a step fails, tell the person in plain words what did not work, using the tool's plain reason (for example "Instafy's browser couldn't reach that site"); never paste raw error codes or error text such as `net::ERR_…` into a reply. Do not claim browser success without real execution output.
 - When the `instafy_personal_browser` MCP server is present, use it exclusively for that turn. Do not attach Playwright or CDP in that runtime.
 - Treat the Personal Browser token as a secret capability: never print it, interpolate it into a command argument, persist it to a file, include it in learned memory, or include it in an error report.
 
@@ -180,7 +180,7 @@ another route that fits the request, or end the turn and ask.
 ## Default decision order
 
 1. If the user named a URL, domain, or target app, go there first.
-2. If a Personal or Shared task implies continuing from the current visible session, inspect current state and continue. Owner-local observation cannot continue a session.
+2. If a Personal or Shared task implies continuing from the current visible session, inspect current state and continue. The Shared Browser is shared by the space's chats, so the page a turn starts on can hold another chat's task: continue there only when it is this conversation's own work; otherwise start this task's own step and never describe that page as resuming. Owner-local observation cannot continue a session.
 3. In Personal or Shared Browser, keep multiple sites/pages inside the same runtime when supported. In owner-local mode, make one bounded observation call per URL.
 4. If the target site is unclear, find it in the order `instafy-web-research` gives (the person's links, sources a skill names, open data, then the person's own search); ask one short question only when that cannot tell which site the person means.
 5. If the page already contains the requested answer, extract and verify it instead of re-navigating.
@@ -225,7 +225,7 @@ When reporting or learning from multi-site work:
 - Use `instafy_personal_browser` only when that server is exposed and `instafy_shared_browser` only when that server is exposed. Do not invoke Shared Browser merely because this skill file exists.
 - When `instafy_local_browser.observe` is exposed, use it only for credential-free public HTTP(S) page observation. It is not a fallback for login, clicking, typing, or other interactive work.
 - In a Shared Browser turn, if no browser panel is visible yet, still start with the exposed `snapshot` tool. A successful snapshot can create or reveal the shared headed browser session for the user.
-- In a Shared Browser turn, if the first controller action fails, report that concrete failure or use it to drive one small repair attempt. Do not attempt the Shared controller in Personal or owner-local turns.
+- In a Shared Browser turn, if the first controller action fails, say plainly what failed or use it to drive one small repair attempt. Do not attempt the Shared controller in Personal or owner-local turns.
 - Prefer one compact execution step that both acts and prints structured evidence over multi-step exploratory loops.
 - When a task involves more than one actionable browser cue (for example route + field + submit + result link + extraction label), print those exact successful cues in the command's structured JSON evidence under a compact `workedCues` object or array. Use only cues that actually worked:
   - route or relative path
@@ -303,8 +303,8 @@ The high-level `instafy_shared_browser` MCP server is the only normal Shared
 Browser automation path. It attaches to provisioned headed Chromium, selects the
 focused page, bounds snapshot output, and emits cursor/ticker events. Do not
 replace it with shell commands, inline Node, Playwright, CDP, direct action-log
-writes, or a new browser process. If the tool returns a concrete error, report
-that error and stop after at most one focused retry.
+writes, or a new browser process. If the tool returns an error, say in plain
+words what did not work and stop after at most one focused retry.
 
 ## Browser learning examples
 
@@ -328,4 +328,4 @@ Bad:
 
 - “Opened `<url>` and observed `<title>` / `<heading>` / `<label>`.”
 - “Clicked `<label>` and confirmed the page changed to `<state>`.”
-- “Could not continue because `<exact error>`.”
+- “Couldn't open `<site>`: Instafy's browser couldn't reach it.” (the plain reason, never the raw code)

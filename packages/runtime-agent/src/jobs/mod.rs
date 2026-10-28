@@ -2672,6 +2672,23 @@ fn format_terminal_failure_message(
     }
 }
 
+/// Studio binds a browser task to the browser's current tab. When a run of
+/// another chat held that tab last, the turn is told it starts on that chat's
+/// page, not on its own earlier work. Records this job's chat for the page.
+fn shared_browser_page_left_by_other_chat(job: &LeaseJob, page_id: Option<&str>) -> bool {
+    page_id.is_some_and(|page_id| {
+        crate::shared_browser::page_left_by_another_conversation(
+            page_id,
+            job.conversation_id.or_else(|| {
+                job.payload
+                    .get("conversation_id")
+                    .and_then(JsonValue::as_str)
+                    .and_then(|value| Uuid::parse_str(value.trim()).ok())
+            }),
+        )
+    })
+}
+
 fn terminal_base_scope_key(job: &LeaseJob, project_id: Uuid) -> String {
     if let Some(conversation_id) = job.conversation_id.or_else(|| {
         job.payload
@@ -6445,6 +6462,8 @@ impl JobProcessor {
         } else {
             None
         };
+        let shared_browser_page_left_by_other_chat =
+            shared_browser_page_left_by_other_chat(job, shared_browser_page_id.as_deref());
         // Browser and granted turns have one trusted MCP server and no command lanes.
         let bounded_execution = explicit_personal_browser_execution
             || explicit_shared_browser_execution
@@ -6864,6 +6883,7 @@ impl JobProcessor {
             personal_browser: explicit_personal_browser_execution,
             shared_browser: explicit_shared_browser_execution,
             shared_browser_page_id,
+            shared_browser_page_left_by_other_chat,
             expect_mcp_tools: expects_generic_mcp_tool_execution,
             reasoning_effort: sequential_job_reasoning_effort(
                 job,
@@ -9762,7 +9782,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
             - For recommendation-seeking browser tasks, prefer map/listing/review pages over repeating search-result links. If needed, inspect a few likely candidates and summarize the strongest observed option with concrete details.\n\
             - Use loaded skills and learned blocks for workflow behavior. Treat Rust/runtime prompts as execution invariants only, not as the source of task-specific strategy.\n\
-            - If a browser tool fails, report its exact error and stop; do not claim success without real execution. No browser tools on this turn is not a failure: emit `request_browser`.\n\
+            - If a browser tool fails, say in plain words what did not work and stop (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution. No browser tools on this turn is not a failure: emit `request_browser`.\n\
             - Ask for clarification if you lack enough information to act.
             "
         );
@@ -19349,6 +19369,58 @@ mod tests {
                 "the origin's git child inherited launch credential {key}"
             );
         }
+    }
+
+    /// Live drive, Oct 28: a new chat's Roborock browser turn started on the
+    /// tab another chat had left on Visit Lisboa, and Octo said it "resumed on
+    /// Visit Lisboa rather than Roborock".
+    #[test]
+    fn a_browser_turn_knows_when_its_page_was_left_by_another_chat() {
+        let page = format!("PAGE_{}", Uuid::new_v4().simple());
+        let lisbon = Uuid::new_v4();
+        let roborock = Uuid::new_v4();
+        let job_in = |conversation_id: Uuid| {
+            let mut job = test_lease_job(None, json!({}));
+            job.conversation_id = Some(conversation_id);
+            job
+        };
+        // The first run on a page, and later runs of the same chat, continue it.
+        assert!(!shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            Some(&page)
+        ));
+        assert!(!shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            Some(&page)
+        ));
+        // Another chat's run on that tab starts on Roborock's page, and the
+        // first chat coming back starts on Lisbon's.
+        assert!(shared_browser_page_left_by_other_chat(
+            &job_in(lisbon),
+            Some(&page)
+        ));
+        assert!(shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            Some(&page)
+        ));
+        assert!(!shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            Some(&page)
+        ));
+        // The chat can come from the payload; a job with none, or no page, says nothing.
+        let from_payload = test_lease_job(None, json!({ "conversation_id": lisbon.to_string() }));
+        assert!(shared_browser_page_left_by_other_chat(
+            &from_payload,
+            Some(&page)
+        ));
+        assert!(!shared_browser_page_left_by_other_chat(
+            &test_lease_job(None, json!({})),
+            Some(&page)
+        ));
+        assert!(!shared_browser_page_left_by_other_chat(
+            &job_in(roborock),
+            None
+        ));
     }
 
     pub(super) fn test_lease_job(intent: Option<&str>, payload: JsonValue) -> LeaseJob {
