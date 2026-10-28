@@ -130,6 +130,8 @@ mod tests_provider_request_lifecycle;
 mod tests_provider_space;
 #[cfg(test)]
 mod tests_runtime_stop_fence;
+#[cfg(test)]
+mod tests_user_credential_policies;
 mod tokens;
 mod tunnels;
 mod turn_rate_limit_retry;
