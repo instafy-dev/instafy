@@ -3,6 +3,16 @@ import { SUGGESTION_BROWSER_MENU_STUBS } from "../../fixtures/suggestion-browser
 
 const fixture = "/tests/fixtures/suggestion-browser-menus/index.html";
 const editor = (page: Page) => page.getByRole("textbox", { name: "Review message" });
+const draft = (page: Page) => page.getByTestId("review-message-value");
+
+async function clearEditor(page: Page) {
+  // Use the editor's keyboard path, then wait for both Lexical and its controlled
+  // owner to accept the edit before starting the next suggestion interaction.
+  await editor(page).press("ControlOrMeta+A");
+  await editor(page).press("Backspace");
+  await expect(editor(page)).toHaveText("");
+  await expect(draft(page)).toHaveText("");
+}
 
 async function configure(page: Page, width: number) {
   const errors: string[] = [];
@@ -50,7 +60,7 @@ for (const width of [320, 390, 768, 1280]) for (const theme of ["light", "dark"]
       { prefix: "/", menu: "chat-slash-command-menu", option: "chat-slash-command-option", token: "data-command" },
       { prefix: "@", menu: "assistant-mention-menu", option: "assistant-mention-option", token: "data-token" },
     ]) {
-      await editor(page).fill("");
+      await clearEditor(page);
       await editor(page).pressSequentially(suggestion.prefix);
       const menu = page.getByTestId(suggestion.menu);
       const options = menu.getByTestId(suggestion.option);
@@ -65,8 +75,9 @@ for (const width of [320, 390, 768, 1280]) for (const theme of ["light", "dark"]
       await editor(page).press("Enter");
       await expect(menu).toHaveCount(0);
       await expect(editor(page)).toContainText(secondToken!);
+      await expect(draft(page)).toContainText(secondToken!);
 
-      await editor(page).fill("");
+      await clearEditor(page);
       await editor(page).pressSequentially(suggestion.prefix);
       await expect(menu).toBeVisible();
       await editor(page).press("Escape");
