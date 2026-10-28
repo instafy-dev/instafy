@@ -49,6 +49,7 @@ import {
   tunnelBrokerComposeCalls,
   tunnelBrokerStartPlan,
 } from "./lib/localTunnelBroker.mjs";
+import { stopOwnedService } from "./lib/devStackProcesses.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2657,41 +2658,33 @@ function findProviderPidByPort() {
   return 0;
 }
 
-async function clearProviderPortForPrebuiltLaunch() {
-  const candidatePids = new Set();
-  const managedPid = readProviderPid();
-  if (managedPid && isProviderProcess(managedPid)) {
-    candidatePids.add(managedPid);
-  } else if (managedPid) {
+/**
+ * Stops the provider this checkout started (its pid file), never one it did
+ * not start: see scripts/lib/devStackProcesses.mjs.
+ */
+async function stopOwnedProvider() {
+  const recordedPid = readProviderPid();
+  const result = await stopOwnedService({
+    recordedPid,
+    isService: isProviderProcess,
+    listeners: () => portListeners(providerPort),
+    kill: killPid,
+    wait,
+    onStop: (pids) => console.log(`[runtime-dev] Stopping provider service (pid=${pids.join(", ")})...`),
+  });
+  if (recordedPid && result.pids.length === 0) {
     console.warn(
-      `[runtime-dev] Ignoring stale provider pid file for pid ${managedPid}; the process identity did not match runtime-provider-service.`
+      `[runtime-dev] Ignoring stale provider pid file for pid ${recordedPid}; the process identity did not match runtime-provider-service.`
     );
   }
-  const listeningPid = findProviderPidByPort();
-  if (listeningPid) {
-    candidatePids.add(listeningPid);
+  if (result.pids.length === 0 || result.stopped) {
+    clearProviderPid();
   }
-  clearProviderPid();
+  return result;
+}
 
-  for (const signal of ["SIGINT", "SIGTERM", "SIGKILL"]) {
-    for (const pid of candidatePids) {
-      if (killPid(pid, 0)) {
-        killPid(pid, signal);
-      }
-    }
-    if (candidatePids.size > 0) {
-      await wait(signal === "SIGKILL" ? 150 : 400);
-    }
-    const listening = await waitForPort(providerPort, {
-      attempts: 1,
-      delayMs: 1,
-      host: "127.0.0.1",
-    });
-    if (!listening) {
-      break;
-    }
-  }
-
+async function clearProviderPortForPrebuiltLaunch() {
+  await stopOwnedProvider();
   const closed = await waitForPortClose(providerPort);
   if (!closed) {
     throw new Error(
@@ -2802,7 +2795,7 @@ async function startProviderService() {
     await clearProviderPortForPrebuiltLaunch();
   } else if (fileExists(providerPidFile)) {
     const pid = readProviderPid();
-    if (pid && killPid(pid, 0)) {
+    if (pid && isProviderProcess(pid)) {
       const ready = await waitForProvider(providerPort);
       if (ready) {
         return reuseRunningProvider(pid);
@@ -2811,9 +2804,13 @@ async function startProviderService() {
     clearProviderPid();
   }
 
+  // A provider this checkout did not start is used as it is, and is not
+  // recorded as this checkout's: `down` leaves it running.
   const existingPid = prebuiltLaunch ? 0 : findProviderPidByPort();
   if (existingPid) {
-    writeProviderPid(existingPid);
+    console.log(
+      `[runtime-dev] Using the provider already on port ${providerPort}; this checkout did not start it, so it is left running on down.`
+    );
     return reuseRunningProvider(existingPid);
   }
 
@@ -2877,27 +2874,15 @@ async function startProviderService() {
 }
 
 async function stopProviderService() {
-  const fromFile = readProviderPid();
-  const pid = fromFile && killPid(fromFile, 0) ? fromFile : findProviderPidByPort();
-  if (!pid) {
-    clearProviderPid();
-    return false;
+  const { pids, stopped } = await stopOwnedProvider();
+  if (pids.length === 0 && findProviderPidByPort()) {
+    console.log(
+      `[runtime-dev] A provider this checkout did not start is on port ${providerPort}; leaving it running.`
+    );
   }
-  clearProviderPid();
-  const stopped = killPid(pid, "SIGINT") || killPid(pid, "SIGTERM");
   return stopped;
 }
 
-function forceKillControllerProcess() {
-  try {
-    const result = spawnSync("pkill", ["-f", "runtime-controller"], {
-      stdio: "ignore"
-    });
-    return (result.status ?? result.code ?? 0) === 0;
-  } catch {
-    return false;
-  }
-}
 function parsePidOutput(raw) {
   return raw
     .split(/\r?\n/)
@@ -2942,86 +2927,33 @@ function thisCheckoutStartedController() {
   return ownsControllerListener({
     recordedPid,
     recordedIsController: isControllerProcess(recordedPid),
-    listeners: listListeningPidsByPort(controllerPort).map((pid) => ({ pid, pgid: processGroupOf(pid) })),
+    listeners: portListeners(controllerPort),
   });
 }
-function listControllerPids() {
-  const pids = new Set();
-
-  const byName = tryCapture("pgrep", ["-f", "runtime-controller"]);
-  if (byName.code === 0) {
-    for (const pid of parsePidOutput(byName.stdout ?? "")) {
-      pids.add(pid);
-    }
-  }
-
-  if (pids.size === 0) {
-    const byPort = tryCapture("lsof", ["-ti", `:${controllerPort}`]);
-    if (byPort.code === 0 && (byPort.stdout ?? "").trim()) {
-      for (const pid of parsePidOutput(byPort.stdout ?? "")) {
-        if (isControllerProcess(pid)) {
-          pids.add(pid);
-        }
-      }
-    }
-  }
-
-  return Array.from(pids);
+/** `[{ pid, pgid }]` for each process listening on `port`. */
+function portListeners(port) {
+  return listListeningPidsByPort(port).map((pid) => ({ pid, pgid: processGroupOf(pid) }));
 }
-async function terminateControllerProcesses(pids) {
-  if (!Array.isArray(pids) || pids.length === 0) {
-    return false;
+/**
+ * Stops the controller this checkout started (its pid file), never one it did
+ * not start: see scripts/lib/devStackProcesses.mjs.
+ */
+async function stopOwnedController() {
+  const result = await stopOwnedService({
+    recordedPid: readPid(),
+    isService: isControllerProcess,
+    listeners: () => portListeners(controllerPort),
+    kill: killPid,
+    wait,
+    onStop: (pids) => console.log(`[runtime-dev] Stopping controller (pid=${pids.join(", ")})...`),
+  });
+  if (result.pids.length === 0 || result.stopped) {
+    clearPid();
   }
-  let signalled = false;
-  const signals = ["SIGINT", "SIGTERM", "SIGKILL"];
-
-  for (const signal of signals) {
-    let anySentThisRound = false;
-    for (const pid of pids) {
-      if (killPid(pid, signal)) {
-        signalled = true;
-        anySentThisRound = true;
-      }
-    }
-    if (!anySentThisRound) {
-      continue;
-    }
-    await wait(signal === "SIGKILL" ? 150 : 400);
-    const stillListening = await waitForPort(controllerPort, {
-      attempts: 1,
-      delayMs: 1,
-    });
-    if (!stillListening) {
-      break;
-    }
-  }
-
-  const closed = await waitForPortClose(controllerPort);
-  if (!closed) {
-    console.warn(
-      `[runtime-dev] Controller port ${controllerPort} still in use after termination attempts (pids: ${pids.join(
-        ", "
-      )}).`
-    );
-  }
-  return signalled && closed;
+  return result;
 }
 async function clearControllerPortForPrebuiltLaunch() {
-  const candidatePids = new Set();
-  const managedPid = readPid();
-  if (managedPid && isControllerProcess(managedPid)) {
-    candidatePids.add(managedPid);
-  }
-  for (const pid of listListeningPidsByPort(controllerPort)) {
-    if (isControllerProcess(pid)) {
-      candidatePids.add(pid);
-    }
-  }
-  clearPid();
-
-  if (candidatePids.size > 0) {
-    await terminateControllerProcesses(Array.from(candidatePids));
-  }
+  await stopOwnedController();
   const closed = await waitForPortClose(controllerPort);
   if (!closed) {
     throw new Error(
@@ -3030,23 +2962,14 @@ async function clearControllerPortForPrebuiltLaunch() {
     );
   }
 }
+/** Stops the controller this checkout started; true once its port is closed. */
 async function stopControllerInternal() {
-  const pid = readPid();
-  if (!pid) return false;
-  console.log(`[runtime-dev] Stopping controller (pid=${pid})...`);
-  if (!killPid(pid, "SIGINT")) {
-    console.warn("[runtime-dev] SIGINT failed or not running; trying SIGTERM...");
-    if (!killPid(pid, "SIGTERM")) {
-      console.warn("[runtime-dev] SIGTERM failed; trying SIGKILL...");
-      killPid(pid, "SIGKILL");
-    }
-  }
-  await wait(500);
-  clearPid();
-  const closed = await waitForPortClose(controllerPort);
+  const { pids, stopped } = await stopOwnedController();
+  if (pids.length === 0) return false;
+  const closed = stopped && (await waitForPortClose(controllerPort));
   if (!closed) {
     console.warn(
-      `[runtime-dev] Controller port ${controllerPort} still in use after stopping pid ${pid}.`
+      `[runtime-dev] Controller port ${controllerPort} still in use after stopping pid ${pids.join(", ")}.`
     );
   }
   return closed;
@@ -3459,60 +3382,27 @@ async function startControllerIfNeeded(
   }
 }
 
+/**
+ * Stops the controller this checkout started, by the pid it recorded. A
+ * controller this checkout did not start (another worktree's or project's,
+ * or one started by hand) is left running, even on this port.
+ */
 async function stopControllerIfWeStarted() {
-  if (fileExists(controllerPidFile)) {
-    const stopped = await stopControllerInternal();
-    if (stopped) {
-      return true;
-    }
-    console.warn(
-      `[runtime-dev] Controller port ${controllerPort} still responding after managed shutdown; attempting forced cleanup.`
-    );
-  }
-
-  const stillListening = await waitForPort(controllerPort, {
-    attempts: 1,
-    delayMs: 1,
-  });
-  if (!stillListening) {
-    return false;
-  }
-
-  console.warn(
-    `[runtime-dev] Controller still responding on ${controllerBaseUrl}; attempting forced shutdown...`
-  );
-  const candidatePids = listControllerPids();
-  if (candidatePids.length === 0) {
-    const forced = forceKillControllerProcess();
-    if (forced) {
-      const closed = await waitForPortClose(controllerPort);
-      if (closed) {
-        clearPid();
-        return true;
-      }
-      console.warn(
-        `[runtime-dev] Controller process was signalled but port ${controllerPort} is still active.`
-      );
-      return false;
-    }
-    console.warn(
-      `[runtime-dev] Unable to locate a controller process to stop automatically. ` +
-        `If you started it manually, terminate the process listening on port ${controllerPort}.`
-    );
-    return false;
-  }
-
-  const terminated = await terminateControllerProcesses(candidatePids);
-  if (terminated) {
-    clearPid();
+  const stopped = await stopControllerInternal();
+  if (stopped) {
     return true;
   }
-
-  console.warn(
-    `[runtime-dev] Controller processes (${candidatePids.join(
-      ", "
-    )}) resisted termination. Please stop them manually before restarting.`
-  );
+  if (fileExists(controllerPidFile)) {
+    console.warn(
+      `[runtime-dev] The controller this checkout started (pid file ${controllerPidFile}) did not stop. Stop it by hand before restarting.`
+    );
+    return false;
+  }
+  if (await waitForPort(controllerPort, { attempts: 1, delayMs: 1 })) {
+    console.log(
+      `[runtime-dev] A controller this checkout did not start is on port ${controllerPort}; leaving it running.`
+    );
+  }
   return false;
 }
 async function controllerStatus() {
