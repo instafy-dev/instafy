@@ -251,6 +251,59 @@ describe("HomePanel activity states", () => {
     expect(query("home-continue-working")).toBeNull();
   });
 
+  // Local drive, Oct 28: "Conversation 1" was under both Continue working and Unread.
+  it("lists a chat that is unread under Unread only, not again under Continue working", async () => {
+    mocks.conversationWorkspace = true;
+    mocks.conversations = [localConversation()];
+    mocks.activeConversationId = "local-unread";
+    await render({}, true);
+    expect(container.querySelectorAll('[data-testid^="home-attention-"]').length).toBeGreaterThan(0);
+    expect(query("home-attention-section")?.textContent).toContain("Local unread work");
+    expect(query("home-continue-working")).toBeNull();
+    expect(container.textContent?.match(/Local unread work/g)).toHaveLength(1);
+  });
+
+  it("leaves an unread chat out of Recent chats", async () => {
+    mocks.projects = [{ id: PROJECT, name: "My space", orgId: null, orgName: "Personal" }];
+    mocks.activeProjectId = PROJECT;
+    mocks.conversationsProjectKey = PROJECT;
+    mocks.recentChatKeys = [JSON.stringify([PROJECT, CONVERSATION])];
+    mocks.activity.activityItems = [activityItem({
+      project: { id: PROJECT, name: "My space" },
+      conversation: { id: CONVERSATION, title: "Recent work", visibility: "public", threadKind: null },
+    })];
+    const reply = notification({ eventName: "conversation.reply", category: "conversations", resourceId: CONVERSATION,
+      url: `/studio?projectId=${PROJECT}&conversationControllerId=${CONVERSATION}` });
+    await render({ notifications: notificationState([reply]) });
+    expect(query("home-attention-section")?.textContent).toContain("Recent work");
+    expect(query("home-recent-chats")).toBeNull();
+    expect(container.textContent?.match(/Recent work/g)).toHaveLength(1);
+  });
+
+  it("leaves the chats listed above it out of Recent activity", async () => {
+    mocks.recentChatKeys = [JSON.stringify(["project-personal", "conversation-recent"])];
+    mocks.activity.activityItems = [activityItem(), activityItem({
+      id: "19", at: "2026-09-06T11:00:00Z", title: "Other work",
+      conversation: { id: "other-chat", title: "Other work", visibility: "public", threadKind: null },
+    })];
+    await render();
+    expect(query("home-recent-chats")?.textContent).toContain("Recent work");
+    expect(query("home-recent-section")?.textContent).toContain("Other work");
+    expect(query("home-recent-item-20")).toBeNull();
+    expect(query("home-recent-item-19")).not.toBeNull();
+    expect(container.textContent?.match(/Recent work/g)).toHaveLength(1);
+  });
+
+  it("drops Recent activity, rather than calling it quiet, when every row is listed above", async () => {
+    mocks.recentChatKeys = [JSON.stringify(["project-personal", "conversation-recent"])];
+    mocks.activity.activityItems = [activityItem()];
+    await render();
+    expect(query("home-recent-chats")?.textContent).toContain("Recent work");
+    expect(query("home-recent-section")).toBeNull();
+    expect(container.textContent).not.toContain("Quiet so far");
+    expect(query("home-filter-empty")).toBeNull();
+  });
+
   it.each(["different-space", "deleted", "missing", "removed-team", "access-blocked"])("omits unsafe or unavailable resume targets (%s)", async state => {
     mocks.conversationWorkspace = true;
     mocks.activeConversationId = "local-unread";

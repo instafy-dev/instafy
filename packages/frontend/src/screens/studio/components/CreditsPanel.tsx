@@ -483,17 +483,6 @@ export function CreditsPanel() {
     return merged;
   }, [policy]);
 
-  const activePlan = useMemo(() => {
-    return (
-      (subscriptionPlanId ? planCatalog.find((plan) => plan.id === subscriptionPlanId) : null) ??
-      planCatalog.find((plan) => plan.id === "starter") ??
-      null
-    );
-  }, [planCatalog, subscriptionPlanId]);
-
-  const activePlanDailyBudget = activePlan?.creditLimit ?? 0;
-  const activePlanDailyBudgetUsd = activePlanDailyBudget / unitsPerUsd;
-
   const selectedPlan = useMemo(() => {
     return planCatalog.find((plan) => plan.id === selectedPlanId) ?? planCatalog[0];
   }, [planCatalog, selectedPlanId]);
@@ -810,26 +799,6 @@ export function CreditsPanel() {
     amountView === "usd" ? formatUsdAmount(balanceUsd, displayCurrency) : String(creditBalance);
   const limitDisplayValue =
     amountView === "usd" ? formatUsdAmount(limitUsd, displayCurrency) : String(creditLimit);
-  const planResetDisplay = useMemo(() => {
-    if (activePlanDailyBudget <= 0) {
-      return null;
-    }
-    if (amountView === "usd") {
-      return `${formatUsdAmount(activePlanDailyBudgetUsd, displayCurrency)} daily`;
-    }
-    return `${formatUnits(activePlanDailyBudget, unitLabel)} daily`;
-  }, [amountView, displayCurrency, activePlanDailyBudget, activePlanDailyBudgetUsd, unitLabel]);
-  const planSummary = useMemo(() => {
-    if (!planResetDisplay) {
-      return null;
-    }
-    const parts: string[] = [`${activePlan?.name ?? "Starter"} resets to ${planResetDisplay}`];
-    if (managedAiUsage?.dailyPromptLimit && managedAiUsage.dailyPromptLimit > 0) {
-      parts.push(`managed AI soft cap ${managedAiUsage.dailyPromptLimit} prompts/day`);
-    }
-    parts.push("resets at 00:00 UTC");
-    return parts.join(" · ");
-  }, [activePlan?.name, managedAiUsage?.dailyPromptLimit, planResetDisplay]);
 
   // Fuel gauge: what a hosted machine costs and how long the current balance
   // lasts — pre-answers "why did my runtime pause" before it happens.
@@ -920,17 +889,15 @@ export function CreditsPanel() {
                   </Button>
                 </div>
               ) : (
+                // The balance is a number of credits, never a fraction of the
+                // limit: paid credits can take it past the daily refill.
                 <Text as="div" variant="display" tone="primary" data-testid="credits-balance-row" className="mt-1">
                   <span data-testid="credits-balance">{balanceDisplayValue}</span>
-                  <Text
-                    as="span"
-                    variant="subtitle"
-                    tone="muted"
-                    className="ml-2 inline-flex items-baseline gap-1"
-                  >
-                    <span aria-hidden="true">/</span>
-                    <span data-testid="credits-limit">{limitDisplayValue}</span>
-                  </Text>
+                  {amountView === "usd" ? null : (
+                    <Text as="span" variant="subtitle" tone="muted" className="ml-2">
+                      {unitLabel}
+                    </Text>
+                  )}
                 </Text>
               )}
             </div>
@@ -954,9 +921,11 @@ export function CreditsPanel() {
               ) : null}
             </div>
           </div>
-          {planSummary ? (
+          {/* What the daily refill tops the balance up to, from the team's own limit. */}
+          {creditsLoaded && creditLimit > 0 ? (
             <Text as="div" variant="caption" tone="muted" data-testid="credits-starter-budget">
-              {planSummary}
+              Refills to <span data-testid="credits-limit">{limitDisplayValue}</span>
+              {amountView === "usd" ? "" : ` ${unitLabel}`} every day at 00:00 UTC
             </Text>
           ) : null}
           {runtimeRunwayDisplay ? (

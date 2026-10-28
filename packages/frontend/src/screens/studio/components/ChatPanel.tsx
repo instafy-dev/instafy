@@ -5517,6 +5517,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     autoScrollPendingRef,
     composerAutoHidden,
     composerOverlayHeight,
+    composerScrollPaddingBottom: chatScrollPaddingBottom,
     credentialGateStateForBubble: presentedCredentialGateStateForBubble,
     displayedMessages,
     isAssistantTyping,

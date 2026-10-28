@@ -132,7 +132,7 @@ test.describe("chat getting-started card", () => {
     await expect(card).toBeVisible();
     await expect(card.getByText("Choose your AI", { exact: true })).toBeInViewport();
     await expect(card.getByTestId("onboarding-use-managed-ai")).toContainText(
-      "7 of 20 free prompts left today",
+      "7 of 20 prompts left today",
     );
     await expect(card.getByTestId("onboarding-connect-own-ai")).toContainText("Connect AI");
     await expect(card).not.toContainText("Bring my own AI");
@@ -290,7 +290,7 @@ test.describe("chat getting-started card", () => {
       .toContainEqual(["connector", "notion"]);
   });
 
-  test("names the selected free AI and exposes the real change action", async ({ page }) => {
+  test("names the selected Instafy AI and exposes the real change action", async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
     await mountGettingStartedCard(page, {
       selectedAi: "managed",
@@ -300,7 +300,7 @@ test.describe("chat getting-started card", () => {
 
     const card = page.getByTestId("onboarding-getting-started");
     await expect(card.getByTestId("onboarding-ai-status")).toHaveText(
-      "Using free Instafy AI: 20 prompts a day, 1 credit each·Change AI",
+      "Using Instafy AI · uses credits·Change AI",
     );
     await expect(card).not.toContainText("Using your connected AI");
     await card.getByTestId("onboarding-change-ai").click();
@@ -320,7 +320,7 @@ test.describe("chat getting-started card", () => {
     });
 
     const card = page.getByTestId("onboarding-getting-started");
-    await expect(card).toContainText("Today's free prompts are used (20/day).");
+    await expect(card).toContainText("Today's prompts are used (20/day).");
     await expect(card).toContainText("Connect your own AI to keep going");
     await expect(card.getByTestId("onboarding-use-managed-ai")).toBeDisabled();
     await expect(card.getByTestId("onboarding-connect-own-ai")).toBeEnabled();
@@ -370,7 +370,7 @@ test.describe("chat getting-started card", () => {
       .toContainEqual(["change-ai"]);
   });
 
-  test("keeps the AI step a choice with one Connect AI button while the free tier is paused", async ({ page }) => {
+  test("keeps the AI step a choice with one Connect AI button while Instafy AI is paused", async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
     await mountGettingStartedCard(page, {
       managedAiOffer: { label: "Instafy AI", dailyPromptLimit: 20, remainingPrompts: 7, paused: true },
@@ -379,7 +379,7 @@ test.describe("chat getting-started card", () => {
     const card = page.getByTestId("onboarding-getting-started");
     await expect(card.getByText("Choose your AI", { exact: true })).toBeVisible();
     await expect(card.getByTestId("onboarding-ai-choice-line")).toHaveText(
-      "Free Instafy AI is paused right now. Connect your own AI to start; you pay your provider directly and Instafy adds nothing.",
+      "Instafy AI is paused right now. Connect your own AI to start; you pay for it directly and Instafy adds nothing.",
     );
     await expect(card.getByTestId("onboarding-use-managed-ai")).toHaveCount(0);
     await expect(card.getByTestId("onboarding-ai-choice").getByRole("button")).toHaveCount(1);
@@ -406,9 +406,10 @@ test.describe("chat getting-started card", () => {
     await expect(card.getByRole("heading")).toHaveCount(0);
     await expect(card.getByTestId("onboarding-ai-status")).toHaveCount(0);
     const row = card.getByTestId("onboarding-collapsed-row");
+    // The full row's first tools under the same names, in the same order.
     await expect(row.getByRole("button")).toHaveText([
-      "Import a repo",
       "Notion",
+      "GitHub",
       "More tools",
     ]);
     const boxes = await Promise.all(
@@ -425,13 +426,13 @@ test.describe("chat getting-started card", () => {
     await expect
       .poll(() => page.evaluate(() => (window as { __onboardingActions?: unknown[] }).__onboardingActions))
       .toContainEqual(["connector", "notion"]);
-    await row.getByRole("button", { name: "Import a repo" }).click();
+    await row.getByRole("button", { name: "Import from GitHub" }).click();
     await expect
       .poll(() => page.evaluate(() => (window as { __onboardingActions?: unknown[] }).__onboardingActions))
       .toContainEqual(["mode", "github"]);
   });
 
-  test("describes a non-positive daily cap as uncapped", async ({ page }) => {
+  test("says nothing about a daily cap that does not exist", async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
     await mountGettingStartedCard(page, {
       managedAiOffer: {
@@ -441,8 +442,7 @@ test.describe("chat getting-started card", () => {
       },
     });
 
-    await expect(page.getByTestId("onboarding-use-managed-ai")).toContainText(
-      "No daily prompt cap.",
-    );
+    await expect(page.getByTestId("onboarding-use-managed-ai")).toHaveText("Start with Instafy AIUses credits.");
+    await expect(page.getByTestId("onboarding-getting-started")).not.toContainText(/\bfree\b|cap/i);
   });
 });

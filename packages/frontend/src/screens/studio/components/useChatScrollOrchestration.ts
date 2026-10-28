@@ -104,6 +104,11 @@ type UseChatAutoScrollSyncOptions = {
   autoScrollPendingRef: MutableRefObject<boolean>;
   composerAutoHidden: boolean;
   composerOverlayHeight: number;
+  /**
+   * The transcript's bottom padding that keeps the newest message clear of the
+   * composer. It settles a frame after the composer is measured.
+   */
+  composerScrollPaddingBottom?: string;
   credentialGateStateForBubble: AiCredentialsGateState | null;
   displayedMessages: ChatMessage[];
   isAssistantTyping: boolean;
@@ -822,6 +827,7 @@ export function useChatAutoScrollSync({
   autoScrollPendingRef,
   composerAutoHidden,
   composerOverlayHeight,
+  composerScrollPaddingBottom,
   credentialGateStateForBubble,
   displayedMessages,
   isAssistantTyping,
@@ -872,6 +878,10 @@ export function useChatAutoScrollSync({
     shouldAutoScrollRef,
   ]);
 
+  // The composer's height, and the padding that keeps the transcript clear of
+  // it, settle after the messages are drawn (the padding one frame later).
+  // Growing padding does not scroll, so without pinning again the newest
+  // message stayed under the composer until something else scrolled.
   useLayoutEffect(() => {
     if (
       !followLatest || autoScrollSuspendedRef.current ||
@@ -881,7 +891,14 @@ export function useChatAutoScrollSync({
       return;
     }
     scrollToBottom();
-  }, [autoScrollSuspendedRef, composerOverlayHeight, followLatest, scrollToBottom, shouldAutoScrollRef]);
+  }, [
+    autoScrollSuspendedRef,
+    composerOverlayHeight,
+    composerScrollPaddingBottom,
+    followLatest,
+    scrollToBottom,
+    shouldAutoScrollRef,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {

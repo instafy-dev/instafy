@@ -637,6 +637,11 @@ Home separates **Unread** conversations from **Recent activity**, using flat row
 shared panel surface. Failed runs retain a warning icon and a concise failure label while
 remaining markable as read. A completion or failure retires the matching running entry.
 
+Home lists each chat once. An unread chat is under **Unread** only, so **Continue working** does
+not repeat it; **Recent chats** leaves out both; and **Recent activity** leaves out every chat
+listed above it, stepping aside rather than reading "Quiet so far" when that leaves it empty.
+Rows that follow each other for the same chat read as one row that counts their updates.
+
 Narrow panels initially show four unread rows with **View all**; wide panels show up to
 eight. Previews can wrap to two lines in narrow panels. When team filters are available,
 **All** consistently labels rows **Organization · Space**, even when the loaded page contains
@@ -695,16 +700,17 @@ Automations uses a flat empty state on the shared panel surface, with a labeled
 ## First run
 
 An empty space opens with the getting-started card in the chat, at message weight. Its AI step
-is one decision: **Choose your AI** with **Start free with Instafy AI** (the live allowance on the
-button) and **Connect AI**; when the free tier is paused the heading stays, the line reads "Free
-Instafy AI is paused right now. Connect your own AI to start; you pay your provider directly and
-Instafy adds nothing." and **Connect AI** is the one button. The same verb names the act
+is one decision: **Choose your AI** with **Start with Instafy AI** ("Uses credits.", or the prompts left
+today when there is a daily cap) and **Connect AI**. Instafy AI is paid for with credits, so the card
+never calls it free. When it is paused the heading stays, the line reads "Instafy AI is paused right
+now. Connect your own AI to start; you pay for it directly and Instafy adds nothing." and **Connect
+AI** is the one button. The same verb names the act
 everywhere: **Connect AI** on the card and in the gate, **Add AI connection** as the modal's
-title, **AI connections** as the AI panel's heading. When a free lane is offered the line ends
+title, **AI connections** as the AI panel's heading. When Instafy AI is offered the line ends
 "Next: pick a tool, or just type.", which is what the step below actually asks. Once settled, a
 status line above **Start with a tool you already use** names what will answer ("Using OpenAI
-API key" or "Using free Instafy AI: 20 prompts a day, 1 credit each") followed by **Change AI**,
-which reopens the AI step for the free choice and opens the AI panel for a saved connection.
+API key" or "Using Instafy AI · uses credits") followed by **Change AI**, which reopens the AI
+step for Instafy AI and opens the AI panel for a saved connection.
 
 Typing or sending with no AI connected shows one sentence in the chat, "Connect AI to send this.
 Your message is kept.", with a primary **Connect AI** that opens the Add AI connection modal and,
@@ -724,9 +730,9 @@ not published is not on the card at all. The card carries no action cards and no
 
 The blank path is the composer itself, which is already on screen asking "Ask for something…":
 the closing line points at it, the send button enables on the first character, and typing folds
-the card to one row, **Notion**, **Import a repo** and **More tools**, which unfolds when the draft
-is cleared; history and dismissal hide it as before. The collapsed row names the same tools in
-text form, in the same order, keeping the verb for the repo import.
+the card to one row, **Notion**, **GitHub** and **More tools**, which unfolds when the draft is
+cleared; history and dismissal hide it as before. The collapsed row is the full row's first tools
+in text form, under the same names and in the same order, so typing only drops tools from the end.
 
 A member without write access keeps the heading, the closing line and the **GitHub** chip,
 whose press opens the import form and sends nothing. The skill chips and **More tools** are

@@ -182,7 +182,8 @@ export const SITE_PREVIEW_STATUS_TEXT = {
   starting: "Starting…",
   notResponding: "Not responding",
   unavailable: "Status unavailable",
-  stopped: "Stopped",
+  // Nothing here can start it, so the line says who can: the pane says the same.
+  stopped: "Stopped · ask Octo to start it again",
   stoppedRestarts: "Stopped · opening restarts it",
   stoppedNeedsBuilder: "Stopped · only people who can edit this space can start it",
   couldNotStart: "Couldn't start",

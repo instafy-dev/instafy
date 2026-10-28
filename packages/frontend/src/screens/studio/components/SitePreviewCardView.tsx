@@ -149,14 +149,14 @@ export function SitePreviewCardView({
               <Lock className="h-3 w-3" aria-hidden="true" />
             </span>
           ) : null}
-          <NavArrowRight
-            className={[
-              "ml-auto h-4 w-4 shrink-0 text-slate-400 transition-colors dark:text-slate-500",
-              pressable ? "group-hover:text-slate-600" : "opacity-50",
-            ].join(" ")}
-            aria-hidden="true"
-            data-testid="preview-card-open-icon"
-          />
+          {/* The chevron promises a press, so a card that cannot be pressed has none. */}
+          {pressable ? (
+            <NavArrowRight
+              className="ml-auto h-4 w-4 shrink-0 text-slate-400 transition-colors group-hover:text-slate-600 dark:text-slate-500 dark:group-hover:text-slate-300"
+              aria-hidden="true"
+              data-testid="preview-card-open-icon"
+            />
+          ) : null}
         </div>
         {facts ? (
           <Text as="div" variant="caption" tone="muted" className="truncate" title={facts} data-testid="preview-card-facts">

@@ -361,6 +361,10 @@ describe("StudioTopBar navigation", () => {
     const keepOpen = document.querySelector<HTMLButtonElement>('[data-testid="topbar-tab-keep-open-conversation-1"]');
     expect(keepOpen?.getAttribute("aria-label")).toBe("Keep Preview chat open");
     expect(keepOpen?.title).toBe("Keep open");
+    // Local drive, Oct 28: a long title squeezed the pin. The title truncates;
+    // the pin keeps its own space.
+    expect(keepOpen?.className).toContain("shrink-0");
+    expect(document.querySelector('[data-testid="topbar-tab-item-conversation-1"] .truncate')?.textContent).toBe("Preview chat");
     await act(async () => keepOpen?.click());
     expect(mocks.keepTabOpen).toHaveBeenCalledWith("conversation-1");
 

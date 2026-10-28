@@ -41,6 +41,7 @@ import { getHomeNotificationTarget } from "../homeNotifications";
 import type { HomeSupportReport } from "../homeSupportReports";
 import { useHomeActivity } from "../useHomeActivity";
 import { homeRecentChats } from "../homeRecentChats";
+import { arrangeHomeSections, homeConversationChatKey } from "../homeSections";
 import { useWorkspaceControls } from "../workspaceControls";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
@@ -372,7 +373,6 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
       }),
     [activityItems, conversations, currentProject, notifications?.page.items, organizations, homeProjects, serverLastSeenEventId, teamFilter, visibleAttentionEntries, supportReports],
   );
-  const activityTotal = useMemo(() => feed.activity.reduce((count, day) => count + day.events.length, 0), [feed.activity]);
   useEffect(() => {
     // Keep search and the displayed filter in agreement after membership or
     // Personal-team resolution changes. Fresh activity can also supply a team.
@@ -382,10 +382,6 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
   }, [activityLoading, feed.teamFilter, membershipsReady, setHomeState, teamFilter]);
   const recentChatKeys = useStudioRecentChatKeys();
   const recentChats = useMemo(() => homeRecentChats([...feed.needs, ...feed.activity.flatMap(day => day.events)], recentChatKeys), [feed, recentChatKeys]);
-  const activityEvents = useMemo(
-    () => feed.activity.flatMap((day) => day.events).slice(0, recentLimit),
-    [feed.activity, recentLimit],
-  );
 
   const acknowledgeInbox = useCallback(
     async (event: HomeFeedEvent): Promise<boolean> => {
@@ -555,17 +551,28 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
       : null;
   const resumeTeamName = currentProject?.orgId
     ? organizations.find(team => team.id === currentProject.orgId)?.name ?? currentProject.orgName ?? "Team" : "Personal";
-  const visibleRecentChats = resumeConversation ? recentChats.filter(event => event.project.id !== activeProjectId ||
-    event.source.type !== "activity" || event.source.item.conversation?.id !== resumeConversation.controllerId) : recentChats;
+  // Each chat once: Unread, then Continue working, Recent chats, Recent activity.
+  const resumeChatKey = resumeConversation ? homeConversationChatKey(resumeConversation) : null;
+  const sections = useMemo(
+    () => arrangeHomeSections({ feed, conversations, resumeChatKey, recentChats }),
+    [conversations, feed, recentChats, resumeChatKey],
+  );
+  const showResumeConversation = resumeConversation && sections.showResume ? resumeConversation : null;
+  const visibleRecentChats = sections.recentChats;
+  const activityTotal = useMemo(() => sections.activity.reduce((count, day) => count + day.events.length, 0), [sections.activity]);
+  const activityEvents = useMemo(
+    () => sections.activity.flatMap((day) => day.events).slice(0, recentLimit),
+    [sections.activity, recentLimit],
+  );
   // All is cross-team even when the loaded page contains only one team's
   // activity. Keep the team and space together so each row identifies its scope.
   const showTeamOnRows = showTeamChips && feed.teamFilter === HOME_TEAM_FILTER_ALL;
   // Within one team, repeat space context only when multiple spaces are shown.
   // Names can repeat across spaces; their identities determine provenance.
   const spansSpaces = useMemo(() => {
-    const events = [...feed.needs, ...feed.activity.flatMap((day) => day.events)];
+    const events = [...feed.needs, ...sections.activity.flatMap((day) => day.events)];
     return new Set(events.map((event) => event.project.id).filter(Boolean)).size > 1;
-  }, [feed.activity, feed.needs]);
+  }, [sections.activity, feed.needs]);
   // "New space" lands in the team being looked at, else the current one.
   const newSpaceOrgId =
     feed.teamFilter === HOME_TEAM_FILTER_ALL
@@ -579,10 +586,14 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
   const feedLoading = activityLoading || notifications?.loading === true || supportLoading;
   const feedError = activityError || notifications?.error || supportError;
   const moreHistory = activityHasMore || Boolean(notifications?.page.nextCursor);
-  const lanesEmpty = feed.needs.length === 0 && activityEvents.length === 0 && !feedLoading;
+  const lanesEmpty = feed.needs.length === 0 && visibleRecentChats.length === 0 && activityEvents.length === 0 && !feedLoading;
   const filteredTeamHasSpaces =
     filteredTeam !== null && homeProjects.some((project) => teamKeyForOrgId(project.orgId) === filteredTeam.key);
   const canShowMoreRecent = activityTotal > recentLimit || moreHistory;
+  // Every activity row is about a chat already listed above: "Quiet so far"
+  // would be untrue, and an empty heading says nothing, so the lane steps aside.
+  const activityListedAbove = activityTotal === 0 && feed.activity.some((day) => day.events.length > 0) &&
+    !feedLoading && !feedError && !canShowMoreRecent;
   const handleShowMoreRecent = useCallback(() => {
     if (activityTotal > recentLimit) {
       setRecentLimit((limit) => limit + RECENT_LIMIT);
@@ -717,15 +728,15 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
           )}
         </header> : null}
 
-        {resumeConversation ? (
+        {showResumeConversation ? (
           <section aria-label="Continue working" data-testid="home-continue-working">
             <LaneHeader label="Continue working" />
             <div className={ROW_HOVER_CLASS}>
-              <FeedRow title={resumeConversation.title} subtitle={`${resumeTeamName} · ${currentSpaceName}`}
+              <FeedRow title={showResumeConversation.title} subtitle={`${resumeTeamName} · ${currentSpaceName}`}
                 icon={<ChatLines className="h-5 w-5" aria-hidden="true" />} iconClassName={ROW_ICON_CLASS}
                 end={<NavArrowRight className="h-4 w-4 text-slate-400" aria-hidden="true" />}
                 density="compact" surface="plain" verticalAlign="center" className="min-h-16 !rounded-none !bg-transparent"
-                onPress={() => { requestUrlPush(); openConversationTab(resumeConversation.localId, { restoreWorkspace: true }); }}
+                onPress={() => { requestUrlPush(); openConversationTab(showResumeConversation.localId, { restoreWorkspace: true }); }}
                 data-testid="home-resume-conversation" />
             </div>
           </section>
@@ -745,7 +756,7 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
         {feed.isEmpty && !feedLoading && !moreHistory && !feedError ? (
           <section className="space-y-3" data-testid="home-empty">
             <Heading level={2} variant="subtitle">
-              {resumeConversation ? "No updates yet" : "Nothing here yet"}
+              {showResumeConversation ? "No updates yet" : "Nothing here yet"}
             </Heading>
             <Text as="p" variant="body" tone="muted" className="max-w-prose">
               Replies, runs and changes from every space you belong to show up here.
@@ -831,7 +842,6 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
                   <div key={event.key} className={[ROW_HOVER_CLASS, index > 0 ? ROW_DIVIDER_CLASS : ""].join(" ")}>
                     <FeedRow title={event.title} subtitle={`${event.team.name} · ${event.project.name}`}
                       icon={<ChatLines className="h-4 w-4" aria-hidden="true" />} iconClassName={ROW_ICON_CLASS}
-                      trailingAction={event.lane === "needs" ? <Text variant="caption" tone="accent">Unread</Text> : undefined}
                       density="compact" surface="plain" verticalAlign="center"
                       className="min-h-14 !rounded-none !bg-transparent"
                       onPress={() => openEvent(event)} data-testid={`home-chat-${event.key}`} />
@@ -840,7 +850,7 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
               </section>
             ) : null}
 
-            <section data-testid="home-recent-section">
+            {activityListedAbove ? null : <section data-testid="home-recent-section">
               <LaneHeader label="Recent activity" action={feedLoading ? <span role="status" aria-label="Loading activity"><Spinner size="xs" /></span> : null} />
               {activityEvents.length === 0 && !feedLoading && !feedError ? (
                 <Text as="p" variant="body" tone="muted" className={`py-2 ${LANE_INSET_CLASS}`} data-testid="home-recent-empty">
@@ -849,14 +859,14 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
               ) : null}
               {(() => {
                 let flatIndex = 0;
-                return feed.activity.map((day, dayIndex) => {
+                return sections.activity.map((day, dayIndex) => {
                   const dayStart = flatIndex;
                   if (dayStart >= recentLimit) return null;
-                  const cutAtDayStart = feed.sinceCutIndex === dayStart;
+                  const cutAtDayStart = sections.sinceCutIndex === dayStart;
                   return (
                     <div key={day.key} className="min-w-0">
                       {cutAtDayStart ? <EarlierActivityCut /> : null}
-                      {feed.activity.length > 1 ? (
+                      {sections.activity.length > 1 ? (
                         // A sub-group label: a caption under the lane heading,
                         // and silent altogether when everything is one day.
                         <Text
@@ -877,7 +887,7 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
                         const index = flatIndex;
                         flatIndex += 1;
                         if (index >= recentLimit) return null;
-                        const cutHere = feed.sinceCutIndex === index && index !== dayStart;
+                        const cutHere = sections.sinceCutIndex === index && index !== dayStart;
                         return (
                           <Fragment key={event.key}>
                             {cutHere ? <EarlierActivityCut /> : null}
@@ -892,7 +902,7 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
               {canShowMoreRecent ? (
                 <LaneMore label={activityLoadingMore || notifications?.loading ? "Loading…" : activityEvents.length === 0 ? "Load older activity" : "Show more"} onPress={handleShowMoreRecent} disabled={activityLoadingMore || notifications?.loading} testId={activityEvents.length === 0 ? "home-recent-load-older" : "home-recent-show-more"} />
               ) : null}
-            </section>
+            </section>}
           </div>
         )}
       </div>

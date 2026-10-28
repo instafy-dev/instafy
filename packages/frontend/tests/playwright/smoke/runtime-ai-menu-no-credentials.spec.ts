@@ -88,7 +88,7 @@ test.describe("Runtime & AI menu", () => {
     const onboarding = page.getByTestId("onboarding-getting-started");
     await expect(onboarding).toBeVisible();
     await expect(onboarding.getByTestId("onboarding-use-managed-ai")).toContainText(
-      "20 of 20 free prompts left today",
+      "20 of 20 prompts left today",
     );
     await expect(onboarding.getByTestId("onboarding-connect-own-ai")).toBeVisible();
     await expect(page.getByTestId("credentials-status-indicator")).toHaveCount(0);

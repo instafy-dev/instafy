@@ -305,7 +305,8 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
                   aria-label={`Keep ${tab.title} open`}
                   title="Keep open"
                   data-testid={`topbar-tab-keep-open-${tab.id}`}
-                  className={`text-slate-400 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 ${DARK_CONTROL_HOVER_CLASS}`}
+                  // The title truncates first; the row's own controls keep their size.
+                  className={`shrink-0 text-slate-400 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 ${DARK_CONTROL_HOVER_CLASS}`}
                 >
                   <Pin className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
@@ -318,7 +319,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
                   radius="full"
                   aria-label={`Close ${tab.title}`}
                   data-testid={`topbar-tab-close-${tab.id}`}
-                  className={`text-slate-400 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 ${DARK_CONTROL_HOVER_CLASS}`}
+                  className={`shrink-0 text-slate-400 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 ${DARK_CONTROL_HOVER_CLASS}`}
                 >
                   <Xmark className="h-4 w-4" aria-hidden="true" />
                 </IconButton>

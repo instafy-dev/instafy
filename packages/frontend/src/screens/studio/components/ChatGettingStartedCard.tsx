@@ -8,7 +8,7 @@ import { Text } from "../../../components/Text";
 import { controllerClient } from "../../../sdk/instafy";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
-import { ConnectChipStrip } from "./ConnectChipStrip";
+import { ConnectChipStrip, connectChipAccessibleName, isConnectorConnected } from "./ConnectChipStrip";
 import {
   CARD_READ_ONLY_TOOL_CONNECTORS,
   CARD_TOOL_CONNECTORS,
@@ -21,17 +21,12 @@ import type {
 } from "./gettingStartedAiChoices";
 
 // The collapsed row names at most this many tools before "More tools", so it
-// holds one line at 390 px: "Notion · Import a repo · More tools" is narrower
-// than the three labels it replaces.
+// holds one line at 390 px. It is the full row's first tools under the same
+// names, so typing only drops tools from the end ("Notion · GitHub ·
+// FreeFinance" becomes "Notion · GitHub"), never renames or reorders them.
 const COLLAPSED_ROW_TOOL_LIMIT = 2;
 
-// The collapsed row keeps the verb for the repo import, which is the one
-// place a bare "GitHub" would lose it. It no longer leads the row: see the
-// ordering rule in connectors.ts.
-function collapsedToolLabel(connector: ProductConnector): string {
-  return connector.kind === "github" ? "Import a repo" : connector.name;
-}
-
+// Selectors stay as they were when the repo import had its own label.
 function collapsedToolTestId(connector: ProductConnector): string {
   return connector.kind === "github"
     ? "onboarding-collapsed-import-github-repo"
@@ -106,10 +101,13 @@ interface ChatGettingStartedCardProps {
 // coarse pointers through the Button size.
 function CollapsedActionButton({
   label,
+  accessibleName,
   onPress,
   testId,
 }: {
   label: string;
+  /** The chip's own name ("Import from GitHub"), which contains the visible label. */
+  accessibleName?: string;
   onPress: () => void;
   testId: string;
 }) {
@@ -120,6 +118,7 @@ function CollapsedActionButton({
       size="xs"
       radius="full"
       onPress={onPress}
+      aria-label={accessibleName}
       data-testid={testId}
     >
       {label}
@@ -172,44 +171,45 @@ export function ChatGettingStartedCard({
     }
     onSelectConnector(connector);
   };
-  // A paused tier keeps the choice framing but offers no free button: the one
-  // primary action is Connect AI, and the line says why.
+  // A paused tier keeps the choice framing but offers no Instafy AI button:
+  // the one primary action is Connect AI, and the line says why.
   const managedAiPaused = managedAiOffer?.paused === true;
   const managedAiChoice = managedAiOffer && !managedAiPaused ? managedAiOffer : null;
-  const managedAiAllowance = managedAiChoice
-    ? managedAiChoice.dailyPromptLimit <= 0
-      ? "No daily prompt cap."
+  // Instafy AI is paid for with credits, so the card never calls it free. A
+  // daily prompt cap is named only when there is one: a limit that does not
+  // exist is nothing a new person asked about. Without one, the line says
+  // what it costs, as the status line does once it is chosen.
+  const managedAiAllowance = !managedAiChoice
+    ? null
+    : managedAiChoice.dailyPromptLimit <= 0
+      ? "Uses credits."
       : managedAiChoice.remainingPrompts === 0
-      ? `Today's free prompts are used (${managedAiChoice.dailyPromptLimit}/day).`
-      : typeof managedAiChoice.remainingPrompts === "number"
-        ? `${managedAiChoice.remainingPrompts} of ${managedAiChoice.dailyPromptLimit} free prompts left today.`
-        : `${managedAiChoice.dailyPromptLimit} free prompts each day.`
-    : null;
+        ? `Today's prompts are used (${managedAiChoice.dailyPromptLimit}/day).`
+        : typeof managedAiChoice.remainingPrompts === "number"
+          ? `${managedAiChoice.remainingPrompts} of ${managedAiChoice.dailyPromptLimit} prompts left today.`
+          : `${managedAiChoice.dailyPromptLimit} prompts each day.`;
   const managedAiLabel = managedAiOffer?.label ?? "Instafy AI";
   const aiChoiceHeading =
     managedAiOffer || personalAiConnectionState === "needs_default" ? "Choose your AI" : "Connect AI";
   const aiChoiceLine =
     personalAiConnectionState === "needs_default"
       ? managedAiChoice
-        ? "Use free AI now, or choose which saved connection Instafy should use."
+        ? `Use ${managedAiLabel} now, or choose which saved connection Instafy should use.`
         : "Choose which saved connection Instafy should use."
       : managedAiPaused
-        ? `Free ${managedAiLabel} is paused right now. Connect your own AI to start; you pay your provider directly and Instafy adds nothing.`
+        ? `${managedAiLabel} is paused right now. Connect your own AI to start; you pay for it directly and Instafy adds nothing.`
         : managedAiChoice?.remainingPrompts === 0
-          ? "Today's free prompts are used. Connect your own AI to keep going, or come back tomorrow."
+          ? `Today's ${managedAiLabel} prompts are used. Connect your own AI to keep going, or come back tomorrow.`
           : managedAiChoice
             // Names what the next step actually offers, so the forward
             // reference stays true when that step is a row of tools.
-            ? "Start free now, or connect an AI account you already pay for. Next: pick a tool, or just type."
+            ? `Use ${managedAiLabel}, or connect an AI account you already pay for. Next: pick a tool, or just type.`
             : "Connect the AI account you already use.";
-  // The status line names what will answer, at the point of decision.
+  // The status line names what will answer, at the point of decision, and
+  // what it costs: Instafy AI is charged in credits by usage.
   const aiStatusLine =
     selectedAi === "managed"
-      ? `Using free ${managedAiLabel}: ${
-          managedAiOffer && managedAiOffer.dailyPromptLimit > 0
-            ? `${managedAiOffer.dailyPromptLimit} prompts a day`
-            : "no daily cap"
-        }, credits charged by usage`
+      ? `Using ${managedAiLabel} · uses credits`
       : selectedAi === "connected"
         ? connectedAiLabel
           ? `Using ${connectedAiLabel}`
@@ -259,15 +259,20 @@ export function ChatGettingStartedCard({
           aria-label="Workspace options"
           data-testid="onboarding-collapsed-row"
         >
-          {/* The same tools as the full row, in the same order, in text form.
-              The repo import keeps its verb; the rest are named. */}
+          {/* The full row's first tools, in the same order, under the same
+              names and accessible names, in text form. */}
           {cardTools.slice(0, COLLAPSED_ROW_TOOL_LIMIT).map((connector, index) => (
-            <li key={connector.id} className={index === 0 ? undefined : "flex items-center gap-x-1"}>
+            // flex on every item: a block item's line box sat the first button 2 px off the others.
+            <li key={connector.id} className="flex items-center gap-x-1">
               {index === 0 ? null : (
                 <span aria-hidden="true" className="text-slate-400 dark:text-slate-500">·</span>
               )}
               <CollapsedActionButton
-                label={collapsedToolLabel(connector)}
+                label={connector.name}
+                accessibleName={connectChipAccessibleName(
+                  connector,
+                  isConnectorConnected(connector, installedSkillNames),
+                )}
                 onPress={() => handleSelectTool(connector)}
                 testId={collapsedToolTestId(connector)}
               />
@@ -345,7 +350,7 @@ export function ChatGettingStartedCard({
                       <Sparks className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                       <span className="min-w-0">
                         <Text as="span" variant="caption" tone="inherit" className="block text-left font-medium">
-                          Start free with {managedAiChoice.label}
+                          Start with {managedAiChoice.label}
                         </Text>
                         <Text as="span" variant="caption" tone="inherit" className="mt-0.5 block text-left opacity-90">
                           {managedAiAllowance}
@@ -378,8 +383,8 @@ export function ChatGettingStartedCard({
                         {personalAiConnectionState === "needs_default"
                           ? "Select which saved connection Instafy should use."
                           : desktopCodexLoginFound
-                            ? "Use the Codex login on this computer, sign in with ChatGPT, or use a key from another AI provider."
-                            : "Sign in with ChatGPT, or use a key from another AI provider."}
+                            ? "Use the Codex login on this computer, sign in with ChatGPT, or use a key from another AI company."
+                            : "Sign in with ChatGPT, or use a key from another AI company."}
                       </Text>
                     </span>
                   </span>
