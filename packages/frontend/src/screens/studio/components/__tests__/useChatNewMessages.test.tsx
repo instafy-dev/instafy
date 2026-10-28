@@ -214,6 +214,30 @@ describe("new arrivals above the composer", () => {
     expect(action()).toBeNull();
   });
 
+  // A local test: a turn failed while the chat's Browser view was in front;
+  // back in Chat, at the bottom, "New messages ↓" covered the failure block.
+  it("clears once the chat comes back already at its newest message, with no scroll", async () => {
+    await update({ enabled: false, arrivalMessages: [message(1), message(2)] });
+    expect(action()).toBeNull();
+    metrics.scrollTop = 800;
+    await update({ enabled: true });
+    expect(action()).toBeNull();
+    // Back somewhere above the newest message, the same arrival still shows.
+    metrics.scrollTop = 100;
+    await update({ enabled: false, arrivalMessages: [message(1), message(2), message(3)] });
+    await update({ enabled: true });
+    expect(action()).not.toBeNull();
+  });
+
+  it("does not signal an arrival the reader already sees at the bottom", async () => {
+    metrics.scrollTop = 800;
+    await update({ arrivalMessages: [message(1), message(2)] });
+    expect(action()).toBeNull();
+    container.setAttribute("hidden", "");
+    await update({ arrivalMessages: [message(1), message(2), message(3)] });
+    expect(action()).not.toBeNull();
+  });
+
   it("suppresses the action while access is unresolved or the chat surface is inactive", async () => {
     await update({ arrivalMessages: [message(1), message(2)] });
     await update({ hasResolvedHistory: false });

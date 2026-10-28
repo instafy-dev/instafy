@@ -116,6 +116,20 @@ describe("Shared browser retained frames", () => {
     expect(stateCard()).toBeNull();
   });
 
+  // A local test on a phone in light mode: around the live page the Browser
+  // view stayed black, so its chrome read as dark while Chat turned light.
+  it("puts a live page, and its retained picture, on a stage that follows the theme", async () => {
+    await render();
+    await paint();
+    const stage = document.querySelector('[data-testid="browser-session-viewport"]')!.className.split(/\s+/);
+    expect(stage).toEqual(expect.arrayContaining(["bg-slate-100", "dark:bg-black"]));
+    expect(stage).not.toContain("bg-black");
+    await render({ active: false });
+    const retained = frozen()!.className.split(/\s+/);
+    expect(retained).toEqual(expect.arrayContaining(["bg-slate-100", "dark:bg-black"]));
+    expect(retained).not.toContain("bg-black");
+  });
+
   it("disconnects when hidden and retains pixels while the returning collaboration roster loads", async () => {
     await hidePaintedPage();
     const first = latest();

@@ -19,6 +19,17 @@ interface NewMessagesOptions {
   onJumpToLatest: () => void;
 }
 
+/**
+ * The live reader sees the newest message: the chat is on screen, in its live
+ * window, and scrolled to the bottom.
+ */
+function readerAtNewest(node: HTMLDivElement, options: NewMessagesOptions): boolean {
+  if (options.messageTargetActive || !options.hasResolvedHistory || !options.isReadingReady() || node.clientHeight <= 0
+    || node.ownerDocument.visibilityState === "hidden" || node.closest('[hidden], [inert], [aria-hidden="true"]')
+    || (window.history.state?.key ?? "default") !== options.routeKey) return false;
+  return node.scrollHeight - node.clientHeight - node.scrollTop <= LIVE_BOTTOM_THRESHOLD_PX;
+}
+
 /** Tracks arrivals after the first authorized history read, independently from
  * the historical window being displayed. It never changes the reading position. */
 export function useChatNewMessages(options: NewMessagesOptions) {
@@ -62,22 +73,33 @@ export function useChatNewMessages(options: NewMessagesOptions) {
       if (hadContent === false || message.timestamp >= known.newest) arrived = true;
     }
     known.newest = newest;
+    const node = scrollContainerRef.current;
+    // An arrival the reader already sees at the bottom is no news.
+    if (arrived && enabled && node && readerAtNewest(node, latest.current)) return;
     if (arrived && (messageTargetActive || !shouldAutoScrollRef.current)) setPendingScope(scope);
-  }, [arrivalMessages, currentUserId, hasResolvedHistory, messageTargetActive, scope, shouldAutoScrollRef]);
+  }, [arrivalMessages, currentUserId, enabled, hasResolvedHistory, messageTargetActive, scope, scrollContainerRef, shouldAutoScrollRef]);
 
+  // The visible live reader at the newest message has seen every arrival. It
+  // gets there by scrolling, or without a scroll: the chat came back from its
+  // Browser view (hidden, it noted a reply) already at the bottom, or the
+  // transcript resized under it. Only a scroll used to clear it, so the pill
+  // stayed over the newest turn of a chat that was at the bottom.
   useLayoutEffect(() => {
     const node = scrollContainerRef.current;
     if (!node || !scope || !enabled) return;
-    const onScroll = () => {
+    const settle = () => {
       const current = latest.current;
-      if (current.visitKey !== visitKey || current.currentUserId !== currentUserId || current.messageTargetActive
-        || !current.hasResolvedHistory || !current.isReadingReady() || node.clientHeight <= 0
-        || node.ownerDocument.visibilityState === "hidden" || node.closest('[hidden], [inert], [aria-hidden="true"]')
-        || (window.history.state?.key ?? "default") !== current.routeKey) return;
-      if (node.scrollHeight - node.clientHeight - node.scrollTop <= LIVE_BOTTOM_THRESHOLD_PX) setPendingScope(null);
+      if (current.visitKey !== visitKey || current.currentUserId !== currentUserId) return;
+      if (readerAtNewest(node, current)) setPendingScope(null);
     };
-    node.addEventListener("scroll", onScroll, { passive: true });
-    return () => node.removeEventListener("scroll", onScroll);
+    settle();
+    node.addEventListener("scroll", settle, { passive: true });
+    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => settle());
+    resize?.observe(node);
+    return () => {
+      node.removeEventListener("scroll", settle);
+      resize?.disconnect();
+    };
   }, [currentUserId, enabled, scope, scrollContainerRef, visitKey]);
 
   const jumpToLatest = useCallback(() => {

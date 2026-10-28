@@ -533,7 +533,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
               <h1 className="sr-only" data-testid="conversation-workspace-title">{topbarLocationTitle}</h1>
               <ConversationQuickTabs tabs={openChatTabs}
                 activeId={activeChatTabId}
-                scopeName={organizationChatTabs ? resolvedTeamName : resolvedProjectName}
+                scopeName={resolvedProjectName}
                 newChat={showChatActions && !isGlobalPage && !controllerProjectMissing && activeProjectId && onStartNewConversation
                   ? { spaceName: resolvedProjectName, onCreate: onStartNewConversation } : undefined}
                 onSelect={selectOpenChat}

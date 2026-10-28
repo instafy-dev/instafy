@@ -259,7 +259,6 @@ function StudioLayoutInner() {
     tabs: workspaceTabs,
     conversationTabsReady,
     conversationTabsRestored,
-    updateInactiveConversationTab,
     closeTab: closeWorkspaceTab,
     keepTabOpen,
     openPanelTab,
@@ -694,27 +693,16 @@ function StudioLayoutInner() {
       navigateToDestination({ kind: "conversation", projectId: tab.projectId,
         conversationId: tab.conversationId, conversationControllerId: tab.controllerId, viewTabId: tab.viewTabId });
     },
+    // Every listed tab is the open space's.
     onClose: (id: string) => {
       const tab = organizationTabs.tabs.find(item => item.id === id);
-      if (!tab) return;
-      if (tab.projectId === activeProjectId) {
-        const current = workspaceTabs.find(item => item.kind === "conversation" && item.conversationId === tab.conversationId);
-        if (current) closeWorkspaceTab(current.id);
-      } else {
-        updateInactiveConversationTab(tab.projectId, tab.conversationId, "close");
-        organizationTabs.updateInactive(tab, "close");
-      }
+      const current = tab && workspaceTabs.find(item => item.kind === "conversation" && item.conversationId === tab.conversationId);
+      if (current) closeWorkspaceTab(current.id);
     },
     onKeep: (id: string) => {
       const tab = organizationTabs.tabs.find(item => item.id === id);
-      if (!tab) return;
-      if (tab.projectId === activeProjectId) {
-        const current = workspaceTabs.find(item => item.kind === "conversation" && item.conversationId === tab.conversationId);
-        if (current) keepTabOpen(current.id);
-      } else {
-        updateInactiveConversationTab(tab.projectId, tab.conversationId, "keep");
-        organizationTabs.updateInactive(tab, "keep");
-      }
+      const current = tab && workspaceTabs.find(item => item.kind === "conversation" && item.conversationId === tab.conversationId);
+      if (current) keepTabOpen(current.id);
     },
   };
   const handleHomeReturn = homeReturn.canReturn ? () => runStudioNavigation(homeReturn.returnToPrevious) : undefined;

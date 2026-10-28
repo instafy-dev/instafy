@@ -108,10 +108,11 @@ A member can **Present** a site whose page says it can share its view, and the o
   6 uploads per preview a minute and 60 per runtime an hour.
 - **Storage.** One picture per preview in `runtime_preview_thumbnails` (RLS on, no client policy). It goes with every
   new open of the preview (a preview is keyed by machine and port, so a later site on the port has the same id; the
-  CLI takes a new picture once that site is live), when the preview is closed or replaced (`supersededBy`), and with
-  its space. A preview stopped by a sleeping machine keeps its picture. One closed on purpose and started again from
-  its card has none until the next `instafy preview check` or open. A card whose record now names another site
-  shows neither that site's picture nor its facts.
+  CLI takes a new picture once that site is live), when the preview is replaced (`supersededBy`) or closed for good,
+  and with its space. A preview stopped by a sleeping machine keeps its picture. One closed on purpose whose card can
+  start it again keeps its picture and page description, unshown while it is closed, so the card shows both again
+  once a press brings the site back. A card whose record now names another site shows neither that site's picture
+  nor its facts.
 - **Reading it.** `GET /projects/:id/previews/:pid/thumbnail?v=<version>` applies the rule `GET` of the preview uses:
   members who may open the preview (a private runtime's preview is a 404 to others). The answer is
   `cache-control: private, no-store`, `x-content-type-options: nosniff`, `content-security-policy: default-src 'none';

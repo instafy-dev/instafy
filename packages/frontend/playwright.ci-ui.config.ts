@@ -35,6 +35,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-live-proof.spec.ts",
   "browser-transport-switch.spec.ts",
   "browser-recovery.spec.ts",
+  "chat-sticky-speaker-clear.spec.ts",
   "conversation-surfaces.spec.ts",
   "composer-panels.spec.ts",
   "suggestion-browser-menus.spec.ts",

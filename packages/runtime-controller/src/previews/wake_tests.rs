@@ -823,6 +823,80 @@ async fn a_preview_closed_on_purpose_starts_again_on_open_by_people_who_may_chan
     .await
 }
 
+/// "Stop the preview server", then Open on its card: a local test found the
+/// card back without its picture and facts line, because the close had
+/// deleted them and a wake takes no new picture. A preview that can start
+/// again keeps them while it is closed, unshown, and shows them once it is
+/// back.
+#[tokio::test]
+async fn a_closed_preview_shows_its_picture_and_facts_again_once_a_wake_brings_it_back(
+) -> anyhow::Result<()> {
+    use super::super::thumbnail_tests::{jpeg, upload_body};
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.open_restartable(&job).await?;
+            f.ready(&job.token, &preview_id).await?;
+            let (status, body) = f
+                .upload(
+                    &job.token,
+                    &preview_id,
+                    upload_body(&jpeg(640, 400), "image/jpeg"),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let live = f.get_preview(&preview_id).await?;
+            let version = live["thumbnail"]["version"].clone();
+            assert!(version.is_string(), "{live}");
+            assert_eq!(live["pageDescription"], json!("Trip · 3 days · 14 places"));
+
+            let (status, _) = f
+                .request(
+                    &job.token,
+                    "POST",
+                    &f.path(&format!("/{preview_id}/close")),
+                    json!({}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            // Closed: nothing shows, and the picture waits for the site.
+            let closed = f.get_preview(&preview_id).await?;
+            assert_eq!(closed["restartable"], json!(true));
+            assert_eq!(closed["thumbnail"], Value::Null, "{closed}");
+            assert!(
+                closed.get("pageDescription").map_or(true, Value::is_null),
+                "{closed}"
+            );
+            let (status, _, _) = f.picture(&f.tokens[0], &preview_id).await?;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(f.thumbnail_rows(&preview_id).await?, 1);
+
+            // A builder's Open starts it again on the running machine.
+            let (status, woken) = f.wake(1, &preview_id).await?;
+            assert_eq!(status, StatusCode::ACCEPTED, "{woken}");
+            let agent = f.agent_token(job.runtime_id, job.lease_id)?;
+            let (status, claimed) = f.claim(&agent).await?;
+            assert_eq!(status, StatusCode::OK, "{claimed}");
+            let wake_id = claimed["restarts"][0]["wakeId"]
+                .as_str()
+                .context("wakeId")?
+                .to_string();
+            let (status, result) = f.report(&agent, &wake_id, json!({ "ok": true })).await?;
+            assert_eq!(status, StatusCode::OK, "{result}");
+
+            let back = f.get_preview(&preview_id).await?;
+            assert_eq!(back["status"], "active");
+            assert_eq!(back["thumbnail"]["version"], version, "{back}");
+            assert_eq!(back["pageDescription"], json!("Trip · 3 days · 14 places"));
+            let (status, _, bytes) = f.picture(&f.tokens[0], &preview_id).await?;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!bytes.is_empty());
+            Ok(())
+        })
+    })
+    .await
+}
+
 /// A preview someone closed, whose port the broker later gave another tunnel
 /// when a newer site opened on it, is replaced as surely as one that was
 /// still open: the retirement skips a closed preview, so it carries no

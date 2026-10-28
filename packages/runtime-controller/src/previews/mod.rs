@@ -1687,6 +1687,24 @@ async fn get_preview(
     Ok(Json(response))
 }
 
+/// A preview closed on purpose shows no picture while it is closed (`GET`
+/// and the picture route both leave it out). One whose card can start it
+/// again keeps the picture and its page description for that: once a wake
+/// brings the same site back, its card shows them again, as it did before
+/// the stop, instead of a bare title until the next `instafy preview open`.
+/// A preview that cannot come back forgets them now.
+async fn forget_closed_preview_picture(state: &AppState, project_id: &Uuid, grant: &PreviewGrant) {
+    if grant.restartable() {
+        return;
+    }
+    thumbnail::delete_preview_thumbnails(
+        &state.pool,
+        project_id,
+        std::slice::from_ref(&grant.record.tunnel_id),
+    )
+    .await;
+}
+
 #[instrument(skip(state, headers))]
 async fn post_preview_close(
     State(state): State<AppState>,
@@ -1728,12 +1746,7 @@ async fn post_preview_close(
         // and that nobody still presents it.
         revoke_preview_sessions_for_tunnel(&state.pool, &grant.record.tunnel_id).await;
         mark_preview_closed(&state.pool, &grant.record.id).await?;
-        thumbnail::delete_preview_thumbnails(
-            &state.pool,
-            &project_id,
-            std::slice::from_ref(&grant.record.tunnel_id),
-        )
-        .await;
+        forget_closed_preview_picture(&state, &project_id, &grant).await;
         state
             .follow
             .end_preview(&grant.record.tunnel_id, follow::EndReason::Closed);
@@ -1745,12 +1758,7 @@ async fn post_preview_close(
             .ok_or_else(|| not_found("preview not found"))?;
     revoke_tunnel_record(&state, record, None).await?;
     mark_preview_closed(&state.pool, &grant.record.id).await?;
-    thumbnail::delete_preview_thumbnails(
-        &state.pool,
-        &project_id,
-        std::slice::from_ref(&grant.record.tunnel_id),
-    )
-    .await;
+    forget_closed_preview_picture(&state, &project_id, &grant).await;
     // A closed preview has nothing left to present.
     state
         .follow

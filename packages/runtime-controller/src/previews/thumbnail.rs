@@ -755,11 +755,13 @@ pub(super) async fn load_thumbnail_view(
     }))
 }
 
-/// Forget the pictures of previews that were closed, replaced or opened
-/// again (a later site on the same port shares the preview's id). A closed or
-/// replaced card reads Stopped; the next open of the port takes a new picture.
-/// Logged, never fatal: a picture left behind is unreadable while its preview
-/// is closed.
+/// Forget the pictures of previews that were replaced, opened again (a later
+/// site on the same port shares the preview's id) or closed for good. A
+/// closed or replaced card reads Stopped; the next open of the port takes a
+/// new picture. A preview closed on purpose that a wake can start again keeps
+/// its picture for when it does (`forget_closed_preview_picture`). Logged,
+/// never fatal: a picture left behind is unreadable while its preview is
+/// closed.
 pub(super) async fn delete_preview_thumbnails(
     pool: &PgPool,
     project_id: &Uuid,
