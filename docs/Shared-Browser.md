@@ -224,7 +224,8 @@ requests are dropped, and any message the lane does not know closes it.
 Capabilities advertise it as `rfb.viewOnly: true`. Studio uses it while Octo or
 another person drives: noVNC connects with `viewOnly` and scales the picture
 instead of resizing the shared screen, and moves to the driver's lane when
-control comes back. Octo brings the tab it works in to the front, so the view
+control comes back. Like the driver's lane, it is open only while the Browser
+view is shown. Octo brings the tab it works in to the front, so the view
 follows Octo across its own tabs. WebRTC or CDP, when the runtime offers them,
 still come first for a viewer.
 

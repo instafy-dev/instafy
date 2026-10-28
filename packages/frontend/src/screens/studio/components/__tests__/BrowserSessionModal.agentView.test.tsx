@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
   // Whether Studio has read the action log yet (the newest step it found).
   logRead: true,
   rfb: [] as Array<{ url: string; viewOnly: boolean; resizeSession?: boolean; listeners: Record<string, () => void>; frame: () => void;
-    canvas: HTMLCanvasElement }>,
+    canvas: HTMLCanvasElement; disconnect: ReturnType<typeof vi.fn> }>,
 }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   core: { enabled: true, baseUrl: "" },
@@ -125,11 +125,12 @@ type HostProps = {
   conversationId?: string;
   pageUrl?: string;
   agentPageIds?: string[];
+  hidden?: boolean;
 };
 
 /** Studio's part: tabs are read only while the view is opening or live. */
 function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl = "https://www.visitlisboa.com/",
-  agentPageIds }: HostProps) {
+  agentPageIds, hidden = false }: HostProps) {
   const [kind, setKind] = useState<HostedBrowserViewKind | null>(null);
   const pagesActive = hostedBrowserPagesActive(kind);
   const [ready, setReady] = useState(false);
@@ -147,7 +148,7 @@ function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl
     : [];
   return <BrowserSessionModal isOpen onOpenChange={noop} projectId={projectId} currentUserId="user-1"
     browserSessionId="browser-session-1" preferRuntimeId={null} resumeRuntimeId={runtimeId}
-    presentation="docked" fillContainer canControlBrowser canClearBrowserData
+    presentation="docked" fillContainer canControlBrowser canClearBrowserData transportActive={!hidden}
     controlOwner={agentHolds ? { kind: "agent", displayName: "Octo" } : { kind: "human" }}
     onTakeOverAgent={async () => true} spaceBusy={agentHolds}
     onViewStateChange={setKind} conversationId={conversationId}
@@ -243,6 +244,25 @@ describe("Shared Browser view while Octo drives", () => {
     await advance(200);
     expect(mocks.rfb.at(-1)!.url).toMatch(/\/browser\/vnc\?/);
     expect(mocks.rfb.at(-1)!.viewOnly).toBe(false);
+  });
+
+  it("closes the view-only lane while the view is hidden, as the driver's lane does", async () => {
+    await octoTakesControl({ viewOnly: true, agentPageIds: ["PAGE1"] });
+    const lane = mocks.rfb.at(-1)!;
+    expect(lane.url).toMatch(/\/browser\/vnc\/view\?/);
+    await act(async () => { lane.listeners.connect?.(); lane.frame(); });
+    await advance(50);
+    const lanes = mocks.rfb.length;
+    // The person goes back to Chat while Octo drives: nothing streams.
+    await act(async () => root.render(<Host agentHolds viewOnly hidden agentPageIds={["PAGE1"]} />));
+    await advance(200);
+    expect(lane.disconnect).toHaveBeenCalled();
+    expect(mocks.rfb.length).toBe(lanes);
+    // Back on the Browser view, it watches again.
+    await act(async () => root.render(<Host agentHolds viewOnly agentPageIds={["PAGE1"]} />));
+    await advance(200);
+    expect(mocks.rfb.length).toBe(lanes + 1);
+    expect(mocks.rfb.at(-1)!.url).toMatch(/\/browser\/vnc\/view\?/);
   });
 
   it("drops the still when the chat changes, and says where Octo is instead", async () => {

@@ -993,8 +993,9 @@ export function BrowserSessionModal({
   }
   const activeSharedBrowserViewerKind = transportActive ? participantViewerKind : retainedViewerRef.current.kind;
   // RFB for a person who does not drive (Octo, or another person, does): the
-  // view-only lane, which follows the tab Octo works in.
-  const rfbViewOnlyLane =
+  // view-only lane, which follows the tab Octo works in. Like the driver's
+  // lane, it is open only while the view is shown.
+  const rfbViewOnlyLane = transportActive &&
     activeSharedBrowserViewerKind === "rfb" && rfbViewOnlyAvailable && !humanInputEnabled;
   const rfbViewOnlyLaneRef = useRef(rfbViewOnlyLane);
   rfbViewOnlyLaneRef.current = rfbViewOnlyLane;
