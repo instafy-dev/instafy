@@ -72,6 +72,15 @@ describe("browserRequestUnavailableReason", () => {
     expect(parsed).toEqual({ task: "Open x", location: "auto" });
     expect(browserRequestUnavailableReason(parsed!, web)).toBeNull();
   });
+
+  it("reads whether Octo builds from what the browser finds, and only a plain true", () => {
+    expect(browserRequestFromMessage(card({ task: "Open x", location: "auto", continueBuilding: true })))
+      .toEqual({ task: "Open x", location: "auto", continueBuilding: true });
+    for (const continueBuilding of [false, "true", 1, null]) {
+      expect(browserRequestFromMessage(card({ task: "Open x", location: "auto", continueBuilding })))
+        .toEqual({ task: "Open x", location: "auto" });
+    }
+  });
 });
 
 describe("browserRequestTransport on Desktop with Instafy AI", () => {
@@ -135,6 +144,11 @@ describe("browserRequestFromContinuationPrompt", () => {
     expect(browserRequestFromContinuationPrompt(continuation({
       browserRequestOf: "job:job-1", dispatchContent: dispatched, browserTransport: "desktop-personal",
     }))).toEqual({ task: "Open https://app.example.test and stop on API keys.", location: "device" });
+    // A retry of a card Octo builds from still hands back.
+    expect(browserRequestFromContinuationPrompt(continuation({
+      prompt_metadata: { browserRequestOf: "job:job-1", dispatchContent: dispatched, browserTransport: "shared",
+        browserHandsBack: true },
+    }))).toEqual({ task: "Open https://app.example.test and stop on API keys.", location: "workspace", continueBuilding: true });
   });
 
   it("finds nothing for an ordinary prompt or one without the task", () => {
