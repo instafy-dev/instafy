@@ -59,7 +59,10 @@ init       Write a starter bound.json, index.html and handlers/hello.mjs. --star
            files are kept; --force overwrites them.
 check      Does the site show every item the request named (each product, stop or entry)? Reads the text of its
            HTML pages and every value in its data files (data.json, data/**/*.json), and lists the items it does
-           not show; exit 1 when one is missing, 2 when there is nothing to check. Items: --expect, plus an
+           not show. On a page of options (the compare and ranked starters' data.json) it also lists values that
+           only say nothing ("—", "n/a"), values without the page and day they were read, and a filter that
+           would count a row whose value is unknown; and it notes the rows a filter lists apart. Exit 1 when an
+           item is missing or a value needs fixing, 2 when there is nothing to check. Items: --expect, plus an
            "expect" array in data.json. Run it before telling anyone the page is done.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.

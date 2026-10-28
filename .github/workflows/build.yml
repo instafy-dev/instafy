@@ -575,7 +575,7 @@ jobs:
         run: pnpm --filter @instafy/cli exec vitest run test/preview-thumbnail.spec.ts
 
       - name: Test CLI web search and link
-        run: pnpm --filter @instafy/cli exec vitest run test/web-search.spec.ts test/web-search-eval.spec.ts test/web-reference-search.spec.ts test/web-link.spec.ts
+        run: pnpm --filter @instafy/cli exec vitest run test/web-search.spec.ts test/web-search-eval.spec.ts test/web-compare-eval.spec.ts test/web-reference-search.spec.ts test/web-link.spec.ts
 
   javascript-desktop:
     name: JavaScript Desktop and runtime

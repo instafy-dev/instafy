@@ -4,7 +4,8 @@
 // every string in its data files (data.json, data/**/*.json, records included). Items come from --expect and from
 // an "expect" array in data.json. Text that only says an item is unavailable ("Not found yet: Tokyo", a data file's
 // "missing" list) does not count as showing it: builders are told to say on the page what they could not add, and
-// that line must not pass the check. Pure helpers are exported for the tests.
+// that line must not pass the check. On a page of options it also checks the values (below). Pure helpers are
+// exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
@@ -157,20 +158,179 @@ export function checkSite(dir, expect = []) {
   return { items, shown, missing, files: site.parts.map((p) => p.file) };
 }
 
-/** The CLI's lines and exit code: 0 every item shown, 1 some missing, 2 nothing to check. */
+// ---------- the values of a page of options (the compare and ranked starters' data.json) ----------
+// Each value on such a page names the page it was read on and the day ("checked 27 Oct on maker.com"), and a value
+// nobody found says so with why; a dash or "n/a" is not a value. A filter from a stated limit ("under €600") counts
+// only values the page shows: the starters' site.byFilter lists a row whose value is unknown apart ("Price
+// unknown"), never as within the limit. These rules read the data the same way site.js draws it.
+
+/** A value that only says nothing is known: blank, dashes, "?", "n/a", "unknown", "TBD" (site.js: no value). */
+export const NO_VALUE = /^(?:[\s\-\u2010-\u2015?.\u00b7\u2026/]*|n\s*\/\s*a|unknown|tb[ad])$/i;
+const valueOf = (fact) => (fact && typeof fact === "object" && fact.v != null ? String(fact.v) : "");
+const hasValue = (fact) => !!valueOf(fact) && !NO_VALUE.test(valueOf(fact).trim());
+const httpsUrl = (url) => {
+  try {
+    return new URL(String(url)).protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+/** The number a page shows for a seed fact (site.known): a value with its source, or an estimate; else null. */
+export function knownNumber(fact) {
+  if (!hasValue(fact) || !(fact.src || fact.est)) return null;
+  if (typeof fact.n === "number") return fact.n;
+  const m = /-?\d[\d,]*(?:\.\d+)?/.exec(valueOf(fact));
+  return m ? Number(m[0].replace(/,/g, "")) : null;
+}
+
+/** Is this data.json a page of options: compare (columns of facts per item) or ranked (a price and specs per item)? */
+export function isOptionsData(data) {
+  if (!data || typeof data !== "object" || !Array.isArray(data.items)) return false;
+  return Array.isArray(data.columns) || data.items.some((i) => i && typeof i === "object" && ("price" in i || "specs" in i || "rank" in i));
+}
+
+/** Every value of a page of options: [{item, ref, label, key, fact, price}]. Compare: each column of each item;
+ *  ranked: each item's price (when it has one or a store), specs and details. */
+export function optionCells(data) {
+  const out = [];
+  if (!isOptionsData(data)) return out;
+  const columns = Array.isArray(data.columns) ? data.columns.filter((c) => c && typeof c === "object" && c.key) : null;
+  for (const item of data.items) {
+    if (!item || typeof item !== "object") continue;
+    const base = { item: String(item.name ?? item.ref ?? "an item"), ref: item.ref };
+    if (columns) {
+      for (const c of columns.slice(0, 5)) out.push({ ...base, label: String(c.label ?? c.key), key: c.key, fact: item.facts?.[c.key], price: c.type === "price" });
+      continue;
+    }
+    if ("price" in item || item.store) out.push({ ...base, label: "Price", key: "price", fact: item.price, price: true });
+    for (const fact of Array.isArray(item.specs) ? item.specs : []) out.push({ ...base, label: "spec", key: null, fact });
+    for (const d of Array.isArray(item.details) ? item.details : []) out.push({ ...base, label: String(d?.label ?? d?.key ?? "detail"), key: d?.key ?? null, fact: d?.fact });
+  }
+  return out;
+}
+
+/** The newest live record per ref and attribute in the site's record files (what a check wrote): Map ref -> record[]. */
+function liveRecords(root) {
+  const byRef = new Map();
+  const dir = path.join(root, "data", "records");
+  let files = [];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return byRef;
+  }
+  for (const file of files) {
+    let value;
+    try {
+      value = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+    } catch {
+      continue;
+    }
+    for (const r of Array.isArray(value?.records) ? value.records : []) {
+      if (!r || typeof r !== "object" || typeof r.ref !== "string") continue;
+      (byRef.get(r.ref) || byRef.set(r.ref, []).get(r.ref)).push(r);
+    }
+  }
+  return byRef;
+}
+
+/** Does a check record give the row a value for `key` that the page shows (a priced offer, or a claim that found it)? */
+function liveValue(records, key) {
+  const list = (records || []).filter((r) => (key === "price" && r.type === "offer" && typeof r.price?.amount === "number") || (r.type === "claim" && r.attr === key));
+  const newest = list.sort((a, b) => (Date.parse(b.prov?.observed_at) || 0) - (Date.parse(a.prov?.observed_at) || 0))[0];
+  if (!newest) return null;
+  if (newest.type === "offer") return newest.price.amount;
+  if (["uncertain", "not_found", "error"].includes(newest.status) || newest.value == null) return null;
+  const m = /-?\d[\d,]*(?:\.\d+)?/.exec(String(newest.value));
+  return m ? Number(m[0].replace(/,/g, "")) : null;
+}
+
+/** The values of a site's page of options: problems to fix before the card, and notes for the reply. */
+export function checkValues(dir) {
+  const root = path.resolve(dir);
+  const problems = [];
+  const notes = [];
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(path.join(root, "data.json"), "utf8"));
+  } catch {
+    return { checked: false, problems, notes };
+  }
+  if (!isOptionsData(data)) return { checked: false, problems, notes };
+  for (const cell of optionCells(data)) {
+    const { fact } = cell;
+    const where = `${cell.item} · ${cell.label}`;
+    if (!fact || typeof fact !== "object") continue; // drawn "Unknown": nothing was found, and the page says so
+    if (fact.v != null && !hasValue(fact)) {
+      problems.push(`${where}: "${valueOf(fact).trim() || " "}" says nothing. Leave out "v" and say why in "note" ("no price on maker.com's page"), or give the page you read that does not list it ({"src", "url", "date"}); the page then says "Unknown".`);
+      continue;
+    }
+    if (!hasValue(fact) || fact.est) continue;
+    const lacks = [!fact.src && '"src"', !httpsUrl(fact.url) && '"url" (the page)', !fact.date && !fact.asof && '"date" (the day)'].filter(Boolean);
+    const list = lacks.length > 1 ? `${lacks.slice(0, -1).join(", ")} or ${lacks[lacks.length - 1]}` : lacks[0];
+    if (lacks.length) problems.push(`${where}: "${valueOf(fact)}" has no ${list}: add where you read it and when ("checked 27 Oct on maker.com"), or leave the value out.${fact.src ? "" : " Without a source the page shows it as not checked."}`);
+  }
+
+  const filter = data.filter;
+  if (filter && typeof filter === "object") {
+    const label = String(filter.label || "the filter");
+    const columns = Array.isArray(data.columns) ? data.columns : null;
+    const isNumber = (v) => v != null && v !== "" && Number.isFinite(Number(v));
+    if (!filter.key) problems.push(`the filter "${label}" has no "key".`);
+    else if (columns && !columns.some((c) => c && c.key === filter.key)) problems.push(`the filter's key "${filter.key}" is not a column, so "${label}" filters nothing.`);
+    if (!isNumber(filter.max) && !isNumber(filter.min)) problems.push(`the filter "${label}" has no number in "max" or "min".`);
+    let app = "";
+    try {
+      app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+    } catch {
+      /* a page without app.js draws no filter */
+    }
+    if (app && !/\bsite\.byFilter\s*\(|\bsite\.within\s*\(/.test(app)) {
+      problems.push(`data.json has a filter, and app.js applies it without site.byFilter: a row whose value is unknown may be listed as "${label}". Use the starter's filter code (site.byFilter), which lists such rows apart.`);
+    }
+    if (filter.key) {
+      const live = liveRecords(root);
+      const unknown = optionCells(data)
+        .filter((c) => c.key === filter.key)
+        .filter((c) => knownNumber(c.fact) == null && liveValue(live.get(c.ref), filter.key) == null)
+        .map((c) => c.item);
+      if (unknown.length) {
+        const col = columns?.find((c) => c && c.key === filter.key);
+        const title = filter.unknown || `${col?.label ?? (filter.key === "price" ? "Price" : filter.key)} unknown`;
+        notes.push(`${unknown.length} item(s) have no ${String(col?.label ?? filter.key).toLowerCase()} the page can show: ${unknown.join(", ")}. The page lists them apart ("${title}"), never as "${label}"; say so in the lede and the reply, with why for each.`);
+      }
+    }
+  }
+  return { checked: true, problems, notes };
+}
+
+/** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing or a value to fix, 2
+ *  nothing to check. */
 export function checkReport(dir, expect, { json = false } = {}) {
   const result = checkSite(dir, expect);
-  if (!result.items.length) {
+  const values = checkValues(dir);
+  const bad = result.missing.length > 0 || values.problems.length > 0;
+  if (!result.items.length && !values.problems.length) {
     const message = 'nothing to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json';
-    return { exit: 2, lines: [json ? JSON.stringify({ ok: false, error: message }) : message] };
+    return { exit: 2, lines: [json ? JSON.stringify({ ok: false, error: message, values }) : message, ...(json ? [] : values.notes.map((n) => `NOTE: ${n}`))] };
   }
-  if (json) return { exit: result.missing.length ? 1 : 0, lines: [JSON.stringify({ ok: !result.missing.length, ...result })] };
+  if (json) return { exit: bad ? 1 : 0, lines: [JSON.stringify({ ok: !bad, ...result, values })] };
   const lines = [];
   if (result.missing.length) {
     lines.push(`MISSING: the request named ${result.missing.length} item(s) the site does not show: ${result.missing.join(", ")}.`);
     lines.push("Add each one to the page (its data file), or say plainly in the reply which are missing and why.");
   }
-  lines.push(`${result.shown.length} of ${result.items.length} expected item(s) shown${result.shown.length ? `: ${result.shown.map((s) => s.item).join(", ")}` : ""}.`);
-  lines.push(`Read ${result.files.length} file(s): the HTML text and the data files (what a script renders from elsewhere is not seen).`);
-  return { exit: result.missing.length ? 1 : 0, lines };
+  if (values.problems.length) {
+    lines.push(`VALUES: ${values.problems.length} value(s) to fix in data.json:`);
+    for (const problem of values.problems) lines.push(`- ${problem}`);
+  }
+  for (const note of values.notes) lines.push(`NOTE: ${note}`);
+  if (result.items.length) {
+    lines.push(`${result.shown.length} of ${result.items.length} expected item(s) shown${result.shown.length ? `: ${result.shown.map((s) => s.item).join(", ")}` : ""}.`);
+    lines.push(`Read ${result.files.length} file(s): the HTML text and the data files (what a script renders from elsewhere is not seen).`);
+  } else {
+    lines.push('No items to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json.');
+  }
+  return { exit: bad ? 1 : 0, lines };
 }

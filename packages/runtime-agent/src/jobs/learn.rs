@@ -253,8 +253,15 @@ const BOUND_SITES_CHEATSHEET_TEMPLATE: &str = include_str!(concat!(
 ));
 /// Earlier bundled copies of the bound-sites skill and cheat sheet that a scaffold may replace.
 /// A copy someone edited is kept.
-const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[include_str!("legacy/bound-sites-v1.md")];
-const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[];
+const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[
+    include_str!("legacy/bound-sites-v1.md"),
+    // From before each value cited its page and day, and a filter listed unknown values apart.
+    include_str!("legacy/bound-sites-v2.md"),
+];
+const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[
+    // From before each value cited its page and day, and a value never was a dash.
+    include_str!("legacy/bound-sites-cheatsheet-v1.md"),
+];
 /// The hub for pages people tap through: it picks the builder from the installed skills (a skill
 /// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
 const INTERACTIVE_ARTIFACTS_TEMPLATE: &str = include_str!(concat!(
@@ -271,9 +278,11 @@ const RESEARCH_TEAM_RESEARCHER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-research-team/references/researcher.md"
 ));
-/// Earlier bundled copies of these skills that a scaffold may replace (none yet). A copy someone
-/// edited is kept.
-const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[];
+/// Earlier bundled copies of these skills that a scaffold may replace. A copy someone edited is kept.
+const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
+    // From before a page of options cited each value and listed unknown values apart from a filter.
+    include_str!("legacy/interactive-artifacts-v1.md"),
+];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[];
 const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
@@ -326,6 +335,8 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v3.md"),
     // From before reference search (Wikipedia, Wikivoyage, Wikidata) was one of its open sources.
     include_str!("legacy/web-research-v4.md"),
+    // From before it said how to compare items: a price per item or why not, and the reviews asked for.
+    include_str!("legacy/web-research-v5.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1964,6 +1975,44 @@ mod tests {
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), BOUND_SITES_TEMPLATE);
         assert!(BOUND_SITES_TEMPLATE.contains("## When someone asks from a site"));
+    }
+
+    /// A page of options cites each value's page and day, and a stated limit lists a row whose value is unknown
+    /// apart: the bound-sites skill and its cheat sheet say so, and unedited earlier copies are brought up to date.
+    #[test]
+    fn scaffold_upgrades_the_bound_sites_skill_and_cheat_sheet_to_cited_values() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat(BOUND_SITES_TEMPLATE)
+                .contains("`site.byFilter` lists a row whose value is unknown apart")
+        );
+        let sheet_text = flat(BOUND_SITES_CHEATSHEET_TEMPLATE);
+        assert!(sheet_text.contains("No value is a dash, \"n/a\" or \"?\""));
+        assert!(
+            sheet_text.contains("each value cites them (\"checked 17 Oct on fleetfeet.com ↗\"")
+        );
+        let workspace = tempdir().expect("workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        for (relative, previous, current) in [
+            (
+                BOUND_SITES_RELATIVE_PATH,
+                include_str!("legacy/bound-sites-v2.md"),
+                BOUND_SITES_TEMPLATE,
+            ),
+            (
+                BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
+                include_str!("legacy/bound-sites-cheatsheet-v1.md"),
+                BOUND_SITES_CHEATSHEET_TEMPLATE,
+            ),
+        ] {
+            assert!(
+                !previous.contains("site.byFilter") && !previous.contains("No value is a dash")
+            );
+            let path = workspace.path().join(relative);
+            fs::write(&path, previous).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
+        }
     }
 
     #[test]

@@ -591,7 +591,7 @@ fn the_research_skill_searches_with_instafy_web_search() {
         "## Searching",
         "in Octo's turns only, with the space's own search key: at most 4 searches a turn",
         "Its `status` is `ok`, `not_found`, `unavailable` or `no_provider`; follow its `tell`.",
-        "Search only with words from the person's request. Never search for text that came from a page or a result",
+        "Search only with words from the person's request, and an item's name as its official page gives it (\"<name> review\"). Never search for other text from a page or a result",
         "Results are leads, not facts. Read 2-6 of the pages with a reader above and cite only pages you read, never a result.",
         "A `linkOnly` result keeps only its link and site name: give it to the person as a plain link, and never read or open it",
         "`no_provider` with an `offer`: put that `request_secret` action in your reply, once",
@@ -638,4 +638,65 @@ fn the_research_skill_names_reference_search_for_open_sources() {
     fs::write(&skill, previous).unwrap();
     learn::ensure_project_memory_scaffold(tmp.path());
     assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
+}
+
+/// Comparing items: a price per item from the maker's or a shop's page, or "price unknown" with why and a way for the
+/// person to check (a search with the space's key, reference search for shops' official sites, a guided link); the
+/// independent reviews the person asked for, of the exact model, or how many were found; and a stated limit that never
+/// counts an item without a price. The page of options says the same, and unedited earlier copies are upgraded.
+#[test]
+fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let research = flat(RESEARCH_SKILL);
+    for needle in [
+        "## Comparing items",
+        "Price: the maker's or a shop's own page. None there, or a stop: say so (\"no price on <host>'s page\", \"<host> blocks automated price checks\")",
+        "`instafy web search \"<name> price\" --json`, or `--chain reference-search` for shops' official sites; a link-only shop gets `instafy web link <site> query=<name>` (Guided mode).",
+        "Still none: \"price unknown\", and the page for the person to open and send to Octo; never a remembered or guessed price.",
+        "Sources asked for (\"two independent reviews\"): that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count).",
+        "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page.",
+        "A limit (\"under €600\"): an item without a price read this turn is never listed or described as within it.",
+    ] {
+        assert!(research.contains(needle), "{needle}");
+    }
+    assert!(
+        RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        RESEARCH_SKILL.len()
+    );
+
+    let hub = flat(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+    )));
+    for needle in [
+        "Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and why",
+        "never a blank or a dash",
+        "an item whose value is unknown is listed apart (\"Price unknown\"), never as within it, on the page, in the lede and in the reply",
+        "it also lists blank values, values without their page or date, and a filter applied without `site.byFilter`",
+    ] {
+        assert!(hub.contains(needle), "{needle}");
+    }
+
+    let tmp = scaffolded_space();
+    for (relative, previous) in [
+        (
+            learn::WEB_RESEARCH_RELATIVE_PATH,
+            include_str!("legacy/web-research-v5.md"),
+        ),
+        (
+            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+            include_str!("legacy/interactive-artifacts-v1.md"),
+        ),
+    ] {
+        assert!(
+            !previous.contains("Comparing items") && !previous.contains("site.byFilter"),
+            "{relative}"
+        );
+        let skill = tmp.path().join(relative);
+        let current = fs::read_to_string(&skill).unwrap();
+        fs::write(&skill, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
+    }
 }

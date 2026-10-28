@@ -10,16 +10,20 @@
  *                          changed, then missing ones). Otherwise rows keep the order of "items", before and after a
  *                          price check: put them in the order the lede talks about them.
  *   columns: [{key, label, type: "price"|"number"|"text"}]   at most 5; a "price" column can be checked live
- *   filter (only for a constraint the person stated): {key, max, label: "Under $160", rest: "over $160"}
+ *   filter (only for a constraint the person stated): {key, max, label: "Under $160", rest: "over $160",
+ *                          unknown?: "Price unknown"}. Only a value the page shows counts: a row whose value is
+ *                          unknown is never listed as under $160; it is listed apart, under "Price unknown".
  *   items: [{ref: "option:a", name, why (one short line), badge?: "Previous model", note?, facts: {key: fact},
  *            store: {name, url, readable}, more?: [{label, fact}], sources?: [{name, url}]}]
  *   unchecked: ["what was not checked", …]     listed once in the footer
  *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
- *   A source you read that does not give the value: the fact without "v" ({"src", "url", "date"}) reads "Not listed ·
- *   Maker ↗". "Not checked" means nobody checked it ({"note": "what to check"}).
- * When most of a column comes from one source on one date, the cells show just the value and one line under the list
- * names the source; so does a row whose own values come from one other source ("Option C (Support and Ride): Fleet
- * Feet product page ↗"). Any other cell keeps its own caption.
+ *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read that
+ *   does not give the value is the fact without "v" ({"src", "url", "date"}): "Not listed · checked 17 Oct on
+ *   maker.com ↗"; any other missing value reads "Unknown", with {"note": "the store blocks price checks"} saying why.
+ *   Never a dash.
+ * When one page gives most of a column on one date, the cells show just the value and one line under the list cites
+ * that page; so does a row whose own values come from one other page ("Option C (Support and Ride): checked 16 Oct on
+ * fleetfeet.com ↗"). Any other cell keeps its own caption.
  * Query: ?sort=<key>&show=all&open=<slug>. Rows: id="row-<slug>", data-ref="<ref>".
  * SPDX-License-Identifier: AGPL-3.0-only */
 (function () {
@@ -60,7 +64,12 @@
     if (live && site.blocked(item.ref)) return seed; // a blocked check keeps the seed value
     return live || seed;
   }
-  /** Per column: the source most of its cells share ({src, date, asof, url}), when two or more cells and over half do. */
+  /** A fact's page and day: two values share a citation only when one page on one day gives both. */
+  function citeKey(f) {
+    var page = site.safeUrl(f.url);
+    return [page ? page.split("#")[0] : "src:" + f.src, f.date || "", f.asof || ""].join("|");
+  }
+  /** Per column: the page most of its cells share ({src, date, asof, url}), when two or more cells and over half do. */
   function sharedSources(data, items) {
     var out = {};
     columns(data).forEach(function (c) {
@@ -68,8 +77,8 @@
       var count = {};
       items.forEach(function (i) {
         var f = seedOf(i, c);
-        if (!f || !f.src || f.est || f.v == null) return;
-        var k = [f.src, f.date || "", f.asof || ""].join("|");
+        if (!f || !f.src || f.est || !site.valueText(f)) return;
+        var k = citeKey(f);
         count[k] = count[k] || { n: 0, fact: f };
         count[k].n++;
       });
@@ -81,11 +90,11 @@
   function isShared(shared, item, col) {
     var s = shared[col.key];
     var f = seedOf(item, col);
-    return !!(s && f && f.src && !f.est && [f.src, f.date || "", f.asof || ""].join("|") === s.key);
+    return !!(s && f && f.src && !f.est && citeKey(f) === s.key);
   }
-  /** Per row: the one source its own cells share ({key, fact, labels}), when two or more of its cells outside the
-   * price column come from one source on one date that is not their column's. The line under the list names it once
-   * ("Option C (Support and Ride): Fleet Feet product page ↗ · seen 16 Oct"), so the row is not a stack of links. */
+  /** Per row: the one page its own cells share ({key, fact, labels}), when two or more of its cells outside the price
+   * column come from one page on one date that is not their column's. The line under the list cites it once
+   * ("Option C (Support and Ride): checked 16 Oct on fleetfeet.com ↗"), so the row is not a stack of links. */
   function rowSources(data, items, shared) {
     var out = {};
     items.forEach(function (i) {
@@ -94,9 +103,9 @@
         if (isPrice(c) || isShared(shared, i, c)) return;
         var f = seedOf(i, c);
         if (!f || !f.src || f.est) return;
-        var k = [f.src, f.date || "", f.asof || ""].join("|");
+        var k = citeKey(f);
         (by[k] = by[k] || { key: k, fact: f, labels: [], values: 0 }).labels.push(c.label);
-        if (f.v != null) by[k].values++;
+        if (site.valueText(f)) by[k].values++;
       });
       var keys = Object.keys(by);
       if (keys.length === 1 && by[keys[0]].labels.length >= 2 && by[keys[0]].values >= 1) out[i.ref] = by[keys[0]];
@@ -106,14 +115,14 @@
   function ownRow(rows, item, col) {
     var r = rows[item.ref];
     var f = seedOf(item, col);
-    return !!(r && f && f.src && !f.est && !isPrice(col) && [f.src, f.date || "", f.asof || ""].join("|") === r.key);
+    return !!(r && f && f.src && !f.est && !isPrice(col) && citeKey(f) === r.key);
   }
-  /** label: say what was not checked ("Price not checked") where no column header or fact label says it. */
+  /** A missing value reads "Unknown" (with label: "Price unknown", where no column header or fact label says what). */
   function cell(item, col, src, label) {
     if (isPrice(col)) {
-      return site.trust(valueOf(item, col), { price: true, ref: item.ref, intent: "read_offer", store: item.store, seed: seedOf(item, col), label: label });
+      return site.trust(valueOf(item, col), { price: true, ref: item.ref, intent: "read_offer", store: item.store, seed: seedOf(item, col), label: label, unknown: "Unknown" });
     }
-    return site.trust(valueOf(item, col), { shared: isShared(src.cols, item, col) || ownRow(src.rows, item, col), label: label });
+    return site.trust(valueOf(item, col), { shared: isShared(src.cols, item, col) || ownRow(src.rows, item, col), label: label, unknown: "Unknown" });
   }
   function hasMore(item) { return !!(item.note || (item.more && item.more.length) || (item.sources && item.sources.length)); }
 
@@ -125,22 +134,28 @@
     var def = (data.sort || []).filter(function (s) { return s.key === st.sort; })[0] || (data.sort || [])[0];
     if (!def) return items;
     var col = colOf(data, def.key) || { key: def.key };
-    var tier = function (i) { var v = valueOf(i, col); return site.num(v) == null ? 2 : site.old(v, isPrice(col)) ? 1 : 0; };
+    var tier = function (i) { var v = valueOf(i, col); return site.known(v) == null ? 2 : site.old(v, isPrice(col)) ? 1 : 0; };
     return items.slice().sort(function (a, b) {
       var ta = tier(a), tb = tier(b);
       if (ta !== tb) return ta - tb;
       if (ta === 2) return 0;
-      var x = site.num(valueOf(a, col)), y = site.num(valueOf(b, col));
+      var x = site.known(valueOf(a, col)), y = site.known(valueOf(b, col));
       return def.dir === "desc" ? y - x : x - y;
     });
   }
-  function fits(data, item) {
+  /** The rows by the page's one filter: {in, unknown, out}. A row whose value is unknown is never "in". */
+  function byFilter(data, items) {
     var f = data.filter;
-    if (!f) return true;
-    var n = site.num(valueOf(item, colOf(data, f.key) || { key: f.key }));
-    if (n == null) return true;
-    return (f.max == null || n <= f.max) && (f.min == null || n >= f.min);
+    var col = f ? colOf(data, f.key) || { key: f.key } : null;
+    return site.byFilter(items, f, function (i) { return valueOf(i, col); });
   }
+  /** "Price unknown": the heading of the rows the filter cannot place. */
+  function unknownTitle(data) {
+    var f = data.filter;
+    var col = colOf(data, f.key);
+    return f.unknown || ((col ? col.label : f.key) + " unknown");
+  }
+  function lowerFirst(text) { text = String(text || ""); return text.charAt(0).toLowerCase() + text.slice(1); }
 
   function render(data, st) {
     site.head(data);
@@ -152,8 +167,12 @@
       items = lastOrder.map(function (ref) { return all.filter(function (i) { return i.ref === ref; })[0]; }).filter(Boolean);
     }
     lastOrder = items.map(function (i) { return i.ref; });
-    var shown = st.show === "all" ? items : items.filter(function (i) { return fits(data, i); });
-    var hidden = items.length - shown.length;
+    // "All" is one list; the stated limit shows the rows within it, then the rows nobody could place ("Price unknown",
+    // never counted as within it), and one line for the rest
+    var parts = st.show === "all" || !data.filter ? { "in": items, unknown: [], out: [] } : byFilter(data, items);
+    var shown = parts["in"];
+    var apart = parts.unknown;
+    var hidden = parts.out.length;
     var hasPrice = columns(data).some(isPrice);
     var cols = sharedSources(data, all);
     var shared = { cols: cols, rows: rowSources(data, all, cols) };
@@ -179,7 +198,15 @@
     } else {
       var stores = hasPrice ? site.priceNotice(all) : null;
       wideNow = isWide();
-      var wrap = h("div", { "class": "stack" }, wideNow ? table(data, shown, st, shared) : cards(data, shown, st, shared));
+      var wrap = h("div", { "class": "stack" });
+      if (shown.length) wrap.appendChild(wideNow ? table(data, shown, st, shared) : cards(data, shown, st, shared));
+      else wrap.appendChild(h("p", { "class": "cap", text: "None is known to be " + lowerFirst(data.filter.label) + "." }));
+      if (apart.length) {
+        wrap.appendChild(h("section", { "class": "group", attrs: { id: "group-unknown", "aria-label": unknownTitle(data) } },
+          h("div", { "class": "group-head" }, h("h2", { text: unknownTitle(data) }),
+            h("span", { "class": "cap", text: "Not counted as " + lowerFirst(data.filter.label) })),
+          wideNow ? table(data, apart, st, shared) : cards(data, apart, st, shared)));
+      }
       var lines = [];
       if (hidden > 0) {
         lines.push(h("p", { "class": "cap hidden-line" }, hidden + " more " + (data.filter.rest || "hidden") + " · ",
@@ -215,12 +242,12 @@
     var def = (data.sort || []).filter(function (s) { return s.key === st.sort; })[0] || (data.sort || [])[0];
     if (!def) return null;
     var col = colOf(data, def.key) || { key: def.key, label: def.key };
-    var n = items.filter(function (i) { return site.num(valueOf(i, col)) == null; }).length;
+    var n = items.filter(function (i) { return site.known(valueOf(i, col)) == null; }).length;
     if (!n || n === items.length) return null;
     return h("p", { "class": "cap", text: n + " without " + (/^[aeiou]/i.test(col.label) ? "an " : "a ") + String(col.label).toLowerCase() + (n === 1 ? " is" : " are") + " listed last." });
   }
-  /** "Support and Heel drop: Running Shoes Guru ↗ · seen 16 Oct", plus ", unless a value says otherwise" when a cell
-   * of those columns has its own source. */
+  /** "Support and Heel drop: checked 16 Oct on runningshoesguru.com ↗", plus ", unless a value says otherwise" when a
+   * cell of those columns has its own source. */
   function sharedLine(data, src, items) {
     var groups = {};
     var and = function (list) { return list.length > 1 ? list.slice(0, -1).join(", ") + " and " + list[list.length - 1] : list[0]; };
@@ -230,18 +257,16 @@
       var g = groups[s.key] = groups[s.key] || { fact: s.fact, labels: [], others: false };
       g.labels.push(c.label);
       // a value with its own source that no row line names keeps its own caption: "unless a value says otherwise"
-      if (items.some(function (i) { var f = seedOf(i, c); return f && f.src && f.v != null && !isShared(src.cols, i, c) && !ownRow(src.rows, i, c); })) g.others = true;
+      if (items.some(function (i) { var f = seedOf(i, c); return f && f.src && site.valueText(f) && !isShared(src.cols, i, c) && !ownRow(src.rows, i, c); })) g.others = true;
     });
     var out = Object.keys(groups).map(function (k) {
       var g = groups[k];
-      var when = site.seen(g.fact);
-      return h("p", { "class": "cap" }, and(g.labels) + ": ", site.link(g.fact.url, g.fact.src), when ? [" · ", h("span", { "class": "nowrap", text: when })] : "", g.others ? ", unless a value says otherwise" : "");
+      return h("p", { "class": "cap" }, and(g.labels) + ": ", site.cite(g.fact), g.others ? ", unless a value says otherwise" : "");
     });
     items.forEach(function (i) {
       var r = src.rows[i.ref];
       if (!r) return;
-      var when = site.seen(r.fact);
-      out.push(h("p", { "class": "cap" }, i.name + " (" + and(r.labels) + "): ", site.link(r.fact.url, r.fact.src), when ? [" · ", h("span", { "class": "nowrap", text: when })] : ""));
+      out.push(h("p", { "class": "cap" }, i.name + " (" + and(r.labels) + "): ", site.cite(r.fact)));
     });
     return out.length ? h("div", null, out) : null;
   }

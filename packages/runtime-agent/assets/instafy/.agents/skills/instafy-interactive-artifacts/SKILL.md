@@ -31,13 +31,20 @@ own kind of page.
 
 - Phone-first, no build step, no secrets in the page. Render text with `textContent`; only open `https:` links.
 - One primary button per page; no search, filter or sort nobody asked for. The lede: the verdict plus the biggest
-  unknown. Facts carry their trust: `seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Not checked`.
+  unknown. Facts carry their trust: `checked 17 Oct on maker.com`, `€549 at Shop · seen 17 Oct`, `checked 4 min
+  ago`, `Estimate`, `Unknown`.
+- Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
+  why ("no price on maker.com's page"), never a blank or a dash. A filter from a stated limit ("under €600") counts
+  known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on the
+  page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too.
 - Keep sort, filters and the open tab in the URL query and give rows ids, so links and Studio's Follow keep them.
 - Every item the request names (stops, products, entries) is on the page, or the reply says plainly which is
   missing and why. Check before the card with the builder skill's own check, else
-  `instafy bind check <dir> --expect "<item>,<item>"`.
+  `instafy bind check <dir> --expect "<item>,<item>"`; it also lists blank values, values without their page or
+  date, and a filter applied without `site.byFilter`. Fix each.
 - Facts come from pages you opened this turn, never from memory: the builder skill's source or fetch command when
-  it has one, else Instafy's browser (`instafy-browser-automation`). Keep each fact's link and date.
+  it has one, else `instafy-web-research` (its "Comparing items" for prices and reviews per item) or Instafy's
+  browser (`instafy-browser-automation`). Keep each fact's link and date.
 - "Near me": never `navigator.geolocation` (Studio blocks it); `await instafyBind.location()` per
   `instafy-bound-sites`, with a typed place as a fallback.
 
