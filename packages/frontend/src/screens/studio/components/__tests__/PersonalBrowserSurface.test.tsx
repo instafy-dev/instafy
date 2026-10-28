@@ -731,8 +731,8 @@ describe("PersonalBrowserSurface", () => {
       .toBe("Browser location");
     const personal = document.querySelector<HTMLButtonElement>('[data-testid="browser-transport-personal"]')!;
     const shared = document.querySelector<HTMLButtonElement>('[data-testid="browser-transport-shared"]')!;
-    expect(personal.textContent).toBe("This device");
-    expect(shared.textContent).toBe("Workspace");
+    expect(personal.textContent).toContain("This device");
+    expect(shared.textContent).toContain("Workspace");
     expect(personal.getAttribute("aria-label")).toBe("This device");
     expect(personal.getAttribute("aria-pressed")).toBe("true");
     expect(shared.getAttribute("aria-label")).toBe("Workspace browser");

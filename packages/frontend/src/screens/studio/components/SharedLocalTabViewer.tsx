@@ -12,6 +12,8 @@ import { BrowserToolsPopover } from "./BrowserToolsPopover";
 import { Button, IconButton } from "../../../components/Button";
 import { Select } from "../../../components/Select";
 import { Text } from "../../../components/Text";
+import { MenuItemContent } from "../../../components/MenuItemContent";
+import { StudioMenuAction } from "../../../components/aria/StudioMenu";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { browserShareClient, type BrowserShare } from "../../../services/runtimeController/browserShares";
 import { DARK_PANEL_BORDER_CLASS } from "../../../theme/darkSurfaces";
@@ -205,12 +207,12 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
         }}>
           <option value="fit">Fit to view</option><option value="1">100% · Read size</option><option value="1.5">150%</option><option value="2">200%</option>
         </Select>
-        <div className="flex flex-col items-stretch gap-2">
-          <Button preset="inline" variant="ghost" onPress={() => { setToolsOpen(false); setFullscreen(current => !current); }} aria-label={fullscreen ? "Minimize shared tab" : "Expand shared tab"}>{fullscreen ? "Minimize" : "Expand"}</Button>
-          {exploring ? <Button preset="inline" variant="ghost" aria-label="Reload your browsing page" onPress={() => { command("exploreNavigate",{viewId:explore!.view!.viewId,action:"reload"}); setToolsOpen(false); }}>Reload</Button> : null}
-          {!exploring && !selfControls && hasPicture && control?.available ? <Button preset="inline" variant="ghost" data-testid="local-tab-control-action" onPress={() => { command(control.requested ? "releaseControl" : "requestControl"); setToolsOpen(false); }}>{control.requested ? "Cancel control request" : "Request control"}</Button> : null}
-          {selfControls && !exploring && narrowToolbar ? <Button preset="inline" variant="ghost" data-testid="local-tab-control-action" aria-label="Release control" onPress={() => { command("releaseControl"); setToolsOpen(false); }}>Release control</Button> : null}
-          {selfControls || exploring ? <Button preset="inline" variant="ghost" aria-pressed={panOnly} onPress={() => { setPanOnly(current => !current); setToolsOpen(false); }}>{panOnly ? "Control page" : "Pan view"}</Button> : null}
+        <div>
+          <StudioMenuAction onPress={() => { setToolsOpen(false); setFullscreen(current => !current); }} aria-label={fullscreen ? "Minimize shared tab" : "Expand shared tab"}><MenuItemContent>{fullscreen ? "Minimize" : "Expand"}</MenuItemContent></StudioMenuAction>
+          {exploring ? <StudioMenuAction aria-label="Reload your browsing page" onPress={() => { command("exploreNavigate",{viewId:explore!.view!.viewId,action:"reload"}); setToolsOpen(false); }}><MenuItemContent>Reload</MenuItemContent></StudioMenuAction> : null}
+          {!exploring && !selfControls && hasPicture && control?.available ? <StudioMenuAction data-testid="local-tab-control-action" onPress={() => { command(control.requested ? "releaseControl" : "requestControl"); setToolsOpen(false); }}><MenuItemContent>{control.requested ? "Cancel control request" : "Request control"}</MenuItemContent></StudioMenuAction> : null}
+          {selfControls && !exploring && narrowToolbar ? <StudioMenuAction data-testid="local-tab-control-action" aria-label="Release control" onPress={() => { command("releaseControl"); setToolsOpen(false); }}><MenuItemContent>Release control</MenuItemContent></StudioMenuAction> : null}
+          {selfControls || exploring ? <StudioMenuAction aria-pressed={panOnly} onPress={() => { setPanOnly(current => !current); setToolsOpen(false); }}><MenuItemContent>{panOnly ? "Control page" : "Pan view"}</MenuItemContent></StudioMenuAction> : null}
         </div>
         <Text variant="caption" tone="muted">{exploring ? "Your page and scroll are separate. Website logins and saved data are shared. Reload to see others’ changes; behavior depends on the website." : selfControls ? "You can click and type using the owner’s account. Release returns control to the owner." : "You are viewing the shared page. Request control to click and type using the owner’s account."}</Text>
       </BrowserToolsPopover>

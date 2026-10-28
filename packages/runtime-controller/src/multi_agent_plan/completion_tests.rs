@@ -365,3 +365,65 @@ async fn planning_finalizer_keeps_the_issuing_generation_and_leaves_replacement_
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn a_helper_reply_folds_into_the_plan_without_a_reply_notification() -> anyhow::Result<()> {
+    // The Studio folds a plan worker's own messages into the plan card, so its
+    // completion must not reach the inbox, a lock screen, Home's feed or Home's
+    // unread replies as a reply. The same completion outside a plan is an
+    // ordinary visible reply.
+    for worker in [true, false] {
+        let Some(fixture) = seed_reserved_managed_ai_prompt("helper-reply-notification").await?
+        else {
+            eprintln!("skipping helper reply notification integration: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let result: anyhow::Result<()> = async {
+            let (runtime, _, _, token) = add_runtime(&fixture).await?;
+            let group = Uuid::new_v4();
+            let connection = fixture.pool.get().await?;
+            let plan_metadata = if worker {
+                json!({"multiAgentPlan":{"groupId":group,"role":"worker","lead":{"leadHandle":"octo"}}})
+            } else { json!({}) };
+            let conversation: Uuid = connection.query_one("update agent_jobs
+                set status='leased',leased_by_runtime_id=$2,lease_attempts=1,
+                    lease_expires_at=now()+interval '1 minute',plan_group_id=$3,agent_role=$4,
+                    payload=jsonb_set(payload,'{metadata}',coalesce(payload->'metadata','{}'::jsonb)||$5::jsonb)
+                where id=$1 returning conversation_id",
+                &[&fixture.job_id,&runtime,&worker.then_some(group),&worker.then_some("worker"),&PgJson(plan_metadata)]).await?.get(0);
+            drop(connection);
+            let app = crate::agent::router().with_state(fixture.state.clone());
+            let response = post(app,"/agent/complete",&token,json!({"job_id":fixture.job_id,"outcome":"succeeded",
+                "summary":"Read the three files; the blue version keeps its contrast.","artifacts":[]})).await?;
+            assert_eq!(response.0,StatusCode::OK,"{:?}",response.1);
+            let connection = fixture.pool.get().await?;
+            let reply = connection.query_one("select id,metadata from conversation_messages
+                where conversation_id=$1 and role='assistant' and metadata->>'jobId'=$2",
+                &[&conversation,&fixture.job_id.to_string()]).await?;
+            let (reply_id, metadata): (Uuid, JsonValue) = (reply.get(0), reply.get(1));
+            assert_eq!(metadata["multiAgentPlan"]["role"]==json!("worker"),worker,"{metadata}");
+            let replies: i64 = connection.query_one("select count(*) from notification_events where producer_key=$1",
+                &[&format!("conversation.reply:{reply_id}")]).await?.get(0);
+            assert_eq!(replies,if worker {0} else {1},"worker={worker}");
+            let feed: i64 = connection.query_one("select count(*) from activity_events
+                where kind='conversation.reply' and conversation_id=$1 and run_id=$2",
+                &[&conversation,&fixture.run_id]).await?.get(0);
+            assert_eq!(feed,if worker {0} else {1},"worker={worker}");
+            drop(connection);
+            let owner_token = crate::auth::issue_controller_token(&fixture.config,&fixture.owner_user_id).map_err(api_error)?.token;
+            let response = crate::notifications::router().with_state(fixture.state.clone()).oneshot(Request::builder()
+                .method("GET").uri("/me/notifications/inbox")
+                .header("authorization",format!("Bearer {owner_token}")).body(Body::empty())?).await?;
+            assert_eq!(response.status(),StatusCode::OK);
+            let inbox: JsonValue = serde_json::from_slice(&to_bytes(response.into_body(),usize::MAX).await?)?;
+            let unread = inbox["items"].as_array().ok_or_else(|| anyhow::anyhow!("inbox items: {inbox}"))?.iter()
+                .any(|item| item["conversationId"]==json!(conversation) && item["lastMessageId"]==json!(reply_id));
+            assert_eq!(unread,!worker,"worker={worker}: {inbox}");
+            Ok(())
+        }.await;
+        let cleanup = fixture.cleanup().await;
+        result?;
+        cleanup?;
+    }
+    Ok(())
+}

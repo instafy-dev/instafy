@@ -8,7 +8,6 @@ import { useLexicalTextEntity } from "@lexical/react/useLexicalTextEntity";
 import type { EntityMatch } from "@lexical/text";
 import { $createTextNode, $insertNodes, $isTextNode, type TextNode } from "lexical";
 import type { AssistantMentionToken } from "../../../../conversations/assistantMentions";
-import { Text } from "../../../../components/Text";
 import {
   OCTO_AVATAR_SRC,
   resolveAgentAvatarGradient,
@@ -27,6 +26,7 @@ import { resolveAssistantMentionToken } from "../assistantMentionUI";
 import { $createAgentMentionNode, AgentMentionNode } from "./AgentMentionNode";
 import { $createAssistantMentionNode, AssistantMentionNode } from "./AssistantMentionNode";
 import { $createUserMentionNode } from "./UserMentionNode";
+import { ComposerSuggestionMenu, ComposerSuggestionOption } from "./ComposerSuggestions";
 
 export type MentionAgentProfile = {
   handle?: string | null;
@@ -410,46 +410,25 @@ function AssistantMentionsMenu({
   };
 
   return createPortal(
-    <div
-      className="fixed z-50 overflow-y-auto overscroll-contain rounded-xl border border-slate-200 bg-white p-2 shadow-lg dark:border-slate-800 dark:bg-slate-900"
+    <ComposerSuggestionMenu
       style={menuStyle}
       data-testid="assistant-mention-menu"
     >
       {options.map((option, index) => (
-        <button
+        <ComposerSuggestionOption
           key={option.key}
           ref={option.setRefElement}
-          type="button"
           data-testid="assistant-mention-option"
           data-token={option.token}
-          data-highlighted={selectedIndex === index ? "true" : "false"}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition ${
-            selectedIndex === index
-              ? "bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-100"
-              : "text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800/70"
-          }`}
+          isHighlighted={selectedIndex === index}
+          label={option.token}
+          description={option.label}
+          start={<MentionOptionFace option={option} agentProfilesByHandle={agentProfilesByHandle} />}
           onClick={() => selectOptionAndCleanUp(option)}
           onMouseEnter={() => setHighlightedIndex(index)}
-        >
-          <MentionOptionFace option={option} agentProfilesByHandle={agentProfilesByHandle} />
-          <span className="min-w-0 flex-1">
-            <span className="flex min-w-0 items-center gap-2">
-              <span className="inline-flex shrink-0 items-center rounded-full border border-slate-300/80 bg-slate-200/70 px-2 py-0.5 text-[13px] font-semibold leading-none text-slate-800 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100">
-                {option.token}
-              </span>
-              <Text
-                as="span"
-                variant="caption"
-                tone="muted"
-                className="truncate text-sm font-medium leading-5"
-              >
-                {option.label}
-              </Text>
-            </span>
-          </span>
-        </button>
+        />
       ))}
-    </div>,
+    </ComposerSuggestionMenu>,
     anchorElement
   );
 }

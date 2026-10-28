@@ -89,6 +89,16 @@ determines the winner. Arbitrary layout classes remain supported.
   description slot; utility icons are plain 16px icons, not nested bordered tiles.
   Shared separators reset the native rule border so only the themed 1px divider
   is visible. Popover scroll areas follow the selected theme's native color scheme.
+- Slash-command and mention suggestions use `ComposerSuggestions` for the floating
+  surface and native menu-row presentation. Labels and descriptions share the
+  menu typography; mention avatars remain round. Lexical owns anchoring,
+  highlighting, selection and keyboard focus, so these remain native buttons
+  rather than a separate React Aria menu that takes focus from the editor.
+- Browser location, session and sharing menus use shared menu actions, descriptions,
+  text and separators. Session details retains its native disclosure behavior with
+  the shared native-row presentation. Viewport bounds and native browser-overlay
+  registration remain feature-owned. The composer's silence hint uses a quiet
+  `IconButton` dismiss action with the shared 44px coarse-pointer target.
 - Queue and saved drafts use `ComposerMessagePanel` for their 384px maximum measure,
   14px heading, 16px icon and 12px/8px header insets. `ComposerMessagePopover` owns
   viewport clearance and anchoring, leaving extra side room for queue dragging.
