@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   requestAccessToken: vi.fn(),
   fetchPendingApproval: vi.fn(),
   actions: [] as RuntimeBrowserSessionAction[],
+  // Whether Studio has read the action log yet (the newest step it found).
+  logRead: true,
   rfb: [] as Array<{ url: string; viewOnly: boolean; resizeSession?: boolean; listeners: Record<string, () => void>; frame: () => void;
     canvas: HTMLCanvasElement }>,
 }));
@@ -33,7 +35,8 @@ vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   } },
 } }));
 vi.mock("../SharedBrowserProfileStatus", () => ({ SharedBrowserProfileStatus: () => null }));
-vi.mock("../useBrowserSessionActions", () => ({ useBrowserSessionActions: () => ({ actions: mocks.actions, latestClick: null }) }));
+vi.mock("../useBrowserSessionActions", () => ({ useBrowserSessionActions: () => ({ actions: mocks.actions, latestClick: null,
+  logSeq: mocks.logRead ? mocks.actions.reduce((latest, action) => Math.max(latest, action.seq), 0) : null }) }));
 vi.mock("../browserSessionRfbFrame", () => ({
   observeBrowserRfbFrames: (rfb: { frame?: () => void }, onFrame: () => void) => { rfb.frame = onFrame; return () => {}; },
 }));
@@ -169,6 +172,7 @@ describe("Shared Browser view while Octo drives", () => {
     server.owner = { kind: "human", participantId: "self" }; server.sockets = []; server.revision = 0;
     mocks.rfb.length = 0;
     mocks.actions = [];
+    mocks.logRead = true;
     mocks.fetchStatus.mockReset().mockResolvedValue({ runtimes: [session] });
     mocks.requestAccessToken.mockReset().mockResolvedValue({ token: "origin-token", endpoint: "https://origin.test", expiresIn: 300 });
     mocks.fetchPendingApproval.mockReset().mockResolvedValue(null);
@@ -264,6 +268,30 @@ describe("Shared Browser view while Octo drives", () => {
     await octoTakesControl({ agentPageIds: ["PAGE1"] });
     expect(document.querySelector('[data-testid="browser-reading-takeover"]')).not.toBeNull();
     expect(takeOverButtons()).toBe(1);
+  });
+
+  it("never captions an earlier turn's step when the view opens during Octo's turn", async () => {
+    // Drive, Oct 28: the view opened as the card was pressed, read the log
+    // once Octo held the browser, and captioned the earlier chat's last step
+    // ("Go to https://www.roborock.com/").
+    mocks.actions = [action(1, "Go to https://www.roborock.com/")];
+    mocks.logRead = false;
+    server.owner = { kind: "agent", displayName: "Octo" };
+    await act(async () => root.render(<Host agentHolds viewOnly agentPageIds={["PAGE1"]} />));
+    await advance(1_000);
+    const lane = mocks.rfb.at(-1)!;
+    expect(lane.url).toMatch(/\/browser\/vnc\/view\?/);
+    await act(async () => { lane.listeners.connect?.(); lane.frame(); });
+    await advance(50);
+    // The log is first read while Octo holds the browser.
+    mocks.logRead = true;
+    await act(async () => root.render(<Host agentHolds viewOnly agentPageIds={["PAGE1"]} />));
+    await advance(20);
+    expect(ticker()).toBeNull();
+    mocks.actions = [...mocks.actions, action(2, "Click \"menu\"")];
+    await act(async () => root.render(<Host agentHolds viewOnly agentPageIds={["PAGE1"]} />));
+    await advance(20);
+    expect(ticker()).toContain("Click \"menu\"");
   });
 
   it("captions only Octo's steps of this turn, and nothing once it ends", async () => {

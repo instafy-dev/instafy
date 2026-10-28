@@ -120,9 +120,12 @@ earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
 earlier tab" in the tab picker. Take over
 is the same action as the toolbar's take-over, without a confirmation: it
 cancels the run, and ending its runtime-wide agent marker returns every tab to
-people. On a tab the agent opened itself, take-over finds the runtime's one
-browser run; a person's own tab never falls back to a runtime-wide run. Once
-control is gone, no tab carries the agent's name.
+people. Taken on one of the agent's own tabs, it first keeps that tab (the
+keep route below, waited on for at most 1.5 s), so the page the person took
+stays open when the run's other tabs close. On a tab the agent opened itself,
+take-over finds the runtime's one browser run; a person's own tab never falls
+back to a runtime-wide run. Once control is gone, no tab carries the agent's
+name.
 
 Personal and Shared Browser use one `BrowserAddressField` and the common Instafy
 `Input`, `Button`, `IconButton` and `Checkbox` primitives for their address, actions
@@ -230,9 +233,12 @@ while Octo drives keeps a still of the page Octo is on, and who has control
 with one **Take over** (the reading row's, when it shows). The still is kept
 only for the chat, page and address it was taken on: once any of them changes
 the stage says in one line where Octo is ("Octo is on example.com") instead of
-showing another page. When nobody holds control the view says to request it.
-The caption of Octo's latest step shows only while Octo holds the browser, and
-only for steps of that hold.
+showing another page. A viewer that stays connected while its tab moves to
+another address (a screencast) can still be captured for the new address.
+When nobody holds control the view says to request it. The caption of Octo's
+latest step shows only while Octo holds the browser, and only for steps of that
+hold: steps already in the log when the hold began, or when the view first read
+the log during the hold, are never captioned.
 
 The collaboration roster belongs to the browser, not to a tab: its socket stays
 connected while Studio's tab list is empty or reloading, and the participant's
@@ -639,9 +645,10 @@ Browser has tabs of its own (see Personal-Browser.md).
   confirmed gone, runtime-agent closes Octo's tabs through the loopback
   DevTools endpoint (`GET /json/close/<id>`), apart from the ones kept through
   `POST /browser/pages/:id/keep` (`browser.control`, recorded in the run's
-  `kept-tabs.json`). Studio's toolbar no longer shows a **Keep tab** button: it
-  was unexplained to a first-time user, and the person now watches Octo's tab
-  live while Octo works in it. The route stays for clients. A kept tab stays
+  `kept-tabs.json`). Studio keeps the tab on screen when the person takes over
+  on one of Octo's tabs; it shows no separate **Keep tab** button, which was
+  unexplained to a first-time user, since the person now watches Octo's tab
+  live while Octo works in it. A kept tab stays
   an ordinary tab no later run can use, and both records are cleared with the
   run's approval directory.
 - **No orphan tabs.** A tab of Octo's that is still open when its run's

@@ -10,7 +10,7 @@ const { cancelAgentJob, cancelConversationJobs, cancelPlanGroup } = vi.hoisted((
 }));
 vi.mock("../../../../services/runtimeController/jobs", () => ({ cancelAgentJob, cancelConversationJobs, cancelPlanGroup }));
 
-import { useChatBrowserHandoff } from "../useChatBrowserHandoff";
+import { TAKE_OVER_KEEP_TAB_WAIT_MS, useChatBrowserHandoff } from "../useChatBrowserHandoff";
 
 type Options = Parameters<typeof useChatBrowserHandoff>[0];
 type Result = ReturnType<typeof useChatBrowserHandoff>;
@@ -115,6 +115,41 @@ describe("useChatBrowserHandoff", () => {
     expect(cancelAgentJob).not.toHaveBeenCalled();
     await expect(resultRef.current!.takeOverShared({ agentHoldsBrowser: true })).resolves.toBe(true);
     expect(cancelAgentJob).toHaveBeenCalledExactlyOnceWith(JOB_ID, "User taking over the browser");
+  });
+
+  it("keeps the agent's own tab on screen when the person takes over on it, then stops the turn", async () => {
+    // Take over on a tab Octo opened: the turn's end closes Octo's tabs that
+    // are not kept, so without this the page the person took would vanish.
+    cancelAgentJob.mockResolvedValue({ ok: true, canceledJobIds: [JOB_ID], canceledRunIds: [] });
+    const keepAgentTab = vi.fn().mockResolvedValue(true);
+    const onOctosTab = { id: "octo-tab-1", url: "https://example.test/route", host: "example.test", label: "Route", openedBy: "agent" as const };
+    await render(options({ page: onOctosTab, keepAgentTab }));
+    await expect(resultRef.current!.takeOverShared({ agentHoldsBrowser: true })).resolves.toBe(true);
+    expect(keepAgentTab).toHaveBeenCalledExactlyOnceWith("octo-tab-1");
+    expect(cancelAgentJob).toHaveBeenCalledExactlyOnceWith(JOB_ID, "User taking over the browser");
+    expect(keepAgentTab.mock.invocationCallOrder[0]).toBeLessThan(cancelAgentJob.mock.invocationCallOrder[0]);
+  });
+
+  it("keeps no tab for a person's own tab or a kept one, and stops the turn when keeping fails or hangs", async () => {
+    cancelAgentJob.mockResolvedValue({ ok: true, canceledJobIds: [JOB_ID], canceledRunIds: [] });
+    const keepAgentTab = vi.fn().mockResolvedValue(true);
+    await render(options({ keepAgentTab }));
+    await expect(resultRef.current!.takeOverShared({ agentHoldsBrowser: true })).resolves.toBe(true);
+    const kept = { id: "octo-tab-1", url: "https://example.test/route", host: "example.test", label: "Route", openedBy: "agent" as const, kept: true };
+    await render(options({ page: kept, keepAgentTab }));
+    await expect(resultRef.current!.takeOverShared({ agentHoldsBrowser: true })).resolves.toBe(true);
+    expect(keepAgentTab).not.toHaveBeenCalled();
+
+    const octosTab = { ...kept, kept: false };
+    await render(options({ page: octosTab, keepAgentTab: vi.fn().mockRejectedValue(new Error("gone")) }));
+    await expect(resultRef.current!.takeOverShared({ agentHoldsBrowser: true })).resolves.toBe(true);
+    const hanging = vi.fn(() => new Promise<boolean>(() => {}));
+    await render(options({ page: octosTab, keepAgentTab: hanging }));
+    const takingOver = resultRef.current!.takeOverShared({ agentHoldsBrowser: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(TAKE_OVER_KEEP_TAB_WAIT_MS); });
+    await expect(takingOver).resolves.toBe(true);
+    expect(hanging).toHaveBeenCalledOnce();
+    expect(cancelAgentJob).toHaveBeenCalledTimes(4);
   });
 
   it("propagates cancellation failure without fallback", async () => {

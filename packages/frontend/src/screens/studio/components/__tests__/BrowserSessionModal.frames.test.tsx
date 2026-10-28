@@ -90,14 +90,14 @@ describe("Shared browser retained frames", () => {
     container.remove(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
-  async function render(options: { active?: boolean; open?: boolean; runtime?: string; page?: string; user?: string; project?: string; browserSession?: string } = {}) {
+  async function render(options: { active?: boolean; open?: boolean; runtime?: string; page?: string; user?: string; project?: string; browserSession?: string; url?: string; viewer?: "rfb" | "cdp-screencast" } = {}) {
     await act(async () => root.render(<BrowserSessionModal isOpen={options.open ?? true} transportActive={options.active ?? true}
       onOpenChange={noop} projectId={options.project ?? projectId} currentUserId={options.user ?? "user-1"}
       browserSessionId={options.browserSession ?? "browser-session-1"} preferRuntimeId={null} resumeRuntimeId={options.runtime ?? runtimeId}
       presentation="docked" fillContainer canControlBrowser canClearBrowserData sharedBrowserCapabilitiesResolved sharedBrowserCapabilitiesAvailable
-      sharedBrowserViewerKind="rfb" sharedBrowserAvailableViewerKinds={["rfb", "cdp-screencast"]}
+      sharedBrowserViewerKind={options.viewer ?? "rfb"} sharedBrowserAvailableViewerKinds={["rfb", "cdp-screencast"]}
       sharedBrowserRfbCapabilities={{ renderScale: 1, maxFramebufferPixels: 8_294_400 }}
-      sharedBrowserChrome={{ pages: [{ id: options.page ?? "page-1", label: "Example", title: "Example", lastReferencedAt: 0, host: "example.test", url: "https://example.test", isActive: true }],
+      sharedBrowserChrome={{ pages: [{ id: options.page ?? "page-1", label: "Example", title: "Example", lastReferencedAt: 0, host: "example.test", url: options.url ?? "https://example.test", isActive: true }],
         resolved: true, pendingAction: null, error: null, onNavigate: noop, onBack: noop, onForward: noop, onReload: noop, onFocusPage: noop, onClearError: noop }} />));
     await act(async () => { await vi.advanceTimersByTimeAsync(0); await vi.dynamicImportSettled(); });
   }
@@ -215,6 +215,26 @@ describe("Shared browser retained frames", () => {
     expect(first.disconnect).toHaveBeenCalledTimes(1);
     expect(first.viewOnly).toBe(true);
     expect(mocks.instances).toHaveLength(1);
+  });
+
+  it("keeps a screencast's picture across a move to another address in the same tab", async () => {
+    // The screencast follows its tab, so it stays connected while the page
+    // moves on and reports Ready only once. The address a still is kept for
+    // changes with the page, but the surface showing the new address may
+    // still be captured when the connection drops.
+    mocks.cdpSurface = true;
+    await render({ viewer: "cdp-screencast", url: "https://example.test/a" });
+    await act(async () => mocks.cdpCallbacks!.onConnected());
+    expect(frozen()).toBeNull();
+    const connections = mocks.cdpUrls.length;
+    await render({ viewer: "cdp-screencast", url: "https://example.test/b" });
+    expect(mocks.cdpUrls.at(-1)).toBe(mocks.cdpUrls[connections - 1]);
+    await act(async () => mocks.cdpCallbacks!.onDisconnected({ connected: true, reason: "renderer disconnected" }));
+    expect(HTMLCanvasElement.prototype.toDataURL).toHaveBeenCalledTimes(1);
+    expect(frozen()?.src).toBe(picture);
+    // That still is of /b: it goes once the page moves on again.
+    await render({ viewer: "cdp-screencast", url: "https://example.test/c" });
+    expect(frozen()).toBeNull();
   });
 
   it("discards the retained authenticated page before clearing browser data", async () => {

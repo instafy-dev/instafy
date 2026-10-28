@@ -79,6 +79,7 @@ export function useChatComposerBrowserTargeting({
     goForward: goForwardInSharedBrowser,
     reloadPage: reloadSharedBrowserPage,
     focusPage: focusBrowserSessionPage,
+    keepPage: keepSharedBrowserPage,
   } = useBrowserSessionPages({
     enabled:
       sharedBrowserActivated &&
@@ -249,6 +250,7 @@ export function useChatComposerBrowserTargeting({
     goBackInSharedBrowser,
     goForwardInSharedBrowser,
     reloadSharedBrowserPage,
+    keepSharedBrowserPage,
     setPendingBrowserLaunchMode: updatePendingBrowserLaunchMode,
   };
 }

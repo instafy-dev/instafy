@@ -1849,6 +1849,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     goBackInSharedBrowser,
     goForwardInSharedBrowser,
     reloadSharedBrowserPage,
+    keepSharedBrowserPage,
     setPendingBrowserLaunchMode,
   } = useChatComposerBrowserTargeting({
     activeConversationId,
@@ -4680,6 +4681,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personal: personalBrowser,
     agentHandle: typingAgentHandle,
     onSubmit,
+    keepAgentTab: keepSharedBrowserPage,
   });
   // Octo opens the browser in the desktop app, or Instafy's browser on the
   // conversation's own machine in a covered space, by itself for its

@@ -874,13 +874,26 @@ export function BrowserSessionModal({
   const frameOriginId = frameOriginRef.current?.runtimeId === frameRuntimeId ? frameOriginRef.current.originId : null;
   const frameScope = JSON.stringify([currentUserId, projectId, browserSessionId,
     resumeRuntimeId, preferRuntimeId, forcedRuntimeId,
-    frameRuntimeId, frameOriginId, sharedBrowserPageId, conversationId, sharedBrowserPageUrl]);
+    frameRuntimeId, frameOriginId, sharedBrowserPageId]);
   const frameScopeRef = useRef(frameScope);
   frameScopeRef.current = frameScope;
+  // A still is shown only for the chat and the address it was taken on, so
+  // a page an earlier chat or step left never shows under another one. The
+  // surface that painted stays a source for a new still: a screencast keeps
+  // its connection while its tab moves on.
+  const stillScope = JSON.stringify([frameScope, conversationId, sharedBrowserPageUrl]);
+  const stillScopeRef = useRef(stillScope);
+  stillScopeRef.current = stillScope;
   const retainFrameRef = useRef(isOpen);
   retainFrameRef.current = isOpen && !browserDataClearInFlight;
-  const frozenFrameUrl = isOpen && capturedFrameScopeRef.current === frameScope ? capturedFrameUrl : null;
+  const frozenFrameUrl = isOpen && capturedFrameScopeRef.current === stillScope ? capturedFrameUrl : null;
   useEffect(clearRetainedBrowserFrame, [clearRetainedBrowserFrame, frameScope, isOpen]);
+  useEffect(() => {
+    if (capturedFrameScopeRef.current !== null && capturedFrameScopeRef.current !== stillScope) {
+      capturedFrameScopeRef.current = null;
+      setFrozenFrameUrl(null);
+    }
+  }, [stillScope]);
 
   // The conversation's own approval lane, keyed on its running job's machine
   // and page, stands in for this view's own poll when it is for this view's
@@ -1104,7 +1117,7 @@ export function BrowserSessionModal({
   // the AI cursor and caption what it's doing. Gated to match where the overlay
   // renders (connected and not collapsed) so a hidden/collapsed session doesn't
   // keep polling. Uses the same runtime the VNC stream resolved to.
-  const { actions: browserActions, latestClick: browserLatestClick } = useBrowserSessionActions({
+  const { actions: browserActions, latestClick: browserLatestClick, logSeq: browserLogSeq } = useBrowserSessionActions({
     enabled:
       isOpen &&
       !browserDataClearInFlight &&
@@ -1120,14 +1133,18 @@ export function BrowserSessionModal({
   });
   // The caption of Octo's latest step shows only while Octo holds the
   // browser, and only for steps of this hold: never a step an earlier turn
-  // left in the log, and never once the turn has ended.
-  const agentActionFloorRef = useRef(0);
-  const latestBrowserActionSeq = browserActions.at(-1)?.seq ?? 0;
-  if (!effectiveAgentControlOwner) agentActionFloorRef.current = latestBrowserActionSeq;
+  // left in the log, and never once the turn has ended. The floor is the
+  // newest step in the log before the hold, or, when this view first reads
+  // the log during the hold (it opened then), the newest step it found.
+  const agentActionFloorRef = useRef<number | null>(null);
+  if (!effectiveAgentControlOwner || agentActionFloorRef.current === null) {
+    agentActionFloorRef.current = browserLogSeq ?? null;
+  }
+  const agentActionFloor = agentActionFloorRef.current;
   // The ticker keys on its latest action, which filtering keeps as the same
   // object, so a re-render does not re-arm it.
-  const agentTurnActions = effectiveAgentControlOwner
-    ? browserActions.filter((action) => action.seq > agentActionFloorRef.current)
+  const agentTurnActions = effectiveAgentControlOwner && agentActionFloor !== null
+    ? browserActions.filter((action) => action.seq > agentActionFloor)
     : [];
   const browserHumanInputOptions = {
     identityKey: `${humanInputIdentityKey ?? ""}:${browserSessionId}:${forcedRuntimeId ?? preferRuntimeId}:${sharedBrowserPageId}`,
@@ -1249,7 +1266,7 @@ export function BrowserSessionModal({
     try {
       context.drawImage(surface, 0, 0, width, height);
       const url = snapshot.toDataURL("image/jpeg", 0.78);
-      capturedFrameScopeRef.current = frameScope;
+      capturedFrameScopeRef.current = stillScopeRef.current;
       setFrozenFrameUrl(url);
     } catch {
       // A frozen frame is a visual optimization; transport fallback still works
