@@ -753,8 +753,8 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
     let research = flat(RESEARCH_SKILL);
     let new_rules = [
         "an item with no price read this turn is listed as \"price unknown\", never as within it.",
-        "The official site failed twice: read at least one independent source (a review, or a shop robots.txt allows) before building.",
-        "each fact not read marked unknown with why. A row per candidate found.",
+        "The official site failed twice: read an independent source (a review, or a shop robots.txt allows) before building.",
+        "each fact not read marked unknown with why. A row per candidate a page read names.",
         "Name: the exact model and generation its official page gives, else the page naming it.",
     ];
     let previous = include_str!("legacy/web-research-v7.md");

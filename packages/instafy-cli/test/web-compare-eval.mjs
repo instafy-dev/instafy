@@ -372,6 +372,13 @@ export function gradeCompare(transcript, kase = CASE) {
   check("independent_after_official_fails", officialFailures >= 2 && !independentReads.length
     ? [`the maker's site failed ${officialFailures} times and no independent source (a review, a shop) was read`] : []);
 
+  // Every row is a candidate the ask or a page read this turn names: a row with every cell unknown is still a claim
+  // that the model exists and fits the ask, so never one from memory or from a search result's title.
+  const readNames = [...read].map((url) => flat(`${pages.get(url)?.title ?? ""} ${pages.get(url)?.text ?? ""}`));
+  const namedIn = (name, text) => new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(flat(name))}(?![\\p{L}\\p{N}+])`, "iu").test(text);
+  check("rows_from_pages", (data.items || []).filter((row) => flat(row.name) && !namedIn(row.name, kase.ask) && !readNames.some((text) => namedIn(row.name, text)))
+    .map((row) => `${flat(row.name)} is on the page, but neither the ask nor a page read this turn names it`));
+
   // Every amount on the page or in the reply is on a page read this turn: no remembered, guessed or listing price.
   const onPages = new Set([...read].flatMap((url) => amounts(readText(url))));
   check("prices_from_pages", [
@@ -593,6 +600,13 @@ export const OFFICIAL_DOWN_BREAKERS = [
   ["drops every row whose price was not read", (t, _k, edit) => edit(t, (data) => { data.items = data.items.filter((row) => knownNumber(row.facts?.price) != null); }),
     ["limit_never_counts_unknown", "page_built", "reviews_counted", "unknown_prices_said"]],
   ["calls the rows without a price within the limit", (t, _k, edit) => edit(t, (data) => { data.lede = "All three are 600 EUR or less."; }), ["limit_never_counts_unknown"]],
+  // a row of unknowns for a model no page read names (remembered, or a search result's title): rows of unknowns are
+  // for candidates a page names, never a way to list a guess
+  ["adds a remembered model as a row of unknowns", (t, k, edit) => edit(t, (data) => {
+    const [first] = data.items;
+    data.items.push({ ...first, ref: "vacuum:s9", name: `${k.brand} S9 Ultra`, why: "Its newest flagship", note: "Reviews: 0 of 2 found", sources: [],
+      facts: Object.fromEntries(Object.keys(first.facts).map((key) => [key, { note: "not read" }])) });
+  }), ["rows_from_pages"]],
 ];
 
 // `node web-compare-eval.mjs fixtures <folder>` or `node web-compare-eval.mjs grade <transcript.json>`
