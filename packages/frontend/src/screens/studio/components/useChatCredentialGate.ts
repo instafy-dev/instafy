@@ -466,10 +466,13 @@ export function useChatCredentialGate({
       if (candidate.role !== "assistant" || !shouldDisplayChatMessage(candidate)) {
         continue;
       }
-      // Instafy AI's own sign-in is not the person's to fix, so a failure on
-      // it never opens the connect wizard.
-      if (!isExpiredCredentialProxyError(candidate.content) || ranOnInstafyAi(candidate)) {
+      if (!isExpiredCredentialProxyError(candidate.content)) {
         continue;
+      }
+      // Instafy AI's own sign-in is not the person's to fix, so the newest
+      // such failure on it opens nothing, not even for an older one.
+      if (ranOnInstafyAi(candidate)) {
+        break;
       }
       latestExpiredAssistantMessage = candidate;
       break;
