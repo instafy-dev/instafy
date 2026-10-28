@@ -545,7 +545,7 @@ describe("ChatComposerSurface", () => {
     await act(async () => root.render(<ChatComposerSurface {...props} browserFollowUp={{ onCancel }} />));
     const token = container.querySelector<HTMLElement>('[data-testid="composer-browser-follow-up-token"]')!;
     expect(token).not.toBeNull();
-    expect(token.textContent).toBe("Next message goes to Instafy's browser");
+    expect(token.textContent).toBe("Goes to Instafy's browser");
     expect(container.querySelector("form")!.contains(token)).toBe(true);
     expect(token.compareDocumentPosition(container.querySelector('[data-testid="chat-input"]')!))
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING);

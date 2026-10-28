@@ -1206,7 +1206,7 @@ export function ChatComposerSurface({
               />
             ) : browserFollowUp ? (
               <ComposerContextToken
-                label="Next message goes to Instafy's browser"
+                label="Goes to Instafy's browser"
                 cancelLabel="Don't send it to the browser"
                 onCancel={browserFollowUp.onCancel}
                 testId="composer-browser-follow-up"
