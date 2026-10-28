@@ -20,6 +20,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     minimumTests: 53,
     files: [
       "browser-agent-tabs.spec.ts",
+      "browser-approval-feedback.spec.ts",
       "browser-chrome-mobile-layout.spec.ts",
       "browser-cobrowsing-ui.spec.ts",
       "browser-cursor-overlay.spec.ts",

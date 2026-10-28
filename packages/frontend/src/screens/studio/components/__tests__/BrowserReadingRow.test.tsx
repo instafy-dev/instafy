@@ -69,14 +69,16 @@ describe("BrowserReadingRow", () => {
   });
 
   it("names the agent, shows progress and errors, and hides without pages", async () => {
+    const error = "Could not stop the browser task because the connection is unavailable. Reconnect and try taking control again; the page remains locked until ownership is confirmed.";
     await act(async () => root.render(
-      <BrowserReadingRow pages={[page("alpha")]} agentName="Researcher" canTakeOver takingOver error="Could not stop" onTakeOver={vi.fn()} />,
+      <BrowserReadingRow pages={[page("alpha")]} agentName="Researcher" canTakeOver takingOver error={error} onTakeOver={vi.fn()} />,
     ));
     expect(container.textContent).toContain("Researcher is reading");
     const takeOver = container.querySelector<HTMLButtonElement>('[data-testid="browser-reading-takeover"]')!;
     expect(takeOver.textContent).toBe("Stopping AI…");
     expect(takeOver.disabled).toBe(true);
-    expect(container.querySelector('[role="alert"]')!.textContent).toBe("Could not stop");
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe(error);
+    expect(container.querySelector('[role="alert"]')!.hasAttribute("title")).toBe(false);
 
     await act(async () => root.render(<BrowserReadingRow pages={[page("alpha")]} canTakeOver={false} onTakeOver={vi.fn()} />));
     expect(container.querySelector('[data-testid="browser-reading-row"]')).not.toBeNull();
