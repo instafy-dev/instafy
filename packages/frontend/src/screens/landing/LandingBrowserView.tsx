@@ -1,7 +1,10 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { Check, Globe, Lock, MoreHoriz, NavArrowDown, NavArrowRight } from "iconoir-react";
 import { Spinner } from "../../components/Spinner";
+import { Surface } from "../../components/Surface";
 import { Text } from "../../components/Text";
+import { StudioDialogFooter } from "../../components/aria/StudioDialogLayout";
+import { StudioDialogGutterContext } from "../../components/aria/StudioDialogSpacing";
 import { BrowserChromeShell } from "../studio/components/BrowserChromeShell";
 import { browserApprovalSentence } from "../studio/components/browserApprovalWords";
 // The studio's own edge glow (RemoteControlSurface.tsx): its classes and CSS.
@@ -247,33 +250,33 @@ function ApprovalSheet({ origin, pressed }: { origin: string; pressed: boolean }
       data-testid="landing-browser-approval"
       data-pressed={pressed ? "true" : "false"}
     >
-      <div className={chrome.APPROVAL_SHEET}>
-        <div data-testid="landing-browser-approval-content" className={chrome.APPROVAL_CONTENT}>
-          <div className="flex items-start gap-3">
-            <div className={chrome.APPROVAL_LOCK}>
-              <Lock aria-hidden="true" className="h-4 w-4" />
+      <Surface tone="floating" shadow="lg" className={chrome.APPROVAL_SHEET}>
+        <StudioDialogGutterContext.Provider value="responsive">
+          <div data-testid="landing-browser-approval-content" className={chrome.APPROVAL_CONTENT}>
+            <div className="flex items-start gap-3">
+              <Lock aria-hidden="true" className={chrome.APPROVAL_LOCK} />
+              <Text as="p" variant="subtitle" tone="primary" className={chrome.APPROVAL_SENTENCE}>
+                {sentence}
+              </Text>
             </div>
-            <Text as="p" variant="bodyStrong" tone="primary" className={chrome.APPROVAL_SENTENCE}>
-              {sentence}
-            </Text>
+            <Surface tone="raised" radius="xl" shadow="none" className={chrome.APPROVAL_SITE}>
+              <Text as="p" variant="caption" tone="muted">
+                Site
+              </Text>
+              <Text variant="mono" tone="primary" className={chrome.APPROVAL_SITE_TEXT}>{origin}</Text>
+            </Surface>
           </div>
-          <div className={chrome.APPROVAL_SITE}>
-            <Text as="p" variant="caption" tone="muted">
-              Site
-            </Text>
-            <p className={chrome.APPROVAL_SITE_TEXT}>{origin}</p>
-          </div>
-        </div>
-        <div className={chrome.APPROVAL_ACTIONS}>
-          <span className={chrome.BUTTON_SECONDARY}>Deny</span>
-          <span
-            data-testid="landing-browser-allow"
-            className={`${chrome.BUTTON_PRIMARY} w-full min-[420px]:w-auto${pressed ? ` ${chrome.BUTTON_PRIMARY_PRESSED}` : ""}`}
-          >
-            Allow site
-          </span>
-        </div>
-      </div>
+          <StudioDialogFooter padding="default" divider className={chrome.APPROVAL_ACTIONS}>
+            <span className={chrome.APPROVAL_BUTTON_SECONDARY}>Deny</span>
+            <span
+              data-testid="landing-browser-allow"
+              className={`${chrome.APPROVAL_BUTTON_PRIMARY}${pressed ? ` ${chrome.BUTTON_PRIMARY_PRESSED}` : ""}`}
+            >
+              Allow site
+            </span>
+          </StudioDialogFooter>
+        </StudioDialogGutterContext.Provider>
+      </Surface>
     </div>
   );
 }

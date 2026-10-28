@@ -451,20 +451,25 @@ export const TICKER_DOT_TONE = {
   scroll: "bg-slate-400",
 } as const;
 
-// SharedBrowserApprovalPrompt.tsx:79-215 the site approval over the stage
-// (dark cool-slate 700/900/950 replaced by the panel, raised-control and
-// canvas tiers; the scrim never scrolls, so it holds no tab stop).
+// SharedBrowserApprovalPrompt.tsx: the site approval over the stage. Surface,
+// Text and the dialog footer are shared components; the drawn controls and
+// animated content remain noninteractive so the demo holds no tab stop.
 export const APPROVAL_SCRIM = "absolute inset-0 z-30 flex items-end justify-center overflow-hidden bg-slate-950/60 p-2 backdrop-blur-[2px] sm:items-center sm:p-4";
-export const APPROVAL_SHEET = `flex max-h-full w-full max-w-md flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-4 shadow-2xl sm:p-5 ${DARK_PANEL_SURFACE_CLASS}`;
-// The content area. The studio's scrolls (overflow-y-auto); the landing's
-// never does, so it holds no tab stop.
-export const APPROVAL_CONTENT = "min-h-0 overflow-hidden";
+export const APPROVAL_SHEET = "flex max-h-full w-full max-w-md flex-col overflow-hidden";
+// StudioDialogBody's responsive gutter and geometry. The studio's content
+// scrolls (overflow-y-auto); the landing's never does, so it holds no tab stop.
+export const APPROVAL_CONTENT = "min-h-0 flex-1 overflow-hidden overscroll-contain px-4 py-4 sm:px-5 space-y-4";
+export const APPROVAL_LOCK = "mt-0.5 h-4 w-4 shrink-0";
 // The sentence the studio's sheet asks with (its title).
-export const APPROVAL_SENTENCE = "min-w-0 flex-1 break-words pt-1.5 leading-snug";
-export const APPROVAL_SITE = `mt-4 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 ${DARK_RAISED_CONTROL_BORDER_CLASS} ${DARK_CANVAS_CLASS}`;
-export const APPROVAL_SITE_TEXT = "mt-0.5 break-all font-mono text-xs font-medium text-slate-800 dark:text-slate-100";
-export const APPROVAL_LOCK = "flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary-50 text-primary-700 dark:bg-primary-500/15 dark:text-primary-300";
-export const APPROVAL_ACTIONS = "mt-4 flex shrink-0 flex-col gap-2 min-[420px]:flex-row min-[420px]:justify-end";
+export const APPROVAL_SENTENCE = "min-w-0 flex-1 break-words";
+export const APPROVAL_SITE = "px-3 py-2.5";
+export const APPROVAL_SITE_TEXT = "mt-0.5 break-all";
+export const APPROVAL_ACTIONS = "flex flex-col gap-2 min-[420px]:flex-row min-[420px]:justify-end";
+// Button preset=form: flat 12px corners and pointer-adaptive targets. These
+// spans retain the landing's simulation rather than introducing real controls.
+const APPROVAL_BUTTON = "inline-flex w-full items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium pointer-coarse:min-h-11 pointer-coarse:min-w-11 min-[420px]:w-auto";
+export const APPROVAL_BUTTON_SECONDARY = `${APPROVAL_BUTTON} bg-slate-100 text-slate-700 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-100`;
+export const APPROVAL_BUTTON_PRIMARY = `${APPROVAL_BUTTON} bg-primary-600 text-white transition-[background-color,transform] duration-150 ease-out motion-reduce:transition-none`;
 
 // Button.tsx at sm, radius full: secondary (Deny) and primary.
 export const BUTTON_SECONDARY = "inline-flex w-full items-center justify-center gap-2 rounded-full bg-slate-100 px-2.5 py-1.5 text-sm font-medium text-slate-700 shadow-sm shadow-slate-200/60 min-[420px]:w-auto dark:bg-[var(--color-studio-dark-active)] dark:text-slate-100 dark:shadow-none";

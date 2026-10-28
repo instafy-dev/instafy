@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { BROWSER_TURN_BEATS, type TurnBeatId } from "../../src/screens/landing/landingTurnScript";
 
 // The landing's example window shows its work in a laptop's first view: from
 // 1184px it fits the viewport (landingStudioChrome.ts FRAME), so the press
@@ -18,12 +19,24 @@ async function box(page: Page, testId: string): Promise<Box | null> {
   }, testId);
 }
 
-async function untilBeat(page: Page, beat: string) {
-  await page.waitForFunction(
-    (want) => document.querySelector<HTMLElement>('[data-testid="landing-session-deck"]')?.dataset.beat === want,
-    beat,
-    { timeout: 30_000, polling: "raf" },
-  );
+function browserTurnClock(page: Page) {
+  let elapsed = 0;
+  let nextIndex = 1;
+  return async (beat: TurnBeatId) => {
+    const targetIndex = BROWSER_TURN_BEATS.findIndex((entry) => entry.id === beat);
+    expect(targetIndex, `the browser script includes ${beat}`).toBeGreaterThanOrEqual(nextIndex);
+    // Render every scheduled beat. A busy runner must not miss the 250ms tap/allowPress states while
+    // inspecting the previous frame. The real application still owns its
+    // timers and state; only elapsed time is controlled by the test.
+    while (nextIndex <= targetIndex) {
+      const next = BROWSER_TURN_BEATS[nextIndex];
+      await page.clock.fastForward(next.atMs - elapsed);
+      await page.clock.runFor(32);
+      elapsed = next.atMs + 32;
+      await expect(page.getByTestId("landing-session-deck")).toHaveAttribute("data-beat", next.id);
+      nextIndex += 1;
+    }
+  };
 }
 
 async function expectAboveFold(page: Page, testId: string, label: string) {
@@ -52,11 +65,14 @@ for (const [width, height] of [
       test.setTimeout(90_000);
       await page.setViewportSize({ width, height });
       await page.emulateMedia({ reducedMotion: "no-preference", colorScheme: "light" });
+      await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+      await page.clock.pauseAt(new Date("2026-01-01T00:00:01Z"));
       await page.goto("/?cub-dev=0", { waitUntil: "networkidle" });
       await page.getByTestId("landing-session-deck").waitFor();
       // Measured once the web font has swapped in (a fallback face sets the
       // hero's lines, and so the window's top, differently).
       await page.waitForFunction(() => document.fonts.status === "loaded");
+      await page.clock.runFor(100);
     });
 
     test("fits the window, its composer included, in the first view", async ({ page }) => {
@@ -70,27 +86,30 @@ for (const [width, height] of [
     test("shows Ada's press, the approval, Octo's work and Kim's reply above the fold as they happen", async ({ page }) => {
       await page.getByTestId("landing-scenario-chips").getByRole("button", { name: "Launch a site" }).click();
       await page.mouse.move(2, 2);
+      await expect(page.getByTestId("landing-session-deck")).toHaveAttribute("data-example", "site");
+      await expect(page.getByTestId("landing-session-deck")).toHaveAttribute("data-beat", "rest");
+      const untilBeat = browserTurnClock(page);
       expect(await page.evaluate(() => window.scrollY)).toBe(0);
 
-      await untilBeat(page, "tap");
+      await untilBeat("tap");
       await expectAboveFold(page, "landing-browser-request-button", "tap");
-      await untilBeat(page, "press");
+      await untilBeat("press");
       await expectAboveFold(page, "landing-browser-request-button", "press");
       await expect(page.getByTestId("landing-browser-request-button")).toHaveText("Opening browser…");
       await expectAboveFold(page, "landing-browser-starting", "press");
 
-      await untilBeat(page, "approve");
+      await untilBeat("approve");
       await expectAboveFold(page, "landing-browser-allow", "approve");
       // Octo's one-sentence question is in view beside the Allow site she presses.
-      await untilBeat(page, "allowPress");
+      await untilBeat("allowPress");
       await expectAboveFold(page, "landing-browser-approval-content", "allowPress");
       await expectAboveFold(page, "landing-browser-allow", "allowPress");
-      await untilBeat(page, "navigate");
+      await untilBeat("navigate");
       await expectAboveFold(page, "landing-browser-ticker", "navigate");
-      await untilBeat(page, "click");
+      await untilBeat("click");
       await expectAboveFold(page, "landing-browser-cursor", "click");
       await expectAboveFold(page, "landing-browser-ticker", "click");
-      await untilBeat(page, "reply");
+      await untilBeat("reply");
       await expectAboveFold(page, "landing-kim-reply", "reply");
       await expectAboveFold(page, "landing-browser-kim", "reply");
       expect(await page.evaluate(() => window.scrollY)).toBe(0);

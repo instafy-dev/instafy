@@ -154,6 +154,28 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(container.querySelector("#shared-browser-approval-title")?.textContent).toBe("Ada wants to use example.test.");
   });
 
+  it("wraps keyboard focus inside the prompt", async () => {
+    const onDecision = vi.fn();
+    await act(async () => root.render(
+      <SharedBrowserApprovalPrompt onDecision={onDecision} request={originRequest} submitting={false} />,
+    ));
+    const first = container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-deny"]')!;
+    const last = container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-allow"]')!;
+    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    await act(async () => {
+      last.focus();
+      last.dispatchEvent(tab);
+    });
+    expect(tab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+
+    const shiftTab = new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true });
+    await act(async () => first.dispatchEvent(shiftTab));
+    expect(shiftTab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(last);
+    expect(onDecision).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["type", "Search", "Octo wants to type into “Search” on example.test."],
     ["form-submit", "Email", "Octo wants to send the form “Email” on example.test."],
@@ -185,11 +207,12 @@ describe("SharedBrowserApprovalPrompt", () => {
   });
 
   it("keeps both decisions disabled while a decision is being written", async () => {
+    const onDecision = vi.fn();
     await act(async () => {
       root.render(
         <SharedBrowserApprovalPrompt
           error="The request changed."
-          onDecision={vi.fn()}
+          onDecision={onDecision}
           request={originRequest}
           submitting
         />,
@@ -199,6 +222,12 @@ describe("SharedBrowserApprovalPrompt", () => {
     const buttons = Array.from(container.querySelectorAll("button"));
     expect(buttons).toHaveLength(2);
     expect(buttons.every((button) => button.disabled)).toBe(true);
+    await act(async () => {
+      buttons.forEach((button) => button.click());
+      container.querySelector('[data-testid="shared-browser-approval-scrim"]')
+        ?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(onDecision).not.toHaveBeenCalled();
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       "The request changed.",
     );
