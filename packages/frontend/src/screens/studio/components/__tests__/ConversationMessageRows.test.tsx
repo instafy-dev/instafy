@@ -2172,7 +2172,7 @@ describe("ConversationMessageRows", () => {
     });
 
     expect(container.textContent).toContain(
-      "The reply didn't come through — this is usually a temporary provider hiccup.",
+      "The reply didn't come through. This is usually temporary.",
     );
     expect(container.textContent).not.toContain(rawFailure);
     expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
@@ -2254,7 +2254,7 @@ describe("ConversationMessageRows", () => {
     // Calm auto state: friendly sentence + quiet "trying again automatically",
     // Details still available, no manual "Try again" button.
     expect(container.textContent).toContain(
-      "The reply didn't come through — this is usually a temporary provider hiccup.",
+      "The reply didn't come through. This is usually temporary.",
     );
     expect(container.querySelector('[data-testid="run-failure-auto-retrying"]')?.textContent).toBe(
       "Trying again automatically…",

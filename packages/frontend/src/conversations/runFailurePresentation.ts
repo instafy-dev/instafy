@@ -32,25 +32,28 @@ export type RunFailurePresentation = {
   manageAi?: boolean;
 };
 
+// What a person reads for a failed turn. Plain words only: never "upstream",
+// "provider", "credential", "runtime" or "switch", which name the plumbing;
+// the raw text keeps them behind Details.
 const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
   missing_final_message:
-    "The reply didn't come through — this is usually a temporary provider hiccup.",
+    "The reply didn't come through. This is usually temporary.",
   no_workspace_changes: "The file changes didn't come through.",
   missing_verification: "The run ended before it could verify its work.",
   needs_ai:
-    "I couldn't find a connected AI credential for this run. Connect or reconnect a provider, then try again.",
+    "No AI is connected for this turn. Connect AI, then try again.",
   // The proxy reports a spent ChatGPT plan window with the same 429 text as a
   // short throttle, so this copy cannot promise when a retry will work.
   provider_rate_limited:
-    "The AI provider is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, the provider account may have reached its usage limit.",
+    "The AI is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, its usage limit may have been reached.",
   // Used when the run's AI access is not known; see
   // providerUsageLimitFriendlyText for Instafy AI and for the person's own.
   provider_usage_limit:
-    "The AI provider account for this turn has reached its usage limit, so it stopped. Try again after the limit resets, or switch to another AI connection.",
+    "The AI account for this turn has reached its usage limit, so it stopped. Try again after the limit resets, or connect another AI.",
   // Used when the provider gave a reason this copy does not name; see
   // INCOMPLETE_RESPONSE_FRIENDLY_TEXT for the ones it does.
   response_incomplete:
-    "The AI provider stopped the answer before it was finished, so this turn stopped. Try again, or ask for less at once.",
+    "The AI stopped the answer before it was finished, so this turn stopped. Try again, or ask for less at once.",
   browser_page_missing:
     "This was sent as a browser task without a page to work on, so nothing ran. Try again from Chat, or open a page in the browser first.",
   // Used when the stop was not a person's; see interruptedRunExpiredFriendlyText.
@@ -200,7 +203,7 @@ const INCOMPLETE_RESPONSE_FRIENDLY_TEXT: Record<string, string> = {
   max_output_tokens:
     "The answer hit the model's length limit before it was finished, so this turn stopped. Try asking for less at once, or split the request into smaller steps.",
   content_filter:
-    "The AI provider's content filter stopped this answer before it was finished, so this turn stopped. Try rephrasing the request.",
+    "The AI's content filter stopped this answer before it was finished, so this turn stopped. Try rephrasing the request.",
 };
 
 function incompleteResponseFriendlyText(rawText: string): string {
@@ -232,7 +235,7 @@ const PROVIDER_USAGE_LIMIT_PATTERNS = [/hit your usage limit/i, /\busage_limit_r
 const USAGE_LIMIT_RESET_PATTERN = /try again at\s+([^\n]+?)\.?\s*$/im;
 
 const MANAGED_AI_USAGE_LIMIT_FRIENDLY_TEXT =
-  "Instafy AI is unavailable right now: its model provider's usage limit is reached, so this turn stopped. This is on Instafy's side, not your credits or your plan. Try again later.";
+  "Instafy AI is unavailable right now: it has reached its usage limit, so this turn stopped. This is on Instafy's side, not your credits or your plan. Try again later.";
 
 function providerUsageLimitFriendlyText(
   rawText: string,
@@ -247,8 +250,8 @@ function providerUsageLimitFriendlyText(
   }
   const resetsAt = USAGE_LIMIT_RESET_PATTERN.exec(rawText)?.[1]?.trim() ?? "";
   return resetsAt
-    ? `Your AI provider account has reached its usage limit, so this turn stopped. The provider says to try again at ${resetsAt}, or switch to another AI connection.`
-    : "Your AI provider account has reached its usage limit, so this turn stopped. Try again after it resets, or switch to another AI connection.";
+    ? `Your AI account has reached its usage limit, so this turn stopped. Try again at ${resetsAt}, or connect another AI.`
+    : "Your AI account has reached its usage limit, so this turn stopped. Try again after it resets, or connect another AI.";
 }
 
 // A 429 that names an exhausted quota or plan limit will not clear after a

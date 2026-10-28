@@ -2840,6 +2840,7 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
 
 const PROXY_AUTH_REJECTED_REFUND_REASON: &str = "proxy_auth_rejected";
 const PROVIDER_LIMIT_REJECTED_REFUND_REASON: &str = "provider_limit_rejected";
+const REQUEST_REJECTED_REFUND_REASON: &str = "request_rejected";
 
 /// Why a failed managed-AI completion never reached a model, as the refund's
 /// reason, or None when it may have. A throttling 429, a 5xx or a timeout may
@@ -2851,6 +2852,8 @@ const PROVIDER_LIMIT_REJECTED_REFUND_REASON: &str = "provider_limit_rejected";
 /// - The provider refused it for a spent plan window or quota. Such a 429 is
 ///   decided before any generation, unlike a throttle or a 5xx, which may
 ///   have cut a paid answer short.
+/// - The proxy or the provider refused the request as sent: any other client
+///   error (`request_rejected`, see `names_only_refused_request_statuses`).
 ///
 /// The caller still refuses the refund when anything shows a model call
 /// succeeded.
@@ -2904,12 +2907,45 @@ fn managed_ai_failure_refund_reason(error_message: Option<&str>) -> Option<&'sta
     {
         return Some(PROVIDER_LIMIT_REJECTED_REFUND_REASON);
     }
+    if names_only_refused_request_statuses(&normalized) {
+        return Some(REQUEST_REJECTED_REFUND_REASON);
+    }
     None
 }
 
-/// Whether the job's usage receipt (`ai/task-usage`) records a model call
-/// that did not end in an error: such a call may have been answered and paid.
-fn artifacts_show_a_model_call_that_did_not_fail(artifacts: &JsonValue) -> bool {
+/// Whether the diagnostic names at least one HTTP status the proxy answered
+/// ("unexpected status 400 Bad Request: …", as Codex quotes it), and every one
+/// it names is a client error other than a timeout (408) or a throttle (429).
+/// The proxy answers with a status only before it streams anything, so such a
+/// refusal (its own 400, or the provider's 400, 404 or 413 passed on) was
+/// decided before any model answered. A 408, a 429 or a 5xx may follow a
+/// cut-short answer, so any of them anywhere keeps the reserve.
+fn names_only_refused_request_statuses(normalized: &str) -> bool {
+    const MARKER: &str = "unexpected status ";
+    let mut named = false;
+    for (index, _) in normalized.match_indices(MARKER) {
+        let rest = &normalized[index + MARKER.len()..];
+        let status = rest
+            .get(..3)
+            .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
+            .filter(|_| !rest[3..].starts_with(|next: char| next.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<u16>().ok());
+        match status {
+            Some(status) if (400..500).contains(&status) && status != 408 && status != 429 => {
+                named = true;
+            }
+            _ => return false,
+        }
+    }
+    named
+}
+
+/// Whether the job's usage receipt (`ai/task-usage`) shows a model answered:
+/// a call that did not end in an error, which may have been answered and
+/// paid, or a call that recorded usage. A call records usage only from a model
+/// response that completed, so one that failed later (a plan step answered,
+/// then a sign-in the proxy could not renew) still reached a model.
+fn usage_receipt_shows_a_model_answered(artifacts: &JsonValue) -> bool {
     artifacts
         .as_array()
         .into_iter()
@@ -2919,16 +2955,19 @@ fn artifacts_show_a_model_call_that_did_not_fail(artifacts: &JsonValue) -> bool 
         })
         .filter_map(|artifact| artifact.get("calls").and_then(JsonValue::as_array))
         .flatten()
-        .any(|call| call.get("outcome").and_then(JsonValue::as_str) != Some("error"))
+        .any(|call| {
+            call.get("outcome").and_then(JsonValue::as_str) != Some("error")
+                || call.get("usage").is_some_and(|usage| !usage.is_null())
+        })
 }
 
 /// A managed-AI run that failed before reaching a model still holds the
 /// prompt reserve burned at dispatch and the daily prompt slot that goes with
 /// it. Give both back, once, when nothing shows the model was ever called:
 /// no completed Codex turn in the artifacts, no call in the job's usage
-/// receipt that did not fail, no visible assistant message, no tool updates
-/// other than the routing pre-observation the runtime ran before the model,
-/// and an error that the request was refused before any model answered
+/// receipt that did not fail or that recorded usage, no visible assistant
+/// message, no tool updates other than the routing pre-observation the
+/// runtime ran before the model, and an error that the request was refused before any model answered
 /// (`managed_ai_failure_refund_reason`). Returns the org id when this call
 /// wrote the refund, for a post-commit `credits.updated`.
 #[allow(clippy::too_many_arguments)]
@@ -2955,9 +2994,9 @@ async fn refund_managed_ai_reserve_on_failed_completion(
     let Some(refund_reason) = managed_ai_failure_refund_reason(error_message) else {
         return Ok(None);
     };
-    // A call that did not fail may have been answered and paid, whatever
-    // refusal ended the turn after it.
-    if artifacts_show_a_model_call_that_did_not_fail(artifacts_value) {
+    // A call that did not fail, or that recorded a completed response, may
+    // have been answered and paid, whatever refusal ended the turn after it.
+    if usage_receipt_shows_a_model_answered(artifacts_value) {
         return Ok(None);
     }
     let Some(prompt_uuid) = prompt_id else {
@@ -6449,11 +6488,52 @@ mod tests {
     fn a_usage_receipt_with_an_answered_call_shows_the_model_was_reached() {
         let only_failed = json!([{"kind": "ai/task-usage", "calls": [
             {"phase": "routing", "outcome": "error"}]}]);
-        assert!(!artifacts_show_a_model_call_that_did_not_fail(&only_failed));
+        assert!(!usage_receipt_shows_a_model_answered(&only_failed));
         let answered = json!([{"kind": "ai/task-usage", "calls": [
             {"phase": "routing", "outcome": "success"}, {"phase": "main", "outcome": "error"}]}]);
-        assert!(artifacts_show_a_model_call_that_did_not_fail(&answered));
-        assert!(!artifacts_show_a_model_call_that_did_not_fail(&json!([])));
+        assert!(usage_receipt_shows_a_model_answered(&answered));
+        assert!(!usage_receipt_shows_a_model_answered(&json!([])));
+        // A call carries usage only once a model response in it completed, so
+        // a call that failed after an answer (a plan step, then a sign-in the
+        // proxy could not renew) still shows the model was reached.
+        let answered_then_failed = json!([{"kind": "ai/task-usage", "calls": [
+            {"phase": "main", "outcome": "error", "usageStatus": "partial", "usage": {
+                "input_tokens": 100, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                "output_tokens": 10, "reasoning_output_tokens": 0, "total_tokens": 110}}]}]);
+        assert!(usage_receipt_shows_a_model_answered(&answered_then_failed));
+        let unknown = json!([{"kind": "ai/task-usage", "calls": [
+            {"phase": "main", "outcome": "error", "usageStatus": "unknown"}]}]);
+        assert!(!usage_receipt_shows_a_model_answered(&unknown));
+    }
+
+    #[test]
+    fn a_request_the_ai_refused_as_sent_never_reached_a_model() {
+        // The proxy answers with a status only before it streams anything, so
+        // a client error other than a timeout or a throttle was decided before
+        // any model answered: the proxy's own 400, or the provider's 400, 404
+        // or 413 that the proxy passes on.
+        for text in [
+            "unexpected status 400 Bad Request: The upstream provider rejected the request., url: http://proxy:8789/v1/responses",
+            "unexpected status 404 Not Found: The upstream provider rejected the request., url: http://proxy:8789/v1/responses",
+            "unexpected status 400 Bad Request: service_tier \"flex\" is not available on this credential, url: http://proxy:8789/v1/responses",
+            "unexpected status 413 Payload Too Large: length limit exceeded, url: http://proxy:8789/v1/responses",
+        ] {
+            assert_eq!(
+                managed_ai_failure_refund_reason(Some(text)),
+                Some(REQUEST_REJECTED_REFUND_REASON),
+                "{text}"
+            );
+        }
+        for text in [
+            "unexpected status 408 Request Timeout: The upstream provider rejected the request., url: http://proxy:8789/v1/responses",
+            "unexpected status 429 Too Many Requests",
+            "unexpected status 500 Internal Server Error",
+            "unexpected status 400 Bad Request: after unexpected status 502 Bad Gateway: The upstream request failed.",
+            "unexpected status 4000",
+            "the request returned status 400",
+        ] {
+            assert_eq!(managed_ai_failure_refund_reason(Some(text)), None, "{text}");
+        }
     }
 
     #[test]

@@ -273,21 +273,30 @@ counts codex reports, and codex multi-agent v2 subagent requests never get one, 
 under-charges them. The proxy sees their upstream usage, so its meter charges them once metering
 moves there; nothing changes the legacy charge before then.
 
-A managed-AI turn that failed before any model answered gives back its prompt reserve and its
-daily prompt slot (`refund_managed_ai_reserve_on_failed_completion`): when the proxy refused the
-request (auth, configuration, a sign-in it could not renew, or the provider refusing access:
-a 401, 424 `upstream_credential_refresh_failed` "Upstream credentials could not be refreshed.",
-424 `upstream_configuration_error` or 403 `upstream_access_denied`; refund reason
-`proxy_auth_rejected`), or the provider refused it for a spent plan window or quota ("You've hit
-your usage limit", `usage_limit_reached`, `usage_not_included`, `insufficient_quota`, or the
-proxy's sentences for them; reason `provider_limit_rejected`), and nothing shows a model was
-reached: no completed Codex turn, no visible message or tool update (the routing
-pre-observation, a command the runtime runs and shows before the model's first call, does not
-count), and no call in the job's usage receipt that did not end in an error. Codex stores only
-the proxy's message, not its JSON code, so each code's fixed sentence counts as the code. A
-throttling 429, a 5xx or a timeout keeps the reserve: it may have cut a paid answer short. The
-refund row is keyed per prompt, so a completion delivered again, or the expiry sweep reaching
-the same prompt, never writes a second one. The Studio tells a managed-AI run that hit the limit that Instafy AI is unavailable
+A failed managed-AI turn gives back its prompt reserve and its daily prompt slot
+(`refund_managed_ai_reserve_on_failed_completion`) when the request was refused before any model
+answered and nothing shows a model was reached. The refusals are:
+
+- the proxy refused the request (auth, configuration, a sign-in it could not renew, or the
+  provider refusing access: a 401, 424 `upstream_credential_refresh_failed` "Upstream
+  credentials could not be refreshed.", 424 `upstream_configuration_error` or 403
+  `upstream_access_denied`; refund reason `proxy_auth_rejected`);
+- the provider refused it for a spent plan window or quota ("You've hit your usage limit",
+  `usage_limit_reached`, `usage_not_included`, `insufficient_quota`, or the proxy's sentences
+  for them; reason `provider_limit_rejected`);
+- the proxy or the provider refused the request as sent: any other client error the proxy
+  answered, such as its own 400 or the provider's 400, 404 or 413 (reason `request_rejected`).
+  The proxy answers with a status only before it streams anything.
+
+Nothing shows a model was reached when there is no completed Codex turn, no visible message or
+tool update (the routing pre-observation, a command the runtime runs and shows before the
+model's first call, does not count), and no call in the job's usage receipt that did not end in
+an error or that recorded usage (a call records usage only from a model response that
+completed). Codex stores only the proxy's message, not its JSON code, so each code's fixed
+sentence counts as the code. A timeout (408), a throttling 429, a 5xx or a dropped connection
+keeps the reserve: it may have cut a paid answer short. The refund row is keyed per prompt, so a
+completion delivered again, or the expiry sweep reaching the same prompt, never writes a second
+one. The Studio tells a managed-AI run that hit the limit that Instafy AI is unavailable
 (`aiAccessMode` on the run's final message), with no "Try again", since a resend before the
 window reopens fails the same way.
 

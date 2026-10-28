@@ -683,7 +683,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     expect(container.textContent).not.toContain("Status unavailable");
     expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
-      "The AI provider is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, the provider account may have reached its usage limit.",
+      "The AI is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, its usage limit may have been reached.",
     );
     const retryButton = container.querySelector(
       '[data-testid="run-failure-retry"]',
@@ -816,7 +816,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       "Run failed",
     );
     expect(container.textContent).toContain(
-      "The reply didn't come through — this is usually a temporary provider hiccup.",
+      "The reply didn't come through. This is usually temporary.",
     );
     expect(container.textContent).not.toContain(
       "Codex completed without returning a final assistant message after retry.",
@@ -869,7 +869,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
     expect(container.textContent).toContain(
-      "The reply didn't come through — this is usually a temporary provider hiccup.",
+      "The reply didn't come through. This is usually temporary.",
     );
   });
 

@@ -46,7 +46,7 @@ const MISSING_MCP_TOOL =
 // Codex's wording when the model provider answers 429. No retry actually ran.
 const PROVIDER_RATE_LIMITED = "exceeded retry limit, last status: 429 Too Many Requests";
 const PROVIDER_RATE_LIMITED_TEXT =
-  "The AI provider is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, the provider account may have reached its usage limit.";
+  "The AI is limiting requests right now, so this turn stopped. Wait a little, then try again. If it keeps happening, its usage limit may have been reached.";
 // 429s that name an exhausted quota or plan window. Retrying soon will not help.
 const PROVIDER_INSUFFICIENT_QUOTA =
   'backend responded with 429 Too Many Requests: {"error":{"type":"insufficient_quota","code":"insufficient_quota"}}';
@@ -264,7 +264,7 @@ describe("provider usage limit", () => {
       content: CODEX_PLAN_LIMIT,
     });
     expect(presentation?.friendlyText).toBe(
-      "Your AI provider account has reached its usage limit, so this turn stopped. The provider says to try again at Oct 23rd, 2026 8:40 AM, or switch to another AI connection.",
+      "Your AI account has reached its usage limit, so this turn stopped. Try again at Oct 23rd, 2026 8:40 AM, or connect another AI.",
     );
   });
 
@@ -336,6 +336,58 @@ describe("the AI not answering", () => {
     expect(resolveRunFailurePresentation({ metadata: FAILED, content: usageLimit })?.kind).toBe(
       "provider_usage_limit",
     );
+  });
+});
+
+describe("plain words in every failure sentence", () => {
+  const FAILED = { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" };
+  const PROXY = (status: string, body: string) =>
+    `unexpected status ${status}: ${body}, url: http://proxy:8789/v1/responses`;
+  // One raw failure for each kind a person can be shown, as the runtime and
+  // Codex store them. `generic` repeats the raw line itself, so it is left out.
+  const RAW_FAILURES = [
+    MISSING_FINAL_MESSAGE,
+    STOPPED_AFTER_PROGRESS,
+    NO_WORKSPACE_CHANGES,
+    MISSING_COMMAND_OBSERVATION,
+    MISSING_MCP_TOOL,
+    "No AI provider is connected for this project.",
+    "credential not found",
+    PROVIDER_RATE_LIMITED,
+    PROXY_STREAMED_RATE_LIMIT,
+    "You’ve hit your usage limit. Try again at Oct 23rd, 2026 8:40 AM.",
+    "You've hit your usage limit. Upgrade to Pro or try again later.",
+    "Incomplete response returned, reason: max_output_tokens",
+    "Incomplete response returned, reason: content_filter",
+    "Incomplete response returned, reason: something_else",
+    "Browser task is missing its UI-selected browserPageId",
+    PROXY("424 Failed Dependency", "Upstream credentials could not be refreshed."),
+    PROXY("424 Failed Dependency", "The upstream request configuration is invalid."),
+    PROXY("401 Unauthorized", "The upstream provider rejected authentication."),
+    PROXY("402 Payment Required", "The upstream provider has no available quota."),
+    PROXY("403 Forbidden", "The upstream provider denied access."),
+    PROXY("400 Bad Request", "The upstream provider rejected the request."),
+    PROXY("429 Too Many Requests", "The upstream provider rate limit was reached."),
+    PROXY("502 Bad Gateway", "The upstream request failed."),
+    PROXY("504 Gateway Timeout", "The upstream request timed out."),
+  ];
+  const JARGON = /upstream|provider|credential|switch|runtime/i;
+
+  it.each(["managed", "byoc", undefined])("never names the plumbing (aiAccessMode %s)", (aiAccessMode) => {
+    for (const content of RAW_FAILURES) {
+      const presentation = resolveRunFailurePresentation({
+        metadata: { ...FAILED, aiAccessMode },
+        content,
+      });
+      expect(presentation?.kind, content).not.toBe("generic");
+      expect(presentation?.friendlyText, content).not.toMatch(JARGON);
+    }
+    const expired = resolveRunFailurePresentation({
+      metadata: { ...FAILED, aiAccessMode, kind: "interrupted_run_expired" },
+      content: "The interrupted run expired before a runtime resumed it.",
+    });
+    expect(expired?.kind).toBe("interrupted_run_expired");
+    expect(expired?.friendlyText).not.toMatch(JARGON);
   });
 });
 
@@ -934,7 +986,7 @@ describe("resolveRunFailurePresentation", () => {
     });
     expect(presentation).toEqual({
       kind: "missing_final_message",
-      friendlyText: "The reply didn't come through — this is usually a temporary provider hiccup.",
+      friendlyText: "The reply didn't come through. This is usually temporary.",
       rawText: MISSING_FINAL_MESSAGE,
     });
   });
@@ -1145,12 +1197,12 @@ describe("resolveRunFailurePresentation", () => {
       rawText: RESPONSE_INCOMPLETE("max_output_tokens"),
     });
     expect(failed(RESPONSE_INCOMPLETE("content_filter"))?.friendlyText).toBe(
-      "The AI provider's content filter stopped this answer before it was finished, so this turn stopped. Try rephrasing the request.",
+      "The AI's content filter stopped this answer before it was finished, so this turn stopped. Try rephrasing the request.",
     );
     // A reason the copy does not name, or none, still reads as a stopped answer.
     for (const reason of ["unknown", "interrupted", ""]) {
       expect(failed(RESPONSE_INCOMPLETE(reason))?.friendlyText).toBe(
-        "The AI provider stopped the answer before it was finished, so this turn stopped. Try again, or ask for less at once.",
+        "The AI stopped the answer before it was finished, so this turn stopped. Try again, or ask for less at once.",
       );
     }
     // The error bubble opts in with assumeFailed when the metadata lacks an outcome.

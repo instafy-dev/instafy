@@ -40,7 +40,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   Instafy proxy's `unexpected status …`, read by `proxyError.ts`), the sentence never names the
   plumbing. On Instafy AI (`aiAccessMode: managed` on the run's final message) it reads "Instafy
   AI isn't answering right now."; on the person's own AI it says what happened ("Your AI
-  connection needs you to sign in again.") and adds "Manage AI" when AI settings can fix it.
+  connection needs you to sign in again.") and adds "Manage AI" when AI settings can fix it. No
+  failure sentence says "upstream", "provider", "credential", "runtime" or "switch"; the raw text
+  behind Details keeps them (`runFailurePresentation.ts`).
 - Details (`TurnActivityDetails.tsx`) lists the turn in order: each command with its label, the
   command without its shell wrapper (the full line is its title), its state and its output behind
   a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes,

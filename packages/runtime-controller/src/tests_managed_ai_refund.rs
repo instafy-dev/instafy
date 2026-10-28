@@ -561,16 +561,45 @@ async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> an
 /// and the envelope's fixed sentence, without the JSON code.
 const PROXY_REFRESH_FAILED_ERROR: &str = "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed., url: http://proxy:8789/v1/responses";
 
-/// The proxy's 424 for a sign-in it could not renew is refused before any
-/// model call, so the reserve and the daily slot come back, once: the same
-/// completion delivered again writes no second refund. A usage receipt that
-/// shows an answered call keeps the charge.
+/// The provider's 400 as the proxy passes it on: refused as sent.
+const PROVIDER_400_ERROR: &str = "unexpected status 400 Bad Request: The upstream provider rejected the request., url: http://proxy:8789/v1/responses";
+
+/// The proxy's 424 for a sign-in it could not renew, and a request the AI
+/// refused as sent, are decided before any model call, so the reserve and the
+/// daily slot come back, once: the same completion delivered again writes no
+/// second refund. A usage receipt that shows an answered call keeps the
+/// charge, and so does one whose failed call had a response complete first.
 #[tokio::test]
 async fn managed_ai_prompt_refunds_a_sign_in_the_proxy_could_not_renew() -> anyhow::Result<()> {
     let answered_call = crate::task_usage::tests::receipt_fixture();
-    for (label, artifacts, refunded) in [
-        ("refund-on-424", json!([]), true),
-        ("keep-after-an-answered-call", json!([answered_call]), false),
+    let mut answered_then_failed = crate::task_usage::tests::receipt_fixture();
+    answered_then_failed["calls"][0]["outcome"] = json!("error");
+    answered_then_failed["calls"][0]["usageStatus"] = json!("partial");
+    for (label, error_message, artifacts, refund_reason) in [
+        (
+            "refund-on-424",
+            PROXY_REFRESH_FAILED_ERROR,
+            json!([]),
+            Some("proxy_auth_rejected"),
+        ),
+        (
+            "refund-on-400",
+            PROVIDER_400_ERROR,
+            json!([]),
+            Some("request_rejected"),
+        ),
+        (
+            "keep-after-an-answered-call",
+            PROXY_REFRESH_FAILED_ERROR,
+            json!([answered_call]),
+            None,
+        ),
+        (
+            "keep-after-an-answer-in-a-failed-call",
+            PROXY_REFRESH_FAILED_ERROR,
+            json!([answered_then_failed]),
+            None,
+        ),
     ] {
         let Some(fixture) = seed_reserved_managed_ai_prompt(label).await? else {
             eprintln!("skipping managed AI 424 refund test: TEST_DATABASE_URL not set");
@@ -579,7 +608,7 @@ async fn managed_ai_prompt_refunds_a_sign_in_the_proxy_could_not_renew() -> anyh
         let completion = json!({
             "job_id": fixture.job_id,
             "outcome": "failed",
-            "error_message": PROXY_REFRESH_FAILED_ERROR,
+            "error_message": error_message,
             "artifacts": artifacts,
         });
         for delivery in 1..=2 {
@@ -592,7 +621,7 @@ async fn managed_ai_prompt_refunds_a_sign_in_the_proxy_could_not_renew() -> anyh
                 .filter(|(reason, _, _)| reason == "managed_ai_refund")
                 .collect();
             let prompt = prompt_metadata(&fixture.pool, &fixture.prompt_id).await?;
-            if refunded {
+            if let Some(refund_reason) = refund_reason {
                 assert_eq!(
                     refunds,
                     vec![&(
@@ -615,7 +644,8 @@ async fn managed_ai_prompt_refunds_a_sign_in_the_proxy_could_not_renew() -> anyh
                 .await?;
                 assert_eq!(
                     reserve_metadata["refundReason"],
-                    json!("proxy_auth_rejected")
+                    json!(refund_reason),
+                    "{label}"
                 );
                 assert_eq!(prompt["managedAiUsed"], json!(false), "{label}");
                 assert_eq!(

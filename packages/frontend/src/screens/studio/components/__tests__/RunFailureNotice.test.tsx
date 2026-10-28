@@ -158,7 +158,7 @@ describe("RunFailureMessageBody", () => {
       metadata: { ...FAILURE.metadata, aiAccessMode: "byoc" },
     });
     await render(contextValue({ onConnectAi }), own);
-    expect(container.textContent).toContain("Your AI provider account has reached its usage limit");
+    expect(container.textContent).toContain("Your AI account has reached its usage limit");
     expect(container.textContent).toContain("Oct 23rd, 2026 8:40 AM");
     expect(query("run-failure-retry")).toBeNull();
     await act(async () => {
