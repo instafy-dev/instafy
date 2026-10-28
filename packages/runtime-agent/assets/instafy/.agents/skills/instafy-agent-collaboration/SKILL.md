@@ -50,7 +50,7 @@ Write-scope rules for top-level agents:
 - Assign disjoint owned paths/modules before concurrent edits. Write access must be explicit structured metadata; the controller cannot infer it from prompt text. Do not rely on one runtime serializing work as a safety boundary.
 - If scope is missing or overlaps, expect `writeScope.mode = coordination_required`; stop before editing and ask for an explicit split.
 - With `writeScope.mode = owned`, edit only `ownedPaths`; treat `readOnlyPaths` as inspect-only. Read-only/Q&A agents need no editable paths.
-- For independent generated files or small disjoint edits on one machine, prefer exact `ownedPaths` over `ownedPathGlobs` only when the scoped worker's execution capabilities cover the task. Tool-free file generation cannot perform required commands, tests or observations. Do not remove requirements to make a worker eligible; explain an unavailable explicitly requested mechanism.
+- For independent generated files or small disjoint edits on one machine, prefer exact `ownedPaths` over `ownedPathGlobs` only when the scoped worker's execution capabilities cover the task. Set `requiresTools: true` on each plan worker that needs commands, tests or live observations. This requirement grants no permissions and survives retries and replies. Tool-free file generation cannot perform those operations; use admitted tool-capable execution or report the unavailable capability. Do not remove requirements to make a worker eligible; explain an unavailable explicitly requested mechanism.
 
 ## Observing concurrency
 

@@ -77,6 +77,27 @@ cleanup removes the child from its manager before awaiting shutdown in a detache
 An empty manager therefore does not prove that this pending cleanup has finished. The
 runtime does not claim complete process containment or a verified barrier for that case.
 
+## Live research and tool requirements
+
+Plan agents may set `requiresTools: true` for live reads, commands or tests. This is a
+capability requirement, not a permission grant. The controller retains it per worker through
+retries, timed continuations and human replies. A tool-free owned-file worker fails before
+model execution when tools are required; a complete read-only file preview no longer removes
+its required tools. Plans without the field retain their existing behavior.
+
+The research-team skill chooses available native helpers for ordinary independent live
+research, or admitted tool-capable durable workers when useful. It does not treat owned files
+or runtime spread as proof of execution capability. Isolated tool workers remain opt-in,
+retain private snapshots and scoped publication, and receive their own host-generated turn
+clock for paced web tools. CLI availability, authorized search configuration and the worker's
+actual tool results still need verification. Separate jobs have separate budgets; native
+helpers share their parent's turn budgets. The lead allocates a bounded research budget and
+reconciles sources and unknowns before synthesis.
+
+Interactive browser control remains single-agent. Research helpers use public reading/search
+commands and return browser-dependent gaps for a separate authorized browser step. This
+change does not alter model defaults, enable isolated execution or introduce model-cost routing.
+
 ## Worker Settings and Evidence Handoffs
 
 Scoped workers preserve the controller-resolved agent model and reasoning effort. An explicit

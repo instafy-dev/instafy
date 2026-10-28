@@ -579,12 +579,16 @@ fn multi_agent_plan_final_output_json_schema() -> JsonValue {
                     "items": {
                       "type": "object",
                       "additionalProperties": false,
-                      "required": ["handle", "label", "prompt", "scopeSummary", "writeScope"],
+                      "required": ["handle", "label", "prompt", "scopeSummary", "writeScope", "requiresTools"],
                       "properties": {
                         "handle": { "type": "string" },
                         "label": { "type": "string" },
                         "prompt": { "type": "string" },
                         "scopeSummary": { "type": "string" },
+                        "requiresTools": {
+                          "type": ["boolean", "null"],
+                          "description": "True when this worker must execute tools for live observations, commands or tests. This is a requirement, not permission or an opt-in to isolated execution."
+                        },
                         "writeScope": {
                           "type": ["object", "null"],
                           "additionalProperties": false,
