@@ -4,6 +4,7 @@ import type { RunStatus } from "../../../types";
 import type { ChatMessage } from "../types";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import {
+  BROWSER_HANDS_BACK_METADATA_KEY,
   BROWSER_REQUEST_OF_METADATA_KEY,
   browserRequestJobId,
   isBrowserTurnPromptMetadata,
@@ -12,9 +13,10 @@ import {
 } from "./browserRequest";
 
 /**
- * Hand-back: once a browser turn that continued Octo's card finishes, Studio
- * sends one turn back to the building lane, so Octo keeps building with what
- * the browser found. The prompt names the browser job; the controller checks
+ * Hand-back: once a browser turn that continued Octo's card for something it
+ * builds finishes, Studio sends one turn back to the building lane, so Octo
+ * keeps building with what the browser found. A card for a question gets no
+ * hand-back: the browser turn's reply is the answer. The prompt names the browser job; the controller checks
  * it and gives the turn the browser's reply as quoted page data, never as the
  * person's words or consent (runtime-controller `browser_hand_back.rs`). The
  * claim key and prompt are pinned in
@@ -112,6 +114,20 @@ export function browserTurnStoppedForPerson(messages: readonly ChatMessage[], jo
   });
 }
 
+/**
+ * The browser turn read at least one page: the runtime's Details note of its
+ * finding lines counts the pages it read (runtime-agent
+ * `move_findings_into_details`). A turn that only says where it stopped gives
+ * the building turn nothing to continue with.
+ */
+export function browserTurnReadAPage(messages: readonly ChatMessage[], jobId: string): boolean {
+  return messages.some((message) => {
+    if (message.role !== "assistant" || browserRequestJobId(message) !== jobId) return false;
+    const findings = extractMessageDetails(message.metadata)?.browserFindings;
+    return isRecord(findings) && typeof findings.pagesRead === "number" && findings.pagesRead > 0;
+  });
+}
+
 export type BrowserHandBackInput = {
   messages: readonly ChatMessage[];
   /** When this conversation was opened here: history never hands back. */
@@ -131,10 +147,12 @@ export type BrowserHandBackInput = {
  * - the newest message is that browser turn's (nobody wrote after it);
  * - this page sent both the browser continuation and the prompt whose turn
  *   sent the card, so another viewer, device, reload or worker never does;
- * - the card's turn was neither a browser turn nor a hand-back: one hop only,
- *   so a card the hand-back turn sends stays a button;
+ * - the card's turn was neither a browser turn nor a hand-back: one hop only;
+ * - the card continues building (a page, a map): a question's browser turn
+ *   already answered it, and a second turn would only repeat the answer;
  * - the browser turn finished successfully, recently, after the conversation
- *   was opened here, and did not stop for a step of the person's;
+ *   was opened here, read at least one page, and did not stop for a step of
+ *   the person's;
  * - no hand-back for it was sent yet.
  * The controller checks the same chain again and refuses anything else.
  */
@@ -159,7 +177,8 @@ export function browserHandBackCandidate(input: BrowserHandBackInput): string | 
     ? promptMetadataString(continuation.metadata, [BROWSER_REQUEST_OF_METADATA_KEY])
     : null;
   if (!continuation || !cardKey?.startsWith("job:") ||
-      !promptMetadataString(continuation.metadata, ["browserTransport", "browser_transport"])) {
+      !promptMetadataString(continuation.metadata, ["browserTransport", "browser_transport"]) ||
+      !promptMetadataRecords(continuation.metadata).some((record) => record[BROWSER_HANDS_BACK_METADATA_KEY] === true)) {
     return null;
   }
   const card = input.sentPromptForRun(cardKey.slice("job:".length));
@@ -170,7 +189,7 @@ export function browserHandBackCandidate(input: BrowserHandBackInput): string | 
   if (!isRunFailureRecentForAutoRetry(newest, input.nowMs) || newest.timestamp < input.openedAtMs - 1_000) {
     return null;
   }
-  if (browserTurnStoppedForPerson(messages, jobId)) return null;
+  if (browserTurnStoppedForPerson(messages, jobId) || !browserTurnReadAPage(messages, jobId)) return null;
   if (messages.some((message) => readBrowserHandBackOf(message) === jobId)) return null;
   return jobId;
 }
