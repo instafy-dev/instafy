@@ -10,6 +10,7 @@ import type {
   AssistantTypingAgent,
 } from "./chatAssistantIdentity";
 import type { TypingIndicatorPhase, TypingIndicatorState } from "./typingIndicatorState";
+import { useSteadyActivityLabel } from "./useSteadyActivityLabel";
 
 type AssistantTypingStatusSnapshot = {
   phase: TypingIndicatorPhase | null;
@@ -43,6 +44,9 @@ function AssistantTypingStatusLine({
   onToggleThinkingLabel: () => void;
 }) {
   const isFinalizing = snapshot.phase === "finalizing";
+  // The same steady label as the turn's own line, which takes over from this
+  // row: a turn opens with one "Starting…", not three labels in a second.
+  const label = useSteadyActivityLabel(snapshot.label, !hidden);
   // One line in a fixed box, whatever the label: a multi-agent count or a
   // fallback that wrapped at phone width changed the row's height each time
   // the runs changed. Only the runtime-busy notice, a sentence to read, wraps.
@@ -77,11 +81,11 @@ function AssistantTypingStatusLine({
       {!hidden ? snapshot.indicator : null}
       <span
         className={["instafy-status-sweep min-w-0 max-w-full text-xs", labelClassName].join(" ")}
-        data-sweep-text={snapshot.label}
-        title={snapshot.wraps ? undefined : snapshot.label}
+        data-sweep-text={label}
+        title={snapshot.wraps ? undefined : label}
         aria-hidden="true"
       >
-        {snapshot.label}
+        {label}
       </span>
     </div>
   );

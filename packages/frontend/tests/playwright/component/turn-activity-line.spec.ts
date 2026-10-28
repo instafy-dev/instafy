@@ -163,7 +163,9 @@ for (const dark of [false, true]) {
       expect(running.documentWidth).toBe(running.viewportWidth);
 
       // A long line stays one line and truncates, with the whole text as its title.
+      // The line holds its label a moment before it changes.
       await setLine(page, { long: true });
+      await expect(line).toHaveAttribute("title", "Judging calm and lively areas around the river…");
       const long = await lineGeometry(page);
       expect(long.height).toBe(20);
       expect(long.documentWidth).toBe(long.viewportWidth);

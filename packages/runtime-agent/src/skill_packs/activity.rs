@@ -37,7 +37,7 @@ pub const MAX_SUBCOMMANDS: usize = 64;
 pub enum ActivityRole {
     /// What the turn did ("looked up 14 places"); the two biggest are named.
     Content,
-    /// What the turn made ("built the map"); the latest is named last.
+    /// What the turn made ("built the map"); the latest leads the line.
     Outcome,
     /// Shown only while it runs and in Details.
     Quiet,

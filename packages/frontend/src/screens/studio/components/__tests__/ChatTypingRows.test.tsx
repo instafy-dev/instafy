@@ -8,6 +8,7 @@ import type { ChatMessage } from "../../types";
 import type { RunRecord } from "../../../../types";
 import { ChatMessageAvatar } from "../ChatMessageAvatar";
 import { ChatTypingRows } from "../ChatTypingRows";
+import { ACTIVITY_LABEL_HOLD_MS, THINKING_LABEL_DELAY_MS } from "../useSteadyActivityLabel";
 import {
   isTranscriptTailActiveTurnOutcome,
   resolveJobThreadTypingCoverage,
@@ -185,11 +186,57 @@ describe("ChatTypingRows", () => {
     expect(container.querySelector('[data-testid="chat-speaker-marker"]')).toBeNull();
   });
 
+  // Drive 3: "Octo is starting its workspace…", "Octo is waiting for its
+  // turn…", then "Thinking…", all inside 1.1 s.
+  it("opens a turn with one Starting… that holds while the model begins", async () => {
+    vi.useFakeTimers();
+    const label = () => container.querySelector('[data-testid="assistant-typing-indicator"] [data-sweep-text]')?.textContent;
+    const row = (phase: "waiting" | "thinking", text: string) => (
+      <ChatTypingRows
+        peerTypingLabel={null}
+        isAssistantTyping
+        isAssistantTypingCoveredByJobThreadPreview={false}
+        typingAgents={[]}
+        hasMultipleTypingAgents={false}
+        typingAgentHandle="octo"
+        typingAgentAvatarSeed="octo"
+        typingIndicatorState={{ phase, label: null }}
+        typingStatusLabel={text}
+        typingStatusAriaLabel="Octo is starting"
+        isThinkingLabelExpanded={false}
+        onToggleThinkingLabel={() => undefined}
+        latestDisplayedMessageId="message-1"
+        renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+      />
+    );
+    await act(async () => {
+      root.render(row("waiting", "Starting…"));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+      root.render(row("thinking", "Thinking…"));
+    });
+    expect(label()).toBe("Starting…");
+    await act(async () => {
+      vi.advanceTimersByTime(THINKING_LABEL_DELAY_MS - 1);
+    });
+    expect(label()).toBe("Starting…");
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(label()).toBe("Thinking…");
+  });
+
   it("keeps every typing label on one truncated line except the runtime-busy notice", async () => {
     // A multi-agent count or a fallback could wrap at phone width and flip
     // between one and two lines as runs changed; only the clickable reasoning
     // title used to sit in a fixed one-line box.
+    vi.useFakeTimers();
     const label = () => container.querySelector('[data-testid="assistant-typing-indicator"] [data-sweep-text]');
+    // Each label holds a moment before the next one shows.
+    const hold = () => act(async () => {
+      vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
+    });
     const twoAgents = [
       { handle: "octo", avatarSeed: "octo", displayName: "Octo", isThinking: true },
       { handle: "reviewer", avatarSeed: "reviewer", displayName: "Reviewer", isThinking: false },
@@ -228,13 +275,14 @@ describe("ChatTypingRows", () => {
           typingAgents={[]}
           hasMultipleTypingAgents={false}
           typingIndicatorState={{ phase: "waiting", label: null }}
-          typingStatusLabel="Octo is starting its workspace…"
-          typingStatusAriaLabel="Octo is starting its workspace"
+          typingStatusLabel="Starting…"
+          typingStatusAriaLabel="Octo is starting"
         />,
       );
     });
+    await hold();
     expect(label()?.className.split(/\s+/)).toContain("truncate");
-    expect(label()?.getAttribute("title")).toBe("Octo is starting its workspace…");
+    expect(label()?.getAttribute("title")).toBe("Starting…");
 
     const busyNotice =
       'Your cloud runtime is busy in "Space B". Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.';
@@ -251,6 +299,7 @@ describe("ChatTypingRows", () => {
         />,
       );
     });
+    await hold();
     expect(label()?.className.split(/\s+/)).not.toContain("truncate");
     expect(label()?.hasAttribute("title")).toBe(false);
   });

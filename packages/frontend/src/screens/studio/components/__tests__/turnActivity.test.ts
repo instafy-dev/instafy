@@ -61,7 +61,38 @@ const VALIDATE = {
   count: 1,
   also: [],
 };
-const PREVIEW_OPEN = { v: 1, key: "instafy/preview-open", role: "quiet", live: "Opening the preview", count: 1, also: [] };
+const PREVIEW_OPEN = {
+  v: 1,
+  key: "instafy/preview-open",
+  role: "quiet",
+  live: "Opening the preview",
+  done: "opened a preview",
+  count: 1,
+  also: [],
+};
+// An older runtime's preview step: quiet, with no past form.
+const PREVIEW_OPEN_OLDER = { v: 1, key: "instafy/preview-open", role: "quiet", live: "Opening the preview", count: 1, also: [] };
+const PREVIEW_CHECK = { v: 1, key: "instafy/preview-check", role: "quiet", live: "Checking the page", count: 1, also: [] };
+const PREVIEW_CLOSE = {
+  v: 1,
+  key: "instafy/preview-close",
+  role: "outcome",
+  live: "Stopping the preview",
+  done: "stopped the preview",
+  when: "success",
+  count: 1,
+  also: [],
+};
+const MAP_SETUP = { v: 1, key: "pack/interactive-map/uw/new", role: "quiet", live: "Working on the map", count: 1, also: [] };
+const WEB_SEARCH = {
+  v: 1,
+  key: "instafy/web-search",
+  role: "content",
+  live: "Searching the web",
+  done: { one: "searched the web", other: "searched the web {n} times", some: "searched the web" },
+  count: 1,
+  also: [],
+};
 
 let sequence = 0;
 
@@ -145,6 +176,11 @@ function note(content: string, type = "status", activity?: unknown): ChatMessage
   };
 }
 
+/** A step's activity as an entry of another step's `also`. */
+function entryOf(activity: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(activity).filter(([key]) => key !== "v" && key !== "also"));
+}
+
 function summarize(messages: ChatMessage[], phase: TurnActivityPhase = "completed", viewerCanAnswer = false) {
   return summarizeTurnActivity(messages, { jobId: JOB, phase, viewerCanAnswer });
 }
@@ -180,7 +216,7 @@ describe("the label rules", () => {
 });
 
 describe("summarizeTurnActivity", () => {
-  it("says what the turn did from its labels: the Lisbon turn ends with built the map", () => {
+  it("says what the turn did from its labels: the Lisbon turn leads with built the map", () => {
     const messages = [
       ...Array.from({ length: 14 }, () => command(ADD_POINT)),
       command(WEB_READ, { command: "bash -lc 'instafy web read https://a.example/ …'" }),
@@ -188,7 +224,7 @@ describe("summarizeTurnActivity", () => {
       command(PREVIEW_OPEN, { command: "bash -lc 'instafy preview open --port 4173'" }),
     ];
     const activity = summarize(messages);
-    expect(activity.summary).toBe("Looked up 14 places, read 6 pages, built the map");
+    expect(activity.summary).toBe("Built the map, looked up 14 places, read 6 pages");
     expect(activity.live).toBeNull();
     expect(activity.stepCount).toBe(17);
   });
@@ -217,7 +253,7 @@ describe("summarizeTurnActivity", () => {
       summarize([step("file_change", null, { paths: ["a.md", "b.md"] }), step("file_change", null, { paths: ["a.md"] })])
         .summary,
     ).toBe("Edited 2 files");
-    const quiet = summarize([command(PREVIEW_OPEN), command(PREVIEW_OPEN)]);
+    const quiet = summarize([command(MAP_SETUP), command(MAP_SETUP)]);
     expect(quiet.summary).toBe("Ran 2 commands");
     expect(quiet.stepCount).toBe(2);
     expect(summarize([note("All set.")]).summary).toBeNull();
@@ -245,7 +281,7 @@ describe("summarizeTurnActivity", () => {
   it("uses the some form for a loop", () => {
     const validateEntry = Object.fromEntries(Object.entries(VALIDATE).filter(([key]) => key !== "v" && key !== "also"));
     const loop = command({ ...ADD_POINT, count: null, also: [validateEntry] });
-    expect(summarize([loop, command(WEB_READ)]).summary).toBe("Looked up places, read 6 pages, built the map");
+    expect(summarize([loop, command(WEB_READ)]).summary).toBe("Built the map, looked up places, read 6 pages");
   });
 
   it("counts an outcome only when its command succeeded", () => {
@@ -255,16 +291,123 @@ describe("summarizeTurnActivity", () => {
   });
 
   // Details put "Built the map" beside the failed validate's cross: a failed
-  // step names what it was doing, never what it would have done.
+  // step names what it tried, never what it would have done.
   it("never labels a failed step in Details with what it would have done", () => {
     const activity = summarize([command(VALIDATE, { status: "failed", exitCode: 1 }), command(ADD_POINT, { exitCode: 2 })]);
     const labels = activity.details.map((item) => (item.kind === "step" ? [item.step.state, item.step.label] : null));
     expect(labels).toEqual([
-      ["failed", "Checking the map"],
-      ["failed", "Looking up places"],
+      ["failed", "Tried checking the map"],
+      ["failed", "Tried looking up places"],
     ]);
     const done = summarize([command(VALIDATE)]).details[0];
     expect(done.kind === "step" && done.step.label).toBe("Built the map");
+  });
+
+  // Drive 3: "Searched the web 2 times, read a page" after both searches and
+  // the read had failed.
+  it("never counts a step that failed, and says what was tried when nothing else is left", () => {
+    const failedSearch = command(WEB_SEARCH, { status: "failed", exitCode: 1 });
+    const searchThenRead = command({ ...WEB_SEARCH, also: [{ ...entryOf(WEB_READ), count: 1 }] }, {
+      status: "failed",
+      exitCode: 1,
+    });
+    expect(summarize([failedSearch, command(null), searchThenRead]).summary).toBe("Tried searching the web");
+    // What went well is said; what failed is left out.
+    expect(summarize([command(WEB_SEARCH), failedSearch, command(WEB_READ, { exitCode: 2 })]).summary).toBe(
+      "Searched the web",
+    );
+    // A cancelled turn says the same.
+    expect(summarize([failedSearch], "cancelled").summary).toBe("Stopped · tried searching the web");
+  });
+
+  // Drive 3: the map turn read "Looked up transit, found places to stay" and
+  // the hello turn "Edited a file": neither said what the turn made.
+  it("leads with a preview that opened when nothing else the turn made is named", () => {
+    const rows = (overrides: Record<string, unknown> = {}) => [
+      command(null, { command: "bash -lc 'rg -n preview AGENTS.md'" }),
+      step("file_change", { v: 1, key: "builtin/edit", role: "content", live: "Editing files", done: { one: "edited a file", other: "edited {n} files", some: "edited files" }, count: 1, also: [] }, { paths: ["hello-page/index.html"] }),
+      command(PREVIEW_OPEN, { command: "bash -lc 'instafy preview open --port 4178'", ...overrides }),
+      command(PREVIEW_CHECK, { command: "bash -lc 'instafy preview check --port 4178'" }),
+    ];
+    expect(summarize(rows()).summary).toBe("Opened a preview, edited a file");
+    // An older runtime's quiet preview step says the same.
+    expect(summarize([command(PREVIEW_OPEN_OLDER)]).summary).toBe("Opened a preview");
+    // A preview that did not open is no result.
+    expect(summarize(rows({ status: "failed", exitCode: 1 })).summary).toBe("Edited a file");
+    // What the turn made itself outranks the preview it opened.
+    expect(summarize([command(ADD_POINT), command(VALIDATE), command(PREVIEW_OPEN)]).summary).toBe(
+      "Built the map, looked up a place",
+    );
+  });
+
+  it("says Stopped the preview for a turn that closed one", () => {
+    const messages = [
+      command(null, { command: "bash -lc 'ps -ef'" }),
+      command(null, { command: "bash -lc 'instafy preview --help'" }),
+      command(PREVIEW_CLOSE, { command: "bash -lc 'instafy preview close 9b5fcdfb'" }),
+    ];
+    expect(summarize(messages).summary).toBe("Stopped the preview");
+  });
+
+  // Drive 3's map turn, its labels as the runtime streamed them.
+  it("reads the drive's map turn by what it made", () => {
+    const pack = (sub: string, role: string, live: string, done?: string) => ({
+      key: `pack/interactive-map/uw/${sub}`, role, live, ...(done ? { done } : {}), count: 1,
+    });
+    const SETUP = (sub: string) => pack(sub, "quiet", "Working on the map");
+    const STAY = pack("stay", "content", "Finding places to stay", "found places to stay");
+    const STATION = pack("station", "content", "Looking up transit", "looked up transit");
+    const PLAN = pack("plan", "content", "Planning the days", "planned the days");
+    const activity = (entry: Record<string, unknown>, also: Record<string, unknown>[] = []) => ({ v: 1, ...entry, also });
+    const messages = [
+      command(null, { command: "bash -lc 'cat .agents/skills/interactive-map/SKILL.md'" }),
+      command(activity(SETUP("doctor"))),
+      command(activity(SETUP("geocode"), [SETUP("new")])),
+      command(activity(STATION)),
+      command(activity(SETUP("geocode"), [STAY])),
+      command(activity(STAY)),
+      command(activity(entryOf(ADD_POINT), [SETUP("fit"), PLAN])),
+      command(activity(SETUP("host"))),
+      command(PREVIEW_OPEN),
+    ];
+    // No `uw validate` ran, so nothing says the map was built: the preview it
+    // opened leads, then the two biggest things it did.
+    expect(summarize(messages).summary).toBe("Opened a preview, looked up transit, found places to stay");
+  });
+
+  // Drive 3: "uw geocode Baixa; uw stay …" read "Working on the map".
+  it("names a chain by its meaningful command, not the quiet one before it", () => {
+    const stay = { key: "pack/interactive-map/uw/stay", role: "content", live: "Finding places to stay", done: "found places to stay", count: 1 };
+    const chain = { ...MAP_SETUP, also: [stay] };
+    const running = summarize([command(chain, { status: "in_progress" })], "running");
+    expect(running.live).toBe("Finding places to stay…");
+    const label = (activity: unknown, status = "completed", exitCode: number | null = 0) => {
+      const item = summarize([command(activity, { status, exitCode })]).details[0];
+      return item.kind === "step" ? item.step.label : null;
+    };
+    expect(label(chain)).toBe("Found places to stay");
+    expect(label(chain, "in_progress", null)).toBe("Finding places to stay");
+    expect(label(chain, "failed", 1)).toBe("Tried finding places to stay");
+    // Quiet commands only: the first names the step.
+    expect(label({ ...MAP_SETUP, also: [{ key: "pack/interactive-map/uw/host", role: "quiet", live: "Working on the map", count: 1 }] })).toBe(
+      "Working on the map",
+    );
+  });
+
+  it("reads a finished row in the past tense, and an unlabelled one in plain words", () => {
+    const label = (message: ChatMessage) => {
+      const item = summarize([message]).details[0];
+      return item.kind === "step" ? item.step.label : null;
+    };
+    expect(label(command(PREVIEW_OPEN))).toBe("Opened a preview");
+    expect(label(command(null))).toBe("Checked the space");
+    expect(label(command(null, { status: "in_progress", exitCode: null }))).toBe("Checking the space");
+    expect(label(command(null, { status: "failed", exitCode: 1 }))).toBe("Tried checking the space");
+    expect(label(step("mcp_tool_call", null, { server: "files", tool: "list" }))).toBe("Used a tool");
+    expect(label(step("mcp_tool_call", { v: 1, key: "browser/use", role: "content", live: "Using the browser", done: "used the browser", count: 1, also: [] }, { status: "failed" }))).toBe(
+      "Tried using the browser",
+    );
+    expect(label(step("file_change", null, { paths: ["a.md", "b.md"] }))).toBe("Edited 2 files");
   });
 
   it("names the two biggest content groups in the order they happened", () => {
@@ -491,7 +634,7 @@ describe("answered browser prompts", () => {
     const site = browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot", approval: "once" });
     expect(summarize([opened, site]).summary).toBe("Opened carris.pt, read a page · you allowed the site");
     const google = browserStep({ key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" }, { step: "navigate", approval: "denied" }, "failed");
-    expect(summarize([google]).summary).toBe("Used the browser · you said no to opening a page");
+    expect(summarize([google]).summary).toBe("Used a tool · you said no to opening a page");
   });
 
   it("never say a step the person said no to, or left, was done", () => {

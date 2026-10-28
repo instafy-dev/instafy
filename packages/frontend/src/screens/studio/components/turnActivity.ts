@@ -1,6 +1,6 @@
-// A turn's plain-language activity line (docs/Chat-Activity.md): "Looked up 14
-// places, read 6 pages, built the map" once it is done, "Looking up places…"
-// while it runs.
+// A turn's plain-language activity line (docs/Chat-Activity.md): "Built the
+// map, looked up 14 places, read 6 pages" once it is done, "Looking up
+// places…" while it runs.
 //
 // The words come only from the `activity` a runtime attached to a step and the
 // controller checked and lifted to the message's top level. A label is never
@@ -274,8 +274,12 @@ export type TurnStep = {
   message: ChatMessage;
   activity: StepActivity | null;
   state: StepState;
-  /** The label Details shows beside the step, from its activity. */
-  label: string | null;
+  /**
+   * The label Details shows beside the step: from its activity, else a
+   * neutral one for its kind ("Checked the space"). A finished step reads in
+   * the past tense, a failed one as what it tried ("Tried searching the web").
+   */
+  label: string;
 };
 
 export type DetailItem =
@@ -312,6 +316,13 @@ export type TurnActivity = {
   stepCount: number;
   details: DetailItem[];
 };
+
+/** The line before the model has begun, and before its first step. */
+export const STARTING_LINE = "Starting…";
+/** The line while the model works with no step running. */
+export const THINKING_LINE = "Thinking…";
+/** The line while a request in the turn waits on the person viewing it. */
+export const WAITING_FOR_YOU_LINE = "Waiting for you";
 
 const STEP_TYPES: Record<string, StepKind> = {
   command_execution: "command",
@@ -369,6 +380,42 @@ function capitalize(text: string): string {
   const [first = "", ...rest] = [...text];
   return first.toUpperCase() + rest.join("");
 }
+
+/** A running label in the middle of a sentence: "Searching the web" reads "searching the web". */
+function lowerFirst(text: string): string {
+  const [first = "", second = "", ...rest] = [...text];
+  // "PDF export" keeps its capitals.
+  return /^\p{Uppercase}$/u.test(second) ? text : first.toLowerCase() + second + rest.join("");
+}
+
+/** "tried searching the web": a step that failed, in the past tense, never as what it would have done. */
+function triedWords(live: string, host?: string): string {
+  return `tried ${lowerFirst(fillHost(live, host))}`;
+}
+
+/**
+ * The entry a step is named by: its first that says what the step did or
+ * made. In a chain the meaningful command wins over the quiet setup before it
+ * ("uw geocode Baixa; uw stay …" finds places to stay); a step of quiet
+ * commands only is named by its first.
+ */
+export function primaryEntry(activity: StepActivity): ActivityEntry {
+  return [activity, ...activity.also].find((entry) => entry.role !== "quiet") ?? activity;
+}
+
+// Steps no runtime labelled (an unlisted command, an older runtime) read as
+// what such steps nearly always are: looking around the space, a tool, a
+// search or an edit. The command itself stays the row's second line.
+const NEUTRAL_LABELS: Record<StepKind, { live: string; done: string }> = {
+  command: { live: "Checking the space", done: "checked the space" },
+  tool: { live: "Using a tool", done: "used a tool" },
+  search: { live: "Searching the web", done: "searched the web" },
+  edit: { live: "Editing files", done: "edited files" },
+};
+
+// A step that names the turn's result when no step made something itself:
+// a site that opened in a preview is what a turn without its own outcome made.
+const RESULT_WITHOUT_OUTCOME = new Map<string, string>([["instafy/preview-open", "opened a preview"]]);
 
 function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many.replace("{n}", String(count));
@@ -453,15 +500,37 @@ function groupWords(group: Group, previousHost: string | null): string {
 /**
  * The done line from the turn's labelled steps, or null when none is shown,
  * with the host of the first group it shows.
+ *
+ * What the turn made leads ("Built the map, looked up 14 places, read 6
+ * pages"), then the two biggest things it did. A step that failed counts for
+ * nothing it would have done: when nothing else is left to say, the line says
+ * what was tried ("Tried searching the web").
  */
 function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: string | null } {
   const groups = new Map<string, Group>();
+  // Assigned in the loop below; the assertions keep them from narrowing to null.
+  let tried = null as ActivityEntry | null;
+  let result = null as string | null;
   steps.forEach((step, index) => {
     if (!step.activity) {
       return;
     }
+    // A step the person said no to, or left, is named by its answer instead.
+    const declined = step.activity.approval === "denied" || step.activity.approval === "expired";
     for (const entry of [step.activity, ...step.activity.also]) {
-      if (entry.role === "quiet" || !entry.done) {
+      if (step.state === "failed") {
+        if (!tried && !declined && entry.role !== "quiet" && entry.live) {
+          tried = entry;
+        }
+        continue;
+      }
+      if (entry.role === "quiet") {
+        if (step.state === "done") {
+          result = RESULT_WITHOUT_OUTCOME.get(entry.key) ?? result;
+        }
+        continue;
+      }
+      if (!entry.done) {
         continue;
       }
       if (entry.when === "success" && step.state !== "done") {
@@ -510,16 +579,19 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
     .filter((group) => group.entry.role === "outcome")
     .sort((a, b) => b.last - a.last)
     .slice(0, 1);
-  const shown = [...content, ...outcome];
+  const shown = [...outcome, ...content];
+  const phrases: string[] = outcome.length === 0 && result ? [result] : [];
   let previousHost: string | null = null;
-  const phrases = shown.map((group) => {
-    const words = groupWords(group, previousHost);
+  for (const group of shown) {
+    phrases.push(groupWords(group, previousHost));
     previousHost = group.entry.host ?? null;
-    return words;
-  });
+  }
+  if (phrases.length === 0 && tried?.live) {
+    return { text: triedWords(tried.live, tried.host), firstHost: tried.host ?? null };
+  }
   return {
     text: phrases.length > 0 ? phrases.join(", ") : null,
-    firstHost: shown[0]?.entry.host ?? null,
+    firstHost: shown.find((group) => group.entry.host)?.entry.host ?? null,
   };
 }
 
@@ -635,16 +707,30 @@ function approvalsClause(answered: readonly AnsweredApproval[], namedHost: strin
   }
 }
 
-function stepLabel(activity: StepActivity | null, state: StepState): string | null {
-  if (!activity) {
-    return null;
+function neutralDone(kind: StepKind, message: ChatMessage): string {
+  if (kind === "edit") {
+    const paths = new Set(stepPaths(message)).size;
+    return paths > 0 ? plural(paths, "edited a file", "edited {n} files") : NEUTRAL_LABELS.edit.done;
   }
-  // A failed step names what it was doing ("Checking the map"), never what it
-  // would have done ("Built the map").
-  if (state === "done" && activity.done) {
-    return capitalize(doneWords(activity.done, activity.count, activity.host));
+  return NEUTRAL_LABELS[kind].done;
+}
+
+function stepLabel(kind: StepKind, message: ChatMessage, activity: StepActivity | null, state: StepState): string {
+  const entry = activity ? primaryEntry(activity) : null;
+  const live = entry?.live ? fillHost(entry.live, entry.host) : NEUTRAL_LABELS[kind].live;
+  if (state === "running") {
+    return live;
   }
-  return activity.live ? fillHost(activity.live, activity.host) : null;
+  // A failed step says what it tried ("Tried checking the map"), never what
+  // it would have done ("Built the map").
+  if (state === "failed") {
+    return capitalize(triedWords(live));
+  }
+  if (entry?.done) {
+    return capitalize(doneWords(entry.done, entry.count, entry.host));
+  }
+  // A quiet step its runtime gave no past form keeps its own words.
+  return entry ? live : capitalize(neutralDone(kind, message));
 }
 
 /** One step as Details shows it, or null when the message is not a step. */
@@ -655,7 +741,7 @@ export function turnStepFromMessage(message: ChatMessage, jobId: string | null):
   }
   const activity = readStepActivity(message, jobId);
   const state = stepState(message);
-  return { kind, message, activity, state, label: stepLabel(activity, state) };
+  return { kind, message, activity, state, label: stepLabel(kind, message, activity, state) };
 }
 
 function isRuntimeStatus(message: ChatMessage): boolean {
@@ -791,25 +877,26 @@ export function summarizeTurnActivity(
   let live: string | null = null;
   let summary: string | null = null;
   if (phase === "starting") {
-    live = options.retry ? "Trying again…" : "Starting…";
+    live = options.retry ? "Trying again…" : STARTING_LINE;
   } else if (phase === "stale") {
     live = "Status unavailable";
   } else if (phase === "running") {
     const status = newestStatus as { index: number; activity: StepActivity } | null;
     const runningStep = [...steps].reverse().find((step) => step.state === "running") ?? null;
+    const runningEntry = runningStep?.activity ? primaryEntry(runningStep.activity) : null;
     if (options.viewerCanAnswer) {
-      live = "Waiting for you";
+      live = WAITING_FOR_YOU_LINE;
     } else if (status && status.index > newestOtherIndex && status.activity.live) {
       live = `${fillHost(status.activity.live, status.activity.host)}…`;
     } else if (runningStep) {
-      const label = runningStep.activity?.live
-        ? fillHost(runningStep.activity.live, runningStep.activity.host)
+      const label = runningEntry?.live
+        ? fillHost(runningEntry.live, runningEntry.host)
         : runningStep.kind === "edit"
           ? "Editing files"
           : "Working";
       live = `${label}…`;
     } else {
-      live = "Thinking…";
+      live = THINKING_LINE;
     }
   } else {
     const groups = summarizeGroups(steps);

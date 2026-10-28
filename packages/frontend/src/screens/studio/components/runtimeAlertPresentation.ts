@@ -122,7 +122,7 @@ export function resolveAgentWaitingActivityCopy(input: {
 
   // The runtime slot wall must out-rank every generic waiting phrase: a
   // message queued behind runtime_limit_reached will not send until the
-  // blocking runtime stops, and "starting its workspace…" reads as progress
+  // blocking runtime stops, and "Starting…" reads as progress
   // where there is none. The controller keeps retrying the launch and takes
   // over the blocking runtime once it has been idle for a couple of minutes;
   // after 30 minutes it gives up and fails the message with a reason
@@ -137,37 +137,11 @@ export function resolveAgentWaitingActivityCopy(input: {
     return { label, ariaLabel: label, isRuntimeBusyNotice: true };
   }
 
-  if (input.workspaceStarting) {
-    return multiple
-      ? {
-          label: `${subject} are starting their workspaces…`,
-          ariaLabel: `${subject} are starting their workspaces`,
-        }
-      : {
-          label: `${subject} is starting its workspace…`,
-          ariaLabel: `${subject} is starting its workspace`,
-        };
-  }
-
-  if (input.queued) {
-    return multiple
-      ? {
-          label: `${subject} are waiting for their turns…`,
-          ariaLabel: `${subject} are waiting for their turns`,
-        }
-      : {
-          label: `${subject} is waiting for its turn…`,
-          ariaLabel: `${subject} is waiting for its turn`,
-        };
-  }
-
-  return multiple
-    ? {
-        label: `${subject} are getting ready…`,
-        ariaLabel: `${subject} are getting ready`,
-      }
-    : {
-        label: `${subject} is getting ready…`,
-        ariaLabel: `${subject} is getting ready`,
-      };
+  // Starting the workspace, waiting behind another turn and getting ready
+  // used to be three labels inside a second: one "Starting…" says it, and a
+  // start that stalls becomes its own notice (useStalledWorkspaceStart).
+  return {
+    label: "Starting…",
+    ariaLabel: `${subject} ${multiple ? "are" : "is"} starting`,
+  };
 }
