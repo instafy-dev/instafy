@@ -998,6 +998,10 @@ impl RuntimeAgent {
             // first, above.
             crate::browser_host::shutdown(BROWSER_HOST_SHUTDOWN_BUDGET).await;
 
+            // The shutdown save closes the boot-time Chromium itself: the
+            // watch must not start it again behind it.
+            crate::boot_browser::stop_watching();
+
             // Flag-gated: snapshot the browser profile back to the controller
             // before we tear the runtime down, so the next runtime restores it.
             crate::browser_profile::maybe_snapshot(client.as_ref(), registration).await;

@@ -289,6 +289,9 @@ struct WatchStatus {
 /// The watch's state, read by origin and by the Shared Browser job gate.
 pub struct BootBrowserWatch {
     status: Mutex<WatchStatus>,
+    /// Set when the runtime stops: the shutdown save closes Chromium itself,
+    /// and nothing may start it again behind it.
+    stopping: std::sync::atomic::AtomicBool,
 }
 
 impl BootBrowserWatch {
@@ -298,7 +301,17 @@ impl BootBrowserWatch {
                 state: BootBrowserState::Running,
                 running: None,
             }),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    fn stop(&self) {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_stopping(&self) -> bool {
+        self.stopping.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn set(&self, state: BootBrowserState, running: Option<i32>) {
@@ -406,6 +419,15 @@ pub fn origin_handle() -> Option<BootBrowserHandle> {
     current().map(|watch| watch as BootBrowserHandle)
 }
 
+/// Ends the watch before the runtime stops: the shutdown save closes Chromium
+/// itself, which is no exit to recover from. Call it before anything closes
+/// the browser on purpose.
+pub fn stop_watching() {
+    if let Some(watch) = current() {
+        watch.stop();
+    }
+}
+
 /// Why a Shared Browser job cannot run here, once the watch has given up.
 pub(crate) fn unavailable_reason() -> Option<&'static str> {
     current()
@@ -443,12 +465,17 @@ async fn start_again(config: &WatchConfig) -> Option<ChromiumId> {
     running_from_pid_file(&config.pid_file, config.command_prefix)
 }
 
-/// Sleeps `delay` unless shutdown comes first; false on shutdown.
-async fn wait_or_shutdown(delay: Duration, shutdown: &ShutdownSignal) -> bool {
+/// Sleeps `delay` unless shutdown comes first; false on shutdown, or once the
+/// watch was told to stop.
+async fn wait_or_shutdown(
+    delay: Duration,
+    shutdown: &ShutdownSignal,
+    watch: &BootBrowserWatch,
+) -> bool {
     tokio::select! {
         biased;
         _ = shutdown.cancelled() => false,
-        _ = tokio::time::sleep(delay) => !shutdown.is_cancelled(),
+        _ = tokio::time::sleep(delay) => !shutdown.is_cancelled() && !watch.is_stopping(),
     }
 }
 
@@ -461,7 +488,7 @@ pub(crate) async fn run_watch(
     let mut history = RestartHistory::default();
     let mut watched: Option<Watched> = None;
     loop {
-        if !wait_or_shutdown(config.poll, &shutdown).await {
+        if !wait_or_shutdown(config.poll, &shutdown, &watch).await {
             return;
         }
         let named = running_from_pid_file(&config.pid_file, config.command_prefix);
@@ -523,9 +550,11 @@ pub(crate) async fn run_watch(
         loop {
             match history.on_exit(&config.policy, Instant::now(), ran_for) {
                 Decision::GiveUp => {
+                    // Counted in starts, not exits: a start that did not come
+                    // up counts too.
                     let message = format!(
-                        "Instafy's browser stopped {} times in {} minutes and was not started again. Restart this machine to open it. See {CHROMIUM_LOG_FILE}.",
-                        config.policy.max_restarts + 1,
+                        "Instafy's browser stopped again after {} restarts in {} minutes and was not started again. Restart this machine to open it. See {CHROMIUM_LOG_FILE}.",
+                        config.policy.max_restarts,
                         config.policy.window.as_secs() / 60,
                     );
                     if let Some(parent) = config.warning_file.parent() {
@@ -549,7 +578,7 @@ pub(crate) async fn run_watch(
                         restarts_in_window = history.recent(),
                         "Shared Browser: starting Chromium again"
                     );
-                    if !wait_or_shutdown(delay, &shutdown).await {
+                    if !wait_or_shutdown(delay, &shutdown, &watch).await {
                         return;
                     }
                     if let Some(started) = start_again(&config).await {

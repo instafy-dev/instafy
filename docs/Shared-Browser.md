@@ -1945,9 +1945,9 @@ the two never launch at once:
 - after 1, 5, 15, 30 and then 60 seconds for exits in a row; a browser that ran for two minutes is
   healthy again, and its next exit waits 1 second;
 - at most 5 starts in any 10 minutes. Past that it gives up: it writes
-  `/tmp/instafy/playwright/chromium-warning.txt` ("Instafy's browser stopped 6 times in 10 minutes
-  and was not started again. Restart this machine to open it.") and starts nothing more until the
-  machine restarts. A browser something else starts (a profile restore) is watched again.
+  `/tmp/instafy/playwright/chromium-warning.txt` ("Instafy's browser stopped again after 5
+  restarts in 10 minutes and was not started again. Restart this machine to open it.", a start
+  that did not come up counting as one) and starts nothing more until the machine restarts. A browser something else starts (a profile restore) is watched again.
 
 While Chromium is not running, origin's page, page-command, pixel and input routes answer 503
 before any CDP request or WebSocket upgrade: `browser_restarting` with `Retry-After: 2` while it

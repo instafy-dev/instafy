@@ -277,7 +277,7 @@ async fn a_chromium_that_does_not_start_again_is_given_up_with_a_clear_status() 
     assert_eq!(fixture.launches(), 3, "the boot launch and two restarts");
     let warning = std::fs::read_to_string(&fixture.warning_file).unwrap();
     assert!(
-        warning.starts_with("Instafy's browser stopped 3 times in 10 minutes and was not started again. Restart this machine to open it."),
+        warning.starts_with("Instafy's browser stopped again after 2 restarts in 10 minutes and was not started again. Restart this machine to open it."),
         "{warning}"
     );
     assert!(chromium_state_for_log_of(&watch).contains("stopped"));
@@ -395,4 +395,29 @@ fn a_shared_browser_job_is_refused_once_the_watch_gave_up() {
         origin_handle().expect("a handle").snapshot().state,
         BootBrowserState::Stopped
     );
+}
+
+#[tokio::test]
+async fn a_watch_told_to_stop_starts_nothing_more() {
+    // The runtime stops without its shutdown signal (an unconfirmed worker
+    // shutdown) and its save closes Chromium: no restart follows.
+    let fixture = Fixture::new(10);
+    let first = fixture.boot();
+    let watch = BootBrowserWatch::new();
+    let task = tokio::spawn(run_watch(
+        watch.clone(),
+        fixture.config(&[10], 5),
+        ShutdownSignal::new(),
+    ));
+    until("the watch to see the browser", || {
+        running_pid(&watch) == Some(first)
+    })
+    .await;
+    watch.stop();
+    kill(first);
+    tokio::time::timeout(secs(2), task)
+        .await
+        .expect("the watch ends once told to stop")
+        .unwrap();
+    assert_eq!(fixture.launches(), 1, "nothing was started again");
 }
