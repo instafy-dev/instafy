@@ -399,8 +399,11 @@ pub(crate) async fn resolve_effective_project_access(
         ));
     }
 
+    // A sandbox the controller provisions has no owner, and its session id is
+    // the way in. A space with an owner was made by a person, so its session
+    // id grants nothing and access follows the owner and members below.
     if let Some(project_type) = project.project_type.as_deref() {
-        if project_type == "sandbox" {
+        if project_type == "sandbox" && project.owner_user_id.is_none() {
             if let (Some(project_session), Some(request_session)) =
                 (project.sandbox_session_id, session_id)
             {
@@ -6313,6 +6316,23 @@ async fn create_org_project(
     if owner_user_id.is_none() && !context.is_service_role {
         return Err(unauthorized(
             "You must be signed in to create a project without specifying an owner.",
+        ));
+    }
+
+    // A sandbox's session id lets its holder in without signing in
+    // (`resolve_effective_project_access`), so only the service role
+    // provisions one.
+    let requests_sandbox = body
+        .project_type
+        .as_deref()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("sandbox"))
+        || body
+            .sandbox_session_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    if requests_sandbox && !context.is_service_role {
+        return Err(forbidden(
+            "Only service-role requests can create sandbox projects",
         ));
     }
 

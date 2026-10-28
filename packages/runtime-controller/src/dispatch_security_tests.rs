@@ -576,3 +576,137 @@ async fn dispatch_security_credential_seeded_agents_take_the_agent_id_as_avatar_
     transaction.rollback().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn dispatch_security_owned_sandbox_sessions_grant_nothing() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("owned sandbox session regression").await?;
+    let owner_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_id).await?;
+    let result = AssertUnwindSafe(async {
+        let config = test_config();
+        let project_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        // A person's sandbox, as clients could create before only the service
+        // role could.
+        transaction
+            .execute(
+                "insert into projects (id, project_type, status, sandbox_session_id, owner_user_id)
+                 values ($1, 'sandbox', 'active', $2, $3)",
+                &[&project_id, &session_id, &owner_id],
+            )
+            .await?;
+        let anonymous = RequestContext {
+            user_id: None,
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        let denied = ensure_project_record_for_dispatch(
+            &transaction,
+            &config,
+            &normalized_request(project_id, session_id),
+            &anonymous,
+        )
+        .await
+        .err()
+        .expect("an owned sandbox's session must not grant access");
+        assert_eq!(denied.0, StatusCode::UNAUTHORIZED);
+        transaction.rollback().await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    pool.get()
+        .await?
+        .execute("delete from auth.users where id = $1", &[&owner_id])
+        .await?;
+    match result {
+        Ok(result) => result,
+        Err(panic) => resume_unwind(panic),
+    }
+}
+
+#[tokio::test]
+async fn dispatch_security_only_the_service_role_creates_sandbox_projects() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("sandbox creation regression").await?;
+    let user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    ensure_test_user(&pool, &user_id).await?;
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into organizations (id, slug, name) values ($1, $2, 'Sandbox test team')",
+                &[&org_id, &format!("sandbox-{org_id}")],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into org_memberships (org_id, user_id, role) values ($1, $2, 'owner')",
+                &[&org_id, &user_id],
+            )
+            .await?;
+    }
+    let result = AssertUnwindSafe(async {
+        let config = test_config();
+        let token = crate::auth::issue_controller_token(&config, &user_id)
+            .expect("issue user token")
+            .token;
+        let app = crate::projects::router().with_state(build_test_state(pool.clone(), config));
+        for body in [
+            json!({ "projectType": "sandbox", "sandboxSessionId": Uuid::new_v4() }),
+            json!({ "projectType": " Sandbox " }),
+            json!({ "sandboxSessionId": Uuid::new_v4() }),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/orgs/{org_id}/projects"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))?,
+                )
+                .await?;
+            let status = response.status();
+            let reply: JsonValue =
+                serde_json::from_slice(&to_bytes(response.into_body(), 16_384).await?)?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}: {reply}");
+            assert_eq!(
+                reply["message"], "Only service-role requests can create sandbox projects",
+                "{body}"
+            );
+        }
+        let created: i64 = pool
+            .get()
+            .await?
+            .query_one(
+                "select count(*) from projects where org_id = $1",
+                &[&org_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(created, 0, "refused requests create no space");
+        Ok::<_, anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    let connection = pool.get().await?;
+    connection
+        .execute("delete from projects where org_id = $1", &[&org_id])
+        .await?;
+    connection
+        .execute("delete from organizations where id = $1", &[&org_id])
+        .await?;
+    connection
+        .execute("delete from auth.users where id = $1", &[&user_id])
+        .await?;
+    match result {
+        Ok(result) => result,
+        Err(panic) => resume_unwind(panic),
+    }
+}
