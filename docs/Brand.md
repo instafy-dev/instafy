@@ -335,10 +335,11 @@ The example is one scripted task drawn with the studio's own chrome: one turn,
 plus the browser handoff that turn asks for when it needs one. Ada types into
 the composer (when the composer is below the fold, as on a laptop's first view,
 the task opens on the sent prompt instead, and everything from Octo's work on
-keeps its time, so Cub's hello still comes first), Octo works through its
-activity rail (a step's caption is a command's own text or the studio's
-"Calling tool…", "Updating plan…" or "Thinking…"), the result lands in the
-message that produced it and beside the conversation, and a teammate replies
+keeps its time, so Cub's hello still comes first), Octo works under the
+studio's one activity line ("Editing files…" or "Running tests…" while a step
+runs, "Thinking…" between steps, then what the run did, such as "Edited 3
+files, ran tests", with Details beside it), the result lands in the message
+that produced it and beside the conversation, and a teammate replies
 only once that message is complete. The window keeps one fixed height, like the
 studio's screen, and a conversation that outgrows it keeps its newest message in
 view the way the chat does. Under reduced motion, offscreen and in hidden tabs
@@ -370,8 +371,9 @@ already open beside the chat:
 - Build a feature: the router. Octo's edit lands as the Updated card with its
   hunk, and the router beside the chat shows the new code with the change's
   first range selected (the import on line 2), as a click on the card's
-  filename reveals it. The payment tests show as the studio shows a command:
-  their command text as the live caption, and the result in Octo's summary.
+  filename reveals it. The payment tests show as the studio labels a test
+  run: "Running tests…" on the activity line while they run, and the command
+  and its result in Octo's summary.
 - Launch a site: the pricing notes. Octo builds the page, starts its dev
   server and a tunnel (Ada's prompt asks for the preview link, the consent the
   tunnel needs), posts the preview link, and asks to continue in the browser.
