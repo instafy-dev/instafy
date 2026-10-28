@@ -15,6 +15,8 @@
  *                          unknown is never listed as under $160; it is listed apart, under "Price unknown".
  *   items: [{ref: "option:a", name, why (one short line), badge?: "Previous model", note?, facts: {key: fact},
  *            store: {name, url, readable}, more?: [{label, fact}], sources?: [{name, url}]}]
+ *                          every candidate a page you read named, also one nothing could be read for: its cells say
+ *                          "Unknown" (a table of unknowns). Empty only when no page named any: it reads "No options yet".
  *   unchecked: ["what was not checked", …]     listed once in the footer
  *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
  *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read that

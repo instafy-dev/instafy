@@ -57,6 +57,7 @@ describe("a request_browser card", () => {
       opening: text("browser-request-opening"),
       openingNote: text("browser-request-opening-note"),
       opened: text("browser-request-opened"),
+      notOpened: text("browser-request-not-opened"),
       reason: text("browser-request-reason"),
       button: container.querySelector<HTMLButtonElement>('[data-testid="browser-request-continue"]'),
     };
@@ -129,17 +130,44 @@ describe("a request_browser card", () => {
     expect(card.destination).toBeNull();
   });
 
-  it("reads Browser opened, without its button, once continued, also after a reload", async () => {
+  it("reads a plain Opened, without its button, once continued, also after a reload", async () => {
     for (const host of [
       { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]) },
       { ...web, continuedKeys: new Set(["job:job-1"]) },
+      // Also once a newer card followed it.
+      { ...web, continuedKeys: new Set(["job:job-1"]), newestCardKey: "job:job-2" },
     ]) {
       const card = await render(task, host);
-      // The browser opened; whether the site loaded is for the browser to
-      // show, so the host stays a destination.
-      expect(card.opened).toBe("Browser opened for dashboard.stripe.com");
+      // The browser opened; whether the site loaded is for the browser to show.
+      expect(card.opened).toBe("Opened");
       expect(card.button).toBeNull();
+      expect(card.destination).toBeNull();
     }
+  });
+
+  // Local drive, Oct 28: two live cards stacked up in one chat, and the older
+  // one's button stayed pressable for the rest of it.
+  it("offers no button once a newer card followed it, and the newest keeps its own", async () => {
+    let card = await render(task, { ...web, newestCardKey: "job:job-2" });
+    expect(card.button).toBeNull();
+    expect(card.destination).toBeNull();
+    expect(card.opened).toBeNull();
+    // It never opened, and it no longer promises to: a plain "Not opened" in
+    // place of "Studio opens the browser and continues this task there."
+    expect(card.notOpened).toBe("Not opened");
+    expect(container.textContent).not.toContain("Studio opens the browser");
+    card = await render(task, { ...web, newestCardKey: "job:job-1" });
+    expect(card.button?.disabled).toBe(false);
+    expect(card.destination).toBe("For dashboard.stripe.com");
+    expect(card.notOpened).toBeNull();
+    expect(container.textContent).toContain("Studio opens the browser and continues this task there.");
+    // No reason or warning on a card that offers nothing to press.
+    card = await render(task, { ...web, sharedUnavailable: true, newestCardKey: "job:job-2", cardStates: new Map([[
+      "job:job-1", { kind: "button", reason: "This starts a second cloud machine for this space." } as const,
+    ]]) });
+    expect(card.button).toBeNull();
+    expect(card.reason).toBeNull();
+    expect(card.unavailable).toBeNull();
   });
 
   it("keeps the button with the reason Studio did not open it by itself", async () => {

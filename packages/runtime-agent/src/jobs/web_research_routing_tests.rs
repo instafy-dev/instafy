@@ -696,7 +696,7 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
         "Still none: \"price unknown\", and the page for the person to open and send to Octo; never a remembered or guessed price.",
         "Sources asked for (\"two independent reviews\"): that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count).",
         "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page.",
-        "A limit (\"under €600\"): an item without a price read this turn is never listed or described as within it.",
+        "A limit (\"under €600\"): an item with no price read this turn is listed as \"price unknown\", never as within it.",
     ] {
         assert!(research.contains(needle), "{needle}");
     }
@@ -736,6 +736,61 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
         );
         let skill = tmp.path().join(relative);
         let current = fs::read_to_string(&skill).unwrap();
+        fs::write(&skill, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
+    }
+}
+
+/// The official site that never loads (28 Oct drive 3: every Roborock address failed the TLS handshake, the turn read
+/// nothing else, dropped every model because no price was read and built a page reading "No options yet"): an item
+/// without a price is listed as "price unknown", two failures on the official site send the turn to at least one
+/// independent source, and a page of options has a row per candidate. Unedited earlier copies are upgraded.
+#[test]
+fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_official_site_fails()
+{
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let research = flat(RESEARCH_SKILL);
+    let new_rules = [
+        "an item with no price read this turn is listed as \"price unknown\", never as within it.",
+        "The official site failed twice: read an independent source (a review, or a shop robots.txt allows) before building.",
+        "each fact not read marked unknown with why. A row per candidate a page read names.",
+        "Name: the exact model and generation its official page gives, else the page naming it.",
+    ];
+    let previous = include_str!("legacy/web-research-v7.md");
+    for needle in new_rules {
+        assert!(research.contains(needle), "{needle}");
+        assert!(
+            !flat(previous).contains(needle),
+            "new in this version: {needle}"
+        );
+    }
+    assert!(!research.contains("never listed or described as within it"));
+    assert!(
+        RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        RESEARCH_SKILL.len()
+    );
+
+    let hub = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+    ));
+    let rows = "A candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty (\"No options yet\") while a page you read named what to compare.";
+    assert!(flat(hub).contains(rows));
+    let previous_hub = include_str!("legacy/interactive-artifacts-v2.md");
+    assert!(!flat(previous_hub).contains(rows));
+
+    let tmp = scaffolded_space();
+    for (relative, previous, current) in [
+        (learn::WEB_RESEARCH_RELATIVE_PATH, previous, RESEARCH_SKILL),
+        (
+            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+            previous_hub,
+            hub,
+        ),
+    ] {
+        let skill = tmp.path().join(relative);
         fs::write(&skill, previous).unwrap();
         learn::ensure_project_memory_scaffold(tmp.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");

@@ -36,7 +36,9 @@ own kind of page.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
   why ("no price on maker.com's page"), never a blank or a dash. A filter from a stated limit ("under €600") counts
   known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on the
-  page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too.
+  page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
+  candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty
+  ("No options yet") while a page you read named what to compare.
 - Keep sort, filters and the open tab in the URL query and give rows ids, so links and Studio's Follow keep them.
 - Every item the request names (stops, products, entries) is on the page, or the reply says plainly which is
   missing and why. Check before the card with the builder skill's own check, else
