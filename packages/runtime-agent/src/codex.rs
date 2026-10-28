@@ -1414,6 +1414,22 @@ impl CodexClient {
                 };
                 observation.finish(outcome);
             }
+            if let Some(signal) = shared_browser_shutdown_confirmation
+                .as_ref()
+                .filter(|signal| !signal.shared_browser_shutdown_is_confirmed())
+            {
+                // A run that ended before it reached the shutdown check never
+                // recorded why; say how it ended instead.
+                signal.note_shared_browser_shutdown_failure(if cleanup_result.is_err() {
+                    "codex_threads_not_drained"
+                } else if signal.is_canceled() {
+                    "run_cancelled_before_shutdown"
+                } else if result.is_err() {
+                    "run_deadline_before_shutdown"
+                } else {
+                    "run_ended_before_shutdown"
+                });
+            }
             cleanup_result?;
             if shared_browser_shutdown_confirmation
                 .as_ref()
@@ -2624,15 +2640,25 @@ impl CodexClient {
                     "Shared Browser execution lost its shutdown confirmation signal"
                 ));
             };
-            confirm_shared_browser_shutdown(&conversation).await?;
+            if let Err(error) = confirm_shared_browser_shutdown(&conversation).await {
+                shutdown_confirmation
+                    .note_shared_browser_shutdown_failure("codex_shutdown_unconfirmed");
+                return Err(error);
+            }
             // Codex reports ShutdownComplete after only signalling its MCP processes. Authority
             // returns to the human once every recorded MCP process group is proven gone.
-            shared_browser_process_groups
-                .take()
-                .context("Shared Browser execution lost its MCP process-group registry")?
-                .terminate_and_confirm()
-                .await
-                .context("Shared Browser MCP processes could not be confirmed gone")?;
+            let Some(process_groups) = shared_browser_process_groups.take() else {
+                shutdown_confirmation.note_shared_browser_shutdown_failure("mcp_registry_lost");
+                return Err(anyhow!(
+                    "Shared Browser execution lost its MCP process-group registry"
+                ));
+            };
+            if let Err(error) = process_groups.terminate_and_confirm().await {
+                shutdown_confirmation
+                    .note_shared_browser_shutdown_failure("mcp_processes_not_gone");
+                return Err(error)
+                    .context("Shared Browser MCP processes could not be confirmed gone");
+            }
             shutdown_confirmation.confirm_shared_browser_shutdown();
         }
 

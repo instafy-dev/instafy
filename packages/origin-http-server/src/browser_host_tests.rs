@@ -272,6 +272,16 @@ async fn serve(
     marker: &std::path::Path,
     handles: Vec<Option<BrowserHostHandle>>,
 ) -> (Served, Vec<AppState>, Vec<String>) {
+    serve_with(workspace, marker, handles, |_| {}).await
+}
+
+/// [`serve`], with `adjust` applied to each origin's state before it serves.
+async fn serve_with(
+    workspace: &TempDir,
+    marker: &std::path::Path,
+    handles: Vec<Option<BrowserHostHandle>>,
+    adjust: impl Fn(&mut AppState),
+) -> (Served, Vec<AppState>, Vec<String>) {
     let key_der = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
         .unwrap()
         .as_ref()
@@ -305,7 +315,7 @@ async fn serve(
     let mut states = Vec::new();
     let mut bases = Vec::new();
     for handle in handles {
-        let state = state_with(
+        let mut state = state_with(
             workspace,
             &controller,
             project_id,
@@ -313,6 +323,7 @@ async fn serve(
             marker,
             handle,
         );
+        adjust(&mut state);
         let app = crate::routes::router(state.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         bases.push(format!("http://{}", listener.local_addr().unwrap()));
@@ -717,6 +728,166 @@ async fn browser_transports_wait_for_a_ready_host() {
     // Once ready, the guard steps aside: an upgrade-less request reaches the
     // websocket extractor (400) rather than the guard.
     host.inner().snapshot.state = BrowserHostState::Ready;
+    let past_guard = client
+        .get(format!("{base}/browser/vnc"))
+        .bearer_auth(&both)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(past_guard.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ---------------------------------------------------------------------------
+// A boot-time browser's guard (crate::boot_browser).
+
+struct FakeBootBrowser(Mutex<crate::boot_browser::BootBrowserState>);
+
+impl crate::boot_browser::BootBrowserStatus for FakeBootBrowser {
+    fn snapshot(&self) -> crate::boot_browser::BootBrowserSnapshot {
+        crate::boot_browser::BootBrowserSnapshot {
+            state: *self.0.lock().unwrap(),
+        }
+    }
+}
+
+/// The status, `Retry-After` and body a websocket upgrade is refused with.
+async fn ws_refusal(url: String, token: &str) -> Option<(u16, Option<String>, Value)> {
+    let mut request = url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    match tokio_tungstenite::connect_async(request).await {
+        Ok(_) => None,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => Some((
+            response.status().as_u16(),
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+            serde_json::from_slice(response.body().as_deref().unwrap_or_default())
+                .unwrap_or(Value::Null),
+        )),
+        Err(error) => panic!("unexpected websocket error: {error}"),
+    }
+}
+
+#[tokio::test]
+async fn a_boot_browser_says_its_chromium_is_restarting_or_stopped() {
+    use crate::boot_browser::{BootBrowserHandle, BootBrowserState};
+
+    let workspace = TempDir::new().unwrap();
+    let markers = TempDir::new().unwrap();
+    let boot = Arc::new(FakeBootBrowser(Mutex::new(BootBrowserState::Restarting)));
+    let handle: BootBrowserHandle = boot.clone();
+    let (served, _, _) = serve_with(
+        &workspace,
+        &marker_path(&markers),
+        vec![None],
+        move |state| {
+            state.boot_browser = Some(handle.clone());
+        },
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let user = Uuid::new_v4().to_string();
+    let view = served.token(&user, "s1", &["browser.view"]);
+    let control = served.token(&user, "s1", &["browser.control"]);
+    let both = served.token(&user, "s1", &["browser.view", "browser.control"]);
+    let base = &served.base;
+    let ws = base.replace("http://", "ws://");
+
+    for (state, code, retry_after) in [
+        (
+            BootBrowserState::Restarting,
+            "browser_restarting",
+            Some("2"),
+        ),
+        (BootBrowserState::Stopped, "browser_stopped", None),
+    ] {
+        *boot.0.lock().unwrap() = state;
+        let requests = [
+            client
+                .get(format!("{base}/browser/pages"))
+                .bearer_auth(&view),
+            client
+                .post(format!("{base}/browser/pages/PAGE1/focus"))
+                .bearer_auth(&control),
+            client
+                .post(format!("{base}/browser/pages/PAGE1/command"))
+                .bearer_auth(&control)
+                .json(&json!({ "action": "reload" })),
+            client
+                .post(format!("{base}/browser/pages/PAGE1/capture"))
+                .bearer_auth(&control),
+        ];
+        for request in requests {
+            let response = request.send().await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{state:?}"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                retry_after,
+                "{state:?}"
+            );
+            let refused = body(response).await;
+            assert_eq!(refused["code"], code);
+            assert_eq!(
+                refused.as_object().unwrap().len(),
+                2,
+                "only error and code: {refused}"
+            );
+        }
+        for (path, token) in [
+            ("/browser/screencast", &both),
+            ("/browser/input", &control),
+            ("/browser/vnc", &both),
+        ] {
+            let (status, retry, refused) = ws_refusal(format!("{ws}{path}"), token)
+                .await
+                .expect("the upgrade is refused");
+            assert_eq!(status, 503, "{path} {state:?}");
+            assert_eq!(retry.as_deref(), retry_after, "{path} {state:?}");
+            assert_eq!(refused["code"], code, "{path} {state:?}");
+        }
+        // Metadata stays readable, and no lazy-host route appears.
+        for path in ["/browser/capabilities", "/browser/actions"] {
+            let response = client
+                .get(format!("{base}{path}"))
+                .bearer_auth(&view)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
+        let host = client
+            .get(format!("{base}/browser/host"))
+            .bearer_auth(&view)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(host.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body(host).await["code"], "browser_host_absent");
+    }
+
+    // Running: the guard steps aside, so a request reaches its own handler
+    // (here, the page list without a browser behind it).
+    *boot.0.lock().unwrap() = BootBrowserState::Running;
+    let pages = client
+        .get(format!("{base}/browser/pages"))
+        .bearer_auth(&view)
+        .send()
+        .await
+        .unwrap();
+    let pages = body(pages).await;
+    assert_ne!(pages["code"], "browser_restarting");
+    assert_ne!(pages["code"], "browser_stopped");
     let past_guard = client
         .get(format!("{base}/browser/vnc"))
         .bearer_auth(&both)

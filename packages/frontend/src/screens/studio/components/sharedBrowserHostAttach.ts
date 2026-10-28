@@ -39,6 +39,8 @@ export const SHARED_BROWSER_HOST_COPY = {
   machineDidNotStart: "This space's machine did not start. Try again.",
   askBuilder: "Ask a space builder to open Instafy's browser.",
   poisoned: "Instafy's browser needs this space's machine to restart before it can open again.",
+  restarting: "Instafy's browser stopped. Starting it again…",
+  stoppedForGood: "Instafy's browser stopped and did not start again. Restart this space's machine to open it.",
   policyOff: "Instafy's browser is turned off for this space.",
 } as const;
 

@@ -1558,10 +1558,11 @@ at most one button, and a neutral status pill.
 | live | none | none | Ready (screen readers only) |
 | opening | "Opening Instafy's browser…" | none | Starting… |
 | opening, after a minute of a press starting the space's machine | "Still starting this space's machine…" | none | Starting… |
+| opening, while a browser session machine starts its browser again | "Instafy's browser stopped. Starting it again…" | none | Starting… |
 | off | "Instafy's browser is off." | Open browser | Off |
 | failed | "Instafy's browser did not open. Try again." | Try again | Off |
 | failed (machine) | "This space's machine did not start. Try again." | Try again | Off |
-| blocked | its own: turned off for this space, ask a space builder, or the machine must restart | none | Off |
+| blocked | its own: turned off for this space, ask a space builder, the machine must restart, or "Instafy's browser stopped and did not start again. Restart this space's machine to open it." | none | Off |
 
 Off covers a machine or browser that stopped, a browser that started again
 while the view reconnected, and a machine without its browser. A view is
@@ -1931,6 +1932,45 @@ changes the wait for the boot-time launch (whole seconds, clamped to 1 to 300). 
 a persisted-profile restore runs through runtime-agent's helper environment allowlist, so it always
 uses the 30-second default. That launch happens after registration and before the first heartbeat,
 and the default keeps it inside the controller's 60-second heartbeat window for queued-job recovery.
+
+### When the boot-time Chromium exits
+
+On a browser session machine (`INSTAFY_ENABLE_BROWSER_SESSION=1`, no lazy browser host) the
+entrypoint launches Chromium once, and runtime-agent keeps it running (`boot_browser.rs`). Once it
+has seen Chromium run, it checks the process every two seconds (by pid and start time, so a reused
+pid is not taken for the browser). When Chromium exits it starts it again through
+`runtime-entrypoint launch-chromium`, the same launcher the profile restore uses, under one lock so
+the two never launch at once:
+
+- after 1, 5, 15, 30 and then 60 seconds for exits in a row; a browser that ran for two minutes is
+  healthy again, and its next exit waits 1 second;
+- at most 5 starts in any 10 minutes. Past that it gives up: it writes
+  `/tmp/instafy/playwright/chromium-warning.txt` ("Instafy's browser stopped 6 times in 10 minutes
+  and was not started again. Restart this machine to open it.") and starts nothing more until the
+  machine restarts. A browser something else starts (a profile restore) is watched again.
+
+While Chromium is not running, origin's page, page-command, pixel and input routes answer 503
+before any CDP request or WebSocket upgrade: `browser_restarting` with `Retry-After: 2` while it
+starts again, and `browser_stopped` once the watch gave up. Studio reads the pages once before it
+connects a view to such a machine: while the browser restarts the view says "Instafy's browser
+stopped. Starting it again…" and reads every two seconds, for up to two minutes, then connects; once
+the machine gave up it says "Instafy's browser stopped and did not start again. Restart this space's
+machine to open it." with no Try again. An origin without these codes, or any other answer, lets the
+view connect as before. A Shared Browser job sent to a machine whose watch gave up is refused with
+the same reason instead of starting a turn without a browser.
+
+Each step is one log line with an `event` field, so the machine's logs say which of two things
+ended a browser that "did not open":
+
+| `event` | When | Fields |
+|---|---|---|
+| `chromium_exited` | Chromium exited by itself | `pid`, `status` (its exit status or signal, such as `killed by signal 9 (SIGKILL)`, when runtime-agent is its parent and reaps it), `uptime_secs`, `oom_kills_since_watch_start` (the memory cgroup's OOM kill count since the watch began), `agent_run_active` |
+| `chromium_restart_scheduled`, `chromium_restarted`, `chromium_restart_failed`, `chromium_restart_gave_up` | the watch's restarts | `delay_ms`, `pid`, `restarts_in_window` |
+| `runtime_exit` | runtime-agent exits with status 70 because a turn's end could not confirm its browser tools stopped | `cause` (`unconfirmed_tool_shutdown`, or a marker or approval cleanup that failed), `reason` (`run_deadline_before_shutdown`, `run_cancelled_before_shutdown`, `codex_shutdown_unconfirmed`, `mcp_processes_not_gone`, ...), `run_id`, `exit_code`, and `chromium`: the watch's last view of the browser (`running (pid N)`, `restarting`, `stopped`) |
+
+On a lazy browser host the same unconfirmed end logs `event = "browser_host_poisoned"` and closes
+the host instead of ending the process. A Chromium that is alive but no longer answers on CDP is not
+detected by the watch.
 
 ### On-demand browser host
 

@@ -7,6 +7,7 @@ import {
 } from "../../../sdk/instafy";
 import type { BrowserSessionPage } from "./browserSessionPages";
 import { SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS } from "./sharedBrowserHostAttach";
+import { BOOT_BROWSER_RESTARTING_CODE } from "./bootBrowserWait";
 import { useAdaptivePoll } from "../../../runtime/pollingGate";
 
 const BROWSER_SESSION_POLL_INTERVAL_MS = 2500;
@@ -35,6 +36,12 @@ export const BROWSER_HOST_NOT_READY_TIMEOUT_MS = SHARED_BROWSER_HOST_WAIT_TIMEOU
  * pages are simply not there.
  */
 const BROWSER_HOST_NOT_READY_CODE = "browser_host_not_ready";
+/**
+ * Answers that mean the browser is not running yet but is on its way: a
+ * lazy host that is not ready, or a browser session machine starting its
+ * boot-time browser again after it stopped.
+ */
+const BROWSER_STARTING_CODES = new Set<string>([BROWSER_HOST_NOT_READY_CODE, BOOT_BROWSER_RESTARTING_CODE]);
 
 export type LiveBrowserSessionPage = BrowserSessionPage & {
   canGoBack: boolean;
@@ -271,7 +278,7 @@ export function useBrowserSessionPages(params: {
           // hidden tab is never polled and never started.
           if (
             !suspendOnUnavailable &&
-            (error as { code?: string | null }).code === BROWSER_HOST_NOT_READY_CODE
+            BROWSER_STARTING_CODES.has((error as { code?: string | null }).code ?? "")
           ) {
             preferredActivePageIdRef.current = { scopeKey: requestScope, pageId: null };
             setPageState({ scopeKey: requestScope, pages: [], resolved: false });

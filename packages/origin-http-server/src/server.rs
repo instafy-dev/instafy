@@ -130,6 +130,8 @@ pub struct OriginHttpServer {
     drain_limit: Duration,
     /// Set by [`OriginHttpServer::set_browser_host`].
     browser_host: Option<crate::browser_host::BrowserHostHandle>,
+    /// Set by [`OriginHttpServer::set_boot_browser`].
+    boot_browser: Option<crate::boot_browser::BootBrowserHandle>,
     /// Set by [`OriginHttpServer::set_browser_page_capture_script`].
     browser_page_capture_script: Option<crate::browser_page_capture::BrowserPageCaptureScript>,
 }
@@ -237,6 +239,7 @@ impl OriginHttpServer {
             sweeper: None,
             drain_limit: SHUTDOWN_DRAIN_LIMIT,
             browser_host: None,
+            boot_browser: None,
             browser_page_capture_script: None,
         })
     }
@@ -283,6 +286,15 @@ impl OriginHttpServer {
     /// [`OriginHttpServer::start`]; the multi-tenant gateway ignores it.
     pub fn set_browser_host(&mut self, handle: crate::browser_host::BrowserHostHandle) {
         self.browser_host = Some(handle);
+    }
+
+    /// Reports this machine's boot-time browser (see [`crate::boot_browser`])
+    /// on the browser transports: while its Chromium restarts, or once it is
+    /// no longer started again, they answer 503 with the reason. Call it
+    /// before [`OriginHttpServer::start`]; a lazy browser host's guard takes
+    /// precedence, and the multi-tenant gateway ignores it.
+    pub fn set_boot_browser(&mut self, handle: crate::boot_browser::BootBrowserHandle) {
+        self.boot_browser = Some(handle);
     }
 
     /// Serves **Send page to Octo** on this machine's browser
@@ -402,6 +414,7 @@ impl OriginHttpServer {
                 )
                 .context("failed to open workspace root capability")?;
                 state.browser_host = self.browser_host.clone();
+                state.boot_browser = self.boot_browser.clone();
                 state.browser_page_capture_script = self.browser_page_capture_script.clone();
                 self.state = Some(state.clone());
                 routes::router(state)

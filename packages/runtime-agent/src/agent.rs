@@ -709,6 +709,9 @@ impl RuntimeAgent {
         // A lazy browser host lives as long as this process, across
         // registration renewals; it is published only on an attested lease.
         crate::browser_host::install(client.clone());
+        // A browser session machine's boot-time Chromium is started again
+        // when it exits, for as long as this process runs.
+        crate::boot_browser::install(shutdown.clone());
 
         Self::run_registration_loop(
             config.clone(),

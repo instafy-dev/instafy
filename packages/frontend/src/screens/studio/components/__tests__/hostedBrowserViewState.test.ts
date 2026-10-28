@@ -60,6 +60,21 @@ describe("hostedBrowserViewState", () => {
       .toBe(SHARED_BROWSER_HOST_COPY.opening);
   });
 
+  it("says a boot-time browser is starting again while the machine restarts it, and why it cannot open once it gave up", () => {
+    expect(hostedBrowserViewState({ status: "connecting", failure: null, hasConnection: false, browserRestarting: true }))
+      .toEqual({ kind: "opening", sentence: "Instafy's browser stopped. Starting it again…", action: null });
+    expect(hostedBrowserViewState({
+      status: "error",
+      failure: { kind: "blocked", reason: SHARED_BROWSER_HOST_COPY.stoppedForGood },
+      hasConnection: false,
+      browserRestarting: true,
+    })).toEqual({
+      kind: "blocked",
+      sentence: "Instafy's browser stopped and did not start again. Restart this space's machine to open it.",
+      action: null,
+    });
+  });
+
   it("never shows a raw reason as its sentence unless the reason is a sentence of its own", () => {
     for (const kind of ["off", "failed", "machine"] as const) {
       const state = view("error", { kind, reason: "Browser session is unavailable (origin token request failed)." });

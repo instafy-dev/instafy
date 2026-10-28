@@ -83,6 +83,10 @@ pub struct AppState {
     /// runs one (see [`crate::browser_host`]). `None` serves no host routes
     /// and leaves the browser transports unguarded.
     pub browser_host: Option<crate::browser_host::BrowserHostHandle>,
+    /// The boot-time browser on this machine, when the process hosting the
+    /// origin keeps one running (see [`crate::boot_browser`]). `None` leaves
+    /// the browser transports as they are without a lazy host.
+    pub boot_browser: Option<crate::boot_browser::BootBrowserHandle>,
     /// What reads a page a person sends to the chat (see
     /// [`crate::browser_page_capture`]). `None` answers that route with 404.
     pub browser_page_capture_script: Option<crate::browser_page_capture::BrowserPageCaptureScript>,
@@ -168,6 +172,7 @@ impl AppState {
             stop_flag: StopFlag::default(),
             working_memory: WorkingMemory::default(),
             browser_host: None,
+            boot_browser: None,
             browser_page_capture_script: None,
         })
     }

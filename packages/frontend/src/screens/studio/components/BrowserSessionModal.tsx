@@ -74,10 +74,12 @@ import {
 } from "./browserSessionRuntimeEnsure";
 import {
   liveSharedBrowserHostCandidate,
+  SHARED_BROWSER_HOST_COPY,
   shouldStartSpaceMachineForBrowser,
   startSpaceMachineForBrowser,
   waitForSharedBrowserHostReady,
 } from "./sharedBrowserHostAttach";
+import { bootBrowserProbeFromError, waitForBootBrowserRunning } from "./bootBrowserWait";
 import {
   hostedBrowserViewState,
   type HostedBrowserErrorKind,
@@ -659,6 +661,9 @@ export function BrowserSessionModal({
   // says the machine is still starting. The machine coming up, and each
   // attempt, error and connection, clears it.
   const [machineStartSlow, setMachineStartSlow] = useState(false);
+  // A browser session machine is starting its boot-time browser again after
+  // it stopped: the view says so while the attempt waits for it.
+  const [browserRestarting, setBrowserRestarting] = useState(false);
   const [runtimeLimitDetails, setRuntimeLimitDetails] =
     useState<HostedRuntimeLimitErrorDetails | null>(null);
   const [resolvedViewerUrl, setResolvedViewerUrl] = useState<{
@@ -706,6 +711,7 @@ export function BrowserSessionModal({
     if (by === "press") pressedAttemptRef.current = attempt;
     if (by === "studio") studioAttemptRef.current = attempt;
     setMachineStartSlow(false);
+    setBrowserRestarting(false);
     setConnectAttempt(attempt);
   }, []);
   // Forgets the connection this view had, and with it everything that used
@@ -739,6 +745,7 @@ export function BrowserSessionModal({
     setStatus("error");
     setFailure({ kind, reason });
     setMachineStartSlow(false);
+    setBrowserRestarting(false);
     runtimeDebugLog("browser-session:failed", { kind, reason });
   }, [dropConnection]);
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
@@ -1030,6 +1037,7 @@ export function BrowserSessionModal({
     failure,
     hasConnection: browserOriginConnection !== null,
     machineStartSlow,
+    browserRestarting,
   });
   const viewLive = viewState.kind === "live";
   const viewKindRef = useRef(viewState.kind);
@@ -1970,6 +1978,43 @@ export function BrowserSessionModal({
         connectedHostRef.current = { runtimeId, generation };
       } else {
         connectedHostRef.current = null;
+        // A browser session machine starts its boot-time browser again when
+        // it stops, and gives up after too many stops. Its origin says which
+        // on a page read: wait while it starts again, and say when it gave
+        // up, instead of connecting to a browser that is not there.
+        const resolvedRuntimeId = runtimeId;
+        const bootWait = await waitForBootBrowserRunning({
+          probe: async (signal) => {
+            try {
+              await controllerClient.browserSessions.fetchPages({
+                projectId,
+                browserSessionId,
+                preferRuntimeId: resolvedRuntimeId,
+                signal,
+              });
+              return "running";
+            } catch (cause) {
+              return bootBrowserProbeFromError(cause, controllerClient.browserSessions.isUnavailableError);
+            }
+          },
+          onRestarting: () => {
+            if (!connectionCancelled()) setBrowserRestarting(true);
+          },
+          signal: startupAbortController.signal,
+        });
+        if (connectionCancelled() || bootWait.kind === "cancelled") {
+          return;
+        }
+        setBrowserRestarting(false);
+        runtimeDebugLog("browser-session:boot-browser-wait", { projectId, runtimeId, result: bootWait.kind });
+        if (bootWait.kind === "stopped") {
+          fail("blocked", SHARED_BROWSER_HOST_COPY.stoppedForGood);
+          return;
+        }
+        if (bootWait.kind === "timeout") {
+          fail("failed", "the machine did not start its browser again in time");
+          return;
+        }
       }
 
       // Runtime discovery is also what unlocks the versioned capability
