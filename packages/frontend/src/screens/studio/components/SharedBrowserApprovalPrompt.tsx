@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Lock } from "iconoir-react";
 import { Button } from "../../../components/Button";
+import { Checkbox } from "../../../components/Checkbox";
+import { InlineNotice } from "../../../components/InlineNotice";
+import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
+import { StudioDialogBody, StudioDialogFooter } from "../../../components/aria/StudioDialogLayout";
+import { StudioDialogGutterContext } from "../../../components/aria/StudioDialogSpacing";
 import { splitBrowserApprovalLabel } from "./browserApprovalLabel";
 
 export type SharedBrowserApprovalKind = "origin" | "action";
@@ -151,117 +156,112 @@ export function SharedBrowserApprovalPrompt({
         }
       }}
     >
-      <section
+      <Surface
         aria-describedby="shared-browser-approval-description"
         aria-labelledby="shared-browser-approval-title"
         aria-modal="true"
-        className="flex max-h-full w-full max-w-md flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-4 shadow-2xl dark:border-slate-700 dark:bg-slate-900 sm:p-5"
+        className="flex max-h-full w-full max-w-md flex-col overflow-hidden"
         data-testid="shared-browser-approval-prompt"
         role="alertdialog"
+        tone="floating"
+        shadow="lg"
       >
-        <div className="min-h-0 overflow-y-auto" data-testid="shared-browser-approval-content">
-          <div className="flex items-start gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary-50 text-primary-700 dark:bg-primary-500/15 dark:text-primary-300">
-              <Lock aria-hidden="true" className="h-4 w-4" />
+        <StudioDialogGutterContext.Provider value="responsive">
+          <StudioDialogBody scrollable className="space-y-4" data-testid="shared-browser-approval-content">
+            <div className="flex items-start gap-3">
+              <Lock aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="min-w-0 flex-1 space-y-1">
+                <Text as="h2" id="shared-browser-approval-title" variant="subtitle" tone="primary">
+                  {isOriginApproval
+                    ? "Allow the AI agent to use this site?"
+                    : "Allow this browser action?"}
+                </Text>
+                <Text
+                  as="p"
+                  id="shared-browser-approval-description"
+                  variant="bodyCompact"
+                  tone="secondary"
+                >
+                  {isOriginApproval
+                    ? "Shared Browser is paused before the AI agent can read or act on a new site."
+                    : `The AI agent is waiting to ${sharedBrowserApprovalActionDescription(request)}.`}
+                </Text>
+              </div>
             </div>
-            <div className="min-w-0 flex-1 space-y-1">
-              <Text as="h2" id="shared-browser-approval-title" variant="bodyStrong" tone="primary">
-                {isOriginApproval
-                  ? "Allow the AI agent to use this site?"
-                  : "Allow this browser action?"}
-              </Text>
-              <Text
-                as="p"
-                id="shared-browser-approval-description"
-                variant="body"
-                tone="secondary"
-                className="leading-snug"
-              >
-                {isOriginApproval
-                  ? "Shared Browser is paused before the AI agent can read or act on a new site."
-                  : `The AI agent is waiting to ${sharedBrowserApprovalActionDescription(request)}.`}
-              </Text>
-            </div>
-          </div>
 
-          {destination ? (
-            <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-950/70">
-              <Text as="p" variant="caption" tone="muted">
-                {targetAddress ? "Page" : isOriginApproval ? "Site" : "Destination"}
-              </Text>
-              <p
-                className="mt-0.5 break-all font-mono text-xs font-medium text-slate-800 dark:text-slate-100"
-                data-testid="shared-browser-approval-destination"
-              >
-                {destination}
-              </p>
-            </div>
-          ) : null}
+            {destination ? (
+              <Surface tone="raised" radius="xl" shadow="none" className="px-3 py-2.5">
+                <Text as="p" variant="caption" tone="muted">
+                  {targetAddress ? "Page" : isOriginApproval ? "Site" : "Destination"}
+                </Text>
+                <Text
+                  variant="mono"
+                  tone="primary"
+                  className="mt-0.5 break-all"
+                  data-testid="shared-browser-approval-destination"
+                >
+                  {destination}
+                </Text>
+              </Surface>
+            ) : null}
 
-          <Text as="p" variant="caption" tone="muted" className="mt-3 leading-snug">
-            {allowRoutine
-              ? "Routine browsing applies across sites for this AI turn. You can revoke it by taking over or stopping the turn."
-              : isOriginApproval
-                ? "Allow applies to this site for the current AI turn, so its pages open without asking again. Other actions still ask."
-                : "This approval is used once. Only you can approve it, and it expires automatically."}
-          </Text>
+            <Text as="p" variant="caption" tone="muted">
+              {allowRoutine
+                ? "Routine browsing applies across sites for this AI turn. You can revoke it by taking over or stopping the turn."
+                : isOriginApproval
+                  ? "Allow applies to this site for the current AI turn, so its pages open without asking again. Other actions still ask."
+                  : "This approval is used once. Only you can approve it, and it expires automatically."}
+            </Text>
 
-          {isOriginApproval && routineApprovalAvailable ? (
-            <label className="mt-3 flex cursor-pointer items-start gap-2 rounded-xl border border-slate-200 p-3 text-xs leading-snug dark:border-slate-700">
-              <input
-                checked={allowRoutine}
-                className="mt-0.5 h-4 w-4 shrink-0"
+            {isOriginApproval && routineApprovalAvailable ? (
+              <Checkbox
+                isSelected={allowRoutine}
                 data-testid="shared-browser-approval-routine"
-                disabled={submitting}
-                onChange={(event) => setRoutineApprovalId(event.target.checked ? request.approvalId : null)}
-                type="checkbox"
+                isDisabled={submitting}
+                onChange={(checked) => setRoutineApprovalId(checked ? request.approvalId : null)}
+                label="Always allow routine browsing for this turn"
+                description="Allow sites and ordinary actions without more prompts. Recognized high-impact actions and form submissions still ask; secrets stay manual. Websites can have unexpected side effects. Ends when this turn stops."
               />
-              <span>
-                <span className="block font-medium">Always allow routine browsing for this turn</span>
-                <span className="mt-1 block text-slate-500 dark:text-slate-400">
-                  Allow sites and ordinary actions without more prompts. Recognized high-impact actions and form submissions still ask; secrets stay manual. Websites can have unexpected side effects. Ends when this turn stops.
-                </span>
-              </span>
-            </label>
-          ) : null}
-          {error ? (
-            <p
-              className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"
-              data-testid="shared-browser-approval-error"
-              role="alert"
-            >
-              {error}
-            </p>
-          ) : null}
+            ) : null}
+            {error ? (
+              <InlineNotice
+                tone="danger"
+                data-testid="shared-browser-approval-error"
+                role="alert"
+              >
+                {error}
+              </InlineNotice>
+            ) : null}
 
-        </div>
-        <div className="mt-4 flex shrink-0 flex-col gap-2 min-[420px]:flex-row min-[420px]:justify-end">
-          <Button
-            ref={denyButtonRef}
-            data-testid="shared-browser-approval-deny"
-            fullWidth
-            isDisabled={submitting}
-            onPress={() => onDecision("deny")}
-            preset="form"
-            variant="secondary"
-            className="min-[420px]:w-auto"
-          >
-            {submitting ? "Saving…" : "Deny"}
-          </Button>
-          <Button
-            ref={allowButtonRef}
-            data-testid="shared-browser-approval-allow"
-            fullWidth
-            isDisabled={submitting}
-            onPress={() => onDecision(allowRoutine ? "allow_routine" : sharedBrowserApprovalAllowDecision(request.kind))}
-            preset="form"
-            variant="primary"
-            className="min-[420px]:w-auto"
-          >
-            {allowRoutine ? "Allow routine browsing" : isOriginApproval ? "Allow site" : "Allow once"}
-          </Button>
-        </div>
-      </section>
+          </StudioDialogBody>
+          <StudioDialogFooter padding="default" divider className="flex flex-col gap-2 min-[420px]:flex-row min-[420px]:justify-end">
+            <Button
+              ref={denyButtonRef}
+              data-testid="shared-browser-approval-deny"
+              fullWidth
+              isDisabled={submitting}
+              onPress={() => onDecision("deny")}
+              preset="form"
+              variant="secondary"
+              className="min-[420px]:w-auto"
+            >
+              {submitting ? "Saving…" : "Deny"}
+            </Button>
+            <Button
+              ref={allowButtonRef}
+              data-testid="shared-browser-approval-allow"
+              fullWidth
+              isDisabled={submitting}
+              onPress={() => onDecision(allowRoutine ? "allow_routine" : sharedBrowserApprovalAllowDecision(request.kind))}
+              preset="form"
+              variant="primary"
+              className="min-[420px]:w-auto"
+            >
+              {allowRoutine ? "Allow routine browsing" : isOriginApproval ? "Allow site" : "Allow once"}
+            </Button>
+          </StudioDialogFooter>
+        </StudioDialogGutterContext.Provider>
+      </Surface>
     </div>
   );
 }

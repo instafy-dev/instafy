@@ -10,8 +10,11 @@ export type InlineNoticeProps = {
   title?: ReactNode;
   children: ReactNode;
   density?: "compact" | "comfortable";
+  /** Quiet feedback inside an existing surface does not need another panel. */
+  appearance?: "panel" | "inline";
   actions?: ReactNode;
   className?: string;
+  id?: string;
   /** Announce the notice: "status" for outcomes, "alert" for errors. */
   role?: "status" | "alert";
   "data-testid"?: string;
@@ -22,8 +25,10 @@ export function InlineNotice({
   title = null,
   children,
   density = "compact",
+  appearance = "panel",
   actions,
   className,
+  id,
   role,
   "data-testid": dataTestId,
 }: InlineNoticeProps) {
@@ -32,20 +37,22 @@ export function InlineNotice({
   return (
     <div
       className={[
-        "flex items-start gap-2.5 rounded-xl border px-3 py-2",
-        SEMANTIC_TONE_CLASSES[tone].surface,
+        "flex min-w-0 max-w-full items-start gap-2.5",
+        appearance === "panel" && "rounded-xl border px-3 py-2",
+        appearance === "panel" && SEMANTIC_TONE_CLASSES[tone].surface,
         className,
       ]
         .filter(Boolean)
         .join(" ")}
       role={role}
+      id={id}
       data-testid={dataTestId}
     >
       <Icon className={["mt-0.5 h-4 w-4 shrink-0", SEMANTIC_TONE_CLASSES[tone].icon].join(" ")} aria-hidden="true" />
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2">
         <div className="min-w-0 flex-1 basis-48 space-y-0.5">
           {title ? <Text variant="bodyStrong" tone={tone}>{title}</Text> : null}
-          <Text as="div" variant={density === "compact" ? "caption" : "bodyCompact"} tone={tone}>
+          <Text as="div" variant={density === "compact" ? "caption" : "bodyCompact"} tone={tone} className="[overflow-wrap:anywhere]">
             {children}
           </Text>
         </div>

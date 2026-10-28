@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { Button } from "../../../components/Button";
+import { InlineNotice } from "../../../components/InlineNotice";
 import type { BrowserSessionPage } from "./browserSessionPages";
 import {
   BROWSER_AGENT_DEFAULT_NAME,
@@ -56,7 +57,7 @@ export function BrowserReadingRow({
   const count = pages.length === 1 ? "1 page" : `${pages.length} pages`;
   return (
     <div
-      className="flex min-w-0 shrink-0 items-center gap-2 border-b border-slate-200 px-3 py-1 text-xs dark:border-slate-800"
+      className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-1 text-xs dark:border-slate-800"
       data-browser-session-safe-zone="true"
       data-testid="browser-reading-row"
     >
@@ -89,9 +90,8 @@ export function BrowserReadingRow({
       {canTakeOver ? (
         <Button
           type="button"
-          size="sm"
+          preset="inline"
           variant="outline"
-          radius="full"
           className="flex-none"
           isDisabled={takingOver}
           onPress={onTakeOver}
@@ -102,7 +102,7 @@ export function BrowserReadingRow({
         </Button>
       ) : null}
       {error ? (
-        <span role="alert" className="max-w-48 flex-none truncate text-rose-600 dark:text-rose-300" title={error}>{error}</span>
+        <InlineNotice tone="danger" appearance="inline" role="alert" className="basis-full">{error}</InlineNotice>
       ) : null}
     </div>
   );
