@@ -9,12 +9,18 @@
  * - Rows: give each row id="row-<slug>" and data-ref="<kind>:<slug>" (site.rowAttrs(ref)). A "select" command from
  *   chat scrolls to the row and marks it; "highlight" fades the rows it names. "toast" and "reload" are the client's.
  * - Facts: one shape everywhere, {"v": "8.9 oz", "src": "Maker", "url": "https://…", "date": "2026-10-17", "est": false}.
- *   Optional "asof": the source's own date, shown in place of "date" ("seen 5 Aug"); a price with an "asof" over 30
- *   days old is muted and says "may have changed", like a live price past its time.
- *   site.trust(fact | record, opts) draws the one trust line: "Source ↗ · seen 17 Oct", "at Store ↗ · checked 4 min
- *   ago", "Estimate", "Price not checked" (nobody checked it), "Not listed · Source ↗" (a fact with a source and no
- *   value: the source was read and does not give it). A price fact with "list": true is that source's list price,
- *   never a store's price now: "$900 · list price on BabyGearLab ↗ · seen 5 Aug".
+ *   "url" is the page it was read on and "date" the day it was read; each value cites them: "checked 17 Oct on
+ *   maker.com ↗" (a price: "seen 17 Oct on shop.com ↗"). Optional "asof": the source's own date, shown in place of
+ *   "date" ("seen 5 Aug on …"); a price with an "asof" over 30 days old is muted and says "may have changed", like a
+ *   live price past its time. A value that only says nothing is known ("—", "n/a", "?", "unknown") is no value.
+ *   site.trust(fact | record, opts) draws the one trust line: "checked 17 Oct on maker.com ↗", "at Store ↗ · checked
+ *   4 min ago", "Estimate", "Price not checked" (nobody checked it), "Not listed · checked 16 Oct on maker.com ↗" (a
+ *   fact with a source and no value: the source was read and does not give it); in a table of options a value nobody
+ *   found reads opts.unknown, "Unknown · why" ("Price unknown"). A price fact with "list": true is that source's
+ *   list price, never a store's price now: "$900 · list price on BabyGearLab ↗ · seen 5 Aug".
+ * - Filters: site.within(value, filter) is "in", "out" or "unknown" for the page's one filter ({key, max, min}), and
+ *   site.byFilter(rows, filter, valueOf) splits rows into {in, unknown, out}. Only a value the page shows counts: a
+ *   row without one is never "under $140"; the starters list it apart ("Price unknown").
  * - Live checks: site.checkAll(rows) is the page's one primary button ("Check all prices", with two or more checkable
  *   rows). trust(value, {ref, intent, store, seed}) ends a row's caption in its one quiet action: "Check price" (only
  *   without "Check all prices"), "Try again" after an error, "Open store ↗" when the store can't be read. While a
@@ -147,24 +153,82 @@
     }
   }
   function isRecord(x) { return !!(x && typeof x === "object" && x.prov && x.type); }
-  /** The text of a fact or record value ("" when there is none). */
+  /** A value that only says nothing is known: blank, dashes, "?", "n/a", "unknown", "TBD". */
+  var NO_VALUE = /^(?:[\s\-\u2010-\u2015?.\u00b7\u2026/]*|n\s*\/\s*a|unknown|tb[ad])$/i;
+  /** The text of a fact or record value ("" when there is none, or it only says nothing is known: a dash in a table
+   * is never drawn as if it were a value). */
   function valueText(x) {
     if (!x) return "";
+    var text;
     if (isRecord(x)) {
       if (x.type === "offer") return money(x.price);
       if (x.value === true) return "Yes";
       if (x.value === false) return "No";
-      return x.value == null ? "" : String(x.value);
+      text = x.value == null ? "" : String(x.value);
+    } else {
+      text = x.v == null ? "" : String(x.v);
     }
-    return x.v == null ? "" : String(x.v);
+    return NO_VALUE.test(text.trim()) ? "" : text;
   }
-  /** A number to sort by: fact.n, an offer's amount, else the first number in the value text. */
+  /** The first number in a text, read the way shops write it: a ".", ",", space or "'" before exactly three digits
+   * groups thousands ("1.299", "1 299", "1'299", "1,299" are 1299), and the last "." or "," is the decimal mark
+   * otherwise ("1.299,00" and "1,299.00" are 1299, "549,99" is 549.99, "4.6" is 4.6, "0.125" is 0.125). */
+  function numberIn(text) {
+    var m = /(-?)(\d+)((?:[.,'’    ]\d+)*)/.exec(String(text == null ? "" : text));
+    if (!m) return null;
+    var head = m[2];
+    var parts = m[3] ? m[3].match(/[.,'’    ]\d+/g) : [];
+    var mark = function (p) { return p.charAt(0); };
+    var dec = -1;
+    parts.forEach(function (p, i) { if (mark(p) === "." || mark(p) === ",") dec = i; });
+    // the last "." or "," groups thousands when three digits follow it, one to three (not just 0) lead, and no other
+    // kind of decimal mark comes before it: "1.299", "1,299,000"
+    if (dec >= 0 && parts[dec].length === 4 && head.length <= 3 && head !== "0" &&
+      parts.slice(0, dec).every(function (p) { return (mark(p) !== "." && mark(p) !== ",") || mark(p) === mark(parts[dec]); })) dec = -1;
+    var whole = head;
+    var end = dec >= 0 ? dec : parts.length;
+    for (var i = 0; i < end; i++) {
+      // a mark that does not group thousands ends the number: "2 3-year plans" is 2
+      if (head.length > 3 || parts[i].length !== 4) return Number(m[1] + whole);
+      whole += parts[i].slice(1);
+    }
+    return Number(m[1] + whole + (dec >= 0 ? "." + parts[dec].slice(1) : ""));
+  }
+  /** A number to sort by: fact.n, an offer's amount, else the first number in the value text (numberIn). */
   function num(x) {
     if (!x) return null;
     if (isRecord(x) && x.type === "offer") return x.price && typeof x.price.amount === "number" ? x.price.amount : null;
     if (typeof x.n === "number") return x.n;
-    var m = /-?\d[\d,]*(?:\.\d+)?/.exec(valueText(x));
-    return m ? Number(m[0].replace(/,/g, "")) : null;
+    return numberIn(valueText(x));
+  }
+  /** The number of a value the page shows, else null. A value counts only when its trust line draws it: a live value,
+   * an estimate, or a fact with its source. An unsourced fact (drawn "Not checked"), a check that could not read it,
+   * and a dash are unknown, so no filter or sort counts them. */
+  function known(x) {
+    if (!x) return null;
+    if (isRecord(x)) {
+      if (x.type === "claim" && (x.status === "uncertain" || x.status === "not_found" || x.status === "error")) return null;
+      return valueText(x) ? num(x) : null;
+    }
+    if (!valueText(x) || !(x.src || x.est)) return null;
+    return num(x);
+  }
+  /** Where a value stands against the page's one filter ({key, max?, min?}): "in", "out", or "unknown" when the page
+   * has no number for it. Unknown is never "in": a row without a price is not "under $140". */
+  function within(x, filter) {
+    if (!filter) return "in";
+    var n = known(x);
+    if (n == null) return "unknown";
+    var max = filter.max == null || filter.max === "" ? null : Number(filter.max);
+    var min = filter.min == null || filter.min === "" ? null : Number(filter.min);
+    return (max == null || n <= max) && (min == null || n >= min) ? "in" : "out";
+  }
+  /** Rows split by the page's one filter, each part in the rows' own order: {in, unknown, out}. Without a filter every
+   * row is "in". valueOf(row) gives the row's value for the filter's key. */
+  function byFilter(rows, filter, valueOf) {
+    var parts = { "in": [], unknown: [], out: [] };
+    (rows || []).forEach(function (r) { parts[within(filter ? valueOf(r) : null, filter)].push(r); });
+    return parts;
   }
 
   // ---------- live values ----------
@@ -188,6 +252,30 @@
   function seenText(x) {
     var when = x && (x.asof || x.date);
     return when && date(when) ? "seen " + date(when) : "";
+  }
+  /** Where and when a value was read, as one caption part: "checked 17 Oct on maker.com ↗" (the host links the page it
+   * was read on). A price, or a date the source gives ("asof"), is "seen": "seen 5 Aug on reviews.example ↗", never
+   * "checked", so it does not read as today's price. Without a page link it names the source: "Maker · checked 17
+   * Oct". o.price: the value is a price. */
+  function citeParts(x, o) {
+    o = o || {};
+    if (!x) return [];
+    var when = x.asof || x.date;
+    var day = when && date(when) ? ((o.price || x.asof ? "seen " : "checked ") + date(when)) : "";
+    var site = host(x.url);
+    if (site) return [h("span", { "class": "cite" }, day ? day + " on " : "", link(x.url, site))];
+    var out = [];
+    if (x.src) out.push(String(x.src));
+    if (day) out.push(h("span", { "class": "age", text: day }));
+    return out;
+  }
+  /** cite() as one inline piece, for a line under a list ("Weight: checked 17 Oct on maker.com ↗"). */
+  function cite(x, o) {
+    var parts = citeParts(x, o);
+    if (!parts.length) return null;
+    var el = h("span", null);
+    parts.forEach(function (p, i) { if (i) el.appendChild(document.createTextNode(" · ")); append(el, p); });
+    return el;
   }
   function newest(list) {
     return list.slice().sort(function (a, b) { return (Date.parse(b.prov.observed_at) || 0) - (Date.parse(a.prov.observed_at) || 0); })[0] || null;
@@ -233,12 +321,14 @@
 
   /**
    * The one trust line for a fact or a live record: the value, then a quiet caption.
-   *   value · source ↗ · seen 17 Oct          (a seed fact; the source's own date when it gives one)
+   *   value · checked 17 Oct on maker.com ↗    (a seed fact: the page it was read on and the day; "seen 5 Aug on …"
+   *                                            for a price or the source's own date)
    *   value at Store ↗ · checked 4 min ago     (a live check; " · may have changed" once it is old)
    *   value · Estimate · how ↗
    *   Price not checked · reason · where to check ↗
-   * opts: label ("Price": says what was not checked), price (a price: "at <store>"), shared (the source is said once
-   * for the whole column: value only), and for a row that can be checked live: ref, intent, store, params. Then the
+   * opts: label ("Price": says what was not checked), unknown (the word for a missing value: "Unknown" in a table of
+   * options, "To confirm" on a checklist), price (a price: "at <store>"), shared (the source is said once for the
+   * whole column: value only), and for a row that can be checked live: ref, intent, store, params. Then the
    * caption ends in the row's one action: "Check price" (only when there is no "Check all prices"), "Try again" after
    * an error, "Open store ↗" when the store can't be read. While a check runs the value stays and the caption says
    * "Checking…".
@@ -259,17 +349,21 @@
     var value = valueText(x);
     // "Not checked" has one meaning on every page: nobody checked it. A checklist says "To confirm" (opts.unknown),
     // because there "checked" is the tick.
+    // A table of options says "Unknown" ("Price unknown") for a value nobody found, then why; "Not listed" when the
+    // page that was read does not give it.
+    var word = opts.unknown || "Not checked";
     var notChecked = function (note, url) {
-      add((opts.label ? opts.label + " not checked" : (opts.unknown || "Not checked")) + (usefulNote(note) ? " · " + usefulNote(note) : ""));
+      add((opts.label ? opts.label + " " + word.toLowerCase() : word) + (usefulNote(note) ? " · " + usefulNote(note) : ""));
       if (safeUrl(url)) add(link(url, "where to check", "act"));
     };
-    // looked for and not there: the source was read and does not give it ("Not listed · Maker ↗ · seen 16 Oct"); the
-    // link to the page that was read stays even when the source is named once for the column (then without the date)
+    // looked for and not there: the source was read and does not give it ("Not listed · checked 16 Oct on maker.com
+    // ↗"); the link to the page that was read stays even when the source is named once for the column (then without
+    // the date)
     var notListed = function (note, src, url, fact) {
       add((opts.label ? opts.label + " not listed" : "Not listed") + (usefulNote(note) ? " · " + usefulNote(note) : ""));
-      if (src) add(safeUrl(url) ? link(url, src) : src);
-      var seen = !opts.shared && src ? seenText(fact) : "";
-      if (seen) add(h("span", { "class": "age", text: seen }));
+      if (fact && !opts.shared) citeParts(fact, { price: opts.price }).forEach(add);
+      else if (safeUrl(url)) add(link(url, host(url) || src));
+      else if (src) add(src);
     };
     var failed = live && !pending && checks.errors.has(opts.ref);
 
@@ -285,6 +379,9 @@
       } else if (x.type === "claim" && x.status === "error") {
         value = "";
         add(h("span", null, icon("error"), "Couldn't check" + (usefulNote(x.note) ? " · " + usefulNote(x.note) : "")));
+      } else if (!value) {
+        // a record whose value only says nothing is known ("—") is unknown, never a caption without a value
+        notChecked(x.note);
       } else if (ESTIMATE_BASIS.indexOf(x.basis) >= 0) {
         add("Estimate");
         if (safeUrl(url)) add(link(url, "how"));
@@ -293,7 +390,7 @@
         add(h("span", { "class": "age", text: "checked " + ago(x.prov.observed_at) }));
       }
       if (expired(x) && value) { el.classList.add("is-old"); add("may have changed"); }
-    } else if (x && x.est) {
+    } else if (x && x.est && value) {
       // an estimate names its basis: a source to check it against ("Estimate · Taiwan Railway ↗") or how ↗
       add("Estimate");
       if (x.src) add(link(x.url, x.src)); else if (safeUrl(x.url)) add(link(x.url, "how"));
@@ -305,9 +402,14 @@
       // under the list names the source: next to "Open Amazon ↗" a bare "$900" reads as Amazon's price today
       var list = opts.price && !atStore && x.list;
       if (!opts.shared) {
-        add(atStore ? h("span", null, "at ", link(x.url, x.src)) : list ? h("span", null, "list price on ", link(x.url, x.src)) : link(x.url, x.src));
-        var when = seenText(x);
-        if (when) add(h("span", { "class": "age", text: when }));
+        if (atStore || list) {
+          add(atStore ? h("span", null, "at ", link(x.url, x.src)) : h("span", null, "list price on ", link(x.url, x.src)));
+          var when = seenText(x);
+          if (when) add(h("span", { "class": "age", text: when }));
+        } else {
+          // every value cites the page it was read on and the day: "checked 17 Oct on maker.com ↗"
+          citeParts(x, { price: opts.price }).forEach(add);
+        }
         if (seedOld) add("may have changed");
       } else if (list) {
         add("list price");
@@ -872,10 +974,10 @@
   }
 
   window.site = {
-    version: "1.4.0",
+    version: "1.5.0",
     h: h, append: append, icon: icon, link: link, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
-    old: isOld, expired: expired,
+    cite: cite, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,
     live: live, trust: trust, rowAction: rowAction, checkButton: checkButton, checkAll: checkAll, canCheck: canCheck,
     anyPending: anyPending, priceNotice: priceNotice, storesBlocked: storesBlocked, blocked: blockedRecord, tidy: tidyCaptions, remember: remember, recall: recall,
     state: state, setState: setState, onState: onState, render: render, schedule: schedule,

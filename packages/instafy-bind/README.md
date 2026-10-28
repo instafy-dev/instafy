@@ -197,7 +197,10 @@ handler can answer with `kit.uncertain`. `instafy bind try <dir> <intent> '<para
 a click would and keeps its accepted records in the site (same checks, provenance and version bump), so a new page
 opens with its values. `instafy bind check <dir> --expect "<item>,<item>"` then says whether the page shows every
 item the request named (from its HTML text and data files; an `"expect"` array in `data.json` is checked too) and
-exits 1 when one is missing.
+exits 1 when one is missing. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
+value that only says nothing (`"—"`, `"n/a"`: leave out `v` and say why in `note`), a value without the page and day
+it was read (`src`, `url`, `date`), and a filter applied without `site.byFilter`; and it notes the rows the filter
+lists apart because their value is unknown (`site.within` never counts an unknown value as within a limit).
 
 On timeout the binder sends SIGTERM, then SIGKILL after 3 s, and reports `error timeout`.
 

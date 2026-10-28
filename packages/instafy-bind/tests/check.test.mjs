@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { checkSite, htmlLines, htmlText, jsonStrings, names, parseExpect } from "../src/check.mjs";
+import { checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect } from "../src/check.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
 const cleanEnv = { PATH: process.env.PATH, HOME: os.tmpdir() };
@@ -100,6 +100,140 @@ test("check with nothing to check says how to give the list (exit 2)", () => {
     assert.equal(out.status, 2);
     assert.match(out.stdout, /nothing to check: pass --expect/);
     assert.equal(run("check", path.join(dir, "nope"), "--expect", "x").status, 64);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- the values of a page of options ----------
+
+function optionsSite(starter, mutate) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-values-"));
+  execFileSync(process.execPath, [BIN, "init", dir, "--starter", starter], { env: cleanEnv });
+  const file = path.join(dir, "data.json");
+  const data = JSON.parse(fs.readFileSync(file, "utf8"));
+  fs.writeFileSync(file, JSON.stringify(mutate ? mutate(data, dir) ?? data : data, null, 2));
+  return dir;
+}
+
+test("the starters pass their own value check, with a stated limit too", () => {
+  for (const starter of ["compare", "ranked"]) {
+    const dir = optionsSite(starter, (data) => ({ ...data, filter: { key: "price", max: 140, label: "Under $140", rest: "over $140" } }));
+    try {
+      const values = checkValues(dir);
+      assert.equal(values.checked, true, starter);
+      assert.deepEqual(values.problems, [], `${starter}: ${values.problems.join("\n")}`);
+      // the example's third option has no price: the page lists it apart, and the reply must say so
+      assert.equal(values.notes.length, 1, starter);
+      assert.match(values.notes[0], /1 item\(s\) have no price the page can show: Option C\. The page lists them apart \("Price unknown"\), never as "Under \$140"/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  // a timeline or checklist is not a page of options: nothing of this is checked there
+  const plan = optionsSite("timeline");
+  try {
+    assert.deepEqual(checkValues(plan), { checked: false, problems: [], notes: [] });
+  } finally {
+    fs.rmSync(plan, { recursive: true, force: true });
+  }
+});
+
+test("check fails for a value that only says nothing and for a value without its page and day", () => {
+  const dir = optionsSite("compare", (data) => {
+    data.items[0].facts.weight = { v: "—", src: "Maker", url: "https://example.com/a", date: "2026-10-27" };
+    data.items[1].facts.rating = { v: "n/a" };
+    data.items[2].facts.warranty = { v: "2 years", src: "Maker", date: "2026-10-27" };
+    data.items[2].facts.rating = { v: "4.4 of 5" };
+    data.items[1].facts.weight = { v: "about 9.5 oz", est: true };
+    return data;
+  });
+  try {
+    const { problems } = checkValues(dir);
+    assert.equal(problems.length, 4, problems.join("\n"));
+    assert.match(problems[0], /^Option A · Weight: "—" says nothing\. Leave out "v" and say why in "note"/);
+    assert.match(problems[1], /^Option B · Rating: "n\/a" says nothing/);
+    assert.match(problems[2], /^Option C · Rating: "4\.4 of 5" has no "src", "url" \(the page\) or "date" \(the day\): add where you read it and when \("checked 27 Oct on maker\.com"\), or leave the value out\. Without a source the page shows it as not checked\.$/);
+    assert.match(problems[3], /^Option C · Warranty: "2 years" has no "url" \(the page\): add where you read it and when/);
+    const out = run("check", dir, "--expect", "Option A, Option B, Option C");
+    assert.equal(out.status, 1, "every item is shown, and the values still fail the check");
+    assert.match(out.stdout, /^VALUES: 4 value\(s\) to fix in data\.json:$/m);
+    assert.match(out.stdout, /3 of 3 expected item\(s\) shown/);
+    const json = JSON.parse(run("check", dir, "--expect", "Option A", "--json").stdout);
+    assert.equal(json.ok, false);
+    assert.equal(json.values.problems.length, 4);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("check fails for a filter a page applies by itself, or that cannot filter; it notes the rows listed apart", () => {
+  const dir = optionsSite("compare", (data) => ({ ...data, filter: { key: "price", max: 600, label: "€600 or less" } }));
+  try {
+    assert.deepEqual(checkValues(dir).problems, []);
+    // the live test's page: its own filter let a row without a price through
+    const app = path.join(dir, "app.js");
+    fs.writeFileSync(app, fs.readFileSync(app, "utf8").replace("return site.byFilter(items, f, function (i) { return valueOf(i, col); });",
+      "return { in: items.filter(function (i) { var n = site.num(valueOf(i, col)); return n == null || n <= f.max; }), unknown: [], out: [] };"));
+    const own = checkValues(dir).problems;
+    assert.equal(own.length, 1, own.join("\n"));
+    assert.match(own[0], /data\.json has a filter, and app\.js applies it without site\.byFilter: a row whose value is unknown may be listed as "€600 or less"/);
+    const out = run("check", dir, "--expect", "Option A");
+    assert.equal(out.status, 1);
+    assert.match(out.stdout, /^NOTE: 1 item\(s\) have no price the page can show: Option C\./m);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const bad = optionsSite("compare", (data) => ({ ...data, filter: { key: "cost", max: "about 600", label: "Cheap" } }));
+  try {
+    assert.deepEqual(checkValues(bad).problems, [
+      'the filter\'s key "cost" is not a column, so "Cheap" filters nothing.',
+      'the filter "Cheap" has no number in "max" or "min".',
+    ]);
+  } finally {
+    fs.rmSync(bad, { recursive: true, force: true });
+  }
+});
+
+test("a price a check read counts for the filter; a check that found the shop blocked does not", () => {
+  const dir = optionsSite("compare", (data, d) => {
+    fs.mkdirSync(path.join(d, "data/records"), { recursive: true });
+    const at = new Date().toISOString();
+    fs.writeFileSync(path.join(d, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: [
+      { type: "offer", ref: "option:option-c", price: { amount: 120, currency: "USD" }, prov: { observed_at: at } },
+      { type: "claim", ref: "option:option-a", attr: "price", value: null, status: "uncertain", note: "blocked", prov: { observed_at: at } },
+    ] }));
+    data.items[0].facts.price = { note: "the store blocks price checks" };
+    return { ...data, filter: { key: "price", max: 140, label: "Under $140" } };
+  });
+  try {
+    const { notes } = checkValues(dir);
+    assert.equal(notes.length, 1);
+    assert.match(notes[0], /^1 item\(s\) have no price the page can show: Option A\./);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("on a ranked page, a row with no price at all is noted as listed apart too", () => {
+  const dir = optionsSite("ranked", (data) => {
+    delete data.items[1].price;
+    delete data.items[1].store;
+    return { ...data, filter: { key: "price", max: 140, label: "Under $140" } };
+  });
+  try {
+    const { notes, problems } = checkValues(dir);
+    assert.deepEqual(problems, []);
+    assert.match(notes[0], /^2 item\(s\) have no price the page can show: Option B, Option C\./);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a filter without a label fails the check: the page would have nothing to call the limit", () => {
+  const dir = optionsSite("compare", (data) => ({ ...data, filter: { key: "price", max: 140 } }));
+  try {
+    assert.deepEqual(checkValues(dir).problems, ['the filter has no "label" (what the person asked for: "€600 or less").']);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

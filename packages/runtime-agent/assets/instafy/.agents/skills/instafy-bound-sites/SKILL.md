@@ -61,8 +61,9 @@ Not for: a one-off answer in chat, or a static page with nothing to check (use `
    button) and `site.trust` do it: a value stays with "Checking…" while a check runs, rows keep their order, and
    a row's caption ends in its one quiet action ("Check price" only without "Check all prices", "Try again",
    "Open <store> ↗" once a store blocks reads; the reason is said once, under the list). `site.trust` draws
-   `value · source ↗ · age` ("seen 17 Oct", "checked 4 min ago", "Price not checked"). Keep them; render new
-   values with them. No ↻ or emoji per cell. The client underneath (`__bind/client.js`): `references/cheatsheet.md`.
+   `value · where ↗ · when` ("checked 17 Oct on maker.com ↗", "at Fleet Feet ↗ · seen 17 Oct", "checked 4 min
+   ago", "Price unknown · why"), and `site.byFilter` lists a row whose value is unknown apart from a stated limit,
+   never within it. Keep them; render new values with them. No ↻ or emoji per cell. The client underneath (`__bind/client.js`): `references/cheatsheet.md`.
    "Near me": `await instafyBind.location()` (cheat sheet), never `navigator.geolocation`, and always a typed
    place too (a city or postcode field): in Studio's preview card location is not available yet, and the page says
    so. Render strings with `textContent`; only open `https:` links, and take store links from your seed data unless

@@ -219,10 +219,13 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
   the Brooks first."). A row names only its own unknown. The footer ("Still to confirm") holds only what the page
   does not already say (not the lede's unknown, not a cell's "Not listed"), each as something the reader can do
   ("Check train times on Taiwan Railway before you book"), never how you worked ("no timetable was read").
-- `date` is the day you read the page ("seen 17 Oct"); add `asof` when the source dates the fact itself
+- `url` is the page you read and `date` the day you read it: each value cites them ("checked 17 Oct on
+  fleetfeet.com ↗"; a price "seen 17 Oct"); add `asof` when the source dates the fact itself
   (shown instead: "seen 5 Aug"; a price over 30 days old also says "may have changed"), so an old list price never
   looks fresh. A store known to block checks gets `"readable": false` from the start (no button that will fail).
-- When every price or most of a column comes from one source on one date, the starters say it once under the list.
+- When every price or most of a column comes from one page on one date, the starters say it once under the list.
+- No value is a dash, "n/a" or "?": leave out `v` and say why in `note` ("no price on maker.com's page"); the page
+  reads "Unknown · why".
 - A seller's own product copy names itself as such (`"src": "Fleet Feet product page"`), so it never reads as a review;
   a feel or ride from it is the seller's words in `why` too ("the store calls it gently guided"). Plain words over
   brand names for features ("firm rails at the heel", not "GuideRails").
@@ -232,12 +235,13 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
 - An estimate you made (a leg time, a walk) names its basis: a `src` and `url` ("Estimate · Taiwan Railway ↗")
   or a route-search `url` ("Estimate · how ↗"). "Not checked" means nobody checked it; a fact with a `url` says
   where to check. A page you read that does not give the value is `{"src", "url", "date"}` without `v`: "Not listed ·
-  Fleet Feet product page ↗". On a checklist the same reads "To confirm" ("checked" is the tick there).
+  checked 17 Oct on fleetfeet.com ↗". On a checklist the same reads "To confirm" ("checked" is the tick there).
 - A review site's price is its list price, `"list": true`: the row says "list price" next to the store link, so it
   never reads as the store's price today, and the line under the list names the source once; the lede need not say
   it again.
 - No control nobody asked for: compare shows "Sort by" only with 5+ options (otherwise rows keep the order in
-  `items`, so list them in the lede's order); one filter only from a stated constraint. A per-person checklist (`people`) asks "Whose list is this?" before showing any ticks.
+  `items`, so list them in the lede's order); one filter only from a stated constraint, and a row whose value is
+  unknown is listed apart from it ("Price unknown"), never in the lede as within it. A per-person checklist (`people`) asks "Whose list is this?" before showing any ticks.
 - Details holds only what the row does not already show. No emoji in labels or notes.
 
 ## Products and prices

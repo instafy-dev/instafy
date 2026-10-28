@@ -139,8 +139,8 @@ try {
         ok(!BANNED.test(body), `${where}: plain words (${(body.match(BANNED) || [])[0]})`);
         ok(!/(?!\u2197)\p{Extended_Pictographic}/u.test(body), `${where}: no emoji (the ↗ after a link is text)`);
         eq(page.errors, [], `${where}: no console errors`);
-        // a trust line never says just "Not checked" without saying what, except under a column or fact label
-        const bare = await page.evaluate(() => [...document.querySelectorAll(".trust")].filter((t) => !t.closest("td, dd") && /^Not checked( · (Open .+ ↗|Check price|Try again))?$/.test(t.innerText.trim())).map((t) => t.innerText));
+        // a trust line never says just "Not checked" or "Unknown" without saying what, except under a column or fact label
+        const bare = await page.evaluate(() => [...document.querySelectorAll(".trust")].filter((t) => !t.closest("td, dd") && /^(Not checked|Unknown)( · (Open .+ ↗|Check price|Try again))?$/.test(t.innerText.trim())).map((t) => t.innerText));
         eq(bare, [], `${where}: every "not checked" says what`);
         eq(await dotLines(page), [], `${where}: no caption line starts or ends with a dot`);
         if (starter === "ranked" && size === "phone") {
@@ -191,9 +191,9 @@ try {
     const cellText = async (id, col) => (await page.locator(`#${id} td`).nth(col).innerText()).split("\n").map((t) => t.trim().replace(/^· /, "")).filter(Boolean).join(" · ");
     ok(/^\$160 · at Example Store ↗ · checked \d+ \w+ · may have changed$/.test(await cellText("row-option-b", 1)), `old: ${await cellText("row-option-b", 1)}`);
     ok(await page.locator("#row-option-b .trust.is-old").count() === 1, "old values are muted");
-    eq(await cellText("row-option-d", 1), "Not checked · the store asks for a login · Open Shop D ↗", "a store that could not be read: one row, so the reason stays on it, and the link names the store");
+    eq(await cellText("row-option-d", 1), "Unknown · the store asks for a login · Open Shop D ↗", "a store that could not be read: one row, so the reason stays on it, and the link names the store");
     ok(/^about 9\.5 oz · Estimate · how ↗$/.test(await cellText("row-option-b", 2)), `estimate: ${await cellText("row-option-b", 2)}`);
-    eq(await cellText("row-option-e", 1), "$150 · Example Store ↗ · seen 17 Oct", "seen: the link is on the source, the age is plain");
+    eq(await cellText("row-option-e", 1), "$150 · seen 17 Oct on example.com ↗", "a price from another page: seen, on that page's host");
     eq(await page.locator(".btn.primary").innerText(), "Check all prices");
     // with "Check all prices" a row has no button of its own
     eq(await page.locator("tbody button", { hasText: /Check price/ }).count(), 0, "no per-row Check price next to Check all prices");
@@ -286,12 +286,17 @@ try {
     }
   }
 
-  // ---------- 2c. Studio's pane (955 px): no caption wraps to more than two lines ----------
+  // ---------- 2c. Studio's pane (955 px): no cell is taller than a value and two caption lines ----------
   {
     const binder = await serve(makeSite("compare-studio", "compare"));
     const page = await open(`${binder.url}/`, { width: 955, height: 808 });
-    const tall = await page.evaluate(() => [...document.querySelectorAll(".trust .meta")].filter((m) => m.getBoundingClientRect().height > 34).map((m) => m.innerText));
-    eq(tall, [], "trust captions stay within two lines in Studio's pane");
+    // a value's caption stays within two lines; a cell without a value ("Unknown · why") may use a third line instead
+    const tall = await page.evaluate(() => [...document.querySelectorAll(".trust")].filter((t) => {
+      const meta = t.querySelector(".meta");
+      if (!meta) return false;
+      return t.querySelector(".v") ? meta.getBoundingClientRect().height > 34 : meta.getBoundingClientRect().height > 50;
+    }).map((t) => t.innerText));
+    eq(tall, [], "no cell is taller than a value and two caption lines in Studio's pane");
     eq(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), 0, "no sideways scroll in Studio's pane");
     await page.context().close();
   }
@@ -407,17 +412,21 @@ try {
 
   // ---------- 2g. review v4: one line per row source, one failed state, the list-price line, empty pages ----------
   {
-    // a row whose own values come from one other source: the cells show the values, one line names the source
+    // a row whose own values all come from one other page: the cells show the values, one line cites the page
     const rows = await staticServer(makeSite("compare-row-source", "compare", (d) => {
       const lab = { src: "Lab Test", url: "https://lab.example.net/option-c", date: "2026-10-15" };
       d.items[2].facts.weight = { ...lab, v: "9.9 oz" };
       d.items[2].facts.rating = { ...lab, v: "4.1 of 5" };
+      d.items[2].facts.warranty = { ...lab, v: "1 year" };
       return d;
     }));
     const page = await open(`${rows}/`, { width: 1280, height: 800 });
     eq((await page.locator("#row-option-c td").nth(2).innerText()).trim(), "9.9 oz", "the row's own source is not repeated in its cells");
-    eq(await page.locator("#row-option-c .trust a", { hasText: "Lab Test" }).count(), 0, "no per-cell links to the row's source");
-    ok(/Option C \(Weight and Rating\): Lab Test ↗ · seen 15 Oct/.test(await text(page)), `one line names the row's source: ${(await text(page)).match(/Option C \(.*/)?.[0]}`);
+    eq(await page.locator("#row-option-c .trust a", { hasText: "lab.example.net" }).count(), 0, "no per-cell links to the row's source");
+    ok(/Option C \(Weight, Rating and Warranty\): checked 15 Oct on lab\.example\.net ↗/.test(await text(page)), `one line cites the row's page: ${(await text(page)).match(/Option C \(.*/)?.[0]}`);
+    // values from different pages each cite their own page, even from one source: no line names a page for them all
+    ok(/2 years\s+checked 17 Oct on example\.com ↗/.test(await page.locator("#row-option-a").innerText()), "Option A's warranty cites its own page");
+    ok(!/^Warranty: /m.test(await text(page)), "no line under the list cites one page for values read on different pages");
     ok(!/Sources:.*Lab Test/.test(await text(page)), "a source the line under the list names is not named again under Sources");
     // the footer does not repeat what the page says, and the Details button names its row for screen readers
     eq(await page.locator("#row-option-a .more-btn").getAttribute("aria-label"), "Details for Option A", "Details names its row");
@@ -480,6 +489,57 @@ try {
     });
     ok(gaps.plain <= 4 && gaps.linked <= 4, `with a mouse every fact sits right under its row's title: ${JSON.stringify(gaps)}`);
     await cp.context().close();
+  }
+
+  // ---------- 2h. a stated limit counts only values the page shows: rows without one are listed apart ----------
+  {
+    // the live test: "under €600", every official page without a price; one shop page with one
+    const dir = makeSite("compare-limit", "compare", (d, siteDir) => {
+      d.filter = { key: "price", max: 600, label: "€600 or less", rest: "over €600" };
+      d.items = [
+        { ref: "option:read", name: "Read Model", why: "Its price was read", facts: { price: { v: "€549", src: "Shop One", url: "https://shop-one.example/read", date: "2026-10-27" }, weight: { v: "3.1 kg", src: "Maker", url: "https://maker.example/read", date: "2026-10-27" } } },
+        { ref: "option:over", name: "Over Model", why: "Over the limit", facts: { price: { v: "€699", src: "Shop One", url: "https://shop-one.example/over", date: "2026-10-27" } } },
+        { ref: "option:none", name: "Silent Model", why: "No price on its page", facts: { price: { src: "Maker", url: "https://maker.example/silent", date: "2026-10-27" }, weight: { v: "—", src: "Maker", url: "https://maker.example/silent", date: "2026-10-27" } } },
+        { ref: "option:blocked", name: "Blocked Model", why: "Its shop blocks checks", facts: { price: { note: "shop-two.example blocks automated price checks" } }, store: { name: "Shop Two", url: "https://shop-two.example/blocked", readable: false } },
+        { ref: "option:nosrc", name: "Unsourced Model", why: "A remembered price", facts: { price: { v: "€399" } } },
+      ];
+      d.sort = d.sort.slice(0, 1);
+      return d;
+    });
+    const binder = await serve(dir);
+    for (const [width, label] of [[1280, "table"], [390, "phone"]]) {
+      const page = await open(`${binder.url}/`, { width, height: 900 });
+      const rows = (sel) => page.evaluate((s) => [...document.querySelectorAll(s)].map((r) => r.id), sel);
+      const within = await rows("#list [data-ref]:not(#group-unknown [data-ref])");
+      const apart = await rows("#group-unknown [data-ref]");
+      eq(within, ["row-read"], `${label}: only the row with a price read this turn is listed as €600 or less`);
+      eq(apart, ["row-none", "row-blocked", "row-nosrc"], `${label}: the rows whose price is unknown are listed apart`);
+      eq((await page.locator("#group-unknown h2").innerText()).trim(), "Price unknown", `${label}: the group says what is unknown`);
+      ok(/Not counted as €600 or less/.test(await page.locator("#group-unknown").innerText()), `${label}: and that they are not counted as within the limit`);
+      ok(/1 more over €600 · Show/.test(await text(page)), `${label}: the row over the limit leaves one line`);
+      const none = (await page.locator("#row-none").innerText()).replace(/\s+/g, " ");
+      ok(/Not listed/.test(none) && /checked 27 Oct( 2026)? on maker\.example ↗/.test(none), `${label}: a page without the price says so and cites it: ${none}`);
+      ok(!/—/.test(none), `${label}: a dash is never drawn as a value: ${none}`);
+      const blocked = (await page.locator("#row-blocked").innerText()).replace(/\s+/g, " ");
+      ok(/(Price unknown|Unknown) · shop-two\.example blocks automated price checks/.test(blocked), `${label}: a blocked shop says why: ${blocked}`);
+      ok(!/€399/.test(await page.locator("#row-nosrc").innerText()), `${label}: a price without its page is not shown, nor counted`);
+      eq(page.errors, [], `${label}: no console errors`);
+      if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `compare-limit-${label}.png`), fullPage: true });
+      await page.locator('.seg input[value="all"]').check({ force: true });
+      eq(await page.locator("#group-unknown").count(), 0, `${label}: "All" is one list`);
+      eq((await rows("#list [data-ref]")).length, 5, `${label}: every row under All`);
+      await page.context().close();
+    }
+    // every row unknown: the page says none is known to fit, and lists them apart
+    const allUnknown = await staticServer(makeSite("ranked-limit", "ranked", (d) => ({ ...d, filter: { key: "price", max: 140, label: "Under $140" },
+      items: d.items.map((i) => ({ ...i, price: { note: "not sold online" } })) })));
+    const rp = await open(`${allUnknown}/`);
+    ok(/None is known to be under \$140\./.test(await text(rp)), "ranked: no row is called within the limit");
+    eq(await rp.locator("#group-unknown [data-ref]").count(), 3, "ranked: every row is listed apart");
+    ok(/Price unknown · not sold online/.test((await rp.locator("#group-unknown").innerText()).replace(/\s+/g, " ")), "ranked: each says why");
+    if (SHOTS) await rp.screenshot({ path: path.join(SHOTS, "ranked-limit-phone.png"), fullPage: true });
+    eq(rp.errors.filter((e) => !/404|Failed to load resource/.test(e)), [], "ranked limit: no script errors (no binder here)");
+    await rp.context().close();
   }
 
   // ---------- 3. touch targets (coarse pointer) on every starter ----------
@@ -642,14 +702,14 @@ try {
     const plain = await staticServer(makeSite("no-binder", "compare"));
     const off = await open(`${plain}/`, { width: 1280, height: 800 });
     const body = await text(off);
-    ok(/\$145/.test(body) && /seen 17 Oct/.test(body), "seeded values show without a binder");
+    ok(/\$145/.test(body) && /seen 17 Oct/.test(body) && /checked 17 Oct on example\.com/.test(body), "seeded values show without a binder, each citing its page");
     eq(await off.locator(".btn.primary").count(), 0, "no Check all prices without a binder");
     eq(await off.locator("button", { hasText: /Check/ }).count(), 0, "no check buttons without a binder");
     ok(await off.locator(".trust a", { hasText: /^Open .+ ↗$/ }).count() >= 1, "each row links its store instead");
-    // looked for and not there is "Not listed" with where it was looked for; "Not checked" means nobody checked
+    // looked for and not there is "Not listed" with where and when it was looked for; never a blank cell
     const b = await off.locator("#row-option-b").innerText();
-    ok(/Not listed/.test(b) && !/Not checked/.test(b), `a value the source does not give: Not listed (${b.replace(/\s+/g, " ")})`);
-    eq(await off.locator("#row-option-b .trust a", { hasText: /^Maker ↗$/ }).count(), 1, "Not listed links the source that was read");
+    ok(/Not listed · checked 17 Oct( 2026)? on example\.com ↗/.test(b.replace(/\s+/g, " ").replace(/listed checked/, "listed · checked")) && !/Not checked|Unknown/.test(b), `a value the source does not give: Not listed (${b.replace(/\s+/g, " ")})`);
+    ok(await off.locator("#row-option-b td:nth-child(5) .trust a", { hasText: /^example\.com ↗$/ }).count() === 1, "it links the page that was read");
     // one link pattern at two weights: a cited source is quiet (caption colour), an action ("Open Store ↗") is in the
     // link colour; both are underlined
     const looks = await off.evaluate(() => {

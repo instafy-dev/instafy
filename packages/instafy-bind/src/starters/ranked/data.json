@@ -1,6 +1,6 @@
 {
   "title": "Top three options",
-  "lede": "Option A is the best all-round pick. Option C costs least, but its price was not checked.",
+  "lede": "Option A is the best all-round pick. Option C's price is unknown: its store blocks price checks.",
   "basis": "Ranked by review scores, then price.",
   "items": [
     {
@@ -106,7 +106,7 @@
       "ref": "option:option-c",
       "rank": 3,
       "name": "Option C",
-      "why": "The lowest price, fewer reviews",
+      "why": "Well reviewed, by fewer people",
       "specs": [
         {
           "v": "9.8 oz",

@@ -4,7 +4,9 @@
  * data.json:
  *   title, lede     the page title and its one-line answer (the verdict, and the biggest unknown if there is one)
  *   basis           how it is ranked, one line: "Ranked by safety reviews, then price."
- *   filter (only for a constraint the person stated): {key: "price", max: 300, label: "Under $300"}
+ *   filter (only for a constraint the person stated): {key: "price", max: 300, label: "Under $300", unknown?:
+ *            "Price unknown"}. Only a price the page shows counts: a row without one is never listed as under $300;
+ *            it is listed apart, under "Price unknown".
  *   items: [{ref: "option:a", rank, name, why (one short line), badge?, specs: [fact] (at most 3), price?: fact,
  *            store?: {name, url, readable}, details?: [{label, fact}], sources?: [{name, url}]}]
  *   badge: only for a label the person must notice. "Our pick" only when it is your own pick and "why" says why;
@@ -12,8 +14,9 @@
  *          "BabyGearLab: best budget"), never a "Details" toggle. Nothing is added by itself.
  *   price: the price as a fact (not in specs), with "asof" when the source dates it; a live check replaces it. A
  *          review site's price is its list price: "list": true, so the row says "list price" and never reads as the
- *          store's price now. When every price comes from one source on one date, one line under the list names the
- *          source once ("List prices on BabyGearLab ↗ · seen 5 Aug"), and "Sources" does not name it again.
+ *          store's price now. When one page on one date gives every price, one line under the list names it once
+ *          ("List prices on BabyGearLab ↗ · seen 5 Aug"), and "Sources" does not name it again. A missing price reads
+ *          "Price unknown", then why ({"note": "the store blocks price checks"}).
  *   details: only facts the row does not already show.
  *   unchecked: ["what was not checked", …]
  *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "est": false}
@@ -31,24 +34,36 @@
     render: render
   });
 
-  function priceOf(item) { return site.live(item.ref, "price") || item.price || null; }
+  /** The price a row shows: a live check, else the seed price (also when the check found the store blocked). */
+  function priceOf(item) {
+    var live = site.live(item.ref, "price");
+    if (live && site.blocked(item.ref)) return item.price || live;
+    return live || item.price || null;
+  }
   function valueFor(item, key) {
     if (key === "price") return priceOf(item);
     var d = (item.details || []).filter(function (x) { return x.key === key; })[0];
     return d ? d.fact : null;
   }
-  function fits(data, item) {
+  /** "Price unknown": the heading of the rows the filter cannot place. */
+  function unknownTitle(data) {
     var f = data.filter;
-    if (!f) return true;
-    var n = site.num(valueFor(item, f.key));
-    if (n == null) return true;
-    return (f.max == null || n <= f.max) && (f.min == null || n >= f.min);
+    if (f.unknown) return f.unknown;
+    if (f.key === "price") return "Price unknown";
+    var d = (data.items || []).map(function (i) { return (i.details || []).filter(function (x) { return x.key === f.key; })[0]; }).filter(Boolean)[0];
+    return ((d && d.label) || f.key) + " unknown";
   }
+  function lowerFirst(text) { text = String(text || ""); return text.charAt(0).toLowerCase() + text.slice(1); }
   function render(data, st) {
     site.head(data); // title, lede and the basis line ("Ranked by …") come first, before any button
     var items = (data.items || []).slice().sort(function (a, b) { return (a.rank || 0) - (b.rank || 0); });
-    var shown = st.show === "all" ? items : items.filter(function (i) { return fits(data, i); });
-    var hidden = items.length - shown.length;
+    // the stated limit shows the rows within it, then the rows nobody could place ("Price unknown", never counted as
+    // within it); "All" is the whole ranking
+    var parts = st.show === "all" || !data.filter ? { "in": items, unknown: [], out: [] }
+      : site.byFilter(items, data.filter, function (i) { return valueFor(i, data.filter.key); });
+    var shown = parts["in"];
+    var apart = parts.unknown;
+    var hidden = parts.out.length;
     var priced = items.some(function (i) { return i.price || i.store; });
     var shared = sharedPrice(items);
 
@@ -72,7 +87,14 @@
       // today's price is ("Open a store for today's price."), instead of a box about checks nobody was offered
       var inline = !!(shared && stores && site.storesBlocked(items));
       if (inline) stores = null;
-      wrap.appendChild(h("ol", { "class": "list ranked" }, shown.map(function (item) { return row(item, st, priced, shared); })));
+      if (shown.length) wrap.appendChild(h("ol", { "class": "list ranked" }, shown.map(function (item) { return row(item, st, priced, shared); })));
+      else wrap.appendChild(h("p", { "class": "cap", text: "None is known to be " + lowerFirst(data.filter.label || "within the limit") + "." }));
+      if (apart.length) {
+        wrap.appendChild(h("section", { "class": "group", attrs: { id: "group-unknown", "aria-label": unknownTitle(data) } },
+          h("div", { "class": "group-head" }, h("h2", { text: unknownTitle(data) }),
+            h("span", { "class": "cap", text: "Not counted as " + lowerFirst(data.filter.label || "within the limit") })),
+          h("ol", { "class": "list ranked" }, apart.map(function (item) { return row(item, st, priced, shared); }))));
+      }
       if (hidden > 0) {
         wrap.appendChild(h("p", { "class": "cap" }, hidden + " hidden · ",
           h("button", { "class": "link-btn", text: "Show all", attrs: { type: "button", "data-key": "show-all" }, on: { click: function () { site.setState({ show: "all" }); } } })));
@@ -93,11 +115,12 @@
     site.notes(items.length ? data.unchecked : [], items.length ? sources : []);
   }
 
-  /** The price fact every priced row shares (same source and date), else null. */
+  /** The price fact every priced row shares (one page on one date), else null. */
   function sharedPrice(items) {
     var facts = items.map(function (i) { return i.price; }).filter(Boolean);
     if (facts.length < 2) return null;
-    var key = function (f) { return f && f.src && !f.est && f.v != null ? [f.src, f.asof || f.date || "", f.list ? "list" : ""].join("|") : null; };
+    var page = function (f) { var u = site.safeUrl(f.url); return u ? u.split("#")[0] : "src:" + f.src; };
+    var key = function (f) { return f && f.src && !f.est && site.valueText(f) ? [page(f), f.asof || f.date || "", f.list ? "list" : ""].join("|") : null; };
     var k = key(facts[0]);
     return k && facts.every(function (f) { return key(f) === k; }) ? facts[0] : null;
   }
@@ -149,7 +172,7 @@
         item.why ? h("p", { "class": "why", text: item.why }) : null,
         specs.length ? h("p", { "class": "cap", text: specs.join(" · ") }) : null,
         // every priced row has the same price line, with or without a store
-        priced ? site.trust(live || item.price || null, { label: "Price", price: true, ref: item.ref, intent: "read_offer", store: item.store, seed: item.price || null, shared: !live && !!shared && !!item.price }) : null,
+        priced ? site.trust(live || item.price || null, { label: "Price", unknown: "Unknown", price: true, ref: item.ref, intent: "read_offer", store: item.store, seed: item.price || null, shared: !live && !!shared && !!item.price }) : null,
         open && hasMore(item) ? more(item) : null));
   }
 
