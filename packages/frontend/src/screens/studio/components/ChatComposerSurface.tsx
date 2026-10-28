@@ -91,6 +91,13 @@ type ChatComposerSurfaceProps = {
    * that cancels the request. Null when no new tab is pending.
    */
   pendingNewTab?: { onCancel: () => void } | null;
+  /**
+   * The next message goes on in Instafy's browser, continuing the person's
+   * browser turn (useSharedBrowserFollowUp): a token in the context row that
+   * keeps it in the chat instead. Null when the message is an ordinary chat
+   * turn.
+   */
+  browserFollowUp?: { onCancel: () => void } | null;
   /** Compact conversation views stay in the measured overlay above the input. */
   viewNavigation?: ReactNode;
   /**
@@ -265,25 +272,31 @@ export const COMPOSER_SEND_REST_CLASS = "[&_svg]:text-slate-400 dark:[&_svg]:tex
 export const COMPOSER_EDITOR_WRAPPER_CLASS = `flex ${CHAT_INPUT_CONTROL_HEIGHT_CLASS} min-w-0 flex-1 flex-col justify-center`;
 
 /**
- * The next message asks Octo for a new browser tab. One removable token in
- * the composer's context row, like a reply recipient: the browser pane's own
- * tab picker chooses every other tab a message refers to.
+ * Where the next message goes, as one removable token in the composer's
+ * context row, like a reply recipient: a new browser tab, or the browser turn
+ * it continues. The browser pane's own tab picker chooses every other tab a
+ * message refers to.
  */
-function ComposerNewTabToken({ onCancel }: { onCancel: () => void }) {
+function ComposerContextToken({ label, cancelLabel, onCancel, testId }: {
+  label: string;
+  cancelLabel: string;
+  onCancel: () => void;
+  testId: string;
+}) {
   return (
-    <div className="flex min-w-0 px-2 pt-1" data-testid="composer-new-tab-token">
+    <div className="flex min-w-0 px-2 pt-1" data-testid={`${testId}-token`}>
       <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full bg-slate-100 py-0.5 pl-2.5 pr-0.5 text-slate-600 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-300">
         <Globe className="h-3.5 w-3.5 flex-none" aria-hidden="true" />
-        <Text as="span" variant="caption" tone="inherit" className="truncate">New tab for the next message</Text>
+        <Text as="span" variant="caption" tone="inherit" className="truncate">{label}</Text>
         <IconButton
           type="button"
           variant="ghost"
           size="xs"
           radius="full"
           onPress={onCancel}
-          aria-label="Cancel new tab"
-          title="Cancel new tab"
-          data-testid="composer-new-tab-cancel"
+          aria-label={cancelLabel}
+          title={cancelLabel}
+          data-testid={`${testId}-cancel`}
         >
           <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
         </IconButton>
@@ -299,6 +312,7 @@ export function ChatComposerSurface({
   aboveComposer,
   replyContext,
   pendingNewTab = null,
+  browserFollowUp = null,
   viewNavigation,
   touchLikeInput = false,
   compactBrowserViewport,
@@ -1183,7 +1197,21 @@ export function ChatComposerSurface({
         >
           <div className={draftExpanded ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}>
             {replyContext}
-            {pendingNewTab ? <ComposerNewTabToken onCancel={pendingNewTab.onCancel} /> : null}
+            {pendingNewTab ? (
+              <ComposerContextToken
+                label="New tab for the next message"
+                cancelLabel="Cancel new tab"
+                onCancel={pendingNewTab.onCancel}
+                testId="composer-new-tab"
+              />
+            ) : browserFollowUp ? (
+              <ComposerContextToken
+                label="Goes to Instafy's browser"
+                cancelLabel="Don't send it to the browser"
+                onCancel={browserFollowUp.onCancel}
+                testId="composer-browser-follow-up"
+              />
+            ) : null}
             {showActiveGoal && !draftExpanded ? (
               <div
                 className={`@container/goal pointer-events-auto flex min-w-0 flex-col gap-2 rounded-2xl border border-slate-200/70 bg-white/95 px-3 py-2 text-sm shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-strong)] ${
