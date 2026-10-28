@@ -560,4 +560,17 @@ describe("detailsOnlySummary", () => {
     expect(detailsOnlySummary([update("reasoning", "**Thinking about it**")])).toBeNull();
     expect(detailsOnlySummary([])).toBeNull();
   });
+  it("never counts a status the runtime wrote itself (a retry) as Octo's note", () => {
+    const retry = note("Retrying: the latest request requires MCP tool usage.", "status", {
+      v: 1,
+      key: "runtime/retry",
+      role: "quiet",
+      live: "Retrying",
+      count: 1,
+      also: [],
+    });
+    const runtimeStatus = { kind: "update" as const, id: retry.id, message: retry };
+    expect(detailsOnlySummary([runtimeStatus])).toBeNull();
+    expect(detailsOnlySummary([runtimeStatus, update("status", "Checking the river side")])).toBe("Wrote a note");
+  });
 });
