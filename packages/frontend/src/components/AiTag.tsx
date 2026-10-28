@@ -10,8 +10,9 @@ export const QUIET_TAG_CLASS =
 /**
  * The word for an AI (docs/Brand.md, "One rule for faces"): a quiet tag after
  * an AI's name, only in lists that mix people and AI (the @-mention picker,
- * the participants drawer, profile cards). Never in thread rows or inside
- * sentences, where the AI's rounded-square face already says it.
+ * the participants drawer, the Shared Browser's participant list, profile
+ * cards). Never in thread rows or inside sentences, where the AI's
+ * rounded-square face already says it.
  *
  * The ", " before the word is for screen readers only, so a row's accessible
  * name reads "Pia, AI" rather than "Pia AI".

@@ -181,24 +181,30 @@ is printed: the 20px thread stack, the conversation roster, a phone's header.
   rather than spelling its own radius.
 - **Octo** is a white tile (`#262626` in dark) holding the one-ink mark at
   75%, the mark unchanged (see [Octo's tile](#octos-tile)).
-- **Octo's helpers and saved agents** wear the same tile with the fills they
-  already have: the ID-hashed gradient with an initial, or an uploaded picture
-  clipped to the tile.
+- **Saved agents** wear the same tile with the fills they already have: the
+  ID-hashed gradient with an initial, or an uploaded picture clipped to the
+  tile.
+- **A plan's helpers** (its workers) are AI too, so a helper drawn in a face
+  slot is a tile. A helper's own face is pending a follow-up; until it lands,
+  a helper falls back to a gradient hashed from its handle, with its initial,
+  which is a stand-in, not its design.
 - **People** stay round. `HumanAvatar`, a photo or initials on a muted
   ID-derived color, is a circle at every size.
 - **Team and space identities** keep their own rounded squares (`OrgIdentity`,
   `SpaceIdentity`). They are places, not faces, and never sit in a face slot,
   so a square in a face slot always means an AI.
 - **The word:** where a list mixes people and AI (the mention picker's rows,
-  the participants drawer and agent profile cards), a quiet AI chip follows an
-  AI's name: `AiTag` (`packages/frontend/src/components/AiTag.tsx`), 10px,
-  medium weight, slate on a faint fill, with a small radius: the studio's
-  quiet tag (`QUIET_TAG_CLASS`), the one the drawer already uses for a
-  runtime's kind. The drawer's section for agents is headed AI (Runtimes & AI
-  while it groups them by runtime). The chip never appears in thread rows or
-  inside a sentence. The chip's comma is for screen readers only, so a row reads
-  "Pia, AI", and an AI face or control that has an accessible name of its own
-  adds ", AI" to it (`formatAiAccessibleName`: "View profile for @pia, AI").
+  the participants drawer, the Shared Browser's participant list and agent
+  profile cards), a quiet AI chip follows an AI's name: `AiTag`
+  (`packages/frontend/src/components/AiTag.tsx`), 10px, medium weight, slate
+  on a faint fill, with a small radius: the studio's quiet tag
+  (`QUIET_TAG_CLASS`), the one the drawer already uses for a runtime's kind.
+  The drawer's section for agents is headed AI (Runtimes & AI while it groups
+  them by runtime). The chip never appears in thread rows or inside a
+  sentence. The chip's comma is for screen readers only, so a row reads
+  "Pia, AI", and an AI face or control that has an accessible name of its
+  own adds ", AI" to it (`formatAiAccessibleName`: "View profile for
+  @pia, AI").
 - **What hugs a face follows it:** an AI's speaker pill and a Machines agent
   chip round their corners to the tile's, the tile's corner plus the gap
   beside it (12px beside the speaker pill's 28 and 32px faces, 9.2px around

@@ -692,10 +692,10 @@ cards fetch public fields by exact agent ID and space, with current access requi
 the viewer and the agent owner. A cleared bio disappears from the card.
 
 Lists that mix people and AI mark each AI's name with a quiet **AI** word: the mention picker's
-rows, the participants list (which heads its agents **AI**, or **Runtimes & AI** when it groups them
-by runtime) and agent profile cards. Thread rows and sentences never carry it; there the rounded
-square face says it. AI faces and controls with an accessible name add ", AI" to it, so a screen
-reader hears "Pia, AI".
+rows, the participants list (which heads its agents **AI**, or **Runtimes & AI** when it groups
+them by runtime), the Shared Browser's participant list and agent profile cards. Thread rows and
+sentences never carry it; there the rounded square face says it. AI faces and controls with an
+accessible name add ", AI" to it, so a screen reader hears "Pia, AI".
 
 The Studio corner-radius scale uses 6px for compact search scope chips, 8px for menu rows,
 12px for form controls and profile actions, and 16px for cards and dialogs. People's avatars
