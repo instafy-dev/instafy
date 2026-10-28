@@ -1,5 +1,6 @@
 import type { RunRecord } from "../../../types";
 import type { RuntimeBrowserSessionAction } from "../../../sdk/instafy";
+import { BROWSER_HANDS_BACK_METADATA_KEY } from "./browserRequest";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -73,6 +74,67 @@ export function continuedSharedBrowserRunId(
     if (!newest || runTimestamp(run) > runTimestamp(newest)) newest = run;
   }
   return newest?.id ?? null;
+}
+
+/**
+ * How long after a browser turn a message from the chat still goes on in the
+ * browser: as long as the runtime keeps that turn's approvals for a run that
+ * continues it.
+ */
+export const SHARED_BROWSER_FOLLOW_UP_WINDOW_MS = 10 * 60_000;
+
+function runStartedAt(run: RunRecord): number {
+  return Date.parse(run.createdAt ?? run.updatedAt ?? "") || 0;
+}
+
+/** The browser turn a chat message continues, its tab, and until when that applies. */
+export type SharedBrowserFollowUp<Page> = { runId: string; page: Page; endsAtMs: number };
+
+/**
+ * The browser turn a message from the chat continues in Instafy's browser,
+ * and the tab it continues in. Only when the conversation's newest run is
+ * this person's Shared Browser run on this browser, it finished successfully
+ * within {@link SHARED_BROWSER_FOLLOW_UP_WINDOW_MS}, its tab is still open,
+ * and it did not continue a card Octo builds from (`browserHandsBack`): a
+ * browser turn has only the browser's tools, so after a building card's
+ * browser turn the building turn keeps the chat, as it does with the
+ * hand-back. Studio sends such a message as a browser turn in that tab,
+ * naming the run it continues (`browserContinuesRunId`), so the runtime
+ * carries the run's approvals over and no card or press stands in between;
+ * the composer says so while it applies (useSharedBrowserFollowUp). Null
+ * otherwise: the message is an ordinary chat turn.
+ */
+export function sharedBrowserFollowUp<Page extends { id: string }>(
+  runs: readonly RunRecord[],
+  scope: {
+    conversationId: string | null;
+    runtimeId: string | null;
+    userId: string | null;
+    pages: readonly Page[];
+    nowMs?: number;
+  },
+): SharedBrowserFollowUp<Page> | null {
+  if (!scope.conversationId || !scope.runtimeId || !scope.userId) return null;
+  let newest: RunRecord | null = null;
+  for (const run of runs) {
+    if (run.conversationId !== scope.conversationId) continue;
+    if (!newest || runStartedAt(run) > runStartedAt(newest)) newest = run;
+  }
+  const metadata = newest?.metadata;
+  if (
+    !newest || !UUID.test(newest.id) || newest.status !== "success" ||
+    metadata?.browserTransport !== "shared" ||
+    metadata.browserRuntimeId !== scope.runtimeId ||
+    metadata.initiatingUserId !== scope.userId ||
+    metadata[BROWSER_HANDS_BACK_METADATA_KEY] === true
+  ) {
+    return null;
+  }
+  const endedAt = runTimestamp(newest);
+  const endsAtMs = endedAt + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS;
+  if (!endedAt || (scope.nowMs ?? Date.now()) > endsAtMs) return null;
+  const page = scope.pages.find((candidate) => candidate.id === metadata.browserPageId);
+  return page ? { runId: newest.id, page, endsAtMs } : null;
 }
 
 function activeSharedBrowserRuns(runs: readonly RunRecord[], runtimeId: string): RunRecord[] {

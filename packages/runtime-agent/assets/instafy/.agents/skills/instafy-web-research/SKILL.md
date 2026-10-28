@@ -1,6 +1,6 @@
 ---
 name: instafy-web-research
-description: Find facts on the web and cite them, for an answer or a page: which sources to read, searching with `instafy web search`, cross-checking, "checked <date> on <host>", amounts "seen <date>", links instead of copied listings, stopping at logins and bot checks, and guided links to link-only sites.
+description: Find facts on the web and cite them, for an answer or a page: which sources to read, searching with `instafy web search`, cross-checking, "checked <date> on <host>", stopping at logins and bot checks, and guided links to link-only sites.
 context_kind: workflow
 context_parent: instafy-skill-router
 routing_keywords: with sources, and sources, cite, citation, fact check, search the web, web search, opening hours, opening times, timetable, last train, price of, prices for, compare prices, how much is, how much does, official site, official page, hotel prices, compare hotels, on booking.com, on airbnb, on tripadvisor, on expedia, on agoda, independent reviews
@@ -14,10 +14,10 @@ Goal: facts read from the web this turn, each one traceable to the page that sta
 
 ## Readers
 
-Read pages only through a reader made for it:
+Read pages only with these readers:
 
 - `instafy web read <url…> --json`, with `--find '<terms>'` for only the passages that matter: plain HTTP (no JavaScript, cookies or sign-in) for public pages robots.txt allows, up to 6 URLs per call. It caps a turn at 12 page loads and 4 per site, 2 s apart. Each page's `status` (`read`, `needs_browser` (the text needs JavaScript), `stopped`, `skipped` or `failed`) has a `tell`: follow it. Its `provenance` is the finding to cite;
-- the browser tools exposed on this turn (Personal or Shared Browser): visible tabs the person can watch, for a `needs_browser` page, an aggregator, or a page the person wants to see or show;
+- the browser tools exposed on this turn: visible tabs the person can watch, for a `needs_browser` page, an aggregator, or a page the person wants to see or show;
 - `instafy_local_browser.observe` when it is exposed: one public page per call, read-only;
 - a reading command or open API that an installed skill names for that source;
 - for a `needs_browser` page, or when none of these is there: one `request_browser` card that lists the related reads, at most 6, and asks for one labelled finding per page, `{url, title, readAt, viewer, facts}` or `{url, stopped}` (`instafy-browser-automation`, "Several reads in one card").
@@ -46,15 +46,13 @@ An aggregator (a site listing many businesses' offers, prices or reviews) is nev
 
 ### Guided mode
 
-When the task needs a `no-agents` site (hotel prices on Booking.com, say):
+When the task needs a `no-agents` site (hotel prices on Booking.com):
 
 1. Run `instafy web link <site> query=<…> checkin=<YYYY-MM-DD> …` with the values the task gives (the list's `placeholders` name them). It returns the filled `link`, or the site's home page plus `typeIn` (what to type there) when the site bars deep links or has no search link.
 2. Reply with short numbered steps for the person: open the link in their own tab (or the home page, and type the `typeIn` values there), pick the pages to compare, and press **Send page to Octo** on each.
 3. Never open or read these links yourself, in any tab or reader. Work only from the pages the person sends, cite them "seen <date> on <host>", and keep their content out of anything published or shared by public link.
 
 ## Finding sources
-
-In this order:
 
 1. URLs the person gave.
 2. Sources an installed skill names for this need.
@@ -76,7 +74,7 @@ In this order:
 
 - 2-6 reads per question. Stop once every fact that matters is supported.
 - At most 4 reads of one host per turn. Never crawl, page through results or sweep a listing.
-- Read the specific page (the timetable, the room, the product), not the home page and its links.
+- Read the specific page (the timetable, the room, the product), not the home page.
 
 ## Cross-checking
 
@@ -88,11 +86,12 @@ In this order:
 
 Say per item what you found:
 
-- Name: the exact model and generation its official page gives.
+- Name: the exact model and generation its official page gives, else the page naming it.
 - Price: the maker's or a shop's own page. None there, or a stop: say so ("no price on <host>'s page", "<host> blocks automated price checks"), then try a shop robots.txt allows: `instafy web search "<name> price" --json`, or `--chain reference-search` for shops' official sites; a link-only shop gets `instafy web link <site> query=<name>` (Guided mode). Still none: "price unknown", and the page for the person to open and send to Octo; never a remembered or guessed price.
 - Sources asked for ("two independent reviews"): that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count). Short: "<item>: 1 of 2 reviews found", in the reply and on the page.
-- A limit ("under €600"): an item without a price read this turn is never listed or described as within it.
-- A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.
+- A limit ("under €600"): an item with no price read this turn is listed as "price unknown", never as within it.
+- The official site failed twice: read an independent source (a review, or a shop robots.txt allows) before building.
+- A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why. A row per candidate a page read names.
 
 ## Stops
 
@@ -119,7 +118,6 @@ Every fact keeps its finding `{url, title, readAt, viewer}`: `readAt` is when it
 
 ## Into pages and datasets
 
-- Each item stores `source` as its finding.
 - Coordinates come only from the venue's own site (its structured data or the map it publishes) or openly licensed data (OpenStreetMap, Wikidata). Never take coordinates from a map service's links or embeds. Otherwise geocode the address with an open geocoder a skill names and label the pin "approximate".
 - Prices are stored with "seen <date>", never as live prices.
 - Shopping and trip items link to the shop's or operator's page. Booking and buying happen there, by the person.

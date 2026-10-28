@@ -9,6 +9,10 @@
 // does (28 Oct drive: roborock.com timed out, www.roborock.com answered, and the turn never tried it). Without a search
 // key the turn still researches: the official site through reference search, the reviews from a publisher's own pages,
 // and builds the page with what it read (the drive asked for a key and the browser at once and built nothing).
+// OFFICIAL_DOWN_CASE is the third 28 Oct drive: the maker's site never answers at either address, there is no search key,
+// and the turn read nothing else, dropped every model because no price was read and built a page that read "No options
+// yet". It must read an independent source (a review publisher's own page names the latest models) and list every
+// model, with "price unknown" and never as within the limit.
 // Nothing here touches a live site or a real search API.
 //
 // A turn is graded by the rules of the instafy-web-research skill ("Comparing items") and of the comparison page
@@ -80,6 +84,20 @@ export const CASE = {
   hubs: [{ url: "https://www.review-one.example/robot-vacuums", title: "Robot vacuum reviews - Review One", reviews: ["review:s8:0", "review:s8-pro:0", "review:q5:0"] }],
 };
 
+/** The third 28 Oct drive: the maker's own site never answers (its www. host and its bare domain), there is no search key,
+ *  and reference search names only the company. A review publisher's own page names the three latest models and links
+ *  a review of each; no page gives a price. */
+export const OFFICIAL_DOWN_CASE = {
+  ...CASE,
+  id: "shop-robot-vacuums-official-down",
+  official: { url: `${MAKER}/`, down: true },
+  items: CASE.items.map((item) => ({ ...item, page: { url: item.page.url, down: true } })),
+  // the maker's own "review" is on its site too, which never answers
+  reviews: CASE.reviews.map((review) => (host(review.url) === host(MAKER) ? { ...review, down: true } : review)),
+  shops: [],
+  searches: {},
+};
+
 /** The page a search answer's entry names. */
 export function pageOf(kase, ref) {
   if (ref === "linkOnly") return { url: kase.linkOnly.url, title: kase.linkOnly.title, description: kase.linkOnly.snippet };
@@ -111,7 +129,10 @@ const html = (title, text, links = []) =>
 export function writeCompareFixtures(folder, kase = CASE) {
   fs.mkdirSync(folder, { recursive: true });
   const pages = {};
-  for (const [url, page] of pagesOf(kase)) pages[url] = page.status ? { status: page.status, body: "Access denied", type: "text/plain" } : { body: html(page.title, page.text, page.links) };
+  for (const [url, page] of pagesOf(kase)) {
+    if (page.down) continue; // not in the fixtures: the reader gets no answer, as from a site that never loads
+    pages[url] = page.status ? { status: page.status, body: "Access denied", type: "text/plain" } : { body: html(page.title, page.text, page.links) };
+  }
   for (const [query, refs] of Object.entries(kase.searches)) {
     pages[searchAddress(query)] = { body: JSON.stringify({ type: "search", web: { type: "search", results: refs.map((ref) => pageOf(kase, ref)) } }), type: "application/json" };
   }
@@ -213,6 +234,57 @@ export function referencePage(kase, readAt, { key }) {
   };
 }
 
+/** The reference reply when the maker's site never answers: every model a review publisher's page names, each price
+ *  unknown with why, what one review of each states, and a way to check each price (`links`: guided links by slug). */
+export function officialDownReply(kase, readAt, { links }) {
+  const day = dayMonth(readAt);
+  const maker = host(kase.official.url);
+  const reviewHost = host(kase.hubs[0].url);
+  const [s8, pro, q5] = kase.items;
+  return [
+    `${kase.brand}'s three latest robot vacuums are the ${s8.name}, the ${pro.name} and the ${q5.name} (checked ${day} on ${reviewHost}). ${kase.brand}'s own site did not answer (not read: ${new URL(kase.wikidata.website).host} and ${maker}, the site did not load), so the comparison page lists all three with what a review states. The comparison page is in the card above.`,
+    `- ${s8.name}: price unknown, as ${maker} did not answer. Battery 170 minutes in a review's test (checked ${day} on ${reviewHost}); suction and mop unknown. ${s8.name}: 1 of 2 reviews found.`,
+    `- ${pro.name}: price unknown, as ${maker} did not answer. Suction 7,000 Pa, battery 200 minutes and a lifting mop (checked ${day} on ${reviewHost}). ${pro.name}: 1 of 2 reviews found.`,
+    `- ${q5.name}: price unknown, as ${maker} did not answer. No mop (checked ${day} on ${reviewHost}); suction and battery unknown. ${q5.name}: 1 of 2 reviews found.`,
+    "600 EUR or less: none is known, as no price could be read; all three are listed apart.",
+    `To check the prices yourself, look on Amazon: ${links[s8.slug]}, ${links[pro.slug]} and ${links[q5.slug]}, or open ${kase.brand}'s pages in your own tab and press Send page to Octo.`,
+    `This space has no search key, so I read ${reviewHost}'s reviews directly. Add a key in the card if you want me to look for more reviews and shops next time.`,
+  ].join("\n");
+}
+
+/** The reference page when the maker's site never answers: a row per model the review publisher names, each price
+ *  unknown with why (never within the limit: listed apart), and what one review of each states. */
+export function officialDownPage(kase, readAt) {
+  const date = readAt.slice(0, 10);
+  const [s8, pro, q5] = kase.items;
+  const review = (slug) => kase.reviews.find((r) => r.item === slug && hubReviews(kase).has(r.url));
+  const spec = (slug, v) => ({ v, src: "Review One", url: review(slug).url, date });
+  const unread = (what) => ({ note: what });
+  const price = { note: `${host(kase.official.url)} did not answer; no shop page was read` };
+  const row = (item, why, facts) => ({
+    ref: `vacuum:${item.slug}`, name: item.name, why, note: "Reviews: 1 of 2 found", facts: { price, ...facts },
+    store: { name: kase.brand, url: item.page.url, readable: false }, sources: [{ name: "Review One", url: review(item.slug).url }],
+  });
+  return {
+    title: `${kase.brand} robot vacuums under 600 EUR`,
+    lede: `None is known to be 600 EUR or less: ${kase.brand}'s site did not answer, so no price could be read. The ${pro.name} has the strongest suction a review states.`,
+    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }],
+    columns: [
+      { key: "price", label: "Price", type: "price" },
+      { key: "suction", label: "Suction", type: "number" },
+      { key: "battery", label: "Battery", type: "text" },
+      { key: "mop", label: "Mop", type: "text" },
+    ],
+    filter: { key: "price", max: kase.limit.max, label: kase.limit.label, rest: "over 600 EUR" },
+    items: [
+      row(s8, "One review timed its battery", { suction: unread("not in the review read"), battery: spec(s8.slug, "170 minutes (in a test)"), mop: unread("not in the review read") }),
+      row(pro, "The strongest suction a review states", { suction: spec(pro.slug, "7,000 Pa"), battery: spec(pro.slug, "200 minutes"), mop: spec(pro.slug, "lifting mop") }),
+      row(q5, "A budget pick, per its review", { suction: unread("not in the review read"), battery: unread("not in the review read"), mop: spec(q5.slug, "none") }),
+    ],
+    unchecked: [`Prices: ${kase.brand}'s site did not answer; check them on a shop's page`, "Find a second review of each before you buy"],
+  };
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Grading
 
@@ -273,7 +345,10 @@ export function gradeCompare(transcript, kase = CASE) {
   const unknown = items.filter((item) => priced.get(item.slug).length === 0);
 
   // A page with every item on it: a failed search or a site that did not load never ends the turn without one.
-  check("page_built", built ? items.filter((item) => !rowOf(item)).map((item) => `${item.name} is not on the page`) : ["no page was built"]);
+  check("page_built", !built ? ["no page was built"] : [
+    ...((data.items || []).length ? [] : ['the page has no rows: it reads "No options yet"']),
+    ...items.filter((item) => !rowOf(item)).map((item) => `${item.name} is not on the page`),
+  ]);
 
   // An address that does not answer gets its "www." form (added or removed) once, and is never asked again.
   check("tries_www_once", reads.flatMap((r, i) => {
@@ -281,11 +356,28 @@ export function gradeCompare(transcript, kase = CASE) {
     const other = wwwSiblingHost(r.url);
     if (!other) return [];
     const later = reads.slice(i + 1).map((x) => host(x.url));
+    const tried = reads.filter((_, j) => j !== i).map((x) => host(x.url));
     return [
-      ...(later.includes(other) ? [] : [`${host(r.url)} did not answer and ${other} was never tried`]),
+      ...(tried.includes(other) ? [] : [`${host(r.url)} did not answer and ${other} was never tried`]),
       ...(later.includes(host(r.url)) ? [`${host(r.url)} did not answer and was asked again`] : []),
     ];
   }));
+
+  // Two failures on the maker's own site send the turn to an independent source before it builds: a review publisher's
+  // page or a shop a reader allows (28 Oct drive 3: the maker's site never answered, nothing else was read, and the
+  // page had no rows).
+  const makerHosts = new Set([kase.official.url, kase.wikidata.website, ...items.map((item) => item.page.url)].map(host));
+  const officialFailures = reads.filter((r) => makerHosts.has(host(r.url)) && r.status !== "read").length;
+  const independentReads = reads.filter((r) => r.status === "read" && !makerHosts.has(host(r.url)) && !noAgents(r.url));
+  check("independent_after_official_fails", officialFailures >= 2 && !independentReads.length
+    ? [`the maker's site failed ${officialFailures} times and no independent source (a review, a shop) was read`] : []);
+
+  // Every row is a candidate the ask or a page read this turn names: a row with every cell unknown is still a claim
+  // that the model exists and fits the ask, so never one from memory or from a search result's title.
+  const readNames = [...read].map((url) => flat(`${pages.get(url)?.title ?? ""} ${pages.get(url)?.text ?? ""}`));
+  const namedIn = (name, text) => new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(flat(name))}(?![\\p{L}\\p{N}+])`, "iu").test(text);
+  check("rows_from_pages", (data.items || []).filter((row) => flat(row.name) && !namedIn(row.name, kase.ask) && !readNames.some((text) => namedIn(row.name, text)))
+    .map((row) => `${flat(row.name)} is on the page, but neither the ask nor a page read this turn names it`));
 
   // Every amount on the page or in the reply is on a page read this turn: no remembered, guessed or listing price.
   const onPages = new Set([...read].flatMap((url) => amounts(readText(url))));
@@ -487,6 +579,34 @@ export const NO_PROVIDER_BREAKERS = [
   ["asks the address that did not answer again", (t, k) => ({ ...t, reads: [...t.reads, { url: `${k.wikidata.website}s8`, status: "failed", code: "unreachable" }] }), ["tries_www_once"]],
   ["claims reviews it did not read", (t) => ({ ...t, reply: t.reply.replace("Brightvac S8: 1 of 2 reviews found", "Brightvac S8: 2 of 2 reviews found") }), ["reviews_counted"]],
   ["gives no way to check the prices it could not read", (t) => ({ ...t, reply: t.reply.replace(/\nTo check the prices yourself:[^\n]*/, "") }), ["price_fallback"]],
+];
+
+export const OFFICIAL_DOWN_BREAKERS = [
+  // the third 28 Oct drive: the maker's two addresses and nothing else, then a page with no rows and every fact
+  // "unavailable"
+  ["reads only the maker's site and builds a page with no rows", (t, k, edit) => edit({
+    ...t,
+    reads: t.reads.filter((r) => [k.wikidata.website, k.official.url].includes(r.url)),
+    findings: [],
+    links: [],
+    reply: `Built and opened the comparison page. ${k.brand}'s official pages didn't respond, so model names, suction, battery, mop features, prices and all six requested independent reviews are marked unavailable rather than guessed.`,
+  }, (data) => {
+    data.title = `${k.brand} comparison: research blocked`;
+    data.lede = `I couldn't verify even one eligible model: ${k.brand}'s official page did not respond.`;
+    data.items = [];
+    delete data.columns; delete data.filter; delete data.sort;
+  }), ["independent_after_official_fails", "keeps_going_without_key", "limit_never_counts_unknown", "page_built", "price_fallback", "reviews_counted", "unknown_prices_said"]],
+  // the old limit rule ("an item without a price read this turn is never listed"): every row goes
+  ["drops every row whose price was not read", (t, _k, edit) => edit(t, (data) => { data.items = data.items.filter((row) => knownNumber(row.facts?.price) != null); }),
+    ["limit_never_counts_unknown", "page_built", "reviews_counted", "unknown_prices_said"]],
+  ["calls the rows without a price within the limit", (t, _k, edit) => edit(t, (data) => { data.lede = "All three are 600 EUR or less."; }), ["limit_never_counts_unknown"]],
+  // a row of unknowns for a model no page read names (remembered, or a search result's title): rows of unknowns are
+  // for candidates a page names, never a way to list a guess
+  ["adds a remembered model as a row of unknowns", (t, k, edit) => edit(t, (data) => {
+    const [first] = data.items;
+    data.items.push({ ...first, ref: "vacuum:s9", name: `${k.brand} S9 Ultra`, why: "Its newest flagship", note: "Reviews: 0 of 2 found", sources: [],
+      facts: Object.fromEntries(Object.keys(first.facts).map((key) => [key, { note: "not read" }])) });
+  }), ["rows_from_pages"]],
 ];
 
 // `node web-compare-eval.mjs fixtures <folder>` or `node web-compare-eval.mjs grade <transcript.json>`
