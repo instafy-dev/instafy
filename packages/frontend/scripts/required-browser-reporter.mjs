@@ -28,6 +28,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "shared-browser-focused-editable.spec.ts",
       "shared-browser-sessions-responsive.spec.ts",
       "browser-live-proof.spec.ts",
+      "browser-recovery.spec.ts",
       "conversation-surfaces.spec.ts",
       "suggestion-browser-menus.spec.ts",
       "queue-composer.spec.ts",

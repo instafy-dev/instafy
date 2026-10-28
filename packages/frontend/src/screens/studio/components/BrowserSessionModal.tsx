@@ -9,7 +9,7 @@ import {
 } from "react";
 import { Expand, Safari, Xmark } from "iconoir-react";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
-import { Button, IconButton } from "../../../components/Button";
+import { IconButton } from "../../../components/Button";
 import { StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
@@ -58,7 +58,7 @@ import { SharedBrowserParticipantPointers } from "./SharedBrowserParticipantPoin
 import { collaborationSelfOwnsControl } from "./sharedBrowserCollaboration";
 import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
 import { BrowserIdentityBadge } from "./BrowserIdentityBadge";
-import { BrowserUnavailableNotice } from "./BrowserUnavailableNotice";
+import { BrowserSessionRecovery, BrowserSessionReconnecting } from "./BrowserSessionRecovery";
 import {
   shouldForceDockedBrowserFullscreen,
   shouldRenderBrowserSessionFullscreen,
@@ -1098,6 +1098,7 @@ export function BrowserSessionModal({
         ? "connected"
       : "connecting"
     : null;
+  const compactRecovery = collapsedCardMode === "error" || collapsedCardMode === "limit";
   const renderCollapsedConnectedIntoShelf =
     shouldUseDesktopDockedCard &&
     collapsedCardMode === "connected" &&
@@ -3098,73 +3099,21 @@ export function BrowserSessionModal({
     viewLive
       ? "bg-black"
       : "bg-slate-100 dark:bg-slate-950";
-  const disconnectedCardClass =
-    "border border-slate-200 bg-white text-left text-slate-700 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200";
-  const compactCardBody = shouldCollapseDocked ? (
+  const recoveryRuntimeLimit = error && limitReached ? {
+    summary: runtimeSlotSummary,
+    blockerProjectCopy,
+    busy: runtimeLimitActionBusy,
+    onTakeOver: hasTakeoverBlocker ? handleRuntimeLimitTakeover : undefined,
+  } : undefined;
+  const compactCardBody = shouldCollapseDocked ? compactRecovery ? (
+    <BrowserSessionRecovery presentation="compact" viewState={viewState} reason={error}
+      runtimeLimit={recoveryRuntimeLimit} onRetry={retryConnection} onHide={closeBrowserSession} />
+  ) : (
     <div
-      className={[
-        "absolute inset-0 rounded-[1.35rem] border shadow-sm",
-        collapsedCardMode === "limit"
-          ? "border-amber-300/70 bg-amber-50/90 dark:border-amber-500/30 dark:bg-amber-500/10"
-          : collapsedCardMode === "error"
-            ? "border-rose-200/80 bg-rose-50/90 dark:border-rose-500/30 dark:bg-rose-500/10"
-            : "border-slate-200/70 bg-white/96 dark:border-slate-800 dark:bg-slate-950/95",
-      ].join(" ")}
+      className="absolute inset-0 rounded-[1.35rem] border border-slate-200/70 bg-white/96 shadow-sm dark:border-slate-800 dark:bg-slate-950/95"
       data-testid="browser-session-collapsed-card"
     >
-          {collapsedCardMode === "limit" ? (
-            <div className="space-y-3 px-3.5 py-3">
-              <div className="min-w-0 space-y-1">
-                <Text as="p" variant="bodyStrong" tone="primary">
-                  Cloud runtime already in use
-                </Text>
-                <Text as="p" variant="caption" tone="muted" className="leading-snug">
-                  {runtimeSlotSummary}
-                </Text>
-                {blockerProjectCopy ? (
-                  <Text as="p" variant="caption" tone="muted" className="leading-snug">
-                    {blockerProjectCopy}
-                  </Text>
-                ) : null}
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {hasTakeoverBlocker ? (
-                  <Button
-                    onPress={handleRuntimeLimitTakeover}
-                    variant="primary"
-                    size="sm"
-                    radius="full"
-                    isDisabled={runtimeLimitActionBusy}
-                  >
-                    {runtimeLimitActionBusy ? "Opening here..." : "Stop and open here"}
-                  </Button>
-                ) : null}
-                <Button
-                  onPress={retryConnection}
-                  variant="ghost"
-                  size="sm"
-                  radius="full"
-                  isDisabled={runtimeLimitActionBusy}
-                >
-                  Try again
-                </Button>
-              </div>
-            </div>
-          ) : collapsedCardMode === "error" ? (
-            <div className="space-y-3 px-3.5 py-3" data-view-state={viewState.kind}>
-              <BrowserUnavailableNotice sentence={viewState.sentence ?? ""} reason={error} compact />
-              <div className="flex items-center gap-2">
-                {viewState.action ? (
-                  <Button onPress={retryConnection} variant="ghost" size="sm" radius="full">
-                    {viewState.action}
-                  </Button>
-                ) : null}
-                <Button onPress={closeBrowserSession} variant="ghost" size="sm" radius="full">
-                  Hide
-                </Button>
-              </div>
-            </div>
-          ) : collapsedCardMode === "connecting" ? (
+          {collapsedCardMode === "connecting" ? (
             <div
               className="flex items-center justify-between gap-3 px-3.5 py-3"
               role={shouldUseDesktopDockedCard ? "button" : undefined}
@@ -3477,7 +3426,9 @@ export function BrowserSessionModal({
                 : "relative h-full w-full overflow-hidden rounded-lg"
               : isInlineDocked
               ? shouldCollapseDocked
-                ? "relative w-full overflow-hidden rounded-[1.15rem] border border-slate-200/70 bg-slate-950/92 shadow-modal dark:border-slate-800 dark:bg-slate-950/96"
+                ? compactRecovery
+                  ? "relative min-w-0 w-full"
+                  : "relative w-full overflow-hidden rounded-[1.15rem] border border-slate-200/70 bg-slate-950/92 shadow-modal dark:border-slate-800 dark:bg-slate-950/96"
                 : "relative w-full overflow-hidden rounded-none border-0 bg-transparent shadow-none"
               : "relative h-full w-full"
           }
@@ -3488,7 +3439,8 @@ export function BrowserSessionModal({
               ? {
                   ...(shouldCollapseDocked
                     ? {
-                        height: `${dockedStageHeight}px`,
+                        // Recovery copy and touch actions determine their own height.
+                        height: compactRecovery ? undefined : `${dockedStageHeight}px`,
                         maxWidth: `${dockedStageMaxWidth}px`,
                       }
                     : {
@@ -3600,115 +3552,11 @@ export function BrowserSessionModal({
               />
             </>
           ) : null}
-          {!shouldCollapseDocked && viewLive && status === "connecting" ? (
-            <div
-              className="pointer-events-none absolute right-3 top-3 rounded-full border border-white/15 bg-slate-950/80 px-2.5 py-1 text-xs font-medium text-white shadow-sm backdrop-blur"
-              data-testid="browser-session-reconnecting"
-              role="status"
-            >
-              Reconnecting…
-            </div>
-          ) : null}
+          {!shouldCollapseDocked && viewLive && status === "connecting" ? <BrowserSessionReconnecting /> : null}
           {compactCardBody}
           {!shouldCollapseDocked && displayStatus !== "selecting" && !viewLive ? (
-            <div
-              className={[
-                "pointer-events-none absolute inset-0 flex items-center justify-center p-6",
-                error && limitReached ? "bg-slate-950/15 backdrop-blur-[1px]" : "",
-              ].join(" ")}
-              data-testid={error && limitReached ? "browser-runtime-limit-scrim" : undefined}
-            >
-              <div
-                className={[
-                  "pointer-events-auto w-full max-w-md rounded-2xl p-4 text-sm shadow-xl",
-                  disconnectedCardClass,
-                ].join(" ")}
-                data-testid={
-                  error && limitReached
-                    ? "browser-runtime-limit-card"
-                    : "browser-session-state-card"
-                }
-              >
-                {error ? (
-                  limitReached ? (
-                    <div className="space-y-3" data-testid="browser-runtime-limit-notice">
-                      <Text as="p" variant="bodyStrong" tone="primary">
-                        Cloud runtime already in use
-                      </Text>
-                      <Text as="p" variant="body" tone="secondary" className="leading-snug">
-                        {runtimeSlotSummary}
-                      </Text>
-                      {blockerProjectCopy ? (
-                        <Text as="p" variant="body" tone="secondary" className="leading-snug">
-                          {blockerProjectCopy}
-                        </Text>
-                      ) : null}
-                      <Text as="p" variant="caption" tone="muted" className="leading-snug">
-                        {hasTakeoverBlocker
-                          ? "Stop it to free the slot and open Shared Browser here. This can interrupt work running there."
-                          : "Stop another cloud runtime, then try again."}
-                      </Text>
-                      <div className="flex flex-col gap-2 pt-1 sm:flex-row sm:items-center">
-                        {hasTakeoverBlocker ? (
-                          <Button
-                            onPress={handleRuntimeLimitTakeover}
-                            variant="primary"
-                            size="sm"
-                            radius="full"
-                            isDisabled={runtimeLimitActionBusy}
-                            data-testid="browser-runtime-limit-takeover"
-                          >
-                            {runtimeLimitActionBusy
-                              ? "Opening here..."
-                              : "Stop and open here"}
-                          </Button>
-                        ) : null}
-                        <Button
-                          onPress={retryConnection}
-                          variant="secondary"
-                          size="sm"
-                          radius="full"
-                          isDisabled={runtimeLimitActionBusy}
-                          data-testid="browser-runtime-limit-retry"
-                        >
-                          Try again
-                        </Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-3" data-testid="browser-session-error-notice" data-view-state={viewState.kind}>
-                      <BrowserUnavailableNotice sentence={viewState.sentence ?? ""} reason={error} />
-                      {viewState.action ? (
-                        <div className="flex items-center">
-                          <Button
-                            onPress={retryConnection}
-                            variant="secondary"
-                            size="sm"
-                            radius="full"
-                            data-testid="browser-session-error-retry"
-                          >
-                            {viewState.action}
-                          </Button>
-                        </div>
-                      ) : null}
-                    </div>
-                  )
-                ) : (
-                  <div
-                    className="flex items-center gap-3"
-                    data-testid="browser-session-loading-notice"
-                    data-view-state={viewState.kind}
-                    role="status"
-                  >
-                    <Spinner aria-hidden="true" tone="slate" size="sm" />
-                    <Text as="p" variant="body" tone="primary" className="min-w-0 leading-snug"
-                      data-testid="browser-session-view-sentence">
-                      {viewState.sentence}
-                    </Text>
-                  </div>
-                )}
-              </div>
-            </div>
+            <BrowserSessionRecovery viewState={viewState} reason={error}
+              runtimeLimit={recoveryRuntimeLimit} onRetry={retryConnection} />
           ) : null}
           {!shouldCollapseDocked && sharedBrowserApprovalRequest ? (
             <SharedBrowserApprovalPrompt
