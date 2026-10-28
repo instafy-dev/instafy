@@ -541,7 +541,7 @@ export function useChatSubmitFlow({
             runtimeId: submitRuntimeOverride.runtimeId,
             // A follow-up in this chat keeps the person's OK for the sites
             // of the cards they pressed earlier in it.
-            cardSites: pressedBrowserCardSites(activeConversationMessages),
+            cardSites: pressedBrowserCardSites(activeConversationMessages, currentUserId),
           })
       : resolvedBaseSubmitMetadata;
     const queuedSubmitMetadata = {

@@ -4677,8 +4677,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // each one in the chat's later browser turns.
   const activeConversationMessageList = activeConversation?.messages;
   const pressedCardSites = useMemo(
-    () => pressedBrowserCardSites(Array.isArray(activeConversationMessageList) ? activeConversationMessageList : []),
-    [activeConversationMessageList],
+    () => pressedBrowserCardSites(
+      Array.isArray(activeConversationMessageList) ? activeConversationMessageList : [],
+      currentUserId,
+    ),
+    [activeConversationMessageList, currentUserId],
   );
   const browserHandoff = useChatBrowserHandoff({
     userId: currentUserId,

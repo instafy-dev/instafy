@@ -206,11 +206,19 @@ function isAutoStartedContinuation(message: Pick<ChatMessage, "metadata">): bool
 /**
  * The sites of the cards the person pressed in a chat, oldest first: each
  * continuation they sent by pressing a card, read back from its own prompt.
+ * Only the person's own presses count: in a shared chat, a teammate's press
+ * is that teammate's OK, never this person's.
  */
-export function pressedBrowserCardSites(messages: readonly ChatMessage[]): string[] {
+export function pressedBrowserCardSites(
+  messages: readonly ChatMessage[],
+  currentUserId: string | null | undefined,
+): string[] {
+  const person = currentUserId?.trim() ?? "";
+  if (!person) return [];
   const sites: string[] = [];
   for (const message of messages) {
-    if (!readBrowserRequestOf(message) || isUnsentBrowserRequestNotice(message) || isAutoStartedContinuation(message)) {
+    if (message.authorId?.trim() !== person || !readBrowserRequestOf(message) ||
+        isUnsentBrowserRequestNotice(message) || isAutoStartedContinuation(message)) {
       continue;
     }
     const request = browserRequestFromContinuationPrompt(message);
