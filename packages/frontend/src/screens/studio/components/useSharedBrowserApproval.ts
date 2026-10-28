@@ -14,11 +14,15 @@ const APPROVAL_PENDING_POLL_INTERVAL_MS = 400;
 export const APPROVAL_QUIET_POLL_INTERVAL_MS = 15_000;
 export const APPROVAL_QUIET_IDLE_POLL_INTERVAL_MS = 30_000;
 /**
- * The fewest milliseconds between two reads of the same prompt lane (machine,
- * page, grant), also when the lane stops and starts again: inputs that flip
- * quickly cannot turn it into a read per flip. A new lane reads at once.
+ * The fewest milliseconds between two reads of a prompt lane, also when it
+ * stops and starts again or comes back to a page or grant it read recently:
+ * inputs that flip quickly, or a page that changes back and forth, cannot
+ * turn it into a read per flip. A page or grant it has not read yet reads at
+ * once.
  */
 export const APPROVAL_MIN_READ_GAP_MS = APPROVAL_PENDING_POLL_INTERVAL_MS;
+/** How many lanes count as read recently for {@link APPROVAL_MIN_READ_GAP_MS}. */
+const APPROVAL_RECENT_LANES = 8;
 /** Reads that fail in a row wait twice as long each time, up to this. */
 export const APPROVAL_FAILURE_MAX_POLL_INTERVAL_MS = 10_000;
 /**
@@ -75,8 +79,9 @@ export function useSharedBrowserApproval({
   pendingRef.current = pending;
   const runActiveRef = useRef(runActive);
   const kickPollRef = useRef<(() => void) | null>(null);
-  // The lane the last read was for and when it started, kept across restarts.
-  const lastReadRef = useRef<{ lane: string; atMs: number }>({ lane: "", atMs: 0 });
+  // When the last read started, and the lanes (machine, page, grant) read
+  // recently, newest last; kept across restarts.
+  const lastReadRef = useRef<{ atMs: number; lanes: string[] }>({ atMs: 0, lanes: [] });
 
   const identity = JSON.stringify([projectId, browserSessionId, runtimeId, browserPageId]);
   // A decision belongs to one mounted, authenticated browser surface. The token
@@ -115,7 +120,7 @@ export function useSharedBrowserApproval({
 
     const lane = JSON.stringify([scope.identity, scope.originEndpoint, scope.originAccessToken]);
     const gapLeft = () =>
-      lastReadRef.current.lane === lane ? lastReadRef.current.atMs + APPROVAL_MIN_READ_GAP_MS - Date.now() : 0;
+      lastReadRef.current.lanes.includes(lane) ? lastReadRef.current.atMs + APPROVAL_MIN_READ_GAP_MS - Date.now() : 0;
     let cancelled = false;
     let timerId: number | null = null;
     let pollAbort: AbortController | null = null;
@@ -155,7 +160,10 @@ export function useSharedBrowserApproval({
         return;
       }
       inFlight = true;
-      lastReadRef.current = { lane, atMs: Date.now() };
+      lastReadRef.current = {
+        atMs: Date.now(),
+        lanes: [...lastReadRef.current.lanes.filter((read) => read !== lane), lane].slice(-APPROVAL_RECENT_LANES),
+      };
       pollAbort = new AbortController();
       try {
         const next = await controllerClient.browserSessions.fetchPendingApproval({
@@ -206,7 +214,7 @@ export function useSharedBrowserApproval({
     };
     kickPollRef.current = kick;
     const unsubscribe = subscribePollingGate(schedule);
-    // The first read goes at once, unless this lane read a moment ago.
+    // The first read goes at once, unless the lane read a moment ago.
     void poll();
 
     return () => {

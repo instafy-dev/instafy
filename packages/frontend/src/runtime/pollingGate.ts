@@ -250,9 +250,10 @@ export function quietPollDelay(delayMs: number, quietReads: number, quietMaxMs: 
 /**
  * How soon {@link useAdaptivePoll} may read "at once" again (at most its
  * `fastMs`): after it is enabled again with the same callback, or after a
- * second change of `fast`. Inputs that flip quickly then cost at most one
- * read a second instead of one read per flip; a new callback (a new scope)
- * and a first change of `fast` still read at once.
+ * change of `fast` that follows a read for an earlier change. Inputs that
+ * flip quickly then cost about one read a second instead of one read per
+ * flip, and the read they owe is never put off by the next flip; a new
+ * callback (a new scope) and a first change of `fast` still read at once.
  */
 export const ADAPTIVE_POLL_MIN_GAP_MS = 1_000;
 
@@ -267,24 +268,30 @@ export const ADAPTIVE_POLL_MIN_GAP_MS = 1_000;
  * not part of any scope, so a change never resets the caller's state. With
  * `quietMaxMs`, reads that find nothing new stretch the delay (see
  * {@link quietPollDelay}); a change of `fast` starts from the plain cadence.
- * Being enabled again with the same callback, or a second change of `fast`,
- * reads no sooner than {@link ADAPTIVE_POLL_MIN_GAP_MS} after the read or the
- * change before it.
+ * Being enabled again with the same callback reads no sooner than
+ * {@link ADAPTIVE_POLL_MIN_GAP_MS} after its last read, and a change of `fast`
+ * no sooner than that after the read for the change before it: the read is
+ * owed until then, and later changes neither add reads nor put it off.
  */
 export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs, slowMs, slowIdleMs = slowMs, quietMaxMs }: AdaptivePollOptions): void {
   const fastRef = useRef(fast);
   const kickRef = useRef<(() => void) | null>(null);
-  // The last read's callback and start, kept across restarts; and when a
-  // change of `fast` last read at once.
+  // The last read's callback and start, kept across restarts; and when the
+  // last read for a change of `fast` started.
   const lastStartRef = useRef<{ callback: unknown; atMs: number }>({ callback: null, atMs: 0 });
-  const lastKickAtRef = useRef(0);
+  const lastChangeReadAtRef = useRef(Number.NEGATIVE_INFINITY);
   useEffect(() => {
     if (typeof window === "undefined" || !enabled) return;
     let timer: number | null = null;
     let cancelled = false;
-    let lastRunAt = 0;
+    // Enabled again with the same callback: its last read still counts.
+    const restarted = lastStartRef.current.callback === callback;
+    let lastRunAt = restarted ? lastStartRef.current.atMs : 0;
     let quietReads = 0;
     let run = 0;
+    // A read owed by a restart or a change of `fast` within the gap: due no
+    // later than this, whatever the cadence says.
+    let owedAt: number | null = null;
     const minGapMs = Math.min(ADAPTIVE_POLL_MIN_GAP_MS, fastMs);
     const clear = () => { if (timer !== null) window.clearTimeout(timer); timer = null; };
     const schedule = () => {
@@ -292,16 +299,10 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
       if (cancelled) return;
       const delay = adaptivePollDelay(fastRef.current, fastMs, slowMs, slowIdleMs);
       if (delay === null) return;
-      const wait = lastRunAt + quietPollDelay(delay, quietReads, quietMaxMs) - Date.now();
+      const dueAt = lastRunAt + quietPollDelay(delay, quietReads, quietMaxMs);
+      const wait = (owedAt === null ? dueAt : Math.min(dueAt, owedAt)) - Date.now();
       if (wait <= 0) tick();
       else timer = window.setTimeout(tick, wait);
-    };
-    // At once, or `sinceMs` + the minimum gap when that is later.
-    const readSoon = (sinceMs: number) => {
-      const wait = sinceMs + minGapMs - Date.now();
-      if (wait <= 0) { tick(); return; }
-      clear();
-      timer = window.setTimeout(tick, wait);
     };
     // Only the latest read moves the backoff; a stale answer changes nothing.
     const settle = (thisRun: number, foundSomething: boolean) => {
@@ -314,6 +315,9 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
     const tick = () => {
       clear();
       lastRunAt = Date.now();
+      // Any read answers an owed one.
+      if (owedAt !== null) lastChangeReadAtRef.current = lastRunAt;
+      owedAt = null;
       lastStartRef.current = { callback, atMs: lastRunAt };
       run += 1;
       const thisRun = run;
@@ -330,14 +334,27 @@ export function useAdaptivePoll(callback: () => unknown, { enabled, fast, fastMs
       quietReads = 0;
       // Hidden: owe the read to the return instead of reading now.
       if (pollingGateState() === "hidden") { lastRunAt = 0; return; }
-      // A first change reads now; one that follows it soon waits the gap.
-      const previousKickAtMs = lastKickAtRef.current;
-      lastKickAtRef.current = Date.now();
-      readSoon(previousKickAtMs);
+      // A first change reads now; one soon after a change's read owes a read
+      // at the gap, and changes before then ride on it.
+      const dueAt = lastChangeReadAtRef.current + minGapMs;
+      if (dueAt <= Date.now()) {
+        lastChangeReadAtRef.current = Date.now();
+        tick();
+        return;
+      }
+      if (owedAt !== null) return;
+      owedAt = dueAt;
+      schedule();
     };
     const unsubscribe = subscribePollingGate(schedule);
-    // Enabled again with the same callback right after a read: wait the gap.
-    readSoon(lastStartRef.current.callback === callback ? lastStartRef.current.atMs : 0);
+    // Enabled again with the same callback right after a read: owe the read
+    // at the gap; otherwise read at once.
+    if (restarted && lastRunAt + minGapMs > Date.now()) {
+      owedAt = lastRunAt + minGapMs;
+      schedule();
+    } else {
+      tick();
+    }
     return () => { cancelled = true; clear(); unsubscribe(); kickRef.current = null; };
   }, [callback, enabled, fastMs, quietMaxMs, slowIdleMs, slowMs]);
   useEffect(() => {

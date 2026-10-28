@@ -889,11 +889,14 @@ thinking between actions), and the next action found brings back the 1 s tail.
 It reads the pending prompt 1.5 s after each answer (every 400 ms while a
 prompt is shown). Reads that fail in a row wait twice as long each time, up to
 10 s, and the prompt says "Approval connection interrupted. Reconnecting…"
-only once reads have kept failing for 2 s. Two reads for the same machine,
-page and grant are never closer than 400 ms, also when the poll stops and
-starts again; the tab list and action log polls likewise read "at once" at
-most once a second while they are switched off and on, or while their pace
-keeps changing. With neither, it reads the action log every
+only once reads have kept failing for 2 s. Two reads are never closer than
+400 ms when the poll stops and starts again, or comes back to a machine, page
+or grant it read recently (one it has not read yet reads at once), so a page
+that changes back and forth costs no read per change. The tab list and action
+log polls likewise read "at once" at most once a second while they are
+switched off and on, or while their pace keeps changing: a change soon after
+the read for the change before it owes one read a second after that read, and
+later changes neither add reads nor put it off. With neither, it reads the action log every
 10 s and the prompt every 15 s, 30 s each once nobody has touched the tab for
 three minutes. A run starting, or the agent taking control, reads both at once;
 a run ending takes one more read of the action log, so a human-input request

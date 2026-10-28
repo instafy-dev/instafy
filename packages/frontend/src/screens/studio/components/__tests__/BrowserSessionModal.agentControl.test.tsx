@@ -213,6 +213,24 @@ describe("Shared Browser while Octo holds an RFB-only browser", () => {
     expect(seen).toEqual(["take-over"]);
   });
 
+  it("stays on Take over while the roster socket keeps dropping and coming back", async () => {
+    await octoTakesControl();
+    await advance(500);
+    const readsBefore = mocks.fetchPendingApproval.mock.calls.length;
+    const seen: string[] = [];
+    // The origin drops the roster socket right after each welcome, for six
+    // seconds: every reconnect comes back within a second.
+    for (let elapsed = 0; elapsed < 6_000; elapsed += 50) {
+      for (const socket of server.sockets) if (socket.readyState === FakeSocket.OPEN) socket.close();
+      await advance(50);
+      const now = reconnecting() ? "reconnecting" : recovery() ? "recovery" : takeOver() ? "take-over" : "other";
+      if (seen.at(-1) !== now) seen.push(now);
+    }
+    expect(seen).toEqual(["take-over"]);
+    // A run is active: one approval read every 1.5 s, whatever the socket does.
+    expect(mocks.fetchPendingApproval.mock.calls.length - readsBefore).toBeLessThanOrEqual(5);
+  });
+
   it("keeps its roster while it shows a notice that empties Studio's tab list", async () => {
     await act(async () => root.render(<Host agentHolds={false} />));
     await advance(1_000);

@@ -280,6 +280,36 @@ describe("useSharedBrowserApproval", () => {
     expect(fetchPendingApprovalMock.mock.calls.length).toBe(reads + 1);
   });
 
+  it("reads at most once per gap while its page keeps changing between two tabs", async () => {
+    fetchPendingApprovalMock.mockResolvedValue(null);
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(1);
+    // The active tab under the lane changes back and forth every 10 ms for a
+    // second: each change is a new page, but not a read per change.
+    for (let flip = 0; flip < 100; flip += 1) {
+      await act(async () => {
+        root.render(<Harness browserPageId={flip % 2 === 0 ? "page-2" : "page-1"} />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+    }
+    expect(fetchPendingApprovalMock.mock.calls.length).toBeLessThanOrEqual(1 + Math.ceil(1_000 / 400));
+    // The page that stays is read within the gap.
+    const reads = fetchPendingApprovalMock.mock.calls.length;
+    await act(async () => {
+      root.render(<Harness browserPageId="page-2" />);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(fetchPendingApprovalMock.mock.calls.length).toBe(reads + 1);
+    expect(fetchPendingApprovalMock.mock.calls.at(-1)?.[0]).toMatchObject({ browserPageId: "page-2" });
+  });
+
   it("retains the exact request when a decision write fails and permits a safe retry", async () => {
     fetchPendingApprovalMock.mockResolvedValue(pending);
     decideApprovalMock

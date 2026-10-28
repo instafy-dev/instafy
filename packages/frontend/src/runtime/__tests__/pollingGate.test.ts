@@ -4,7 +4,6 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  ADAPTIVE_POLL_MIN_GAP_MS,
   installPollingGate,
   isPollingActive,
   POLLING_IDLE_AFTER_MS,
@@ -322,7 +321,7 @@ describe("polling gate", () => {
         expect(callback).toHaveBeenCalledTimes(1);
         // Oct 28: the tab list was switched off and on ten times a second.
         for (let flip = 0; flip < 100; flip += 1) await render({ enabled: flip % 2 === 1, fast: true });
-        expect(callback.mock.calls.length).toBeLessThanOrEqual(1 + 1 + Math.ceil(1_000 / ADAPTIVE_POLL_MIN_GAP_MS));
+        expect(callback.mock.calls.length).toBeLessThanOrEqual(3);
       });
     });
 
@@ -334,7 +333,28 @@ describe("polling gate", () => {
         await render({ enabled: true, fast: false });
         expect(callback).toHaveBeenCalledTimes(1);
         for (let flip = 0; flip < 100; flip += 1) await render({ enabled: true, fast: flip % 2 === 0 });
-        expect(callback.mock.calls.length).toBeLessThanOrEqual(1 + 1 + Math.ceil(1_000 / ADAPTIVE_POLL_MIN_GAP_MS));
+        expect(callback.mock.calls.length).toBeLessThanOrEqual(3);
+      });
+    });
+
+    it("keeps reading about once a second while fast keeps changing, instead of waiting for it to settle", async () => {
+      await withPoll(async (render, callback) => {
+        await render({ enabled: true, fast: false });
+        await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+        const readAt: number[] = [];
+        callback.mockClear();
+        callback.mockImplementation(async () => { readAt.push(Date.now()); return true; });
+        // `fast` changes every 300 ms for six seconds: each change may not
+        // read at once, but the reads it owes still happen, once a second.
+        for (let flip = 0; flip < 20; flip += 1) {
+          await render({ enabled: true, fast: flip % 2 === 0 });
+          await act(async () => { await vi.advanceTimersByTimeAsync(290); });
+        }
+        expect(readAt.length).toBeGreaterThanOrEqual(5);
+        expect(readAt.length).toBeLessThanOrEqual(7);
+        for (let index = 1; index < readAt.length; index += 1) {
+          expect(readAt[index]! - readAt[index - 1]!).toBeGreaterThanOrEqual(1_000);
+        }
       });
     });
   });
