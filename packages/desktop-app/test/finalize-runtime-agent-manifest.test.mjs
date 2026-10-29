@@ -167,3 +167,68 @@ test("records the packaged skill packs and refuses a package whose packs differ 
   staged(undefined);
   assert.throws(() => finalizeRuntimeAgentManifest(context), /Invalid staged runtime-agent manifest/);
 });
+
+test("restores the pack files electron-builder leaves out, and nothing else", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-finalize-dropped-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const context = {
+    appOutDir: path.join(root, "out"),
+    electronPlatformName: "darwin",
+    packager: { appInfo: { productFilename: "Instafy Studio" } },
+  };
+  const directory = path.join(context.appOutDir, "Instafy Studio.app", "Contents", "Resources", "runtime-agent");
+  const stagedRoot = path.join(root, "staged", "skill-packs");
+  const tree = createHash("sha256")
+    .update("SKILL.md").update("\0").update("# map\n").update("\0")
+    .update("starter/data/.gitkeep").update("\0").update("").update("\0")
+    .digest("hex");
+  const manifest = JSON.stringify({ schema: 1, name: "map", version: "0.1.0", tree_sha256: tree });
+  // Staged: the pack as installed and checked against its pin.
+  fs.mkdirSync(path.join(stagedRoot, "map", "starter", "data"), { recursive: true });
+  fs.writeFileSync(path.join(stagedRoot, "map", "SKILL.md"), "# map\n");
+  fs.writeFileSync(path.join(stagedRoot, "map", "starter", "data", ".gitkeep"), "");
+  fs.writeFileSync(path.join(stagedRoot, "map", ".instafy-pack.json"), manifest);
+  // Packaged: electron-builder copied everything but the .gitkeep (and so its empty directory).
+  const pack = path.join(directory, "skill-packs", "map");
+  fs.mkdirSync(pack, { recursive: true });
+  fs.writeFileSync(path.join(pack, "SKILL.md"), "# map\n");
+  fs.writeFileSync(path.join(pack, ".instafy-pack.json"), manifest);
+  fs.writeFileSync(path.join(directory, "runtime-agent"), "bytes", { mode: 0o755 });
+  fs.writeFileSync(path.join(directory, "codex-code-mode-host"), "host", { mode: 0o755 });
+  const staged = () =>
+    fs.writeFileSync(
+      path.join(directory, "runtime-agent-manifest.json"),
+      JSON.stringify({
+        schemaVersion: 3,
+        filename: "runtime-agent",
+        platform: "darwin",
+        arch: "arm64",
+        sizeBytes: 1,
+        sha256: "0".repeat(64),
+        codeModeHost: { filename: "codex-code-mode-host", sizeBytes: 1, sha256: "0".repeat(64) },
+        skillPacks: [{ name: "map", version: "0.1.0", tree_sha256: tree }],
+        sourceSha: "d".repeat(40),
+      }),
+    );
+
+  staged();
+  assert.deepEqual(finalizeRuntimeAgentManifest(context, { stagedSkillPacksRoot: stagedRoot }).manifest.skillPacks, [
+    { name: "map", version: "0.1.0", tree_sha256: tree },
+  ]);
+  assert.equal(fs.readFileSync(path.join(pack, "starter", "data", ".gitkeep"), "utf8"), "");
+
+  // A file that is present but different is not overwritten, so the pack still fails its manifest.
+  fs.writeFileSync(path.join(pack, "SKILL.md"), "# changed\n");
+  staged();
+  assert.throws(
+    () => finalizeRuntimeAgentManifest(context, { stagedSkillPacksRoot: stagedRoot }),
+    /does not match its manifest/,
+  );
+  // A pack missing as a whole is not restored from the staged copy.
+  fs.rmSync(path.join(directory, "skill-packs"), { recursive: true });
+  staged();
+  assert.throws(
+    () => finalizeRuntimeAgentManifest(context, { stagedSkillPacksRoot: stagedRoot }),
+    /differ from the staged/,
+  );
+});
