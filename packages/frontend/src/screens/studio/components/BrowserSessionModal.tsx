@@ -847,8 +847,6 @@ export function BrowserSessionModal({
   const [hostAttach, setHostAttach] = useState<{ scope: string; runtimeId: string } | null>(null);
   const attachMode = hostAttach?.scope === selectionScope;
   const sessionControlsVisible = isOpen && transportActive;
-  const sessionControlsVisibleRef = useRef(sessionControlsVisible);
-  sessionControlsVisibleRef.current = sessionControlsVisible;
   useLayoutEffect(() => {
     // The browser stays mounted while Chat or another resource is selected.
     // Its portalled menu must not outlive the visible toolbar that anchors it.
@@ -1643,7 +1641,6 @@ export function BrowserSessionModal({
       const statusEntries = Array.isArray(statusSnapshot?.runtimes) ? statusSnapshot.runtimes : [];
       if (!statusSnapshot) {
         fail("failed", "Could not discover Shared sessions. Refresh sessions to retry.");
-        setSessionChooserOpen(sessionControlsVisibleRef.current);
         setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: "Session discovery is unavailable; no new browser was started." });
         return;
       }
@@ -1741,8 +1738,9 @@ export function BrowserSessionModal({
           } else {
             fail("notice", message);
           }
+          // The choice waits behind Browser options (⋯): opening the
+          // browser never opens that menu by itself.
           setSessionChoices({ scope: selectionScope, candidates, loading: false, error: message });
-          setSessionChooserOpen(sessionControlsVisibleRef.current);
           return;
         }
         if (selection.kind === "selected") {

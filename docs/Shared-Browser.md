@@ -64,8 +64,11 @@ Open it while signed in on another device to request that exact live Shared
 session. The new device is a separate participant and must acquire input control
 through the existing collaboration controls.
 
+A press on a card opens the conversation's own machine by name, as Studio
+opening a card by itself does, so a press never asks which machine.
 Without an exact resume target, one eligible live Shared session is reused;
-multiple sessions require an explicit choice. A missing target and failed
+multiple sessions require an explicit choice, made in **Browser options**,
+which only the three-dot button opens. A missing target and failed
 discovery never silently allocate or select a different browser. Reconnects stay
 pinned to the resolved session, and **Start new session** is an explicit
 Builder-or-higher action. Choosing or starting another session updates an incoming
@@ -1693,7 +1696,9 @@ unless the policy is `"covered"`.
   for that attempt and acts once it ends off or failed.
 - **Hands-free.** One rule the person can predict: on a space whose browser
   runs on its own machine, Octo's `request_browser` card opens by itself,
-  whether that browser runs yet or not. Studio opens Instafy's browser by
+  whether that browser runs yet or not. A conversation that names no machine
+  (a new space's first one) runs on the space's machine: the one live host,
+  when the space has exactly one. Studio opens Instafy's browser by
   itself on the conversation's own machine when that machine is up (a status
   that takes work, whatever its last heartbeat said), has an origin and
   reports `sharedBrowserHost`, and the response says

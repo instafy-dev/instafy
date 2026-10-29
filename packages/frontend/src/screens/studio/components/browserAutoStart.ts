@@ -139,13 +139,18 @@ function isLiveBrowserHostMachine(entry: ControllerRuntimeStatusEntry): boolean 
 /**
  * The conversation's own machine when the space is covered and that machine
  * is a live machine with an origin that starts Instafy's browser on demand;
- * null otherwise.
+ * null otherwise. A conversation that names no machine runs on the space's
+ * machine, so it is the one live such machine when the space has exactly one.
  */
 export function conversationBrowserHostId(
   input: Pick<BrowserAutoStartPlanInput, "sharedBrowserHostPolicy" | "conversationRuntimeId" | "runtimes">,
 ): string | null {
+  if (input.sharedBrowserHostPolicy !== "covered" || !input.runtimes) return null;
   const runtimeId = input.conversationRuntimeId?.trim() ?? "";
-  if (input.sharedBrowserHostPolicy !== "covered" || !runtimeId || !input.runtimes) return null;
+  if (!runtimeId) {
+    const hosts = input.runtimes.filter(isLiveBrowserHostMachine);
+    return hosts.length === 1 ? hosts[0]!.runtimeId : null;
+  }
   const machine = input.runtimes.find((entry) => entry.runtimeId === runtimeId);
   return machine && isLiveBrowserHostMachine(machine) ? machine.runtimeId : null;
 }

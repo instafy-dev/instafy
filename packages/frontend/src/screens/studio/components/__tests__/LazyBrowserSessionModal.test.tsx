@@ -82,7 +82,7 @@ describe("lazy shared browser code", () => {
     </>));
 
     expect(load).toHaveBeenCalledOnce();
-    expect(container.querySelector('[role="status"]')?.textContent).toContain("Loading shared browser");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Opening Instafy's browser…");
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
     for (const label of ["Current chat", "Browser tabs", "Back to chat", "Close"]) {
       await act(async () => button(container, label).click());
@@ -102,7 +102,7 @@ describe("lazy shared browser code", () => {
     const dialog = document.body.querySelector('[role="dialog"][aria-label="Shared browser"]');
     expect(dialog).not.toBeNull();
     expect(container.querySelector('[data-testid="browser-session-code-loading"]')).toBeNull();
-    expect(dialog?.querySelector('[role="status"]')?.textContent).toContain("Loading shared browser");
+    expect(dialog?.querySelector('[role="status"]')?.textContent).toContain("Opening Instafy's browser…");
     await act(async () => button(dialog!, "Close").click());
     expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
   });
@@ -129,7 +129,7 @@ describe("lazy shared browser code", () => {
     expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
     await act(async () => button(container, "Retry").click());
     expect(load).toHaveBeenCalledTimes(2);
-    expect(container.querySelector('[role="status"]')?.textContent).toContain("Loading shared browser");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Opening Instafy's browser…");
     await act(async () => recovered.resolve({
       BrowserSessionModal: ({ projectId }) => <div data-testid="ready-browser">{projectId}</div>,
     }));

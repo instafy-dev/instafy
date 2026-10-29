@@ -10,6 +10,7 @@ import {
   browserAutoStartPlan,
   browserAutoStartedRecently,
   claimBrowserAutoStart,
+  conversationBrowserHostId,
   forgetBrowserAutoStartsForTests,
   hostsNamedIn,
   isBrowserAutoStartDeclined,
@@ -35,6 +36,7 @@ const browserSession = runtime({
 });
 
 const MACHINE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const SECOND_MACHINE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const NOW_MS = Date.parse("2026-10-20T12:00:00Z");
 function lazyHost(overrides: Partial<ControllerRuntimeStatusEntry> = {}): ControllerRuntimeStatusEntry {
   return runtime({
@@ -257,6 +259,22 @@ describe("browserAutoStartPlan for Instafy's browser on the conversation's own m
 
   it("never opens Instafy's browser for the browser on this device (row 1)", () => {
     expect(hostPlan({ transport: "personal", personalAvailable: true, personalOwnAi: true })).toEqual({ kind: "personal" });
+  });
+
+  // A new space's first conversation names no machine until a press picks
+  // one: it runs on the space's machine, and its card opens that machine's
+  // browser by itself instead of waiting for a press.
+  it("opens the space's one machine for a conversation that names none", () => {
+    expect(hostPlan({ conversationRuntimeId: null })).toEqual({ kind: "attach", runtimeId: MACHINE_ID });
+    expect(conversationBrowserHostId({ sharedBrowserHostPolicy: "covered", conversationRuntimeId: null, runtimes: [lazyHost()] }))
+      .toBe(MACHINE_ID);
+    // Two such machines leave it to a press; so do a stopped one and a space that is not covered.
+    expect(hostPlan({ conversationRuntimeId: null, runtimes: [lazyHost(), lazyHost({ runtimeId: SECOND_MACHINE_ID })] }))
+      .not.toMatchObject({ kind: "attach" });
+    expect(hostPlan({ conversationRuntimeId: null, runtimes: [lazyHost({ status: "stopped" })] })).not.toMatchObject({ kind: "attach" });
+    expect(hostPlan({ conversationRuntimeId: null, sharedBrowserHostPolicy: null })).not.toMatchObject({ kind: "attach" });
+    // A conversation that names another machine never opens this one.
+    expect(hostPlan({ conversationRuntimeId: SECOND_MACHINE_ID })).not.toMatchObject({ kind: "attach" });
   });
 });
 
