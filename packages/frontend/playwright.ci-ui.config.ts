@@ -43,6 +43,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "suggestion-browser-menus.spec.ts",
   "queue-composer.spec.ts",
   "login-keyboard.spec.ts",
+  "cli-login-layout.spec.ts",
   "search-keyboard.spec.ts",
   "mobile-sidebar-keyboard.spec.ts",
   "mobile-editor-dialogs.spec.ts",

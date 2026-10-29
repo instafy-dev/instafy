@@ -40,6 +40,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "suggestion-browser-menus.spec.ts",
       "queue-composer.spec.ts",
       "login-keyboard.spec.ts",
+      "cli-login-layout.spec.ts",
       "search-keyboard.spec.ts",
       "mobile-sidebar-safe-area.spec.ts",
       "mobile-sidebar-keyboard.spec.ts",
