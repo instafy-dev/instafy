@@ -427,9 +427,9 @@ of the history its lane has not sent in that time: all of it, the first time a c
 or after a pause, and only what other lanes added since, when the lane ran a few minutes before.
 The requests after it are cached. A one-command turn ("open the map"), the chat's first in its
 lane, sent its 75k-token history uncached once and cached once, and cost 9 credits; with the start
-cached it would cost about 2. A building turn three minutes after the chat's last building turn
-was 98% cached, although a browser turn came between, and a browser follow-up after a browser
-turn was 97% cached. A chat that moves between building, asking and browsing pays the whole
+cached it would cost about 2. A building turn a few minutes after the chat's last turn in the
+same lane was 98% cached, although a browser turn came between, and a browser follow-up after a
+browser turn was 97% cached. A chat that moves between building, asking and browsing pays the whole
 history again at the first turn of each lane, and more the longer the chat. Making the start the
 same for every lane of a thread (the same base instructions, tools and output format, with each
 lane's rules later in the request), or giving each lane its own thread, would remove it; both
