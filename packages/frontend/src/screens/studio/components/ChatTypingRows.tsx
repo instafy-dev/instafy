@@ -165,7 +165,10 @@ export function ChatTypingRows({
       label: typingStatusLabel,
       ariaLabel: typingStatusAriaLabel,
       expanded: isThinkingLabelExpanded,
-      clickable: Boolean(typingIndicatorState?.label && !hasMultipleTypingAgents),
+      // Only the run's own words (a run held for an approval) can run long enough to expand.
+      clickable: Boolean(
+        typingIndicatorState?.label && !hasMultipleTypingAgents && typingStatusLabel === typingIndicatorState.label,
+      ),
       wraps: typingStatusWraps,
       indicator:
         !hasMultipleTypingAgents && typingIndicatorState?.phase === "compacting" ? (

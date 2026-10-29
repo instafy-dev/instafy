@@ -257,6 +257,8 @@ describe("new arrivals above the composer", () => {
     metrics.scrollTop = 800;
     await act(async () => {
       options.scrollContainerRef.current!.appendChild(document.createElement("div"));
+      // Looked at once per frame.
+      await new Promise((resolve) => window.requestAnimationFrame(() => resolve(null)));
     });
     expect(action()).toBeNull();
   });

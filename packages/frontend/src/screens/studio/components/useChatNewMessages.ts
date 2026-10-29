@@ -102,12 +102,22 @@ export function useChatNewMessages(options: NewMessagesOptions) {
     const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => settle());
     resize?.observe(node);
     for (const child of Array.from(node.children)) resize?.observe(child);
-    const grown = typeof MutationObserver === "undefined" ? null : new MutationObserver(() => settle());
+    // A streaming reply changes the transcript many times a second: one look per frame.
+    let frame: number | null = null;
+    const settleOnce = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        settle();
+      });
+    };
+    const grown = typeof MutationObserver === "undefined" ? null : new MutationObserver(settleOnce);
     grown?.observe(node, { childList: true, subtree: true, characterData: true });
     return () => {
       node.removeEventListener("scroll", settle);
       resize?.disconnect();
       grown?.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
     };
   }, [enabled, pending, scope, scrollContainerRef, settle]);
   // The chat restores its place after it shows again (a frame or two later,
