@@ -48,7 +48,7 @@ const CANCEL_COVERED_DEFAULT_OCTO_JOB_SQL: &str = "update agent_jobs
        and parent_job_id is null
        and plan_group_id is null
        and lower(coalesce(payload #>> '{metadata,agent,handle}', '')) = 'octo'
-     returning id, run_id";
+     returning id, run_id, payload";
 
 const LOCK_DEFAULT_OCTO_JOB_FOR_AWAIT_REVALIDATION_SQL: &str = "select status
      from agent_jobs
@@ -697,14 +697,23 @@ pub(crate) fn apply_arithmetic_coverage(
     resolution
 }
 
+/// A covered default Octo job [`cancel_covered_default_octo_job`] canceled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CanceledCoveredOctoJob {
+    /// The org whose credits the cancel changed: a turn Instafy started by
+    /// itself ends here without Octo's reply, so its reserve went back
+    /// (crate::system_turns). Announce `credits.updated` once committed.
+    pub(crate) refunded_org_id: Option<Uuid>,
+}
+
 pub(crate) async fn cancel_covered_default_octo_job(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     conversation_id: &Uuid,
     coverage: ArithmeticCoverage,
-) -> Result<bool, (StatusCode, Json<ApiError>)> {
+) -> Result<Option<CanceledCoveredOctoJob>, (StatusCode, Json<ApiError>)> {
     if coverage.action != ArithmeticCoverageAction::CancelActiveOcto {
-        return Ok(false);
+        return Ok(None);
     }
 
     let locked_job = transaction
@@ -722,7 +731,7 @@ pub(crate) async fn cancel_covered_default_octo_job(
             internal_error(format!("failed to lock covered default Octo job: {error}"))
         })?;
     if locked_job.is_none() {
-        return Ok(false);
+        return Ok(None);
     }
 
     // `/agent/message` locks this same job row before persisting a streamed
@@ -731,7 +740,7 @@ pub(crate) async fn cancel_covered_default_octo_job(
     if verified_octo_answer_covers_question(transaction, project_id, conversation_id, coverage)
         .await?
     {
-        return Ok(false);
+        return Ok(None);
     }
 
     let reason: Option<&str> = Some(HUMAN_ANSWER_CANCELLATION_REASON);
@@ -752,9 +761,9 @@ pub(crate) async fn cancel_covered_default_octo_job(
                 "failed to cancel covered default Octo job: {error}"
             ))
         })?;
-    if canceled.is_none() {
-        return Ok(false);
-    }
+    let Some(canceled) = canceled else {
+        return Ok(None);
+    };
 
     let updated_run_count = transaction
         .execute(
@@ -791,7 +800,21 @@ pub(crate) async fn cancel_covered_default_octo_job(
         HUMAN_ANSWER_CANCELLATION_REASON,
     )
     .await?;
-    Ok(true)
+    // A turn Instafy started by itself that a human answer covers ends
+    // without Octo's reply, so it costs nothing (crate::system_turns).
+    let refunded_org_id = crate::system_turns::give_back_reserve_without_reply(
+        transaction,
+        project_id,
+        &coverage.job_id,
+        Some(coverage.run_id),
+        None,
+        None,
+        &canceled
+            .get::<_, tokio_postgres::types::Json<JsonValue>>("payload")
+            .0,
+    )
+    .await?;
+    Ok(Some(CanceledCoveredOctoJob { refunded_org_id }))
 }
 
 /// Marker decision stamped on controller-authenticated evaluation turns: the

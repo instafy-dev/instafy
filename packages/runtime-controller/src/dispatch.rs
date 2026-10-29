@@ -1475,20 +1475,23 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 coverage => coverage,
             };
             let mut canceled_arithmetic_coverage = None;
+            let mut covered_refund_org_id = None;
             let mut canceled_job_input_state_updates = Vec::new();
             let mut participation = match arithmetic_coverage {
                 Some(coverage)
                     if coverage.action
                         == crate::group_participation::ArithmeticCoverageAction::CancelActiveOcto =>
                 {
-                    if crate::group_participation::cancel_covered_default_octo_job(
-                        &transaction,
-                        &project.id,
-                        &conversation.id,
-                        coverage,
-                    )
-                    .await?
+                    if let Some(canceled) =
+                        crate::group_participation::cancel_covered_default_octo_job(
+                            &transaction,
+                            &project.id,
+                            &conversation.id,
+                            coverage,
+                        )
+                        .await?
                     {
+                        covered_refund_org_id = canceled.refunded_org_id;
                         canceled_job_input_state_updates.extend(
                             crate::send_intents::reject_unacknowledged_inputs_for_job(
                                 &transaction,
@@ -1612,6 +1615,13 @@ pub(crate) async fn process_dispatch_prompt_timed(
                     )
                     .await;
                     crate::send_queue::spawn_send_queue_drain(state.clone(), conversation.id);
+                }
+                if let Some(org_id) = covered_refund_org_id {
+                    crate::credits::spawn_credits_updated(
+                        state,
+                        org_id,
+                        crate::credits::CREDITS_UPDATED_LEDGER,
+                    );
                 }
                 return Ok(recorded_dispatch_response(conversation.id));
             }

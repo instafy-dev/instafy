@@ -240,6 +240,58 @@ async fn stopping_a_turn_instafy_started_gives_its_reserve_back() -> anyhow::Res
     fixture.cleanup().await
 }
 
+/// In a group chat, a teammate's correct answer cancels Octo's turn on the
+/// same sum (crate::group_participation). A turn Instafy started that is
+/// canceled that way ends without Octo's reply too, so its reserve comes back.
+#[tokio::test]
+async fn a_turn_instafy_started_that_a_teammates_answer_covers_gives_its_reserve_back(
+) -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("system-turn-covered").await? else {
+        eprintln!("skipping system turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    stamp(
+        &fixture,
+        AUTOMATIC_RETRY_KEY,
+        json!({ "version": 1, "failedRunId": Uuid::new_v4() }),
+    )
+    .await?;
+    let mut connection = fixture.pool.get().await?;
+    let conversation_id: Uuid = connection
+        .query_one(
+            "update agent_jobs
+                set status = 'leased', lease_attempts = 1, intent = 'feature',
+                    payload = jsonb_set(payload, '{metadata,agent}', '{\"handle\": \"octo\"}'::jsonb, true)
+              where id = $1
+          returning conversation_id",
+            &[&fixture.job_id],
+        )
+        .await?
+        .get(0);
+    let transaction = connection.transaction().await?;
+    let canceled = crate::group_participation::cancel_covered_default_octo_job(
+        &transaction,
+        &fixture.project_id,
+        &conversation_id,
+        crate::group_participation::ArithmeticCoverage {
+            action: crate::group_participation::ArithmeticCoverageAction::CancelActiveOcto,
+            message_id: Uuid::new_v4(),
+            run_id: fixture.run_id,
+            job_id: fixture.job_id,
+        },
+    )
+    .await
+    .map_err(|error| controller_error("cancel a covered turn", error))?;
+    transaction.commit().await?;
+    drop(connection);
+    assert_eq!(
+        canceled.map(|canceled| canceled.refunded_org_id),
+        Some(Some(fixture.org_id))
+    );
+    assert_given_back(&fixture).await?;
+    fixture.cleanup().await
+}
+
 /// A turn Instafy started whose job expires gives its reserve back, even
 /// though a runtime held it, which keeps the charge of a turn someone sent.
 #[tokio::test]

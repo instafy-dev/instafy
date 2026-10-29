@@ -22843,7 +22843,7 @@ async fn group_participation_job_lock_fences_human_octo_answer_races() -> anyhow
         )
         .await
         .map_err(|error| controller_error("cancel human-covered Octo answer", error))?;
-        assert!(canceled);
+        assert!(canceled.is_some());
         transaction.commit().await?;
     }
     {
@@ -22940,7 +22940,7 @@ async fn group_participation_job_lock_fences_human_octo_answer_races() -> anyhow
 
     let canceled = timeout(std::time::Duration::from_secs(2), cancel_task).await???;
     assert!(
-        !canceled,
+        canceled.is_none(),
         "a delivered correct Octo answer must defeat stale cancellation"
     );
     {
