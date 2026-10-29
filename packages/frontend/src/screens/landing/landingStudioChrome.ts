@@ -6,6 +6,7 @@
 // Crew colours are inline styles at the call sites (landingCrew.ts), never
 // classes, and so are the label colours that read on them.
 
+import { AI_TILE_CLASS, AI_TILE_SHAPE_CLASS } from "../../components/OctoCoin";
 import {
   DARK_ACTIVE_BG_CLASS,
   DARK_CANVAS_CLASS,
@@ -188,9 +189,10 @@ export const ROSTER =
 // The ring is a 1px separator in the bar's own colour, not an outline: on the
 // bar it does not show, and where Cub's arm passes behind a coin it keeps a
 // sliver of bar between them. The coin's avatar coin shadow draws over it.
+// People's ring is round; every AI's (Octo's included) follows its tile
+// (AI_TILE_SHAPE_CLASS, docs/Brand.md "One rule for faces").
 export const ROSTER_RING = "rounded-full ring-1 ring-white dark:ring-[var(--color-studio-dark-panel)]";
-// The scenario agent's coin is a rounded square (AVATAR_SHELL_AGENT); its ring follows it.
-export const ROSTER_RING_AGENT = "rounded-[30%] ring-1 ring-white dark:ring-[var(--color-studio-dark-panel)]";
+export const ROSTER_RING_AGENT = `${AI_TILE_SHAPE_CLASS} ring-1 ring-white dark:ring-[var(--color-studio-dark-panel)]`;
 
 // ChatTranscriptViewport.tsx:82-90 without the scrollbar. Landing-only:
 // isolate keeps the transcript's own z-indexes below the hero's creature
@@ -203,15 +205,18 @@ export const TRANSCRIPT = "relative isolate flex min-h-0 flex-1 flex-col overflo
 // first paint and on a scenario change, eased afterwards.
 export const TRANSCRIPT_SCROLL = "transition-transform duration-0 ease-out group-data-[deck-settled]/deck:duration-500 motion-reduce:transition-none";
 
-// ChatMessageAvatar.tsx wrapper: in light the coin's only edge is the avatar
-// coin shadow every coin shares, Octo's included (docs/Brand.md); in dark a
-// hairline border, the cool-slate border (700/800) replaced by the
-// raised-control border tier, and the small shadow. Humans fill with their
-// crew colour inline, label colour included.
+// ChatMessageAvatar.tsx wrapper for a person, always round: in light the
+// coin's only edge is the avatar coin shadow every face shares, Octo's included
+// (docs/Brand.md); in dark a hairline border, the cool-slate border (700/800)
+// replaced by the raised-control border tier, and the small shadow. Humans fill
+// with their crew colour inline, label colour included.
 export const AVATAR_SHELL = `flex shrink-0 items-center justify-center overflow-hidden rounded-full shadow-avatar-coin dark:border dark:shadow-sm ${DARK_RAISED_CONTROL_BORDER_CLASS}`;
-// An agent other than Octo: the same coin as a rounded square (the prototype's
-// roster), crew fill and initial inline; the shadow follows the square.
-export const AVATAR_SHELL_AGENT = `flex shrink-0 items-center justify-center overflow-hidden rounded-[30%] shadow-avatar-coin dark:border dark:shadow-sm ${DARK_RAISED_CONTROL_BORDER_CLASS}`;
+// An agent other than Octo: the AI tile Octo wears (AI_TILE_CLASS, docs/Brand.md
+// "One rule for faces"), crew fill and initial inline. In light the shared
+// coin shadow follows the tile; in dark its only edge is the tile's own
+// hairline, as Octo's and the studio's ChatMessageAvatar tiles are, so it takes
+// none of the people's dark border or small shadow.
+export const AVATAR_SHELL_AGENT = `flex shrink-0 items-center justify-center overflow-hidden ${AI_TILE_CLASS} shadow-avatar-coin`;
 export const AVATAR_2XS = "h-6 w-6 text-xxs";
 // The roster's coins (the approved hero's 28px, 11.5px initials; 24px on phones).
 export const AVATAR_ROSTER = "h-6 w-6 text-xxs md:h-7 md:w-7 md:text-[11.5px]";

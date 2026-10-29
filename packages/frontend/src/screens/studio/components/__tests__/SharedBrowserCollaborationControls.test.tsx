@@ -159,6 +159,12 @@ describe("SharedBrowserCollaborationControls", () => {
     expect(controller()?.closest("li")?.dataset.controllerKind).toBe("agent");
     expect(participantsList().textContent).not.toContain("Queued agent");
     expect(action()).toBeNull();
+    // The list mixes people and the controlling AI, so the AI's name carries
+    // the quiet AI word (docs/Brand.md, "One rule for faces"); people never do.
+    const agentRow = document.querySelector<HTMLElement>('li[data-controller-kind="agent"]');
+    expect(agentRow?.querySelector("[data-participant-name]")?.textContent).toBe("Runtime Octo");
+    expect(agentRow?.querySelector('[data-testid="ai-tag"]')?.textContent).toBe(", AI");
+    expect(participantsList().querySelector('li[data-participant-id] [data-testid="ai-tag"]')).toBeNull();
   });
 
   it.each([true, false])("requests peer control with a clear label and disables duplicate requests (compact=%s)", async (compact) => {

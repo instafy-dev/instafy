@@ -18,7 +18,13 @@ import {
   turnPlanFor,
   type TurnBeatId,
 } from "../landingTurnScript";
-import { expectAvatarCoinLightEdge, expectCanonicalOctoCoin } from "../../../components/__tests__/octoCoinExpectations";
+import {
+  classTokens,
+  expectAiTile,
+  expectAvatarCoinLightEdge,
+  expectCanonicalOctoCoin,
+  expectPersonCircle,
+} from "../../../components/__tests__/octoCoinExpectations";
 
 describe("landing studio window turn column", () => {
   let container: HTMLDivElement;
@@ -410,24 +416,39 @@ describe("landing studio window turn column", () => {
     const kim = coin("kim").querySelector("[data-crew-fill]") as HTMLElement;
     expect(kim.style.backgroundColor).toBe("rgb(27, 134, 75)");
     expect(kim.style.color).toBe("rgb(255, 255, 255)");
-    // The scenario agent: a flame rounded square with its ink initial, never Octo's mark in a crew colour.
+    // The scenario agent: a flame AI tile with its ink initial, never Octo's mark in a crew colour.
     const agent = coin("agent").querySelector("[data-crew-fill]") as HTMLElement;
     expect(agent.textContent).toBe(scenario.presenceAgent.charAt(0));
     expect(agent.style.backgroundColor).toBe("rgb(250, 88, 21)");
     expect(agent.style.color).toBe("rgb(15, 23, 42)");
-    expect(agent.className).toContain("rounded-[30%]");
     expect(coin("agent").getAttribute("data-agent-name")).toBe(scenario.presenceAgent);
     expect(coin("agent").querySelector("svg.octo-mark")).toBeNull();
 
-    // Every roster coin shares one light edge, the avatar coin shadow (no
-    // grey border), and keeps its hairline border and small shadow in dark.
-    for (const fill of [ada, kim, agent]) {
-      const tokens = expectAvatarCoinLightEdge(fill);
-      expect(tokens).toEqual(expect.arrayContaining(["dark:border", "dark:shadow-sm"]));
+    // One rule for faces: people are circles, every AI (Octo included) is the
+    // AI tile, and each face's separator ring takes its face's shape.
+    for (const person of [ada, kim]) {
+      expectPersonCircle(person);
+      expect(person.parentElement?.className).toContain("rounded-full");
+    }
+    const agentTokens = expectAiTile(agent);
+    for (const name of ["octo", "agent"]) {
+      const ring = classTokens(coin(name));
+      expect(ring).toEqual(expect.arrayContaining(["rounded-[30%]", "ring-1"]));
+      expect(ring).not.toContain("rounded-full");
     }
 
-    // Octo: the studio's own coin (white with the shared coin shadow,
-    // reversed in dark), no crew fill, tint or nodes.
+    // Every roster coin shares one light edge, the avatar coin shadow (no
+    // grey border). People keep their hairline border and small shadow in
+    // dark; the agent's only dark edge is the AI tile's own hairline, as in
+    // the studio.
+    for (const fill of [ada, kim, agent]) expectAvatarCoinLightEdge(fill);
+    for (const person of [ada, kim]) {
+      expect(classTokens(person)).toEqual(expect.arrayContaining(["dark:border", "dark:shadow-sm"]));
+    }
+    expect(agentTokens.filter((token) => /^dark:(border|shadow)/.test(token))).toEqual([]);
+
+    // Octo: the studio's own tile (white with the shared coin shadow and the
+    // AI tile's hairline, reversed in dark), no crew fill, tint or nodes.
     const octo = coin("octo");
     expect(octo.getAttribute("data-testid")).toBe("landing-roster-octo");
     expect(octo.querySelector("[data-crew-fill]")).toBeNull();
@@ -440,6 +461,7 @@ describe("landing studio window turn column", () => {
     expect(profile.style.backgroundColor).toBe("rgb(255, 60, 159)");
     expect(profile.style.color).toBe("rgb(15, 23, 42)");
     expect(expectAvatarCoinLightEdge(profile)).toContain("dark:border");
+    expectPersonCircle(profile);
 
     // None of the retired palette survives.
     const html = container.innerHTML;
@@ -454,7 +476,10 @@ describe("landing studio window turn column", () => {
     expect(kimAvatars.length).toBeGreaterThan(0);
     expect(kimAvatars.every((node) => node.textContent === "K")).toBe(true);
     expect(kimAvatars.every((node) => node.style.backgroundColor === "rgb(27, 134, 75)" && node.style.color === "rgb(255, 255, 255)")).toBe(true);
-    for (const avatar of kimAvatars) expectAvatarCoinLightEdge(avatar);
+    for (const avatar of kimAvatars) {
+      expectAvatarCoinLightEdge(avatar);
+      expectPersonCircle(avatar);
+    }
   });
 
   // The line is one line at every beat, so the transcript never moves as its

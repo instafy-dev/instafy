@@ -4,7 +4,7 @@ import { resolveViteReactDependencies } from "./viteComponentDependencies.js";
 
 const FIXTURE_PATH = "/__octo-coin-fixture__";
 
-// Every size Octo's coin is drawn at: the mention picker and thread stacks
+// Every size Octo's tile is drawn at: the mention picker and thread stacks
 // (20, 24), the roster (24, 28), chat avatars (2xs 24, xs 28, sm 32, lg 48)
 // and agent avatars (28, 36, 64).
 const SIZES = [20, 24, 28, 32, 36, 48, 64] as const;
@@ -30,17 +30,18 @@ async function mountOctoCoins(page: Page, theme: "light" | "dark"): Promise<stri
         h("div", { className: "flex items-center gap-4" }, ...sizes.map((size) =>
           h("span", { key: size, "data-thinking-size": size, style: { width: size + "px", height: size + "px" } },
             h(OctoCoin, { className: "h-full w-full", motion: "thinking" })))),
-        // A person's coin and another agent's coin: every avatar coin shares
-        // Octo's light edge. The probe paints the shared shadow token alone.
+        // A person's face and another agent's face: every face shares Octo's
+        // light shadow; the agent is the same AI tile, the person a circle.
+        // The probe paints the shared shadow token alone.
         h("div", { className: "flex items-center gap-4" },
           h("span", { "data-peer": "human" }, h(HumanAvatar, { userId: "u-ada", displayName: "Ada Person" })),
           h("span", { "data-peer": "agent" }, h(AgentAvatar, { agent: { handle: "reviewer", avatarSeed: "reviewer" } })),
           h("span", { "data-probe": "", className: "block h-6 w-6", style: { boxShadow: "var(--avatar-coin-shadow)" } })),
         // An overlapping avatar stack like the conversation roster (its
-        // separator ring sits on each face): the face after Octo must still
-        // cover Octo's right edge.
+        // separator ring sits on each face, each slot in its face's shape):
+        // the face after Octo must still cover Octo's right edge.
         h("div", { className: "flex items-center -space-x-1.5", "data-stack": "" },
-          h("span", { className: "rounded-full *:ring-1 *:ring-white", "data-stack-item": "octo" },
+          h("span", { className: "rounded-[30%] *:ring-1 *:ring-white", "data-stack-item": "octo" },
             h(OctoCoin, { className: "h-6 w-6" })),
           h("span", { className: "rounded-full *:ring-1 *:ring-white", "data-stack-item": "next" },
             h(HumanAvatar, { userId: "u-ben", displayName: "Ben", className: "h-6 w-6 text-xxs" })))));
@@ -77,10 +78,14 @@ type CoinReading = {
   border: string;
   position: string;
   after: string;
-  /** The coin's computed box-shadow: the shared coin shadow in light, the faint inset ring in dark. */
+  /** The tile's corner radius as computed: 30% at every size. */
+  radius: string;
+  /** The tile's computed box-shadow: the shared coin shadow in light, none in dark. */
   edge: string;
+  /** The tile's hairline: a 1px solid outline drawn 1px inside its edge. */
+  outline: { style: string; width: string; offset: string; color: string };
   markColor: string;
-  /** The coin's inner edge (inside any inset ring) minus the mark's furthest point, idle and at worst through the thinking cycle. */
+  /** The tile's inscribed circle (inside the hairline) minus the mark's furthest point, idle and at worst through the thinking cycle. */
   clearance: number;
 };
 
@@ -117,8 +122,12 @@ async function readCoins(page: Page, selector: string): Promise<CoinReading[]> {
       const radius = rect.width / 2;
       const cx = rect.left + radius;
       const cy = rect.top + radius;
-      const edge = getComputedStyle(coin).boxShadow;
-      const ringWidth = Number(edge.match(/0px 0px 0px ([\d.]+)px inset/)?.[1] ?? 0);
+      const style = getComputedStyle(coin);
+      const edge = style.boxShadow;
+      // The hairline is an outline pulled inside the edge, so it eats into
+      // the room the mark has.
+      const outline = { style: style.outlineStyle, width: style.outlineWidth, offset: style.outlineOffset, color: style.outlineColor };
+      const hairline = outline.style === "none" ? 0 : Math.max(0, -parseFloat(outline.offset));
       let worst = furthest(svg, cx, cy);
       if (svg.getAttribute("data-octo-animated") === "true") {
         svg.pauseAnimations();
@@ -133,9 +142,11 @@ async function readCoins(page: Page, selector: string): Promise<CoinReading[]> {
         border: getComputedStyle(coin).borderTopWidth,
         position: getComputedStyle(coin).position,
         after: getComputedStyle(coin, "::after").content,
+        radius: style.borderTopLeftRadius,
         edge,
+        outline,
         markColor: getComputedStyle(svg).color,
-        clearance: radius - ringWidth - worst,
+        clearance: radius - hairline - worst,
       };
     });
   }, selector);
@@ -145,7 +156,7 @@ async function readCoins(page: Page, selector: string): Promise<CoinReading[]> {
 const NO_SHADOW = "rgba(0, 0, 0, 0) 0px 0px 0px 0px";
 
 for (const theme of ["light", "dark"] as const) {
-  test(`Octo's coin keeps its ${theme} edge, clear of the mark at every size`, async ({ page }) => {
+  test(`Octo's tile keeps its ${theme} edge, clear of the mark at every size`, async ({ page }) => {
     await page.setViewportSize({ width: 900, height: 400 });
     const errors = await mountOctoCoins(page, theme);
     expect(errors).toEqual([]);
@@ -168,35 +179,54 @@ for (const theme of ["light", "dark"] as const) {
     const thinking = await readCoins(page, "[data-thinking-size]");
     expect(idle.map((coin) => coin.size)).toEqual([...SIZES]);
     for (const coin of [...idle, ...thinking]) {
-      // No border, and the coin is not positioned and draws no ::after, so
+      // No border, and the tile is not positioned and draws no ::after, so
       // overlapping stacks keep their tree order.
       expect(coin.border).toBe("0px");
       expect(coin.position).toBe("static");
       expect(coin.after).toBe("none");
+      // One rule for faces: a 30% rounded square at every size, its hairline
+      // a 1px outline drawn just inside the edge.
+      expect(coin.radius).toBe("30%");
+      expect(coin.outline).toEqual(expect.objectContaining({ style: "solid", width: "1px", offset: "-1px" }));
+      // The hairline is the tile's only inset edge: no inset ring.
+      expect(coin.edge).not.toContain("inset");
       if (theme === "light") {
         expect(coin.background).toBe("rgb(255, 255, 255)");
         expect(coin.markColor).toBe("rgb(15, 23, 42)");
-        // The shared coin shadow is the coin's only edge: no brand-ink ring.
+        // The shared coin shadow and the 14% ink hairline: no brand-ink ring.
         expect(coin.edge.endsWith(coinShadow)).toBe(true);
-        expect(coin.edge).not.toContain("inset");
+        expect(coin.outline.color).toBe("rgba(15, 23, 42, 0.14)");
       } else {
         expect(coin.background).toBe("rgb(38, 38, 38)");
         expect(coin.markColor).toBe("rgb(255, 255, 255)");
-        expect(coin.edge).toContain("rgba(255, 255, 255, 0.22) 0px 0px 0px 1px inset");
+        expect(coin.edge.endsWith(NO_SHADOW)).toBe(true);
+        expect(coin.outline.color).toBe("rgba(255, 255, 255, 0.22)");
       }
     }
 
-    // A person's coin and another agent's coin share the light edge, and draw
-    // no shadow of their own in dark.
+    // A person's face and another agent's face share the light shadow, and
+    // draw no shadow of their own in dark. The agent wears Octo's tile and
+    // hairline; the person stays a circle with no outline.
     const peers = await page.evaluate(() =>
-      ["human", "agent"].map((peer) => getComputedStyle(document.querySelector(`[data-peer="${peer}"] > *`)!).boxShadow),
+      ["human", "agent"].map((peer) => {
+        const style = getComputedStyle(document.querySelector(`[data-peer="${peer}"] > *`)!);
+        return { edge: style.boxShadow, radius: style.borderTopLeftRadius, outline: style.outlineStyle, outlineColor: style.outlineColor };
+      }),
     );
-    for (const edge of peers) {
-      expect(edge.endsWith(theme === "light" ? coinShadow : NO_SHADOW)).toBe(true);
+    for (const peer of peers) {
+      expect(peer.edge.endsWith(theme === "light" ? coinShadow : NO_SHADOW)).toBe(true);
     }
+    const [human, agent] = peers;
+    expect(human.radius).not.toBe("30%");
+    expect(parseFloat(human.radius)).toBeGreaterThanOrEqual(16);
+    expect(human.outline).toBe("none");
+    expect(agent.radius).toBe("30%");
+    expect(agent.outline).toBe("solid");
+    expect(agent.outlineColor).toBe(theme === "light" ? "rgba(15, 23, 42, 0.14)" : "rgba(255, 255, 255, 0.22)");
 
-    // In the stack the separator ring sits on the coin itself, above its
-    // shadow: a clean white edge with the soft shadow outside it.
+    // In the stack the separator ring sits on the tile itself, above its
+    // shadow and outside its inside hairline: a clean white edge, in the
+    // tile's own corners, with the soft shadow outside it.
     if (theme === "light") {
       const stackEdge = await page.evaluate(
         () => getComputedStyle(document.querySelector('[data-stack-item="octo"] [data-octo-coin]')!).boxShadow,
@@ -212,8 +242,9 @@ for (const theme of ["light", "dark"] as const) {
       return hit?.closest("[data-stack-item]")?.getAttribute("data-stack-item") ?? null;
     });
     expect(coverer).toBe("next");
-    // The mark never reaches the coin's edge (inside the dark ring), at rest
-    // at every size and through the thinking stroke from 24px up.
+    // The mark never reaches the tile's inscribed circle (inside the
+    // hairline), at rest at every size and through the thinking stroke from
+    // 24px up.
     for (const coin of idle) expect(coin.clearance).toBeGreaterThan(1);
     for (const coin of thinking.filter((entry) => entry.size >= 24)) expect(coin.clearance).toBeGreaterThan(0.25);
   });

@@ -10,9 +10,11 @@ import {
 } from "../../../../conversations/conversationMessageUtils";
 import {
   classTokens,
+  expectAiTile,
   expectAvatarCoinLightEdge,
   expectCanonicalOctoCoin,
 } from "../../../../components/__tests__/octoCoinExpectations";
+import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import { getSitePreview } from "../../../../services/runtimeController/previews";
 import { ConversationPreviewContext } from "../../../../workspace/ConversationPreviewContext";
 import type { ChatMessage } from "../../types";
@@ -1898,6 +1900,7 @@ describe("AgentJobThreadPreviewLayout", () => {
         participants: [
           { handle: "octo", avatarSeed: "octo" },
           { handle: "ben", avatarSeed: "ben" },
+          { handle: "pia", avatarSeed: "https://images.example/pia.png" },
         ],
       },
     ];
@@ -1933,21 +1936,40 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('[data-testid="agent-thread-branch-row"]')?.textContent).toContain(
       "Preview cleanup smoke",
     );
-    const participantStack = container.querySelector('[aria-label="Participants: @octo, @ben"]');
-    expect(participantStack).not.toBeNull();
-    // Octo is its coin (OctoCoin), never the static avatar file as an <img>.
-    expect(participantStack?.querySelector("img")).toBeNull();
-    expectCanonicalOctoCoin(participantStack?.querySelector('[aria-label="@octo"] > [data-octo-coin]'));
-    expect(participantStack?.querySelector('[aria-label="@ben"]')?.textContent).toBe("B");
-    // Every face carries the shared coin shadow outside a clean white
-    // separator: Ben's face as its own white border, Octo's as a ring on the
-    // coin that draws above the coin's shadow. Neither slot is positioned, so
-    // tree order decides the overlap.
-    const octoSlot = participantStack?.querySelector('[aria-label="@octo"]');
-    expect(classTokens(octoSlot)).toEqual(expect.arrayContaining(["p-px", "*:ring-1", "*:ring-white", "dark:*:ring-slate-950"]));
-    expect(classTokens(octoSlot).filter((token) => /^(border|shadow|relative|absolute|z-)/.test(token))).toEqual([]);
-    const benTokens = expectAvatarCoinLightEdge(participantStack?.querySelector('[aria-label="@ben"]'), ["border", "border-white"]);
-    expect(benTokens).toEqual(expect.arrayContaining(["dark:border-slate-950", "dark:shadow-sm"]));
+    const participantStack = container.querySelector('[aria-label="Participants: @octo, @ben, @pia"]');
+    expect(participantStack?.getAttribute("role")).toBe("group");
+    // Octo is its tile (OctoCoin), never the static avatar file as an <img>;
+    // the only picture is Pia's own upload.
+    expect(Array.from(participantStack?.querySelectorAll("img") ?? [], (img) => img.getAttribute("src"))).toEqual([
+      "https://images.example/pia.png",
+    ]);
+    // Each face is an image whose accessible name says it is an AI (a role,
+    // so the name is announced at all); the tooltip keeps the handle.
+    const octoSlot = participantStack?.querySelector('[aria-label="@octo, AI"]');
+    const benSlot = participantStack?.querySelector('[aria-label="@ben, AI"]');
+    const piaSlot = participantStack?.querySelector('[aria-label="@pia, AI"]');
+    for (const slot of [octoSlot, benSlot, piaSlot]) expect(slot?.getAttribute("role")).toBe("img");
+    expect(benSlot?.getAttribute("title")).toBe("@ben");
+    expectCanonicalOctoCoin(octoSlot?.querySelector(":scope > [data-octo-coin]"));
+    expect(benSlot?.textContent).toBe("B");
+    // One rule for faces: every face in the stack is an AI tile (Octo's, Ben's
+    // gradient and Pia's picture clipped to it) filling its 20px slot with no
+    // inset, carrying the shared coin shadow outside a clean separator: a ring
+    // on the face that draws above the face's shadow and follows its corners.
+    // No slot is positioned, so tree order decides the overlap.
+    for (const slot of [octoSlot, benSlot, piaSlot]) {
+      expect(classTokens(slot)).toEqual(
+        expect.arrayContaining(["h-5", "w-5", AI_TILE_SHAPE_CLASS, "*:ring-1", "*:ring-white", "dark:*:ring-slate-950"]),
+      );
+      expect(classTokens(slot).filter((token) => /^(p-|border|shadow|relative|absolute|z-|rounded-full)/.test(token))).toEqual([]);
+      const face = slot?.firstElementChild;
+      expectAiTile(face);
+      expect(classTokens(face)).toEqual(expect.arrayContaining(["h-full", "w-full"]));
+      expectAvatarCoinLightEdge(face);
+      expect(classTokens(face).filter((token) => /^dark:(border|shadow)/.test(token))).toEqual([]);
+    }
+    expect(classTokens(piaSlot?.firstElementChild)).toContain("overflow-hidden");
+    expect(piaSlot?.querySelector("img")).not.toBeNull();
     const hiddenActivityIndicator = container.querySelector(
       '[aria-label="3 child thread updates"]',
     ) as HTMLElement | null;

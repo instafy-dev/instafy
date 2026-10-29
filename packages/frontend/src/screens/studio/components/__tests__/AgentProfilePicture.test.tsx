@@ -2,6 +2,8 @@
 import { act, useState, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { classTokens, expectAiTile } from "../../../../components/__tests__/octoCoinExpectations";
+import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import { AgentProfileModal } from "../AgentProfileModal";
 
 const onSave = vi.fn();
@@ -50,6 +52,15 @@ describe("bot profile picture editor", () => {
     const behavior = document.querySelector('[aria-label="Bot behavior"]')!;
     expect(behavior.querySelector('#agent-profile-description')).not.toBeNull();
     expect(behavior.querySelector('#agent-profile-bio')).toBeNull();
+  });
+  it("shapes the photo target like the bot's AI tile, so hover and focus never show past its corners", async () => {
+    // One rule for faces (docs/Brand.md): a bot is an AI, so the button
+    // takes the 64px tile's own corners, not a team's 12px or a person's circle.
+    await render();
+    const button = document.querySelector('button[aria-label="Change bot picture"]');
+    expect(classTokens(button)).toEqual(expect.arrayContaining(["h-16", "w-16", AI_TILE_SHAPE_CLASS]));
+    expect(classTokens(button).filter((token) => /^rounded-(none|md|lg|xl|2xl|full)$/.test(token))).toEqual([]);
+    expectAiTile(button?.firstElementChild);
   });
   it("rejects unsupported and oversized files while keeping the current picture", async () => {
     await render();

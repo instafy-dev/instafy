@@ -4,7 +4,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 
 ## Maps
 - Product overview: `docs/Product.md`
-- Brand colors, logo variants, and asset rules: `docs/Brand.md`
+- Brand colors, logo variants, faces (every AI a rounded square, every person a circle), and asset rules: `docs/Brand.md`
 - Scheduled automations and quiet runs: `docs/Automations.md`
 - On-demand space review and remembered recommendations: `docs/Space-Review.md`
 - Scoped search, message excerpts and exact-message navigation: [Studio search](Studio-Search.md)

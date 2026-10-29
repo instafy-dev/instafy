@@ -77,6 +77,15 @@ describe("agent public About", () => {
     expect(container.textContent).not.toContain("PRIVATE STYLE");
   });
 
+  it("follows the agent's name with the AI tag, read as \"Helper, AI\"", async () => {
+    // Profile cards open from lists that mix people and AI (docs/Brand.md).
+    mocks.read.mockResolvedValue({ success: true, value: publicProfile });
+    await act(async () => root.render(card()));
+    const tag = container.querySelector('[data-testid="ai-tag"]');
+    expect(tag?.textContent).toBe(", AI");
+    expect(tag?.previousElementSibling?.textContent).toBe("Updated Helper");
+  });
+
   it("does not reuse an old bio when a request fails or the agent changes", async () => {
     mocks.read.mockResolvedValueOnce({ success: true, value: { ...publicProfile, bio: "Old bio" } });
     await act(async () => root.render(card()));

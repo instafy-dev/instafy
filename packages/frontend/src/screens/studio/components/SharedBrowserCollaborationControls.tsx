@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CursorPointer, Group } from "iconoir-react";
 import { Dialog, DialogTrigger } from "react-aria-components";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
+import { AiTag } from "../../../components/AiTag";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import type { SharedBrowserControlOwner } from "./sharedBrowserControlOwner";
@@ -360,7 +361,10 @@ export function SharedBrowserCollaborationControls({
                   {agentDisplayName ? (
                     <li className="flex min-w-0 items-baseline gap-2" data-controller-kind="agent">
                       <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-violet-500" />
-                      <Text as="span" variant="bodyCompact" tone="primary" className="min-w-0 flex-1 break-words" data-participant-name="">{agentDisplayName}</Text>
+                      <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                        <Text as="span" variant="bodyCompact" tone="primary" className="min-w-0 break-words" data-participant-name="">{agentDisplayName}</Text>
+                        <AiTag />
+                      </span>
                       {controlIndicator}
                     </li>
                   ) : null}
