@@ -1,4 +1,4 @@
-export type BrowserOriginSocketPath = "vnc" | "screencast" | "input" | "collaboration";
+export type BrowserOriginSocketPath = "vnc" | "vnc/view" | "screencast" | "input" | "collaboration";
 export type BrowserOriginHttpPath = "webrtc/offer";
 
 /**

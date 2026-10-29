@@ -166,6 +166,28 @@ describe("resolveSharedBrowserViewerKind", () => {
     ).toBe("rfb");
   });
 
+  it("keeps RFB for a spectator when the runtime serves a view-only RFB lane", () => {
+    // Drive, Oct 28: on an RFB-only browser the person saw no live page while
+    // Octo drove. A runtime with the view-only lane gives them its pixels.
+    expect(
+      resolveSharedBrowserViewerForParticipant({
+        requested: "rfb",
+        available: ["rfb"],
+        humanOwnsControl: false,
+        rfbViewOnly: true,
+      }),
+    ).toBe("rfb");
+    // A safe pixel viewer of its own still comes first.
+    expect(
+      resolveSharedBrowserViewerForParticipant({
+        requested: "rfb",
+        available: ["rfb", "cdp-screencast"],
+        humanOwnsControl: false,
+        rfbViewOnly: true,
+      }),
+    ).toBe("cdp-screencast");
+  });
+
   it("disables WebRTC input while preserved video retargets to another page", () => {
     expect(webRtcInputTargetsActivePage("page-a", "page-a")).toBe(true);
     expect(webRtcInputTargetsActivePage("page-a", "page-b")).toBe(false);

@@ -1932,13 +1932,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       onFocusPage: (pageId) => {
         void handleSelectBrowserSessionPage(pageId);
       },
-      onKeepPage: (pageId) => {
-        void keepSharedBrowserPage(pageId);
-      },
       onClearError: clearSharedBrowserCommandError,
     };
   }, [
-    keepSharedBrowserPage,
     clearSharedBrowserCommandError,
     compactBrowserBar,
     goBackInSharedBrowser,
@@ -4711,6 +4707,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personal: personalBrowser,
     agentHandle: typingAgentHandle,
     onSubmit,
+    keepAgentTab: keepSharedBrowserPage,
   });
   // Octo opens the browser in the desktop app, or Instafy's browser on the
   // conversation's own machine in a covered space, by itself for its
@@ -6664,6 +6661,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     conversationRuntimeId={effectiveRuntimeId ?? null}
                     spaceBusy={spaceRunActive}
                     runApproval={browserRunApproval}
+                    conversationId={activeConversationId ?? null}
                   />
                 </div>
               ) : null}

@@ -4222,6 +4222,31 @@ async fn proxy_origin_vnc_ws(
     .await
 }
 
+/// The view-only RFB lane: anyone with `browser.view` watches the browser,
+/// such as while Octo drives it. The origin drops every input message the
+/// viewer sends (`browser_rfb_view` in origin-http-server).
+#[instrument(skip_all)]
+async fn proxy_origin_vnc_view_ws(
+    State(state): State<AppState>,
+    Path(params): Path<OriginProxyPathParams>,
+    headers: HeaderMap,
+    Query(query): Query<OriginProxyWsQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    proxy_origin_browser_ws(
+        state,
+        params,
+        headers,
+        query,
+        ws.max_message_size(64 * 1024).max_frame_size(64 * 1024),
+        "browser/vnc/view",
+        BrowserRelayTransport::Rfb,
+        None,
+        ORIGIN_PROXY_BROWSER_VIEW_SCOPES,
+    )
+    .await
+}
+
 #[instrument(skip_all)]
 async fn proxy_origin_screencast_ws(
     State(state): State<AppState>,
@@ -4761,6 +4786,10 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/origin/register", post(post_origin_register))
         .route("/origin/:origin_id/browser/vnc", get(proxy_origin_vnc_ws))
+        .route(
+            "/origin/:origin_id/browser/vnc/view",
+            get(proxy_origin_vnc_view_ws),
+        )
         .route(
             "/origin/:origin_id/browser/screencast",
             get(proxy_origin_screencast_ws),

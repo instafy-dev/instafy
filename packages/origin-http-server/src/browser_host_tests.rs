@@ -711,6 +711,10 @@ async fn browser_transports_wait_for_a_ready_host() {
             503
         );
         assert_eq!(ws_status(format!("{ws}/browser/vnc"), &both).await, 503);
+        assert_eq!(
+            ws_status(format!("{ws}/browser/vnc/view"), &view).await,
+            503
+        );
     }
 
     // Metadata stays readable while the host is down.
@@ -735,6 +739,29 @@ async fn browser_transports_wait_for_a_ready_host() {
         .await
         .unwrap();
     assert_ne!(past_guard.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // A viewer who may not drive reaches the view-only lane, and never the
+    // driver's lane, which passes input through.
+    let view_lane = client
+        .get(format!("{base}/browser/vnc/view"))
+        .bearer_auth(&view)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(view_lane.status(), StatusCode::BAD_REQUEST);
+    let driver_lane = client
+        .get(format!("{base}/browser/vnc"))
+        .bearer_auth(&view)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            driver_lane.status(),
+            StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
+        ),
+        "{}",
+        driver_lane.status()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -848,6 +875,7 @@ async fn a_boot_browser_says_its_chromium_is_restarting_or_stopped() {
             ("/browser/screencast", &both),
             ("/browser/input", &control),
             ("/browser/vnc", &both),
+            ("/browser/vnc/view", &view),
         ] {
             let (status, retry, refused) = ws_refusal(format!("{ws}{path}"), token)
                 .await

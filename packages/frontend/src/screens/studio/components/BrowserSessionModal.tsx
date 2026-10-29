@@ -45,7 +45,7 @@ import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { RemoteControlSurface } from "./RemoteControlSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { BrowserReadingRow } from "./BrowserReadingRow";
-import { resolveAgentReadingPages } from "./browserAgentTabs";
+import { browserReadingHost, resolveAgentReadingPages } from "./browserAgentTabs";
 import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHandoffRouting";
 import { ActionTicker } from "./ActionTicker";
 import { SharedBrowserCollaborationControls } from "./SharedBrowserCollaborationControls";
@@ -309,6 +309,21 @@ function resolveBrowserViewportMode(params: {
   return "fit";
 }
 
+// One load of the viewer's code, shared by the viewers that start at once
+// (one lane closing as another opens, such as when Octo takes control). A
+// failed load is tried again by the next viewer.
+let browserRfbModule: Promise<unknown> | null = null;
+function loadBrowserRfbModule(): Promise<unknown> {
+  if (!browserRfbModule) {
+    const loading: Promise<unknown> = import("@novnc/novnc/lib/rfb");
+    browserRfbModule = loading;
+    loading.catch(() => {
+      if (browserRfbModule === loading) browserRfbModule = null;
+    });
+  }
+  return browserRfbModule;
+}
+
 function resolveBrowserSessionRfbConstructor(mod: unknown): BrowserSessionRfbConstructor {
   if (typeof mod === "function") {
     return mod as BrowserSessionRfbConstructor;
@@ -408,12 +423,13 @@ function buildBrowserWebSocketUrl(params: {
   return buildBrowserOriginWebSocketUrl({ ...params, controllerBaseUrl });
 }
 
-function buildVncWebSocketUrl(params: {
+function buildVncWebSocketUrl({ viewOnly = false, ...params }: {
   endpoint: string;
   token: string;
   originId?: string | null;
+  viewOnly?: boolean;
 }): string {
-  return buildBrowserWebSocketUrl({ ...params, browserPath: "vnc" });
+  return buildBrowserWebSocketUrl({ ...params, browserPath: viewOnly ? "vnc/view" : "vnc" });
 }
 
 function buildBrowserHttpUrl(params: {
@@ -471,6 +487,7 @@ export function BrowserSessionModal({
   openedByPerson = true,
   spaceBusy = false,
   runApproval = null,
+  conversationId = null,
 }: {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
@@ -563,6 +580,11 @@ export function BrowserSessionModal({
    * (see useChatSharedBrowserApproval) and its machine, lowercased.
    */
   runApproval?: { runtimeId: string; approval: SharedBrowserApprovalState } | null;
+  /**
+   * The chat this browser view belongs to. A still picture kept from one chat
+   * never shows in another.
+   */
+  conversationId?: string | null;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -578,10 +600,15 @@ export function BrowserSessionModal({
   const [collaborationConnectionKey, setCollaborationConnectionKey] =
     useState<string | null>(null);
   const sharedBrowserViewportOnly = sharedBrowserChrome !== null;
-  const sharedBrowserPageId =
-    sharedBrowserChrome?.pages.find((page) => page.isActive)?.id ??
-    sharedBrowserChrome?.pages[0]?.id ??
+  const sharedBrowserActivePage =
+    sharedBrowserChrome?.pages.find((page) => page.isActive) ??
+    sharedBrowserChrome?.pages[0] ??
     null;
+  const sharedBrowserPageId = sharedBrowserActivePage?.id ?? null;
+  // Where the page on screen is now. A still picture of it is kept only
+  // while it stays there: a picture of another address, such as the page an
+  // earlier turn left, is never shown under this one.
+  const sharedBrowserPageUrl = sharedBrowserActivePage?.url ?? null;
   // The roster belongs to the browser, not to a tab: it stays connected while
   // Studio's tab list is empty or reloading (a page id follows by heartbeat).
   // Tying it to the list made a loop: a view that showed an error emptied the
@@ -686,8 +713,9 @@ export function BrowserSessionModal({
   const [browserRestarting, setBrowserRestarting] = useState(false);
   const [runtimeLimitDetails, setRuntimeLimitDetails] =
     useState<HostedRuntimeLimitErrorDetails | null>(null);
+  // `viewOnly`: an RFB address is for its view-only lane (see rfbViewOnlyLane).
   const [resolvedViewerUrl, setResolvedViewerUrl] = useState<{
-    kind: SupportedSharedBrowserViewerKind; url: string | null;
+    kind: SupportedSharedBrowserViewerKind; url: string | null; viewOnly: boolean;
   } | null>(null);
   const wsUrl = resolvedViewerUrl?.url ?? null;
   const [browserInputWsUrl, setBrowserInputWsUrl] = useState<string | null>(null);
@@ -852,10 +880,23 @@ export function BrowserSessionModal({
     frameRuntimeId, frameOriginId, sharedBrowserPageId]);
   const frameScopeRef = useRef(frameScope);
   frameScopeRef.current = frameScope;
+  // A still is shown only for the chat and the address it was taken on, so
+  // a page an earlier chat or step left never shows under another one. The
+  // surface that painted stays a source for a new still: a screencast keeps
+  // its connection while its tab moves on.
+  const stillScope = JSON.stringify([frameScope, conversationId, sharedBrowserPageUrl]);
+  const stillScopeRef = useRef(stillScope);
+  stillScopeRef.current = stillScope;
   const retainFrameRef = useRef(isOpen);
   retainFrameRef.current = isOpen && !browserDataClearInFlight;
-  const frozenFrameUrl = isOpen && capturedFrameScopeRef.current === frameScope ? capturedFrameUrl : null;
+  const frozenFrameUrl = isOpen && capturedFrameScopeRef.current === stillScope ? capturedFrameUrl : null;
   useEffect(clearRetainedBrowserFrame, [clearRetainedBrowserFrame, frameScope, isOpen]);
+  useEffect(() => {
+    if (capturedFrameScopeRef.current !== null && capturedFrameScopeRef.current !== stillScope) {
+      capturedFrameScopeRef.current = null;
+      setFrozenFrameUrl(null);
+    }
+  }, [stillScope]);
 
   // The conversation's own approval lane, keyed on its running job's machine
   // and page, stands in for this view's own poll when it is for this view's
@@ -928,12 +969,15 @@ export function BrowserSessionModal({
     setForcedRuntimeId(generateUUID());
     startAttempt();
   }, [attachMode, canControlBrowser, projectId, selectionScope, startAttempt]);
+  // The runtime serves RFB's view-only lane: a person who does not drive
+  // still watches the page over RFB, with their input dropped by the origin.
+  const rfbViewOnlyAvailable = sharedBrowserRfbCapabilities?.viewOnly === true;
   const permittedSharedBrowserViewerKinds = useMemo(
     () =>
-      humanOwnsBrowserControl
+      humanOwnsBrowserControl || rfbViewOnlyAvailable
         ? sharedBrowserAvailableViewerKinds
         : sharedBrowserAvailableViewerKinds.filter((kind) => kind !== "rfb"),
-    [humanOwnsBrowserControl, sharedBrowserAvailableViewerKinds],
+    [humanOwnsBrowserControl, rfbViewOnlyAvailable, sharedBrowserAvailableViewerKinds],
   );
   const requestedSharedBrowserViewerKind = viewerOverride ?? sharedBrowserViewerKind;
   const participantViewerKind = resolveSharedBrowserViewerForParticipant({
@@ -941,6 +985,7 @@ export function BrowserSessionModal({
     available: sharedBrowserAvailableViewerKinds,
     // Hiding the surface disables input; it does not change who owns the page.
     humanOwnsControl: humanOwnsBrowserControl,
+    rfbViewOnly: rfbViewOnlyAvailable,
   });
   // The collaboration roster intentionally disconnects while hidden. Its idle
   // state must not select another renderer behind the retained view. Input and
@@ -950,11 +995,20 @@ export function BrowserSessionModal({
     retainedViewerRef.current = { scope: frameScope, kind: participantViewerKind };
   }
   const activeSharedBrowserViewerKind = transportActive ? participantViewerKind : retainedViewerRef.current.kind;
+  // RFB for a person who does not drive (Octo, or another person, does): the
+  // view-only lane, which follows the tab Octo works in. Like the driver's
+  // lane, it is open only while the view is shown.
+  const rfbViewOnlyLane = transportActive &&
+    activeSharedBrowserViewerKind === "rfb" && rfbViewOnlyAvailable && !humanInputEnabled;
+  const rfbViewOnlyLaneRef = useRef(rfbViewOnlyLane);
+  rfbViewOnlyLaneRef.current = rfbViewOnlyLane;
   const sharedBrowserConnectionPageId =
     activeSharedBrowserViewerKind === "rfb" ? null : sharedBrowserPageId;
   // URL resolution follows renderer selection in an effect. Never mount the
-  // newly selected protocol with the previous renderer's URL in between.
-  const resolvedSharedBrowserViewerKind = resolvedViewerUrl?.kind === activeSharedBrowserViewerKind
+  // newly selected protocol with the previous renderer's URL in between, nor
+  // one RFB lane with the other's: control changing hands switches the lane.
+  const resolvedSharedBrowserViewerKind = resolvedViewerUrl?.kind === activeSharedBrowserViewerKind &&
+    (activeSharedBrowserViewerKind !== "rfb" || resolvedViewerUrl.viewOnly === rfbViewOnlyLane)
     ? activeSharedBrowserViewerKind : null;
   // The viewer this render mounts (its kind and URL), or null when none is.
   const mountedViewerTargetRef = useRef<string | null>(null);
@@ -1069,7 +1123,7 @@ export function BrowserSessionModal({
   // the AI cursor and caption what it's doing. Gated to match where the overlay
   // renders (connected and not collapsed) so a hidden/collapsed session doesn't
   // keep polling. Uses the same runtime the VNC stream resolved to.
-  const { actions: browserActions, latestClick: browserLatestClick } = useBrowserSessionActions({
+  const { actions: browserActions, latestClick: browserLatestClick, logSeq: browserLogSeq } = useBrowserSessionActions({
     enabled:
       isOpen &&
       !browserDataClearInFlight &&
@@ -1083,6 +1137,21 @@ export function BrowserSessionModal({
     // Only the agent writes the log: tail it every second only while it may.
     agentActive: spaceBusy || effectiveAgentControlOwner !== null,
   });
+  // The caption of Octo's latest step shows only while Octo holds the
+  // browser, and only for steps of this hold: never a step an earlier turn
+  // left in the log, and never once the turn has ended. The floor is the
+  // newest step in the log before the hold, or, when this view first reads
+  // the log during the hold (it opened then), the newest step it found.
+  const agentActionFloorRef = useRef<number | null>(null);
+  if (!effectiveAgentControlOwner || agentActionFloorRef.current === null) {
+    agentActionFloorRef.current = browserLogSeq ?? null;
+  }
+  const agentActionFloor = agentActionFloorRef.current;
+  // The ticker keys on its latest action, which filtering keeps as the same
+  // object, so a re-render does not re-arm it.
+  const agentTurnActions = effectiveAgentControlOwner && agentActionFloor !== null
+    ? browserActions.filter((action) => action.seq > agentActionFloor)
+    : [];
   const browserHumanInputOptions = {
     identityKey: `${humanInputIdentityKey ?? ""}:${browserSessionId}:${forcedRuntimeId ?? preferRuntimeId}:${sharedBrowserPageId}`,
     request: selectSharedBrowserHumanInput(
@@ -1203,7 +1272,7 @@ export function BrowserSessionModal({
     try {
       context.drawImage(surface, 0, 0, width, height);
       const url = snapshot.toDataURL("image/jpeg", 0.78);
-      capturedFrameScopeRef.current = frameScope;
+      capturedFrameScopeRef.current = stillScopeRef.current;
       setFrozenFrameUrl(url);
     } catch {
       // A frozen frame is a visual optimization; transport fallback still works
@@ -2164,6 +2233,7 @@ export function BrowserSessionModal({
               endpoint: connection.endpoint,
               token: connection.accessToken,
               originId: connection.originId,
+              viewOnly: rfbViewOnlyLane,
             });
 
     runtimeDebugLog("browser-session:resolved-ws-url", {
@@ -2195,7 +2265,11 @@ export function BrowserSessionModal({
       setStatus("connecting");
       setFailure(null);
     }
-    setResolvedViewerUrl({ kind: activeSharedBrowserViewerKind, url });
+    setResolvedViewerUrl({
+      kind: activeSharedBrowserViewerKind,
+      url,
+      viewOnly: activeSharedBrowserViewerKind === "rfb" && rfbViewOnlyLane,
+    });
     setBrowserInputWsUrl(inputUrl);
 
     if (activeSharedBrowserViewerKind === "webrtc") {
@@ -2223,6 +2297,7 @@ export function BrowserSessionModal({
     browserDataClearInFlight,
     canControlBrowser,
     isOpen,
+    rfbViewOnlyLane,
     sharedBrowserConnectionPageId,
   ]);
 
@@ -2656,7 +2731,7 @@ export function BrowserSessionModal({
       return;
     }
 
-    if (!humanInputEnabled) {
+    if (!humanInputEnabled && !rfbViewOnlyLane) {
       return;
     }
 
@@ -2676,7 +2751,7 @@ export function BrowserSessionModal({
 
     void (async () => {
       try {
-        const mod = await import("@novnc/novnc/lib/rfb");
+        const mod = await loadBrowserRfbModule();
         if (cancelled) {
           return;
         }
@@ -2708,7 +2783,9 @@ export function BrowserSessionModal({
         if (!scaledResizeInstalled && rfbRenderScale > 1) {
           throw new Error("Unable to initialize the HiDPI Shared Browser viewer.");
         }
-        applyBrowserViewportMode(rfb, viewportMode, sharedBrowserViewportOnlyRef.current);
+        // A viewer never resizes the screen the driver uses: the view-only
+        // lane scales the picture to fit instead.
+        applyBrowserViewportMode(rfb, viewportMode, sharedBrowserViewportOnlyRef.current && !rfbViewOnlyLane);
         const initialRect = container.getBoundingClientRect();
         const initialFramebuffer = resolveBrowserRfbFramebufferSize({
           logicalWidth: initialRect.width,
@@ -2832,6 +2909,7 @@ export function BrowserSessionModal({
     presentation,
     rfbMaxFramebufferPixels,
     rfbRenderScale,
+    rfbViewOnlyLane,
     scheduleReconnectAttempt,
     resolvedSharedBrowserViewerKind,
     connectAttempt,
@@ -2921,7 +2999,8 @@ export function BrowserSessionModal({
       }
       try {
         if (sharedBrowserViewportOnly) {
-          applyBrowserViewportMode(rfb, viewportMode, true);
+          // The view-only lane never resizes the screen the driver uses.
+          applyBrowserViewportMode(rfb, viewportMode, !rfbViewOnlyLaneRef.current);
         } else if (viewportMode === "fit") {
           // noVNC recalculates viewport scaling when this flag is toggled.
           rfb.scaleViewport = false;
@@ -2986,11 +3065,11 @@ export function BrowserSessionModal({
       return;
     }
     try {
-      applyBrowserViewportMode(rfb, viewportMode, sharedBrowserViewportOnly);
+      applyBrowserViewportMode(rfb, viewportMode, sharedBrowserViewportOnly && !rfbViewOnlyLane);
     } catch {
       // ignore viewport mode updates when session is reconnecting
     }
-  }, [isOpen, sharedBrowserViewportOnly, viewportMode]);
+  }, [isOpen, rfbViewOnlyLane, sharedBrowserViewportOnly, viewportMode]);
 
   const handleCdpScreencastConnected = useCallback(() => {
     if (browserDataClearInFlightRef.current) {
@@ -3135,13 +3214,32 @@ export function BrowserSessionModal({
     [fail, fallBackFromViewer],
   );
 
+  // While Octo drives, the stage shows the page it is on: the live picture
+  // (a viewer that may watch, such as RFB's view-only lane), else a still
+  // of that same page, else one plain line saying where Octo is. Never an
+  // empty black stage.
+  const agentPictureShown = Boolean(frozenFrameUrl) ||
+    (activeSharedBrowserViewerKind !== null && displayStatus === "connected");
+  const agentPage = effectiveAgentControlOwner
+    ? agentReadingPages.find((page) => page.id === sharedBrowserPageId) ?? agentReadingPages[0] ?? null
+    : null;
+  const agentWhereabouts = effectiveAgentControlOwner && viewLive && !agentPictureShown
+    ? agentPage
+      ? `${effectiveAgentControlOwner.displayName} is on ${browserReadingHost(agentPage)}`
+      : `${effectiveAgentControlOwner.displayName} is using the browser`
+    : null;
   // Around a live page the stage follows the theme like the chrome above it
   // and the composer below: black under a page in light mode read as dark
   // chrome on a phone, where the page leaves bands above and below it.
   const viewportSurfaceClass =
-    viewLive
+    viewLive && !agentWhereabouts
       ? BROWSER_LIVE_STAGE_CLASS
       : "bg-slate-100 dark:bg-slate-950";
+  // The row of pages Octo reads, with its one Take over, above the stage.
+  const readingRowShown = !shouldCollapseDocked && fillContainer && sharedBrowserChrome !== null &&
+    viewLive && effectiveAgentControlOwner !== null && agentReadingPages.length > 0;
+  const readingRowCanTakeOver = browserHumanInputOptions.canTakeOver &&
+    (!browserHumanInputState.active || browserHumanInputState.busy === "takeover");
   const recoveryRuntimeLimit = error && limitReached ? {
     summary: runtimeSlotSummary,
     blockerProjectCopy,
@@ -3417,12 +3515,11 @@ export function BrowserSessionModal({
         />
       ) : null}
 
-      {!shouldCollapseDocked && fillContainer && sharedBrowserChrome && viewLive && effectiveAgentControlOwner ? (
+      {readingRowShown && effectiveAgentControlOwner ? (
         <BrowserReadingRow
           pages={agentReadingPages}
           agentName={effectiveAgentControlOwner.displayName}
-          canTakeOver={browserHumanInputOptions.canTakeOver &&
-            (!browserHumanInputState.active || browserHumanInputState.busy === "takeover")}
+          canTakeOver={readingRowCanTakeOver}
           takingOver={browserHumanInputState.busy === "takeover"}
           // The toolbar's take-over controls already say why a take-over failed.
           error={humanInputIdentityKey ? null : browserHumanInputState.error}
@@ -3491,6 +3588,15 @@ export function BrowserSessionModal({
           data-shared-browser-viewer={activeSharedBrowserViewerKind ?? "unsupported"}
           data-human-input-enabled={humanInputEnabled ? "true" : "false"}
         >
+          {!shouldCollapseDocked && agentWhereabouts ? (
+            <div
+              className="absolute inset-0 flex items-center justify-center p-4 text-center"
+              data-testid="browser-session-agent-whereabouts"
+              role="status"
+            >
+              <Text variant="body" tone="muted">{agentWhereabouts}</Text>
+            </div>
+          ) : null}
           {frozenFrameUrl ? (
             <img
               alt=""
@@ -3564,7 +3670,10 @@ export function BrowserSessionModal({
                   data-testid={remoteController.kind === "agent" ? "shared-browser-agent-control-overlay" : "shared-browser-participant-control-overlay"}
                 >
                   <RemoteControlSurface controller={remoteController.displayName} working={!browserHumanInputState.active}
-                    onTakeOver={browserHumanInputOptions.canTakeOver ? browserHumanInputState.requestTakeOver : undefined} />
+                    // One Take over: the reading row's, when it shows one.
+                    onTakeOver={browserHumanInputOptions.canTakeOver &&
+                      !(remoteController.kind === "agent" && readingRowShown && readingRowCanTakeOver)
+                      ? browserHumanInputState.requestTakeOver : undefined} />
                 </div>
               ) : null}
               <BrowserCursorOverlay
@@ -3578,7 +3687,7 @@ export function BrowserSessionModal({
                 participants={collaboration.client.state?.participants ?? []}
                 selfParticipantId={collaboration.client.participantId}
               />
-              <ActionTicker actions={browserActions} />
+              {effectiveAgentControlOwner ? <ActionTicker actions={agentTurnActions} /> : null}
               <RemoteBrowserMobileKeyboard
                 enabled={
                   humanInputEnabled && activeSharedBrowserViewerKind !== "rfb"

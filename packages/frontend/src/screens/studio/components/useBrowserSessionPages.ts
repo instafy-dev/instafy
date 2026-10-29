@@ -586,8 +586,9 @@ export function useBrowserSessionPages(params: {
     [browserSessionId, enabled, preferRuntimeId, projectId, refreshAfterMutation, scopeIsCurrent, scopeKey],
   );
 
-  // Keep tab: one of Octo's tabs stays open when its turn ends. Works while
-  // Octo has control, so it is not a page command.
+  // One of Octo's tabs stays open when its turn ends: Take over on that tab
+  // keeps it. Works while Octo has control, so it is not a page command, and
+  // it says nothing when it fails: the take-over goes on either way.
   const keepPage = useCallback(
     async (pageId: string): Promise<boolean> => {
       const trimmedPageId = pageId.trim();
@@ -595,28 +596,21 @@ export function useBrowserSessionPages(params: {
         return false;
       }
       const requestScope = scopeKey;
+      let kept = false;
       try {
-        const kept = await controllerClient.browserSessions.keepPage({
+        kept = await controllerClient.browserSessions.keepPage({
           projectId,
           browserSessionId,
           pageId: trimmedPageId,
           preferRuntimeId,
         });
-        if (scopeIsCurrent(requestScope)) {
-          await refreshAfterMutation().catch(() => false);
-        }
-        return kept;
-      } catch (error) {
-        if (scopeIsCurrent(requestScope)) {
-          setCommandState({
-            scopeKey: requestScope,
-            pending: null,
-            error: error instanceof Error ? error.message : "Keeping the tab failed.",
-          });
-          await refreshAfterMutation().catch(() => false);
-        }
-        return false;
+      } catch {
+        kept = false;
       }
+      if (scopeIsCurrent(requestScope)) {
+        void refreshAfterMutation().catch(() => false);
+      }
+      return kept;
     },
     [browserSessionId, enabled, preferRuntimeId, projectId, refreshAfterMutation, scopeIsCurrent, scopeKey],
   );

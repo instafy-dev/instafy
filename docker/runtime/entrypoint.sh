@@ -669,6 +669,9 @@ start_browser_session() {
   local x_lock_file="/tmp/.X${display_number}-lock"
   local x_socket_file="/tmp/.X11-unix/X${display_number}"
 
+  # -SendCutText=0: the display never sends text copied or selected in the
+  # browser to its viewers. Everyone who may watch the browser has an RFB
+  # lane (the view-only one too), and no Instafy viewer reads the clipboard.
   start_vnc_server() {
     build_model_safe_env \
       "${MODEL_SAFE_BASE_ENV_KEYS[@]}" \
@@ -681,6 +684,7 @@ start_browser_session() {
       -localhost \
       -SecurityTypes None \
       -AlwaysShared \
+      -SendCutText=0 \
       >/tmp/instafy/vnc.log 2>&1 &
 
     if command -v xdpyinfo >/dev/null 2>&1; then
@@ -1238,6 +1242,7 @@ start_browser_host() {
   build_model_safe_env \
     "${MODEL_SAFE_BASE_ENV_KEYS[@]}" \
     DISPLAY XAUTHORITY XDG_RUNTIME_DIR
+  # -SendCutText=0, as at boot: no viewer gets the browser's copied text.
   env -i "${MODEL_SAFE_ENV[@]}" Xtigervnc "${DISPLAY}" \
     -rfbport "${vnc_port}" \
     -geometry "${geometry}" \
@@ -1246,6 +1251,7 @@ start_browser_host() {
     -localhost \
     -SecurityTypes None \
     -AlwaysShared \
+    -SendCutText=0 \
     >"${state_dir}/vnc.log" 2>&1 9>&- &
   local display_pid=$!
   browser_host_track_child display "${display_pid}" required
