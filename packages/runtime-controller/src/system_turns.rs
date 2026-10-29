@@ -18,14 +18,16 @@
 //!   only what Octo asked.
 //!
 //! Each reserves its credit at dispatch like any other turn. A hand-back or an
-//! automatic retry costs what any turn costs only when it ends with Octo's
-//! reply; a team plan it writes is its reply once the plan goes out. A card's
-//! browser turn costs what any turn costs only when it did something in the
-//! browser beyond looking at the page it was given (it opened a page, clicked,
-//! typed): a refusal is a reply too, so a reply cannot be the test. One that
-//! does not get there gets its reserve and its daily prompt slot back, and its
-//! tokens are never charged, whether it finished, failed, was stopped,
-//! expired or had its plan refused.
+//! automatic retry costs what any turn costs when it ends with Octo's reply (a
+//! team plan it writes is its reply once the plan goes out), or when it left
+//! the person something without one, by the test for a failed turn below:
+//! otherwise it could do the work and then fail, or be stopped, for free. A
+//! card's browser turn costs what any turn costs only when it did something
+//! in the browser beyond looking at the page it was given (it opened a page,
+//! clicked, typed): a refusal is a reply too, so a reply cannot be the test.
+//! A turn of these kinds that is not charged gets its reserve and its daily
+//! prompt slot back, and its tokens are never charged, whether it finished,
+//! failed, was stopped, expired or had its plan refused.
 //!
 //! Any turn that fails gets the same, as long as it left the person nothing:
 //! no reply or note, no step that worked (a command, a tool call or a file
@@ -584,8 +586,20 @@ pub(crate) async fn completion_refund_reason(
 ) -> Result<Option<&'static str>, (StatusCode, Json<ApiError>)> {
     Ok(match system_turn_of(job_payload) {
         Some(SystemTurn::BrowserHandBack | SystemTurn::AutomaticRetry) => {
-            (!completion_is_a_reply(outcome, summary, swallowed))
+            if completion_is_a_reply(outcome, summary, swallowed) {
+                None
+            } else {
+                turn_left_nothing(
+                    transaction,
+                    project_id,
+                    job_id,
+                    run_id,
+                    Some(artifacts),
+                    true,
+                )
+                .await?
                 .then_some(SYSTEM_TURN_WITHOUT_REPLY_REFUND_REASON)
+            }
         }
         Some(SystemTurn::BrowserCard) => turn_left_nothing(
             transaction,
@@ -615,9 +629,10 @@ pub(crate) async fn completion_refund_reason(
 /// back when it ended without what it is charged for, and without a
 /// completion: it was stopped, expired, had its plan refused or was covered
 /// by a teammate's answer. A hand-back or an automatic retry then never ended
-/// with a reply; a card's browser turn is charged when it did something in
-/// the browser beyond looking. A turn someone sent, or one that did not run
-/// on Instafy AI, is left alone. See [`give_back_reserve`].
+/// with a reply, and costs nothing when it left the person nothing else
+/// either; a card's browser turn is charged when it did something in the
+/// browser beyond looking. A turn someone sent, or one that did not run on
+/// Instafy AI, is left alone. See [`give_back_reserve`].
 pub(crate) async fn give_back_reserve_without_reply(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
@@ -630,6 +645,9 @@ pub(crate) async fn give_back_reserve_without_reply(
     let reason = match system_turn_of(job_payload) {
         None => return Ok(None),
         Some(SystemTurn::BrowserHandBack | SystemTurn::AutomaticRetry) => {
+            if !turn_left_nothing(transaction, project_id, job_id, run_id, None, true).await? {
+                return Ok(None);
+            }
             SYSTEM_TURN_WITHOUT_REPLY_REFUND_REASON
         }
         Some(SystemTurn::BrowserCard) => {

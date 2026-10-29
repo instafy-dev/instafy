@@ -455,8 +455,9 @@ pub(crate) async fn refund_managed_ai_reserve_for_expired_job(
     refund_reason: &str,
 ) -> AnyResult<Option<Uuid>> {
     // A turn Instafy started by itself that ends here never ended with a
-    // reply, so it costs nothing, even after a runtime held it
-    // (crate::system_turns).
+    // reply, so it follows its own rule, even after a runtime held it: it
+    // costs nothing unless it left the person something else, or did
+    // something in the browser (crate::system_turns).
     if crate::system_turns::system_turn_of(payload).is_some() {
         return crate::system_turns::give_back_reserve_without_reply(
             transaction,

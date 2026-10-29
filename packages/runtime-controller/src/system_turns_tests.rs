@@ -949,6 +949,166 @@ async fn an_expired_turn_instafy_started_gives_its_reserve_back() -> anyhow::Res
     fixture.cleanup().await
 }
 
+/// The stamp of a hand-back or an automatic retry, as dispatch puts it.
+fn system_turn_stamp(kind: &str) -> (&'static str, serde_json::Value) {
+    if kind == "hand-back" {
+        (
+            crate::browser_hand_back::HAND_BACK_KEY,
+            json!({ "version": 1, "browserJobId": Uuid::new_v4() }),
+        )
+    } else {
+        (
+            AUTOMATIC_RETRY_KEY,
+            json!({ "version": 1, "failedRunId": Uuid::new_v4() }),
+        )
+    }
+}
+
+/// A hand-back or an automatic retry that ends without a reply but left the
+/// person something (a command that worked, a note, files) costs what any
+/// turn costs. Otherwise one could do the work and then fail on purpose for
+/// free; and since the failed turn an automatic retry repeats now costs
+/// nothing when it left nothing, the whole request would be free.
+#[tokio::test]
+async fn a_turn_instafy_started_that_left_something_costs_its_tokens_without_a_reply(
+) -> anyhow::Result<()> {
+    for (kind, left, outcome) in [
+        ("retry", "command", "failed"),
+        ("retry", "note", "failed"),
+        ("hand-back", "files", "failed"),
+        ("hand-back", "command", "succeeded"),
+    ] {
+        let Some(fixture) =
+            seed_reserved_managed_ai_prompt(&format!("system-turn-left-{kind}-{left}")).await?
+        else {
+            eprintln!("skipping system turn billing test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let (key, record) = system_turn_stamp(kind);
+        stamp(&fixture, key, record).await?;
+        let mut artifacts = vec![run_log_with_usage()];
+        match left {
+            "command" => {
+                step(
+                    &fixture,
+                    "command_execution",
+                    command("python3 build_the_page.py"),
+                    "completed",
+                )
+                .await?
+            }
+            "note" => note(&fixture, "Here is the whole comparison: …").await?,
+            _ => artifacts.push(json!({
+                "kind": "apply/files",
+                "files": [{ "path": "sites/hello/index.html", "changeType": "created" }],
+            })),
+        }
+        let status = complete(
+            &fixture,
+            json!({
+                "job_id": fixture.job_id,
+                "outcome": outcome,
+                "summary": if outcome == "succeeded" { json!("  ") } else { json!(null) },
+                "error_message": "Codex completed without returning a final assistant message.",
+                "artifacts": artifacts,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{kind} {left}");
+        assert_charged_its_tokens(&fixture).await?;
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// Stopping a hand-back or an automatic retry, or losing its machine, after
+/// it did something keeps its reserve, as for a turn the person sent: the
+/// files and the output stay. Only one that left nothing gets it back.
+#[tokio::test]
+async fn a_turn_instafy_started_that_did_something_keeps_its_reserve_when_stopped_or_expired(
+) -> anyhow::Result<()> {
+    for (kind, ending) in [
+        ("retry", "stopped"),
+        ("hand-back", "stopped"),
+        ("hand-back", "expired"),
+    ] {
+        let Some(fixture) =
+            seed_reserved_managed_ai_prompt(&format!("system-turn-did-{kind}-{ending}")).await?
+        else {
+            eprintln!("skipping system turn billing test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let (key, record) = system_turn_stamp(kind);
+        stamp(&fixture, key, record).await?;
+        step(
+            &fixture,
+            "file_change",
+            json!({ "kind": "codex_file_change", "path": "sites/hello/index.html" }),
+            "completed",
+        )
+        .await?;
+        let mut connection = fixture.pool.get().await?;
+        let row = connection
+            .query_one(
+                "update agent_jobs set status = 'leased', lease_attempts = 1
+                  where id = $1
+              returning conversation_id, payload",
+                &[&fixture.job_id],
+            )
+            .await?;
+        let conversation_id: Uuid = row.get(0);
+        let payload: PgJson<serde_json::Value> = row.get(1);
+        let mut transaction = connection.transaction().await?;
+        let refunded = if ending == "stopped" {
+            crate::conversations::cancel_jobs_with_notice(
+                &fixture.config,
+                &transaction,
+                &fixture.project_id,
+                &conversation_id,
+                None,
+                &[(fixture.job_id, Some(fixture.run_id))],
+                "Stopped",
+                None,
+            )
+            .await
+            .map_err(|error| controller_error("stop", error))?
+            .refunded_org_ids
+        } else {
+            crate::runtime::refund_managed_ai_reserve_for_expired_job(
+                &mut transaction,
+                &fixture.project_id,
+                &fixture.job_id,
+                Some(fixture.run_id),
+                1,
+                &payload.0,
+                "runtime_not_ready",
+            )
+            .await?
+            .into_iter()
+            .collect()
+        };
+        transaction.commit().await?;
+        drop(connection);
+        assert!(refunded.is_empty(), "{kind} {ending}: {refunded:?}");
+        assert!(
+            !reasons(&ledger_rows(&fixture.pool, &fixture.project_id).await?)
+                .iter()
+                .any(|(reason, _)| *reason == "managed_ai_refund"),
+            "{kind} {ending} keeps its reserve"
+        );
+        assert_eq!(
+            credit_balance(&fixture.pool, &fixture.org_id).await?,
+            fixture.reserved_balance
+        );
+        assert_eq!(
+            daily_prompts_used(&fixture.pool, &fixture.owner_user_id).await?,
+            1
+        );
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
 /// What the failed turn was asked.
 const FAILED_PROMPT: &str = "Compare the three latest robot vacuums.";
 

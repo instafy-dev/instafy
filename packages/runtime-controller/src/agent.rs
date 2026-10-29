@@ -3609,8 +3609,9 @@ pub(crate) async fn agent_complete(
 
     // Some turns cost nothing (crate::system_turns): a turn Instafy started by
     // itself (a hand-back, an automatic retry) that does not end with Octo's
-    // reply, a card's browser turn that did nothing in the browser beyond
-    // looking, and a failed turn that left the person nothing. Such a turn
+    // reply and left nothing else, a card's browser turn that did nothing in
+    // the browser beyond looking, and a failed turn that left the person
+    // nothing. Such a turn
     // gets its reserve back, and its tokens are not billed. A decline is no
     // reply only where it posts nothing, as it does below.
     let swallowed = silent_completion

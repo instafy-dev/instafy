@@ -2117,7 +2117,8 @@ pub(crate) async fn cancel_jobs_and_runs(
     }
 
     // A turn Instafy started by itself that is stopped never ends with a
-    // reply, so it costs nothing (crate::system_turns).
+    // reply, so it costs nothing unless it left the person something else or
+    // did something in the browser (crate::system_turns).
     let mut refunded_org_ids = Vec::new();
     for row in &canceled_rows {
         let payload = row.get::<_, PgJson<JsonValue>>("payload").0;

@@ -71,7 +71,8 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   a rate-limited resend reads "Trying again in 20 s" with Cancel. Only a dropped reply and a short
   rate limit are sent again by themselves: a turn that did not make its changes already had the
   runtime's second try inside it, so its "Try again" is the person's to press, since a resend they
-  ask for is a turn they pay for. Instafy's own resend costs nothing unless it ends with a reply
+  ask for is a turn they pay for. Instafy's own resend costs nothing unless it ends with a reply or
+  leaves the person something else
   ([Credits and Billing](Credits-Billing.md#turns-instafy-starts-by-itself)), and a failed turn
   that left the person nothing costs nothing either
   ([Failed turns](Credits-Billing.md#failed-turns)). A hand-back is never

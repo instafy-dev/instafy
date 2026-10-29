@@ -360,7 +360,11 @@ Each kind reserves its credit at dispatch like any other. A hand-back or an auto
 charged when it ends with a reply (it succeeded and posted something that is not empty), and its
 usage is then reconciled like any turn's. `NO_RESPONSE` is no reply only where the controller
 swallows it and posts nothing, as for an evaluation turn in a group chat; any other turn posts it
-as its message, so it is a reply. A team plan it writes is its reply once the plan goes out.
+as its message, so it is a reply. A team plan it writes is its reply once the plan goes out. One
+that ends without a reply is charged all the same when it left the person something, by the test
+in "Failed turns" above: a note, a step that worked or a file written. Otherwise it could do the
+work and then fail, or be stopped, for free; and since the failed turn an automatic retry repeats
+costs nothing when it left nothing, the whole request would be free.
 
 A card's browser turn is charged when it did something in the browser beyond looking at the page
 it was given: it opened a page or a tab, clicked, typed, pressed a key or scrolled, or ran any
@@ -368,10 +372,10 @@ other step that worked. Looking at the tabs, the browser's state or the page doe
 neither does its reply: a refusal is a reply too, as when the turn finds the browser on a page that
 has nothing to do with its task and stops.
 
-A turn of any of these kinds that is not charged (it fails, is stopped, expires, ends without a
-reply or has its plan refused, or a card's browser turn did nothing in the browser, including one
-that a stop of its machine failed) gets its
-reserve and its daily prompt slot back (refund reason `system_turn_without_reply`, or
+A turn of any of these kinds that is not charged (a hand-back or an automatic retry that left
+nothing and fails, is stopped, expires, ends without a reply or has its plan refused, or a card's
+browser turn that did nothing in the browser, including one that a stop of its machine failed)
+gets its reserve and its daily prompt slot back (refund reason `system_turn_without_reply`, or
 `browser_card_without_page` for a card's browser turn), and its tokens are not charged, even when
 a runtime already ran it; the runtime's later receipt for a refused plan bills nothing either. The
 turn it continues or retries follows the rules for a turn the person sent ("Failed turns" above).
