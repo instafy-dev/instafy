@@ -5,11 +5,12 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CreditsPanel } from "../CreditsPanel";
 
+type LedgerRow = { delta: number; reason: string; metadata: Record<string, unknown> | null; createdAt: string };
 const mocks = vi.hoisted(() => ({ checkout: vi.fn(), portal: vi.fn(), planChange: vi.fn(), showStatus: vi.fn(),
-  billing: { creditBalance: 1000, creditLimit: 2000, subscription: null } }));
+  billing: { creditBalance: 1000, creditLimit: 2000, subscription: null }, ledger: [] as LedgerRow[] }));
 vi.mock("../../../../credits/useCredits", () => ({ CREDITS_UPDATED_EVENT: "credits-updated", useCredits: () => ({
   billing: mocks.billing, controllerEnabled: false,
-  hasLoaded: true, lastError: null, ledger: [], ledgerError: null, refresh: async () => {},
+  hasLoaded: true, lastError: null, ledger: mocks.ledger, ledgerError: null, refresh: async () => {},
 }) }));
 vi.mock("../../../../credits/creditService", () => ({ fetchCreditPolicy: vi.fn() }));
 vi.mock("../../../../credits/checkoutService", () => ({ requestCheckoutSession: mocks.checkout,
@@ -25,6 +26,7 @@ describe("Credits display choices", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     mocks.billing = { creditBalance: 1000, creditLimit: 2000, subscription: null };
+    mocks.ledger = [];
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
   });
   afterEach(async () => {
@@ -62,13 +64,57 @@ describe("Credits display choices", () => {
     expect(row?.textContent).not.toContain("/");
     expect(row?.textContent).not.toContain("800");
     const refill = container.querySelector('[data-testid="credits-starter-budget"]');
-    expect(refill?.textContent).toBe("Refills to 800 credits every day at 00:00 UTC");
+    expect(refill?.textContent).toBe("Tops back up to 800 credits every day at 00:00 UTC");
     // The refill names the team's own limit, which the payment checks read.
     expect(container.querySelector('[data-testid="credits-limit"]')?.textContent).toBe("800");
     expect(container.textContent).not.toMatch(/resets to|soft cap|managed AI/i);
 
     await act(async () => radio("credits-amount-view-usd").click());
     expect(row?.textContent).toBe("$0.90");
-    expect(refill?.textContent).toBe("Refills to $0.80 every day at 00:00 UTC");
+    expect(refill?.textContent).toBe("Tops back up to $0.80 every day at 00:00 UTC");
+  });
+
+  // Local drives 2 and 3: "Refills to 800 credits every day" read as 800 added
+  // each day, next to daily refills of +200. The daily refill adds what tops a
+  // balance under the team's limit back up to it (credits.rs
+  // attempt_daily_refill), so the line and the ledger row both say "top up".
+  it("names the daily top-up the same way in the refill line and the activity log", async () => {
+    mocks.billing = { creditBalance: 800, creditLimit: 800, subscription: null };
+    mocks.ledger = [
+      { delta: -1, reason: "managed_ai_prompt", metadata: null, createdAt: "2026-10-29T09:00:00Z" },
+      { delta: 200, reason: "auto_refill_daily", metadata: { creditLimit: 800, preRefillBalance: 600 }, createdAt: "2026-10-29T00:01:00Z" },
+    ];
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    expect(container.querySelector('[data-testid="credits-starter-budget"]')?.textContent).toMatch(/^Tops back up to 800 /);
+    const rows = [...container.querySelectorAll('[data-testid="credit-ledger-entry"]')];
+    expect(rows[1]?.textContent).toContain("Daily top-up");
+    expect(rows[1]?.textContent).toContain("+200 credits");
+    expect(container.textContent).not.toMatch(/refill/i);
+  });
+
+  // Local drive 3: Activity showed only the newest 8 rows, with no way to see more.
+  it("shows the newest 8 activity rows, then more of what it loaded on Show more", async () => {
+    mocks.ledger = Array.from({ length: 30 }, (_, index) => ({
+      delta: -1,
+      reason: "managed_ai_prompt",
+      metadata: null,
+      createdAt: new Date(Date.UTC(2026, 9, 29, 12, 59 - index)).toISOString(),
+    }));
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    const rows = () => container.querySelectorAll('[data-testid="credit-ledger-entry"]');
+    const showMore = () => container.querySelector<HTMLButtonElement>('[data-testid="credits-activity-show-more"]');
+    expect(rows()).toHaveLength(8);
+    expect(showMore()?.textContent).toBe("Show more");
+
+    await act(async () => showMore()!.click());
+    expect(rows()).toHaveLength(28);
+    // Focus moves to the first row it revealed.
+    expect(document.activeElement).toBe(rows()[8]);
+
+    await act(async () => showMore()!.click());
+    expect(rows()).toHaveLength(30);
+    expect(document.activeElement).toBe(rows()[28]);
+    // Everything loaded is shown: the button goes.
+    expect(showMore()).toBeNull();
   });
 });

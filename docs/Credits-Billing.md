@@ -441,5 +441,12 @@ Required envs (GitHub secrets/vars or local env):
 ## Frontend Flow
 - Credits panel calls `/credits/status` and `/credits/ledger` via the controller.
 - Credits panel now supports `Log` and `Graph` views over the same shared ledger data.
+- Under the balance, one line says what the daily refill does: "Tops back up to 800 credits every
+  day at 00:00 UTC", with the team's own `credit_limit`. That is what the ledger does: once per UTC
+  day, on the first status read or burn, a balance under the limit gets the difference as one
+  `auto_refill_daily` row, which the log calls "Daily top-up" (`attempt_daily_refill`). A balance at
+  or above the limit gets nothing that day.
+- The log shows the newest 8 rows; Show more reveals the rest of the 100 the panel loads, 20 at a
+  time, and moves focus to the first row it revealed.
 - Checkout/portal actions call `/billing/checkout` with `action=checkout|portal`.
 - Low-balance copy should direct users to upgrade/refill via the billing flow.
