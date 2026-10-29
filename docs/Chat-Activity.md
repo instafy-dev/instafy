@@ -3,7 +3,7 @@
 A turn in chat shows Octo's reply and one plain-language line that says what the turn did:
 
 ```
-Built the map, looked up 14 places, read 6 pages   Details ›
+Built the map, read 6 pages, looked up 14 places   Details ›
 ```
 
 While the turn runs, the line says "Starting…" until the turn's first step, then names the current step ("Looking up
@@ -22,11 +22,11 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | From the send until the turn's first step | `Starting…`, however long that takes: the workspace starting, the turn waiting behind another, the model reasoning before its first step, the runtime retrying its request, and a turn Instafy resent by itself all read the same |
 | Running a labelled step | its running label, for example `Looking up places…` (the newest running step wins; in a chain, its first command that is not quiet) |
 | Running an unlabelled command or tool | `Working…`; a file edit says `Editing files…` |
-| A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives |
+| A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives; a step still running from before it never names the line again |
 | The model is working with no step running, after the turn's first step | `Thinking…` (never its reasoning titles or notes), once there has been no step for 3 seconds; until then the line keeps the step before it |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
-| Done | what it made leads (the latest outcome), then up to two "what it did" groups, the biggest, in the order they happened: `Built the map, looked up 14 places, read 6 pages`; then, after ` · `, what the person answered to the turn's browser prompts. A turn that made nothing labelled but opened or stopped a preview leads with the later of the two: `Opened a preview, edited a file`, `Stopped the preview`, and a site stopped and opened again reads `Opened a preview`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
-| Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files` |
+| Done | what it made leads (the latest outcome), then the step that answered (the last "what it did" group) and the biggest other one (the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that made nothing labelled but opened or stopped a preview leads with the later of the two: `Opened a preview, edited a file`, `Stopped the preview`, and a site stopped and opened again reads `Opened a preview`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
+| Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files`; a look around the workspace (`pwd`, `ls`, `cat`, `rg --files`) is not counted, so a turn that only looked and answered, or only posted a card, has no line |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
 | Done, nothing of its own after an automatic retry | `Took two tries`, so Details opens on the first try |
 | Stopped by the person | `Stopped · looked up 9 places`, or `Stopped` |
@@ -39,7 +39,8 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   answered. The typing row before the turn's own line uses the same rule and says `Starting…`
   until then (a run held for an approval, and a long context rewrite, say so instead), and a
   screen reader hears the label it shows, never one it holds back. Its runtime-busy notice, which
-  asks the person to act, shows and goes at once.
+  asks the person to act, shows and goes at once. A failed turn's last running label holds its
+  moment too before the failure block takes its place.
 - A finished turn's line is worked out from the steps the controller stored with its reply
   (`turnSteps`: each step's type, status, exit code, files and checked `activity`, never its
   command or output; `chat_activity.rs`), so a reload reads the same words even when its page of
@@ -51,7 +52,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   is pressed. Opening Details never moves the line or changes the turn's chrome.
 - A turn reads its outcome once. A failed turn has no activity line and no "Run failed" beside
   its author: its failure block is its one line, and that block's Details ("Details ›", then
-  "Hide details", with `aria-controls`) lists the error text and then the steps. Only a failed
+  "Hide details", with `aria-controls`) lists the error text and then the steps. The error text
+  is left out when it is the block's own sentence, and with nothing else to show there is no
+  Details. Only a failed
   turn with nothing to show below keeps the "Run failed" marker; "Run needs attention" stays in
   the header.
 - Every failed turn shows the same failure block (`RunFailureMessageBody`): one plain sentence,
@@ -96,7 +99,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   A row's label comes from its first command that is
   not quiet, so `uw geocode Baixa; uw stay …` reads "Found places to stay". A finished row reads
   in the past tense ("Opened a preview"), a running one as it runs, and a failed one as what it
-  tried ("Tried checking the map"), never as what it would have done. A row with no label reads
+  tried ("Tried checking the map"), never as what it would have done. A step still running when
+  its turn ended reads as what it did not finish ("Didn't finish finding places to stay"), with no
+  spinner and no tick. A row with no label reads
   "Ran a command" ("Running a command" while it runs; "Used a tool" for a tool), never a guess at what it did: the command
   itself is only its second line. It shows the newest 60 rows, with "Show earlier steps" above
   them; pressing that moves focus to the first row it reveals.
@@ -138,8 +143,14 @@ from trusted data only, in this order:
    ("used the browser") and other tool calls ("used a tool") have fixed labels too, as do the
    runtime's own statuses: saving the turn's changes and retrying a request. A Shared Browser
    step names its site (see [Browser steps](#browser-steps)).
-4. **Anything else gets no label.** Studio counts those steps instead ("Ran 3 commands"). So does a
-   command asked for its own help (`uw cite --help`): it only prints how to use it.
+4. **A look around the workspace** is marked as one (`builtin/plumbing`, quiet, in an unlabelled
+   command's words): a command made only of `pwd`, `ls`, `cat`, `head`, `tail`, `wc`, `rg`,
+   `grep`, `find`, `cd`, `echo`, `printf`, `true`, `test`, `[`, `sleep`, `which`, `stat`,
+   `realpath`, `dirname` and `basename`, or a command asked for its own help (`uw cite --help`).
+   Anything that writes a file (`echo hi > a.html`), deletes or runs something of its own
+   (`find -delete`, `find -exec`, `rg --pre`, a substitution) is not a look. Studio leaves looks
+   off the line.
+5. **Anything else gets no label.** Studio counts those steps instead ("Ran 3 commands").
 
 A label is never built from command output, page text, a page title or text the model wrote. The
 only values that fill one are a count (`{n}`) and, for a browser step, a host name the runtime
@@ -150,7 +161,8 @@ free text written after reading pages, so they stay in Details.
 
 `runtime-agent` reads only a command's argv (`command_argv`), or its command line when there is no
 argv. A `bash -lc '<script>'` script is parsed with tree-sitter-bash, the parser Codex's own command
-checks use. A script over 16 KiB, or one that does not parse cleanly, gets no label.
+checks use. A script over 16 KiB, or one that does not parse cleanly, gets no label (and is never
+a look).
 
 - The script is split into simple commands. `NAME=value`, `env`, `command`, `exec`, `time`,
   `nohup` and `timeout <duration>` in front of a program are skipped, and redirections are
@@ -180,11 +192,12 @@ Exit status reaches Studio through the step's own `status` and `exitCode`; a lab
   "count": 1, "also": [] }
 ```
 
-- `role` is `content` (what the turn did; the two biggest are named), `outcome` (what it made;
+- `role` is `content` (what the turn did; the last and the biggest other are named), `outcome` (what it made;
   the latest leads the line) or `quiet` (shown only while it runs and in Details; a quiet label's
   `done` is its row's past tense in Details).
 - `done` is one form for any count, or `one`, `other` (with `{n}`) and `some` (count unknown).
-- `when: "success"` counts the step only when it exits 0.
+- `when: "success"` counts the step only when it exits 0. Studio counts any step only once it
+  ended, so this is the runtime's word for older Studios.
 - Browser steps may also carry `host`, `pageKey` (16 hex characters, never the URL), `step` and
   `approval`.
 

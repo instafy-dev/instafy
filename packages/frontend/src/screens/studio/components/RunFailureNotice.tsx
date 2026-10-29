@@ -172,6 +172,12 @@ export function useRunFailureAutoRetryActive(
  * collapsed behind the Details toggle. The stored message keeps the raw text.
  * A failed turn has this one Details: it also lists the turn's steps.
  */
+/** The same sentence, whatever its spacing: Details never repeats the block's own words. */
+function sameSentence(a: string, b: string): boolean {
+  const words = (text: string) => text.replace(/\s+/gu, " ").trim();
+  return words(a) === words(b);
+}
+
 export function RunFailureMessageBody({
   message,
   presentation,
@@ -217,6 +223,10 @@ export function RunFailureMessageBody({
   // "Try again" keeps its pending spinner until the request settles, then
   // reads "Retried".
   const quiet = autoRetrying || scheduledAutoRetry !== null;
+  // Details opens what the sentence above it leaves out: the raw text, unless
+  // it is that same sentence, and the turn's steps.
+  const detailsText = sameSentence(presentation.rawText, presentation.friendlyText) ? null : presentation.rawText;
+  const hasDetails = Boolean(detailsText?.trim()) || Boolean(steps);
   const showManualControls = retryContext !== null && !quiet && !needsAi && !usageLimit;
   const showRetry = showManualControls && (retryPending || !superseded);
   const showRetried = showManualControls && superseded && !retryPending;
@@ -381,35 +391,39 @@ export function RunFailureMessageBody({
                 Retried
               </span>
             ) : null}
-            <Button
-              ref={detailsButtonRef}
-              variant="text"
-              tone="muted"
-              size="xs"
-              radius="xl"
-              data-testid="run-failure-details-toggle"
-              onPress={() => setDetailsOpen((current) => !current)}
-              aria-expanded={detailsOpen}
-              aria-controls={detailsOpen ? detailsId : undefined}
-            >
-              <span className="inline-flex items-center gap-0.5">
-                {detailsOpen ? "Hide details" : "Details"}
-                {detailsOpen ? (
-                  <NavArrowDown aria-hidden="true" className="h-3 w-3" />
-                ) : (
-                  <NavArrowRight aria-hidden="true" className="h-3 w-3" />
-                )}
-              </span>
-            </Button>
-          </div>
-          {detailsOpen ? (
-            <div id={detailsId} className="min-w-0 space-y-1.5">
-              <div
-                data-testid="run-failure-details"
-                className="whitespace-pre-wrap break-words text-xs text-slate-500 dark:text-slate-400"
+            {hasDetails ? (
+              <Button
+                ref={detailsButtonRef}
+                variant="text"
+                tone="muted"
+                size="xs"
+                radius="xl"
+                data-testid="run-failure-details-toggle"
+                onPress={() => setDetailsOpen((current) => !current)}
+                aria-expanded={detailsOpen}
+                aria-controls={detailsOpen ? detailsId : undefined}
               >
-                {presentation.rawText}
-              </div>
+                <span className="inline-flex items-center gap-0.5">
+                  {detailsOpen ? "Hide details" : "Details"}
+                  {detailsOpen ? (
+                    <NavArrowDown aria-hidden="true" className="h-3 w-3" />
+                  ) : (
+                    <NavArrowRight aria-hidden="true" className="h-3 w-3" />
+                  )}
+                </span>
+              </Button>
+            ) : null}
+          </div>
+          {detailsOpen && hasDetails ? (
+            <div id={detailsId} className="min-w-0 space-y-1.5">
+              {detailsText ? (
+                <div
+                  data-testid="run-failure-details"
+                  className="whitespace-pre-wrap break-words text-xs text-slate-500 dark:text-slate-400"
+                >
+                  {detailsText}
+                </div>
+              ) : null}
               {steps ? <div className="min-w-0">{steps}</div> : null}
             </div>
           ) : null}

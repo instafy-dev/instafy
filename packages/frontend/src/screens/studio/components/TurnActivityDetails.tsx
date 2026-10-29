@@ -24,6 +24,11 @@ function StepStateGlyph({ state }: { state: StepState }) {
   if (state === "running") {
     return <Spinner aria-label="Running" tone="slate" size="xs" className="h-3 w-3 flex-none" />;
   }
+  // Its turn ended before it did: the label says so, and nothing spins or
+  // ticks. The empty slot keeps the row's output chevron in line.
+  if (state === "unfinished") {
+    return <span aria-hidden="true" className="h-3.5 w-3.5 flex-none" />;
+  }
   if (state === "failed") {
     return (
       <Xmark role="img" aria-label="Failed" className="h-3.5 w-3.5 flex-none text-rose-500 dark:text-rose-300" />

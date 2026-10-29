@@ -123,6 +123,48 @@ describe("RunFailureMessageBody", () => {
     expect(details?.className.split(/\s+/)).toContain("bg-transparent");
   });
 
+  // A local test: a browser turn's failure block read "Octo couldn't open a page
+  // in the browser, so this turn stopped.", and its Details opened that same
+  // sentence again above the steps.
+  it("never repeats its own sentence in Details", async () => {
+    const SENTENCE = "Octo couldn't open a page in the browser, so this turn stopped.";
+    const plain = createMessage({ ...FAILURE, id: "plain", content: SENTENCE });
+    expect(presentationFor(plain).friendlyText).toBe(SENTENCE);
+    const steps = <div data-testid="turn-steps">Tried opening roborock.com</div>;
+    await act(async () => {
+      root.render(
+        <RunFailureRetryProvider value={contextValue()}>
+          <RunFailureMessageBody message={plain} presentation={presentationFor(plain)} steps={steps} />
+        </RunFailureRetryProvider>,
+      );
+    });
+    await act(async () => {
+      query("run-failure-details-toggle")?.click();
+    });
+    expect(query("run-failure-details")).toBeNull();
+    expect(container.querySelector('[data-testid="turn-steps"]')).not.toBeNull();
+    expect(container.textContent?.split(SENTENCE)).toHaveLength(2);
+
+    const remount = async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      root = createRoot(container);
+    };
+    // With nothing else to show, there is no Details to open.
+    await remount();
+    await render(contextValue(), plain);
+    expect(query("run-failure-details-toggle")).toBeNull();
+
+    // A raw text that says more than the sentence is still there.
+    await remount();
+    await render(contextValue());
+    await act(async () => {
+      query("run-failure-details-toggle")?.click();
+    });
+    expect(query("run-failure-details")?.textContent).toBe(PROVIDER_RATE_LIMITED);
+  });
+
   it("gives Connect AI the same hit area on a missing credential", async () => {
     const onConnectAi = vi.fn();
     const needsAi = createMessage({ ...FAILURE, content: "credential not found" });
