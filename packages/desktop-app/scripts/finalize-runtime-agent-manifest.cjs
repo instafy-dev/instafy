@@ -4,6 +4,7 @@ const path = require("node:path");
 const { describeSkillPacks } = require("./skill-pack-tree.cjs");
 
 const MANIFEST_FILENAME = "runtime-agent-manifest.json";
+const STAGED_SKILL_PACKS = path.resolve(__dirname, "..", "build", "runtime-agent", "skill-packs");
 const SOURCE_SHA_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 
 function packagedPlatform(electronPlatformName) {
@@ -72,6 +73,37 @@ function requireStagedManifest(manifestPath, expected) {
   return manifest;
 }
 
+// electron-builder leaves some file names out of everything it copies, extraResources included
+// (.gitkeep, .gitignore, .npmignore and the like), so a pack holding one arrived without it and
+// failed its manifest. Copy back exactly the staged files missing from a packaged pack. A pack that
+// is missing as a whole is not restored, and a file that is present but different is left alone,
+// so both still fail the checks below.
+function restoreDroppedSkillPackFiles(stagedRoot, packagedRoot) {
+  if (!fs.existsSync(stagedRoot) || !fs.existsSync(packagedRoot)) return [];
+  const restored = [];
+  const walk = (packDir, rel) => {
+    for (const entry of fs.readdirSync(path.join(stagedRoot, packDir, rel), { withFileTypes: true })) {
+      const child = rel ? path.join(rel, entry.name) : entry.name;
+      if (entry.isSymbolicLink()) throw new Error(`Staged skill pack ${packDir} holds a link: ${child}`);
+      if (entry.isDirectory()) {
+        walk(packDir, child);
+      } else if (entry.isFile()) {
+        const source = path.join(stagedRoot, packDir, child);
+        const target = path.join(packagedRoot, packDir, child);
+        if (fs.existsSync(target)) continue;
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+        fs.chmodSync(target, fs.statSync(source).mode & 0o777);
+        restored.push(path.join(packDir, child));
+      }
+    }
+  };
+  for (const entry of fs.readdirSync(stagedRoot, { withFileTypes: true })) {
+    if (entry.isDirectory() && fs.existsSync(path.join(packagedRoot, entry.name))) walk(entry.name, "");
+  }
+  return restored;
+}
+
 // The packaged skill packs, each checked against its manifest, must be exactly the staged ones.
 function requirePackagedSkillPacks(directory, staged) {
   const packaged = describeSkillPacks(path.join(directory, "skill-packs"));
@@ -84,9 +116,13 @@ function requirePackagedSkillPacks(directory, staged) {
   return packaged;
 }
 
-function finalizeRuntimeAgentManifest(context) {
+function finalizeRuntimeAgentManifest(context, { stagedSkillPacksRoot = STAGED_SKILL_PACKS } = {}) {
   const bundle = resolvePackagedRuntimeBundle(context);
   const staged = requireStagedManifest(bundle.manifestPath, bundle);
+  const restored = restoreDroppedSkillPackFiles(stagedSkillPacksRoot, path.join(bundle.directory, "skill-packs"));
+  if (restored.length > 0) {
+    console.log(`[instafy-desktop] Restored skill pack files electron-builder left out: ${restored.join(", ")}`);
+  }
   const skillPacks = requirePackagedSkillPacks(bundle.directory, staged.skillPacks);
   const manifest = {
     schemaVersion: 3,
