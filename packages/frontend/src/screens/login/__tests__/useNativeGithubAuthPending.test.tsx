@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   claimNativeAuthCallback,
   forgetNativeAuthCallbackClaimsForTests,
+  isNativeAuthCallbackClaimed,
   NATIVE_AUTH_ERROR_EVENT,
   NATIVE_AUTH_ERROR_STORAGE_KEY,
   parseNativeAuthCallbackUrl,
@@ -77,6 +78,18 @@ vi.mock("../../../services/runtimeController/authTelemetry", () => ({
 }));
 
 import { useNativeGithubAuth } from "../useNativeGithubAuth";
+
+const failedExchange = { data: { session: null, user: null }, error: new Error("invalid flow state") };
+const signedInExchange = { data: { user: { email: "dev@example.com" } }, error: null };
+type ExchangeResult = typeof failedExchange | typeof signedInExchange;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
 
 // The hook reports status through the page's setters. A web redirect keeps its
 // provider pending until the page unloads; the native custom tab and the
@@ -650,6 +663,247 @@ describe("useNativeGithubAuth pending status", () => {
     await act(async () => listeners.appUrlOpen?.({ url: "instafy://auth?code=native-code" }));
 
     expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("native-code");
+  });
+
+  // Every sign-in the apps start is PKCE and returns a code, so a callback
+  // carrying session tokens was made by whoever opened the link.
+  describe("native callbacks that carry session tokens", () => {
+    it.each([
+      ["fragment", "instafy://auth#access_token=another-account&refresh_token=another-account&expires_in=3600&token_type=bearer"],
+      ["query", "instafy://auth?access_token=another-account&refresh_token=another-account"],
+    ])("ignores a token pair in the %s when no sign-in is pending, and leaves it unclaimed", async (_place, callback) => {
+      platform.native = true;
+      const listeners = installNativePlugins();
+      await mount();
+
+      await act(async () => listeners.appUrlOpen?.({ url: callback }));
+
+      expect(supabaseMock.setSession).not.toHaveBeenCalled();
+      expect(supabaseMock.exchangeCodeForSession).not.toHaveBeenCalled();
+      expect(setError).not.toHaveBeenCalled();
+      expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
+      expect(telemetry.post).not.toHaveBeenCalled();
+      expect(claimNativeAuthCallback(parseNativeAuthCallbackUrl(callback)!)).toBe(true);
+    });
+
+    it("leaves a native sign-in pending through a token pair, and still completes it with the code", async () => {
+      platform.native = true;
+      supabaseMock.exchangeCodeForSession.mockResolvedValue(signedInExchange);
+      const listeners = installNativePlugins();
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+
+      await act(async () =>
+        listeners.appUrlOpen?.({
+          url: "instafy://auth#access_token=another-account&refresh_token=another-account&expires_in=3600&token_type=bearer",
+        }),
+      );
+
+      expect(supabaseMock.setSession).not.toHaveBeenCalled();
+      expect(setError.mock.calls).toEqual([[null]]);
+      expect(telemetry.post.mock.calls.map(([event]) => event.kind)).toEqual(["auth.login.github.started"]);
+      expect(readPendingNativeAuthAttempt()).not.toBeNull();
+
+      await act(async () => listeners.appUrlOpen?.({ url: "instafy://auth?code=auth-code" }));
+
+      expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("auth-code");
+      expect(setError).toHaveBeenLastCalledWith(null);
+      expect(readPendingNativeAuthAttempt()).toBeNull();
+    });
+  });
+
+  // The shell hands a desktop callback over once: it parks it and sends it,
+  // and the listener drains the parked copy. One dropped while another is
+  // being exchanged would be lost, so it waits its turn instead.
+  describe("callbacks that arrive while another is being exchanged", () => {
+    const deliver = async (url: string) => {
+      platform.parkedDesktopCallback = url;
+      await act(async () => platform.desktopListener?.(url));
+    };
+
+    const startDesktopSignIn = async () => {
+      platform.desktop = true;
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+    };
+
+    it("exchanges a code that arrived during a failing exchange once that exchange settles", async () => {
+      await startDesktopSignIn();
+      const first = deferred<ExchangeResult>();
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValueOnce(signedInExchange);
+
+      await deliver("instafy://auth?code=older-tab");
+      await deliver("instafy://auth?code=newer-tab");
+      expect(platform.parkedDesktopCallback).toBeNull();
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["older-tab"]]);
+
+      await act(async () => first.resolve(failedExchange));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["older-tab"], ["newer-tab"]]);
+      expect(setError).toHaveBeenLastCalledWith(null);
+      expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
+      expect(readPendingNativeAuthAttempt()).toBeNull();
+    });
+
+    it("drops a code that waited behind an exchange that signed in", async () => {
+      await startDesktopSignIn();
+      const first = deferred<ExchangeResult>();
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValue(signedInExchange);
+
+      await deliver("instafy://auth?code=first");
+      await deliver("instafy://auth?code=second");
+      await act(async () => first.resolve(signedInExchange));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["first"]]);
+      expect(setError).toHaveBeenLastCalledWith(null);
+      expect(isNativeAuthCallbackClaimed(parseNativeAuthCallbackUrl("instafy://auth?code=second")!)).toBe(false);
+    });
+
+    it("exchanges a code once when the shell delivers it twice while another is exchanged", async () => {
+      await startDesktopSignIn();
+      const first = deferred<ExchangeResult>();
+      // Every exchange fails, so the sign-in stays pending and nothing but the
+      // repeat itself could stop a second exchange.
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValue(failedExchange);
+
+      await deliver("instafy://auth?code=first");
+      await deliver("instafy://auth?code=second");
+      await deliver("instafy://auth?code=second");
+      await act(async () => first.resolve(failedExchange));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["first"], ["second"]]);
+    });
+
+    it("exchanges a code once when it is delivered again during its own exchange", async () => {
+      await startDesktopSignIn();
+      const first = deferred<ExchangeResult>();
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValue(failedExchange);
+
+      await deliver("instafy://auth?code=first");
+      await deliver("instafy://auth?code=first");
+      await act(async () => first.resolve(failedExchange));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["first"]]);
+    });
+
+    it("keeps only the newest three callbacks waiting", async () => {
+      await startDesktopSignIn();
+      const first = deferred<ExchangeResult>();
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValue(failedExchange);
+
+      await deliver("instafy://auth?code=a");
+      for (const code of ["b", "c", "d", "e"]) {
+        await deliver(`instafy://auth?code=${code}`);
+      }
+      await act(async () => first.resolve(failedExchange));
+
+      // The person's own code is the one that arrives last, so the oldest
+      // waiting callback is the one that gives way.
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["a"], ["c"], ["d"], ["e"]]);
+      expect(isNativeAuthCallbackClaimed(parseNativeAuthCallbackUrl("instafy://auth?code=b")!)).toBe(false);
+    });
+
+    it("gives a repeated callback no place in line, so it cannot push another out", async () => {
+      await startDesktopSignIn();
+      const first = deferred<ExchangeResult>();
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValue(failedExchange);
+
+      await deliver("instafy://auth?code=a");
+      await deliver("instafy://auth?code=b");
+      // A repeat of the code being exchanged, then of one already waiting.
+      await deliver("instafy://auth?code=a");
+      await deliver("instafy://auth?code=c");
+      await deliver("instafy://auth?code=c");
+      await deliver("instafy://auth?code=d");
+      await act(async () => first.resolve(failedExchange));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["a"], ["b"], ["c"], ["d"]]);
+    });
+
+    it("drops waiting callbacks when the page goes away", async () => {
+      await startDesktopSignIn();
+      const first = deferred<ExchangeResult>();
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValue(signedInExchange);
+
+      await deliver("instafy://auth?code=a");
+      await deliver("instafy://auth?code=b");
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await act(async () => first.resolve(failedExchange));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["a"]]);
+    });
+
+    it("never keeps a token pair waiting, nor sets a session from one", async () => {
+      await startDesktopSignIn();
+      const first = deferred<ExchangeResult>();
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValue(failedExchange);
+      const tokenPair =
+        "instafy://auth#access_token=another-account&refresh_token=another-account&expires_in=3600&token_type=bearer";
+
+      await deliver("instafy://auth?code=a");
+      for (const code of ["b", "c", "d"]) {
+        await deliver(`instafy://auth?code=${code}`);
+      }
+      // With the line full, a token pair kept waiting would push "b" out.
+      await deliver(tokenPair);
+      await act(async () => first.resolve(failedExchange));
+
+      expect(supabaseMock.setSession).not.toHaveBeenCalled();
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["a"], ["b"], ["c"], ["d"]]);
+      expect(isNativeAuthCallbackClaimed(parseNativeAuthCallbackUrl(tokenPair)!)).toBe(false);
+    });
+
+    it("exchanges a live code that arrives while the one held for the page is exchanged", async () => {
+      await startDesktopSignIn();
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      const held = deferred<ExchangeResult>();
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => held.promise)
+        .mockResolvedValueOnce(signedInExchange);
+      platform.parkedDesktopCallback = "instafy://auth?code=held";
+
+      await mount();
+      await deliver("instafy://auth?code=live");
+      await act(async () => held.resolve(failedExchange));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["held"], ["live"]]);
+      expect(setError).toHaveBeenLastCalledWith(null);
+    });
+
+    it("still drops a native callback that arrives while a native exchange is in flight", async () => {
+      platform.native = true;
+      const listeners = installNativePlugins();
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+      const first = deferred<ExchangeResult>();
+      supabaseMock.exchangeCodeForSession
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValue(signedInExchange);
+
+      await act(async () => listeners.appUrlOpen?.({ url: "instafy://auth?code=a" }));
+      await act(async () => listeners.appUrlOpen?.({ url: "instafy://auth?code=b" }));
+      await act(async () => first.resolve(failedExchange));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["a"]]);
+    });
   });
 
   it("reports a failed start as an error and releases the button", async () => {
