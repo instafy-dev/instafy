@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   clearOwnedBrowserBookkeeping,
   fixedBrowserDirectoryIsOwned,
+  linuxProcessGroupHasLiveMembers,
   runtimeDiagnosticCollector,
   startStudioProvider,
 } from "./sharedStudioProvider.mjs";
@@ -38,6 +39,60 @@ test("Chromium readiness warnings are classified even when its launcher exits su
   collect(Buffer.from("no Chromium executable found token=never-retain\n"));
   assert.deepEqual(categories, ["chromium-cdp-ready", "chromium-cdp-not-ready", "chromium-executable-missing"]);
   assert.doesNotMatch(JSON.stringify(categories), /private|never-retain/);
+});
+
+function fakeProcfs(entries) {
+  const listings = [];
+  const reads = [];
+  return {
+    listings,
+    reads,
+    async readdir(directory, options) {
+      listings.push([directory, options]);
+      // A process exiting mid-scan is typed unknown, and Node's lstat of it
+      // then fails. This is the 2026-10-27 Public Build failure.
+      if (options?.withFileTypes) {
+        throw Object.assign(new Error("ENOENT: no such file or directory, lstat '/proc/8286'"), { code: "ENOENT" });
+      }
+      return [...entries.keys()];
+    },
+    async readFile(file, encoding) {
+      assert.equal(encoding, "utf8");
+      reads.push(file);
+      const entry = entries.get(file.match(/^\/proc\/([^/]+)\/stat$/)?.[1]);
+      if (entry.startsWith("E")) throw Object.assign(new Error(`${entry}: ${file}`), { code: entry });
+      return entry;
+    },
+  };
+}
+
+function procStat(pid, state, processGroup) {
+  return `${pid} (fake agent) ${[state, 1, processGroup, processGroup, ...Array(15).fill(0), 1000 + pid].join(" ")}\n`;
+}
+
+test("process-group cleanup lists /proc by name and skips processes that exit mid-scan", async () => {
+  const ownedGroup = 4242;
+  const entries = new Map([
+    ["self", "EACCES"],
+    ["0", "EACCES"],
+    ["007", "EACCES"],
+    ["8286", "ENOENT"],
+    ["8287", "ESRCH"],
+    ["8288", procStat(8288, "Z", ownedGroup)],
+    ["8289", procStat(8289, "S", ownedGroup + 1)],
+  ]);
+  const gone = fakeProcfs(entries);
+  assert.equal(await linuxProcessGroupHasLiveMembers(ownedGroup, gone), false);
+  assert.deepEqual(gone.listings, [["/proc", undefined]]);
+  assert.deepEqual(gone.reads, ["8286", "8287", "8288", "8289"].map(pid => `/proc/${pid}/stat`));
+
+  entries.set("8290", procStat(8290, "S", ownedGroup));
+  assert.equal(await linuxProcessGroupHasLiveMembers(ownedGroup, fakeProcfs(entries)), true);
+
+  // Anything other than a vanished process still fails cleanup closed.
+  await assert.rejects(linuxProcessGroupHasLiveMembers(ownedGroup, fakeProcfs(new Map([["8285", "EACCES"]]))), {
+    code: "EACCES",
+  });
 });
 
 async function fixture(t, { rootSuffix = "", ...options } = {}) {

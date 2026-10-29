@@ -555,13 +555,17 @@ async function waitForExit(runtime, timeoutMs) {
   }
 }
 
-async function linuxProcessGroupHasLiveMembers(processGroup) {
-  const entries = await readdir("/proc", { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !/^[1-9][0-9]*$/.test(entry.name)) continue;
+// List /proc by name only. With withFileTypes, Node lstats every entry whose
+// type procfs reports as unknown, which happens for a process that is exiting,
+// and one that is already gone rejects the whole listing. Numeric names are the
+// PID directories; a PID that exits before its stat is read is skipped below.
+export async function linuxProcessGroupHasLiveMembers(processGroup, procfs = { readdir, readFile }) {
+  const names = await procfs.readdir("/proc");
+  for (const name of names) {
+    if (!/^[1-9][0-9]*$/.test(name)) continue;
     try {
       const identity = parseLinuxProcessStat(
-        await readFile(`/proc/${entry.name}/stat`, "utf8"),
+        await procfs.readFile(`/proc/${name}/stat`, "utf8"),
         "owned runtime process",
       );
       if (identity.processGroup === processGroup && identity.state !== "Z") return true;
