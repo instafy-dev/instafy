@@ -1262,7 +1262,7 @@ export function CreditsPanel() {
                     tabIndex={takesFocus ? -1 : undefined}
                     className={
                       takesFocus
-                        ? "rounded-lg py-2.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:focus-visible:ring-primary-300/80"
+                        ? "py-2.5 focus:outline-none focus-visible:rounded-lg focus-visible:ring-2 focus-visible:ring-primary-400 dark:focus-visible:ring-primary-300/80"
                         : "py-2.5"
                     }
                     data-testid="credit-ledger-entry"

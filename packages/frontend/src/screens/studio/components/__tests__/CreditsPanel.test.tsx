@@ -90,6 +90,12 @@ describe("Credits display choices", () => {
     expect(rows[1]?.textContent).toContain("Daily top-up");
     expect(rows[1]?.textContent).toContain("+200 credits");
     expect(container.textContent).not.toMatch(/refill/i);
+
+    // The graph's key names the same rows: credits added, never "Refill".
+    await act(async () => radio("credits-activity-view-graph").click());
+    expect(container.querySelector('[data-testid="credit-activity-graph"]')).not.toBeNull();
+    expect(container.textContent).toContain("Added");
+    expect(container.textContent).not.toMatch(/refill/i);
   });
 
   // Local drive 3: Activity showed only the newest 8 rows, with no way to see more.
@@ -110,6 +116,10 @@ describe("Credits display choices", () => {
     expect(rows()).toHaveLength(28);
     // Focus moves to the first row it revealed.
     expect(document.activeElement).toBe(rows()[8]);
+    // That row rounds only while its focus ring shows: rounded for good, it
+    // would bend the ends of the divider under it.
+    expect(rows()[8]?.className.split(/\s+/)).not.toContain("rounded-lg");
+    expect(rows()[8]?.className).toContain("focus-visible:rounded-lg");
 
     await act(async () => showMore()!.click());
     expect(rows()).toHaveLength(30);

@@ -319,7 +319,8 @@ export function CreditActivityChart({
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: COLORS.refill }} />
-          Refill
+          {/* Every credit that came in: the daily top-up, a starting balance, a refund. */}
+          Added
         </span>
       </div>
 
