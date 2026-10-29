@@ -1,0 +1,19 @@
+html, body, #root { margin: 0; width: 100%; height: 100%; }
+body { background: var(--color-slate-50); color: var(--color-slate-800); }
+.dark body { background: var(--color-slate-950); color: var(--color-slate-100); }
+.browser-keyboard-review { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; }
+.browser-keyboard-review > header { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; font-size: 13px; flex: none; }
+.browser-keyboard-review > header span { opacity: .75; }
+.browser-keyboard-review > section { display: flex; position: relative; flex: 1; min-height: 0; min-width: 0; }
+.review-status-stage { align-items: center; justify-content: center; }
+.review-personal-stage { flex-direction: column; }
+.review-keyboard-stage { flex-direction: column; overflow: hidden; }
+.review-page { flex: 1; min-height: 0; width: 100%; height: 100%; padding: clamp(20px, 5vw, 48px); background: #f7f4ec; color: #383d35; font-family: system-ui, sans-serif; box-sizing: border-box; }
+.review-page-eyebrow { font-size: 11px; letter-spacing: .12em; color: #667661; }
+.review-page h1 { font-size: clamp(22px, 4vw, 32px); line-height: 1.2; margin: 16px 0; font-weight: 600; }
+.review-page p { font-size: 15px; line-height: 1.65; max-width: 38em; margin: 0 0 32px; }
+.review-page label { display: block; font-size: 13px; font-weight: 500; }
+.review-page-field { padding: 14px; margin-top: 8px; max-width: 32em; background: white; border: 1px solid #d9ddd4; border-radius: 8px; color: #6b7067; font-size: 14px; font-weight: 400; }
+.review-keyboard-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; flex: none; }
+.review-desktop-note { position: absolute; right: 16px; bottom: 16px; margin: 0; padding: 12px; max-width: calc(100% - 32px); box-sizing: border-box; font-size: 13px; background: #fff; color: #5f635c; border-radius: 8px; }
+@media (pointer: coarse) { .review-desktop-note { display: none; } }

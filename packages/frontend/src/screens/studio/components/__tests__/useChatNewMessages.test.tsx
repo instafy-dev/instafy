@@ -229,6 +229,55 @@ describe("new arrivals above the composer", () => {
     expect(action()).not.toBeNull();
   });
 
+  // A local test: back from the Browser view, "New messages ↓" sat for 40 s
+  // over a reply in a chat that fit on screen, and flashed for 1 to 2 s on
+  // every switch back. The chat restores its place a frame after it shows,
+  // and a chat that fits never scrolls.
+  it("clears once the chat has found its place at the newest message, with no scroll, and never shows before", async () => {
+    let ready = false;
+    await update({ enabled: false, isReadingReady: () => ready, arrivalMessages: [message(1), message(2)] });
+    metrics = { scrollTop: 0, scrollHeight: 200, clientHeight: 200 };
+    await update({ enabled: true });
+    // Still finding its place: whether the reply is out of view is not known.
+    expect(action()).toBeNull();
+    ready = true;
+    // The panel renders once its place is restored; nothing scrolls.
+    await render();
+    expect(action()).toBeNull();
+    // A newer arrival it sees at the bottom is no news either.
+    await update({ arrivalMessages: [message(1), message(2), message(3)] });
+    expect(action()).toBeNull();
+  });
+
+  // The chat finds its place a frame or two after it shows again, with no
+  // render of its own: a reply that came while it was hidden still gets its
+  // pill once that place turns out to be above the newest message.
+  it("shows once the chat has found its place above the newest message, with no render after", async () => {
+    let ready = false;
+    await update({ enabled: false, isReadingReady: () => ready, arrivalMessages: [message(1), message(2)] });
+    await update({ enabled: true });
+    expect(action()).toBeNull();
+    ready = true;
+    await act(async () => {
+      await new Promise((resolve) => window.requestAnimationFrame(() => resolve(null)));
+    });
+    expect(action()).not.toBeNull();
+  });
+
+  it("clears when a reply grows the content under a reader at the bottom", async () => {
+    await update({ arrivalMessages: [message(1), message(2)] });
+    expect(action()).not.toBeNull();
+    // The reader got to the newest message without a scroll event: the
+    // transcript's content changed under them.
+    metrics.scrollTop = 800;
+    await act(async () => {
+      options.scrollContainerRef.current!.appendChild(document.createElement("div"));
+      // Looked at once per frame.
+      await new Promise((resolve) => window.requestAnimationFrame(() => resolve(null)));
+    });
+    expect(action()).toBeNull();
+  });
+
   it("does not signal an arrival the reader already sees at the bottom", async () => {
     metrics.scrollTop = 800;
     await update({ arrivalMessages: [message(1), message(2)] });

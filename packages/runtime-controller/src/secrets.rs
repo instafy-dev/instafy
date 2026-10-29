@@ -1,5 +1,9 @@
 use std::str::FromStr;
 
+#[cfg(test)]
+#[path = "secrets_initialization_tests.rs"]
+mod initialization_tests;
+
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, patch, post};
@@ -178,8 +182,9 @@ fn normalize_secret_value(value: &str) -> Result<String, (StatusCode, Json<ApiEr
     Ok(trimmed.to_string())
 }
 
-async fn ensure_project_secrets_table(pool: &PgPool) -> anyhow::Result<()> {
-    let connection = pool.get().await?;
+async fn ensure_project_secrets_table(
+    connection: &impl tokio_postgres::GenericClient,
+) -> anyhow::Result<()> {
     connection
         .batch_execute(
             "
@@ -197,6 +202,11 @@ async fn ensure_project_secrets_table(pool: &PgPool) -> anyhow::Result<()> {
               updated_at timestamptz not null default now()
             );
 
+            -- Acquire the strongest relation lock before CREATE INDEX's weaker
+            -- lock, so concurrent readers can finish writing without an upgrade cycle.
+            alter table project_secrets enable row level security;
+            revoke all privileges on table project_secrets from anon, authenticated;
+
             create unique index if not exists project_secrets_unique
               on project_secrets (project_id, user_id, name)
               where revoked_at is null;
@@ -204,17 +214,15 @@ async fn ensure_project_secrets_table(pool: &PgPool) -> anyhow::Result<()> {
             create unique index if not exists project_secrets_unique_project
               on project_secrets (project_id, name)
               where revoked_at is null;
-
-            alter table project_secrets enable row level security;
-            revoke all privileges on table project_secrets from anon, authenticated;
             ",
         )
         .await?;
     Ok(())
 }
 
-async fn ensure_project_secret_grants_table(pool: &PgPool) -> anyhow::Result<()> {
-    let connection = pool.get().await?;
+async fn ensure_project_secret_grants_table(
+    connection: &impl tokio_postgres::GenericClient,
+) -> anyhow::Result<()> {
     connection
         .batch_execute(
             "
@@ -233,8 +241,9 @@ async fn ensure_project_secret_grants_table(pool: &PgPool) -> anyhow::Result<()>
     Ok(())
 }
 
-async fn ensure_project_secret_handle_grants_table(pool: &PgPool) -> anyhow::Result<()> {
-    let connection = pool.get().await?;
+async fn ensure_project_secret_handle_grants_table(
+    connection: &impl tokio_postgres::GenericClient,
+) -> anyhow::Result<()> {
     connection
         .batch_execute(
             "
@@ -253,11 +262,70 @@ async fn ensure_project_secret_handle_grants_table(pool: &PgPool) -> anyhow::Res
     Ok(())
 }
 
-pub(crate) async fn ensure_secret_tables(pool: &PgPool) -> anyhow::Result<()> {
-    ensure_project_secrets_table(pool).await?;
-    ensure_project_secret_grants_table(pool).await?;
-    ensure_project_secret_handle_grants_table(pool).await?;
+async fn create_secret_tables(transaction: &tokio_postgres::Transaction<'_>) -> anyhow::Result<()> {
+    ensure_project_secrets_table(transaction).await?;
+    ensure_project_secret_grants_table(transaction).await?;
+    ensure_project_secret_handle_grants_table(transaction).await?;
     Ok(())
+}
+
+async fn lock_secret_table_initialization(
+    transaction: &tokio_postgres::Transaction<'_>,
+) -> anyhow::Result<()> {
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended('instafy:secret-tables', 0))",
+            &[],
+        )
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn ensure_secret_tables(pool: &PgPool) -> anyhow::Result<()> {
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    lock_secret_table_initialization(&transaction).await?;
+    create_secret_tables(&transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn secret_tables_exist(
+    transaction: &tokio_postgres::Transaction<'_>,
+) -> anyhow::Result<bool> {
+    // Scan the catalog: a table-free to_regclass lookup can retain negative
+    // relation-cache entries after waiting for another initializer to commit.
+    Ok(transaction
+        .query_one(
+            "select count(*) = 3 from pg_class
+             where relname in ('project_secrets', 'project_secret_agent_grants',
+                               'project_secret_agent_handle_grants')
+               and relkind in ('r', 'p') and pg_table_is_visible(oid)",
+            &[],
+        )
+        .await?
+        .get(0))
+}
+
+/// Called after project authorization and before any secret query. An undefined
+/// table aborts PostgreSQL's transaction, so creating it on another connection
+/// cannot make a retry in that transaction work. Initialize atomically here,
+/// without taking DDL locks on every request once the tables exist.
+async fn ensure_secret_tables_for_request(
+    transaction: &tokio_postgres::Transaction<'_>,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    async {
+        if !secret_tables_exist(transaction).await? {
+            lock_secret_table_initialization(transaction).await?;
+            // Another first request may have committed the schema while we waited.
+            if !secret_tables_exist(transaction).await? {
+                create_secret_tables(transaction).await?;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await
+    .map_err(|error| internal_error(format!("failed to initialize secret tables: {error}")))
 }
 
 fn normalize_agent_handles(values: &[String]) -> Result<Vec<String>, (StatusCode, Json<ApiError>)> {
@@ -321,38 +389,18 @@ async fn list_project_secrets(
 
     let project = load_project_record(&transaction, &project_id).await?;
     ensure_project_access(&transaction, &project, &access_context, None).await?;
+    ensure_secret_tables_for_request(&transaction).await?;
 
-    let attempt_list = || async {
-        transaction
-            .query(
-                "select id, name, description, last_used_at, revoked_at, created_at, updated_at
-                 from project_secrets
-                 where project_id = $1 and revoked_at is null
-                 order by created_at desc",
-                &[&project_id],
-            )
-            .await
-    };
-
-    let rows = match attempt_list().await {
-        Ok(rows) => rows,
-        Err(error) => {
-            if error
-                .as_db_error()
-                .map(|db| db.code() == &SqlState::UNDEFINED_TABLE)
-                .unwrap_or(false)
-            {
-                ensure_secret_tables(&state.pool).await.map_err(|err| {
-                    internal_error(format!("failed to create secrets table: {err}"))
-                })?;
-                attempt_list().await.map_err(|err| {
-                    internal_error(format!("failed to list secrets after ensure: {err}"))
-                })?
-            } else {
-                return Err(internal_error(format!("failed to list secrets: {error}")));
-            }
-        }
-    };
+    let rows = transaction
+        .query(
+            "select id, name, description, last_used_at, revoked_at, created_at, updated_at
+             from project_secrets
+             where project_id = $1 and revoked_at is null
+             order by created_at desc",
+            &[&project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to list secrets: {error}")))?;
 
     let mut secret_ids: Vec<Uuid> = Vec::new();
     let mut base: Vec<(Uuid, ProjectSecretListItem)> = Vec::new();
@@ -418,39 +466,16 @@ async fn list_project_secrets(
     }
 
     // Handle grants (preferred).
-    let attempt_handle_grants = || async {
-        transaction
-            .query(
-                "select secret_id, agent_handle
-                 from project_secret_agent_handle_grants
-                 where secret_id = any($1::uuid[])
-                 order by agent_handle asc",
-                &[&secret_ids],
-            )
-            .await
-    };
-
-    let handle_grants = match attempt_handle_grants().await {
-        Ok(rows) => rows,
-        Err(error) => {
-            if error
-                .as_db_error()
-                .map(|db| db.code() == &SqlState::UNDEFINED_TABLE)
-                .unwrap_or(false)
-            {
-                ensure_secret_tables(&state.pool).await.map_err(|err| {
-                    internal_error(format!("failed to create secrets tables: {err}"))
-                })?;
-                attempt_handle_grants().await.map_err(|err| {
-                    internal_error(format!("failed to load handle grants after ensure: {err}"))
-                })?
-            } else {
-                return Err(internal_error(format!(
-                    "failed to load secret handle grants: {error}"
-                )));
-            }
-        }
-    };
+    let handle_grants = transaction
+        .query(
+            "select secret_id, agent_handle
+             from project_secret_agent_handle_grants
+             where secret_id = any($1::uuid[])
+             order by agent_handle asc",
+            &[&secret_ids],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load secret handle grants: {error}")))?;
 
     for row in handle_grants {
         let secret_id: Uuid = row.get("secret_id");
@@ -521,6 +546,7 @@ async fn create_project_secret(
 
     let project = load_project_record(&transaction, &project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, None).await?;
+    ensure_secret_tables_for_request(&transaction).await?;
 
     let mut agent_handles = normalize_agent_handles(&body.agent_handles)?;
     if agent_handles.is_empty() && !body.agent_ids.is_empty() {
@@ -561,90 +587,47 @@ async fn create_project_secret(
 
     let secret_id = Uuid::new_v4();
 
-    let attempt_duplicate_check = || async {
-        transaction
-            .query_opt(
-                "select id from project_secrets where project_id = $1 and name = $2 and revoked_at is null limit 1",
-                &[&project_id, &name],
-            )
-            .await
-    };
-
-    match attempt_duplicate_check().await {
-        Ok(Some(_)) => return Err(bad_request("secret name already exists")),
-        Ok(None) => {}
-        Err(error) => {
-            if error
-                .as_db_error()
-                .map(|db| db.code() == &SqlState::UNDEFINED_TABLE)
-                .unwrap_or(false)
-            {
-                ensure_secret_tables(&state.pool).await.map_err(|err| {
-                    internal_error(format!("failed to create secrets tables: {err}"))
-                })?;
-                if attempt_duplicate_check()
-                    .await
-                    .map_err(|err| {
-                        internal_error(format!("failed to check secret name after ensure: {err}"))
-                    })?
-                    .is_some()
-                {
-                    return Err(bad_request("secret name already exists"));
-                }
-            } else {
-                return Err(internal_error(format!(
-                    "failed to check secret name: {error}"
-                )));
-            }
-        }
+    if transaction
+        .query_opt(
+            "select id from project_secrets where project_id = $1 and name = $2 and revoked_at is null limit 1",
+            &[&project_id, &name],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to check secret name: {error}")))?
+        .is_some()
+    {
+        return Err(bad_request("secret name already exists"));
     }
 
-    let attempt_insert = || async {
-        transaction
-            .execute(
-                "insert into project_secrets (
-                     id, project_id, user_id, name, description, nonce_b64, ciphertext_b64
-                 ) values ($1, $2, $3, $4, $5, $6, $7)",
-                &[
-                    &secret_id,
-                    &project_id,
-                    &user_id,
-                    &name,
-                    &description,
-                    &nonce_b64,
-                    &ciphertext_b64,
-                ],
-            )
-            .await
-    };
-
-    match attempt_insert().await {
-        Ok(_) => {}
-        Err(error) => {
+    transaction
+        .execute(
+            "insert into project_secrets (
+                 id, project_id, user_id, name, description, nonce_b64, ciphertext_b64
+             ) values ($1, $2, $3, $4, $5, $6, $7)",
+            &[
+                &secret_id,
+                &project_id,
+                &user_id,
+                &name,
+                &description,
+                &nonce_b64,
+                &ciphertext_b64,
+            ],
+        )
+        .await
+        .map_err(|error| {
             if error
-                .as_db_error()
-                .map(|db| db.code() == &SqlState::UNDEFINED_TABLE)
-                .unwrap_or(false)
-            {
-                ensure_secret_tables(&state.pool).await.map_err(|err| {
-                    internal_error(format!("failed to create secrets tables: {err}"))
-                })?;
-                attempt_insert().await.map_err(|err| {
-                    internal_error(format!("failed to insert secret after ensure: {err}"))
-                })?;
-            } else if error
                 .as_db_error()
                 .map(|db| db.code() == &SqlState::UNIQUE_VIOLATION)
                 .unwrap_or(false)
             {
-                return Err(bad_request("secret name already exists"));
+                bad_request("secret name already exists")
             } else {
-                return Err(internal_error(format!("failed to insert secret: {error}")));
+                internal_error(format!("failed to insert secret: {error}"))
             }
-        }
-    }
+        })?;
 
-    let attempt_insert_grants = || async {
+    async {
         for handle in agent_handles.iter() {
             transaction
                 .execute(
@@ -656,29 +639,9 @@ async fn create_project_secret(
                 .await?;
         }
         Ok::<(), tokio_postgres::Error>(())
-    };
-
-    match attempt_insert_grants().await {
-        Ok(_) => {}
-        Err(error) => {
-            if error
-                .as_db_error()
-                .map(|db| db.code() == &SqlState::UNDEFINED_TABLE)
-                .unwrap_or(false)
-            {
-                ensure_secret_tables(&state.pool).await.map_err(|err| {
-                    internal_error(format!("failed to create secrets tables: {err}"))
-                })?;
-                attempt_insert_grants().await.map_err(|err| {
-                    internal_error(format!("failed to insert grants after ensure: {err}"))
-                })?;
-            } else {
-                return Err(internal_error(format!(
-                    "failed to insert secret grants: {error}"
-                )));
-            }
-        }
     }
+    .await
+    .map_err(|error| internal_error(format!("failed to insert secret grants: {error}")))?;
 
     transaction
         .commit()
@@ -744,48 +707,28 @@ async fn update_project_secret(
 
     let project = load_project_record(&transaction, &project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, None).await?;
+    ensure_secret_tables_for_request(&transaction).await?;
 
-    let attempt_update = || async {
-        transaction
-            .query_opt(
-                "update project_secrets
-                 set description = case when $3 then $4 else description end,
-                     nonce_b64 = coalesce($5, nonce_b64),
-                     ciphertext_b64 = coalesce($6, ciphertext_b64),
-                     updated_at = now()
-                 where id = $1 and project_id = $2 and revoked_at is null
-                 returning id, name, description, last_used_at, revoked_at, created_at, updated_at",
-                &[
-                    &secret_id,
-                    &project_id,
-                    &description_present,
-                    &description_next,
-                    &nonce_b64,
-                    &ciphertext_b64,
-                ],
-            )
-            .await
-    };
-
-    let updated = match attempt_update().await {
-        Ok(updated) => updated,
-        Err(error) => {
-            if error
-                .as_db_error()
-                .map(|db| db.code() == &SqlState::UNDEFINED_TABLE)
-                .unwrap_or(false)
-            {
-                ensure_secret_tables(&state.pool).await.map_err(|err| {
-                    internal_error(format!("failed to create secrets tables: {err}"))
-                })?;
-                attempt_update().await.map_err(|err| {
-                    internal_error(format!("failed to update secret after ensure: {err}"))
-                })?
-            } else {
-                return Err(internal_error(format!("failed to update secret: {error}")));
-            }
-        }
-    };
+    let updated = transaction
+        .query_opt(
+            "update project_secrets
+             set description = case when $3 then $4 else description end,
+                 nonce_b64 = coalesce($5, nonce_b64),
+                 ciphertext_b64 = coalesce($6, ciphertext_b64),
+                 updated_at = now()
+             where id = $1 and project_id = $2 and revoked_at is null
+             returning id, name, description, last_used_at, revoked_at, created_at, updated_at",
+            &[
+                &secret_id,
+                &project_id,
+                &description_present,
+                &description_next,
+                &nonce_b64,
+                &ciphertext_b64,
+            ],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to update secret: {error}")))?;
 
     let Some(row) = updated else {
         return Err(not_found("secret not found"));
@@ -838,7 +781,7 @@ async fn update_project_secret(
         }
 
         // Clear both legacy and handle grants, then re-insert handle grants.
-        let attempt_update_grants = || async {
+        async {
             transaction
                 .execute(
                     "delete from project_secret_agent_grants where secret_id = $1",
@@ -862,31 +805,9 @@ async fn update_project_secret(
                     .await?;
             }
             Ok::<(), tokio_postgres::Error>(())
-        };
-
-        match attempt_update_grants().await {
-            Ok(_) => {}
-            Err(error) => {
-                if error
-                    .as_db_error()
-                    .map(|db| db.code() == &SqlState::UNDEFINED_TABLE)
-                    .unwrap_or(false)
-                {
-                    ensure_secret_tables(&state.pool).await.map_err(|err| {
-                        internal_error(format!("failed to create secrets tables: {err}"))
-                    })?;
-                    attempt_update_grants().await.map_err(|err| {
-                        internal_error(format!(
-                            "failed to update secret grants after ensure: {err}"
-                        ))
-                    })?;
-                } else {
-                    return Err(internal_error(format!(
-                        "failed to update secret grants: {error}"
-                    )));
-                }
-            }
         }
+        .await
+        .map_err(|error| internal_error(format!("failed to update secret grants: {error}")))?;
     }
 
     let mut agent_id_out: Vec<String> = Vec::new();
@@ -911,36 +832,13 @@ async fn update_project_secret(
         }
     }
 
-    let attempt_handle_grants = || async {
-        transaction
-            .query(
-                "select agent_handle from project_secret_agent_handle_grants where secret_id = $1 order by agent_handle asc",
-                &[&secret_id],
-            )
-            .await
-    };
-
-    let handle_grants = match attempt_handle_grants().await {
-        Ok(rows) => rows,
-        Err(error) => {
-            if error
-                .as_db_error()
-                .map(|db| db.code() == &SqlState::UNDEFINED_TABLE)
-                .unwrap_or(false)
-            {
-                ensure_secret_tables(&state.pool).await.map_err(|err| {
-                    internal_error(format!("failed to create secrets tables: {err}"))
-                })?;
-                attempt_handle_grants().await.map_err(|err| {
-                    internal_error(format!("failed to load secret grants after ensure: {err}"))
-                })?
-            } else {
-                return Err(internal_error(format!(
-                    "failed to load secret grants: {error}"
-                )));
-            }
-        }
-    };
+    let handle_grants = transaction
+        .query(
+            "select agent_handle from project_secret_agent_handle_grants where secret_id = $1 order by agent_handle asc",
+            &[&secret_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load secret grants: {error}")))?;
 
     for row in handle_grants {
         let handle: String = row.get("agent_handle");
@@ -1003,6 +901,7 @@ async fn revoke_project_secret(
 
     let project = load_project_record(&transaction, &project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, None).await?;
+    ensure_secret_tables_for_request(&transaction).await?;
 
     let updated = transaction
         .execute(

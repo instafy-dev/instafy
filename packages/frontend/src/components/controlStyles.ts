@@ -11,9 +11,12 @@ export const CONTROL_TRIGGER_BASE =
   "min-w-0 flex items-center border text-left text-midnight outline-none transition pointer-coarse:min-h-11 data-[focus-visible]:ring-2 data-[focus-visible]:ring-primary-400/40 data-[focus-visible]:border-primary-400 data-[disabled]:cursor-not-allowed data-[disabled]:bg-slate-100 data-[disabled]:text-slate-400 dark:text-slate-100 dark:data-[disabled]:bg-[var(--color-studio-dark-active)] dark:data-[disabled]:text-slate-500";
 
 export const CONTROL_SIZE_CLASSES: Record<ControlSize, string> = {
-  xs: "px-2.5 py-1 text-base sm:text-xs",
-  sm: "px-3 py-1.5 text-base sm:text-sm",
-  md: `${FORM_CONTROL_HEIGHT} px-3 py-2 text-base sm:text-sm`,
+  // Touch fields retain 16px text even on landscape phones and tablets, where
+  // a smaller font can trigger browser zoom on focus. Density follows input
+  // capability as well as width, just like the shared control height.
+  xs: "px-2.5 py-1 text-base sm:pointer-fine:text-xs",
+  sm: "px-3 py-1.5 text-base sm:pointer-fine:text-sm",
+  md: `${FORM_CONTROL_HEIGHT} px-3 py-2 text-base sm:pointer-fine:text-sm`,
   lg: "px-4 py-2.5 text-base",
 };
 

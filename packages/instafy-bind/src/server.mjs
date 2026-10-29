@@ -698,6 +698,10 @@ export function createBinder(options) {
           site: { title: site.title }, token: tokenNeeded(site, req),
           viewer: viewerOk(site, req, url), parentOrigins: parentOriginsFor(site, req),
           executors: { script: "ready", agent: agentState },
+          // Which folder this binder serves and its process, told only to this machine (a loopback socket and name, no
+          // proxy; a tunnel's client connects from here but keeps the viewer's host): `serve --detach` checks that the
+          // answer on the port is its own binder's, not another server's.
+          ...(adminLocal(req) ? { binder: { root, pid: process.pid } } : {}),
         });
       case "session": {
         // The client trades #k= for an HttpOnly cookie once, so EventSource, polling and the page's own fetches

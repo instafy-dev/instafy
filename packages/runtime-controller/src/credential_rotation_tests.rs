@@ -179,9 +179,9 @@ async fn wait_until_blocked_by<T>(
     }
 }
 
-/// Serialises fixture schema setup in this test binary. `ensure_secret_tables`
-/// runs multi-statement DDL without an advisory lock, so two fixtures seeding
-/// at once can deadlock on the same relation.
+/// Serialises fixture schema setup in this test binary. Browser profile setup
+/// still runs multi-statement DDL without an advisory lock, so two fixtures
+/// seeding at once can deadlock on the same relation.
 static SCHEMA_SETUP: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(Default::default);
 

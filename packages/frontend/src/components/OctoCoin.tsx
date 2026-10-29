@@ -29,8 +29,7 @@ export const AI_TILE_CLASS = `${AI_TILE_SHAPE_CLASS} ${AI_TILE_EDGE_CLASS}`;
  * Octo's tile: the canonical Octo avatar, a white rounded square holding the
  * one-ink mark (docs/Brand.md, "Octo agent avatar/chip"). Every themed surface
  * that shows Octo as a participant draws this component (chat avatars, typing
- * rows, speaker pills, agent chips and pickers, the landing's roster and
- * transcript), so the tile is styled here and nowhere else. (The component
+ * rows, agent chips and pickers, the landing's roster and transcript), so the tile is styled here and nowhere else. (The component
  * keeps its historical name, OctoCoin, and its data-octo-coin hook.)
  *
  * - Light: a white tile edged by the soft avatar coin shadow every avatar

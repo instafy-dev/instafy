@@ -15,12 +15,39 @@ describe("native push registration", () => {
     expect(mocks.register).not.toHaveBeenCalled();
     expect(mocks.request).not.toHaveBeenCalled();
   });
+  it("signs out on Android without invoking its unconfigured Firebase plugin", async () => {
+    mocks.platform = "android";
+    expect(await unregisterNativePushToken(SESSION)).toBe(true);
+    expect(mocks.unregister).not.toHaveBeenCalled();
+    expect(mocks.remove).not.toHaveBeenCalled();
+  });
   it("removes a legacy Android token with Android, using the captured account", async () => {
     mocks.platform = "android";
     window.localStorage.setItem("instafy.notifications.native_push_token", "legacy-android-token");
-    await unregisterNativePushToken(SESSION);
+    expect(await unregisterNativePushToken(SESSION)).toBe(true);
     expect(mocks.remove).toHaveBeenCalledWith({ token: "legacy-android-token", platform: "android", accessToken: SESSION.accessToken });
+    expect(mocks.unregister).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("instafy.notifications.native_push_token")).toBeNull();
+  });
+  it("keeps failed Android server cleanup available to retry without calling Firebase", async () => {
+    mocks.platform = "android";
+    const key = notificationStorageKey("instafy.notifications.native_push_token", SESSION.userId);
+    window.localStorage.setItem(key, "android-token");
+    mocks.remove.mockResolvedValueOnce({ success: false });
+    expect(await unregisterNativePushToken(SESSION)).toBe(false);
+    expect(window.localStorage.getItem(key)).toBe("android-token");
+    expect(await unregisterNativePushToken(SESSION)).toBe(true);
+    expect(window.localStorage.getItem(key)).toBeNull();
+    expect(mocks.remove).toHaveBeenCalledTimes(2);
+    expect(mocks.unregister).not.toHaveBeenCalled();
+  });
+  it("detaches the iOS token after restart even without a registration callback", async () => {
+    const key = notificationStorageKey("instafy.notifications.native_push_token", SESSION.userId);
+    window.localStorage.setItem(key, "ios-token");
+    expect(await unregisterNativePushToken(SESSION)).toBe(true);
     expect(mocks.unregister).toHaveBeenCalledOnce();
+    expect(mocks.remove).toHaveBeenCalledWith({ token: "ios-token", platform: "ios", accessToken: SESSION.accessToken });
+    expect(window.localStorage.getItem(key)).toBeNull();
   });
   it("binds iOS registration to an account and rejects a callback after signout", async () => {
     expect(await ensureNativePushTokenRegistered()).toBe(true);

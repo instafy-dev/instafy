@@ -878,10 +878,10 @@ export function describeFileNotSaved(notSaved: ChatMessageFileNotSaved, placemen
 }
 
 // ---------------------------------------------------------------------------
-// Chat change card: "Revert this change"
+// Chat change card: "Undo", saving a new version that undoes the change
 // ---------------------------------------------------------------------------
 
-// The confirm dialog of "Revert this change". Before it offers Revert it
+// The confirm dialog of the card's Undo. Before it offers Undo it
 // lists the files the change's saved version touched: a version can carry
 // more than this card's files (earlier work saved with it), and a revert
 // undoes all of it.
@@ -898,16 +898,16 @@ export const REVERT_CHECK_FAILED_MESSAGE = "Couldn't check what this change incl
 
 // While the revert request runs. Closing the dialog does not cancel it.
 export const REVERT_RUNNING_MESSAGE =
-  "Reverting… Closing this doesn't stop it. You'll see the result when it's done.";
+  "Undoing… Closing this doesn't stop it. You'll see the result when it's done.";
 // The card stopped waiting for an answer; the request was not cancelled, so
 // the origin may still save the revert, and a late answer is still shown.
 export const REVERT_STILL_RUNNING_MESSAGE =
-  "The revert is taking longer than expected. It may still finish, and you'll see the result when it does.";
+  "Undoing it is taking longer than expected. It may still finish, and you'll see the result when it does.";
 // The dialog reopened while that request still runs. The card sends no
 // second revert (it would only meet the first one's lease); it waits for
 // the first one again.
 export const REVERT_WAITING_AGAIN_MESSAGE =
-  "Your earlier revert of this change is still running. Closing this doesn't stop it. You'll see the result when it's done.";
+  "Your earlier undo of this change is still running. Closing this doesn't stop it. You'll see the result when it's done.";
 
 export function describeRevertOtherWork(otherPaths: readonly string[], canAskAgent: boolean): string {
   const undo = `This change was saved together with other work, so reverting it here would also undo ${formatPathList(otherPaths)}.`;

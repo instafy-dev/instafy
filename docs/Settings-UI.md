@@ -522,8 +522,9 @@ between label, control and helper text. Explicit extra-small fields keep a compa
 The label should identify the field without relying on placeholder text; omit placeholders
 that only repeat the label, such as “Add your name” under “Display name”.
 
-`Input` and `Select` default to the medium form size: 16px text on narrow screens and 14px on wider
-screens. Controls have a 44px minimum height on narrow screens or coarse pointers, and
+`Input` and `Select` default to the medium form size: 16px text on narrow screens or coarse
+pointers, and 14px on wider fine-pointer screens. Touch text stays 16px in landscape and on
+tablets to avoid focus zoom. Controls have a 44px minimum height on narrow screens or coarse pointers, and
 a 38px minimum height on wider fine-pointer screens. Explicit small/extra-small controls
 retain their compact sizing, and unstyled inputs retain their host layout. Preserve the
 existing thin outline, 12px default radius
@@ -703,6 +704,18 @@ connection sentence.
 controller and viewer boundaries. It covers reconnecting, disconnected and runtime-limit
 states, compact/expanded layouts, long blocker names and busy actions in both themes.
 The fixture verifies presentation and callback wiring, not a live remote browser.
+
+The touch-only remote keyboard uses `Input` with 12px corners, an 8px quiet
+`IconButton` to close, and an 8px gap inside a 16px floating `Surface`. Keep its
+native input ref and synchronous opening-tap focus: styling must not defer focus
+or replace the input during composition. Mouse users keep the hardware-keyboard
+path. Compact opening cards and Personal Browser status use `Surface`,
+`LoadingStatus` and `InlineNotice`; the central card owns detailed feedback while
+the toolbar keeps a terse state. Retry uses the shared pending button state.
+`/tests/fixtures/browser-keyboard-status/index.html` covers these production
+controls with inert service boundaries, including narrow layouts, long errors,
+retrying, input composition and touch-tablet text size in both themes. Viewport
+resize checks simulate available space; they do not prove a physical OS keyboard.
 
 On macOS Desktop, the outer organization rail reaches the top of the window and
 widens from 64px to a 92px cap around the native window controls. The cap's shoulder

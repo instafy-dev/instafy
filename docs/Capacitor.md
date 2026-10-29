@@ -241,6 +241,16 @@ each field's Return/Enter behavior are unchanged. This uses the Capacitor Keyboa
 plugin with native viewport resizing and requires an updated native binary. Older
 shells and Safari keep their system behavior; Android's keyboard policy is unchanged.
 
+Login keeps the document as its only scroll owner and respects the shared native safe-area insets.
+Its spacing follows the visible viewport,
+so a software keyboard or short landscape window leaves less room for the logo and gaps without
+hiding sign-in choices. Focused email, password and verification-code fields retain their DOM nodes
+and drafts; the page reveals the field and its submit action together when they fit. Very short
+viewports prioritize the field and leave the remaining form reachable by normal page scrolling.
+Visual-only keyboard resizing adds temporary bottom scroll range, removed when the keyboard closes.
+Touch fields retain 16px text in portrait and landscape. Verify errors, password confirmation and
+keyboard dismissal on the native candidate as well as the simulated viewport fixture.
+
 The compact navigation drawer opens from the fixed sidebar button at the far left of the header;
 the current tab's icon and title are separate from that control. An overview's bar
 yields to a resized software keyboard.

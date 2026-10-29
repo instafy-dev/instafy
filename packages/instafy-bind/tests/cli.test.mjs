@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
@@ -101,6 +102,103 @@ test("serve --detach keeps serving after the command (and the turn that ran it) 
     assert.match(fs.readFileSync(log, "utf8"), /instafy-bind serving/);
   } finally {
     if (pid) try { process.kill(pid, "SIGTERM"); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** Runs the binder's CLI without blocking this process (a server in this process must keep answering meanwhile). */
+function runBin(args) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, ...args], { env: cleanEnv, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("exit", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("serve --detach takes only its own binder's answer: another server on the port is never this site being served", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-cli-detach-taken-"));
+  const log = path.join(dir, "bind.log");
+  // Another site's server already holds the port. It answers every path, __bind/health included, as a dev server's
+  // fallback page or another binder does.
+  const seen = [];
+  const other = http.createServer((req, res) => {
+    seen.push(req.url);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, host: "instafy-bind" }));
+  });
+  await new Promise((resolve) => other.listen(0, "127.0.0.1", resolve));
+  const port = other.address().port;
+  try {
+    execFileSync(process.execPath, [BIN, "init", path.join(dir, "site")], { env: cleanEnv });
+    const result = await runBin(["serve", path.join(dir, "site"), "--port", String(port), "--preview", "--dry-run", "--detach", "--log", log]);
+    assert.equal(result.code, 1, `${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, new RegExp(`port ${port} is in use by another server, so .*site is not served there`));
+    assert.doesNotMatch(result.stdout, /in the background/);
+    assert.ok(seen.includes("/__bind/health"), "the other server was asked, and its answer was not taken");
+    // The other server still has its port.
+    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200);
+  } finally {
+    await new Promise((resolve) => other.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("serve --detach again for a folder its earlier binder still serves keeps that binder and says so: it is not another server", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-cli-detach-again-"));
+  const site = path.join(dir, "site");
+  const free = http.createServer();
+  await new Promise((resolve) => free.listen(0, "127.0.0.1", resolve));
+  const port = free.address().port;
+  await new Promise((resolve) => free.close(resolve));
+  let pid = null;
+  try {
+    execFileSync(process.execPath, [BIN, "init", site], { env: cleanEnv });
+    const args = ["serve", site, "--port", String(port), "--preview", "--dry-run", "--detach"];
+    const first = await runBin([...args, "--log", path.join(dir, "first.log")]);
+    assert.equal(first.code, 0, `${first.stdout}${first.stderr}`);
+    pid = Number(first.stdout.match(/pid (\d+)/)[1]);
+    // A later turn runs the same command while that binder still serves the folder.
+    const again = await runBin([...args, "--log", path.join(dir, "again.log")]);
+    assert.equal(again.code, 0, `${again.stdout}${again.stderr}`);
+    assert.match(again.stdout, new RegExp(`already serves .*site on port ${port} in the background \\(pid ${pid}\\)`));
+    assert.doesNotMatch(`${again.stdout}${again.stderr}`, /another server|pick another --port/);
+    // The earlier binder keeps the port and still serves the site.
+    process.kill(pid, 0);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200);
+  } finally {
+    if (pid) try { process.kill(pid, "SIGTERM"); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a binder's health names its folder and process only to this machine", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-cli-health-"));
+  const { createBinder } = await import("../src/server.mjs");
+  execFileSync(process.execPath, [BIN, "init", dir], { env: cleanEnv });
+  const binder = createBinder({ root: dir, port: 0, env: {}, publicOrigins: ["https://site.tunnel.test"], log: () => {} });
+  await binder.listen();
+  try {
+    const port = new URL(binder.url).port;
+    const health = (host) =>
+      new Promise((resolve, reject) => {
+        const req = http.get({ host: "127.0.0.1", port, path: "/__bind/health", headers: { host } }, (res) => {
+          let body = "";
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => resolve(JSON.parse(body)));
+        });
+        req.on("error", reject);
+      });
+    const local = await health(`127.0.0.1:${port}`);
+    assert.deepEqual(local.binder, { root: path.resolve(dir), pid: process.pid });
+    // A tunnel's client connects from this machine too, but keeps the viewer's host: nothing about this machine.
+    const viewer = await health("site.tunnel.test");
+    assert.equal(viewer.ok, true);
+    assert.equal(viewer.binder, undefined);
+  } finally {
+    await binder.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

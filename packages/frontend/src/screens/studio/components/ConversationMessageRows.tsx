@@ -1,4 +1,4 @@
-import { useEffect, type JSX, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, type JSX, type MouseEvent as ReactMouseEvent } from "react";
 import type { ChatMessage } from "../types";
 import { isCurrentUserChatMessage } from "./chatMessageDetailHelpers";
 import { getMessageType } from "./chatMessageMetadata";
@@ -14,6 +14,7 @@ import {
 } from "./chatAssistantIdentity";
 import { shouldAssistantMessagesShareVisualGroup } from "./assistantMessageGrouping";
 import { ChatBubbleRow } from "./ChatBubbleRow";
+import { ChatSiteContext, conversationSite } from "./chatSiteContext";
 import type { ChatSpeakerMarker } from "./chatSpeakerMarker";
 import {
   AssistantMessageEntry,
@@ -234,6 +235,11 @@ export function ConversationMessageRows({
       document.removeEventListener("copy", sanitizeChatMessageCopyEvent);
     };
   }, []);
+  // A site's card anywhere in the chat makes the changes under its replies the site's.
+  const site = useMemo(
+    () => conversationSite(allConversationMessages ?? messages),
+    [allConversationMessages, messages],
+  );
 
   const rows: JSX.Element[] = [];
   const anchorMessageId = targetedMessageId ?? getConversationScrollAnchorMessageId(scrollSnapshotKey);
@@ -544,8 +550,7 @@ export function ConversationMessageRows({
                   avatarSeed: humanIdentity.avatarSeed,
                 }
               : // One's own messages sit on the right, which already says who
-                // wrote them, so they clear the pill rather than naming the
-                // reader to themselves.
+                // wrote them: they name no one.
                 { kind: "boundary" };
 
         rows.push(
@@ -586,5 +591,9 @@ export function ConversationMessageRows({
     timedSyntheticRowIndex += 1;
   }
 
-  return <DeferredChatRows key={conversationLocalId} messageCount={messages.length}>{rows}</DeferredChatRows>;
+  return (
+    <ChatSiteContext.Provider value={site}>
+      <DeferredChatRows key={conversationLocalId} messageCount={messages.length}>{rows}</DeferredChatRows>
+    </ChatSiteContext.Provider>
+  );
 }

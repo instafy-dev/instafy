@@ -74,11 +74,16 @@ export async function unregisterNativePushToken(session = getNotificationSession
     window.localStorage.removeItem(NATIVE_TOKEN_STORAGE_KEY);
   } catch { /* unavailable storage */ }
   let unregistered = true;
-  try {
-    const { PushNotifications } = await import("@capacitor/push-notifications");
-    await PushNotifications.unregister();
-  } catch { unregistered = false; }
-  // Detach the OS token before a network operation that may wait while offline.
+  // Registration is iOS-only. Android's plugin accesses Firebase even during
+  // unregister, which crashes native builds without an FCM configuration.
+  // Still remove historical Android tokens from the server below.
+  if (platform === "ios") {
+    try {
+      const { PushNotifications } = await import("@capacitor/push-notifications");
+      await PushNotifications.unregister();
+    } catch { unregistered = false; }
+  }
+  // Detach the supported OS token before a network operation that may wait while offline.
   let removed = true;
   if (token.trim() && session) {
     const result = await mutateNativeToken(() => controllerClient.notifications.removeNativePushToken({ token: token.trim(), platform, accessToken: session.accessToken }));

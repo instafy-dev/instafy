@@ -49,7 +49,7 @@ function AssistantTypingStatusLine({
   // row: a turn opens with one "Starting…", not three labels in a second.
   // The runtime-busy notice (the one label that wraps) asks the person to
   // act, so it never waits behind the label before it.
-  const label = useSteadyActivityLabel(snapshot.label, !hidden, false, snapshot.wraps);
+  const label = useSteadyActivityLabel(snapshot.label, !hidden, snapshot.wraps);
   // A screen reader hears the label on screen: the words that came with it,
   // not those of a newer label the row still holds back.
   const ariaLabels = useRef(new Map<string, string>());
@@ -162,13 +162,14 @@ export function ChatTypingRows({
   const assistantStatusSnapshot = useMemo<AssistantTypingStatusSnapshot>(
     () => ({
       phase: typingIndicatorState?.phase ?? null,
-      label:
-        typingIndicatorState?.label && !hasMultipleTypingAgents
-          ? typingIndicatorState.label
-          : typingStatusLabel,
+      // The words are the panel's: one "Starting…" until the turn's first step.
+      label: typingStatusLabel,
       ariaLabel: typingStatusAriaLabel,
       expanded: isThinkingLabelExpanded,
-      clickable: Boolean(typingIndicatorState?.label && !hasMultipleTypingAgents),
+      // Only the run's own words (a run held for an approval) can run long enough to expand.
+      clickable: Boolean(
+        typingIndicatorState?.label && !hasMultipleTypingAgents && typingStatusLabel === typingIndicatorState.label,
+      ),
       wraps: typingStatusWraps,
       indicator:
         !hasMultipleTypingAgents && typingIndicatorState?.phase === "compacting" ? (

@@ -199,9 +199,10 @@ page is ready for it. `packages/instafy-bind/examples/follow-table` is the whole
 
 ## Commands
 
-`instafy bind serve <dir> [--port 4180] [--preview] [--allow-local] [--allow-env NAME] [--public-url <tunnel url>]
-[--detach [--log <file>]]` (`--preview`: no viewer token, for `instafy preview open --port <port>`; `--detach`: keeps
-serving after your turn; `--agent-executor` is the owner's own option, never yours) ·
+`instafy bind serve <dir> --port <port> [--preview] [--allow-local] [--allow-env NAME] [--public-url <tunnel url>]`
+(`--preview`: no viewer token, for the preview card; start it with `instafy preview open … --serve-cmd "instafy bind
+serve . --port {port} --preview" --start` (SKILL.md step 7), which picks the port and keeps it serving after your
+turn; `--agent-executor` is the owner's own option, never yours) ·
 `instafy bind command <dir> <name> '<json args>'` (select, highlight, toast, reload) ·
 `instafy bind init <dir> [--starter <name>] [--force]` · `instafy bind confirm <dir> <job>` · `instafy bind doctor [dir]`
 
@@ -271,8 +272,8 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
    "$145 at Fleet Feet ↗ · seen 17 Oct" until a live check gives a record. Before the
    reply fill the grid: `instafy bind try shoes read_offer '{"url":"…","ref":"shoes:…"}' --save` per readable
    store (the records carry source and age like a click's).
-4. Serve `shoes` detached with `--preview` on port 4180 and run `instafy preview open --port 4180 --title "Running
-   shoes"` (step 7). When the user writes "show me the On", run
+4. From `shoes/`, run `instafy preview open --title 'Running shoes' --serve-cmd "instafy bind serve . --port {port}
+   --preview" --start --json` (step 7). When the user writes "show me the On", run
    `instafy bind command shoes select '{"ref":"shoes:on-cloudmonster-2"}'`.
 5. "Add the Guide 19 and drop anything over $160": edit `data.json` (and `app.js` if needed), then
    `instafy bind command shoes reload '{}'` so every open viewer shows the new list, and reply.

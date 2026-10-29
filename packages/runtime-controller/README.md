@@ -63,6 +63,11 @@ This document explains how the Instafy runtime controller is structured and how 
 
 Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`, `/runtime/idle-reaper`).
 
+Project Secrets requests initialize missing controller-owned secret and grant tables
+after checking project access, in the same database transaction as the request.
+Fresh installations do not need an initial failed request followed by Retry.
+Concurrent initialization is serialized; existing tables and secret values are preserved.
+
 Conversation Stop acknowledges committed controller cancellation, not executor shutdown.
 Runtimes observe lease loss on heartbeat or rejected output, then request local shutdown;
 an in-flight tool may take longer to exit, and completed side effects are not rolled back.

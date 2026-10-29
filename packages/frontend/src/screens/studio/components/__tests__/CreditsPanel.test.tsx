@@ -5,7 +5,9 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CreditsPanel } from "../CreditsPanel";
 
-type LedgerRow = { delta: number; reason: string; metadata: Record<string, unknown> | null; createdAt: string };
+type LedgerRow = {
+  delta: number; reason: string; metadata: Record<string, unknown> | null; createdAt: string; chatName?: string;
+};
 const mocks = vi.hoisted(() => ({ checkout: vi.fn(), portal: vi.fn(), planChange: vi.fn(), showStatus: vi.fn(),
   billing: { creditBalance: 1000, creditLimit: 2000, subscription: null }, ledger: [] as LedgerRow[] }));
 vi.mock("../../../../credits/useCredits", () => ({ CREDITS_UPDATED_EVENT: "credits-updated", useCredits: () => ({
@@ -56,6 +58,10 @@ describe("Credits display choices", () => {
 
   // Local drive, Oct 28: "897 / 800" read as a balance past its own limit, with
   // "Starter resets to 200 credits daily · resets at 00:00 UTC" under it.
+  // Local drive 4: the line said "every day at 00:00 UTC", but the ledger tops
+  // a balance up the first time it finds it under the limit that UTC day, at
+  // any hour (+1 at 10:06 UTC, a moment after a turn took 800 to 799), so the
+  // line names no hour.
   it("shows the balance as a number of credits and one line for the daily refill", async () => {
     mocks.billing = { creditBalance: 897, creditLimit: 800, subscription: null };
     await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
@@ -64,14 +70,14 @@ describe("Credits display choices", () => {
     expect(row?.textContent).not.toContain("/");
     expect(row?.textContent).not.toContain("800");
     const refill = container.querySelector('[data-testid="credits-starter-budget"]');
-    expect(refill?.textContent).toBe("Tops back up to 800 credits every day at 00:00 UTC");
+    expect(refill?.textContent).toBe("Tops back up to 800 credits once a day");
     // The refill names the team's own limit, which the payment checks read.
     expect(container.querySelector('[data-testid="credits-limit"]')?.textContent).toBe("800");
     expect(container.textContent).not.toMatch(/resets to|soft cap|managed AI/i);
 
     await act(async () => radio("credits-amount-view-usd").click());
     expect(row?.textContent).toBe("$0.90");
-    expect(refill?.textContent).toBe("Tops back up to $0.80 every day at 00:00 UTC");
+    expect(refill?.textContent).toBe("Tops back up to $0.80 once a day");
   });
 
   // Local drives 2 and 3: "Refills to 800 credits every day" read as 800 added
@@ -90,12 +96,54 @@ describe("Credits display choices", () => {
     expect(rows[1]?.textContent).toContain("Daily top-up");
     expect(rows[1]?.textContent).toContain("+200 credits");
     expect(container.textContent).not.toMatch(/refill/i);
+    expect(container.textContent).not.toMatch(/at 00:00|UTC/);
 
     // The graph's key names the same rows: credits added, never "Refill".
     await act(async () => radio("credits-activity-view-graph").click());
     expect(container.querySelector('[data-testid="credit-activity-graph"]')).not.toBeNull();
     expect(container.textContent).toContain("Added");
     expect(container.textContent).not.toMatch(/refill/i);
+  });
+
+  // Local drive 4: every turn was two rows at different times, "AI usage −1"
+  // and "AI adjustment −13", each reading "Instafy AI · GPT-6 Luna · OpenAI ·
+  // 66k tokens", with no chat named, and "−1 credits". The ledger keeps those
+  // details; the person reads what each chat cost.
+  it("shows one row per turn, named by its chat, without the model, vendor or tokens", async () => {
+    const ai = (extra: Record<string, unknown>) => ({
+      managedAiLabel: "Instafy AI", managedAiModelLabel: "GPT-6 Luna", managedAiProvider: "openai",
+      usage: { input_tokens: 151556, cached_input_tokens: 76928, output_tokens: 200 }, ...extra,
+    });
+    const lisbon = "Plan 3 days in Lisbon for a first visit…";
+    mocks.ledger = [
+      { delta: -13, reason: "managed_ai_adjustment", metadata: ai({ promptId: "turn-lisbon" }),
+        createdAt: "2026-10-29T09:52:53Z", chatName: lisbon },
+      // A turn that failed and left nothing got its credit back: it cost nothing.
+      { delta: 1, reason: "managed_ai_refund", metadata: ai({ promptId: "turn-failed" }),
+        createdAt: "2026-10-29T10:08:17Z", chatName: "Compare the three latest Roborock…" },
+      { delta: -1, reason: "managed_ai_prompt", metadata: ai({ promptId: "turn-failed" }),
+        createdAt: "2026-10-29T10:07:52Z", chatName: "Compare the three latest Roborock…" },
+      { delta: 1, reason: "auto_refill_daily", metadata: { creditLimit: 800, preRefillBalance: 799 },
+        createdAt: "2026-10-29T10:06:09Z" },
+      // A teammate's private chat: the controller names no chat.
+      { delta: -3, reason: "managed_ai_prompt", metadata: ai({ promptId: "turn-teammate" }),
+        createdAt: "2026-10-29T09:51:00Z" },
+      { delta: -1, reason: "managed_ai_prompt", metadata: ai({ promptId: "turn-lisbon" }),
+        createdAt: "2026-10-29T09:49:47Z", chatName: lisbon },
+    ];
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    const rows = [...container.querySelectorAll('[data-testid="credit-ledger-entry"]')];
+    expect(rows.map((row) => [
+      row.querySelector("p")?.textContent,
+      row.querySelector('[data-testid="credit-ledger-delta"]')?.textContent,
+    ])).toEqual([
+      ["Daily top-up", "+1 credit"],
+      ["A chat", "-3 credits"],
+      [lisbon, "-14 credits"],
+    ]);
+    // Sent at 09:49:47: the turn sits where it was sent, under the top-up.
+    expect(rows[2]?.textContent).toContain(new Date("2026-10-29T09:49:47Z").toLocaleString());
+    expect(container.textContent).not.toMatch(/AI usage|AI adjustment|AI refund|GPT|OpenAI|tokens|Instafy AI|1 credits/);
   });
 
   // Local drive 3: Activity showed only the newest 8 rows, with no way to see more.

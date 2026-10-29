@@ -11,8 +11,6 @@ import { ControllerNoticeActionsProvider } from "../ControllerNoticeActions";
 import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import {
   CHAT_SPEAKER_MARKER_SELECTOR,
-  readStickyChatSpeakerMarker,
-  type StickyChatSpeaker,
 } from "../chatSpeakerMarker";
 
 const workspaceTabsMocks = vi.hoisted(() => ({
@@ -109,11 +107,16 @@ function findTextNode(root: Node, value: string): Text {
   throw new Error(`Text node not found: ${value}`);
 }
 
-function resolveReachedStickySpeaker(markers: Element[]): StickyChatSpeaker | null {
-  return markers.reduce<StickyChatSpeaker | null>(
-    (_speaker, marker) => readStickyChatSpeakerMarker(marker),
-    null,
-  );
+/** The speaker a row's marker names, from its data attributes. */
+function readSpeakerMarker(marker: Element | null) {
+  if (!(marker instanceof HTMLElement)) return null;
+  if (marker.dataset.chatSpeakerKind === "assistant") {
+    return { kind: "assistant", handle: marker.dataset.agentHandle, avatarSeed: marker.dataset.agentAvatarSeed };
+  }
+  if (marker.dataset.chatSpeakerKind === "human") {
+    return { kind: "human", label: marker.dataset.humanLabel, avatarSeed: marker.dataset.humanAvatarSeed ?? null };
+  }
+  return null;
 }
 
 describe("ConversationMessageRows", () => {
@@ -574,7 +577,7 @@ describe("ConversationMessageRows", () => {
     expect(speakerIdentityNodes).toEqual(["chat-speaker-marker", "chat-speaker-inline"]);
   });
 
-  it("hands the sticky speaker to the human author at an assistant-to-human boundary", async () => {
+  it("names the human author at an assistant-to-human boundary", async () => {
     const assistantMessage = createMessage({
       id: "assistant-response",
       role: "assistant",
@@ -600,19 +603,19 @@ describe("ConversationMessageRows", () => {
       "human",
     ]);
     expect(markers[1]?.getAttribute("data-testid")).toBe("chat-speaker-human-marker");
-    expect(readStickyChatSpeakerMarker(markers[0] ?? null)).toEqual({
+    expect(readSpeakerMarker(markers[0] ?? null)).toEqual({
       kind: "assistant",
       handle: "octo",
       avatarSeed: "octo-seed",
     });
-    expect(resolveReachedStickySpeaker(markers)).toEqual({
+    expect(readSpeakerMarker(markers[1] ?? null)).toEqual({
       kind: "human",
       label: "Teammate",
       avatarSeed: "user-2",
     });
   });
 
-  it("renders a sticky human speaker marker for a user-authored long message", async () => {
+  it("renders a human speaker marker for a user-authored long message", async () => {
     const ownerPrompt = createMessage({
       id: "owner-runbook-prompt",
       role: "user",
@@ -654,14 +657,14 @@ describe("ConversationMessageRows", () => {
     expect(marker?.getAttribute("data-chat-speaker-kind")).toBe("human");
     expect(marker?.getAttribute("data-human-label")).toBe("Owner");
     expect(marker?.getAttribute("data-human-avatar-seed")).toBe("user-2");
-    expect(readStickyChatSpeakerMarker(marker)).toEqual({
+    expect(readSpeakerMarker(marker)).toEqual({
       kind: "human",
       label: "Owner",
       avatarSeed: "user-2",
     });
   });
 
-  it("clears the sticky speaker at the current user's own message: the right side already says who", async () => {
+  it("names no one at the current user's own message: the right side already says who", async () => {
     const ownPrompt = createMessage({
       id: "own-long-prompt",
       role: "user",
@@ -699,10 +702,10 @@ describe("ConversationMessageRows", () => {
     const marker = container.querySelector('[data-testid="chat-speaker-boundary"]');
     expect(marker).toBeInstanceOf(HTMLElement);
     expect(marker?.getAttribute("data-chat-speaker-kind")).toBe("boundary");
-    expect(readStickyChatSpeakerMarker(marker)).toBeNull();
+    expect(readSpeakerMarker(marker)).toBeNull();
   });
 
-  it("clears the sticky assistant speaker at an assistant-to-controller boundary", async () => {
+  it("names no one at an assistant-to-controller boundary", async () => {
     const assistantMessage = createMessage({
       id: "assistant-response",
       role: "assistant",
@@ -741,7 +744,7 @@ describe("ConversationMessageRows", () => {
     expect(inlineSpeakers).toHaveLength(2);
     expect(inlineSpeakers[1]?.textContent).toContain("octo");
     expect(inlineSpeakers[1]?.querySelector('[data-testid="chat-avatar-assistant"]')).not.toBeNull();
-    expect(resolveReachedStickySpeaker(markers)).toBeNull();
+    expect(readSpeakerMarker(markers[1] ?? null)).toBeNull();
   });
 
   it("attributes a terminal runtime notice to its verified custom agent", async () => {

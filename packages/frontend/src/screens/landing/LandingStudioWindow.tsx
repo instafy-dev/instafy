@@ -143,7 +143,7 @@ function OctoAvatar({
   );
 }
 
-// AssistantSpeakerIdentityPill.tsx:100-138 / chatHumanIdentity.tsx:52-75 minus
+// AssistantSpeakerIdentityLabel (AssistantSpeakerIdentityPill.tsx) / HumanSpeakerIdentityLabel (chatHumanIdentity.tsx) minus
 // the label's own 28px avatar: the gutter avatar is kept at every width here.
 function SpeakerLabel({ name, time }: { name: string; time: string }) {
   return (

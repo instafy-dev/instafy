@@ -28,6 +28,9 @@ import { Select } from "../../../components/Select";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Text } from "../../../components/Text";
+import { Surface } from "../../../components/Surface";
+import { InlineNotice } from "../../../components/InlineNotice";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { StudioMenuAction, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
@@ -611,7 +614,8 @@ export function PersonalBrowserSurface({
         status={
           <BrowserStatusPill
             compact={compactChrome}
-            detail={browserStatus.detail}
+            detail={ready ? browserStatus.detail : undefined}
+            startingShownInView={!ready}
             state={browserStatus.state}
             testId="personal-browser-agent-status"
             resume={resumeFromStatus ? {
@@ -786,28 +790,31 @@ export function PersonalBrowserSurface({
       >
         {visible && previewUrl ? <img alt="" aria-hidden src={previewUrl} className="pointer-events-none absolute inset-0 h-full w-full object-fill" data-testid="personal-browser-overlay-preview" /> : null}
         {!ready ? (
-          <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
-            <div className="max-w-sm text-sm text-slate-500 dark:text-slate-400">
-              <Globe className="mx-auto mb-3 h-8 w-8 text-slate-400" aria-hidden="true" />
-              <div className="font-medium text-slate-700 dark:text-slate-200">{browserStatus.detail}</div>
-              {model.status?.error ? <div className="mt-1 text-xs text-rose-600 dark:text-rose-300">{model.status.error}</div> : null}
+          <div className="absolute inset-0 flex min-h-0 items-center justify-center p-4 sm:p-6">
+            <Surface tone="default" radius="2xl" shadow="none"
+              className="max-h-full min-w-0 w-full max-w-md space-y-3 overflow-y-auto p-4"
+              data-testid="personal-browser-state-card">
+              {browserStatus.state === "starting" ? (
+                <LoadingStatus className="min-w-0 [overflow-wrap:anywhere]">{browserStatus.detail}</LoadingStatus>
+              ) : !model.status?.error ? (
+                <Text variant="bodyStrong" tone="primary" className="[overflow-wrap:anywhere]">{browserStatus.detail}</Text>
+              ) : null}
+              {model.status?.error ? (
+                <InlineNotice tone="danger" appearance="inline" role="alert">{model.status.error}</InlineNotice>
+              ) : null}
               {model.status?.state === "error" ? (
                 <Button
-                  className="mt-3"
-                  isDisabled={!model.available || model.recovering}
+                  preset="inline"
+                  icon={<Refresh className="h-3.5 w-3.5" aria-hidden="true" />}
+                  isPending={model.recovering}
+                  isDisabled={!model.available && !model.recovering}
                   onPress={model.retryOpen}
-                  radius="full"
-                  size="xs"
                   variant="secondary"
                 >
-                  <Refresh
-                    className={`h-3.5 w-3.5 ${model.recovering ? "animate-spin" : ""}`}
-                    aria-hidden="true"
-                  />
-                  {model.recovering ? "Retrying…" : "Retry Personal Browser"}
+                  Retry Personal Browser
                 </Button>
               ) : null}
-            </div>
+            </Surface>
           </div>
         ) : null}
       </div>

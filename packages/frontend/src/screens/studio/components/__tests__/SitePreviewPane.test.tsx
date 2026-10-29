@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControllerApiError } from "../../../../services/runtimeController/core";
 import { NO_MOUNTED_SITE_PREVIEWS, SITE_PREVIEW_HEALTH_POLL_MS, SITE_PREVIEW_HEARTBEAT_MS, SitePreviewPane, nextMountedSitePreviews } from "../SitePreviewPane";
 import { withHostQuery } from "../previewHost/hostMessages";
+import { waitForSitePreviewPage } from "../SitePreviewCard";
 import { resetFollowStoreForTests, setFollowPresence } from "../previewHost/followStore";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
@@ -163,6 +164,63 @@ describe("SitePreviewPane", () => {
     expect(pill.classList.contains("sr-only")).toBe(true);
     expect(pill.getAttribute("role")).toBe("status");
     expect(pill.textContent).toBe("Starting…");
+  });
+
+  // A local test: a restarted site's pane was blank for 16 to 26 s, and the
+  // map's for 5 to 18 s, with nothing said.
+  it("says Loading… over a frame whose page has not loaded, and tells the cards once it has", async () => {
+    const shown = vi.fn();
+    const stop = waitForSitePreviewPage(PREVIEW_ID, shown);
+    await render();
+    expect(pane().dataset.state).toBe("live");
+    expect(frame()).not.toBeNull();
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Loading…");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+    expect(shown).toHaveBeenCalledOnce();
+    // Reload loads a new frame: blank again until its page loads.
+    await click("[data-testid=site-preview-reload]");
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Loading…");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+    stop();
+  });
+
+  // The frame of a site that stopped answering goes, and a new one loads when
+  // it answers again: at the same address, so the page that loaded in the
+  // frame before is no sign this one has.
+  it("says Loading… over the new frame of a site that answers again, until its page loads", async () => {
+    await render();
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+    mocks.getSitePreview.mockResolvedValue(record({ health: { listening: false, status: null } }));
+    await advance(SITE_PREVIEW_HEALTH_POLL_MS);
+    expect(frame()).toBeNull();
+    mocks.getSitePreview.mockResolvedValue(record());
+    await advance(SITE_PREVIEW_HEALTH_POLL_MS);
+    expect(frame()?.getAttribute("src")).toBe(withHostQuery(FIRST));
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Loading…");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+  });
+
+  // A card that started the site waits for its page in a pane: a pane that
+  // shows it already, or closes before it loads, ends that wait.
+  it("tells the cards when it already shows the page, and when it closes before the page loads", async () => {
+    await render();
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    const shownAlready = vi.fn();
+    const stopShownAlready = waitForSitePreviewPage(PREVIEW_ID, shownAlready);
+    expect(shownAlready).toHaveBeenCalledOnce();
+    stopShownAlready();
+    await click("[data-testid=site-preview-reload]");
+    const closed = vi.fn();
+    const stopClosed = waitForSitePreviewPage(PREVIEW_ID, closed);
+    expect(closed).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+    expect(closed).toHaveBeenCalledOnce();
+    stopClosed();
+    root = createRoot(container);
   });
 
   it("reads only the broker's status message, only from its own frame and origin", async () => {

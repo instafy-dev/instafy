@@ -8,7 +8,9 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import { InputField, Xmark } from "iconoir-react";
-import { IconButton } from "../../../components/Button";
+import { Button, IconButton } from "../../../components/Button";
+import { Input } from "../../../components/Input";
+import { Surface } from "../../../components/Surface";
 
 import { cdpScreencastModifiers } from "./cdpScreencastProtocol";
 import { remoteBrowserKeyDownText, type RemoteBrowserVirtualInputMessage } from "./remoteBrowserInput";
@@ -325,17 +327,18 @@ export function RemoteBrowserMobileKeyboard({
       style={inlineTrigger && !open ? undefined : { bottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
     >
       {open ? (
-        <div className="pointer-events-auto flex w-full max-w-sm items-center gap-1 rounded-2xl border border-slate-300/80 bg-white/95 p-1.5 shadow-xl backdrop-blur dark:border-slate-700 dark:bg-slate-950/95">
+        <Surface tone="floating" radius="2xl" shadow="sm" className="pointer-events-auto flex w-full max-w-sm items-center gap-2 p-2">
           <label className="sr-only" htmlFor="shared-browser-mobile-keyboard-input">
             Type into the focused page field
           </label>
-          <input
+          <Input
             ref={inputRef}
             aria-label="Type into the focused page field"
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
-            className="h-11 min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 text-base text-slate-900 outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+            className="min-w-0 flex-1"
+            fullWidth={false}
             data-testid="shared-browser-mobile-keyboard-input"
             enterKeyHint="enter"
             id="shared-browser-mobile-keyboard-input"
@@ -346,16 +349,16 @@ export function RemoteBrowserMobileKeyboard({
             spellCheck={false}
             type="text"
           />
-          <button
+          <IconButton
             aria-label="Close remote keyboard"
-            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 dark:text-slate-300 dark:hover:bg-slate-800"
+            variant="ghost"
+            className="shrink-0"
             data-testid="shared-browser-mobile-keyboard-close"
-            onClick={() => setOpen(false)}
-            type="button"
+            onPress={() => setOpen(false)}
           >
             <Xmark aria-hidden="true" className="h-5 w-5" />
-          </button>
-        </div>
+          </IconButton>
+        </Surface>
       ) : inlineTrigger ? (
         <IconButton
           aria-label="Open remote keyboard"
@@ -367,16 +370,17 @@ export function RemoteBrowserMobileKeyboard({
           <InputField aria-hidden="true" className="h-4 w-4" />
         </IconButton>
       ) : (
-        <button
+        <Button
           aria-label="Open remote keyboard"
-          className="pointer-events-auto inline-flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-slate-300/80 bg-white/95 px-3 text-xs font-semibold text-slate-700 shadow-lg backdrop-blur hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 dark:border-slate-700 dark:bg-slate-950/95 dark:text-slate-200"
+          className="pointer-events-auto"
+          preset="inline"
+          variant="outline"
           data-testid="shared-browser-mobile-keyboard-open"
-          onClick={handleOpen}
-          type="button"
+          onPress={handleOpen}
         >
           <InputField aria-hidden="true" className="h-4 w-4" />
           <span>Keyboard</span>
-        </button>
+        </Button>
       )}
     </div>
   );
