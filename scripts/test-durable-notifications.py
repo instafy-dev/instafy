@@ -87,6 +87,8 @@ def main():
             print('PASS: an agent pins only a credential its owner holds; owners still pin, switch and clear their own')
             sql('begin;\n' + (ROOT/'supabase/tests/user_credential_client_writes.sql').read_text() + '\nrollback;')
             print('PASS: only the controller writes credential rows; owners still read their own')
+            sql('begin;\n' + (ROOT/'supabase/tests/agent_job_credential_removal.sql').read_text() + '\nrollback;')
+            print('PASS: deleting a credential, or its person, fails the AI jobs queued or leased on it; no job moves to the platform lane')
             sql((ROOT/'supabase/tests/deleted_space_access.sql').read_text())
             print('PASS: a deleted space is hidden from its owner, members and team; live spaces and the service role still read')
             sql((ROOT/'supabase/tests/user_deletion.sql').read_text())
