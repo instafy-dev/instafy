@@ -7,7 +7,7 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
 ## Quickstart
 
 0. Log in once: `instafy login`
-   - Opens a Studio URL; the CLI continues automatically after you sign in.
+   - Prints a Studio URL and a confirmation code; sign in, check that the page shows the same code and press Connect, and the CLI continues on its own.
    - Also enables Git auth (credential helper) for Instafy Git Service. Disable with `instafy login --no-git-setup`.
    - Multiple accounts: `instafy login --profile work` (then bind folders with `instafy space init --profile work` or `instafy space profile work`).
    - Optional: set defaults with `instafy config set controller-url <url>` / `instafy config set studio-url <url>`
