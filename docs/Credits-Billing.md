@@ -364,7 +364,8 @@ as its message, so it is a reply. A team plan it writes is its reply once the pl
 that ends without a reply is charged all the same when it left the person something, by the test
 in "Failed turns" above: a note, a step that worked or a file written. Otherwise it could do the
 work and then fail, or be stopped, for free; and since the failed turn an automatic retry repeats
-costs nothing when it left nothing, the whole request would be free.
+costs nothing when it left nothing, the whole request would be free. A decline the controller
+swallows still costs nothing, as it does for an evaluation turn the person sent.
 
 A card's browser turn is charged when it did something in the browser beyond looking at the page
 it was given: it opened a page or a tab, clicked, typed, pressed a key or scrolled, or ran any

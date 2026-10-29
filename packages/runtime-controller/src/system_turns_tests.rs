@@ -778,7 +778,9 @@ async fn a_hand_back_that_ends_on_the_decline_word_costs_its_tokens() -> anyhow:
 }
 
 /// An automatic retry of a group chat's evaluation turn that declines posts
-/// nothing: it ended without a reply, so it costs nothing.
+/// nothing: it ended without a reply, so it costs nothing, even after it
+/// looked at the space first, as an evaluation turn the person sent costs
+/// nothing when it declines.
 #[tokio::test]
 async fn an_automatic_retry_that_declines_as_an_evaluation_costs_nothing() -> anyhow::Result<()> {
     let Some(fixture) = seed_reserved_managed_ai_prompt("system-turn-evaluation-decline").await?
@@ -798,6 +800,7 @@ async fn an_automatic_retry_that_declines_as_an_evaluation_costs_nothing() -> an
         crate::group_participation::agent_evaluation_marker(),
     )
     .await?;
+    step(&fixture, "command_execution", command("ls"), "completed").await?;
     let status = complete(
         &fixture,
         json!({

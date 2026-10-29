@@ -588,6 +588,10 @@ pub(crate) async fn completion_refund_reason(
         Some(SystemTurn::BrowserHandBack | SystemTurn::AutomaticRetry) => {
             if completion_is_a_reply(outcome, summary, swallowed) {
                 None
+            } else if swallowed {
+                // A decline the controller posts nothing for costs nothing,
+                // as it does for an evaluation turn the person sent.
+                Some(SYSTEM_TURN_WITHOUT_REPLY_REFUND_REASON)
             } else {
                 turn_left_nothing(
                     transaction,
