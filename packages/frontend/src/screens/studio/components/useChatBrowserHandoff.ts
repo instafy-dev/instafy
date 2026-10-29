@@ -50,6 +50,8 @@ type Options = {
    */
   page: (BrowserSessionPageTarget & Partial<Pick<BrowserSessionPage, "openedBy" | "kept">>) | null;
   runs: RunRecord[];
+  /** The sites of the cards the person pressed in this chat: their OK for each one. */
+  browserCardSites?: readonly string[];
   personal: ReturnType<typeof usePersonalBrowserBridge>;
   agentHandle: string;
   onSubmit: (id: string | null, message: string, options?: SubmitConversationOptions) => Promise<void>;
@@ -165,6 +167,7 @@ export function useChatBrowserHandoff(options: Options) {
         baseMetadata: extras?.metadata ?? null,
         browserPageTarget: captured.page,
         runtimeId: captured.runtimeId,
+        cardSites: captured.browserCardSites,
       }),
     });
     return true;

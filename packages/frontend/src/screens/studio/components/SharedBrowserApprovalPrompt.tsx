@@ -1,13 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { Lock } from "iconoir-react";
 import { Button } from "../../../components/Button";
-import { Checkbox } from "../../../components/Checkbox";
 import { InlineNotice } from "../../../components/InlineNotice";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import { StudioDialogBody, StudioDialogFooter } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogGutterContext } from "../../../components/aria/StudioDialogSpacing";
-import { splitBrowserApprovalLabel } from "./browserApprovalLabel";
+import { browserApprovalSentence, sharedBrowserApprovalTargetAddress } from "./browserApprovalWords";
 
 export type SharedBrowserApprovalKind = "origin" | "action";
 export type SharedBrowserApprovalDecision = "allow_origin" | "allow_once" | "allow_routine" | "deny";
@@ -31,95 +30,33 @@ export function sharedBrowserApprovalAllowDecision(
   return kind === "origin" ? "allow_origin" : "allow_once";
 }
 
-const LABEL_ADDRESS_PATTERN = /https?:\/\/[^\s\u2026]+/gi;
+export { sharedBrowserApprovalTargetAddress };
 
 /**
- * The exact page a prompt's step will load, as host and path, when the
- * runtime names it: a site prompt or a navigation names its address in its
- * label (cut with "…" when long). Only an address on the prompt's own site
- * counts, and a prompt from an older runtime names none, so the site is
- * shown then.
+ * The browser view's sheet for a pending prompt, in the chat row's own words
+ * ("Octo wants to use visitlisboa.com." [Deny] [Allow site]), with the exact
+ * site or page it is about. It shares the row's approval state, so one answer
+ * settles both.
  */
-export function sharedBrowserApprovalTargetAddress(
-  request: Pick<SharedBrowserApprovalPromptRequest, "kind" | "operation" | "destinationOrigin" | "display">,
-): string | null {
-  if (request.kind !== "origin" && request.operation !== "navigate") return null;
-  const site = request.display.destinationOrigin?.trim() || request.destinationOrigin?.trim() || "";
-  if (!site) return null;
-  const label = request.display.label;
-  for (const match of label.matchAll(LABEL_ADDRESS_PATTERN)) {
-    let url: URL;
-    try {
-      url = new URL(match[0]);
-    } catch {
-      continue;
-    }
-    if (url.origin !== site) continue;
-    const path = url.pathname === "/" && !url.search ? "" : `${url.pathname}${url.search}`;
-    const cut = label.charAt((match.index ?? 0) + match[0].length) === "\u2026";
-    return `${url.host}${path}${cut ? "\u2026" : ""}`;
-  }
-  return null;
-}
-
-/** What the agent waits to do, as the end of "is waiting to …". */
-export function sharedBrowserApprovalActionDescription(
-  request: Pick<SharedBrowserApprovalPromptRequest, "kind" | "operation" | "destinationOrigin" | "display">,
-): string {
-  // The step's category leads the runtime's label; the sheet quotes only the
-  // control's name and says what the category adds after it.
-  const { label, note } = splitBrowserApprovalLabel(request.display.label);
-  const description = stepDescription(request, label);
-  return note ? `${description}. ${note.replace(/\.$/u, "")}` : description;
-}
-
-function stepDescription(
-  request: Pick<SharedBrowserApprovalPromptRequest, "kind" | "operation" | "destinationOrigin" | "display">,
-  label: string,
-): string {
-  const target = label ? ` “${label}”` : "";
-  switch (request.operation) {
-    case "navigate": {
-      const address = sharedBrowserApprovalTargetAddress(request);
-      return address ? `open ${address}` : "navigate to the approved destination";
-    }
-    case "click":
-      return `click${target || " the selected item"}`;
-    case "type":
-      return `type into${target || " the selected field"}`;
-    case "form-submit":
-      return `submit the form from${target || " the selected field"}`;
-    case "press-key":
-      return label ? `press the requested key (${label})` : "press the requested key";
-    case "press-enter":
-      return `press Enter on${target || " the selected item"}`;
-    case "press-space":
-      return `press Space on${target || " the selected item"}`;
-    default:
-      return label ? `perform the requested browser action on${target}` : "perform the requested browser action";
-  }
-}
-
 export function SharedBrowserApprovalPrompt({
   active = true,
-  routineApprovalAvailable = false,
+  agentName = "Octo",
   request,
   submitting,
   error,
   onDecision,
 }: {
   active?: boolean;
-  routineApprovalAvailable?: boolean;
+  /** Who asks: the agent holding the browser. */
+  agentName?: string;
   request: SharedBrowserApprovalPromptRequest;
   submitting: boolean;
   error?: string | null;
   onDecision: (decision: SharedBrowserApprovalDecision) => void;
 }) {
   const denyButtonRef = useRef<HTMLButtonElement | null>(null);
-  const allowButtonRef = useRef<HTMLButtonElement | null>(null);
-  const [routineApprovalId, setRoutineApprovalId] = useState<string | null>(null);
   const isOriginApproval = request.kind === "origin";
-  const allowRoutine = routineApprovalAvailable && isOriginApproval && routineApprovalId === request.approvalId;
+  const sentence = browserApprovalSentence(agentName.trim() || "Octo", request);
   const targetAddress = sharedBrowserApprovalTargetAddress(request);
   const destination =
     targetAddress || request.display.destinationOrigin?.trim() || request.destinationOrigin?.trim() || null;
@@ -157,7 +94,6 @@ export function SharedBrowserApprovalPrompt({
       }}
     >
       <Surface
-        aria-describedby="shared-browser-approval-description"
         aria-labelledby="shared-browser-approval-title"
         aria-modal="true"
         className="flex max-h-full w-full max-w-md flex-col overflow-hidden"
@@ -170,23 +106,15 @@ export function SharedBrowserApprovalPrompt({
           <StudioDialogBody scrollable className="space-y-4" data-testid="shared-browser-approval-content">
             <div className="flex items-start gap-3">
               <Lock aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
-              <div className="min-w-0 flex-1 space-y-1">
-                <Text as="h2" id="shared-browser-approval-title" variant="subtitle" tone="primary">
-                  {isOriginApproval
-                    ? "Allow the AI agent to use this site?"
-                    : "Allow this browser action?"}
-                </Text>
-                <Text
-                  as="p"
-                  id="shared-browser-approval-description"
-                  variant="bodyCompact"
-                  tone="secondary"
-                >
-                  {isOriginApproval
-                    ? "Shared Browser is paused before the AI agent can read or act on a new site."
-                    : `The AI agent is waiting to ${sharedBrowserApprovalActionDescription(request)}.`}
-                </Text>
-              </div>
+              <Text
+                as="h2"
+                id="shared-browser-approval-title"
+                variant="subtitle"
+                tone="primary"
+                className="min-w-0 flex-1 break-words"
+              >
+                {sentence}
+              </Text>
             </div>
 
             {destination ? (
@@ -205,24 +133,6 @@ export function SharedBrowserApprovalPrompt({
               </Surface>
             ) : null}
 
-            <Text as="p" variant="caption" tone="muted">
-              {allowRoutine
-                ? "Routine browsing applies across sites for this AI turn. You can revoke it by taking over or stopping the turn."
-                : isOriginApproval
-                  ? "Allow applies to this site for the current AI turn, so its pages open without asking again. Other actions still ask."
-                  : "This approval is used once. Only you can approve it, and it expires automatically."}
-            </Text>
-
-            {isOriginApproval && routineApprovalAvailable ? (
-              <Checkbox
-                isSelected={allowRoutine}
-                data-testid="shared-browser-approval-routine"
-                isDisabled={submitting}
-                onChange={(checked) => setRoutineApprovalId(checked ? request.approvalId : null)}
-                label="Always allow routine browsing for this turn"
-                description="Allow sites and ordinary actions without more prompts. Recognized high-impact actions and form submissions still ask; secrets stay manual. Websites can have unexpected side effects. Ends when this turn stops."
-              />
-            ) : null}
             {error ? (
               <InlineNotice
                 tone="danger"
@@ -248,16 +158,15 @@ export function SharedBrowserApprovalPrompt({
               {submitting ? "Saving…" : "Deny"}
             </Button>
             <Button
-              ref={allowButtonRef}
               data-testid="shared-browser-approval-allow"
               fullWidth
               isDisabled={submitting}
-              onPress={() => onDecision(allowRoutine ? "allow_routine" : sharedBrowserApprovalAllowDecision(request.kind))}
+              onPress={() => onDecision(sharedBrowserApprovalAllowDecision(request.kind))}
               preset="form"
               variant="primary"
               className="min-[420px]:w-auto"
             >
-              {allowRoutine ? "Allow routine browsing" : isOriginApproval ? "Allow site" : "Allow once"}
+              {isOriginApproval ? "Allow site" : "Allow"}
             </Button>
           </StudioDialogFooter>
         </StudioDialogGutterContext.Provider>

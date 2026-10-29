@@ -95,7 +95,7 @@ describe("the landing's browser replicas match the studio's components", () => {
     expect(tokens(glow.firstElementChild?.className)).toEqual(tokens(studio.querySelector(".browser-agent-glow")?.className));
   });
 
-  it("asks for the site in SharedBrowserApprovalPrompt's own words, unticked and then with routine browsing ticked", async () => {
+  it("asks for the site in SharedBrowserApprovalPrompt's own words", async () => {
     const request: SharedBrowserApprovalPromptRequest = {
       approvalId: "11111111-1111-4111-8111-111111111111",
       kind: "origin",
@@ -105,31 +105,22 @@ describe("the landing's browser replicas match the studio's components", () => {
       expiresAtMs: Date.now() + 30_000,
       display: { label: "", destinationOrigin: script.origin },
     };
-    const studioPrompt = () => (
-      <SharedBrowserApprovalPrompt active={false} routineApprovalAvailable request={request} submitting={false} error={null} onDecision={() => {}} />
-    );
-    for (const [beat, ticked, allow] of [
-      ["approve", false, "Allow site"],
-      ["routine", true, "Allow routine browsing"],
-    ] as const) {
-      const landing = await landingAt(beat);
-      const sheet = landing.querySelector('[data-testid="landing-browser-approval"]') as HTMLElement;
-      const landingText = text(sheet);
-      const landingContent = tokens(sheet.firstElementChild?.firstElementChild?.className);
+    const landing = await landingAt("approve");
+    const sheet = landing.querySelector('[data-testid="landing-browser-approval"]') as HTMLElement;
+    const landingText = text(sheet);
+    const landingContent = tokens(sheet.firstElementChild?.firstElementChild?.className);
 
-      await render(studioPrompt());
-      if (ticked) await act(async () => container.querySelector<HTMLInputElement>('[data-testid="shared-browser-approval-routine"]')!.click());
-      const studio = container.querySelector('[data-testid="shared-browser-approval-scrim"]') as HTMLElement;
-      expect(landingText).toBe(text(studio));
-      expect(text(container.querySelector('[data-testid="shared-browser-approval-allow"]'))).toBe(allow);
-      // The scrim and the content keep the studio's classes, bar the swaps
-      // the chrome documents (dark tiers; nothing scrolls by hand, so neither
-      // holds a tab stop).
-      const scrim = tokens(chrome.APPROVAL_SCRIM);
-      for (const token of tokens(studio.className)) if (token !== "overflow-y-auto") expect(scrim.has(token)).toBe(true);
-      const content = container.querySelector('[data-testid="shared-browser-approval-content"]') as HTMLElement;
-      for (const token of tokens(content.className)) if (token !== "overflow-y-auto") expect(landingContent.has(token)).toBe(true);
-    }
+    await render(<SharedBrowserApprovalPrompt active={false} request={request} submitting={false} error={null} onDecision={() => {}} />);
+    const studio = container.querySelector('[data-testid="shared-browser-approval-scrim"]') as HTMLElement;
+    expect(landingText).toBe(text(studio));
+    expect(text(container.querySelector('[data-testid="shared-browser-approval-allow"]'))).toBe("Allow site");
+    // The scrim and the content keep the studio's classes, bar the swaps
+    // the chrome documents (dark tiers; nothing scrolls by hand, so neither
+    // holds a tab stop).
+    const scrim = tokens(chrome.APPROVAL_SCRIM);
+    for (const token of tokens(studio.className)) if (token !== "overflow-y-auto") expect(scrim.has(token)).toBe(true);
+    const content = container.querySelector('[data-testid="shared-browser-approval-content"]') as HTMLElement;
+    for (const token of tokens(content.className)) if (token !== "overflow-y-auto") expect(landingContent.has(token)).toBe(true);
   });
 
   it("sends Ada's continuation as browserRequestContinuation words it", () => {

@@ -421,6 +421,7 @@ import {
   BrowserRequestHostContext,
   browserRequestContinuedKeys,
   newestBrowserRequestKey,
+  pressedBrowserCardSites,
   type BrowserRequestHost,
 } from "./browserRequest";
 import {
@@ -4694,6 +4695,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeId: resolvedBrowserRuntimeId,
     pageId: browserHandoffPage?.id ?? null,
   }), [runs, activeProjectId, activeConversationEntry?.controllerId, resolvedBrowserRuntimeId, browserHandoffPage?.id]);
+  // The sites of the cards the person pressed in this chat: their OK for
+  // each one in the chat's later browser turns.
+  const activeConversationMessageList = activeConversation?.messages;
+  const pressedCardSites = useMemo(
+    () => pressedBrowserCardSites(
+      Array.isArray(activeConversationMessageList) ? activeConversationMessageList : [],
+      currentUserId,
+    ),
+    [activeConversationMessageList, currentUserId],
+  );
   const browserHandoff = useChatBrowserHandoff({
     userId: currentUserId,
     projectId: activeProjectId ?? null,
@@ -4704,6 +4715,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeId: resolvedBrowserRuntimeId,
     page: browserHandoffPage,
     runs: activeConversationRuns,
+    browserCardSites: pressedCardSites,
     personal: personalBrowser,
     agentHandle: typingAgentHandle,
     onSubmit,
@@ -6634,7 +6646,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     currentUserId={currentUserId}
                     humanInputIdentityKey={browserHandoff.identityKey}
                     humanInputRunIds={browserHumanInputRunIds}
-                    activeBrowserRunId={browserHandoff.sharedJob?.runId ?? null}
                     onTakeOverAgent={browserHandoff.sharedJobWhileAgentHolds ? takeOverSharedBrowser : null}
                     onContinueAfterHumanInput={browserHandoff.continueSharedRun}
                     onPresenceChange={setSharedBrowserPresence}
@@ -6643,9 +6654,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     sharedBrowserCapabilitiesResolved={sharedBrowserCapabilitiesResolved}
                     sharedBrowserCapabilitiesAvailable={Boolean(sharedBrowserCapabilities)}
                     sharedBrowserCapabilitiesUnsupported={sharedBrowserCapabilitiesUnsupported}
-                    sharedBrowserRoutineApprovalAvailable={
-                      sharedBrowserCapabilities?.approvalModes?.includes("routine") === true
-                    }
                     sharedBrowserAvailableViewerKinds={
                       sharedBrowserCapabilities?.viewerKinds
                     }

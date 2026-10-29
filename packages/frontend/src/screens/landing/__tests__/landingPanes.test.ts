@@ -73,20 +73,16 @@ describe("the Shared Browser in the site scenario", () => {
 
   it("asks Ada to approve the preview's site before Octo reads it, and badges the tab meanwhile", () => {
     expect(siteAt("browse").browser!.approval).toBe("none");
-    // The prompt opens as the studio's does, routine browsing unticked; Ada
-    // scrolls to the box and ticks it, then presses Allow.
+    // The prompt asks as the studio's does, in Octo's words; Ada presses
+    // Allow site.
     expect(siteAt("approve").browser!.approval).toBe("site");
     expect(siteAt("approve").browser!.allowPressed).toBe(false);
     expect(siteAt("approve").tabs[0].attention).toBe(true);
-    expect(siteAt("routine").browser!.approval).toBe("routine");
-    expect(siteAt("routine").browser!.allowPressed).toBe(false);
-    expect(siteAt("routine").tabs[0].attention).toBe(true);
-    expect(siteAt("allowPress").browser!.approval).toBe("routine");
+    expect(siteAt("allowPress").browser!.approval).toBe("site");
     expect(siteAt("allowPress").browser!.allowPressed).toBe(true);
     const allowed = siteAt("allowed");
     expect(allowed.browser!.approval).toBe("none");
     expect(allowed.tabs[0].attention).toBeUndefined();
-    expect(allowed.browser!.routineRow).toBe(true);
     // Nothing is read before the approval: the page loads only after it.
     expect(siteAt("allowPress").browser!.page).toBe(false);
   });
@@ -163,7 +159,6 @@ describe("the Shared Browser in the site scenario", () => {
       page: true,
       approval: "none",
       allowPressed: false,
-      routineRow: false,
       glow: false,
       address: site.browser!.url,
       placeholder: "Enter an address",

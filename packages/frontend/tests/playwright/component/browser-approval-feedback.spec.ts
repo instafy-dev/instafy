@@ -71,31 +71,30 @@ for (const width of [320, 390, 1280]) for (const theme of ["light", "dark"]) {
       const prompt = page.getByRole("alertdialog");
       const allow = page.getByTestId("shared-browser-approval-allow");
       const deny = page.getByTestId("shared-browser-approval-deny");
-      const routine = page.getByTestId("shared-browser-approval-routine");
       await expect(deny).toBeFocused();
       await fits(page, prompt);
       await touchTargets(prompt.getByRole("button"), width);
-      await touchTargets(prompt.locator("label").filter({ has: page.getByRole("checkbox") }), width);
+      // One sentence in Octo's words, and no routine-browsing box.
+      await expect(prompt).toHaveAccessibleName("Octo wants to open research.example.test/research/overview.");
+      await expect(page.getByTestId("shared-browser-approval-routine")).toHaveCount(0);
       await allow.focus();
       await allow.press("Tab");
-      await expect(routine).toBeFocused();
-      await routine.press("Shift+Tab");
+      await expect(deny).toBeFocused();
+      await deny.press("Shift+Tab");
       await expect(allow).toBeFocused();
       await allow.press("Enter");
       await expect(page.getByTestId("review-decision")).toHaveText("allow_origin");
       await expect(prompt).toHaveCount(0);
 
       await open(page, "approval", theme, "&pending=1");
-      await routine.check();
-      await expect(allow).toHaveText("Allow routine browsing");
+      await expect(allow).toHaveText("Allow site");
       await allow.click();
-      await expect(page.getByTestId("review-decision")).toHaveText("allow_routine");
+      await expect(page.getByTestId("review-decision")).toHaveText("allow_origin");
       await expect(allow).toBeDisabled();
       await expect(deny).toBeDisabled();
-      await expect(routine).toBeDisabled();
       await page.keyboard.press("Escape");
       await expect(prompt).toBeVisible();
-      await expect(page.getByTestId("review-decision")).toHaveText("allow_routine");
+      await expect(page.getByTestId("review-decision")).toHaveText("allow_origin");
 
       await open(page, "action-approval", theme, "&error=1");
       await fits(page, prompt);

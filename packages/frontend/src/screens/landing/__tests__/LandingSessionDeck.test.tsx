@@ -701,11 +701,8 @@ describe("landing workspace example", () => {
     await until("browse");
     expect(deck().dataset.runLive).toBe("true");
     await until("approve");
-    expect(browser()?.querySelector('[data-testid="landing-browser-approval"]')?.getAttribute("data-routine")).toBe("false");
+    expect(browser()?.querySelector('[data-testid="landing-browser-approval"]')?.textContent).toContain("Octo wants to use");
     expect(browser()?.querySelector('[data-testid="landing-browser-allow"]')?.textContent).toBe("Allow site");
-    await until("routine");
-    expect(browser()?.querySelector('[data-testid="landing-browser-approval"]')?.getAttribute("data-routine")).toBe("true");
-    expect(browser()?.querySelector('[data-testid="landing-browser-allow"]')?.textContent).toBe("Allow routine browsing");
     await until("allowPress");
     expect(browser()?.querySelector('[data-testid="landing-browser-allow"]')?.className).toContain("scale-[0.98]");
     await until("allowed");
@@ -749,7 +746,6 @@ describe("landing workspace example", () => {
       "handoff",
       "browse",
       "approve",
-      "routine",
       "allowPress",
       "allowed",
       "navigate",

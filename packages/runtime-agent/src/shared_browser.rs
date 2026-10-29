@@ -837,6 +837,75 @@ fn take_continued_run_grants(
         .then_some(grants)
 }
 
+/// The most sites one job may name as the person's OK from pressed cards.
+const MAX_CARD_SITES: usize = 8;
+
+/// The sites of the browser cards the person pressed in this chat, as Studio
+/// names them in a Shared Browser job's metadata (`browserCardSites`, hosts
+/// such as `www.example.com`). A card names its site and the person pressed
+/// it, so that press is their OK for the site: the run starts with each one
+/// approved on the page the person chose, as an answered site prompt would
+/// leave it. Only plain public host names count, each as its `https` origin;
+/// an address, an IP literal, a single-label or local name, or anything else
+/// is left out, and so is a list longer than [`MAX_CARD_SITES`]. The
+/// controller keeps the key only on a person's own message. Every other
+/// check (link-only sites, private addresses, risky addresses and steps,
+/// submissions) is untouched.
+pub fn card_site_origins_from_payload(payload: &JsonValue) -> Vec<String> {
+    let Some(sites) = payload
+        .get("metadata")
+        .and_then(JsonValue::as_object)
+        .and_then(|metadata| metadata.get("browserCardSites"))
+        .and_then(JsonValue::as_array)
+    else {
+        return Vec::new();
+    };
+    if sites.len() > MAX_CARD_SITES {
+        return Vec::new();
+    }
+    let mut origins: Vec<String> = Vec::new();
+    for site in sites {
+        let Some(host) = site.as_str().map(str::trim) else {
+            continue;
+        };
+        let Some(origin) = card_site_origin(host) else {
+            continue;
+        };
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    origins
+}
+
+fn card_site_origin(host: &str) -> Option<String> {
+    let plain_name = !host.is_empty()
+        && host.len() <= 253
+        && host.contains('.')
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+        // A name ending in digits is an IP literal, never a site's name.
+        && !host
+            .rsplit('.')
+            .next()
+            .is_some_and(|tld| tld.bytes().all(|byte| byte.is_ascii_digit()));
+    let local = ["localhost", "local", "internal", "localdomain", "home.arpa"]
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")));
+    if !plain_name || local {
+        return None;
+    }
+    let origin = format!("https://{host}");
+    is_normalized_web_origin(&origin).then_some(origin)
+}
+
 /// The run a Shared Browser job continues, as Studio's Let AI continue names
 /// it. A value that is not one UUID names none.
 pub fn continued_run_id_from_payload(payload: &JsonValue) -> Option<Uuid> {
@@ -953,12 +1022,14 @@ impl SharedBrowserAgentControlGuard {
     /// before any Codex or MCP process starts. `continues_run_id` is the run
     /// Studio's Let AI continue names: its grants carry over only as
     /// [`take_continued_run_grants`] allows.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire(
         run_id: Uuid,
         initiator_user_id: Uuid,
         browser_page_id: &str,
         display_name: &str,
         continues_run_id: Option<Uuid>,
+        card_site_origins: &[String],
         cancel_signal: JobCancelSignal,
     ) -> Result<Self> {
         let mut guard = Self::acquire_at(
@@ -969,6 +1040,7 @@ impl SharedBrowserAgentControlGuard {
             browser_page_id,
             display_name,
             continues_run_id,
+            card_site_origins,
             cancel_signal,
         )?;
         guard.start_window_watch();
@@ -986,6 +1058,7 @@ impl SharedBrowserAgentControlGuard {
         browser_page_id: &str,
         display_name: &str,
         continues_run_id: Option<Uuid>,
+        card_site_origins: &[String],
         cancel_signal: JobCancelSignal,
     ) -> Result<Self> {
         Self::acquire_continuing(
@@ -997,6 +1070,7 @@ impl SharedBrowserAgentControlGuard {
             browser_page_id,
             display_name,
             continues_run_id,
+            card_site_origins,
             cancel_signal,
             AGENT_CONTROL_HEARTBEAT_INTERVAL,
         )
@@ -1023,6 +1097,7 @@ impl SharedBrowserAgentControlGuard {
             browser_page_id,
             display_name,
             None,
+            &[],
             cancel_signal,
             heartbeat_interval,
         )
@@ -1038,6 +1113,7 @@ impl SharedBrowserAgentControlGuard {
         browser_page_id: &str,
         display_name: &str,
         continues_run_id: Option<Uuid>,
+        card_site_origins: &[String],
         cancel_signal: JobCancelSignal,
         heartbeat_interval: Duration,
     ) -> Result<Self> {
@@ -1064,9 +1140,19 @@ impl SharedBrowserAgentControlGuard {
             || continued
                 .as_ref()
                 .is_some_and(|grants| grants.routine_browsing_allowed);
-        let approved_origins = continued
+        let mut approved_origins = continued
             .map(|grants| grants.approved_origins)
             .unwrap_or_default();
+        // The sites of the cards the person pressed: their OK for each site,
+        // on their page, as an answered site prompt would leave it.
+        for origin in card_site_origins {
+            if approved_origins.len() >= MAX_APPROVED_ORIGINS {
+                break;
+            }
+            if is_normalized_web_origin(origin) && !approved_origins.contains(origin) {
+                approved_origins.push(origin.clone());
+            }
+        }
         if routine_browsing_allowed || !approved_origins.is_empty() {
             write_starting_approval_state(
                 &approval_dir,
