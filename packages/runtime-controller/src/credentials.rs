@@ -17,6 +17,7 @@ use tokio_postgres::{types::Json as PgJson, GenericClient, Transaction};
 use uuid::Uuid;
 
 use crate::ai_agents;
+use crate::ai_connection_limits::{self, AiConnectionLimits};
 use crate::auth::{
     authenticate_request, bearer_token, issue_proxy_envelope, require_user_session, RequestContext,
 };
@@ -41,6 +42,8 @@ const DEFAULT_GEMINI_ENDPOINT: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 
 const CREDENTIAL_PROBE_PROMPT: &str = "Respond with exactly: OK";
+/// How long a connection test waits for the provider, through the proxy.
+const CREDENTIAL_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 const INLINE_COMPLETION_MAX_PREFIX_CHARS: usize = 6000;
 const INLINE_COMPLETION_MAX_SUFFIX_CHARS: usize = 2000;
 const INLINE_COMPLETION_MAX_OUTPUT_TOKENS: u32 = 128;
@@ -223,6 +226,10 @@ fn my_session_response(
     })
 }
 
+/// Saves a new AI connection and its default agent. A completed ChatGPT login
+/// passes its session as `codex_device_auth_session_id`: the save closes that
+/// login's receipt in its own transaction, and saves nothing once a newer
+/// start or a cancel closed it.
 pub(crate) async fn insert_user_credential(
     state: &AppState,
     user_id: Uuid,
@@ -231,6 +238,7 @@ pub(crate) async fn insert_user_credential(
     auth_json: JsonValue,
     label: Option<String>,
     make_default: Option<bool>,
+    codex_device_auth_session_id: Option<Uuid>,
 ) -> Result<CreatedCredential, (StatusCode, Json<ApiError>)> {
     let keys = state
         .config
@@ -277,6 +285,22 @@ pub(crate) async fn insert_user_credential(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+
+    // Every new connection is saved here, from POST /me/credentials/codex and
+    // from a completed ChatGPT login, so one count covers both.
+    ai_connection_limits::check_new_connection(
+        &transaction,
+        user_id,
+        &AiConnectionLimits::FOR_EVERYONE,
+    )
+    .await?;
+    // A ChatGPT login's poller waits on OpenAI after it last looked at its
+    // receipt. Closing the receipt here, under the person lock, refuses a
+    // login that a newer start replaced or a cancel ended meanwhile.
+    if let Some(session_id) = codex_device_auth_session_id {
+        ai_connection_limits::close_codex_device_auth_for_save(&transaction, user_id, session_id)
+            .await?;
+    }
 
     let default_row = transaction
         .query_opt(
@@ -579,10 +603,18 @@ pub(crate) async fn fetch_proxy_credential_requirements(
 ) -> ProxyCredentialRequirements {
     let url = format!("{}/healthz", proxy_base_url.trim_end_matches('/'));
     let request = client.get(url);
-    let response = timeout(timeout_duration, request.send()).await;
+    // The timeout covers the body too: a proxy that sends its headers and then
+    // holds the body must not hold the caller, such as a ChatGPT login's save.
+    let response = timeout(timeout_duration, async {
+        let response = request.send().await?;
+        let status = response.status();
+        let payload: JsonValue = response.json().await.unwrap_or(JsonValue::Null);
+        Ok::<_, reqwest::Error>((status, payload))
+    })
+    .await;
 
-    let response = match response {
-        Ok(Ok(response)) => response,
+    let (status, payload) = match response {
+        Ok(Ok(answer)) => answer,
         Ok(Err(error)) => {
             return ProxyCredentialRequirements {
                 requires_user_credentials: true,
@@ -601,8 +633,6 @@ pub(crate) async fn fetch_proxy_credential_requirements(
         }
     };
 
-    let status = response.status();
-    let payload: JsonValue = response.json().await.unwrap_or(JsonValue::Null);
     if !status.is_success() {
         return ProxyCredentialRequirements {
             requires_user_credentials: true,
@@ -1104,19 +1134,39 @@ async fn test_my_credential(
         .map_err(|_| bad_request("credentialId must be a valid UUID"))?;
     let started_at = std::time::Instant::now();
 
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
     // Load metadata before probing so we can return helpful context without parsing secrets.
-    // Importantly: avoid holding a DB transaction open while the proxy calls back into the controller.
+    // An unknown, revoked or foreign id ends here, before anything is counted.
     let Some(OwnedCredential { kind, metadata }) =
-        load_owned_live_credential(&*connection, &user_id, &credential_id).await?
+        load_owned_live_credential(&transaction, &user_id, &credential_id).await?
     else {
         return Err(not_found("credential not found"));
     };
+    // The test counts before it reaches the provider. Committing releases the
+    // person lock, and the connection goes back to the pool: the proxy calls
+    // back into the controller for the credential while the probe waits on a
+    // provider that may be slow.
+    ai_connection_limits::record_credential_test(
+        &transaction,
+        user_id,
+        credential_id,
+        &AiConnectionLimits::FOR_EVERYONE,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(format!("failed to commit credential test: {error}")))?;
+    drop(connection);
 
     let meta = metadata.as_object();
     let provider = meta
@@ -1151,19 +1201,30 @@ async fn test_my_credential(
 
     // Always probe through the proxy. This keeps the credential test path aligned with real runs,
     // and avoids accumulating per-provider "direct" probing logic in the controller.
-    let probe_result = probe_credential_via_proxy(&state, credential_id, &model).await?;
+    let probe_result =
+        probe_credential_via_proxy(&state, credential_id, &model, CREDENTIAL_PROBE_TIMEOUT).await?;
 
-    connection
-        .execute(
-            "update user_credentials
-             set last_used_at = now(), updated_at = now()
-             where id = $1 and user_id = $2",
-            &[&credential_id, &user_id],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!("failed to update credential last_used_at: {error}"))
-        })?;
+    // The provider has answered, so marking the connection used is best
+    // effort: a busy pool must not turn a passed test into an error, because
+    // the connect flow revokes a connection whose test fails.
+    match state.pool.get().await {
+        Ok(connection) => {
+            if let Err(error) = connection
+                .execute(
+                    "update user_credentials
+                     set last_used_at = now(), updated_at = now()
+                     where id = $1 and user_id = $2",
+                    &[&credential_id, &user_id],
+                )
+                .await
+            {
+                tracing::warn!(?error, "failed to update tested credential last_used_at");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no connection to update tested credential last_used_at");
+        }
+    }
 
     Ok(Json(CredentialTestResponse {
         ok: probe_result.ok,
@@ -1790,10 +1851,13 @@ fn sanitize_conversation_title(raw: &str) -> Option<String> {
     }
 }
 
+/// Sends one request through the proxy with `credential_id`, and gives up
+/// after `probe_timeout`, reading the answer included.
 async fn probe_credential_via_proxy(
     state: &AppState,
     credential_id: Uuid,
     model: &str,
+    probe_timeout: Duration,
 ) -> Result<CredentialProbeResult, (StatusCode, Json<ApiError>)> {
     let synthetic_project_id = Uuid::new_v4();
     let synthetic_runtime_id = Uuid::new_v4();
@@ -1839,6 +1903,7 @@ async fn probe_credential_via_proxy(
         .header("content-type", "application/json")
         .header("accept", "application/json")
         .json(&body)
+        .timeout(probe_timeout)
         .send()
         .await
     {
@@ -1853,11 +1918,23 @@ async fn probe_credential_via_proxy(
     };
 
     let status = response.status();
-    let response_text = response.text().await.map_err(|error| {
-        internal_error(format!(
-            "credential test returned invalid proxy body: {error}"
-        ))
-    })?;
+    let response_text = match response.text().await {
+        Ok(text) => text,
+        // The timeout covers the answer's body too: an answer that stalls
+        // fails the test as one that never comes does.
+        Err(error) if error.is_timeout() => {
+            tracing::warn!(?error, "credential test proxy answer timed out");
+            return Ok(CredentialProbeResult {
+                ok: false,
+                output: Some("AI proxy request failed; please retry.".to_string()),
+            });
+        }
+        Err(error) => {
+            return Err(internal_error(format!(
+                "credential test returned invalid proxy body: {error}"
+            )));
+        }
+    };
     let payload = serde_json::from_str::<JsonValue>(&response_text).ok();
 
     let output = payload
@@ -2059,6 +2136,7 @@ async fn create_my_codex_credential(
         body.auth_json,
         body.label,
         body.make_default,
+        None,
     )
     .await?;
 
@@ -3330,6 +3408,100 @@ mod conversation_title_tests {
 }
 
 #[cfg(test)]
+mod probe_timeout_tests {
+    use std::time::Duration;
+
+    use uuid::Uuid;
+
+    use super::probe_credential_via_proxy;
+    use crate::tests::{
+        build_app_config, build_test_state, spawn_aborting, test_origin_private_key,
+        test_origin_public_key,
+    };
+
+    /// Probes a connection through the proxy at `proxy_url` with a timeout of
+    /// half a second, and asserts that the test failed and asks to retry.
+    async fn assert_probe_fails_at_its_timeout(proxy_url: String) -> anyhow::Result<()> {
+        // The probe makes no database call: nothing listens on port 1.
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )?;
+        let pool = bb8::Pool::builder().max_size(1).build_unchecked(manager);
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "probe-timeout",
+        );
+        config.proxy_base_url = Some(proxy_url);
+        let state = build_test_state(pool, config);
+
+        let probe = tokio::time::timeout(
+            Duration::from_secs(10),
+            probe_credential_via_proxy(
+                &state,
+                Uuid::new_v4(),
+                "gpt-test",
+                Duration::from_millis(500),
+            ),
+        )
+        .await
+        .expect("the probe waited past its timeout")
+        .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+        assert!(!probe.ok);
+        assert_eq!(
+            probe.output.as_deref(),
+            Some("AI proxy request failed; please retry.")
+        );
+        Ok(())
+    }
+
+    /// A connection test whose provider never answers ends at its timeout as a
+    /// failed request, instead of keeping the request open.
+    #[tokio::test]
+    async fn a_probe_that_gets_no_answer_fails_at_its_timeout() -> anyhow::Result<()> {
+        async fn never_answer() -> axum::Json<serde_json::Value> {
+            std::future::pending().await
+        }
+        let proxy = axum::Router::new().route("/v1/responses", axum::routing::post(never_answer));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let proxy_url = format!("http://{}", listener.local_addr()?);
+        let _proxy_server = spawn_aborting(async move {
+            axum::serve(listener, proxy)
+                .await
+                .expect("serve a proxy that never answers");
+        });
+        assert_probe_fails_at_its_timeout(proxy_url).await
+    }
+
+    /// The timeout covers the answer's body too: a provider that starts to
+    /// answer and then stalls fails the test the same way, not as a broken
+    /// answer.
+    #[tokio::test]
+    async fn a_probe_whose_answer_stalls_fails_at_its_timeout() -> anyhow::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let proxy_url = format!("http://{}", listener.local_addr()?);
+        let _proxy_server = spawn_aborting(async move {
+            let mut stalled = Vec::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = [0_u8; 8192];
+                let _ = socket.read(&mut request).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                          content-length: 64\r\n\r\n{\"output_text\":",
+                    )
+                    .await;
+                stalled.push(socket);
+            }
+        });
+        assert_probe_fails_at_its_timeout(proxy_url).await
+    }
+}
+
+#[cfg(test)]
 mod codex_refresh_tests {
     use super::codex_auth_json_should_refresh;
     use super::should_serve_stale_codex_access_token_after_refresh_failure;
@@ -3974,6 +4146,44 @@ mod requirement_tests {
 
         let _ = shutdown_tx.send(());
         let _ = server.await;
+    }
+
+    /// A proxy that sends its headers at once and then holds its body is given
+    /// up on at the same deadline as one that does not answer.
+    #[tokio::test]
+    async fn proxy_requirements_fail_closed_when_the_body_stalls() {
+        let app = Router::new().route(
+            "/healthz",
+            get(|| async {
+                let body =
+                    futures_util::stream::pending::<Result<axum::body::Bytes, std::io::Error>>();
+                axum::response::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from_stream(body))
+                    .expect("response")
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let _server = crate::tests::spawn_aborting(async move {
+            axum::serve(listener, app).await.expect("server");
+        });
+
+        let client = reqwest::Client::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            fetch_proxy_credential_requirements(
+                &client,
+                &format!("http://{}", addr),
+                std::time::Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("the probe gives up at its deadline");
+
+        assert!(result.requires_user_credentials);
+        assert_eq!(result.proxy_backend, "unknown");
+        assert_eq!(result.error.as_deref(), Some("proxy request timed out"));
     }
 
     #[test]

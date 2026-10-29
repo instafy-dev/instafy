@@ -49,7 +49,9 @@ Keep the Instafy tab open; it waits for approval and finishes connecting automat
 The controller must treat HTTP **403 and 404 from the token polling endpoint as pending**,
 matching Codex's device-login client. These responses can arrive before the user even opens
 the OpenAI page; they do not establish that the user's device-code setting is disabled.
-Keep the code usable until authorization, cancellation, or its 15-minute expiry. A 404 when
+Keep the code usable until authorization, cancellation, or its 15-minute expiry. A person has
+one pending login, so a newer start replaces the older code, and starts are limited per person
+and across everyone ([AI connection limits](../packages/runtime-controller/README.md#ai-connection-limits)). A 404 when
 initially requesting a code means the configured authentication server's device-code endpoint
 is unavailable, not that a particular user's ChatGPT setting is off.
 

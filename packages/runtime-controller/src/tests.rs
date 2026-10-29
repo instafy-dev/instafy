@@ -34125,16 +34125,18 @@ mod billing_processor_tests {
     }
 }
 
-mod config_env_tests {
+pub(crate) mod config_env_tests {
     use super::*;
 
-    struct EnvVarGuard {
+    /// Sets an environment variable until it is dropped. Only for tests that
+    /// run one at a time, as `pnpm test:controller` runs them.
+    pub(crate) struct EnvVarGuard {
         key: &'static str,
         previous: Option<String>,
     }
 
     impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
+        pub(crate) fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var(key).ok();
             std::env::set_var(key, value);
             Self { key, previous }
