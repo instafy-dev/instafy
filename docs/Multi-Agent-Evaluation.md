@@ -96,13 +96,15 @@ allocates the remaining allowance to distinct source questions and reconciles so
 unknowns before synthesis. Search quotas and job execution deadlines retain their existing scopes.
 
 Space managers can configure **Web research** in space settings or use
-`instafy web settings --max-page-loads 24 --max-page-loads-per-site 8` (also `--interactive`).
-The defaults remain 12 fresh loads total and 4 per site; both values are bounded at 1–200,
+`instafy web settings --max-page-loads 200 --max-page-loads-per-site 50` (also `--interactive`).
+The defaults are 100 fresh loads total and 25 per site; both values are bounded at 1–200,
 with the per-site value no greater than the total. The controller snapshots settings for each
 new task. Changing settings does not replenish running tasks or their continued workers.
+Spaces without saved settings use these defaults; explicit settings remain unchanged.
 `instafy web budget --json` reports remaining allowance without fetching a page.
 
-Apply `20261028170000_shared_research_budgets.sql` before updating the controller.
+Apply `20261028170000_shared_research_budgets.sql` and
+`20261029130000_research_budget_defaults.sql` before updating the controller.
 Job bindings and reservations are controller-owned, with atomic accounting across runtimes
 and idempotent reservation retries. A tool receives only a research-scoped capability for
 its live job; isolated workers still receive no general controller credential. Cached reads
@@ -110,8 +112,8 @@ do not reserve a load, failed fresh attempts do, and redirects count each distin
 allowance while retaining one total page load. The controller spaces each site's reserved
 start slots by at least two seconds; workers wait for their slot. Transport and DNS delays
 can shift actual request times. A shared-budget service failure cannot create a local replacement allowance.
-Standalone CLI use and older controllers without shared-budget support retain local 12/4
-accounting; all participating components must be updated for cross-runtime sharing.
+Standalone CLI use and older controllers without shared-budget support use the updated CLI's
+local 100/25 accounting; all participating components must be updated for cross-runtime sharing.
 
 Interactive browser control remains single-agent. Research helpers use public reading/search
 commands and return browser-dependent gaps for a separate authorized browser step. This

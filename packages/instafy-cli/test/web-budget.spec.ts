@@ -372,7 +372,7 @@ describe("research allowance binding and status", () => {
     expect(JSON.parse(out[0])).toMatchObject({ budget: { scope: "this task", loadsUsed: 0, loadsLeft: 16, loadsPerHost: 5 } });
     expect(c.posts).toHaveLength(0);
     const standalone = await webBudget({ ...deps(c.fetcher), env: {} });
-    expect(standalone.budget).toMatchObject({ loadsUsed: 0, loadsLeft: 12, loadsPerTurn: 12, loadsPerHost: 4 });
+    expect(standalone.budget).toMatchObject({ loadsUsed: 0, loadsLeft: 100, loadsPerTurn: 100, loadsPerHost: 25 });
     expect(standalone.budget.scope).toContain("this session");
     const web = registerWebCommand(new Command());
     expect(web.commands.find((command) => command.name() === "budget")?.options.map((option) => option.long)).toEqual(["--json"]);

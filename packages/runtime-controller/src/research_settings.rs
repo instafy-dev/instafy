@@ -146,7 +146,7 @@ mod tests {
             patch.apply(ResearchSettings::default()).unwrap(),
             ResearchSettings {
                 max_page_loads: 30,
-                max_page_loads_per_site: 4
+                max_page_loads_per_site: 25
             }
         );
         for value in [
@@ -154,7 +154,7 @@ mod tests {
             json!({"maxPageLoads":0}),
             json!({"maxPageLoads":201}),
             json!({"maxPageLoads":3}),
-            json!({"maxPageLoadsPerSite":13}),
+            json!({"maxPageLoadsPerSite":101}),
         ] {
             assert!(serde_json::from_value::<Patch>(value)
                 .unwrap()

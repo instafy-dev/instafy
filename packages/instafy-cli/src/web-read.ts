@@ -16,7 +16,7 @@
 //   is remembered and never read again in this turn (nor from the cache for a day), whatever the options;
 // - page text is redacted (the browsers' redaction.js) before anything is printed or cached, and comes back wrapped
 //   as untrusted page content: data to quote with its source, never instructions or anyone's consent;
-// - the controller shares the task's page allowance across workers; standalone reads allow 12 loads and 4 per site;
+// - the controller shares the task's page allowance across workers; standalone reads allow 100 loads and 25 per site;
 //   per-site start slots are reserved 2 s apart and a call returns within 60 s with what it has. Network delays
 //   can shift actual request times; the spacing is scheduling, not a wire-level guarantee.
 //
@@ -119,8 +119,8 @@ export const ROBOTS_AGENTS: readonly string[] = ["*", "instafy-agent", ...AI_AGE
 
 export const LIMITS = Object.freeze({
   urlsPerCall: 6,
-  loadsPerTurn: 12,
-  loadsPerHost: 4,
+  loadsPerTurn: 100,
+  loadsPerHost: 25,
   hostSpacingMs: 2_000,
   callMs: 60_000,
   pageTimeoutMs: 20_000,

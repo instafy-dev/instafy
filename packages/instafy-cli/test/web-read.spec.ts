@@ -227,7 +227,7 @@ describe("reading a page", () => {
     );
     expect(report.notice).toMatch(/untrusted data/);
     expect(report.guards.linkOnly).toMatchObject({ sites: SKILL_LIST.sites.length, wrappers: SKILL_LIST.wrappers.length, sources: ["bundled"] });
-    expect(report.budget).toMatchObject({ loadsUsed: 1, loadsLeft: 11, scope: "this turn" });
+    expect(report.budget).toMatchObject({ loadsUsed: 1, loadsLeft: 99, scope: "this turn" });
   });
 
   it("sends only an honest agent user agent: no cookies, no credentials", async () => {
@@ -946,40 +946,51 @@ describe("one site, however its host is written", () => {
   it("counts www. and trailing-dot forms against the same per-site cap", async () => {
     dns["www.news.example.org"] = [PUBLIC_A];
     dns["news.example.org."] = [PUBLIC_A];
-    for (let i = 0; i < 2; i += 1) {
-      routes[`news.example.org/p${i}`] = { body: ARTICLE };
-      routes[`www.news.example.org/q${i}`] = { body: ARTICLE };
+    const aliases = ["news.example.org", "www.news.example.org", "news.example.org."];
+    const urls = Array.from({ length: 26 }, (_, i) => {
+      const address = `${aliases[i % aliases.length]}/p${i}`;
+      routes[address] = { body: ARTICLE };
+      return `http://${address}`;
+    });
+    const reports: Awaited<ReturnType<typeof read>>[] = [];
+    for (let at = 0; at < urls.length; at += LIMITS.urlsPerCall) {
+      reports.push(await read(urls.slice(at, at + LIMITS.urlsPerCall)));
     }
-    routes["news.example.org./r"] = { body: ARTICLE };
-    const report = await read(["http://news.example.org/p0", "http://news.example.org/p1", "http://www.news.example.org/q0", "http://www.news.example.org/q1", "http://news.example.org./r"]);
-    expect(report.pages.map((p) => p.status)).toEqual(["read", "read", "read", "read", "skipped"]);
-    expect(report.pages[4]).toMatchObject({ code: "host_limit" });
-    expect(report.budget.hosts).toEqual({ "news.example.org": 4 });
+    const pages = reports.flatMap((report) => report.pages);
+    expect(pages.filter((p) => p.status === "read")).toHaveLength(25);
+    expect(pages[25]).toMatchObject({ code: "host_limit" });
+    expect(reports.at(-1)!.budget.hosts).toEqual({ "news.example.org": 25 });
+    expect(hits.filter((hit) => hit.endsWith("/p25"))).toEqual([]);
   });
 });
 
 describe("per-turn caps", () => {
   it(`allows ${LIMITS.loadsPerHost} loads per site, ${LIMITS.hostSpacingMs / 1000} s apart`, async () => {
-    for (let i = 0; i < 5; i += 1) routes[`news.example.org/p${i}`] = { body: ARTICLE };
-    const report = await read([0, 1, 2, 3, 4].map((i) => `http://news.example.org/p${i}`));
-    expect(report.pages.map((p) => p.status)).toEqual(["read", "read", "read", "read", "skipped"]);
-    expect(report.pages[4]).toMatchObject({ code: "host_limit" });
-    expect(slept).toEqual([2000, 2000, 2000]);
-    expect(hits.filter((hit) => hit.includes("/p4"))).toEqual([]);
+    const urls = Array.from({ length: 26 }, (_, i) => `http://news.example.org/p${i}`);
+    for (let i = 0; i < urls.length; i += 1) routes[`news.example.org/p${i}`] = { body: ARTICLE };
+    const pages: PageResult[] = [];
+    for (let at = 0; at < urls.length; at += LIMITS.urlsPerCall) {
+      pages.push(...(await read(urls.slice(at, at + LIMITS.urlsPerCall))).pages);
+    }
+    expect(pages.filter((p) => p.status === "read")).toHaveLength(25);
+    expect(pages[25]).toMatchObject({ code: "host_limit" });
+    expect(slept).toEqual(Array.from({ length: 24 }, () => 2000));
+    expect(hits.filter((hit) => hit.includes("/p25"))).toEqual([]);
   });
 
   it(`allows ${LIMITS.loadsPerTurn} loads per turn across calls`, async () => {
-    const hosts = ["a", "b", "c", "d"].map((h) => `${h}.example.org`);
+    const hosts = ["a", "b", "c", "d", "e"].map((h) => `${h}.example.org`);
     for (const host of hosts) dns[host] = [PUBLIC_A];
-    for (const host of hosts) for (let i = 0; i < 4; i += 1) routes[`${host}/p${i}`] = { body: ARTICLE };
-    const urls = hosts.flatMap((host) => [0, 1, 2, 3].map((i) => `http://${host}/p${i}`));
+    for (const host of hosts) for (let i = 0; i < 25; i += 1) routes[`${host}/p${i}`] = { body: ARTICLE };
+    const urls = hosts.flatMap((host) => Array.from({ length: 25 }, (_, i) => `http://${host}/p${i}`));
     const pages: PageResult[] = [];
-    for (let at = 0; at < urls.length; at += 4) pages.push(...(await read(urls.slice(at, at + 4))).pages);
-    expect(pages.filter((p) => p.status === "read")).toHaveLength(12);
-    expect(pages.slice(12).every((p) => p.code === "turn_limit")).toBe(true);
-    expect(hits.filter((hit) => hit.startsWith("d.example.org/p"))).toEqual([]);
+    for (let at = 0; at < urls.length; at += LIMITS.urlsPerCall) pages.push(...(await read(urls.slice(at, at + LIMITS.urlsPerCall))).pages);
+    expect(pages.filter((p) => p.status === "read")).toHaveLength(100);
+    expect(pages.slice(100)).toHaveLength(25);
+    expect(pages.slice(100).every((p) => p.code === "turn_limit")).toBe(true);
+    expect(hits.filter((hit) => hit.startsWith("e.example.org/p"))).toEqual([]);
     // A new turn has a new budget.
-    const next = await one("http://d.example.org/p0", {}, { env: { INSTAFY_TURN_STARTED_AT: "2026-10-26T12:00:00Z" } });
+    const next = await one("http://e.example.org/p0", {}, { env: { INSTAFY_TURN_STARTED_AT: "2026-10-26T12:00:00Z" } });
     expect(next.status).toBe("read");
   });
 

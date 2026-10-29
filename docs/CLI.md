@@ -777,7 +777,7 @@ inside the same `<untrusted_page_content>` wrapper as the text.
 - **Redaction.** The browsers' `redaction.js` (`packages/browser-action-policy`) masks keys and tokens in the text,
   title, links, addresses and structured data before anything is printed or cached. A page that shows a credential is
   withheld as `secret_screen`.
-- **Budget.** The default allowance is 12 fresh page loads per task and 4 per site (`www.example.org` and
+- **Budget.** The default allowance is 100 fresh page loads per task and 25 per site (`www.example.org` and
   `example.org` are one site). On an updated controller/runtime, one atomic allowance covers the parent,
   helpers and continued worker jobs across machines. Per-site start slots are reserved at least 2 s apart;
   transport and DNS delays can shift actual request times. A call reads
@@ -793,12 +793,13 @@ new tasks in Studio's **Web research** settings or with:
 
 ```bash
 instafy web settings --space <space-uuid> --json
-instafy web settings --space <space-uuid> --max-page-loads 24 --max-page-loads-per-site 8
+instafy web settings --space <space-uuid> --max-page-loads 200 --max-page-loads-per-site 50
 instafy web settings --space <space-uuid> --interactive
 ```
 
 Both settings accept integers from 1–200, with the per-site allowance no greater than the total. Changes
 apply to new tasks; running tasks and their worker continuations keep their original settings and usage.
+The higher defaults apply to spaces without saved settings; explicit settings are preserved.
 Runtime-scoped tools cannot change these settings. Search quotas, browser permissions and site restrictions
 are independent of this allowance.
 
@@ -807,7 +808,7 @@ content hash; a page the site marks `no-store` or `private` is not cached. `--fr
 cache, robots.txt answers and stop records live in the space's own folder
 (`$INSTAFY_CACHE_DIR/instafy/web-read/{cache,state}`), which outlasts the turn, so a worker whose home folder is new
 every turn still knows what an earlier turn on that workspace stopped at. Standalone use and older controllers
-retain the local default 12/4 turn budget, keyed by `INSTAFY_TURN_STARTED_AT`; outside a runtime turn it lapses
+use the updated CLI's local default 100/25 turn budget, keyed by `INSTAFY_TURN_STARTED_AT`; outside a runtime turn it lapses
 after 15 minutes without reads. Cross-machine sharing requires the updated controller, runtime and CLI. On a person's own
 computer, where nothing sets `INSTAFY_CACHE_DIR` (or where it names a folder this process may not write), the cache
 lives under `$XDG_CACHE_HOME/instafy/web-read` (or `~/.cache`) and the turn budget under

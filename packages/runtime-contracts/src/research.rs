@@ -1,8 +1,8 @@
 //! Bounds for controller-owned, task-wide web research budgets.
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_MAX_PAGE_LOADS: u32 = 12;
-pub const DEFAULT_MAX_PAGE_LOADS_PER_SITE: u32 = 4;
+pub const DEFAULT_MAX_PAGE_LOADS: u32 = 100;
+pub const DEFAULT_MAX_PAGE_LOADS_PER_SITE: u32 = 25;
 pub const MAX_PAGE_LOADS: u32 = 200;
 pub const RESEARCH_RESERVE_SCOPE: &str = "research.reserve";
 
@@ -67,10 +67,21 @@ mod tests {
     fn research_settings_validate_at_the_transport_boundary() {
         assert_eq!(
             serde_json::from_str::<ResearchSettings>(
-                r#"{"maxPageLoads":12,"maxPageLoadsPerSite":4}"#
+                r#"{"maxPageLoads":100,"maxPageLoadsPerSite":25}"#
             )
             .unwrap(),
             ResearchSettings::default()
+        );
+        assert_eq!(
+            serde_json::from_str::<ResearchSettings>(
+                r#"{"maxPageLoads":12,"maxPageLoadsPerSite":4}"#
+            )
+            .unwrap(),
+            ResearchSettings {
+                max_page_loads: 12,
+                max_page_loads_per_site: 4,
+            },
+            "saved settings and task snapshots retain their explicit limits"
         );
         for value in [
             r#"{"maxPageLoads":0,"maxPageLoadsPerSite":4}"#,
