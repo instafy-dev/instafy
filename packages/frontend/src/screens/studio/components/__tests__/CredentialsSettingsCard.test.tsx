@@ -494,12 +494,93 @@ describe("CredentialsSettingsCard", () => {
     expect(mocks.updateAgent).toHaveBeenCalledOnce();
   });
 
-  it("restores the bot fallback when removing an existing picture", async () => {
+  it("gives a bot whose picture is removed the default face, never its id", async () => {
     await renderAgent({ ...inheritedAgent, avatarSeed: "https://storage.example/old.png" }); await openAgent();
+    // Behind the picture waits the face the owner's picture-less bots wear
+    // least, counting down from 8: here no other bot wears one.
+    expect(mocks.agentProfileProps?.face).toBe(8);
+    await act(async () => mocks.agentProfileProps!.onAvatarImageUrlChange(""));
+    await saveProfile();
+    expect(mocks.updateAgent.mock.lastCall?.[1]).toMatchObject({ avatarSeed: "hatchling:8" });
+    expect(mocks.uploadPicture).not.toHaveBeenCalled();
+    // Or the face picked once the picture is gone.
+    await openAgent();
+    await act(async () => {
+      mocks.agentProfileProps!.onAvatarImageUrlChange("");
+      mocks.agentProfileProps!.onFaceChange!(2);
+    });
+    await saveProfile();
+    expect(mocks.updateAgent.mock.lastCall?.[1]).toMatchObject({ avatarSeed: "hatchling:2" });
+  });
+
+  it("keeps Octo on its own tile: no faces to pick, and its picture removed resets its seed to its id", async () => {
+    await renderAgent({ ...inheritedAgent, handle: "octo", avatarSeed: "https://storage.example/octo.png" });
+    await openAgent("octo");
+    expect(mocks.agentProfileProps?.face).toBeNull();
     await act(async () => mocks.agentProfileProps!.onAvatarImageUrlChange(""));
     await saveProfile();
     expect(mocks.updateAgent.mock.lastCall?.[1]).toMatchObject({ avatarSeed: inheritedAgent.id });
-    expect(mocks.uploadPicture).not.toHaveBeenCalled();
+  });
+
+  it("saves the face picked for a bot, and leaves the seed of a bot whose face nobody touched", async () => {
+    await renderAgent(); await openAgent();
+    // An older bot wears its seed's face (helper is 6) until one is picked.
+    expect(mocks.agentProfileProps?.face).toBe(6);
+    await act(async () => mocks.agentProfileProps!.onBioChange!("Only the about changes."));
+    await saveProfile();
+    expect(mocks.updateAgent.mock.lastCall?.[1].avatarSeed).toBeUndefined();
+    await openAgent();
+    await act(async () => mocks.agentProfileProps!.onFaceChange!(6));
+    expect(mocks.agentProfileProps?.dirty).toBe(false);
+    await act(async () => mocks.agentProfileProps!.onFaceChange!(3));
+    expect(mocks.agentProfileProps?.dirty).toBe(true);
+    await saveProfile();
+    expect(mocks.updateAgent.mock.lastCall?.[1]).toMatchObject({ avatarSeed: "hatchling:3" });
+  });
+
+  it("starts a new bot on the face its owner's bots wear least, counting down from 8, and saves the one picked", async () => {
+    mocks.listAgents.mockResolvedValue({ success: true, agents: [
+      { ...inheritedAgent, id: "octo-id", handle: "octo", avatarSeed: "octo" },
+      { ...inheritedAgent, id: "bot-8", handle: "eight", avatarSeed: "hatchling:8" },
+      { ...inheritedAgent, id: "bot-7", handle: "seven", avatarSeed: "hatchling:7" },
+      { ...inheritedAgent, id: "bot-pic", handle: "pic", avatarSeed: "https://storage.example/pic.png" },
+    ] });
+    mocks.createAgent.mockImplementation(async (body: { avatarSeed?: string }) => ({
+      success: true, agent: { ...inheritedAgent, id: "new-bot", handle: "writer", avatarSeed: body.avatarSeed ?? "new-bot" },
+    }));
+    await act(async () => { root.render(<CredentialsSettingsCard section="agents" />); await flush(); });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="bots-create"]')!.click());
+    // Octo and a picture wear no hatchling, and 8 and 7 are taken: 6.
+    expect(mocks.agentProfileProps?.face).toBe(6);
+    await act(async () => {
+      mocks.agentProfileProps!.onHandleChange("@writer");
+      mocks.agentProfileProps!.onFaceChange!(2);
+    });
+    expect(mocks.agentProfileProps?.face).toBe(2);
+    await saveProfile();
+    expect(mocks.createAgent.mock.lastCall?.[0]).toMatchObject({ handle: "writer", avatarSeed: "hatchling:2" });
+    // The controller kept the face, so nothing follows the create.
+    expect(mocks.updateAgent).not.toHaveBeenCalled();
+    expect(mocks.showStatus).toHaveBeenCalledWith("Agent created: @writer", "success", 3000);
+  });
+
+  it("asks before discarding a new bot whose only change is its face", async () => {
+    mocks.listAgents.mockResolvedValue({ success: true, agents: [inheritedAgent] });
+    const router = createMemoryRouter([{ path: "*", element: <StudioDraftsProvider><StudioDraftNavigationGuard>
+      <CredentialsSettingsCard section="agents" />
+    </StudioDraftNavigationGuard></StudioDraftsProvider> }], { initialEntries: ["/studio?panel=ai"] });
+    await act(async () => { root.render(<RouterProvider router={router} />); await flush(); });
+    const create = async () => act(async () => container.querySelector<HTMLButtonElement>('[data-testid="bots-create"]')!.click());
+    // The default face alone is no draft.
+    await create();
+    await act(async () => mocks.agentProfileProps!.onClose());
+    expect(mocks.agentProfileProps?.isOpen).toBe(false);
+    await create();
+    await act(async () => mocks.agentProfileProps!.onFaceChange!(1));
+    await act(async () => mocks.agentProfileProps!.onClose());
+    expect(mocks.agentProfileProps?.isOpen).toBe(true);
+    expect(document.querySelector('[role="dialog"][aria-label="Unfinished work"]')).not.toBeNull();
+    router.dispose();
   });
 
   it("does not carry a pending photo save into another account", async () => {
@@ -652,8 +733,21 @@ describe("CredentialsSettingsCard", () => {
     expect(mocks.agentProfileProps!.mode).toBe("create");
     const model = mocks.agentProfileProps!.modelId;
     await saveProfile();
-    expect(mocks.createAgent.mock.lastCall?.[0]).toMatchObject({ credentialId: oldCredential.id, model });
-    expect(mocks.updateAgent).not.toHaveBeenCalled();
+    expect(mocks.createAgent.mock.lastCall?.[0]).toMatchObject({ credentialId: oldCredential.id, model, avatarSeed: "hatchling:8" });
+    // Without a handle the controller names the bot after its connection and
+    // seeds it with its own id, so the face the editor showed follows in a
+    // save of its own, which pins no credential or model.
+    expect(mocks.updateAgent).toHaveBeenCalledExactlyOnceWith(inheritedAgent.id, { avatarSeed: "hatchling:8" });
+  });
+
+  it("says so when a new bot's face does not save after it", async () => {
+    mocks.createAgent.mockResolvedValue({ success: true, agent: inheritedAgent });
+    await renderAgent();
+    mocks.updateAgent.mockResolvedValue({ success: false, error: "Try again" });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="bots-create"]')!.click());
+    await saveProfile();
+    expect(mocks.showStatus).toHaveBeenLastCalledWith("Agent created: @helper, but its picture or face did not save.", "error", 4500);
+    expect(mocks.agentProfileProps?.isOpen).toBe(false);
   });
 
   it("shows failed auth.json test feedback and an explicit reconnect action", async () => {

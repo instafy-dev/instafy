@@ -1,20 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { AiFace } from "../../../../components/AiFace";
 import { AiTag } from "../../../../components/AiTag";
 import { HumanAvatar } from "../../../../components/HumanAvatar";
-import { AI_TILE_CLASS, OctoCoin } from "../../../../components/OctoCoin";
 import { LexicalTypeaheadMenuPlugin, MenuOption, useBasicTypeaheadTriggerMatch } from "@lexical/react/LexicalTypeaheadMenuPlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import { useLexicalTextEntity } from "@lexical/react/useLexicalTextEntity";
 import type { EntityMatch } from "@lexical/text";
 import { $createTextNode, $insertNodes, $isTextNode, type TextNode } from "lexical";
 import type { AssistantMentionToken } from "../../../../conversations/assistantMentions";
-import {
-  OCTO_AVATAR_SRC,
-  resolveAgentAvatarGradient,
-  resolveAgentAvatarImageSrc,
-  resolveAgentAvatarText,
-} from "../../../../utils/agentAvatar";
 import {
   getBuiltInAssistantMentionPatternSource,
   listBuiltInAssistantDefinitions,
@@ -30,6 +24,7 @@ import { $createUserMentionNode } from "./UserMentionNode";
 import { ComposerSuggestionMenu, ComposerSuggestionOption } from "./ComposerSuggestions";
 
 export type MentionAgentProfile = {
+  id?: string | null;
   handle?: string | null;
   displayName?: string | null;
   avatarSeed?: string | null;
@@ -84,20 +79,21 @@ class AssistantMentionOption extends MenuOption {
   }
 }
 
-// An option's 24px face shell clips its contents to the face's own shape and
-// carries the shared avatar coin shadow in light (docs/Brand.md, "One rule for
-// faces"): a person's is a circle with a hairline border and small shadow in
-// dark; an AI's is the AI tile, whose inside hairline is its only edge in dark.
-const MENTION_FACE_SHELL_BASE_CLASS =
-  "flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden bg-white text-3xs font-semibold text-slate-700 shadow-avatar-coin dark:bg-slate-900 dark:text-slate-200";
-const MENTION_PERSON_FACE_SHELL_CLASS = `${MENTION_FACE_SHELL_BASE_CLASS} rounded-full dark:border dark:border-slate-700 dark:shadow-sm`;
-const MENTION_AI_FACE_SHELL_CLASS = `${MENTION_FACE_SHELL_BASE_CLASS} ${AI_TILE_CLASS}`;
+// A person's 24px face shell clips the face to its circle and carries the
+// shared avatar coin shadow in light, with a hairline border and small shadow
+// in dark (docs/Brand.md, "One rule for faces"). An AI's face is the tile
+// itself (AiFace), whose inside hairline is its only edge in dark.
+const MENTION_PERSON_FACE_SHELL_CLASS =
+  "flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-white text-3xs font-semibold text-slate-700 shadow-avatar-coin dark:border dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:shadow-sm";
 
-function MentionOptionImage({ src }: { src: string }) {
-  return <img src={src} alt="" className="h-full w-full object-cover" decoding="async" draggable={false} />;
-}
-
-/** An option's 24px face: a person's circle or an AI's tile. Octo is its tile (OctoCoin, docs/Brand.md), never the static avatar file. */
+/**
+ * An option's 24px face: a person's circle, or the AI's face (AiFace, docs/Brand.md
+ * "Octo's hatchlings"): Octo's tile, the viewer's saved agent as its profile
+ * has it. Any other AI listed (a handle the conversation names that the viewer
+ * has no saved agent for) is known here only by its handle, so it wears the
+ * hollow face, as the header roster draws it; its numbered face belongs to the
+ * rows it writes.
+ */
 export function MentionOptionFace({
   option,
   agentProfilesByHandle,
@@ -114,44 +110,16 @@ export function MentionOptionFace({
   }
   const normalizedHandle = option.kind === "agent" ? normalizeAgentHandle(option.token) : null;
   const profile = normalizedHandle ? agentProfilesByHandle.get(normalizedHandle) ?? null : null;
-  const imageSrc =
-    option.kind === "assistant"
-      ? resolveAgentAvatarImageSrc({ handle: option.token })
-      : profile
-        ? resolveAgentAvatarImageSrc(profile)
-        : resolveAgentAvatarImageSrc({ handle: normalizedHandle });
-  if (imageSrc === OCTO_AVATAR_SRC) {
-    return <OctoCoin className="h-6 w-6" />;
-  }
-  if (option.kind === "assistant") {
-    return (
-      <span className={MENTION_AI_FACE_SHELL_CLASS}>
-        {imageSrc ? <MentionOptionImage src={imageSrc} /> : option.label.trim().slice(0, 1).toUpperCase() || "@"}
-      </span>
-    );
-  }
-  return (
-    <span className={MENTION_AI_FACE_SHELL_CLASS}>
-      {imageSrc ? (
-        <MentionOptionImage src={imageSrc} />
-      ) : (
-        <span
-          aria-hidden="true"
-          className="inline-flex h-full w-full items-center justify-center text-3xs font-semibold text-white"
-          style={{
-            backgroundImage: resolveAgentAvatarGradient(
-              profile?.avatarSeed?.trim() || profile?.handle?.trim() || option.token,
-            ),
-          }}
-        >
-          {resolveAgentAvatarText({
-            handle: profile?.handle ?? option.token,
-            displayName: profile?.displayName ?? option.label,
-          })}
-        </span>
-      )}
-    </span>
-  );
+  const identity = profile
+    ? {
+        handle: profile.handle,
+        avatarSeed: profile.avatarSeed,
+        avatarUrl: profile.avatarUrl,
+        agentId: profile.id,
+        displayName: profile.displayName,
+      }
+    : { handle: option.token, textOnly: true };
+  return <AiFace identity={identity} className="h-6 w-6" />;
 }
 
 /**

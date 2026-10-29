@@ -117,6 +117,9 @@ for (const theme of ["light", "dark"] as const) {
           // before text starts. The fixed 32px gutter regresses here.
           expect(layout.faces[0].right).toBeGreaterThan(layout.faces[1].left);
           expect(layout.faces[1].left).toBeGreaterThan(layout.faces[0].left);
+          // The next face covers a quarter of the one before, never half: half
+          // of a one-ink hatchling is a fragment (docs/Brand.md).
+          expect(layout.faces[0].right - layout.faces[1].left).toBeLessThanOrEqual(layout.faces[0].width / 4);
           expect(layout.label.left - layout.faces[1].right).toBeGreaterThanOrEqual(8);
         } else if (width >= 640) {
           expect(layout.singleFace).toHaveLength(1);

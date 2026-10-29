@@ -17,7 +17,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     ],
   },
   "browser-ui": {
-    minimumTests: 53,
+    minimumTests: 55,
     // CI runs this lane as two Playwright shards, one job each. Each part
     // proves only its own tests; the required job checks this contract on
     // both parts' receipts together (combineRequiredBrowserParts).
@@ -43,6 +43,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "mobile-editor-dialogs.spec.ts",
       "mobile-thumb-navigation.spec.ts",
       "notification-preferences.spec.ts",
+      "octo-hatchling.spec.ts",
       "organization-rail-reorder.spec.ts",
       "preview-card-responsive.spec.ts",
       "run-failure-block.spec.ts",
@@ -61,6 +62,8 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "agent tabs are badged, listed and taken over in one press at 1100px in light mode",
       "typing avatar stacks keep status text clear in light on desktop and phones",
       "typing avatar stacks keep status text clear in dark on desktop and phones",
+      "Octo's hatchlings sit on Octo's light tile in one ink, clear of its corners at every size",
+      "Octo's hatchlings sit on Octo's dark tile in one ink, clear of its corners at every size",
       "Skills import keeps its title and actions reachable across keyboard resize and rotation",
       "Agent editing keeps Save reachable above the keyboard without remounting the draft",
       "conversation views preserve mounted resources, drafts and split size across narrow layouts",

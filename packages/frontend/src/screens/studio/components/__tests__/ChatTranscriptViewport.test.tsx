@@ -3,8 +3,10 @@
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { expectHatchling } from "../../../../components/__tests__/octoCoinExpectations";
 import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "../ChatTranscriptViewport";
 import type { StickyChatSpeaker } from "../chatSpeakerMarker";
+import { ViewerAgentsContext } from "../viewerAgents";
 
 const assistantSpeaker: StickyChatSpeaker = {
   kind: "assistant",
@@ -162,6 +164,18 @@ describe("ChatSpeakerStickyOverlay", () => {
       const face = pill.firstElementChild as HTMLElement;
       expect(face.className).toContain("h-7");
     }
+  });
+
+  it("draws the viewer's own saved agent in the pill as the gutter does, by the row's agent id", async () => {
+    const speaker: StickyChatSpeaker = { kind: "assistant", handle: "pia", avatarSeed: "hatchling:2", agentId: "own-pia" };
+    await act(async () => {
+      root.render(
+        <ViewerAgentsContext.Provider value={new Map([["own-pia", { avatarSeed: "hatchling:7" }]])}>
+          <ChatSpeakerStickyOverlay speaker={speaker} />
+        </ViewerAgentsContext.Provider>,
+      );
+    });
+    expect(expectHatchling(container.querySelector('[data-testid="chat-avatar-assistant"]'))).toBe("7");
   });
 
   it("paints nothing behind the pill: no backdrop band of any kind", async () => {

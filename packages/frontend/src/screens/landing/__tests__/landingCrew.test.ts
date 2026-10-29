@@ -69,10 +69,10 @@ describe("landing crew palette", () => {
     }
   });
 
-  it("seats the crew in roster order and never gives Octo a crew colour", () => {
+  it("seats the people in roster order and never gives an AI a crew colour", () => {
     expect(LANDING_CREW.ada).toBe(CREW_SLOTS[0]);
     expect(LANDING_CREW.kim).toBe(CREW_SLOTS[1]);
-    expect(LANDING_CREW.agent).toBe(CREW_SLOTS[2]);
-    expect(Object.keys(LANDING_CREW)).not.toContain("octo");
+    // Octo stays ink and the scenario agent wears a hatchling.
+    expect(Object.keys(LANDING_CREW)).toEqual(["ada", "kim"]);
   });
 });

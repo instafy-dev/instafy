@@ -13,6 +13,7 @@ import {
   expectAiTile,
   expectAvatarCoinLightEdge,
   expectCanonicalOctoCoin,
+  expectHatchling,
 } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import { getSitePreview } from "../../../../services/runtimeController/previews";
@@ -1951,9 +1952,10 @@ describe("AgentJobThreadPreviewLayout", () => {
     for (const slot of [octoSlot, benSlot, piaSlot]) expect(slot?.getAttribute("role")).toBe("img");
     expect(benSlot?.getAttribute("title")).toBe("@ben");
     expectCanonicalOctoCoin(octoSlot?.querySelector(":scope > [data-octo-coin]"));
-    expect(benSlot?.textContent).toBe("B");
+    // @ben wears its hatchling (ben is 3), never an initial.
+    expect(expectHatchling(benSlot?.firstElementChild)).toBe("3");
     // One rule for faces: every face in the stack is an AI tile (Octo's, Ben's
-    // gradient and Pia's picture clipped to it) filling its 20px slot with no
+    // hatchling and Pia's picture clipped to it) filling its 20px slot with no
     // inset, carrying the shared coin shadow outside a clean separator: a ring
     // on the face that draws above the face's shadow and follows its corners.
     // No slot is positioned, so tree order decides the overlap.
@@ -1985,6 +1987,38 @@ describe("AgentJobThreadPreviewLayout", () => {
       openButton?.click();
     });
     expect(openBranchThread).toHaveBeenCalledWith("child-thread-local");
+  });
+
+  it("never draws one face twice in a branch row: a repeat folds into +N with everyone past three", async () => {
+    const participants = [
+      { handle: "octo", avatarSeed: "octo" },
+      // ben and reviewer both hash to 3: two helpers, one face.
+      { handle: "ben", avatarSeed: "ben" },
+      { handle: "reviewer", avatarSeed: "reviewer" },
+      { handle: "scout", avatarSeed: "hatchling:6" },
+      { handle: "medic", avatarSeed: "hatchling:1" },
+    ];
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            branchThreads: [{ threadLocalId: "child", title: "Team", hiddenActivityCount: 0, isRunning: false, participants }],
+            onOpenBranchThread: vi.fn(),
+            activity: activityWithUpdates([]),
+            detailsOpen: true,
+          })}
+        />,
+      );
+    });
+    // Everyone is named; three distinct faces are drawn and the rest counted.
+    const stack = container.querySelector('[aria-label="Participants: @octo, @ben, @reviewer, @scout, @medic"]');
+    expect(Array.from(stack?.querySelectorAll(':scope > [role="img"]') ?? [], (slot) => slot.getAttribute("aria-label"))).toEqual([
+      "@octo, AI",
+      "@ben, AI",
+      "@scout, AI",
+    ]);
+    expect(stack?.lastElementChild?.textContent).toBe("+2");
+    expect(stack?.lastElementChild?.getAttribute("aria-hidden")).toBe("true");
   });
 
   it.each([

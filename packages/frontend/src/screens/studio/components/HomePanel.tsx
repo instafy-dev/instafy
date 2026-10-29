@@ -171,7 +171,7 @@ function EventIcon({ event }: { event: HomeFeedEvent }) {
     return (
       <ChatMessageAvatar
         kind="assistant"
-        agent={{ handle: event.actor.handle, avatarSeed: event.actor.avatarSeed }}
+        agent={{ handle: event.actor.handle, avatarSeed: event.actor.avatarSeed, textOnly: event.actor.textOnly }}
         size="xs"
       />
     );

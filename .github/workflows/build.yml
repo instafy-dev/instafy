@@ -350,6 +350,7 @@ jobs:
             scripts/lib/localTunnelBroker.test.mjs \
             scripts/lib/devStackProcesses.test.mjs \
             scripts/octo-turn-grade.test.mjs \
+            scripts/generate-octo-hatchlings.test.mjs \
             scripts/fake-rate-limit-upstream.test.mjs \
             scripts/octo-turn-release.test.mjs \
             scripts/install-skill-packs.test.mjs \

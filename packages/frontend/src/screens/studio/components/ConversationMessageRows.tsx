@@ -6,6 +6,7 @@ import {
   type AssistantAgentIdentity,
   type AssistantAvatarMotion,
   type AssistantAvatarRenderOptions,
+  areDistinctAgents,
   extractAgentIdentityFromMetadata,
   extractRunIdFromMetadata,
   resolveAssistantHandleForMessage,
@@ -109,16 +110,22 @@ function resolveAssistantDisplayHandleForMessage(
   return handle ? normalizeAssistantHandleLabel(handle) : null;
 }
 
-function resolvePreviousVisibleAssistantDisplayHandle(
-  messages: ChatMessage[],
-  index: number,
-  runAgentHandleByRunId: Map<string, string>,
-): string | null {
+function resolvePreviousVisibleAssistantMessage(messages: ChatMessage[], index: number): ChatMessage | null {
   const previous = messages[index - 1];
-  if (!previous || !shouldShowSpeakerIdentityForMessage(previous)) {
-    return null;
-  }
-  return resolveAssistantDisplayHandleForMessage(previous, runAgentHandleByRunId);
+  return previous && shouldShowSpeakerIdentityForMessage(previous) ? previous : null;
+}
+
+/** The agent a row was written as: the one stamped on it, else on its run. */
+function resolveRowAgentIdentity(
+  message: ChatMessage,
+  runAgentIdentityByRunId: Map<string, AssistantAgentIdentity>,
+): AssistantAgentIdentity | null {
+  const metadata =
+    message.metadata && isRecord(message.metadata)
+      ? (message.metadata as Record<string, unknown>)
+      : null;
+  const runId = extractRunIdFromMetadata(metadata);
+  return extractAgentIdentityFromMetadata(metadata) ?? (runId ? runAgentIdentityByRunId.get(runId) ?? null : null);
 }
 
 function buildMultiAgentGroupByParentJob(messages: ChatMessage[]): Map<string, string> {
@@ -277,21 +284,16 @@ export function ConversationMessageRows({
           message.metadata && isRecord(message.metadata)
             ? (message.metadata as Record<string, unknown>)
             : null;
-        const messageAgentIdentityFromMetadata = extractAgentIdentityFromMetadata(messageMetadata);
-        const messageRunId = extractRunIdFromMetadata(messageMetadata);
-        const messageAgentIdentityFromRun =
-          messageRunId ? runAgentIdentityByRunId.get(messageRunId) ?? null : null;
-        const messageAgentIdentity = messageAgentIdentityFromMetadata ?? messageAgentIdentityFromRun;
+        const messageAgentIdentity = resolveRowAgentIdentity(message, runAgentIdentityByRunId);
         // Keep the last attributable assistant across human/controller rows
         // without rescanning the full preceding transcript for each message.
         const previousAssistantHandle = lastAssistantHandle;
         const currentAssistantHandle = resolveAssistantHandleForMessage(message, runAgentHandleByRunId);
         if (currentAssistantHandle) lastAssistantHandle = currentAssistantHandle;
-        const previousVisibleAssistantHandle = resolvePreviousVisibleAssistantDisplayHandle(
-          messages,
-          messageIndex,
-          runAgentHandleByRunId,
-        );
+        const previousVisibleAssistantMessage = resolvePreviousVisibleAssistantMessage(messages, messageIndex);
+        const previousVisibleAssistantHandle = previousVisibleAssistantMessage
+          ? resolveAssistantDisplayHandleForMessage(previousVisibleAssistantMessage, runAgentHandleByRunId)
+          : null;
         const isOwnUserMessage = isCurrentUserChatMessage(
           message,
           normalizedCurrentUserId,
@@ -355,14 +357,7 @@ export function ConversationMessageRows({
             nextMessage.role === "user" ? resolveHumanChatIdentity(nextMessage, humanLabelByUserId) : null;
           const nextIsLeftAligned =
             nextMessage.role === "assistant" || (nextMessage.role === "user" && !nextIsOwnUserMessage);
-          const nextMessageMetadata =
-            nextMessage.metadata && isRecord(nextMessage.metadata)
-              ? (nextMessage.metadata as Record<string, unknown>)
-              : null;
-          const nextAgentIdentityFromMetadata = extractAgentIdentityFromMetadata(nextMessageMetadata);
-          const nextRunId = extractRunIdFromMetadata(nextMessageMetadata);
-          const nextAgentIdentityFromRun = nextRunId ? runAgentIdentityByRunId.get(nextRunId) ?? null : null;
-          const nextAgentIdentity = nextAgentIdentityFromMetadata ?? nextAgentIdentityFromRun;
+          const nextAgentIdentity = resolveRowAgentIdentity(nextMessage, runAgentIdentityByRunId);
           const nextGroupIdentity =
             nextMessage.role === "assistant"
               ? `assistant:${(nextAgentIdentity?.handle ?? "").trim() || "assistant"}`
@@ -372,6 +367,7 @@ export function ConversationMessageRows({
           const nextGroupKey = `${nextIsLeftAligned ? "left" : "right"}:${nextGroupIdentity}`;
           if (
             nextGroupKey === groupKey &&
+            !(message.role === "assistant" && areDistinctAgents(messageAgentIdentity, nextAgentIdentity)) &&
             shouldAssistantMessagesShareVisualGroup(
               getMessageType(message),
               getMessageType(nextMessage),
@@ -405,10 +401,20 @@ export function ConversationMessageRows({
         const normalizedPreviousAssistantHandle = previousVisibleAssistantHandle
           ? normalizeAssistantHandleLabel(previousVisibleAssistantHandle)
           : null;
+        // Two AIs that share a handle (two members' @pia) are two speakers,
+        // each with its own face.
+        const isSameSpeakerAsPrevious =
+          assistantHandleForMessage === normalizedPreviousAssistantHandle &&
+          !areDistinctAgents(
+            messageAgentIdentity,
+            previousVisibleAssistantMessage
+              ? resolveRowAgentIdentity(previousVisibleAssistantMessage, runAgentIdentityByRunId)
+              : null,
+          );
         const isRepeatedAssistantSpeaker =
           message.role === "assistant" &&
           assistantHandleForMessage.length > 0 &&
-          assistantHandleForMessage === normalizedPreviousAssistantHandle;
+          isSameSpeakerAsPrevious;
         const suppressDesktopAssistantAvatar = suppressOuterAssistantAvatar || isRepeatedAssistantSpeaker;
         const usesAssistantAvatarRail = message.role === "assistant" && Boolean(workflowSpineKey) && message.id !== targetedMessageId;
         const showSpeakerIdentity = message.id === targetedMessageId || shouldShowSpeakerIdentityForMessage(message);
@@ -419,7 +425,7 @@ export function ConversationMessageRows({
         const showInlineNarrowSpeakerIdentity =
           (message.role === "assistant" && message.id === targetedMessageId) ||
           showRuntimeNoticeIdentity ||
-          (showSpeakerIdentity && assistantHandleForMessage !== normalizedPreviousAssistantHandle);
+          (showSpeakerIdentity && !isSameSpeakerAsPrevious);
         const threadTerminalStatusMarker = showInlineNarrowSpeakerIdentity
           ? resolveThreadTerminalStatusMarker(message)
           : null;
@@ -536,6 +542,7 @@ export function ConversationMessageRows({
                 kind: "assistant",
                 handle: assistantHandleForMessage,
                 avatarSeed: messageAgentIdentity?.avatarSeed ?? assistantHandleForMessage,
+                ...(messageAgentIdentity?.id ? { agentId: messageAgentIdentity.id } : {}),
               }
             : message.role === "user" && humanIdentity && !isOwnUserMessage
               ? {

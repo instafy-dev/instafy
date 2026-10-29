@@ -46,6 +46,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "mobile-sidebar-safe-area.spec.ts",
   "mobile-thumb-navigation.spec.ts",
   "notification-preferences.spec.ts",
+  "octo-hatchling.spec.ts",
   "organization-rail-reorder.spec.ts",
   "preview-card-responsive.spec.ts",
   "run-failure-block.spec.ts",

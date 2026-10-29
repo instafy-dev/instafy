@@ -3,6 +3,7 @@ import type { ConversationState } from "../../../conversations/ConversationsProv
 import type { HomeAttentionEntry } from "../homeAttention";
 import type { NotificationInboxItem } from "../../../sdk/instafy";
 import type { ActivityItem } from "../../../services/runtimeController/activity";
+import { resolveAiFace } from "../../../utils/aiFace";
 import {
   buildHomeFeed,
   dayLabelFor,
@@ -811,14 +812,17 @@ describe("helpers", () => {
       handle: "octo",
       avatarSeed: "seed-octo",
     });
-    expect(
-      resolveConversationActor(
-        localConversation({
-          messages: [{ id: "m", role: "assistant", content: "x", timestamp: NOW }],
-          ownerAgent: { id: null, handle: "@Ada" },
-        }),
-      ),
-    ).toEqual({ kind: "agent", handle: "ada", avatarSeed: null });
+    // The owner is named by its handle alone, so it is known only by name:
+    // the hollow face, as the thread's branch row draws it, not ada's hash.
+    const owner = resolveConversationActor(
+      localConversation({
+        messages: [{ id: "m", role: "assistant", content: "x", timestamp: NOW }],
+        ownerAgent: { id: null, handle: "@Ada" },
+      }),
+    );
+    expect(owner).toEqual({ kind: "agent", handle: "ada", avatarSeed: null, textOnly: true });
+    expect(resolveAiFace({ handle: owner?.handle, avatarSeed: owner?.avatarSeed, textOnly: owner?.textOnly }))
+      .toEqual({ kind: "unknown" });
     expect(
       resolveConversationActor(
         localConversation({ messages: [{ id: "m", role: "user", content: "x", timestamp: NOW }], ownerAgent: null }),
