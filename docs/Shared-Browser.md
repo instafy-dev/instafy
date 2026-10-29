@@ -570,13 +570,26 @@ read, so that page would go into this chat's reply and Details):
 - **Later turns** run in the tab the chat's last browser turn ran in (its
   `browserPageId`), while that tab is open. A tab the person chose in this chat
   since (the browser's own tab list, or an address typed in its bar) takes its
-  place: that page is theirs to choose.
+  place: that page is theirs to choose. A tab another chat took since (a turn
+  of another chat ran in it later, or the person chose it in another chat
+  later) is that chat's now, and this chat's next turn gets a tab of its own.
+  Turns from before one tab per chat ran in whatever tab was on screen, so
+  several chats' turns may name one tab: it is the chat's whose turn ran there
+  last.
 - **A chat's first browser turn** gets a blank tab: one that no chat's turn was
   sent for (the one tab of a browser that just started), or a new one Studio
   opens with `POST /browser/pages/new` (`browser.control`). That opens
   `about:blank` behind the tab on screen, so whoever watches or drives keeps
-  their page; the browser refuses it once it has 24 tabs. The browser
-  advertises it as `controls.newPage` in `GET /browser/capabilities`. The turn
+  their page. The browser refuses it while Octo works in it for another task
+  (a page that appears during one of Octo's steps is closed as a window the
+  step opened, and fails the step), when Studio says the browser is busy and
+  sends nothing. Once it has 24 tabs, the tab used least recently makes room:
+  it closes once the new one is open (never the tab on screen, the one used
+  last, or one of Octo's). Nobody closes a tab by hand, and the browser
+  brings its tabs back when it starts again under new ids no chat knows, so
+  tabs would otherwise pile up. A chat whose tab closed gets a new one. The
+  browser advertises it as `controls.newPage` in
+  `GET /browser/capabilities`. The turn
   then starts on a blank page, and its blank-page rule takes it to the task's
   address or the official site of what the task is about.
 - **The chat's Browser view shows that tab.** When the view comes on screen for
@@ -588,8 +601,10 @@ read, so that page would go into this chat's reply and Details):
   person's own words: the page reaches the turn only as its bound tab, never as
   a sentence naming it, and a card's continuation sends the card's task alone.
 
-An older browser that cannot open a tab keeps the earlier behaviour: the turn is
-bound to the tab on screen. For that case runtime-agent remembers, per page,
+An older browser that cannot open a tab (its capabilities say so) keeps the
+earlier behaviour: the turn is bound to the tab on screen. Until the browser has
+said whether it can, Studio asks it to open one, and when it does not, nothing
+is sent. For an older browser runtime-agent remembers, per page,
 which conversation's run held it last (in memory, the newest 32 pages). When a
 run starts on a page a run of another conversation held last, its browser
 policy gets one more line: the page was left by a task in another chat, it is

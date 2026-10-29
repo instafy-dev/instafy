@@ -1040,11 +1040,27 @@ export async function focusRuntimeBrowserSessionPage(params: {
 
 const BROWSER_SESSION_PAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
 
-/** Instafy's browser has as many tabs as it opens: one must close first. */
-export class BrowserTabLimitError extends Error {
-  constructor() {
-    super("Instafy's browser has too many tabs open. Close one, then try again.");
-    this.name = "BrowserTabLimitError";
+/** Why Instafy's browser did not open a chat's tab, in words the person can act on. */
+export const BROWSER_TAB_REFUSED_COPY = {
+  /**
+   * It has as many tabs as it opens, and none can make room (the tab used
+   * least recently takes the new one's place unless it is on screen or
+   * Octo's). Nobody can close a tab by hand, so this never asks them to.
+   */
+  limit: "Instafy's browser has too many tabs open to give this chat one of its own.",
+  /**
+   * Octo works in it for another task. A tab that appeared during one of its
+   * steps would be taken for a window the step opened, closed, and fail the
+   * step, so the browser opens none until that task is done.
+   */
+  inUse: "Instafy's browser is busy with another task. Try again once it is done.",
+} as const;
+
+/** Instafy's browser refused a new tab, with a plain reason (BROWSER_TAB_REFUSED_COPY). */
+export class BrowserTabRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserTabRefusedError";
   }
 }
 
@@ -1086,7 +1102,10 @@ export async function openRuntimeBrowserSessionPage(params: {
   }
 
   if (response.status === 409) {
-    throw new BrowserTabLimitError();
+    const refusal = (await response.json().catch(() => null)) as { code?: unknown } | null;
+    throw new BrowserTabRefusedError(
+      refusal?.code === "browser_in_use" ? BROWSER_TAB_REFUSED_COPY.inUse : BROWSER_TAB_REFUSED_COPY.limit,
+    );
   }
 
   if (!response.ok) {

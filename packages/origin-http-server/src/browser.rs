@@ -236,6 +236,9 @@ const BROWSER_CDP_VERSION_BODY_MAX_BYTES: usize = 64 * 1024;
 /// A new blank tab is refused once the browser has this many: a tab per chat,
 /// and Octo's own few, stay well below it.
 const BROWSER_NEW_PAGE_MAX_PAGES: usize = 24;
+/// `409` codes for a refused new tab, so Studio can say which in plain words.
+const BROWSER_NEW_PAGE_IN_USE_CODE: &str = "browser_in_use";
+const BROWSER_NEW_PAGE_LIMIT_CODE: &str = "browser_tab_limit";
 const BROWSER_CDP_ERROR_PREVIEW_MAX_BYTES: usize = 2048;
 const BROWSER_CDP_TARGET_MAX_COUNT: usize = 128;
 const BROWSER_CDP_TARGET_TITLE_MAX_BYTES: usize = 1024;
@@ -1230,19 +1233,75 @@ async fn handle_focus_browser_page(
 /// chat left there. The tab opens behind the one on screen: whoever watches or
 /// drives keeps their page, and Studio brings the new tab forward itself when
 /// the person's view shows that chat. A blank page shows and sends nothing, so
-/// opening one asks for `browser.control` and no approval.
+/// opening one asks for `browser.control` and no approval. It is refused while
+/// an agent run holds the browser (see [`new_browser_page_refusal`]), and at
+/// the limit it takes the place of the tab used least recently (see
+/// [`open_chat_browser_tab`]).
 async fn handle_open_browser_page(
     _ready: BrowserHostReady,
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<BrowserNewPageResponse>), OriginError> {
-    let pages = filter_browser_page_targets(fetch_browser_cdp_targets(&state).await?, true);
-    if pages.len() >= BROWSER_NEW_PAGE_MAX_PAGES {
-        return Err(OriginError::conflict(
-            "Instafy's browser has too many tabs open to add another",
-        ));
+    let approvals = state.browser_collaboration.approval_bridge();
+    if let Some(refusal) = new_browser_page_refusal(&approvals.read_agent_control().await) {
+        return Err(refusal);
     }
-    let id = open_background_blank_tab(&state.http_client, &resolve_browser_cdp_base_url()).await?;
+    let pages = filter_browser_page_targets(fetch_browser_cdp_targets(&state).await?, true);
+    let (active_page_id, agent_tab_ids) = if pages.len() >= BROWSER_NEW_PAGE_MAX_PAGES {
+        (
+            resolve_browser_active_page_id(&pages).await,
+            approvals.agent_tabs().await.tab_ids,
+        )
+    } else {
+        (None, Vec::new())
+    };
+    let id = open_chat_browser_tab(
+        &state.http_client,
+        &resolve_browser_cdp_base_url(),
+        &pages,
+        active_page_id.as_deref(),
+        &agent_tab_ids,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(BrowserNewPageResponse { id })))
+}
+
+/// Why a new blank tab is refused now, if it is: while an agent run holds the
+/// browser (or its marker cannot be read). The run's step guard takes any page
+/// that appears during a step for a window the step opened: it closes that
+/// page and fails the step. A new tab then would end another chat's step, and
+/// leave this chat's turn bound to a tab that is gone. Studio says the browser
+/// is busy instead.
+fn new_browser_page_refusal(
+    agent_control: &crate::browser_approval::AgentControlMarkerObservation,
+) -> Option<OriginError> {
+    (!matches!(
+        agent_control,
+        crate::browser_approval::AgentControlMarkerObservation::Inactive
+    ))
+    .then(|| {
+        OriginError::with_report(
+            StatusCode::CONFLICT,
+            BROWSER_NEW_PAGE_IN_USE_CODE,
+            "Instafy's browser is busy with another task",
+            serde_json::json!({}),
+        )
+    })
+}
+
+/// The tab used least recently, which makes room for a chat's new tab: the
+/// browser lists its tabs by last use, newest first. Never the tab on screen,
+/// the one used last, or one of Octo's (a kept or leftover one included).
+fn least_recently_used_browser_page(
+    pages: &[BrowserCdpTargetDescriptor],
+    active_page_id: Option<&str>,
+    agent_tab_ids: &[String],
+) -> Option<String> {
+    pages
+        .iter()
+        .skip(1)
+        .rev()
+        .find(|page| Some(page.id.as_str()) != active_page_id && !agent_tab_ids.contains(&page.id))
+        .map(|page| page.id.clone())
 }
 
 /// The browser's own CDP endpoint, as `/json/version` names it, when it is a
@@ -1264,12 +1323,36 @@ fn browser_cdp_websocket_url(raw: &str, cdp_base_url: &str) -> Result<String, Or
     Ok(parsed.to_string())
 }
 
-/// Opens `about:blank` in a new tab of the browser at `cdp_base_url`, behind
-/// the tab on screen, and returns its target id.
-async fn open_background_blank_tab(
+/// A chat's own tab: `about:blank` in a new tab of the browser at
+/// `cdp_base_url`, behind the tab on screen; returns its target id. Once the
+/// browser has [`BROWSER_NEW_PAGE_MAX_PAGES`] tabs, the tab used least
+/// recently closes once the new one is open: each chat keeps a tab, nobody
+/// closes one by hand, and the browser brings its tabs back when it starts
+/// again under new ids no chat knows, so they would otherwise pile up until no
+/// chat could get one. A chat whose tab closed gets a new one next time.
+async fn open_chat_browser_tab(
     client: &reqwest::Client,
     cdp_base_url: &str,
+    pages: &[BrowserCdpTargetDescriptor],
+    active_page_id: Option<&str>,
+    agent_tab_ids: &[String],
 ) -> Result<String, OriginError> {
+    let make_room = if pages.len() >= BROWSER_NEW_PAGE_MAX_PAGES {
+        Some(
+            least_recently_used_browser_page(pages, active_page_id, agent_tab_ids).ok_or_else(
+                || {
+                    OriginError::with_report(
+                        StatusCode::CONFLICT,
+                        BROWSER_NEW_PAGE_LIMIT_CODE,
+                        "Instafy's browser has too many tabs open to add another",
+                        serde_json::json!({}),
+                    )
+                },
+            )?,
+        )
+    } else {
+        None
+    };
     let version_url = format!("{cdp_base_url}/json/version");
     let browser_websocket = timeout(BROWSER_CDP_COMMAND_TIMEOUT, async {
         let response = client.get(version_url).send().await.map_err(|error| {
@@ -1312,6 +1395,19 @@ async fn open_background_blank_tab(
         return Err(OriginError::unavailable(
             "browser cdp opened a tab without a usable id",
         ));
+    }
+    if let Some(oldest) = make_room {
+        // A tab that does not close leaves one more open, and the next new
+        // tab tries again.
+        if let Err(error) = send_browser_cdp_command(
+            &browser_websocket,
+            "Target.closeTarget",
+            serde_json::json!({ "targetId": oldest }),
+        )
+        .await
+        {
+            warn!(%error, "Shared Browser could not close the tab used least recently");
+        }
     }
     Ok(id.to_string())
 }
@@ -1673,7 +1769,7 @@ mod tests {
     #[tokio::test]
     async fn a_new_tab_opens_blank_behind_the_tab_on_screen() {
         let (cdp_base_url, mut commands) = fake_cdp_browser("NEW-TAB-1").await;
-        let id = open_background_blank_tab(&reqwest::Client::new(), &cdp_base_url)
+        let id = open_chat_browser_tab(&reqwest::Client::new(), &cdp_base_url, &[], None, &[])
             .await
             .expect("open a blank tab");
         assert_eq!(id, "NEW-TAB-1");
@@ -1689,10 +1785,123 @@ mod tests {
     async fn a_new_tab_without_a_usable_id_is_an_error() {
         let (cdp_base_url, _commands) = fake_cdp_browser("../NOT AN ID").await;
         assert!(
-            open_background_blank_tab(&reqwest::Client::new(), &cdp_base_url)
+            open_chat_browser_tab(&reqwest::Client::new(), &cdp_base_url, &[], None, &[])
                 .await
                 .is_err()
         );
+    }
+
+    /// While Octo works in another chat's tab, a tab that appears during its
+    /// step is closed as a window the step opened, and the step fails. So a
+    /// new tab is refused then (also when the run's marker cannot be read),
+    /// with a code Studio words plainly.
+    #[tokio::test]
+    async fn a_new_tab_waits_for_an_agent_run_to_let_go_of_the_browser() {
+        use crate::browser_approval::{AgentControlMarker, AgentControlMarkerObservation};
+        async fn refusal_body(refusal: Option<OriginError>) -> (StatusCode, JsonValue) {
+            let response = refusal.expect("a refusal").into_response();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("refusal body");
+            (
+                status,
+                serde_json::from_slice(&bytes).expect("refusal JSON"),
+            )
+        }
+        let marker = AgentControlMarker {
+            version: 2,
+            owner_id: "owner-1".to_string(),
+            run_id: "run-1".to_string(),
+            initiator_user_id: "user-1".to_string(),
+            browser_page_id: "PAGE-OTHER-CHAT".to_string(),
+            display_name: "Octo".to_string(),
+            expires_at_ms: u64::MAX,
+        };
+        for agent_control in [
+            AgentControlMarkerObservation::Active(marker),
+            AgentControlMarkerObservation::Unavailable("unreadable".to_string()),
+        ] {
+            let (status, body) = refusal_body(new_browser_page_refusal(&agent_control)).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["code"], "browser_in_use");
+        }
+        assert!(new_browser_page_refusal(&AgentControlMarkerObservation::Inactive).is_none());
+    }
+
+    /// Each chat keeps a tab, and the browser brings its tabs back when it
+    /// starts again, with new ids no chat knows. So at the limit a new chat's
+    /// tab takes the place of the tab used least recently (the browser lists
+    /// its tabs by last use, newest first), never the tab on screen, the one
+    /// used last, or one of Octo's; there is no other way to close one.
+    #[tokio::test]
+    async fn a_new_tab_at_the_limit_takes_the_place_of_the_tab_used_least_recently() {
+        let page = |id: String| BrowserCdpTargetDescriptor {
+            id,
+            target_type: "page".to_string(),
+            title: String::new(),
+            url: "https://example.com/".to_string(),
+            websocket_debugger_url: None,
+        };
+        // Newest first: TAB-0 was used last, TAB-23 longest ago.
+        let pages: Vec<_> = (0..BROWSER_NEW_PAGE_MAX_PAGES)
+            .map(|index| page(format!("TAB-{index}")))
+            .collect();
+        let (cdp_base_url, mut commands) = fake_cdp_browser("NEW-TAB-1").await;
+        let client = reqwest::Client::new();
+        let id = open_chat_browser_tab(&client, &cdp_base_url, &pages, Some("TAB-0"), &[])
+            .await
+            .expect("a tab at the limit");
+        assert_eq!(id, "NEW-TAB-1");
+        let created = commands.recv().await.expect("the new tab");
+        assert_eq!(created["method"], "Target.createTarget");
+        let closed = commands.recv().await.expect("room made");
+        assert_eq!(closed["method"], "Target.closeTarget");
+        assert_eq!(
+            closed["params"],
+            serde_json::json!({ "targetId": "TAB-23" })
+        );
+
+        // Never the tab on screen, the one used last, or one of Octo's.
+        let octo = vec!["TAB-23".to_string(), "TAB-22".to_string()];
+        assert_eq!(
+            least_recently_used_browser_page(&pages, Some("TAB-21"), &octo).as_deref(),
+            Some("TAB-20")
+        );
+        let two = vec![page("TAB-0".to_string()), page("TAB-1".to_string())];
+        assert_eq!(
+            least_recently_used_browser_page(&two, None, &[]).as_deref(),
+            Some("TAB-1")
+        );
+        assert_eq!(
+            least_recently_used_browser_page(&two, Some("TAB-1"), &[]),
+            None
+        );
+
+        // Below the limit, nothing closes.
+        let (cdp_base_url, mut commands) = fake_cdp_browser("NEW-TAB-2").await;
+        open_chat_browser_tab(&client, &cdp_base_url, &pages[1..], None, &[])
+            .await
+            .expect("a tab below the limit");
+        assert_eq!(
+            commands.recv().await.expect("the new tab")["method"],
+            "Target.createTarget"
+        );
+        assert!(commands.try_recv().is_err());
+
+        // A browser with no tab to spare refuses, in a code Studio words.
+        let (cdp_base_url, _commands) = fake_cdp_browser("NEW-TAB-3").await;
+        let ids: Vec<String> = pages.iter().map(|page| page.id.clone()).collect();
+        let refused = open_chat_browser_tab(&client, &cdp_base_url, &pages, Some("TAB-0"), &ids)
+            .await
+            .expect_err("no tab to spare");
+        let response = refused.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("refusal body");
+        let body: JsonValue = serde_json::from_slice(&bytes).expect("refusal JSON");
+        assert_eq!(body["code"], "browser_tab_limit");
     }
 
     #[test]

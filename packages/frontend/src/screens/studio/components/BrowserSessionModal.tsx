@@ -2419,9 +2419,13 @@ export function BrowserSessionModal({
   ]);
 
   // Once this browser has its connection, the wait for its roster (which
-  // says which viewer this participant may use) is bounded.
+  // says which viewer this participant may use) is bounded. The roster
+  // connects only while the view is on screen, so the wait runs only then: a
+  // view Studio opened by itself with the person in Chat stays opening while
+  // the card's turn goes on there.
   const viewerWaiting =
     isOpen &&
+    transportActive &&
     !browserDataClearInFlight &&
     activeSharedBrowserViewerKind === null &&
     sharedBrowserCapabilitiesResolved &&

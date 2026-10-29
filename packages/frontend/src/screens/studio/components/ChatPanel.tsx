@@ -1968,9 +1968,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       controls,
       compact: compactBrowserBar,
       onNavigate: (pageId, url) => {
-        // The person sends this tab somewhere: it is this chat's tab now.
-        chooseChatBrowserTab(pageId);
-        void navigateSharedBrowserPage(pageId, url);
+        // The person sends this tab somewhere: it is this chat's tab now,
+        // once the browser took the address.
+        void navigateSharedBrowserPage(pageId, url).then((sent) => {
+          if (sent) chooseChatBrowserTab(pageId);
+        });
       },
       onBack: (pageId) => {
         void goBackInSharedBrowser(pageId);
@@ -1982,9 +1984,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         void reloadSharedBrowserPage(pageId);
       },
       onFocusPage: (pageId) => {
-        // The person picks this tab: this chat's next browser turn uses it.
-        chooseChatBrowserTab(pageId);
-        void handleSelectBrowserSessionPage(pageId);
+        // The person picks this tab: this chat's next browser turn uses it,
+        // once it is the tab on screen.
+        void handleSelectBrowserSessionPage(pageId).then((focused) => {
+          if (focused) chooseChatBrowserTab(pageId);
+        });
       },
       onClearError: clearSharedBrowserCommandError,
     };
@@ -4977,9 +4981,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     },
     // A card's turn in Instafy's browser runs in this chat's own tab: the
     // one its last browser turn used, or a blank one opened for it now.
-    continueTask: async (transport, message, extras) => transport === "personal"
+    continueTask: (transport, message, extras) => transport === "personal"
       ? browserHandoff.startPersonal(message, extras)
-      : browserHandoff.continueShared(message, extras, await resolveChatBrowserTab()),
+      : browserHandoff.continueShared(message, extras, resolveChatBrowserTab),
     onError: (message) => showStatus(message, "error", 6000),
     auto: browserAutoStart,
   });

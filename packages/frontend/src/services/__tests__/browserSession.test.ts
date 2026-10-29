@@ -505,11 +505,32 @@ describe("runtime browser session page controls", () => {
         openRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1" }),
       ).resolves.toBeNull();
     }
-    // A full browser says so in plain words.
+    // A full browser says so in plain words, and never asks the person to
+    // close a tab, which nothing in Studio can do.
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 409 })));
     await expect(
       openRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1" }),
-    ).rejects.toThrow("Instafy's browser has too many tabs open. Close one, then try again.");
+    ).rejects.toThrow("Instafy's browser has too many tabs open to give this chat one of its own.");
+  });
+
+  // While Octo works in another chat's tab, a tab that appears during its
+  // step is taken for a window the step opened: it is closed and the step
+  // fails. So the browser refuses a new tab then, and the person hears why.
+  it("says the browser is busy when it refuses a new tab while another task holds it", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: "Instafy's browser is busy with another task", code: "browser_in_use" }),
+      { status: 409 },
+    )));
+    await expect(
+      openRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1" }),
+    ).rejects.toThrow("Instafy's browser is busy with another task. Try again once it is done.");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: "Instafy's browser has too many tabs open to add another", code: "browser_tab_limit" }),
+      { status: 409 },
+    )));
+    await expect(
+      openRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1" }),
+    ).rejects.toThrow("Instafy's browser has too many tabs open to give this chat one of its own.");
   });
 
   it("uses browser view to read the browser action stream", async () => {

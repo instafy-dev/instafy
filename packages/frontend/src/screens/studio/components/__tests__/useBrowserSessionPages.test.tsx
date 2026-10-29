@@ -9,11 +9,13 @@ const {
   fetchCapabilitiesMock,
   fetchPagesMock,
   focusPageMock,
+  openPageMock,
 } = vi.hoisted(() => ({
   commandPageMock: vi.fn(),
   fetchCapabilitiesMock: vi.fn(),
   fetchPagesMock: vi.fn(),
   focusPageMock: vi.fn(),
+  openPageMock: vi.fn(),
 }));
 
 vi.mock("../../../../sdk/instafy", () => ({
@@ -23,6 +25,7 @@ vi.mock("../../../../sdk/instafy", () => ({
       fetchCapabilities: fetchCapabilitiesMock,
       fetchPages: fetchPagesMock,
       focusPage: focusPageMock,
+      openPage: openPageMock,
       isCapabilitiesIncompatibleError: () => false,
       isUnavailableError: (error: unknown) =>
         Boolean(error && typeof error === "object" && "status" in error),
@@ -31,6 +34,7 @@ vi.mock("../../../../sdk/instafy", () => ({
 }));
 
 import { useBrowserSessionPages } from "../useBrowserSessionPages";
+import { BrowserTabRefusedError } from "../../../../services/runtimeController/browserSession";
 
 type HookResult = ReturnType<typeof useBrowserSessionPages>;
 
@@ -126,6 +130,25 @@ describe("useBrowserSessionPages", () => {
       preferredViewer: "rfb",
       viewportOnly: true,
     });
+  });
+
+  // A chat's own tab. A refusal the person can act on (the browser is full,
+  // or busy with another task) keeps its plain reason; any other failure is
+  // "could not open one".
+  it("opens a chat's tab and passes on a refusal's plain reason", async () => {
+    await renderHook();
+    openPageMock.mockReset().mockResolvedValueOnce("NEW-TAB-1");
+    let opened: string | null = null;
+    await act(async () => { opened = await latestResult!.openPage(); });
+    expect(opened).toBe("NEW-TAB-1");
+    const busy = new BrowserTabRefusedError("Instafy's browser is busy with another task. Try again once it is done.");
+    openPageMock.mockRejectedValueOnce(busy);
+    let failure: unknown = null;
+    await act(async () => { await latestResult!.openPage().catch((error: unknown) => { failure = error; }); });
+    expect(failure).toBe(busy);
+    openPageMock.mockRejectedValueOnce(new Error("Opening a browser tab failed (500): oops"));
+    await act(async () => { opened = await latestResult!.openPage(); });
+    expect(opened).toBeNull();
   });
 
   it("tracks a command, reports errors, and refreshes pages immediately", async () => {

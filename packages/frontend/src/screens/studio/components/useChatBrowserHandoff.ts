@@ -164,16 +164,24 @@ export function useChatBrowserHandoff(options: Options) {
   }, [assertCurrent]);
 
   /**
-   * `tab`: the chat's own tab (chatBrowserTab.ts), which the turn is sent for.
-   * Without one, the page on screen, as Let AI continue after a manual step.
+   * `resolveTab`: the chat's own tab (chatBrowserTab.ts), which the turn is
+   * sent for. It is read after the chat is captured, and the chat is checked
+   * again once it is in: opening a tab takes a moment, and a chat the person
+   * switched to meanwhile never gets this task. Without one (an older
+   * browser), the page on screen, as Let AI continue after a manual step.
    */
   const continueShared = useCallback(async (
     message: string,
     extras?: BrowserContinuationExtras | null,
-    tab?: BrowserSessionPageTarget | null,
+    resolveTab?: (() => Promise<BrowserSessionPageTarget | null>) | null,
   ) => {
     const captured = latest.current;
     const epoch = generation.current;
+    let tab: BrowserSessionPageTarget | null = null;
+    if (resolveTab) {
+      assertSameChat(captured);
+      tab = await resolveTab();
+    }
     const assertSendable = tab ? () => assertSameChat(captured) : () => assertCurrent(captured, epoch);
     assertSendable();
     const page = tab ?? captured.page;

@@ -211,7 +211,7 @@ describe("useChatBrowserHandoff", () => {
     await expect(resultRef.current!.continueShared("Find the opening hours.", {
       display: "Opened Instafy's browser",
       metadata: { browserRequestOf: "job:job-1" },
-    }, tab)).resolves.toBe(true);
+    }, async () => tab)).resolves.toBe(true);
     const sent = vi.mocked(value.onSubmit).mock.calls[0]![2]!;
     expect(sent.metadata).toMatchObject({ browserPageId: "chat-tab-1", browserPageUrl: "about:blank" });
     // Studio brings the chat's tab to the front while the turn is sent: the
@@ -221,6 +221,26 @@ describe("useChatBrowserHandoff", () => {
     // Another chat or browser does.
     await render({ ...value, conversationId: "conversation-2" });
     expect(() => sent.assertDispatchCurrent!()).toThrow();
+  });
+
+  // Opening the chat's tab takes a moment. A chat the person switches to
+  // meanwhile never gets the card's task, nor the other chat's tab.
+  it("never sends a card's task into the chat the person switched to while its tab opened", async () => {
+    const value = options();
+    await render(value);
+    const opened = deferred<{ id: string; url: string; host: string; label: string } | null>();
+    let sending: Promise<boolean> | null = null;
+    await act(async () => {
+      sending = resultRef.current!.continueShared("Find the opening hours.", {
+        display: "Opened Instafy's browser",
+        metadata: { browserRequestOf: "job:job-1" },
+      }, () => opened.promise);
+      sending.catch(() => undefined);
+    });
+    await render({ ...value, conversationId: "conversation-2" });
+    await act(async () => opened.resolve({ id: "chat-tab-1", url: "about:blank", host: "", label: "New tab" }));
+    await expect(sending!).rejects.toThrow("The browser or conversation changed");
+    expect(value.onSubmit).not.toHaveBeenCalled();
   });
 
   it("records a card's continuation as a notice and sends its task, with the card it continues", async () => {

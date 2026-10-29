@@ -65,6 +65,21 @@ describe("a chat's own tab in Instafy's browser", () => {
       .toBeNull();
   });
 
+  // Browser turns from before one tab per chat ran in whatever tab was on
+  // screen, so several chats' turns name the same tab. That tab is the chat's
+  // whose turn ran there last; the others get a tab of their own instead of
+  // the page that chat left there.
+  it("is not a tab another chat's turn ran in since", () => {
+    const vacuumRun = browserRun("run-vacuum", VACUUM_CHAT, LISBON.id, "2026-10-29T10:03:47Z");
+    const runs = [MAP_RUN, vacuumRun];
+    expect(chatBrowserTab({ scope: scope(MAP_CHAT), runs, pages: [LISBON] })).toBeNull();
+    expect(chatBrowserTab({ scope: scope(VACUUM_CHAT), runs, pages: [LISBON] })).toBe(LISBON);
+    // A turn of the map chat after that takes it back.
+    const mapAgain = browserRun("run-map-3", MAP_CHAT, LISBON.id, "2026-10-29T10:10:00Z");
+    expect(chatBrowserTab({ scope: scope(MAP_CHAT), runs: [...runs, mapAgain], pages: [LISBON] })).toBe(LISBON);
+    expect(chatBrowserTab({ scope: scope(VACUUM_CHAT), runs: [...runs, mapAgain], pages: [LISBON] })).toBeNull();
+  });
+
   it("gives a chat the blank tab a browser that just started shows, and never Octo's own", () => {
     const blank = page("PAGE-START", "about:blank", { isActive: true });
     expect(unusedBlankBrowserTab({ runs: [], pages: [blank] })).toBe(blank);
@@ -124,6 +139,17 @@ describe("useChatBrowserTab", () => {
     expect(target).toMatchObject({ id: "PAGE-NEW" });
   });
 
+  // A new chat has no id of its own until its first message is sent. Its
+  // first browser turn (from the Browser view's own composer) still gets a
+  // tab of its own, never the page another chat left on screen.
+  it("gives a new chat's first browser turn a tab of its own before the chat has its id", async () => {
+    const props = await render({ scope: { ...scope(VACUUM_CHAT), conversationId: null } });
+    let target: Awaited<ReturnType<ReturnType<typeof useChatBrowserTab>["resolveForTurn"]>> = null;
+    await act(async () => { target = await latest!.resolveForTurn(); });
+    expect(props.openPage).toHaveBeenCalledOnce();
+    expect(target).toMatchObject({ id: "PAGE-NEW", url: "about:blank" });
+  });
+
   it("keeps a chat's later turns in the tab its last turn used", async () => {
     const props = await render({ scope: scope(MAP_CHAT) });
     let target: Awaited<ReturnType<ReturnType<typeof useChatBrowserTab>["resolveForTurn"]>> = null;
@@ -140,6 +166,43 @@ describe("useChatBrowserTab", () => {
     let target: Awaited<ReturnType<ReturnType<typeof useChatBrowserTab>["resolveForTurn"]>> = null;
     await act(async () => { target = await latest!.resolveForTurn(); });
     expect(target).toMatchObject({ id: other.id });
+  });
+
+  // The person picks the map chat's tab in the vacuum chat's Browser view and
+  // sends it somewhere: it is the vacuum chat's tab now. The map chat's next
+  // turn gets a tab of its own, never the page the vacuum chat left there,
+  // also when this device's clock is behind the server's.
+  it("gives a tab the person chose in another chat to that chat", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-29T09:00:00Z"));
+    try {
+      await render({ scope: scope(VACUUM_CHAT) });
+      await act(async () => latest!.choose(LISBON.id));
+      expect(latest!.tab?.id).toBe(LISBON.id);
+      expect(chatBrowserTab({ scope: scope(MAP_CHAT), runs: [MAP_RUN], pages: [LISBON] })).toBeNull();
+      await render({ scope: scope(MAP_CHAT) });
+      let target: Awaited<ReturnType<ReturnType<typeof useChatBrowserTab>["resolveForTurn"]>> = null;
+      await act(async () => { target = await latest!.resolveForTurn(); });
+      expect(target).toMatchObject({ id: "PAGE-NEW", url: "about:blank" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Studio reads whether the browser opens tabs when it opens; until that
+  // reading is in, a browser that can is not taken for one that cannot.
+  it("tries to open the chat's tab before the browser said whether it can", async () => {
+    const props = await render({ canOpenPage: null });
+    let target: Awaited<ReturnType<ReturnType<typeof useChatBrowserTab>["resolveForTurn"]>> = null;
+    await act(async () => { target = await latest!.resolveForTurn(); });
+    expect(props.openPage).toHaveBeenCalledOnce();
+    expect(target).toMatchObject({ id: "PAGE-NEW", url: "about:blank" });
+    // One that could not open it says so, and the turn is not sent to the page on screen.
+    forgetChatBrowserTabsForTests();
+    await render({ canOpenPage: null, openPage: vi.fn(async () => null) });
+    let failure: unknown = null;
+    await act(async () => { await latest!.resolveForTurn().catch((error: unknown) => { failure = error; }); });
+    expect((failure as Error | null)?.message).toBe(CHAT_BROWSER_TAB_COPY.notOpened);
   });
 
   it("opens one tab for two turns sent at once", async () => {
