@@ -19,6 +19,7 @@ import { SettingsSection } from "./SettingsSection";
 import { SettingsSurface } from "./SettingsSurface";
 import { SpaceIdentityEditor } from "./SpaceIdentityEditor";
 import { NativeSubagentSettings } from "./NativeSubagentSettings";
+import { ResearchBudgetSettings } from "./ResearchBudgetSettings";
 
 function truncateIdentifier(value: string, max = 16) {
   const trimmed = value.trim();
@@ -190,6 +191,7 @@ export function ProjectSettingsSections({
           {activeProjectId ? <SpaceIdentityEditor key={activeProjectId} projectId={activeProjectId} name={activeProjectName} canWrite={canWriteProject} enabled={runtimeControllerEnabled} /> : null}
 
           {activeProjectId && currentUserId && runtimeControllerEnabled ? <NativeSubagentSettings key={`${currentUserId}:${activeProjectId}`} projectId={activeProjectId} /> : null}
+          {activeProjectId && currentUserId && runtimeControllerEnabled ? <ResearchBudgetSettings key={`research:${currentUserId}:${activeProjectId}`} projectId={activeProjectId} /> : null}
 
           <SettingsActionRow
             title="Managed defaults"

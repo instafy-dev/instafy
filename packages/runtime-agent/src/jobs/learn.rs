@@ -293,7 +293,10 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before a candidate nothing could be read for stayed a row, so a page of options was never empty.
     include_str!("legacy/interactive-artifacts-v2.md"),
 ];
-const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[include_str!("legacy/research-team-v1.md")];
+const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
+    include_str!("legacy/research-team-v1.md"),
+    include_str!("legacy/research-team-v2.md"),
+];
 const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
     // From before a lane read with the research skill and compared a product by its "Comparing items".
     include_str!("legacy/research-team-researcher-v1.md"),
@@ -360,6 +363,8 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // From before an item without a price was listed as "price unknown" (it read as never listed), two failures on
     // the official site sent the turn to an independent source, and a page of options had a row per candidate.
     include_str!("legacy/web-research-v7.md"),
+    // Before the controller shared configurable page allowances across helpers.
+    include_str!("legacy/web-research-v8.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

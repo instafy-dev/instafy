@@ -1009,6 +1009,7 @@ async fn execute_automation_once(
             prefer_runtime: runtime_id.is_some(),
             expected_lane_idle: record.mode == MODE_SPACE_REVIEW,
             dispatch_queue_entry_id: None,
+            delegating_job_id: None,
             allow_silent_automation_decline: record.silent_when_nothing_to_report,
             allow_internal_review: record.mode == MODE_SPACE_REVIEW,
             trigger: None,

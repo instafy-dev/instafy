@@ -29,6 +29,7 @@ pub mod preview_restarts;
 pub mod process_hardening;
 pub mod provider_mcp;
 mod required_execution;
+pub mod research_budget;
 pub mod resources;
 pub mod shared_browser;
 mod shared_browser_activity;

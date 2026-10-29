@@ -30,8 +30,9 @@ read/search tools; file ownership and runtime spread do not provide them.
 - Browser-bound turns remain single-agent. Helpers use public read/search tools only; a page requiring an
   interactive browser becomes a sourced gap for a later single-controller browser step. Do not share browser
   grants with helpers or emit a worker plan from a browser-bound turn.
-- Allocate the available read/search budget across helpers before starting them; do not give every helper
-  the parent's full allowance. Use disjoint source questions and reconcile duplicates at synthesis.
+- Inspect `instafy web budget --json` and allocate remaining reads and searches across helpers before starting
+  them. Fresh page allowances are shared across the whole task, including continued workers. Give helpers
+  disjoint source questions and retrieved evidence to reuse; reconcile duplicates at synthesis.
 - When durable workers are selected, the plan is this turn's whole answer. Never ask first: fill gaps with defaults (party of 2,
   mid-range, a balanced pace, the length they gave or a week, the dates they named) and state them.
 - List the items the answer must cover: every one the user named plus those you chose. Every item gets a lane;

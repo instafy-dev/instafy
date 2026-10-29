@@ -87,6 +87,8 @@ mod org_accent_tests;
 mod participation_billing_tests;
 #[path = "project_identity_tests.rs"]
 mod project_identity_tests;
+#[path = "research_budget_tests.rs"]
+mod research_budget_tests;
 #[path = "self_hosted_platform_lane_tests.rs"]
 mod self_hosted_platform_lane_tests;
 

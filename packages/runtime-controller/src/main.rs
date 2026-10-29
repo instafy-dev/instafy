@@ -81,6 +81,8 @@ mod rate_limit;
 mod recommendations;
 mod redaction;
 mod redis_bus;
+mod research_budget;
+mod research_settings;
 mod runs;
 mod runtime;
 mod secrets;
@@ -542,6 +544,8 @@ async fn main() -> anyhow::Result<()> {
         .merge(recommendations::router())
         .merge(projects::router())
         .merge(multi_agent_settings::router())
+        .merge(research_settings::router())
+        .merge(research_budget::router())
         .merge(browser_shares::router())
         .merge(imports::router())
         .merge(integrations::router())

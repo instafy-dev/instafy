@@ -16,13 +16,16 @@
 //   is remembered and never read again in this turn (nor from the cache for a day), whatever the options;
 // - page text is redacted (the browsers' redaction.js) before anything is printed or cached, and comes back wrapped
 //   as untrusted page content: data to quote with its source, never instructions or anyone's consent;
-// - per turn at most 12 page loads and 4 per site, 2 s apart; a call returns within 60 s with what it has.
+// - the controller shares the task's page allowance across workers; standalone reads allow 12 loads and 4 per site;
+//   per-site start slots are reserved 2 s apart and a call returns within 60 s with what it has. Network delays
+//   can shift actual request times; the spacing is scheduling, not a wire-level guarantee.
 //
-// It never sends cookies or credentials, never submits a form and never runs a page's scripts. A page whose text needs
+// It never sends cookies or credentials to pages, never submits a form and never runs a page's scripts. A page whose text needs
 // JavaScript comes back as `needs_browser`. Which sources to read, and how to cite them, is a skill's judgement.
 //
 // The link-only guard, the turn budget and cache (in the space's folder on a runtime), the untrusted wrapper, the
 // address check and the offline fixtures of test builds are web-shared.ts, which other web commands use too.
+import { randomUUID } from "node:crypto";
 import dns from "node:dns";
 import http from "node:http";
 import https from "node:https";
@@ -77,6 +80,7 @@ import {
   type WebFixtures,
   type WebViewer,
 } from "./web-shared.js";
+import { ResearchBudgetError, sharedResearchBudget, type ResearchBudget, type SharedResearchBudget } from "./web-budget.js";
 
 // The link-only guard, turn budget, cache, untrusted wrapper and address check are shared with the other web commands
 // (web-shared.ts); these names stay importable from here.
@@ -168,7 +172,7 @@ export type StopCode =
   | "download"
   | "secret_screen";
 export type SkipCode = "turn_limit" | "host_limit" | "time_limit";
-export type FailCode = "not_found" | "http_error" | "unreachable" | "timeout";
+export type FailCode = "not_found" | "http_error" | "unreachable" | "timeout" | "budget_unavailable";
 export type PageStatus = "read" | "needs_browser" | "stopped" | "skipped" | "failed";
 
 export type Provenance = { requestedUrl: string; finalUrl: string; title: string; readAt: string; viewer: WebViewer };
@@ -215,6 +219,8 @@ export type WebReadReport = {
     loadsPerHost: number;
     hostSpacingSeconds: number;
     hosts: Record<string, number>;
+    /** The final refresh failed or the call deadline elapsed; never used to authorize another load. */
+    lastKnown?: true;
   };
   guards: {
     /** `sources`: "bundled", then each skill copy that added to it; `noReuse`: sites read but never reused */
@@ -245,6 +251,8 @@ export type WebReadDeps = {
   bundledLinkOnly?: unknown;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
+  /** Controller transport only; page requests still use their checked public addresses. */
+  budgetFetch?: typeof fetch;
 };
 
 export type WebReadOptions = {
@@ -569,6 +577,7 @@ const TELL: Record<StopCode | SkipCode | FailCode | "needs_browser" | "no_reuse"
   http_error: "The site answered with an error. Use another source rather than retrying.",
   unreachable: "The site did not answer. Use another source rather than retrying.",
   timeout: "The site did not answer in time. Use another source rather than retrying.",
+  budget_unavailable: "Research stopped because its shared allowance could not be checked. Keep the evidence already collected; further fresh reads require controller approval.",
   needs_browser:
     "This page builds its text with JavaScript, so a plain read sees almost nothing. Use another source, or ask for a visible browser turn for this page.",
   no_reuse:
@@ -615,6 +624,7 @@ type ReadContext = {
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   turn: TurnStore<StopCode>;
+  sharedBudget: SharedResearchBudget | null;
   cache: Cache<CacheKind>;
   guard: LinkOnlyGuard;
   viewer: WebViewer;
@@ -731,7 +741,11 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     status: "skipped",
     code,
     message,
-    tell: TELL[code],
+    tell: ctx.sharedBudget?.current && code !== "time_limit"
+      ? code === "turn_limit"
+        ? `This task's shared allowance of ${ctx.sharedBudget.current.loadsPerTurn} page loads is used. Work with the evidence already collected, or ask the person.`
+        : `This task has used its ${ctx.sharedBudget.current.loadsPerHost} page loads for this site. Use another source.`
+      : TELL[code],
   });
   // A first address that does not answer may answer with "www." added or removed: the tell names that address once,
   // and not at all when it already did not answer this turn (so the two never send the turn back and forth).
@@ -777,17 +791,26 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     }
   }
 
-  // Over budget or out of time: nothing is fetched, not even robots.txt (the reservation below re-checks under the lock).
-  if (earlier.loads >= LIMITS.loadsPerTurn) {
-    return skip("turn_limit", `this turn already loaded ${earlier.loads} pages (limit ${LIMITS.loadsPerTurn})`);
-  }
-  if (earlier.hostLoads >= LIMITS.loadsPerHost) {
-    return skip("host_limit", `this turn already read ${firstSite} ${earlier.hostLoads} times (limit ${LIMITS.loadsPerHost})`);
+  // Over budget or out of time: nothing is fetched, not even robots.txt. The reservation re-checks atomically.
+  if (ctx.sharedBudget) {
+    if (ctx.deadline - ctx.now() < 1_000) return skip("time_limit", "this call reached its time limit before this URL");
+    const budget = await ctx.sharedBudget.status(ctx.deadline - ctx.now());
+    if (budget.loadsLeft === 0) return skip("turn_limit", `this task already loaded ${budget.loadsUsed} pages (limit ${budget.loadsPerTurn})`);
+    const used = budget.hosts[firstSite]?.loads ?? 0;
+    if (used >= budget.loadsPerHost) return skip("host_limit", `this task already read ${firstSite} ${used} times (limit ${budget.loadsPerHost})`);
+  } else {
+    if (earlier.loads >= LIMITS.loadsPerTurn) {
+      return skip("turn_limit", `this turn already loaded ${earlier.loads} pages (limit ${LIMITS.loadsPerTurn})`);
+    }
+    if (earlier.hostLoads >= LIMITS.loadsPerHost) {
+      return skip("host_limit", `this turn already read ${firstSite} ${earlier.hostLoads} times (limit ${LIMITS.loadsPerHost})`);
+    }
   }
   if (ctx.deadline - ctx.now() < 1_000) return skip("time_limit", "this call reached its time limit before this URL");
 
   const redirects: string[] = [];
   const chainSites = new Set<string>();
+  const loadId = randomUUID();
   let current = new URL(requested);
   let response: Extract<Fetched, { kind: "response" }> | null = null;
   for (let hop = 0; ; hop += 1) {
@@ -816,7 +839,27 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     if ("failed" in robots) return fail(robots.failed, via + robots.message, hopExtra);
     if (robots.refused) return stop("robots", via + robots.refused, host, hopExtra);
 
-    if (!chainSites.has(site)) {
+    if (ctx.sharedBudget) {
+      // Every redirect hop gets a paced slot, while a load and each distinct site are charged only once by the
+      // controller. The adapter retries an uncertain transport with the same request ID, never another allowance.
+      const remainingMs = ctx.deadline - ctx.now();
+      if (remainingMs < 1_000) return skip("time_limit", `${via}this call reached its time limit before reserving a load`, hopExtra);
+      const reservation = await ctx.sharedBudget.reserve(loadId, randomUUID(), site, remainingMs - 1_000);
+      if (!reservation.allowed) {
+        const code = reservation.code!;
+        const budget = reservation.budget;
+        const message = code === "turn_limit"
+          ? `this task already loaded ${budget.loadsUsed} pages (limit ${budget.loadsPerTurn})`
+          : code === "host_limit"
+            ? `this task already read ${site} ${budget.hosts[site]?.loads ?? 0} times (limit ${budget.loadsPerHost})`
+            : `no time left in this call for the next paced read of ${host}`;
+        return skip(code, via + message, hopExtra);
+      }
+      if (reservation.waitMs + 1_000 > ctx.deadline - ctx.now()) {
+        return skip("time_limit", `${via}this call reached its time limit while reserving the next paced read`, hopExtra);
+      }
+      if (reservation.waitMs > 0) await ctx.sleep(reservation.waitMs);
+    } else if (!chainSites.has(site)) {
       const now = ctx.now();
       const reservation = await ctx.turn.update((state) => {
         if (hop === 0 && state.loads >= LIMITS.loadsPerTurn) {
@@ -1057,6 +1100,7 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
     now,
     sleep: deps.sleep ?? realSleep,
     turn,
+    sharedBudget: sharedResearchBudget(env, deps.budgetFetch),
     cache: new Cache<CacheKind>(cacheDir === null ? null : apart(cacheDir)),
     guard,
     viewer,
@@ -1065,8 +1109,24 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
   };
 
   const pages: PageResult[] = [];
-  for (const url of urls) {
-    const page = await readOne(url, { maxChars, links, fresh: Boolean(options.fresh), terms }, ctx);
+  let interruptedBudget: ResearchBudget | null = null;
+  for (const [index, url] of urls.entries()) {
+    let page: PageResult;
+    try {
+      page = await readOne(url, { maxChars, links, fresh: Boolean(options.fresh), terms }, ctx);
+    } catch (error) {
+      if (!(error instanceof ResearchBudgetError) || !ctx.sharedBudget?.current || !pages.length) throw error;
+      // A later authorization failure stops this batch without throwing away earlier evidence. The snapshot
+      // only describes prior grants; it never authorizes a remaining URL or replenishes a local allowance.
+      interruptedBudget = ctx.sharedBudget.current;
+      pages.push(...urls.slice(index).map((remaining) => ({
+        ...basePage(remaining, new Date(now()).toISOString(), viewer),
+        code: "budget_unavailable" as const,
+        message: error.message,
+        tell: TELL.budget_unavailable,
+      })));
+      break;
+    }
     if (page.status === "failed" && unanswered(page.code, page)) {
       const key = unansweredKey(new URL(url));
       await turn.update((state) => {
@@ -1075,22 +1135,16 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
     }
     pages.push(page);
   }
-  const state = await turn.update((s) => ({ loads: s.loads, hosts: Object.fromEntries(Object.entries(s.hosts).map(([h, r]) => [h, r.loads])) }));
+  const budget = interruptedBudget ? lastKnownBudget(interruptedBudget, warnings)
+    : ctx.sharedBudget ? await finalSharedBudget(ctx.sharedBudget, deadline - now(), warnings)
+    : await localBudget(turn, scope.label);
   return {
     ok: true,
     viewer,
     userAgent: USER_AGENT,
     notice: NOTICE,
     pages,
-    budget: {
-      scope: scope.label,
-      loadsUsed: state.loads,
-      loadsLeft: Math.max(0, LIMITS.loadsPerTurn - state.loads),
-      loadsPerTurn: LIMITS.loadsPerTurn,
-      loadsPerHost: LIMITS.loadsPerHost,
-      hostSpacingSeconds: LIMITS.hostSpacingMs / 1000,
-      hosts: state.hosts,
-    },
+    budget,
     guards: {
       linkOnly: {
         sites: guard.list.sites.length,
@@ -1103,6 +1157,76 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
     },
     warnings,
   };
+}
+
+function reportBudget(budget: ResearchBudget): WebReadReport["budget"] {
+  return { ...budget, hosts: Object.fromEntries(Object.entries(budget.hosts).map(([host, value]) => [host, value.loads])) };
+}
+
+function lastKnownBudget(budget: ResearchBudget, warnings: string[]): WebReadReport["budget"] {
+  warnings.push("The shared research allowance could not be refreshed. Budget counts are the last validated controller snapshot and may have changed; another fresh read still requires controller approval.");
+  return { ...reportBudget(budget), lastKnown: true };
+}
+
+/** A failed final refresh must not discard pages already collected. This snapshot is output only: every fresh
+ * read still starts with a controller status check and requires an atomic reservation. */
+async function finalSharedBudget(shared: SharedResearchBudget, remainingMs: number, warnings: string[]): Promise<WebReadReport["budget"]> {
+  try {
+    if (remainingMs <= 0) throw new ResearchBudgetError("The call deadline elapsed before the shared research allowance could be refreshed.");
+    return reportBudget(await shared.status(remainingMs));
+  } catch (error) {
+    if (!(error instanceof ResearchBudgetError) || !shared.current) throw error;
+    return lastKnownBudget(shared.current, warnings);
+  }
+}
+
+async function localBudget(turn: TurnStore<StopCode>, scope: string): Promise<WebReadReport["budget"]> {
+  return turn.update((state) => ({
+    scope,
+    loadsUsed: state.loads,
+    loadsLeft: Math.max(0, LIMITS.loadsPerTurn - state.loads),
+    loadsPerTurn: LIMITS.loadsPerTurn,
+    loadsPerHost: LIMITS.loadsPerHost,
+    hostSpacingSeconds: LIMITS.hostSpacingMs / 1000,
+    hosts: Object.fromEntries(Object.entries(state.hosts).map(([host, value]) => [host, value.loads])),
+  }));
+}
+
+/** Inspect the same allowance as `read`, without reserving a load or fetching any page. */
+export async function webBudget(deps: WebReadDeps = {}): Promise<{ budget: WebReadReport["budget"] }> {
+  const env = deps.env ?? process.env;
+  const cwd = deps.cwd ?? process.cwd();
+  const shared = sharedResearchBudget(env, deps.budgetFetch);
+  if (shared) return { budget: reportBudget(await shared.status()) };
+  const fixtureFolder = webFixturesFolder(env, cwd);
+  const fixtures = fixtureFolder ? loadWebFixtures(fixtureFolder) : null;
+  const dirs = webDirs("web-read", env, cwd);
+  const stateDir = deps.stateDir ?? dirs.stateDir;
+  const scope = turnScope(env);
+  const turn = new TurnStore<StopCode>(
+    fixtures ? path.join(stateDir, "fixtures", sha256(fixtures.folder).slice(0, 16)) : stateDir,
+    scope,
+    deps.now ?? Date.now,
+  );
+  return { budget: await localBudget(turn, scope.label) };
+}
+
+export async function runWebBudgetCli(
+  opts: { json?: boolean },
+  io: { out: (line: string) => void; err: (line: string) => void } = { out: console.log, err: console.error },
+  deps: WebReadDeps = {},
+): Promise<number> {
+  try {
+    const report = await webBudget(deps);
+    const b = report.budget;
+    io.out(opts.json ? JSON.stringify(report, null, 1) : `${b.loadsLeft} page loads left in ${b.scope} (${b.loadsUsed} of ${b.loadsPerTurn} used; ${b.loadsPerHost} per site, ${b.hostSpacingSeconds} s apart).`);
+    return WEB_READ_EXIT_OK;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (opts.json) io.out(JSON.stringify({ ok: false, exitCode: WEB_READ_EXIT_INTERNAL, error: message }));
+    else io.err(message);
+    return WEB_READ_EXIT_INTERNAL;
+  }
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -1134,7 +1258,7 @@ export function formatWebRead(report: WebReadReport): string {
     }
     out.push("");
   }
-  out.push(`${report.budget.loadsUsed} of ${report.budget.loadsPerTurn} page loads used in ${report.budget.scope}.`);
+  out.push(`${report.budget.lastKnown ? "Last known controller count: " : ""}${report.budget.loadsUsed} of ${report.budget.loadsPerTurn} page loads used in ${report.budget.scope}.`);
   for (const warning of report.warnings) out.push(`warning: ${warning}`);
   out.push(report.notice);
   return out.join("\n");
@@ -1170,9 +1294,9 @@ export async function runWebReadCli(
   } catch (error) {
     const usage = error instanceof WebReadUsageError;
     const code = usage ? WEB_READ_EXIT_USAGE : WEB_READ_EXIT_INTERNAL;
-    const message = usage || error instanceof LinkOnlyListUnavailableError || error instanceof WebFixturesError
+    const message = usage || error instanceof LinkOnlyListUnavailableError || error instanceof WebFixturesError || error instanceof ResearchBudgetError
       ? (error as Error).message
-      : `web read failed, nothing was read: ${error instanceof Error ? error.message : String(error)}`;
+      : `web read failed: ${error instanceof Error ? error.message : String(error)}`;
     if (opts.json) io.out(JSON.stringify({ ok: false, exitCode: code, error: message }));
     else io.err(message);
     return code;
@@ -1191,7 +1315,7 @@ export function registerWebCommand(program: Command): Command {
     .command("read")
     .description(
       "Read 1-6 public pages over plain HTTP and print their text, links and structured data with provenance " +
-        `(exit 2: nothing read, 64: bad options). Per turn: ${LIMITS.loadsPerTurn} loads, ${LIMITS.loadsPerHost} per site, ` +
+        `(exit 2: nothing read, 64: bad options). Uses the task's shared allowance; standalone: ${LIMITS.loadsPerTurn} loads, ${LIMITS.loadsPerHost} per site, ` +
         `${LIMITS.hostSpacingMs / 1000} s apart. Stopped URLs (login, CAPTCHA, paywall, 401/403/429, download, secret ` +
         "screen, robots.txt, link-only, private address) are never read another way.",
     )
@@ -1203,6 +1327,13 @@ export function registerWebCommand(program: Command): Command {
     .option("--json", "Output JSON")
     .action(async (urls: string[], opts: WebReadCliOptions) => {
       process.exitCode = await runWebReadCli(urls, opts);
+    });
+  web
+    .command("budget")
+    .description("Show this task's remaining shared page allowance without spending it (or the standalone session allowance)")
+    .option("--json", "Output JSON")
+    .action(async (opts: { json?: boolean }) => {
+      process.exitCode = await runWebBudgetCli(opts);
     });
   return web;
 }
