@@ -211,6 +211,7 @@ import { resolveComposerGhostSuggestion } from "./composerGhostSuggestion";
 import { useChatBrowserSessionState } from "./useChatBrowserSessionState";
 import { useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeting";
 import { useChatBrowserTab } from "./chatBrowserTab";
+import { useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
 import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
 import { canUseDesktopCodexAuthJson } from "./desktopCodexAuthJson";
@@ -844,11 +845,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const generatedChatPanelId = useId();
   const browserPanelId = conversationWorkspace ? "conversation-workspace-browser" : generatedBrowserPanelId;
   const chatPanelId = conversationWorkspace ? "conversation-workspace-chat" : generatedChatPanelId;
-  useLayoutEffect(() => {
-    if (browserSessionOpen && browserSessionExpandRequestToken > 0) {
-      setBrowserSubtab("browser");
-    }
-  }, [browserSessionExpandRequestToken, browserSessionOpen, setBrowserSubtab]);
+  const showBrowserSubtab = useCallback(() => setBrowserSubtab("browser"), [setBrowserSubtab]);
+  useShowBrowserOnRequest(browserSessionOpen, browserSessionExpandRequestToken, showBrowserSubtab);
   const handleBrowserSubtabChange = useCallback(
     (tab: string) => {
       setBrowserSubtab(tab);
