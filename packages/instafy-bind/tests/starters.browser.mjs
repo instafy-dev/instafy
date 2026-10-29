@@ -458,12 +458,13 @@ try {
     ok(/List prices on Review Site ↗ · seen 5 Aug( \d{4})? · may have changed\. Open a store for today's price\./.test(await text(bp)), `the list-price line says where today's price is: ${(await text(bp)).match(/List prices.*/)?.[0]}`);
     await bp.context().close();
 
-    // an empty page: no "Ask in chat" on a shared link (no chat there), only in Studio; no footer to confirm
+    // an empty page: no "Ask in chat" on a shared link (no chat there), only in Studio; what was not checked is still
+    // said, since it is why the page is empty
     const empty = await staticServer(makeSite("compare-empty", "compare", (d) => ({ ...d, items: [] })));
     const ep = await open(`${empty}/`);
     const shown = async () => (await ep.locator(".empty").innerText()).trim();
     eq(await shown(), "No options yet.", "a shared link says just that");
-    ok(await ep.locator("#notes").isHidden(), "an empty page has nothing to confirm");
+    ok(/Still to confirm/.test(await ep.locator("#notes").innerText()), "an empty page still says what was not checked");
     await ep.evaluate(() => document.documentElement.setAttribute("data-host-title", "shown"));
     eq(await shown(), "No options yet. Ask in chat to add some.", "in Studio it says where to ask");
     await ep.context().close();

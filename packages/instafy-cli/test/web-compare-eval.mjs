@@ -13,10 +13,10 @@
 // and the turn read nothing else, dropped every model because no price was read and built a page that read "No options
 // yet". It must read an independent source (a review publisher's own page names the latest models) and list every
 // model, with "price unknown" and never as within the limit.
-// SEARCH_ONLY_CASE is the 29 Oct drive 4: the maker's site never answers, and every review a search finds refuses
-// automated reads. Two failed pages on one site send the turn to `instafy web search` (the browser skill's "Finding a
-// page"); it lists the models the search results name, each "not checked", never placeholders ("Model not verified —
-// candidate 1/2/3", the drive's rows) and never names from memory.
+// SEARCH_ONLY_CASE: the maker's site never answers, and every review a search finds refuses automated reads. Two failed
+// pages on one site send the turn to `instafy web search` (the browser skill's "Finding a page"); it lists the models
+// the search results name, each "not checked" (on the page, a row whose "found" names the result's site), never
+// placeholders ("Model not verified — candidate 1/2/3", "Latest eligible model 1/2/3") and never names from memory.
 // Nothing here touches a live site or a real search API.
 //
 // A turn is graded by the rules of the instafy-web-research skill ("Comparing items") and of the comparison page
@@ -38,7 +38,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkValues, knownNumber } from "../../instafy-bind/src/check.mjs";
+import { checkValues, knownNumber, uncitedRows } from "../../instafy-bind/src/check.mjs";
 import { dayMonth, noAgents, searchAddress } from "./web-search-eval.mjs";
 
 const MAKER = "https://www.brightvac.example";
@@ -316,12 +316,15 @@ export function searchOnlyReply(kase, { links }) {
   ].join("\n");
 }
 
-/** The reference page when only a search names the models: a row per model, "not checked", every value unknown with
- *  why, and the stated limit as the page's one filter. */
+/** The reference page when only a search names the models: a row per model, "found" on the site of the search result
+ *  that names it (the page marks it "Not checked"), every value unknown with why, and the stated limit as the page's
+ *  one filter. */
 export function searchOnlyPage(kase) {
   const unread = (what) => ({ note: what });
+  const searched = Object.values(kase.searches).flat().map((ref) => pageOf(kase, ref));
   const row = (item) => ({
-    ref: `vacuum:${item.slug}`, name: item.name, why: "A search result names it; not checked", note: "Reviews: 0 of 2 found",
+    ref: `vacuum:${item.slug}`, name: item.name, why: "A search for reviews names it", note: "Reviews: 0 of 2 found",
+    found: host(searched.find((result) => result.title?.startsWith(`${item.name} review`)).url),
     facts: {
       price: unread(`${host(kase.official.url)} did not answer; no shop page was read`),
       suction: unread("no page could be read"), battery: unread("no page could be read"), mop: unread("no page could be read"),
@@ -447,10 +450,11 @@ export function gradeCompare(transcript, kase = CASE) {
     .map((row) => (PLACEHOLDER.test(row.name)
       ? `"${flat(row.name)}" is a placeholder, not a model a page or a search result names`
       : `${flat(row.name)} is on the page, but neither the ask, a page read this turn nor a search result names it`)));
-  // A model only a search result names is "not checked", on its row and in the reply.
+  // A model only a search result names is "not checked", on its row (its "found" names the result's site, and the
+  // starter draws "Not checked") and in the reply.
   const searchOnlyRows = (data.items || []).filter((row) => flat(row.name) && !namedIn(row.name, kase.ask) && !readNames.some((text) => namedIn(row.name, text)) && resultNames.some((text) => namedIn(row.name, text)));
   check("search_names_not_checked", searchOnlyRows.flatMap((row) => [
-    ...(/not checked/i.test(flat([row.why, row.note, row.badge].filter(Boolean).join(" "))) ? [] : [`the page does not say ${flat(row.name)} is not checked (only a search result names it)`]),
+    ...(flat(row.found) ? [] : [`the page does not mark ${flat(row.name)} not checked (only a search result names it, and its row has no "found")`]),
     ...(sentences(replyLines).some((s) => namedIn(row.name, s) && /not checked/i.test(s)) ? [] : [`the reply does not say ${flat(row.name)} is not checked`]),
   ]));
 
@@ -529,10 +533,15 @@ export function gradeCompare(transcript, kase = CASE) {
       .map((s) => `"${s}" counts an item without a price as within the limit`),
   ]);
 
+  // Every row says where it comes from, by the data's shape, as `instafy bind check` reads it: a page read that names
+  // it, or the search result that alone does ("found").
+  const rowProblems = uncitedRows(data).map((row) => row.problem);
+  check("rows_cited", rowProblems);
+
   // Every value names the page it was read on and the day; none is a dash; each page was read this turn.
   const today = findings[0] ? findings[0].readAt.slice(0, 10) : null;
   check("values_cited", [
-    ...values.problems.filter((p) => !/filter/.test(p)),
+    ...values.problems.filter((p) => !/filter/.test(p) && !rowProblems.includes(p)),
     ...(data.items || []).flatMap((row) => Object.entries(row.facts || {}).flatMap(([key, fact]) => {
       if (!fact || fact.v == null || fact.est) return [];
       const problems = [];
@@ -681,20 +690,21 @@ export const OFFICIAL_DOWN_BREAKERS = [
     const [first] = data.items;
     data.items.push({ ...first, ref: "vacuum:s9", name: `${k.brand} S9 Ultra`, why: "Its newest flagship", note: "Reviews: 0 of 2 found", sources: [],
       facts: Object.fromEntries(Object.keys(first.facts).map((key) => [key, { note: "not read" }])) });
-  }), ["rows_from_pages"]],
+  }), ["rows_cited", "rows_from_pages"]],
 ];
 
 export const SEARCH_ONLY_BREAKERS = [
-  // the 29 Oct drive 4: rows "Model not verified — candidate 1/2/3", while the search had named the models
+  // rows "Model not verified — candidate 1/2/3" (later "Latest eligible model 1/2/3"), with nothing behind them, while
+  // the search had named the models
   ["writes placeholder rows instead of the names the search gave", (t, k, edit) => edit({
     ...t,
     reply: `I built and opened the comparison page. It shows three explicitly unverified placeholders rather than guessing which ${k.brand} models qualify; suction, battery, mop, prices, and all six requested reviews remain unknown because the official site could not be reached and no source pages were verified.\n${t.reply.split("\n").filter((line) => line.startsWith("To check the prices yourself")).join("\n")}`,
   }, (data) => {
-    data.items.forEach((row, i) => { row.name = `Model not verified — candidate ${i + 1}`; row.ref = `vacuum:candidate-${i + 1}`; });
-  }), ["limit_never_counts_unknown", "page_built", "reviews_counted", "rows_from_pages", "unknown_prices_said"]],
+    data.items.forEach((row, i) => { row.name = `Model not verified — candidate ${i + 1}`; row.ref = `vacuum:candidate-${i + 1}`; delete row.found; });
+  }), ["limit_never_counts_unknown", "page_built", "reviews_counted", "rows_cited", "rows_from_pages", "unknown_prices_said"]],
   ["lists the search's names without saying they are not checked", (t, _k, edit) => edit({ ...t, reply: t.reply.replaceAll(", not checked:", ":").replaceAll(" (not checked)", "") }, (data) => {
-    for (const row of data.items) row.why = "A search result names it";
-  }), ["search_names_not_checked"]],
+    for (const row of data.items) delete row.found;
+  }), ["rows_cited", "search_names_not_checked"]],
   ["adds a remembered model as a row of unknowns", (t, k, edit) => edit(t, (data) => {
     const [first] = data.items;
     data.items.push({ ...first, ref: "vacuum:s9", name: `${k.brand} S9 Ultra`, why: "Its newest flagship; not checked" });

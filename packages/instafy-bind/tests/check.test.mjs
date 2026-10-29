@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect } from "../src/check.mjs";
+import { checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, uncitedRows } from "../src/check.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
 const cleanEnv = { PATH: process.env.PATH, HOME: os.tmpdir() };
@@ -96,6 +96,11 @@ test("text that only says an item is unavailable does not count as showing it", 
 test("check with nothing to check says how to give the list (exit 2)", () => {
   const dir = compareSite(["Brooks Adrenaline GTS 24"]);
   try {
+    // the row says where it comes from (a search result's site), so only the list of requested items is missing
+    const file = path.join(dir, "data.json");
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    data.items[0].found = "reviews.example.net";
+    fs.writeFileSync(file, JSON.stringify(data));
     const out = run("check", dir);
     assert.equal(out.status, 2);
     assert.match(out.stdout, /nothing to check: pass --expect/);
@@ -228,6 +233,50 @@ test("on a ranked page, a row with no price at all is noted as listed apart too"
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// A comparison whose maker's site never answered listed "Latest eligible model 1/2/3", every cell unknown, although a
+// search had named the models. A row is a candidate something named: the request, a page read, or only a search
+// result ("found"). The check reads that from the data's shape, never from the row's words.
+test("check fails a comparison row that says nowhere where it comes from", () => {
+  const unread = { note: "no official product page could be read" };
+  const row = (name, extra = {}) => ({ ref: `vacuum:${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, name, why: "", facts: { price: unread, weight: unread, rating: unread, warranty: unread }, ...extra });
+  const dir = optionsSite("compare", (data) => ({ ...data, items: [1, 2, 3].map((n) => row(`Latest eligible model ${n}`)) }));
+  try {
+    const { problems } = checkValues(dir);
+    assert.equal(problems.length, 3, problems.join("\n"));
+    assert.match(problems[0], /^Latest eligible model 1: nothing says where this row comes from\. Cite the page you read that names it \(a value's "src" and "url", or "sources": \[\{"name", "url"\}\]\)\. When only a search result names it, put that result's site in "found"/);
+    const out = run("check", dir, "--expect", "Brightvac");
+    assert.equal(out.status, 1, out.stdout);
+    assert.match(out.stdout, /^VALUES: 3 value\(s\) to fix in data\.json:$/m);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const data = (items, extra = {}) => ({ columns: [{ key: "price", label: "Price", type: "price" }], items, ...extra });
+  const page = { src: "Review One", url: "https://reviews.example.net/s8", date: "2026-10-29" };
+  // the shape decides, not the words: the same placeholder name passes once a search result is named for it, and a
+  // real-sounding model fails without anything behind it
+  assert.deepEqual(uncitedRows(data([row("Latest eligible model 1", { found: "reviews.example.net" })])), []);
+  assert.deepEqual(uncitedRows(data([row("Brightvac S9 Ultra")])).map((r) => r.item), ["Brightvac S9 Ultra"]);
+  // a page read: a value's (a value or "Not listed") or a "sources" entry, each with its https page
+  assert.deepEqual(uncitedRows(data([
+    row("A", { facts: { price: { v: "€399", ...page } } }),
+    row("B", { facts: { price: { ...page } } }),
+    row("C", { sources: [{ name: "Review One", url: page.url }] }),
+    row("D", { more: [{ label: "Mop", fact: { v: "none", ...page } }] }),
+  ])), []);
+  // an estimate, a value without its page, a source without an https page and a store link are no page read
+  assert.deepEqual(uncitedRows(data([
+    row("E", { facts: { price: { v: "about €400", est: true, url: page.url } } }),
+    row("F", { facts: { price: { v: "€399", src: "Review One", date: "2026-10-29" } } }),
+    row("G", { sources: [{ name: "Review One", url: "http://reviews.example.net/s8" }] }),
+    row("H", { store: { name: "Shop", url: "https://shop.example.net/h", readable: true }, found: " " }),
+  ])).map((r) => r.item), ["E", "F", "G", "H"]);
+  // what the request named is a row by itself, from --expect or the data's own list
+  assert.deepEqual(uncitedRows(data([row("Brightvac S8 Pro")]), ["Brightvac S8 Pro"]), []);
+  assert.deepEqual(uncitedRows(data([row("Brightvac S8 Pro")], { expect: ["Brightvac S8 Pro"] })), []);
+  // a ranked page (no columns) is not judged by this rule
+  assert.deepEqual(uncitedRows({ items: [{ name: "Top pick", price: unread }] }), []);
 });
 
 test("a filter without a label fails the check: the page would have nothing to call the limit", () => {

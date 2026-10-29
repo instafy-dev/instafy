@@ -4,8 +4,8 @@
 // every string in its data files (data.json, data/**/*.json, records included). Items come from --expect and from
 // an "expect" array in data.json. Text that only says an item is unavailable ("Not found yet: Tokyo", a data file's
 // "missing" list) does not count as showing it: builders are told to say on the page what they could not add, and
-// that line must not pass the check. On a page of options it also checks the values (below). Pure helpers are
-// exported for the tests.
+// that line must not pass the check. On a page of options it also checks the values and where each row comes from
+// (below). Pure helpers are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
@@ -162,7 +162,9 @@ export function checkSite(dir, expect = []) {
 // Each value on such a page names the page it was read on and the day ("checked 27 Oct on maker.com"), and a value
 // nobody found says so with why; a dash or "n/a" is not a value. A filter from a stated limit ("under €600") counts
 // only values the page shows: the starters' site.byFilter lists a row whose value is unknown apart ("Price
-// unknown"), never as within the limit. These rules read the data the same way site.js draws it.
+// unknown"), never as within the limit. A row of a comparison is a candidate something named: the request, a page
+// read (a value's or a "sources" page), or only a search result ("found": its site, drawn "Not checked"). These rules
+// read the data the same way site.js and the compare starter draw it.
 
 /** A value that only says nothing is known: blank, dashes, "?", "n/a", "unknown", "TBD" (site.js: no value). */
 export const NO_VALUE = /^(?:[\s\-\u2010-\u2015?.\u00b7\u2026/]*|n\s*\/\s*a|unknown|tb[ad])$/i;
@@ -269,8 +271,37 @@ function liveValue(records, key) {
   return NO_VALUE.test(String(newest.value).trim()) ? null : numberIn(String(newest.value));
 }
 
-/** The values of a site's page of options: problems to fix before the card, and notes for the reply. */
-export function checkValues(dir) {
+/** A page a row cites: a value with its source and https page, or a "sources" entry with an https page. */
+const citesPage = (fact) => !!(fact && typeof fact === "object" && !fact.est && fact.src && httpsUrl(fact.url));
+
+/** The rows of a comparison (the compare starter's data: "columns" and "items") that say nowhere where they come from:
+ *  the request does not name them (`expect`, and data.json's "expect"), no value or "sources" entry cites a page that
+ *  was read, and no "found" names the search result that alone names them. Such a row is a guess or a placeholder
+ *  ("Model 1"): [{item, problem}]. Judged by the data's shape, never by the row's words. */
+export function uncitedRows(data, expect = []) {
+  if (!isOptionsData(data) || !Array.isArray(data.columns)) return [];
+  const requested = parseExpect([...(Array.isArray(data.expect) ? data.expect : []), ...parseExpect(expect)]);
+  const out = [];
+  for (const item of data.items) {
+    if (!item || typeof item !== "object") continue;
+    const name = String(item.name ?? item.ref ?? "");
+    if (requested.some((wanted) => names(name, wanted))) continue;
+    const facts = [...Object.values(item.facts && typeof item.facts === "object" ? item.facts : {}), ...(Array.isArray(item.more) ? item.more.map((m) => m?.fact) : [])];
+    const sources = Array.isArray(item.sources) ? item.sources : [];
+    if (facts.some(citesPage) || sources.some((s) => s && typeof s === "object" && s.name && httpsUrl(s.url))) continue;
+    if (typeof item.found === "string" && item.found.trim()) continue;
+    const label = name || "a row";
+    out.push({
+      item: label,
+      problem: `${label}: nothing says where this row comes from. Cite the page you read that names it (a value's "src" and "url", or "sources": [{"name", "url"}]). When only a search result names it, put that result's site in "found" ("found": "example.com"): the page then says it is not checked. A row nothing named (a guess, "Model 1") does not belong on the page.`,
+    });
+  }
+  return out;
+}
+
+/** The values of a site's page of options, and where its rows come from: problems to fix before the card, and notes
+ *  for the reply. `expect`: the items the request named (data.json's "expect" counts too). */
+export function checkValues(dir, expect = []) {
   const root = path.resolve(dir);
   const problems = [];
   const notes = [];
@@ -294,6 +325,7 @@ export function checkValues(dir) {
     const list = lacks.length > 1 ? `${lacks.slice(0, -1).join(", ")} or ${lacks[lacks.length - 1]}` : lacks[0];
     if (lacks.length) problems.push(`${where}: "${valueOf(fact)}" has no ${list}: add where you read it and when ("checked 27 Oct on maker.com"), or leave the value out.${fact.src ? "" : " Without a source the page shows it as not checked."}`);
   }
+  for (const row of uncitedRows(data, expect)) problems.push(row.problem);
 
   const filter = data.filter;
   if (filter && typeof filter === "object") {
@@ -336,7 +368,7 @@ export function checkValues(dir) {
  *  nothing to check. */
 export function checkReport(dir, expect, { json = false } = {}) {
   const result = checkSite(dir, expect);
-  const values = checkValues(dir);
+  const values = checkValues(dir, expect);
   const bad = result.missing.length > 0 || values.problems.length > 0;
   if (!result.items.length && !values.problems.length) {
     const message = 'nothing to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json';

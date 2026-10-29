@@ -200,7 +200,11 @@ item the request named (from its HTML text and data files; an `"expect"` array i
 exits 1 when one is missing. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
 value that only says nothing (`"—"`, `"n/a"`: leave out `v` and say why in `note`), a value without the page and day
 it was read (`src`, `url`, `date`), and a filter applied without `site.byFilter`; and it notes the rows the filter
-lists apart because their value is unknown (`site.within` never counts an unknown value as within a limit).
+lists apart because their value is unknown (`site.within` never counts an unknown value as within a limit). A row of a
+comparison must say where it comes from, by its data, never its words: the request names it, a value or a `sources`
+entry cites an https page that was read, or, when only a search result names it, `found` names that result's site (the
+compare starter then marks the row "Not checked"). A row with none of these, a guess or a placeholder such as "Model
+1", fails the check.
 
 On timeout the binder sends SIGTERM, then SIGKILL after 3 s, and reports `error timeout`.
 

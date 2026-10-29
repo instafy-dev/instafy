@@ -631,9 +631,12 @@ skill prints just that section with one command), says how every reader finds a
 page: an address the person, a skill or a search result gave, a link on a page
 read, or the official site's home page, never a search engine or a guessed
 path; a missing page's own site search; another source after two failed pages
-on one site; facts from a place's own page, not a listing or a kiosk page; "not
-checked" on anything not read this turn; and a cookie banner's refusal, so the
-banner does not cover the page. The research and comparison evals
+on one site, and the best result of the search for it read; facts from a place's
+own page, not a listing or a kiosk page; "not checked" on anything not read this
+turn; and a cookie banner's refusal, so the banner does not cover the page. A
+sign-in, a bot check, a paywall or a refused read ends that page, never the task:
+nothing a turn carries tells it to stop there, so neither a card's task nor the
+reply rules end the research after a failed page. The research and comparison evals
 (`packages/instafy-bind/tests/web-research-eval.test.mjs`,
 `packages/instafy-cli/test/web-compare-eval.spec.ts`) grade these rules on
 fixture sites.
