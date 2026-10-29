@@ -1,6 +1,6 @@
 {
   "name": "@instafy/cli",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "license": "AGPL-3.0-only",
   "description": "Run Instafy spaces locally, link folders to Studio, and share previews/webhooks via tunnels.",
   "private": false,

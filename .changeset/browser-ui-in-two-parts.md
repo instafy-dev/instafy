@@ -1,4 +1,0 @@
----
----
-
-The required Browser UI rendering check runs its component cases in two parts, one job each (`pnpm test:browser:ci browser-ui --shard=1/2` and `--shard=2/2`), so each part takes about half as long and no longer runs close to the suite's time limit on slow runners. The check itself runs after both parts and fails unless both succeeded, a skipped or cancelled part included; it then checks the lane's full list of required specs and cases on both parts' results together, so a case that no part ran still fails it. Locally, `pnpm test:browser:ci browser-ui` runs the whole lane in one go as before. The queue composer's image thumbnails compare their focus rings only after the ring's transition has ended, since Chromium reports a ring read mid-transition in another colour format. No package changes.
