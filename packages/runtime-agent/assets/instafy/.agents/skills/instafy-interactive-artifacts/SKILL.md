@@ -50,21 +50,21 @@ own kind of page.
 - "Near me": never `navigator.geolocation` (Studio blocks it); `await instafyBind.location()` per
   `instafy-bound-sites`, with a typed place as a fallback.
 
-## 3. Serve it, then show it
+## 3. Serve it and show it
 
-1. Start it so it outlives your turn, on a free port (4173-4199): the builder skill's serve command as it says;
-   a bound or plain site with `instafy bind serve <dir> --port <port> --preview --detach`.
-2. `instafy preview open --port <port> --title '<short title>' --json` (or `--serve-cmd "<command>" --start`
-   per `instafy-frontend-previews`). Then `instafy preview check --port <port>` loads it as Studio does: fix every
-   error it lists and look at the phone screenshot.
+1. One command, from the site's folder, starts it so it outlives your turn and posts its card:
+   `instafy preview open --title '<short title>' --serve-cmd "<serve command>" --start --json`, with `{port}` where
+   the serve command takes its port. The serve command is the builder skill's; a bound or plain site's is
+   `instafy bind serve . --port {port} --preview`. It picks the port: never choose one.
+2. `instafy preview check --port <port>` (the JSON's) loads it as Studio does: fix every error it lists and look at
+   the phone screenshot.
 3. Never post preview, tunnel or localhost URLs. A public link only when the user asks for one:
    `instafy-frontend-previews`.
 4. After an edit no new card is needed; reload open viewers if the builder can (`instafy bind command <dir>
-   reload '{}'`). If the server stopped, start it again and rerun `instafy preview open`.
+   reload '{}'`). If the server stopped, rerun the same `instafy preview open`.
 
 ## 4. Reply
 
 2-5 lines in the user's terms: the verdict, what the page lets them do, what is unverified, and ONE `Assumed:` line
 for the defaults you chose. End with 2-3 short suggested replies they can send as-is (adjustments of what you
-assumed). "Open it from the card above" (no link) only once the card is posted. No file paths, commands or
-"validation passed".
+assumed). The card speaks for itself: never point them to it. No file paths, commands or "validation passed".

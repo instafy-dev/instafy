@@ -53,7 +53,7 @@ pub(super) const WAKE_PENDING_TIMEOUT_SECONDS: i64 = 10 * 60;
 /// A claimed wake without a result may be claimed again after this long (the
 /// agent died mid-restart), at most [`WAKE_MAX_CLAIMS`] times in all. Well
 /// past the agent's longest restart (`preview_restarts.rs`: 60 s for the port,
-/// 30 s for the CLI's state lock, a few seconds of probes), so a slow restart
+/// 90 s for the CLI's state lock, a few seconds of probes), so a slow restart
 /// is not claimed again while it runs; an agent that does see a re-claim of a
 /// preview it is restarting reports that restart's outcome for it.
 pub(super) const WAKE_CLAIM_RETRY_SECONDS: i64 = 180;

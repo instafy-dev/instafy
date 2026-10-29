@@ -1030,8 +1030,10 @@ describe("instafy preview", () => {
       home,
     );
     expect(closed.code, closed.stderr).toBe(0);
-    expect(JSON.parse(closed.stdout)).toEqual({ ok: true, previewId: "preview-1" });
+    // The site was not started by `open --start`, so it is left running.
+    expect(JSON.parse(closed.stdout)).toEqual({ ok: true, previewId: "preview-1", siteStopped: false });
     expect(isAlive(pid)).toBe(false);
+    expect((await fetch(`http://127.0.0.1:${sitePort}/`)).status).toBe(200);
     expect(controller.captures.at(-1)).toMatchObject({
       method: "POST",
       path: `/projects/${projectId}/previews/preview-1/close`,

@@ -612,6 +612,36 @@ export async function readPageDescription(frame: any): Promise<string | null> {
 }
 
 /**
+ * The page's own ready mark. A page that draws itself after it loads (a map fetching its tiles, a chart, a page filled
+ * from data) can say when it is ready to be looked at: `data-instafy-ready="false"` on its `<html>` element while it
+ * draws (in the HTML, or set by a script before the page's load event), then `"true"`. A check and a card's picture
+ * wait for "true"; a page without the mark is taken once its network is quiet, as before.
+ */
+export const READY_MARK_ATTRIBUTE = "data-instafy-ready";
+/** How long a page with the mark may take to say it is ready, from the start of a capture. */
+export const READY_MARK_WAIT_MS = 30_000;
+
+/**
+ * Waits up to `timeoutMs` for the frame's ready mark: "none" when the page has no mark, "ready" once it says so,
+ * "late" when it still says it is drawing.
+ */
+export async function waitForReadyMark(frame: any, timeoutMs: number): Promise<"none" | "ready" | "late"> {
+  const mark = await frame
+    .evaluate((name: string) => document.documentElement?.getAttribute(name) ?? null, READY_MARK_ATTRIBUTE)
+    .catch(() => null);
+  if (mark === null) return "none";
+  if (mark === "true") return "ready";
+  if (timeoutMs <= 0) return "late";
+  return frame
+    .waitForFunction((name: string) => document.documentElement?.getAttribute(name) === "true", READY_MARK_ATTRIBUTE, {
+      timeout: timeoutMs,
+      polling: 100,
+    })
+    .then(() => "ready" as const)
+    .catch(() => "late" as const);
+}
+
+/**
  * What the page shows now as a 640×400 JPEG: the viewport at half size, quality 70, or 50 when that is over 256 KiB.
  * `skipped` says why there is none.
  */
@@ -937,12 +967,23 @@ async function checkViewport(
     });
 
     await page.goto(target.pageUrl, { waitUntil: "load", timeout: timeoutMs });
-    await page.waitForLoadState("networkidle", { timeout: Math.min(8_000, timeoutMs) }).catch(() => {
-      warnings.push("the network was still busy after 8 s (screenshot taken anyway)");
-    });
-    const frame = target.framed
-      ? page.frames().find((f: any) => f !== page.mainFrame() && isSiteUrl(String(f.url()), siteOrigin))
-      : page.mainFrame();
+    const siteFrame = () =>
+      target.framed
+        ? page.frames().find((f: any) => f !== page.mainFrame() && isSiteUrl(String(f.url()), siteOrigin))
+        : page.mainFrame();
+    // A page with its own ready mark is looked at once it says it is ready; any other once its network is quiet.
+    const readiness = await waitForReadyMark(
+      siteFrame() ?? page.mainFrame(),
+      Math.max(0, Math.min(READY_MARK_WAIT_MS, timeoutMs) - (Date.now() - t0)),
+    );
+    if (readiness === "none") {
+      await page.waitForLoadState("networkidle", { timeout: Math.min(8_000, timeoutMs) }).catch(() => {
+        warnings.push("the network was still busy after 8 s (screenshot taken anyway)");
+      });
+    } else if (readiness === "late") {
+      warnings.push(`the page still said it was drawing (${READY_MARK_ATTRIBUTE}) after ${Math.round((Date.now() - t0) / 1000)} s; screenshot taken anyway`);
+    }
+    const frame = siteFrame();
     let framed: "ok" | "refused" | "missing" = "ok";
     let snap = { text: 0, media: 0, elements: 0, title: "" };
     if (refused) framed = "refused";
@@ -979,6 +1020,8 @@ async function checkViewport(
         ? { skipped: `a redirect led to ${firstUnstopped[0].slice(0, 200)} (${firstUnstopped[1]}), which a picture never shows` }
         : blank.blank
         ? { skipped: "the page looked blank" }
+        : readiness === "late"
+        ? { skipped: "the page never said it was ready, so the card keeps its picture" }
         : await pageThumbnail(page, context)
             .then(async (shot) => ("image" in shot ? { image: shot.image, description: await readPageDescription(page.mainFrame()) } : shot))
             .catch((error: unknown) => ({ skipped: `the picture could not be taken: ${firstLine(error)}` }));

@@ -473,6 +473,29 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
     expect(proxied.join("\n")).not.toMatch(/booking\.com/);
   });
 
+  // A page that draws itself after it loads, and says so with its ready mark.
+  const drawsLater = (ms: number | null) => `<!doctype html><html data-instafy-ready="false"><title>Loading</title>
+<body style="font:16px system-ui"><h1 id="h">Loading</h1><script>${
+    ms === null
+      ? ""
+      : `setTimeout(() => { document.title = "Drawn"; document.getElementById("h").textContent = "Drawn"; document.documentElement.setAttribute("data-instafy-ready", "true"); }, ${ms});`
+  }</script></body></html>`;
+
+  it("a page with its own ready mark is looked at once it says it is drawn", { timeout: 90_000 }, async () => {
+    const port = await serve({ "/": { body: drawsLater(3_000) } });
+    const result = await check({ port, outDir: path.join(tmp, "ready-mark"), phone: true });
+    expect(result.code, JSON.stringify(result.report?.viewports.map((v) => v.errors))).toBe(CHECK_EXIT_OK);
+    expect(result.report!.title).toBe("Drawn");
+  });
+
+  it("a page that never says it is drawn is said to be, and does not replace the card's picture", { timeout: 90_000 }, async () => {
+    const port = await serve({ "/": { body: drawsLater(null) } });
+    const result = await check({ port, outDir: path.join(tmp, "never-ready"), timeoutMs: 8_000, thumbnail: true });
+    const desktop = result.report!.viewports.find((v) => v.name === "desktop")!;
+    expect(desktop.warnings.join("\n")).toMatch(/still said it was drawing \(data-instafy-ready\)/);
+    expect(result.thumbnail).toEqual({ skipped: "the page never said it was ready, so the card keeps its picture" });
+  });
+
   it("a minimal page (one heading on a plain background) passes", { timeout: 90_000 }, async () => {
     const port = await serve({ "/": { body: `<!doctype html><title>Hello</title><h1>Hello</h1>` } });
     const result = await check({ port, outDir: path.join(tmp, "minimal") });
@@ -553,17 +576,18 @@ describe("preview check: the previews skill tells the agent to run it", () => {
     "instafy-frontend-previews",
     "SKILL.md",
   );
-  it("checks the page before it is shown, and says exit 4 or 70 means nothing was checked", () => {
+  it("checks the page it shows on the port the card got, before any public link, and says exit 4 or 70 means nothing was checked", () => {
     const text = fs.readFileSync(skill, "utf8");
     const check = text.indexOf("instafy preview check --port <port>");
     expect(check).toBeGreaterThan(-1);
-    // before the site is shown in Studio, and before any step that exposes the port publicly
-    expect(check).toBeLessThan(text.indexOf("instafy preview open --port"));
+    // the port is the one `instafy preview open --start` picked, and the check comes before any step that exposes
+    // the port publicly
+    expect(text).toContain("Check it: `instafy preview check --port <port>` (the JSON's).");
     const tunnel = text.indexOf("instafy tunnel start");
     expect(tunnel).toBeGreaterThan(-1);
     expect(check).toBeLessThan(tunnel);
-    // the person is pointed to the card only after the check
-    expect(text).toMatch(/open it from the card once `instafy preview check` passes/);
+    // the card speaks for itself: the person is never sent to it
+    expect(text).not.toMatch(/open it from the card/i);
     expect(text).toMatch(/exit 4[^\n]*70[^\n]*nothing was checked/i);
   });
 });

@@ -11,8 +11,9 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
 
 ## How it works
 
-1. Octo starts a site in the space's machine (any server on any port) and runs
-   `instafy preview open --port <port> --title <title> [--path <path>]`. The `instafy-frontend-previews` skill tells it
+1. Octo starts a site in the space's machine and shows it with one command,
+   `instafy preview open --title <title> --serve-cmd "<command with {port}>" --start [--path <path>]`: the CLI picks the
+   site's port, starts it and posts its card (item 8). The `instafy-frontend-previews` skill tells it
    when. `instafy preview check --port <port>` takes a local headless look first. A turn on a restored provider thread
    and a direct workspace-change turn (such as "make a page and show me a preview") load no workspace memory snapshot,
    so their prompt names the workflow skills that match the request strongly (at most three,
@@ -45,15 +46,24 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    view-only member's viewing keeps nothing up. Each person's viewing does this for at most 4 hours a day per space.
 7. A site `instafy preview open` knew how to start can be started again from the card or the pane after the machine
    slept (see [Waking a stopped site](#waking-a-stopped-site)).
-8. `instafy preview open --serve-cmd "<command>" --start` also starts the site when nothing answers on the port: the
-   command as argv (never a shell) from its directory in the workspace, in its own session so it outlives the process
-   that started it, without terminal input, with its output appended to `.instafy/agent/logs/preview-<port>.log`, and
-   with the environment stripped of credentials by the same rule as `instafy bind serve --detach` (no `CONTROLLER_*`
-   value except `CONTROLLER_BASE_URL`, no `SUPABASE_*` value, no credential-like name). It waits up to 60 s for the
-   port, the same as a wake, and exits 2 with the log's path when the command exits first or the port stays silent
-   (then the command is stopped). `--json` adds `startedPid` (null when the port already answered and nothing was
-   started) and `logFile`. The log is Instafy's, not the person's work: a turn's file list never counts it, as it
-   counts nothing else under `.instafy/`.
+8. `instafy preview open --serve-cmd "<command>" --start` starts the site: the command as argv (never a shell) from
+   its directory in the workspace, in its own session so it outlives the process that started it, without terminal
+   input, with its output appended to `.instafy/agent/logs/preview-<port>.log`, and with the environment stripped of
+   credentials by the same rule as `instafy bind serve --detach` (no `CONTROLLER_*` value except
+   `CONTROLLER_BASE_URL`, no `SUPABASE_*` value, no credential-like name). It waits up to 60 s for the port, the same
+   as a wake, and exits 2 with the log's path when the command exits first or the port stays silent (then the command
+   is stopped). `--json` adds `startedPid` (null when this same site already ran on its port and nothing was started)
+   and `logFile`. The log is Instafy's, not the person's work: a turn's file list never counts it, as it counts nothing
+   else under `.instafy/`. `instafy preview close` stops the site it started (and one a wake started), but only while
+   its recorded pid still runs the command line recorded when the site answered.
+9. **One site per port.** Without `--port`, `--start` picks the port and writes it where the command says `{port}`:
+   this same site's port when it still has it (the same command from the same folder of the same space; another
+   space's site on the same machine never is), else the first free port from one chosen by the command and its folder,
+   between 20000 and 29999, that no other site here holds or has an open preview on. With `--port`, a port where another server answers is refused (exit 3) and names the site that holds
+   it. The controller refuses an open whose title or folder differs from the open preview on that port with
+   `409 port_in_use` ("Port 4173 already shows 'Lisbon in 3 days'."), unless the open says it replaces that site
+   (`replace`, `--replace`): a preview is keyed by machine and port, so such an open would take the other site's
+   card over.
 
 ```
 runtime   instafy preview open --port N --title T
@@ -79,7 +89,10 @@ A member can **Present** a site whose page says it can share its view, and the o
   text, cut at 80 characters, never Markdown or a link.
 - **Taking the picture.** Once `/ready` reports the site live, `instafy preview open` loads `http://127.0.0.1:<port><path>`
   in the runtime image's own Playwright and Chromium (the engine `instafy preview check` uses) at 1280×800 and keeps a
-  640×400 JPEG (quality 70, or 50 when that is over 256 KiB, else none), within 15 s in all. The JSON gains `thumbnail`
+  640×400 JPEG (quality 70, or 50 when that is over 256 KiB, else none), within 15 s in all. A page that draws itself
+  after it loads marks it: `data-instafy-ready="false"` on its `<html>` element, then `"true"` once drawn (the map
+  engine sets it once its tiles and description are in). The picture then waits for `"true"` instead of a quiet
+  network, up to 30 s in all, and a page still drawing by then gets no picture, never a half-drawn one. The JSON gains `thumbnail`
   (`uploaded`, `skipped` or `failed`) and `thumbnailReason`; the exit code never changes. `--no-thumbnail` takes none;
   `--thumbnail <file>` sends a picture a skill made itself (JPEG, PNG or WebP, at most 512 KiB and 2000×2000).
   `instafy preview check` takes a new one from the desktop page it already loaded, when this machine has a preview open
@@ -107,8 +120,8 @@ A member can **Present** a site whose page says it can share its view, and the o
   removes metadata (EXIF, XMP, ICC, comments, text chunks, anything after the image) without decoding pixels. At most
   6 uploads per preview a minute and 60 per runtime an hour.
 - **Storage.** One picture per preview in `runtime_preview_thumbnails` (RLS on, no client policy). It goes with every
-  new open of the preview (a preview is keyed by machine and port, so a later site on the port has the same id; the
-  CLI takes a new picture once that site is live), when the preview is replaced (`supersededBy`) or closed for good,
+  new open of the preview (a preview is keyed by machine and port, so a site that replaces another on the port has the
+  same id; the CLI takes a new picture once that site is live), when the preview is replaced (`supersededBy`) or closed for good,
   and with its space. A preview stopped by a sleeping machine keeps its picture. One closed on purpose whose card can
   start it again keeps its picture and page description, unshown while it is closed, so the card shows both again
   once a press brings the site back; once a newer tunnel takes its port, no press can, and the picture goes then. A
@@ -167,8 +180,9 @@ again** in its pane), Studio calls `POST /projects/:id/previews/:pid/wake`, then
 
 No agent job, run, chat message or model call is involved. Limits: 6 new wakes per preview per 10 minutes and 30 per
 person per space per hour (`429`); a wake not claimed within 10 minutes fails, and a claim without a result is retried
-after 180 s (well past the agent's longest restart: 60 s for the port, 30 s for the CLI's lock), at most 3 times. An
-agent that sees a re-claim of a preview it is still restarting reports that restart's outcome for it. Each runtime
+after 180 s (well past the agent's longest restart: 60 s for the port, 90 s for the CLI's lock, which `--start` holds
+while its own site starts), at most 3 times. An agent that sees a re-claim of a preview it is still restarting reports
+that restart's outcome for it. Each runtime
 agent asks for claims every 3 s: one indexed update of `runtime_preview_wakes` plus the agent token's runtime check
 (`ensure_runtime_can_heartbeat`), whether or not it has previews. A preview whose tunnel a newer one replaced never
 wakes (`409 not_restartable`), even one someone had closed before the newer one opened on its port: its wake would get

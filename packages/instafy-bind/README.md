@@ -353,8 +353,9 @@ All relative to the site root, under `__bind/`:
 ## How Octo uses it
 
 Octo generates a bound site like any other site: it writes the page (loading `__bind/client.js`), a `bound.json` and
-any small handlers, then runs `instafy bind serve <dir> --preview --detach` and `instafy preview open` so the site
-shows in the chat's preview card. It never writes backend code. Ask Octo clicks reach Octo as the clicker's own chat
+any small handlers, then runs `instafy preview open --title '<title>' --serve-cmd "instafy bind serve . --port {port}
+--preview" --start` from the site's folder: it picks the port, keeps the binder serving after the turn and shows the
+site in the chat's preview card. It never writes backend code. Ask Octo clicks reach Octo as the clicker's own chat
 messages through Studio, and Octo can drive open pages with `instafy bind command <dir> select '{"ref":"..."}'`.
 
 ## Tests
