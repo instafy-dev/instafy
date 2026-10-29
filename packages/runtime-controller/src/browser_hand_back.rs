@@ -501,6 +501,13 @@ pub(crate) async fn require_hand_back(
             "A hand-back continues the building turn with what the browser found, so it cannot carry attachments.",
         ));
     }
+    // Words for one agent would take the place of Studio's (dispatch's
+    // `apply_agent_prompt_segment`).
+    if crate::system_turns::carries_prompt_segments(request_metadata) {
+        return Err(bad_request(
+            "A hand-back continues the building turn with what the browser found, so it cannot carry words of its own.",
+        ));
+    }
     let user_id = match context.user_id {
         Some(user_id) if !context.is_service_role => user_id,
         _ => {

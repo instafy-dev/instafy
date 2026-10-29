@@ -1236,8 +1236,8 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     // Nor can a recorded message continue a browser turn: a hand-back always
     // dispatches (crate::browser_hand_back).
     crate::browser_hand_back::take_hand_back_claim(&mut metadata);
-    // Only a dispatch stamps a resend as Instafy's own (crate::system_turns).
-    crate::system_turns::strip_automatic_retry_stamps(&mut metadata);
+    // Only a dispatch stamps a turn as Instafy's own (crate::system_turns).
+    crate::system_turns::strip_system_turn_stamps(&mut metadata);
     // Only the controller says a message belongs to a team's plan: Studio reads a message's
     // `multiAgentPlan` for the team card's lanes and for which lane a later run replaced, so a
     // member's own record must not claim one.
@@ -2117,7 +2117,8 @@ pub(crate) async fn cancel_jobs_and_runs(
     }
 
     // A turn Instafy started by itself that is stopped never ends with a
-    // reply, so it costs nothing (crate::system_turns).
+    // reply, so it costs nothing unless it left the person something else or
+    // did something in the browser (crate::system_turns).
     let mut refunded_org_ids = Vec::new();
     for row in &canceled_rows {
         let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
