@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControllerApiError } from "../../../../services/runtimeController/core";
 import { NO_MOUNTED_SITE_PREVIEWS, SITE_PREVIEW_HEALTH_POLL_MS, SITE_PREVIEW_HEARTBEAT_MS, SitePreviewPane, nextMountedSitePreviews } from "../SitePreviewPane";
 import { withHostQuery } from "../previewHost/hostMessages";
+import { resetFollowStoreForTests, setFollowPresence } from "../previewHost/followStore";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
 const FIRST = "https://p-aaaaaaaaaaaaaaaaaaaaaaaaaa--11111111111141118111111111111111.preview.localhost/";
@@ -104,6 +105,53 @@ describe("SitePreviewPane", () => {
     expect(pane().dataset.state).toBe("live");
     expect(JSON.stringify({ ...sessionStorage })).not.toContain("p-aaaa");
     expect(JSON.stringify({ ...localStorage })).not.toContain("p-aaaa");
+  });
+
+  it("is one row on a phone: Present and Open in new tab sit beside the title, never on a row of their own", async () => {
+    const bar = () => container.querySelector<HTMLElement>("[data-testid=site-preview-chrome]")!;
+    const contextRow = () => bar().querySelector<HTMLElement>("[data-testid=browser-chrome-context-row]")!;
+    const viewport = (wide: boolean) => vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: wide, media: query, onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false,
+    }));
+    try {
+      // a phone (narrower than 640 px): the bar never wraps its controls onto a second row
+      viewport(false);
+      await render();
+      expect(bar().className).not.toContain("flex-wrap");
+      expect(contextRow().className).not.toContain("basis-full");
+      expect(contextRow().querySelector('[aria-label="Open in new tab"]')).not.toBeNull();
+      // a wider screen keeps the bar it had
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      viewport(true);
+      await render();
+      expect(bar().className).toContain("max-[540px]:flex-wrap");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a phone's follow chip on a row of its own: beside the title it squeezed the title out and pushed Open in new tab off a narrow screen", async () => {
+    const contextRow = () => container.querySelector<HTMLElement>("[data-testid=site-preview-chrome] [data-testid=browser-chrome-context-row]")!;
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false, media: query, onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false,
+    }));
+    try {
+      // Kim presents this site: the bar shows "Kim is presenting · Follow" and "Present instead"
+      setFollowPresence(PREVIEW_ID, { presentationId: "presentation-1", presenter: { id: "kim", name: "Kim" }, state: "live", followers: 0 });
+      await render();
+      expect(container.querySelector("[data-testid=follow-bar-chip]")?.textContent).toContain("Kim is presenting");
+      expect(contextRow().className).toContain("max-[540px]:basis-full");
+      expect(contextRow().querySelector('[aria-label="Open in new tab"]')).not.toBeNull();
+      // nobody presents any more: one row again
+      await act(async () => setFollowPresence(PREVIEW_ID, null));
+      await flush();
+      expect(container.querySelector("[data-testid=follow-bar-chip]")).toBeNull();
+      expect(contextRow().className).not.toContain("basis-full");
+    } finally {
+      vi.unstubAllGlobals();
+      resetFollowStoreForTests();
+    }
   });
 
   it("shows one loading signal while opening: the line in the pane, its pill for screen readers only", async () => {
