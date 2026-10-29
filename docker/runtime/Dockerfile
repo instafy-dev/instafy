@@ -41,6 +41,8 @@ ARG SQLITE3_MIN_VERSION=3.46.1-7+deb13u2
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
 # The pinned Playwright base ships OpenSSL 3.0.13-0ubuntu3.11; 3.0.13-0ubuntu3.16 fixes CVE-2026-84782.
 ARG WEBDEV_OPENSSL_MIN_VERSION=3.0.13-0ubuntu3.16
+# The pinned Playwright base ships libbrotli1 1.1.0-2build2; 1.1.0-2ubuntu0.1 fixes CVE-2026-111497.
+ARG WEBDEV_BROTLI_MIN_VERSION=1.1.0-2ubuntu0.1
 
 ########################
 # Runtime Node distribution
@@ -584,8 +586,10 @@ ARG IP_ADDRESS_SHA256
 ARG UNDICI_VERSION
 ARG UNDICI_SHA256
 ARG WEBDEV_OPENSSL_MIN_VERSION
+ARG WEBDEV_BROTLI_MIN_VERSION
 
 RUN test -n "${WEBDEV_OPENSSL_MIN_VERSION}" && \
+    test -n "${WEBDEV_BROTLI_MIN_VERSION}" && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
@@ -611,8 +615,10 @@ RUN test -n "${WEBDEV_OPENSSL_MIN_VERSION}" && \
       util-linux \
       libssl3t64 \
       openssl \
+      libbrotli1 \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libssl3t64)" ge "${WEBDEV_OPENSSL_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' openssl)" ge "${WEBDEV_OPENSSL_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libbrotli1)" ge "${WEBDEV_BROTLI_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
