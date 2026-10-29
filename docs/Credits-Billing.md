@@ -321,8 +321,9 @@ Starter guidance with the current defaults:
 
 A turn that ends in a failure ("…so this turn stopped." with **Try again**) costs nothing when it
 left the person nothing: no reply or note, no step that worked and no file written. A step is a
-command, a tool call or a file change, and it worked unless its last report is a failure (one whose
-end never arrived counts, since it may have worked). Looking at the browser's tabs, its state or
+command, a tool call, a web search or a file change, and it worked unless its last report is a
+failure or a command's non-zero exit (one whose end never arrived counts, since it may have
+worked). Looking at the browser's tabs, its state or
 the page it is on (`list_tabs`, `status`, `snapshot`) is not a step that worked, and neither is the
 routing pre-observation the runtime runs itself before the model. Such a turn gets its reserve and
 its daily prompt slot back (refund reason `failed_turn_without_result`), and its tokens are not
@@ -420,15 +421,19 @@ differs from a request it saw before. That start depends on the turn's lane (run
   browser's tools, and resumes the same thread (its mode falls back to the thread keys the default
   mode writes).
 
-So the first request of a turn whose lane differs from the turn before pays the uncached price for
-the whole history, and only the requests after it are cached. A one-command turn ("open the map")
-after a building hand-back sent its 75k-token history uncached once and cached once, and cost 9
-credits; with the start cached it would cost about 2. A browser follow-up after a browser turn,
-in the same lane, was 97% cached. A chat that moves between building, asking and browsing pays
-this at every switch, and more the longer the chat. Making the start the same for every lane of a
-thread (the same base instructions, tools and output format, with each lane's rules later in the
-request), or giving each lane its own thread, would remove it; both change what every turn is
-told, so they are left to a change of their own.
+So a lane's requests reuse only that lane's own earlier requests, and only while the provider
+still holds them (a few minutes). The first request of a turn pays the uncached price for the part
+of the history its lane has not sent in that time: all of it, the first time a chat uses the lane
+or after a pause, and only what other lanes added since, when the lane ran a few minutes before.
+The requests after it are cached. A one-command turn ("open the map"), the chat's first in its
+lane, sent its 75k-token history uncached once and cached once, and cost 9 credits; with the start
+cached it would cost about 2. A building turn three minutes after the chat's last building turn
+was 98% cached, although a browser turn came between, and a browser follow-up after a browser
+turn was 97% cached. A chat that moves between building, asking and browsing pays the whole
+history again at the first turn of each lane, and more the longer the chat. Making the start the
+same for every lane of a thread (the same base instructions, tools and output format, with each
+lane's rules later in the request), or giving each lane its own thread, would remove it; both
+change what every turn is told, so they are left to a change of their own.
 
 ### Measuring root-call usage
 
