@@ -14,7 +14,7 @@ import {
 } from "./chatAssistantIdentity";
 import { shouldAssistantMessagesShareVisualGroup } from "./assistantMessageGrouping";
 import { ChatBubbleRow } from "./ChatBubbleRow";
-import { ChatHasSiteContext, conversationHasSite } from "./chatSiteContext";
+import { ChatSiteContext, conversationSite } from "./chatSiteContext";
 import type { ChatSpeakerMarker } from "./chatSpeakerMarker";
 import {
   AssistantMessageEntry,
@@ -236,8 +236,8 @@ export function ConversationMessageRows({
     };
   }, []);
   // A site's card anywhere in the chat makes the changes under its replies the site's.
-  const hasSite = useMemo(
-    () => conversationHasSite(allConversationMessages ?? messages),
+  const site = useMemo(
+    () => conversationSite(allConversationMessages ?? messages),
     [allConversationMessages, messages],
   );
 
@@ -592,8 +592,8 @@ export function ConversationMessageRows({
   }
 
   return (
-    <ChatHasSiteContext.Provider value={hasSite}>
+    <ChatSiteContext.Provider value={site}>
       <DeferredChatRows key={conversationLocalId} messageCount={messages.length}>{rows}</DeferredChatRows>
-    </ChatHasSiteContext.Provider>
+    </ChatSiteContext.Provider>
   );
 }

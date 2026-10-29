@@ -38,7 +38,7 @@ import {
   unsavedWorkPlacementFor,
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
-import { useChatHasSite } from "./chatSiteContext";
+import { useChatSite } from "./chatSiteContext";
 
 const {
   fetchDiff: fetchWorkspaceGitDiffFromController,
@@ -277,15 +277,15 @@ function formatFileCount(count: number): string {
 
 /**
  * What the row says for a site's files: "Created the site" when the turn
- * created every one of them, "Changed the site" otherwise, never a file count
- * or the lines in them. Null when the files are no site's.
+ * that made the site created every one of them, "Changed the site" otherwise,
+ * never a file count or the lines in them. Null when the files are no site's.
  */
-function siteChangeLabel(site: boolean, files: ChatMessageFileChange[]): string | null {
+function siteChangeLabel(site: boolean, madeTheSite: boolean, files: ChatMessageFileChange[]): string | null {
   const entries = resolveUniqueChatFileChanges(files);
   if (!site || entries.length === 0) {
     return null;
   }
-  return entries.every((entry) => entry.file.changeType === "created") ? "Created the site" : "Changed the site";
+  return madeTheSite && entries.every((entry) => entry.file.changeType === "created") ? "Created the site" : "Changed the site";
 }
 
 function resolveChangeSetVerb(entries: ResolvedChatFileChange[]): string {
@@ -371,8 +371,16 @@ export function ChatFileChangeList({
   // files stay one press away.
   madeSite?: boolean;
 }) {
-  const chatHasSite = useChatHasSite();
-  const site = madeSite || chatHasSite;
+  const chatSite = useChatSite();
+  const site = madeSite || chatSite !== null;
+  // The turn that made the site: the one that opened its card, or the chat's
+  // first change. A later turn whose files are all new (a page added, a list
+  // written) changed the site.
+  const madeTheSite =
+    madeSite ||
+    chatSite?.firstChangeAt == null ||
+    messageTimestamp == null ||
+    messageTimestamp <= chatSite.firstChangeAt;
   const { openPanelTab, requestUrlPush, openGitDiffTab } = useWorkspaceTabs();
   const { showStatus } = useStatus();
   const { effectiveRuntimeId, runtimeReady } = useRuntime();
@@ -399,7 +407,7 @@ export function ChatFileChangeList({
   const [diffRefreshNonce, setDiffRefreshNonce] = useState(0);
   const [undoStatusByPath, setUndoStatusByPath] = useState<Record<string, ChatFileUndoStatus>>({});
   const [railExpanded, setRailExpanded] = useState(
-    () => !siteChangeLabel(site, files) && resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
+    () => !siteChangeLabel(site, madeTheSite, files) && resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
   );
   const [unsavedNoteOpen, setUnsavedNoteOpen] = useState(false);
   const [openNotSavedNotes, setOpenNotSavedNotes] = useState<Record<string, boolean>>({});
@@ -483,7 +491,7 @@ export function ChatFileChangeList({
   // Files the turn's save left out; reverted ones have nothing left to save.
   const notSavedCount = pendingEntries.filter((entry) => entry.file.notSaved).length;
 
-  const siteLabel = revertedCount === 0 ? siteChangeLabel(site, files) : null;
+  const siteLabel = revertedCount === 0 ? siteChangeLabel(site, madeTheSite, files) : null;
   const siteSummary = siteLabel !== null;
   // The chat's site can show up after these files did (a later turn opened its
   // card): its files then fold behind the site's line, unless the person opened them.
