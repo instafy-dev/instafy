@@ -1,5 +1,15 @@
 # @instafy/cli
 
+## 0.5.0
+
+### Minor Changes
+
+- 3e7b8d4: Add `instafy web settings` to configure a space's research allowance and `instafy web budget` to inspect remaining reads. Public page reads share controller-enforced task and per-site limits across the parent, helpers and continued worker jobs. Default to 100 fresh page loads per task and 25 per site, including standalone use. Cached reads remain free, and saved settings and running tasks keep their explicit limits.
+
+### Patch Changes
+
+- 2a3847f: One site per preview port, picked by the CLI. `instafy preview open --start` without `--port` picks the site's port itself and writes it where `--serve-cmd` says `{port}`: this same site's port when it still has it (the same command from the same folder of the same space keeps its port, its preview and its card; another space's site on the same machine never counts as this one), else a free port that no other site here holds or has a preview open on. The JSON's `port` says which. With `--port`, a port where another server answers is refused (exit 3) and the message names the site that holds it, never "already running"; this same site already answering there is used as it is. The server now refuses an open whose title or folder differs from the open preview on that port (`409 port_in_use`, "Port 4173 already shows 'Lisbon in 3 days'."), which the CLI reports as exit 3, unless `--replace` says this site replaces that one; a site `--start` started for a preview the server refused is stopped again. `instafy preview close` also stops the site `--start` started, or a card's restart started (only while its recorded process still runs the command line recorded when the site answered), and says so with `siteStopped`. The card's picture, and `instafy preview check`, wait for a page's own ready mark when it has one (`data-instafy-ready="false"` on its `<html>`, then `"true"`), up to 30 s, so a map is pictured once its tiles and description are in. `instafy bind serve --detach` reports the site served only when its own binder answers on the port (the folder it serves and its process, from the child it started, while that child runs), so another server already on the port is never taken for the site, and a binder of the same folder already serving there is kept and named. The preview skills and the interactive-map skill pack (v0.1.10) start every site and show its card with that one command, name no port, point at no card, and stop a site with `instafy preview close`.
+
 ## 0.4.1
 
 ### Patch Changes
