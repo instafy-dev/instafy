@@ -329,7 +329,9 @@ routing pre-observation the runtime runs itself before the model. Such a turn ge
 its daily prompt slot back (refund reason `failed_turn_without_result`), and its tokens are not
 charged, even though its model ran: a browser turn whose every page failed to open is one. A turn
 the sweep fails after its machine was lost is judged the same way, whether or not a runtime held
-it, under the sweep's own refund reason (`system_turns.rs` `turn_left_nothing`).
+it, under the sweep's own refund reason (`system_turns.rs` `turn_left_nothing`). So is a browser
+turn that a stop of its machine fails on the spot, since it cannot move to another machine ("The
+Shared Browser closed when its machine stopped."; `give_back_reserve_of_lost_browser_turn`).
 
 A failure alone is not proof that the person got nothing. The runtime fails a turn whose model
 ended without a final answer, and a model can be asked to do that after doing the work: the files
@@ -363,7 +365,8 @@ neither does its reply: a refusal is a reply too, as when the turn finds the bro
 has nothing to do with its task and stops.
 
 A turn of any of these kinds that is not charged (it fails, is stopped, expires, ends without a
-reply or has its plan refused, or a card's browser turn did nothing in the browser) gets its
+reply or has its plan refused, or a card's browser turn did nothing in the browser, including one
+that a stop of its machine failed) gets its
 reserve and its daily prompt slot back (refund reason `system_turn_without_reply`, or
 `browser_card_without_page` for a card's browser turn), and its tokens are not charged, even when
 a runtime already ran it; the runtime's later receipt for a refused plan bills nothing either. The

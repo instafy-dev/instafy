@@ -652,6 +652,97 @@ pub(crate) async fn give_back_reserve_without_reply(
     .await
 }
 
+/// Gives back the reserve of a browser turn whose machine went away. A browser
+/// turn cannot move to another machine, so a stop of its machine fails it on
+/// the spot (crate::runtime stop), with no completion and no expiry sweep: it
+/// is judged as any failed turn is. A card's browser turn follows its own rule
+/// (it costs nothing unless it did something in the browser), and a turn
+/// someone sent costs nothing when it left the person nothing
+/// ([`turn_left_nothing`]). Its tokens never reached the ledger, so its
+/// reserve is all it was charged. The checks and the refund run in a
+/// savepoint, so a failure is logged and never blocks the stop. Returns the
+/// org whose credits this call changed, for a `credits.updated` once the
+/// caller commits.
+pub(crate) async fn give_back_reserve_of_lost_browser_turn(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    job_id: &Uuid,
+    run_id: Option<Uuid>,
+    job_payload: &JsonValue,
+) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
+    transaction
+        .batch_execute("savepoint lost_browser_turn")
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to open lost browser turn savepoint: {error}"
+            ))
+        })?;
+    let outcome = async {
+        if system_turn_of(job_payload).is_some() {
+            return give_back_reserve_without_reply(
+                transaction,
+                project_id,
+                job_id,
+                run_id,
+                None,
+                None,
+                job_payload,
+            )
+            .await;
+        }
+        if !turn_left_nothing(transaction, project_id, job_id, run_id, None, true).await? {
+            return Ok(None);
+        }
+        give_back_reserve(
+            transaction,
+            project_id,
+            job_id,
+            run_id,
+            None,
+            None,
+            job_payload,
+            FAILED_TURN_WITHOUT_RESULT_REFUND_REASON,
+        )
+        .await
+    }
+    .await;
+    match outcome {
+        Ok(refunded) => {
+            transaction
+                .batch_execute("release savepoint lost_browser_turn")
+                .await
+                .map_err(|error| {
+                    internal_error(format!(
+                        "failed to release lost browser turn savepoint: {error}"
+                    ))
+                })?;
+            Ok(refunded)
+        }
+        Err((status, Json(api_error))) => {
+            warn!(
+                project_id = %project_id,
+                job_id = %job_id,
+                status = status.as_u16(),
+                error = %api_error.message,
+                "could not settle the reserve of a browser turn whose machine stopped; it stands"
+            );
+            transaction
+                .batch_execute(
+                    "rollback to savepoint lost_browser_turn;
+                     release savepoint lost_browser_turn",
+                )
+                .await
+                .map_err(|error| {
+                    internal_error(format!(
+                        "failed to roll back lost browser turn savepoint: {error}"
+                    ))
+                })?;
+            Ok(None)
+        }
+    }
+}
+
 /// Gives a managed-AI turn's reserve and daily prompt slot back, once, with
 /// `reason` on the refund, for a turn that costs nothing (its caller decided
 /// that). One that did not run on Instafy AI is left alone. Runs in a

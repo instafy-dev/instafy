@@ -999,7 +999,7 @@ async fn a_card_browser_turn_is_stamped_only_for_the_cards_own_task() -> anyhow:
                 .await?
                 .is_none());
             // A card that is not the runtime's own message is no card.
-            let mut connection = chain.pool.get().await?;
+            let connection = chain.pool.get().await?;
             let forged_job = chain
                 .job_of(
                     &chain

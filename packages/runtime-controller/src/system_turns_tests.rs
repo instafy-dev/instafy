@@ -512,6 +512,124 @@ async fn an_expired_turn_that_left_nothing_gives_its_reserve_back() -> anyhow::R
     Ok(())
 }
 
+/// A browser turn cannot move to another machine, so a stop of its machine
+/// fails it on the spot ("The Shared Browser closed when its machine
+/// stopped."), without a completion and without the expiry sweep. That is a
+/// failure like any other: a card's browser turn gets its reserve back unless
+/// it did something in the browser, and a turn the person sent gets it back
+/// when it left the person nothing. Before, either kept its reserve.
+#[tokio::test]
+async fn a_browser_turn_whose_machine_stopped_costs_nothing_when_it_left_nothing(
+) -> anyhow::Result<()> {
+    for (case, card, opened_a_page) in [
+        ("card-looked", true, false),
+        ("card-opened", true, true),
+        ("sent-looked", false, false),
+        ("sent-opened", false, true),
+    ] {
+        let Some(fixture) =
+            seed_reserved_managed_ai_prompt(&format!("lost-browser-{case}")).await?
+        else {
+            eprintln!("skipping lost browser turn billing test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        if card {
+            stamp(&fixture, BROWSER_CARD_TURN_KEY, card_stamp()).await?;
+        }
+        step(
+            &fixture,
+            "mcp_tool_call",
+            browser_tool("snapshot"),
+            "completed",
+        )
+        .await?;
+        if opened_a_page {
+            step(
+                &fixture,
+                "mcp_tool_call",
+                browser_tool("navigate"),
+                "completed",
+            )
+            .await?;
+        }
+        let runtime_id = Uuid::new_v4();
+        let mut connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "insert into runtimes (
+                     id, project_id, provider, status, endpoint_url, task_ref,
+                     idle_ttl_seconds, last_seen_at
+                 ) values ($1, $2, 'desktop', 'ready', 'http://example', 'browser-task',
+                           600, now())",
+                &[&runtime_id, &fixture.project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update agent_jobs
+                    set status = 'leased', lease_attempts = 1,
+                        target_runtime_id = $2, leased_by_runtime_id = $2,
+                        leased_at = now(), lease_expires_at = now() + interval '10 minutes',
+                        payload = jsonb_set(payload, '{metadata,browserTransport}', '\"shared\"', true)
+                  where id = $1",
+                &[&fixture.job_id, &runtime_id],
+            )
+            .await?;
+        let transaction = connection.transaction().await?;
+        let runtime = crate::runtime::fetch_runtime_for_update(&transaction, &runtime_id)
+            .await
+            .map_err(|error| controller_error("fetch the browser's machine", error))?;
+        let outcome = crate::runtime::perform_runtime_stop(
+            &transaction,
+            &runtime,
+            crate::runtime::StopOptions {
+                source: "test",
+                reason: Some("idle_stop".to_string()),
+                skip_if_active_jobs: false,
+                require_idle_timeout: false,
+                allow_cleanup_pending_release: false,
+                expected_identity: None,
+            },
+        )
+        .await
+        .map_err(|error| controller_error("stop the browser's machine", error))?;
+        transaction.commit().await?;
+        drop(connection);
+        assert_eq!(
+            outcome.failed_shared_browser_jobs,
+            vec![fixture.job_id],
+            "{case}"
+        );
+        if opened_a_page {
+            assert!(outcome.refunded_org_ids.is_empty(), "{case}");
+            assert!(
+                !reasons(&ledger_rows(&fixture.pool, &fixture.project_id).await?)
+                    .iter()
+                    .any(|(reason, _)| *reason == "managed_ai_refund"),
+                "{case}: a turn that opened a page keeps its reserve"
+            );
+            assert_eq!(
+                credit_balance(&fixture.pool, &fixture.org_id).await?,
+                fixture.reserved_balance,
+                "{case}"
+            );
+        } else {
+            assert_eq!(outcome.refunded_org_ids, vec![fixture.org_id], "{case}");
+            assert_given_back_for(
+                &fixture,
+                if card {
+                    BROWSER_CARD_WITHOUT_PAGE_REFUND_REASON
+                } else {
+                    FAILED_TURN_WITHOUT_RESULT_REFUND_REASON
+                },
+            )
+            .await?;
+        }
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
 /// An automatic retry that fails too costs nothing, although its model ran
 /// and reported tokens: before, it kept its reserve and was billed for them.
 #[tokio::test]
