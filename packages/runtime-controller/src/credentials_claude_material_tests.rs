@@ -137,6 +137,7 @@ async fn the_credential_sink_refuses_a_claude_sign_in_before_sealing_or_the_data
             auth_json,
             Some("ChatGPT".to_string()),
             None,
+            None,
         )
         .await;
         let Err((status, Json(error))) = result else {

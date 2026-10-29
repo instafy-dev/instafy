@@ -4,6 +4,7 @@
 //! Instafy. A Codex device login that comes back with Claude tokens reaches
 //! `insert_user_credential` like any other and stores nothing.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -13,12 +14,14 @@ use futures_util::FutureExt;
 use httpmock::Method::POST;
 use httpmock::MockServer;
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{
     poll_codex_device_auth, router, DeviceAuthProviderState, DeviceAuthSession, DeviceAuthStatus,
-    CODEX_DEVICE_AUTH_UNAVAILABLE_MESSAGE, GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE,
+    GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE,
 };
+use crate::ai_connection_limits::{reserve_codex_device_auth, AiConnectionLimits};
 use crate::claude_material::CLAUDE_CREDENTIAL_REFUSED_MESSAGE;
 use crate::config::CredentialEncryptionKey;
 use crate::credentials::claude_material_tests::{EnvVarGuard, OAUTH_ACCESS, OAUTH_REFRESH};
@@ -38,9 +41,11 @@ fn test_config() -> crate::AppConfig {
 #[tokio::test]
 async fn device_login_providers_stay_codex_and_github() -> anyhow::Result<()> {
     // Codex's issuer is a local recorder without a device-code endpoint, so a
-    // start never leaves this machine, and GitHub stops at the missing
-    // credential key. Both answer as providers, with their own setup errors,
-    // before any database access: nothing listens on port 1.
+    // start never leaves this machine, and nothing listens on port 1. Both
+    // answer as providers: a Codex start counts in the database before it
+    // asks the issuer for a code (crate::ai_connection_limits), so it stops
+    // there as unavailable, and GitHub stops at the missing credential key,
+    // before any database access.
     let issuer = MockServer::start_async().await;
     let usercode = issuer
         .mock_async(|when, then| {
@@ -73,12 +78,12 @@ async fn device_login_providers_stay_codex_and_github() -> anyhow::Result<()> {
     };
 
     let (status, body) = start("codex").await?;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(
         body["message"],
-        json!(CODEX_DEVICE_AUTH_UNAVAILABLE_MESSAGE)
+        json!("Instafy is temporarily unavailable. Please retry.")
     );
-    assert_eq!(usercode.hits_async().await, 1);
+    assert_eq!(usercode.hits_async().await, 0);
 
     let (status, body) = start("github").await?;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
@@ -111,8 +116,8 @@ async fn device_login_providers_stay_codex_and_github() -> anyhow::Result<()> {
             "{provider}"
         );
     }
-    // No other start reached Codex's issuer.
-    assert_eq!(usercode.hits_async().await, 1);
+    // No start reached Codex's issuer.
+    assert_eq!(usercode.hits_async().await, 0);
     Ok(())
 }
 
@@ -143,6 +148,16 @@ async fn complete_codex_device_login(
     issuer: &MockServer,
 ) -> anyhow::Result<DeviceAuthStatus> {
     let session_id = Uuid::new_v4();
+    // A start leaves the login's receipt: its poller stops on a login whose
+    // receipt is not open, and its save closes it.
+    reserve_codex_device_auth(
+        &state.pool,
+        user_id,
+        session_id,
+        &AiConnectionLimits::FOR_EVERYONE,
+    )
+    .await
+    .map_err(|(status, error)| anyhow::anyhow!("{status}: {}", error.0.message))?;
     state
         .device_auth_sessions
         .insert(DeviceAuthSession {
@@ -160,6 +175,7 @@ async fn complete_codex_device_login(
                 client_id: "inert-client".to_string(),
                 device_auth_id: "inert-device-auth".to_string(),
             },
+            saving: Arc::new(Mutex::new(())),
         })
         .await;
     tokio::time::timeout(
