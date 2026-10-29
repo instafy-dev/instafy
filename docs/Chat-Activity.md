@@ -43,8 +43,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 - A finished turn's line is worked out from the steps the controller stored with its reply
   (`turnSteps`: each step's type, status, exit code, files and checked `activity`, never its
   command or output; `chat_activity.rs`), so a reload reads the same words even when its page of
-  history starts in the middle of a long turn. Without them (an older controller), the line is
-  worked out from the steps that loaded.
+  history starts in the middle of a long turn. They are read from the step messages the turn's
+  runtime wrote (never one a person recorded), and a turn too long to read whole stores none.
+  Without them (an older controller), the line is worked out from the steps that loaded.
 - Once the turn has a step, the whole line is one button that opens Details (`aria-expanded`,
   `aria-controls`); it reads "Details ›", then "Hide details", and opens and closes as often as it
   is pressed. Opening Details never moves the line or changes the turn's chrome.
