@@ -83,6 +83,31 @@ async fn an_idle_sweep_tick_takes_one_pool_checkout() -> anyhow::Result<()> {
     .await
 }
 
+/// A controller may be deployed before the migration that adds
+/// `agent_jobs.credential_removed_at`. Its tick still runs every step: the
+/// one that settles jobs whose credential was removed does nothing until the
+/// column exists, and ends no tick early.
+#[tokio::test]
+async fn an_idle_sweep_tick_runs_before_credential_removed_at_exists() -> anyhow::Result<()> {
+    with_empty_tables(&SWEEP_TABLES, |pool| async move {
+        pool.get()
+            .await?
+            .batch_execute("alter table agent_jobs drop column credential_removed_at")
+            .await?;
+        let state = build_test_state(
+            pool.clone(),
+            build_app_config(
+                test_origin_private_key(),
+                test_origin_public_key(),
+                "idle-sweep-tick-before-credential-removed-at",
+            ),
+        );
+        crate::runtime::sweep_idle_activity(&state).await?;
+        Ok(())
+    })
+    .await
+}
+
 /// A project the in-memory activity tracker holds comes up for a lease
 /// release every idle TTL, and the sweep re-arms it when nothing was
 /// released. Its release takes a checkout of its own and the rest of the
@@ -150,6 +175,7 @@ struct Spaces {
     terminal: Uuid,
     stranded: Uuid,
     undeliverable: Uuid,
+    credential_removed: Uuid,
     deleted: Uuid,
 }
 
@@ -166,6 +192,7 @@ impl Spaces {
             terminal: Uuid::new_v4(),
             stranded: Uuid::new_v4(),
             undeliverable: Uuid::new_v4(),
+            credential_removed: Uuid::new_v4(),
             deleted: Uuid::new_v4(),
         }
     }
@@ -182,6 +209,7 @@ impl Spaces {
             self.terminal,
             self.stranded,
             self.undeliverable,
+            self.credential_removed,
             self.deleted,
         ]
     }
@@ -202,6 +230,7 @@ struct Seeded {
     stranded_run: Uuid,
     undeliverable_job: Uuid,
     undeliverable_run: Uuid,
+    credential_removed_run: Uuid,
     deleted_runtime: Uuid,
 }
 
@@ -523,6 +552,33 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
         )
         .await?;
 
+    // A job that failed when its credential row was deleted, whose run is
+    // still live.
+    let credential_removed_run = insert_run(client, spaces.credential_removed).await?;
+    let credential_removed_job = insert_job(
+        client,
+        spaces.credential_removed,
+        "failed",
+        "feature",
+        Some(credential_removed_run),
+        None,
+        json!({}),
+        60,
+    )
+    .await?;
+    client
+        .execute(
+            "update agent_jobs
+                set outcome = 'failed', error_message = $2, completed_at = now(),
+                    credential_removed_at = now()
+              where id = $1",
+            &[
+                &credential_removed_job,
+                &crate::runtime::CREDENTIAL_REMOVED_MESSAGE,
+            ],
+        )
+        .await?;
+
     // A hosted runtime still up in a space deleted five minutes ago.
     let deleted_runtime = insert_runtime(
         client,
@@ -557,6 +613,7 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
         stranded_run,
         undeliverable_job,
         undeliverable_run,
+        credential_removed_run,
         deleted_runtime,
     })
 }
@@ -741,6 +798,17 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
             ("failed".to_string(), Some("failed".to_string())),
             "the job that can no longer start did not fail"
         );
+        let credential_removed_run_status: String = client
+            .query_one(
+                "select status from runs where id = $1",
+                &[&seeded.credential_removed_run],
+            )
+            .await?
+            .get(0);
+        assert_eq!(
+            credential_removed_run_status, "failed",
+            "the job whose credential was removed was not settled"
+        );
 
         // Each failed run is published with the run it read on a connection
         // of its own.
@@ -756,6 +824,7 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
             seeded.requeued_run,
             seeded.stranded_run,
             seeded.undeliverable_run,
+            seeded.credential_removed_run,
         ] {
             assert_eq!(
                 published.get(&run_id),
