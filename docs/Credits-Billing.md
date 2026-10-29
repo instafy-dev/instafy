@@ -254,6 +254,8 @@ BYOC users connect an API key or sanitized `auth.json` through the credential fl
 credential path belongs in a Vite environment or browser bundle. Only the controller writes
 credential rows: a signed-in person reads their own but cannot change or delete one directly, and
 a lease always sends an API key to its provider's own endpoint, never to one stored in the row.
+Deleting a credential row, or the person who owns it, fails the AI jobs still queued or running
+on it, with a reason in their conversation; they never move to the managed lane.
 `MANAGED_AI_STARTUP_CHECK=true` makes the controller fail closed when its own proxy can serve
 neither path; it does not probe per-runtime sidecars. When the check passes, the controller logs
 how that proxy serves managed turns, from the `platformLane` object on the proxy's `/healthz` (see

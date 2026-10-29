@@ -69,6 +69,20 @@ metadata or its revocation) or delete one: first with the privileges as migrated
 with the writes granted back, where the select-only `user credentials self` policy
 refuses them on its own. It rolls back.
 
+`agent_job_credential_removal.sql` checks that a job on a person's own AI never becomes a
+platform job when its credential row is deleted; the controller suite runs it too
+(`tests_agent_job_credential_removal`). As the table owner, it deletes a credential row
+directly, deletes a person with theirs, and clears a job's credential by hand, and checks
+that `agent_jobs_fail_on_credential_removal` fails each AI job still queued or leased on it
+(`credential_removed_at` set, the lease ended, its unacknowledged input rejected), so the
+only live AI job left without a credential is a real platform job. A finished job only
+loses the credential, a terminal command stays queued, jobs on other credentials and
+platform jobs are untouched, an update that ends the job itself keeps its own outcome, and
+the browser roles cannot execute the trigger function. The trigger folds an intent's case
+as the controller does, ASCII only: in a UTF-8 database, under `pg_c_utf8`, which lowers
+`İ` to `i` as libc collations do, `TERMİNAL_COMMAND` still fails and `Terminal_Command`
+stays queued. It rolls back.
+
 `deleted_space_access.sql` checks that a deleted space (`projects.status = 'deleted'`) is hidden
 from direct Supabase reads. As the signed-in role, through the row-level security policies, the
 space's owner, a member and a team member read the space and its environments, conversations,

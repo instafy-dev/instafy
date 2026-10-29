@@ -95,6 +95,8 @@ mod telemetry;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_agent_job_credential_removal;
+#[cfg(test)]
 mod tests_ai_metering_schema;
 #[cfg(test)]
 mod tests_browser_host;

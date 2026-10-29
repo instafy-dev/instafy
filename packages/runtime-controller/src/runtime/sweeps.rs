@@ -236,6 +236,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
     fail_jobs_that_can_no_longer_start(state, &mut tick).await?;
+    settle_jobs_whose_credential_was_removed(state, &mut tick).await?;
     // Last: each of its stops may wait out a provider release.
     stop_runtimes_of_deleted_projects(state, &mut tick).await?;
     // Runtimes the providers still run for spaces the database no longer
@@ -279,11 +280,36 @@ pub(crate) async fn recover_deferred_plan_checkpoints(
     state: &AppState,
     tick: &mut TickConnection<'_>,
 ) -> AnyResult<()> {
-    let rows = tick
+    let client = tick
         .client("deferred plan checkpoint recovery connection")
-        .await?
+        .await?;
+    // A plan that lost a job when the AI connection it ran on was deleted
+    // wakes no lead (`checkpoint_plan_group`), so its early checkpoint would
+    // come up here on every tick, and enough of them would fill the batch
+    // ahead of the plans whose lead is still due. The column ships in a
+    // migration that may land after this controller.
+    let skip_plans_that_lost_a_credential = if credential_removed_at_exists(&*client)
+        .await
+        .context("failed to look up agent_jobs.credential_removed_at")?
+    {
+        "
+               and not exists (
+                   select 1 from agent_jobs removed
+                   where removed.project_id = early.project_id
+                     and removed.conversation_id = early.conversation_id
+                     and (removed.plan_group_id = early.plan_group_id
+                         or ((removed.plan_group_id is null or early.plan_group_id is null)
+                             and coalesce(removed.plan_group_id::text,
+                                 removed.payload #>> '{metadata,multiAgentPlan,groupId}') = g.id))
+                     and removed.credential_removed_at is not null
+               )"
+    } else {
+        ""
+    };
+    let rows = client
         .query(
-            "select early.id from agent_jobs early
+            &[
+                "select early.id from agent_jobs early
              join projects p on p.id = early.project_id and p.status <> 'deleted'
              cross join lateral (
                  select coalesce(early.plan_group_id::text,
@@ -333,8 +359,12 @@ pub(crate) async fn recover_deferred_plan_checkpoints(
                            and m.metadata #> '{details,suppressedPlanGroupIds}' @> jsonb_build_array(g.id))
                          or (m.metadata->>'kind' = 'managed_ai_hosted_runtime_required'
                              and m.metadata #>> '{multiAgentPlan,groupId}' = g.id))
-               )
+               )",
+                skip_plans_that_lost_a_credential,
+                "
              order by early.completed_at, early.id limit 32",
+            ]
+            .concat(),
             &[],
         )
         .await
@@ -1273,6 +1303,142 @@ async fn fail_jobs_that_can_no_longer_start(
     for failed in failed {
         publish_failed_queued_jobs(state, failed).await;
     }
+    Ok(())
+}
+
+/// What a job whose credential row was deleted says, as its run's failure and
+/// in its conversation. `agent_jobs_fail_on_credential_removal` writes the
+/// same words into the job's `error_message`; keep the two identical.
+pub(crate) const CREDENTIAL_REMOVED_MESSAGE: &str = "credential not found: the AI connection this turn was sent with was removed, so it stopped here. Connect an AI and send it again.";
+/// The `failureCode` of the run, and the `kind` of the chat message, of such
+/// a job.
+pub(crate) const CREDENTIAL_REMOVED_CODE: &str = "credential_removed";
+/// The jobs one tick settles.
+const CREDENTIAL_REMOVED_BATCH_SIZE: i64 = 64;
+
+/// Whether `agent_jobs.credential_removed_at` exists yet. It ships in a
+/// migration that may land after this controller, and a query that names it
+/// fails until then. The table is resolved through the search path, as the
+/// queries that read the column resolve it.
+pub(crate) async fn credential_removed_at_exists(
+    client: &impl tokio_postgres::GenericClient,
+) -> Result<bool, tokio_postgres::Error> {
+    Ok(client
+        .query_one(
+            "select exists (
+                 select 1 from pg_attribute
+                 where attrelid = 'agent_jobs'::regclass
+                   and attname = 'credential_removed_at'
+                   and not attisdropped
+             ) as migrated",
+            &[],
+        )
+        .await?
+        .get("migrated"))
+}
+
+/// Settles the jobs `agent_jobs_fail_on_credential_removal` failed. Deleting a
+/// credential row, which deleting its person does too, clears the credential
+/// of the jobs queued with it, and the lease takes an AI job without one as a
+/// platform job, on Instafy's own key. So that trigger fails such a job while
+/// it is still queued or leased, in the statement that clears it, and stamps
+/// `credential_removed_at`. This step does what only the controller can: it
+/// fails the job's run and writes [`CREDENTIAL_REMOVED_MESSAGE`] into its
+/// conversation, as for the work the other steps fail
+/// ([`settle_failed_queued_jobs_with_message`]), with two differences:
+///
+/// - No managed-AI reserve is given back. The job ran on its person's own AI,
+///   and a reserve on its prompt belongs to a platform job of the same
+///   dispatch.
+/// - No plan checkpoint runs. A lead continuation dispatched now would resolve
+///   its person's credentials again and could fall back to the platform lane.
+///   For the same reason no later checkpoint wakes the lead of a plan that
+///   lost a job this way (`multi_agent_plan::checkpoint_plan_group`), and
+///   [`recover_deferred_plan_checkpoints`] passes such a plan over.
+///
+/// A job whose run has ended is left alone: this step ended it, or something
+/// else did. The column ships in a migration that may land after this
+/// controller; until it does, the step does nothing.
+pub(crate) async fn settle_jobs_whose_credential_was_removed(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let mut transaction = tick
+        .client("failed to acquire connection for jobs whose credential was removed")
+        .await?
+        .transaction()
+        .await
+        .context("failed to start settling jobs whose credential was removed")?;
+    let migrated = credential_removed_at_exists(&transaction)
+        .await
+        .context("failed to look up agent_jobs.credential_removed_at")?;
+    // The run is locked with its job: a claim on another controller that
+    // reaches the job once this one has committed rechecks the run, now
+    // failed, and does not settle the job again.
+    let rows = if migrated {
+        transaction
+            .query(
+                "update agent_jobs aj
+                 set updated_at = now()
+                 from (
+                     select j.id
+                     from agent_jobs j
+                     join runs r on r.id = j.run_id
+                     where j.credential_removed_at is not null
+                       and j.status = 'failed'
+                       and r.status in ('queued', 'in_progress', 'awaiting_approval')
+                     order by j.credential_removed_at
+                     limit $1
+                     for update of j, r skip locked
+                 ) removed
+                 where aj.id = removed.id
+                 returning aj.id, aj.project_id, aj.run_id, aj.conversation_id, aj.session_id,
+                           aj.prompt_id, aj.payload #- '{metadata,managedAiUsed}' as payload,
+                           aj.error_message, aj.lease_attempts, aj.grant_ids",
+                &[&CREDENTIAL_REMOVED_BATCH_SIZE],
+            )
+            .await
+            .context("failed to claim jobs whose credential was removed")?
+    } else {
+        Vec::new()
+    };
+    if rows.is_empty() {
+        transaction
+            .rollback()
+            .await
+            .context("failed to close an empty settling of jobs whose credential was removed")?;
+        return Ok(());
+    }
+
+    // Without `managedAiUsed` in the payload, the settle gives no reserve
+    // back.
+    let mut failed = settle_failed_queued_jobs_with_message(
+        &mut transaction,
+        &rows,
+        "credential removed",
+        CREDENTIAL_REMOVED_CODE,
+        "failed",
+        CREDENTIAL_REMOVED_MESSAGE,
+    )
+    .await?;
+    failed
+        .skip_plan_checkpoint_for
+        .extend(rows.iter().map(|row| row.get::<_, Uuid>("id")));
+    transaction
+        .commit()
+        .await
+        .context("failed to commit settling jobs whose credential was removed")?;
+    // Publishing reads runs and credits on connections of its own.
+    tick.release();
+
+    for (project_id, job_id, _, _) in &failed.jobs {
+        info!(
+            %job_id,
+            %project_id,
+            "settled a job that failed when its credential was removed"
+        );
+    }
+    publish_failed_queued_jobs(state, failed).await;
     Ok(())
 }
 

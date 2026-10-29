@@ -427,3 +427,29 @@ async fn a_helper_reply_folds_into_the_plan_without_a_reply_notification() -> an
     }
     Ok(())
 }
+
+/// A controller may be deployed before the migration that adds
+/// `agent_jobs.credential_removed_at`. Until it lands, no plan counts as one
+/// that lost a job to a deleted credential, and asking does not fail, so the
+/// checkpoint wakes leads as before.
+#[tokio::test]
+async fn no_plan_lost_a_credential_before_credential_removed_at_exists() -> anyhow::Result<()> {
+    crate::tests::with_empty_tables(&["agent_jobs"], |pool| async move {
+        let mut connection = pool.get().await?;
+        connection
+            .batch_execute("alter table agent_jobs drop column credential_removed_at")
+            .await?;
+        let transaction = connection.transaction().await?;
+        let lost = plan_group_lost_a_credential(
+            &transaction,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .map_err(api_error)?;
+        assert!(!lost);
+        Ok(())
+    })
+    .await
+}
