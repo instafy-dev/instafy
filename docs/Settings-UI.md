@@ -60,9 +60,10 @@ determines the winner. Arbitrary layout classes remain supported.
   corners, 4px padding and a 32px minimum mouse target;
   the shared 44px minimum still applies to coarse pointers. Width grows with the
   contents instead of forcing a stack into a square. Use the quiet variant for
-  these triggers. Avatars and ownership rings inside remain circular, and status
-  badges remain informational. Take/Request/Give/Release control use the inline
-  action preset; browser approval Allow/Deny use the form preset.
+  these triggers. People's avatars and ownership rings inside remain circular, AI
+  faces keep their rounded square tiles, and status badges remain informational.
+  Take/Request/Give/Release control use the inline action preset; browser approval
+  Allow/Deny use the form preset.
   Browser participant popovers use `Text bodyCompact` with primary contrast for
   names and `caption` with muted contrast for supporting status. Show Controls
   and Requested beside the corresponding person. The compact Give control action
@@ -531,8 +532,8 @@ target and uses a compact 36px height on wider fine-pointer screens.
 
 Use a small, consistent radius scale: 6px for compact search scope chips, 8px for utility icon controls, menu rows
 and segmented options, 12px for navigation rows, form controls and profile actions, and 16px for cards, dialogs and
-popovers. Human avatars remain circular; team identities use rounded squares. Do not turn
-every action into a pill.
+popovers. Human avatars remain circular; every AI's face and team identities use rounded
+squares ([One rule for faces](Brand.md#one-rule-for-faces)). Do not turn every action into a pill.
 
 Compact category navigation and single-choice settings share the same segmented selector
 styles: a quiet group with 12px corners, 8px options and one filled selected option. Hover
@@ -612,8 +613,10 @@ and falls back to the chosen emoji, then initials, when a picture is removed or 
 saved; a missing current space shows the Choose space prompt without a stale identity.
 
 People, bots, teams and spaces share `IdentityPhotoButton`: a labeled photo button with a pencil
-badge opens the native file picker. People and bots stay circular and team/space pictures use rounded
-squares. Removing a space picture preserves its fallback icon and color. Space uploads are
+badge opens the native file picker. Its `shape` follows the picture it wraps: people stay circular
+(`circle`), bots, like every AI, wear the AI tile (`aiTile`), and team/space pictures use rounded
+squares (`square`), so the hover fill and focus ring never show past the picture's corners.
+Removing a space picture preserves its fallback icon and color. Space uploads are
 previewed locally until Save appearance; Cancel discards the draft. Team uploads follow the
 same draft behavior: name, picture and color save together through Save profile. Cancel
 restores the latest saved identity, including updates received while editing. Uploads are
@@ -738,8 +741,9 @@ creates a local preview; Save profile uploads and then saves the URL. Cancel dis
 draft, removal restores the bot's fallback identity, and failed metadata saves reuse the
 uploaded picture on retry. Disable editing and dismissal during a save. Reset drafts on
 account changes and do not save a completed upload into a different account's bot.
-`AgentAvatar` renders the same saved or draft identity in the editor and bot list, including
-the themed Octo mark and a fallback for unavailable images.
+`AgentAvatar` renders the same saved or draft identity in the editor and bot list as the AI tile
+([One rule for faces](Brand.md#one-rule-for-faces)), including Octo's own tile and a fallback for
+unavailable images.
 
 Apply `20260915110000_agent_identity_images.sql` after the identity-image migration. Bot
 uploads use `agents/<owner-user-id>/<random-uuid>.<extension>` in the public `identity-images`

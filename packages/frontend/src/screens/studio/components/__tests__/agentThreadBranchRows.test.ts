@@ -141,4 +141,39 @@ describe("agentThreadBranchRows", () => {
       },
     ]);
   });
+
+  it("takes branch faces only from stamped agents, never from @words in the text", () => {
+    // A person's mention is written @kim, and @types/node or an email's
+    // @example are not participants at all. The stack draws every participant
+    // as an AI tile, so a text scan would turn Kim into an AI.
+    const childThread = createConversation({
+      localId: "child-local",
+      controllerId: "child-controller",
+      title: "Package check",
+      ownerAgent: { id: "agent-octo", handle: "octo" },
+      messages: [
+        createMessage({
+          id: "ask",
+          role: "user",
+          content: "@kim can you check @types/node? Mail kim@example.com if it breaks.",
+        }),
+        createMessage({
+          id: "reply",
+          role: "assistant",
+          content: "@kim the types build. Ran `pnpm --filter @instafy/frontend test`.",
+          metadata: { agent: { handle: "octo", avatarSeed: "octo" } },
+        }),
+      ],
+    });
+    const runThread = createMessage({
+      messageType: "agent_job_thread",
+      metadata: {
+        messageType: "agent_job_thread",
+        threadMessages: [createMessage({ id: "summary", content: "Opened [[thread:child-controller|Package check]]." })],
+      },
+    });
+
+    const [row] = buildAgentThreadBranchRows({ message: runThread, conversations: [childThread] });
+    expect(row?.participants).toEqual([{ handle: "octo", avatarSeed: "octo", avatarUrl: null }]);
+  });
 });

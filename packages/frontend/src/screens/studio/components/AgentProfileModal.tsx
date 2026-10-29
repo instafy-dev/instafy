@@ -146,7 +146,10 @@ export function AgentProfileModal({
       <StudioDialogBody scrollable={isDesktop}>
         <SettingsFormLayout>
           <SettingsIdentityRow>
+            {/* A bot is an AI, so its photo target is the AI tile, never a
+                person's circle. */}
             <IdentityPhotoButton
+              shape="aiTile"
               label={avatarImageUrl || avatarFile ? "Change bot picture" : "Upload bot picture"}
               accept={IDENTITY_IMAGE_ACCEPT}
               disabled={pending || !onAvatarFileChange}
