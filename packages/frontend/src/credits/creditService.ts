@@ -30,6 +30,11 @@ export interface CreditLedgerEntry {
   reason: string;
   metadata?: Record<string, unknown> | null;
   createdAt: string;
+  /**
+   * For an Instafy AI turn's rows, the name of the chat it was in, when the
+   * viewer may open that chat; absent otherwise.
+   */
+  chatName?: string | null;
 }
 
 export interface CreditLedgerResult {
@@ -259,17 +264,22 @@ export async function fetchCreditLedger(
         metadata?: Record<string, unknown> | null;
         createdAt?: string;
         created_at?: string;
+        chatName?: unknown;
       }>;
     };
 
     const entries: CreditLedgerEntry[] = Array.isArray(payload.entries)
       ? payload.entries
-          .map((entry) => ({
-            delta: typeof entry.delta === "number" ? entry.delta : 0,
-            reason: entry.reason ?? "activity",
-            metadata: entry.metadata ?? null,
-            createdAt: entry.createdAt ?? entry.created_at ?? ""
-          }))
+          .map((entry) => {
+            const chatName = typeof entry.chatName === "string" ? entry.chatName.trim() : "";
+            return {
+              delta: typeof entry.delta === "number" ? entry.delta : 0,
+              reason: entry.reason ?? "activity",
+              metadata: entry.metadata ?? null,
+              createdAt: entry.createdAt ?? entry.created_at ?? "",
+              ...(chatName ? { chatName } : {}),
+            };
+          })
           .filter((entry) => entry.createdAt.length > 0)
       : [];
 
