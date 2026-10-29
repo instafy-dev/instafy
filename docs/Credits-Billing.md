@@ -311,7 +311,8 @@ Starter guidance with the current defaults:
 - 200 units/day is the whole shared free budget
 - managed AI has a soft cap of 20 prompts/day by default
 - tunnels and hosted runtimes burn from the same pool, so heavy infra usage reduces how much managed AI remains that day
-- the balance resets once per day in UTC; there is no carry-over
+- once per UTC day the balance tops back up to the daily limit (a balance at or above it gets
+  nothing), so what is left of one day's credits never adds to the next day's
 
 ### Measuring root-call usage
 
