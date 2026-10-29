@@ -818,7 +818,9 @@ describe("ComposerInviteModal", () => {
     );
     await act(async () => render({}));
 
-    expect(document.body.textContent).toContain("Private chat");
+    // Inside "Invite", the heading says Start makes another chat: it does not
+    // bring the teammate into this one.
+    expect(document.body.textContent).toContain("New private chat");
     const start = document.querySelector<HTMLButtonElement>('[aria-label="Start a private chat with Team Mate"]');
     expect(start?.textContent).toBe("Start");
     await act(async () => start!.click());
@@ -829,6 +831,12 @@ describe("ComposerInviteModal", () => {
     await act(async () => render({ mentionableUsers: [] }));
     expect(document.body.textContent).not.toContain("Private chat");
     await act(async () => render({ canWriteProject: false }));
+    expect(document.querySelector('[aria-label="Start a private chat with Team Mate"]')).toBeNull();
+
+    // Inside a private chat the same section adds people to this chat.
+    await act(async () => render({ activeConversationVisibility: "private" }));
+    expect(document.body.textContent).toContain("Private chat");
+    expect(document.body.textContent).not.toContain("New private chat");
     expect(document.querySelector('[aria-label="Start a private chat with Team Mate"]')).toBeNull();
   });
 

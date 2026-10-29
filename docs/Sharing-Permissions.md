@@ -58,6 +58,7 @@ A team invitation grants access across the team according to its role. This diff
 Private chat visibility is narrower than project visibility: project access alone does not reveal a private chat. A user must also be its creator or a participant.
 
 - A participant with project write access can add an existing project/team member from the **Private chat** section.
+- In any other chat, a person with project write access starts a private chat with an existing project/team member from the Invite menu's **New private chat** section.
 - Bringing in a new person uses a Read/Edit link, QR, or prepared email invitation. Acceptance grants the selected project access and adds the person to that private chat in one transaction.
 - Conversation-scoped invitations are available only for private chats and only after the chat has synchronized with the controller (normally after its first message).
 - Creating, listing, canceling, or revoking a private-chat invitation rechecks both sharing permission and access to that exact conversation.

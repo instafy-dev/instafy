@@ -569,10 +569,12 @@ describe("HomePanel activity states", () => {
     }));
     await render();
     const rows = Array.from(query("home-recent-section")!.querySelectorAll('[data-testid^="home-recent-item-"]'));
-    // The newest stands for all five.
+    // The newest stands for all five, and says it is five chats: opening it
+    // shows one of them, so "5 updates" would promise what that chat lacks.
     expect(rows.map((row) => row.getAttribute("data-testid"))).toEqual(["home-recent-item-15"]);
     expect(rows[0].textContent).toContain("New chat");
-    expect(rows[0].textContent).toContain("5 updates");
+    expect(rows[0].textContent).toContain("5 chats");
+    expect(rows[0].textContent).not.toContain("updates");
     expect(container.textContent?.match(/Follow site is ready to preview\./g)).toHaveLength(1);
   });
 

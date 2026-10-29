@@ -40,7 +40,8 @@ export function ComposerInvitePrivateChatSection({
   return (
     <section className="space-y-2.5">
       <StudioDialogSectionLabel className="text-3xs uppercase tracking-[0.24em]">
-        Private chat
+        {/* Start opens another chat; it never brings anyone into this one. */}
+        {onStart ? "New private chat" : "Private chat"}
       </StudioDialogSectionLabel>
       {!conversationReady ? (
         <Text as="p" variant="caption" tone="muted" className="text-xs leading-snug">

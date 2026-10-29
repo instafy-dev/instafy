@@ -58,9 +58,10 @@ export interface HomeFeedEvent {
   notifications?: ProductNotification[];
   /**
    * One row per conversation: this event is the thread's newest ledger row
-   * and stands for `count` rows.
+   * and stands for `count` rows. `chats` is set when the row also stands for
+   * other chats that read exactly like it (see arrangeHomeSections).
    */
-  group?: { count: number; ids: number[] };
+  group?: { count: number; ids: number[]; chats?: number };
   source:
     | { type: "conversation"; localConversationId: string; entry: HomeAttentionEntry }
     | { type: "inbox"; entry: HomeAttentionEntry }

@@ -94,8 +94,20 @@ describe("arrangeHomeSections", () => {
     expect(sections.activity[0].events.map((row) => row.key)).toEqual(["activity:90", "activity:80"]);
     const rows = sections.activity[1].events;
     expect(rows.map((row) => row.key)).toEqual(["activity:30", "activity:5", "activity:4"]);
-    expect(rows[0].group).toEqual({ count: 6, ids: [30, -70, 20, -80, 10, -90] });
+    // The row says it stands for three chats, not six updates of the one it opens.
+    expect(rows[0].group).toEqual({ count: 6, ids: [30, -70, 20, -80, 10, -90], chats: 3 });
     expect(rows[0].title).toBe("Follow site");
+    // A row for one chat counts its updates only.
+    expect(rows[1].group).toEqual({ count: 2, ids: [5, -95] });
+
+    // A chat is counted once, however many of its rows the merged row covers.
+    const again = arrangeHomeSections({
+      feed: { needs: [], hasCut: false, activity: [day("today", [
+        activityEvent(30, chats[0]), activityEvent(20, chats[1]), activityEvent(10, chats[1]),
+      ])] },
+      conversations: [], resumeChatKey: null, recentChats: [],
+    });
+    expect(again.activity[0].events.map((row) => [row.key, row.group?.chats])).toEqual([["activity:30", 2]]);
 
     // A different update, space or kind keeps the rows apart.
     const apart = arrangeHomeSections({

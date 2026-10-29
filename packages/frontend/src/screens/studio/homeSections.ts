@@ -125,6 +125,9 @@ export function arrangeHomeSections({
   const liveByChat = new Map<string, HomeFeedEvent>();
   for (const day of feed.activity) {
     const events: HomeFeedEvent[] = [];
+    // The chats the last row stands for. A row standing for several says so
+    // ("5 chats"): opening it shows only the newest of them.
+    let lastChats = new Set<string>();
     for (const event of day.events) {
       const key = chatKey(event);
       if (key !== null && listed.has(key)) {
@@ -136,9 +139,14 @@ export function arrangeHomeSections({
       const previousKey = previous ? chatKey(previous) : null;
       if (key !== null && previous && previousKey !== null && (previousKey === key ||
         (day.key !== HOME_LIVE_DAY_KEY && rowLook(previous) === rowLook(event)))) {
-        events[events.length - 1] = mergeRows(previous, event);
+        lastChats.add(key);
+        const merged = mergeRows(previous, event);
+        events[events.length - 1] = lastChats.size > 1 && merged.group
+          ? { ...merged, group: { ...merged.group, chats: lastChats.size } }
+          : merged;
         continue;
       }
+      lastChats = new Set(key === null ? [] : [key]);
       events.push(event);
     }
     if (events.length) activity.push({ ...day, events });
