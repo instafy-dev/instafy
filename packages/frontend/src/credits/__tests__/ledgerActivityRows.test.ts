@@ -35,6 +35,29 @@ describe("ledgerActivityRows", () => {
     ]);
   });
 
+  // The panel loads the newest 100 rows. A turn whose reserve is older than
+  // the oldest of them arrives with only its later rows, which add up to the
+  // wrong amount: a refunded turn would read "+1 credit", a 14-credit turn
+  // "-13 credits".
+  it("leaves out a turn whose reserve is older than the rows the panel loaded", () => {
+    const withCost = (row: CreditLedgerEntry, reservedUnits: number): CreditLedgerEntry => ({
+      ...row, metadata: { ...row.metadata, cost: { reservedUnits, chargedUnits: reservedUnits - row.delta } },
+    });
+    const rows = ledgerActivityRows([
+      withCost(entry("managed_ai_adjustment", -4, "2026-10-29T10:21:00Z", "p1", "Hello page"), 1),
+      entry("managed_ai_prompt", -1, "2026-10-29T10:20:00Z", "p1", "Hello page"),
+      // The oldest rows loaded: each of these turns' reserves came before them.
+      entry("managed_ai_refund", 1, "2026-10-29T10:09:00Z", "p2", "Compare vacuums"),
+      withCost(entry("managed_ai_adjustment", -13, "2026-10-29T10:08:00Z", "p3", "Plan 3 days in Lisbon"), 1),
+      // A turn that reserved nothing has no reserve row to wait for.
+      withCost(entry("managed_ai_adjustment", -2, "2026-10-29T10:07:00Z", "p4", "Stop the preview"), 0),
+    ], label);
+    expect(rows.map(({ label, delta }) => [label, delta])).toEqual([
+      ["Hello page", -5],
+      ["Stop the preview", -2],
+    ]);
+  });
+
   it("keeps two turns of one chat apart", () => {
     const rows = ledgerActivityRows([
       entry("managed_ai_prompt", -1, "2026-10-29T10:20:00Z", "p5", "Hello page"),

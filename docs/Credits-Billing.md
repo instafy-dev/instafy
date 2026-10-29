@@ -505,6 +505,9 @@ Required envs (GitHub secrets/vars or local env):
   its time and its amount ("1 credit", "14 credits"), never the model, the AI vendor, a token count
   or an id: the ledger keeps those in each row's metadata, and the Usage section shows the rates.
 - The log shows the newest 8 rows; Show more reveals the rest of the 100 ledger rows the panel
-  loads, 20 at a time, and moves focus to the first row it revealed.
+  loads, 20 at a time, and moves focus to the first row it revealed. A turn whose reserve is
+  older than those 100 rows has no row either: its later rows alone would show the wrong amount
+  (a refunded turn as "+1 credit"). An adjustment's `cost.reservedUnits` and a refund say that
+  the turn had a reserve.
 - Checkout/portal actions call `/billing/checkout` with `action=checkout|portal`.
 - Low-balance copy should direct users to upgrade/refill via the billing flow.
