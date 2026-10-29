@@ -1,4 +1,5 @@
 -- Controller-owned research policy and one atomic pool for an entire task.
+set local lock_timeout = '5s';
 create table public.project_research_settings (
     project_id uuid primary key references public.projects(id) on delete cascade,
     max_page_loads integer not null default 12 check (max_page_loads between 1 and 200),
