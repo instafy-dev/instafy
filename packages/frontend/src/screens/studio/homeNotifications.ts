@@ -4,14 +4,19 @@ import type { HomeFeedEvent } from "./homeFeed";
 export interface HomeNotificationTarget {
   key: string;
   url: string;
-  kind: "conversation" | "support" | "automation" | "run";
+  kind: "conversation" | "support" | "automation";
   projectId: string | null;
   conversationId: string | null;
   supportReportId: string | null;
   resourceId: string;
 }
 
-/** Destination identity comes from the same allowlisted URL used to navigate. */
+/**
+ * Destination identity comes from the same allowlisted URL used to navigate.
+ * A failed run in no chat has none: there is nothing for the person to open
+ * and read, so Home never lists it ("Run failed · All teams" stayed unread for
+ * days). The activity ledger's own row for it stays in Recent activity.
+ */
 export function getHomeNotificationTarget(item: ProductNotification): HomeNotificationTarget | null {
   const canonical = canonicalNotificationUrl(item.url);
   if (!canonical) return null;
@@ -27,16 +32,24 @@ export function getHomeNotificationTarget(item: ProductNotification): HomeNotifi
   if (item.eventName.startsWith("automation.")) {
     return resourceId ? { ...base, kind: "automation", key: `automation:${projectId ?? ""}:${resourceId}` } : null;
   }
-  if (conversationId && (item.eventName === "conversation.reply" || item.eventName === "run.failed")) {
-    return { ...base, kind: "conversation", key: `conversation:${conversationId}` };
-  }
-  return item.eventName === "run.failed" && resourceId
-    ? { ...base, kind: "run", key: `run:${projectId ?? ""}:${resourceId}` }
+  return conversationId && (item.eventName === "conversation.reply" || item.eventName === "run.failed")
+    ? { ...base, kind: "conversation", key: `conversation:${conversationId}` }
     : null;
 }
 
 export function homeNotificationIsUnread(item: ProductNotification): boolean {
   return !item.readAt && !item.archivedAt;
+}
+
+/**
+ * Whether this notification alone lists its row under Unread. A failed run
+ * is shown in its chat as the turn's failure block and is read with the chat,
+ * but reading a chat marks only its replies read, so its failure stayed unread
+ * after the person had read it. The chat's own unread state (its inbox row, an
+ * unread reply) lists it instead; a failure only names the row's status.
+ */
+export function homeNotificationMakesUnread(item: ProductNotification): boolean {
+  return homeNotificationIsUnread(item) && item.eventName !== "run.failed";
 }
 
 /** Live activity and unrelated events with the same project URL never merge. */
@@ -81,7 +94,7 @@ export function mergeHomeNotificationEvents(
     });
     const preferred = matching[0];
     const allItems = new Map([...matching.flatMap((event) => event.notifications ?? []), ...items].map((item) => [item.id, item]));
-    const lane = matching.some((event) => event.lane === "needs") || [...allItems.values()].some(homeNotificationIsUnread)
+    const lane = matching.some((event) => event.lane === "needs") || [...allItems.values()].some(homeNotificationMakesUnread)
       ? "needs" : "activity";
     const latestNotification = (notification.at ?? 0) >= (preferred.at ?? 0);
     const latestKind = latestNotification ? notification.kind : preferred.kind;

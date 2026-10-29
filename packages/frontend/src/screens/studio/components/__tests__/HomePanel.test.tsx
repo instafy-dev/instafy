@@ -622,7 +622,26 @@ describe("HomePanel activity states", () => {
     expect(query("home-recent-item-20")).toBeNull();
     expect(query("home-recent-item-10")?.textContent).toContain("Design feedback");
     expect(query("home-recent-item-10")?.textContent).not.toContain("Design review");
-    expect(query("home-recent-item-10")?.textContent).not.toContain("Design space");
+    // Not the open space, so it still says which space it is from.
+    expect(query("home-recent-item-10")?.textContent).toContain("Design space");
+  });
+
+  // A local test: "Compare the three latest Roborock robot…" rows from four
+  // spaces read the same under Unread.
+  it("names the space of a row from a space other than the open one", async () => {
+    mocks.organizations.mockResolvedValue([]);
+    mocks.activity.activityItems = [activityItem({
+      project: { id: "project-earlier", name: "Last week's space" },
+      conversation: { id: "conversation-earlier", title: "Compare robot vacuums", visibility: "public", threadKind: null },
+      title: "Compare robot vacuums",
+    })];
+    await render();
+    expect(query("home-team-filters")).toBeNull();
+    expect(query("home-recent-item-20")?.textContent).toContain("Last week's space");
+    // The open space's own rows say nothing more.
+    mocks.activeProjectId = "project-earlier";
+    await render();
+    expect(query("home-recent-item-20")?.textContent).not.toContain("Last week's space");
   });
 
   it("preserves space provenance for distinct same-named spaces inside a selected team", async () => {

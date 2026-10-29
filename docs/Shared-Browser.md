@@ -1233,7 +1233,7 @@ composer would, and names that run (`browserContinuesRunId`,
 `sharedBrowserFollowUp`). It needs no new card or press, and the site the
 person already allowed does not ask again. A browser turn has only the
 browser's tools, so this never happens silently: while it applies, the
-composer shows **Goes to Instafy's browser** in its context row,
+composer shows **Goes to Instafy's browser** in its own row, beside the view switch,
 and its × ("Don't send it to the browser") keeps the next message in the chat,
 where Octo can also build, until a newer browser turn ends
 (`useSharedBrowserFollowUp`). After the browser turn of a card Octo builds

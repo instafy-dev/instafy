@@ -151,7 +151,9 @@ outer rail. Opening search shows the full team/space path for adjusting search s
 The controls stay in place when the inner sidebar collapses. The adjacent sidebar
 contains a Chats entry and workspace tools. Its expand/collapse control stays at the same
 position in either width, with **New chat** beside it when expanded and below it when compact.
-New chat makes a chat at once, here, in the tab bar and in the phone's More menu alike; a private
+New chat makes a chat at once, here, in the tab bar and in the phone's More menu alike; in a chat
+where nothing has been said yet it stays there, and with such a chat open elsewhere it goes to that
+one, so an empty chat never stays behind beside the new one. A private
 chat starts from the composer's Invite menu, where **New private chat** lists the space's teammates.
 New chat stays available for the active accessible space when another tab, including personal
 Settings, is selected. It is unavailable on Home or when no space in the selected team is active.
@@ -644,7 +646,10 @@ and unread updates preserve the order of tabs across different kinds of content.
 
 Home separates **Unread** conversations from **Recent activity**, using flat rows on the
 shared panel surface. Failed runs retain a warning icon and a concise failure label while
-remaining markable as read. A completion or failure retires the matching running entry.
+remaining markable as read. A completion or failure retires the matching running entry. A failed
+run is read with its chat: its notification names the row's status but never keeps the chat under
+**Unread** once the chat itself is read, and a failed run in no chat is not listed. A row from a
+space other than the open one names its space.
 
 Home lists each chat once. An unread chat is under **Unread** only, so **Continue working** does
 not repeat it, and comes first there when Continue working gave way to it; **Recent chats** leaves

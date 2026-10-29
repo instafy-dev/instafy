@@ -185,7 +185,9 @@ Home is the single catch-up surface on browser, mobile and Desktop. Unread updat
 appear in its existing Unread lane; read updates appear in Recent activity, newest
 first. Conversation replies share a row with the existing conversation summary;
 support updates group by report and automation outcomes by automation identity.
-The Octo badge counts unread destinations using the same grouping. Unknown and
+A failed run's notification does not keep its chat unread by itself: the chat is
+shown with its failure, so it is read with the chat, and a failed run in no chat
+is not listed. The Octo badge counts unread destinations using the same grouping. Unknown and
 account-wide support updates appear under All, not an inferred organization.
 Older unread support reports remain visible even when they predate the ledger.
 

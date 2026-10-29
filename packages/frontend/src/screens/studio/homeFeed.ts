@@ -5,7 +5,7 @@ import { spaceDisplayName } from "../../projects/spaceName";
 import { homeFailureStatusLabel, type HomeAttentionEntry, type HomeFailureStatusLabel } from "./homeAttention";
 import type { ActivityItem } from "../../services/runtimeController/activity";
 import type { ProductNotification } from "../../notifications/notificationContract";
-import { getHomeNotificationTarget, homeNotificationIsUnread, mergeHomeNotificationEvents } from "./homeNotifications";
+import { getHomeNotificationTarget, homeNotificationMakesUnread, mergeHomeNotificationEvents } from "./homeNotifications";
 import type { HomeSupportReport } from "./homeSupportReports";
 
 /**
@@ -637,7 +637,7 @@ export function buildHomeFeed({
     const project = target.projectId ? notificationProjects.get(target.projectId) : null;
     if (project) rememberTeam(project.orgId, project.orgName);
     const teamKey = project ? resolveTeamKey(project.orgId) : HOME_TEAM_FILTER_ALL;
-    const unread = items.some(homeNotificationIsUnread);
+    const unread = items.some(homeNotificationMakesUnread);
     return {
       key: `notification:${key}`,
       lane: unread ? "needs" : "activity",
