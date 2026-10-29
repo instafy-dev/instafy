@@ -282,7 +282,7 @@ function SortableQueuedChatPrompt({
             {item.errorMessage}
           </Text>
         ) : null}
-        <div className="mt-2 flex items-center justify-between gap-2">
+        <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
           {showReorderHandle ? (
             <button
               ref={setActivatorNodeRef}
@@ -292,13 +292,13 @@ function SortableQueuedChatPrompt({
               aria-label={`Reorder queued message ${index + 1} of ${count}: ${accessibleMessage}`}
               title="Drag to reorder"
               disabled={reorderDisabled}
-              className={`${iconButtonStyles({ variant: "ghost", tone: "muted" })} touch-none cursor-grab active:cursor-grabbing`}
+              className={`${iconButtonStyles({ variant: "ghost", tone: "muted" })} mr-auto touch-none cursor-grab active:cursor-grabbing`}
               data-testid="chat-send-queue-reorder"
             >
               <Drag aria-hidden="true" className="h-4 w-4" />
             </button>
           ) : null}
-          <div className="ml-auto flex items-center gap-2">
+          <div className="contents">
             {onSendNow ? (
               <IconButton
                 aria-label={`Send queued message ${index + 1} now: ${accessibleMessage}`}

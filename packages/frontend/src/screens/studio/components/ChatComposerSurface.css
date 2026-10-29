@@ -1,6 +1,8 @@
 .chat-composer-surface {
   --chat-composer-radius: 1.5rem;
   border-radius: var(--chat-composer-radius);
+  container-type: inline-size;
+  container-name: chat-composer;
 }
 
 .chat-composer-surface[data-compact-navigation="true"] {
@@ -10,4 +12,47 @@
 /* Follow the field's curve inside its 6px padding and 1px border. */
 .chat-composer-surface .chat-composer-action {
   border-radius: calc(var(--chat-composer-radius) - 0.375rem - 1px);
+}
+
+/* Use the visible viewport, including visual-only keyboard resize, so larger
+   thumbnails scroll before pushing navigation or the editor off-screen.
+   Keep room for one 3rem thumbnail plus the list's 1rem vertical padding. */
+.chat-composer-attachment-list {
+  max-height: clamp(4rem, calc(var(--chat-composer-viewport-height, 100dvh) / 4), 10rem);
+}
+
+.chat-composer-attachment-list[data-expanded="true"] {
+  max-height: clamp(4rem, calc(var(--chat-composer-viewport-height, 100dvh) / 4), 6rem);
+}
+
+/* Larger text also enlarges rem-sized controls. Give writing the full line
+   before those controls squeeze it into a few characters, using the same
+   editor-above-actions placement as expanded drafts without remounting it.
+   The groups can wrap again at extreme text sizes instead of clipping Send. */
+@container chat-composer (max-width: 17rem) {
+  .chat-composer-attachment {
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .chat-composer-attachment-metadata {
+    order: 1;
+    flex-basis: 100%;
+  }
+
+  .chat-composer-text-row--inline {
+    flex-wrap: wrap;
+  }
+
+  .chat-composer-text-row--inline > .chat-composer-editor {
+    order: -1;
+    flex-basis: 100%;
+  }
+
+  .chat-composer-text-row--inline > .chat-composer-trailing-controls {
+    margin-inline-start: auto;
+    max-inline-size: 100%;
+    flex-wrap: wrap;
+  }
 }

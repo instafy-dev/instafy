@@ -44,6 +44,64 @@ remain the responsibility of the application suites. Install Playwright Chromium
 written under `packages/frontend/test-results/conversation-perf/`; serialized cache payload and
 actual V8 heap are reported separately.
 
+## Mobile connected-flow review
+
+Use both browser fixtures and a native candidate when changing mobile layouts. Record the
+commit, app build, viewport, platform, keyboard, theme and text-size setting with each result.
+Keep screenshots and traces outside source control and omit credentials or private chat content.
+Use light and dark themes at 320px and 390px portrait widths, short landscape, and a desktop
+width such as 1280px. Include default text and enlarged text; a 150% root font-size check also
+enlarges rem-based spacing and controls, so label it separately from browser zoom and Android
+OS font scale. None is a substitute for the others.
+
+The secret-free [browser UI configuration](../packages/frontend/playwright.ci-ui.config.ts)
+exercises production components with inert account and transport boundaries. Run the full lane
+with `pnpm -C packages/frontend exec playwright test --config playwright.ci-ui.config.ts`;
+its required-inventory reporter intentionally rejects incomplete runs. For focused iteration,
+use a fixture's documented configuration or a separate local configuration with the list
+reporter, then run the required lane before submission. Do not weaken its inventory or turn a
+missing browser, database or native device into a pass.
+
+Review these connected stories, including actions after scrolling rather than screenshots alone:
+
+| Story | Checks | Isolated browser evidence |
+| --- | --- | --- |
+| Sign in and recover | Email, password and code fields retain values and focus as available height changes. Submit, errors and alternate sign-in remain reachable by normal scrolling. Repeat with a short landscape viewport. | [Login fixture](../packages/frontend/tests/fixtures/login-keyboard/README.md) |
+| Navigate and return | Open the chat picker, search, choose another chat, visit Files or settings, and navigate back. Check the header, bottom destinations, drawer Close and search results remain reachable. | [Mobile navigation spec](../packages/frontend/tests/playwright/component/mobile-thumb-navigation.spec.ts) uses synthetic retained input; verify the real composer draft separately. |
+| Write without losing work | Enter a draft, attach several images, switch Chat/Browser both ways, open and close saved drafts and the queue, expand/collapse the editor, then confirm the original text and attachments remain. | [Composer fixture](../packages/frontend/tests/fixtures/conversation-view-tabs/README.md) |
+| Manage queued messages | Scroll a six-item queue, reorder by keyboard and pointer, edit/save/cancel, send one now and remove one. Check order, draft protection, focus restoration and every action's full hit area, including enlarged text. | [Queue spec](../packages/frontend/tests/playwright/component/queue-composer.spec.ts); persistence and authorization require controller database tests. |
+| Recover browser controls | Open and close the mobile keyboard utility, type, switch Shared/Personal, and exercise error/retry pending/completed states. Check focus and controls after resize. | [Browser keyboard/status fixture](../packages/frontend/tests/fixtures/browser-keyboard-status/README.md); remote page input and streaming need a live transport. |
+
+For the signed-in local app, follow [development setup](../DEV_SETUP.md) and mint a throwaway
+local user with `node scripts/mint-test-user.mjs --json`. Use its returned storage key rather
+than assuming a project reference. Keep the session data out of logs, screenshots and tracked
+files, and clean up that exact user with `--cleanup <userId>` after the review. A fixture does
+not prove real login, workspace access, controller persistence or a model turn; report which
+of those were actually exercised against the local stack.
+
+A throwaway user does not isolate controller background work. If the existing local database
+contains automation jobs, starting a controller can claim due jobs for other local users even
+with model providers disabled. Use a disposable database/stack for controller-connected review
+instead of starting a controller against existing data; do not reset the shared database.
+
+An Android emulator can exercise the installed Capacitor build, software keyboard,
+portrait/landscape rotation, Android Back and OS font scale. Repeat the signed-in stories there
+and record the emulator/device model, Android version and IME. With a field focused, the first
+Back should dismiss the keyboard, the next should dismiss the active sheet/dialog, and only
+then should underlying navigation change. Also check the top system-bar area, navigation inset,
+and fields after returning from another app. Restore changed font/theme settings after testing.
+See [native keyboard and navigation expectations](Capacitor.md#ios-release-boundary).
+
+Browser viewport resizing and synthetic visual-viewport events prove layout and focus handling,
+not the OS keyboard lifecycle. An emulator is native-shell evidence, not physical-device proof
+of thumb reach, vendor keyboard behavior, password-manager integration or touch/drag feel.
+Likewise, a stubbed retry or Shared/Personal switch does not establish real authentication,
+WebRTC frames, browser ownership handoff or delivery of typed input to a remote page. Keep those
+limits explicit and leave the corresponding physical-device or live-transport checks pending
+when that environment is unavailable.
+
+## Public CI verification
+
 Public Build keeps its existing job names:
 
 - Secret scan

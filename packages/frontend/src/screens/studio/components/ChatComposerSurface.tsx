@@ -1,6 +1,7 @@
 import type {
   ChangeEventHandler,
   ComponentProps,
+  CSSProperties,
   DragEventHandler,
   FormEventHandler,
   KeyboardEventHandler,
@@ -29,6 +30,7 @@ import {
 } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
+import { useVisualViewportBounds } from "../../../hooks/useVisualViewportBounds";
 import { Surface } from "../../../components/Surface";
 import { AttachmentThumbnail } from "../../../components/AttachmentThumbnail";
 import { Text } from "../../../components/Text";
@@ -374,6 +376,7 @@ export function ChatComposerSurface({
   const composerGhostActionClass = `chat-composer-action ${ghostActionClass}`;
   const composerPrimaryActionClass = `chat-composer-action ${primaryActionClass}`;
   const [draftExpanded, setDraftExpanded] = useState(false);
+  const visibleViewport = useVisualViewportBounds(imageAttachments.length > 0);
   useEffect(() => setDraftExpanded(false), [chatInputProps.draftKey]);
   // Dialogs and menus keep precedence over this in-pane layout change.
   useNativeBackButtonAction(draftExpanded, () => setDraftExpanded(false), 90);
@@ -1409,6 +1412,7 @@ export function ChatComposerSurface({
               // controls, and reads too hard along a full-width composer edge.
               className={`chat-composer-surface flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS} ${draftExpanded ? "min-h-0 flex-1" : ""}`}
               data-compact-navigation={compactNavigationLayout ? "true" : undefined}
+              style={{ "--chat-composer-viewport-height": `${visibleViewport.height}px` } as CSSProperties}
               data-testid="chat-composer-surface"
             >
               {viewNavigation || stashTrayProps?.stashes.length || queuedMessageCount > 0 || queueEditingItem ? (
@@ -1546,13 +1550,14 @@ export function ChatComposerSurface({
                   data-testid="chat-image-upload-preview"
                 >
                   <div
-                    className={`space-y-2 overflow-y-auto p-2 ${draftExpanded ? "max-h-24" : "max-h-40"}`}
+                    className="chat-composer-attachment-list space-y-2 overflow-y-auto p-2"
+                    data-expanded={draftExpanded ? "true" : undefined}
                     data-testid="chat-image-upload-list"
                   >
                     {imageAttachments.map((attachment, index) => attachment.page ? (
                       <div
                         key={attachment.id}
-                        className={`flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
+                        className={`chat-composer-attachment flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
                         data-sending={attachment.sending ? "true" : undefined}
                         data-testid="chat-sent-page-attachment"
                       >
@@ -1565,7 +1570,7 @@ export function ChatComposerSurface({
                         >
                           <Globe className="h-5 w-5" />
                         </Surface>
-                        <div className="min-w-0 flex-1">
+                        <div className="chat-composer-attachment-metadata min-w-0 flex-1">
                           <Text as="div" variant="captionStrong" tone="secondary" className="truncate" title={attachment.page.url}>
                             {attachment.page.title || attachment.page.host}
                           </Text>
@@ -1588,7 +1593,7 @@ export function ChatComposerSurface({
                     ) : (
                       <div
                         key={attachment.id}
-                        className={`flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
+                        className={`chat-composer-attachment flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
                         data-sending={attachment.sending ? "true" : undefined}
                       >
                         <AttachmentThumbnail
@@ -1599,7 +1604,7 @@ export function ChatComposerSurface({
                           aria-label={`Preview uploaded image ${index + 1}`}
                           data-testid={`chat-image-upload-preview-item-${index}`}
                         />
-                        <div className="min-w-0 flex-1">
+                        <div className="chat-composer-attachment-metadata min-w-0 flex-1">
                           <Text as="div" variant="captionStrong" tone="secondary" className="truncate">
                             {attachment.file.name}
                           </Text>
@@ -1654,7 +1659,7 @@ export function ChatComposerSurface({
               {/* The editor stays mounted while the primary slot switches from
                   mic to Send. Controls stay bottom-aligned as the text grows. */}
               <div
-                className={`relative ${draftExpanded ? "grid min-h-0 flex-1 grid-cols-[auto_minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)_auto] gap-1" : `flex items-end ${compactNavigationLayout ? "gap-1" : "gap-2"}`}`}
+                className={`relative ${draftExpanded ? "grid min-h-0 flex-1 grid-cols-[auto_minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)_auto] gap-1" : `flex items-end ${composerInlineControlsInTextRow ? "chat-composer-text-row--inline" : ""} ${compactNavigationLayout ? "gap-1" : "gap-2"}`}`}
                 data-testid="chat-composer-text-row"
                 onDragOver={onDragOver}
                 onDrop={onDrop}
@@ -1669,13 +1674,13 @@ export function ChatComposerSurface({
                   </div>
                 ) : null}
                 <div
-                  className={
+                  className={`chat-composer-editor ${
                     draftExpanded
                       ? "col-span-3 row-start-1 h-full min-h-0 min-w-0 px-2"
                       : composerInlineControlsInTextRow
                       ? COMPOSER_EDITOR_WRAPPER_CLASS
                       : "min-w-0 flex-1"
-                  }
+                  }`}
                 >
                   <ChatInput
                     ref={chatInputRef}
@@ -1689,7 +1694,7 @@ export function ChatComposerSurface({
                 </div>
                 {composerInlineControlsInTextRow ? (
                   <div
-                    className={`flex flex-none items-center justify-end gap-0.5 ${draftExpanded ? "col-start-3 row-start-2" : ""}`}
+                    className={`chat-composer-trailing-controls flex flex-none items-center justify-end gap-0.5 ${draftExpanded ? "col-start-3 row-start-2" : ""}`}
                     data-testid="chat-composer-trailing-controls"
                   >
                     {compactNavigationLayout ? actionMenuNode : null}
