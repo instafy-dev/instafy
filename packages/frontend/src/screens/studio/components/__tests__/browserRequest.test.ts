@@ -21,10 +21,11 @@ import {
   type BrowserRequest,
 } from "../browserRequest";
 
-// What a card's browser turn sends is the controller's fixture too: it stamps
-// such a send as the card's own browser turn, which costs nothing unless it
-// does something in the browser, only when its words are exactly these
-// (runtime-controller system_turns.rs).
+// What a card's browser turn sends is checked against the controller's
+// fixture: the controller stamps such a send as the card's own browser turn,
+// which costs nothing unless it does something in the browser, only when its
+// words are the card's task alone or after this prefix (runtime-controller
+// system_turns.rs).
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../../../../../..");
 const systemTurnFixtures = JSON.parse(readFileSync(
@@ -32,10 +33,10 @@ const systemTurnFixtures = JSON.parse(readFileSync(
 )) as { browserCardContinuationPrefix: string };
 
 describe("browserRequestContinuation", () => {
-  it("sends the card's task after the prefix the controller checks for, and nothing else", () => {
+  it("sends the card's task in words the controller takes as the card's own", () => {
     const task = "Open https://app.example.test and find the opening hours.";
-    expect(browserRequestContinuation({ task, location: "auto" }))
-      .toBe(`${systemTurnFixtures.browserCardContinuationPrefix}${task}`);
+    expect([task, `${systemTurnFixtures.browserCardContinuationPrefix}${task}`])
+      .toContain(browserRequestContinuation({ task, location: "auto" }));
   });
 });
 

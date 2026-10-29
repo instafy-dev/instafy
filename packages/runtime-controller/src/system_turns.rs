@@ -89,9 +89,9 @@ const BROWSER_CARD_TURN_VERSION: u64 = 1;
 /// Studio's claim on a card's continuation: `"job:<card job>"`
 /// (`BROWSER_REQUEST_OF_METADATA_KEY`).
 const BROWSER_REQUEST_OF_KEY: &str = "browserRequestOf";
-/// What Studio puts before a card's task when it sends it
+/// The line Studio has sent in front of a card's task
 /// (`browserRequestContinuation`, system_turns_fixtures.json). A send of the
-/// task alone matches too.
+/// task alone, as Studio may send it, matches too.
 const BROWSER_CARD_CONTINUATION_PREFIX: &str = "Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
