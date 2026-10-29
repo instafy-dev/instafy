@@ -292,6 +292,9 @@ project, organization, subscription, credit grant, or agent job. Existing
 provisioned sandbox sessions retain their session-bound write access. The
 controller checks project write access before initializing organization, billing,
 or credit state.
+The one-time sandbox credit seed goes only to such a provisioned sandbox, read from
+its row (stored `project_type = 'sandbox'` with no owner); a request's
+`metadata.project_type`, a session id or the caller never grants it.
 
 The controller is authoritative for explicit composer delivery intent:
 
