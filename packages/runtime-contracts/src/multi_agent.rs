@@ -53,6 +53,9 @@ impl From<NativeSubagentLimit> for u32 {
 pub struct AgentRuntimeSettings {
     #[serde(default)]
     pub max_native_subagents: NativeSubagentLimit,
+    /// Presence requires the runtime to use the controller-shared budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_budget: Option<crate::research::ResearchSettings>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

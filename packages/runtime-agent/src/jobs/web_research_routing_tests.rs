@@ -55,6 +55,43 @@ fn every_space_gets_the_research_skill_and_its_link_only_list() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), edited);
 }
 
+#[test]
+fn shared_budget_skills_upgrade_unedited_copies_and_preserve_customizations() {
+    let tmp = scaffolded_space();
+    for (relative, previous, current) in [
+        (
+            learn::WEB_RESEARCH_RELATIVE_PATH,
+            include_str!("legacy/web-research-v7.md"),
+            RESEARCH_SKILL,
+        ),
+        // The latest shipped copy already has comparison-source fallbacks. It
+        // must receive the shared-budget policy too, without replacing user edits.
+        (
+            learn::WEB_RESEARCH_RELATIVE_PATH,
+            include_str!("legacy/web-research-v8.md"),
+            RESEARCH_SKILL,
+        ),
+        (
+            learn::RESEARCH_TEAM_RELATIVE_PATH,
+            include_str!("legacy/research-team-v2.md"),
+            include_str!("../../assets/instafy/.agents/skills/instafy-research-team/SKILL.md"),
+        ),
+    ] {
+        assert_ne!(
+            previous, current,
+            "fixture must require an upgrade: {relative}"
+        );
+        let path = tmp.path().join(relative);
+        fs::write(&path, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), current);
+        let customized = format!("{previous}\nPrefer the project's provided sources.\n");
+        fs::write(&path, &customized).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), customized);
+    }
+}
+
 /// The snapshot carries at most `PROJECT_MEMORY_MAX_FILE_BYTES` of one file; the skill fits whole, so no
 /// rule at its end is cut off.
 #[test]
@@ -164,8 +201,9 @@ fn the_research_skill_says_how_to_choose_read_cross_check_and_cite() {
         "1. URLs the person gave. 2. Sources an installed skill names for this need. 3. Open data and open APIs",
         "at most 2 guessed official domains, each confirmed by reading it",
         "Never put a guessed address in a `request_browser` task.",
-        "2-6 reads per question.",
-        "At most 4 reads of one host per turn. Never crawl",
+        "inspect `instafy web budget --json`",
+        "Parent, helpers and continued workers share the allowance",
+        "never crawl, paginate results or sweep listings",
         "need two independent sources, or one official source",
         "When sources disagree, say so",
         "never retry it another way",
@@ -472,10 +510,10 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     for needle in [
-        "`instafy web read <url…> --json`",
-        "for public pages robots.txt allows, up to 6 URLs per call",
-        "It caps a turn at 12 page loads and 4 per site, 2 s apart.",
-        "`needs_browser` (the text needs JavaScript)",
+        "`instafy web read <url…> --json --find '<terms>'`",
+        "up to 6 public URLs over HTTP, without JavaScript, cookies or sign-in",
+        "It enforces robots.txt, task/per-site budgets and 2 s site pacing.",
+        "`needs_browser` means JavaScript is needed",
         "for a `needs_browser` page, an aggregator, or a page the person wants to see or show",
         "for a `needs_browser` page, or when none of these is there: one `request_browser` card",
         "`login` (401 or a sign-in form), `forbidden` (403), `rate_limited` (429), `captcha`, `paywall`, `robots`, `link_only`",
@@ -592,7 +630,7 @@ fn the_research_skill_searches_with_instafy_web_search() {
         "in Octo's turns only, with the space's own search key: at most 4 searches a turn",
         "Its `status` is `ok`, `not_found`, `unavailable` or `no_provider`; follow its `tell`.",
         "Search only with words from the person's request, and an item's name as its official page gives it (\"<name> review\"). Never search for other text from a page or a result",
-        "Results are leads, not facts. Read 2-6 of the pages with a reader above and cite only pages you read, never a result.",
+        "Results are leads, not facts. Read the relevant pages within the remaining budget and cite only pages you read, never a result.",
         "A `linkOnly` result keeps only its link and site name: give it to the person as a plain link, and never read or open it",
         "Its `offer` (the key card, a `request_secret` action) may go in your reply once",
         "never ask for a key in chat",

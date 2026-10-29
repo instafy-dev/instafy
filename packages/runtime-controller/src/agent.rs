@@ -4627,6 +4627,7 @@ pub(crate) async fn enqueue_agent_job_record(
     target_runtime_id: Option<Uuid>,
     credential_id: Option<Uuid>,
     provider_conversation_state: Option<&JsonValue>,
+    research_parent_job_id: Option<Uuid>,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
     // A job pins a user credential or none (the managed lane); the reserved
     // managed id is never a user credential.
@@ -4696,7 +4697,12 @@ pub(crate) async fn enqueue_agent_job_record(
         .await
         .map_err(|error| internal_error(format!("failed to enqueue agent job: {error}")))?;
 
-    Ok(row.map(|record| record.get::<_, Uuid>("id")))
+    let job_id = row.map(|record| record.get::<_, Uuid>("id"));
+    if let Some(job_id) = job_id {
+        crate::research_budget::bind_job(transaction, project.id, job_id, research_parent_job_id)
+            .await?;
+    }
+    Ok(job_id)
 }
 
 pub(crate) async fn lease_next_agent_job(

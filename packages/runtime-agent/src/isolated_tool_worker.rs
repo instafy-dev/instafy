@@ -48,6 +48,7 @@ fn mark_cleanup_unconfirmed() {
 #[derive(Default)]
 pub struct IsolatedWorkerJobConfig {
     pub environment: HashMap<String, String>,
+    pub research_budget: crate::research_budget::ResearchBudgetAccess,
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
 }
@@ -69,6 +70,8 @@ pub struct IsolatedToolWorkerRequest {
     pub controller_token_scopes: Vec<String>,
     pub controller_token_expires_at: Option<String>,
     pub job_environment: HashMap<String, String>,
+    #[serde(default)]
+    pub research_budget: crate::research_budget::ResearchBudgetAccess,
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     /// The project's skill-pack folder (`INSTAFY_CACHE_DIR`): the one place outside the snapshot
@@ -116,10 +119,11 @@ enum ParentFrame {
 
 impl IsolatedToolWorkerRequest {
     fn validate(&self) -> Result<()> {
-        // Sandboxed code never holds controller authority. A controller token
+        // Sandboxed code never holds general controller authority. A controller token
         // could, for one, record a preview start command (`instafy preview
         // open --serve-cmd`), which the runtime agent later runs outside the
-        // sandbox when a member opens the stopped preview. Fail closed.
+        // sandbox when a member opens the stopped preview. Research accounting has
+        // a separate capability with none of those scopes. Fail closed here.
         ensure!(
             self.controller_token.is_none()
                 && self.controller_token_scopes.is_empty()
@@ -197,6 +201,7 @@ impl IsolatedToolWorkerRequest {
                 "worker cache folder must be separate from the workspace and private state"
             );
         }
+        self.research_budget.validate(&self.controller_base_url)?;
         validate_job_environment(&self.job_environment)
     }
 }
@@ -555,6 +560,7 @@ fn worker_environment(
     let format =
         |at: chrono::DateTime<chrono::Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut environment = request.job_environment.clone();
+    request.research_budget.apply(&mut environment);
     environment.extend(HashMap::from([
         ("INSTAFY_TURN_STARTED_AT".into(), format(started)),
         (
@@ -831,7 +837,7 @@ pub async fn run_cli(request: IsolatedToolWorkerRequest) -> Result<()> {
 }
 
 fn redact_error(request: &IsolatedToolWorkerRequest, message: &str) -> String {
-    let mut message = message.to_string();
+    let mut message = request.research_budget.redact(message);
     for value in std::iter::once(&request.proxy_token)
         .chain(request.controller_token.iter())
         .chain(request.job_environment.values())
@@ -877,6 +883,7 @@ mod tests {
             controller_token_scopes: Vec::new(),
             controller_token_expires_at: None,
             job_environment: HashMap::new(),
+            research_budget: Default::default(),
             model: None,
             reasoning_effort: None,
             cache_dir: None,
@@ -1048,6 +1055,7 @@ mod tests {
             controller_token_scopes: Vec::new(),
             controller_token_expires_at: None,
             job_environment: HashMap::new(),
+            research_budget: Default::default(),
             model: None,
             reasoning_effort: None,
             cache_dir: Some(cache.clone()),
@@ -1070,6 +1078,31 @@ mod tests {
             environment["HOME"],
             state_dir.join("home").to_string_lossy()
         );
+        let shared = IsolatedToolWorkerRequest {
+            research_budget: crate::research_budget::ResearchBudgetAccess::from_controller(
+                true,
+                "http://127.0.0.1:9",
+                Some("research-only-token".into()),
+            ),
+            ..request.clone()
+        };
+        assert!(shared.validate().is_ok());
+        assert_eq!(
+            redact_error(
+                &shared,
+                "authorization: research-only-token; proxy: inert-proxy"
+            ),
+            "authorization: [redacted]; proxy: [redacted]"
+        );
+        let shared_environment = worker_environment(&shared, &state_dir, &workspace_dir);
+        assert_eq!(shared_environment["INSTAFY_RESEARCH_SHARED"], "1");
+        assert_eq!(
+            shared_environment["INSTAFY_RESEARCH_ACCESS_TOKEN"],
+            "research-only-token"
+        );
+        assert!(!shared_environment.contains_key("CONTROLLER_ACCESS_TOKEN"));
+        assert!(shared_environment.contains_key("INSTAFY_TURN_DEADLINE"));
+        assert!(!environment.contains_key("INSTAFY_RESEARCH_ACCESS_TOKEN"));
         let without = IsolatedToolWorkerRequest {
             cache_dir: None,
             ..request.clone()
@@ -1175,6 +1208,7 @@ mod tests {
             controller_token_scopes: Vec::new(),
             controller_token_expires_at: None,
             job_environment: HashMap::new(),
+            research_budget: Default::default(),
             model: None,
             reasoning_effort: None,
             cache_dir: None,

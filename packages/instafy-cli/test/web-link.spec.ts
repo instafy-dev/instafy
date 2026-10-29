@@ -368,7 +368,7 @@ describe("the command", () => {
     const program = new Command();
     registerWebLinkCommand(registerWebCommand(program));
     const web = program.commands.find((command) => command.name() === "web")!;
-    expect(web.commands.map((command) => command.name())).toEqual(["read", "link"]);
+    expect(web.commands.map((command) => command.name())).toEqual(["read", "budget", "link"]);
     const home = fs.mkdtempSync(path.join(tmp, "home-"));
     const run = spawnSync(process.execPath, [cliBin, "web", "link", "booking.com", "query=Lisbon", "adults=2", "--json"], {
       cwd: home,

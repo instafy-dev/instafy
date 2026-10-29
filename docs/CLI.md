@@ -807,17 +807,39 @@ inside the same `<untrusted_page_content>` wrapper as the text.
 - **Redaction.** The browsers' `redaction.js` (`packages/browser-action-policy`) masks keys and tokens in the text,
   title, links, addresses and structured data before anything is printed or cached. A page that shows a credential is
   withheld as `secret_screen`.
-- **Budget.** Per turn, at most 12 page loads and 4 per site (`www.example.org` and `example.org` are one site), at
-  least 2 s apart; a call reads at most 6 URLs and
-  returns within 60 s (or before the turn's `INSTAFY_TURN_DEADLINE`) with what it has. The turn is the runtime's
-  (`INSTAFY_TURN_STARTED_AT`); outside a turn the budget lapses after 15 minutes without reads. A page from the cache
-  costs nothing.
+- **Budget.** The default allowance is 100 fresh page loads per task and 25 per site (`www.example.org` and
+  `example.org` are one site). On an updated controller/runtime, one atomic allowance covers the parent,
+  helpers and continued worker jobs across machines. Per-site start slots are reserved at least 2 s apart;
+  transport and DNS delays can shift actual request times. A call reads
+  at most 6 URLs and returns within 60 s (or before `INSTAFY_TURN_DEADLINE`). Cached reads cost nothing;
+  failed fresh attempts spend a load. Redirects spend each newly visited site's allowance but retain one
+  total page load. A shared-budget service failure fails closed for fresh reads. If a budget
+  check fails after pages and a validated budget were collected, those pages are returned with a warning
+  and `budget.lastKnown: true` on the last validated snapshot. Remaining URLs are marked
+  `budget_unavailable` when the batch stops. That snapshot never authorizes additional reads.
+
+`instafy web budget --json` inspects the remaining allowance without spending it. Space managers configure
+new tasks in Studio's **Web research** settings or with:
+
+```bash
+instafy web settings --space <space-uuid> --json
+instafy web settings --space <space-uuid> --max-page-loads 200 --max-page-loads-per-site 50
+instafy web settings --space <space-uuid> --interactive
+```
+
+Both settings accept integers from 1–200, with the per-site allowance no greater than the total. Changes
+apply to new tasks; running tasks and their worker continuations keep their original settings and usage.
+The higher defaults apply to spaces without saved settings; explicit settings are preserved.
+Runtime-scoped tools cannot change these settings. Search quotas, browser permissions and site restrictions
+are independent of this allowance.
 
 Pages are cached per workspace for 6 hours, keyed by the URL's hash (no address is stored in the clear), with the
 content hash; a page the site marks `no-store` or `private` is not cached. `--fresh` reads it again. On a runtime the
-cache, robots.txt answers, stop records and the turn budget live in the space's own folder
+cache, robots.txt answers and stop records live in the space's own folder
 (`$INSTAFY_CACHE_DIR/instafy/web-read/{cache,state}`), which outlasts the turn, so a worker whose home folder is new
-every turn still knows what an earlier turn stopped at, and every worker of a turn shares one budget. On a person's own
+every turn still knows what an earlier turn on that workspace stopped at. Standalone use and older controllers
+use the updated CLI's local default 100/25 turn budget, keyed by `INSTAFY_TURN_STARTED_AT`; outside a runtime turn it lapses
+after 15 minutes without reads. Cross-machine sharing requires the updated controller, runtime and CLI. On a person's own
 computer, where nothing sets `INSTAFY_CACHE_DIR` (or where it names a folder this process may not write), the cache
 lives under `$XDG_CACHE_HOME/instafy/web-read` (or `~/.cache`) and the turn budget under
 `$XDG_STATE_HOME/instafy/web-read` (or `~/.local/state`).
@@ -948,7 +970,7 @@ or a key goes.
   key format, a long random token, `password: …`, or a provider's own key) is refused (exit 64) and not sent. E-mail
   addresses, account numbers and numbers of 9 or more digits are removed before sending, and `queryRedacted` says what
   was removed. `--site` takes a public host; a `no-agents` link-only site is refused there (use `instafy web link`).
-- **Limits.** Per turn, at most 4 searches (apart from `instafy web read`'s 12 page loads); 8 results by default and 20
+- **Limits.** Per turn, at most 4 searches (separate from the configurable page-load budget); 8 results by default and 20
   at most. One search at a time per provider. An HTTP 429, or a refused key (401 or 403), stops that provider for the
   rest of the turn, and the chain's next provider with a key is tried. Every search ends 5 s before the turn's
   deadline. A space's key makes at most its entry's `daily_limit` searches a day (100).

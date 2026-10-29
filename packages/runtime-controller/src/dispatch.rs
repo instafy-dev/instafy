@@ -218,6 +218,9 @@ pub(crate) struct DispatchPromptNormalized {
     /// Controller-private queue reservation ignored by that entry's own lane
     /// admission check. Browser payloads can never set this field.
     pub(crate) dispatch_queue_entry_id: Option<Uuid>,
+    /// Authenticated job that delegated this send. Kept across routes that use
+    /// its human subject for access checks; never accepted from a request body.
+    pub(crate) delegating_job_id: Option<Uuid>,
     /// Trusted internal opt-in set only by the automation scheduler. This is
     /// deliberately absent from the public dispatch request shape.
     pub(crate) allow_silent_automation_decline: bool,
@@ -2375,6 +2378,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
         })
         .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()));
 
+    let mut research_dispatch_parent = None;
     for (run_id, target) in agent_runs.iter() {
         if is_managed_ai_skipped(run_id) {
             continue;
@@ -2474,6 +2478,19 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .await?;
         let queued_runtime_id =
             queued_job_runtime_id(target_runtime_id, target.credential_id, unpinned_runtime_id);
+        let research_parent_job_id = match agent_request.delegating_job_id {
+            Some(parent) => Some(parent),
+            None => {
+                crate::research_budget::dispatch_parent(
+                    &transaction,
+                    state,
+                    context,
+                    &agent_request.metadata,
+                )
+                .await?
+            }
+        }
+        .or(research_dispatch_parent);
         let job_id = agent::enqueue_agent_job_record(
             &transaction,
             &project,
@@ -2484,9 +2501,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
             queued_runtime_id,
             target.credential_id,
             provider_conversation_state.as_ref(),
+            research_parent_job_id,
         )
         .await?;
         if let Some(job_uuid) = job_id {
+            research_dispatch_parent.get_or_insert(job_uuid);
             // The run is the frontend's authoritative live-activity record,
             // while the job is the controller's exact steer CAS target. Keep
             // that one-to-one identity durable in the same transaction as the
@@ -3236,6 +3255,7 @@ pub(crate) fn normalize_dispatch_request(
         prefer_runtime,
         expected_lane_idle: false,
         dispatch_queue_entry_id: None,
+        delegating_job_id: None,
         allow_silent_automation_decline: false,
         allow_internal_review: false,
         trigger: None,

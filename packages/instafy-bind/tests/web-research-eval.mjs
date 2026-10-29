@@ -120,12 +120,9 @@ export async function gradeAnswer(answer, { web, keyFacts = [] }) {
   const pages = new Map();
   for (const f of findings) if (!pages.has(f.url)) pages.set(f.url, await readPage(f.url));
 
-  const perHost = {};
-  for (const f of findings) perHost[hostOf(f.url)] = (perHost[hostOf(f.url)] || 0) + 1;
-  check("reads_within_budget", [
-    ...(findings.length < 2 || findings.length > 6 ? [`${findings.length} reads (2-6 per question)`] : []),
-    ...Object.entries(perHost).filter(([, n]) => n > 4).map(([host, n]) => `${n} reads of ${host} (at most 4)`),
-  ]);
+  // An answer's findings do not establish fresh-load usage: cached excerpts can repeat and
+  // failed loads can be absent. CLI/controller tests verify the configured shared budget
+  // against reservations; this answer-only grader checks the evidence and its citations.
   check("findings_labelled", findings.flatMap((f) => {
     if (f.stopped) return typeof f.url === "string" ? [] : ["a stopped finding without its url"];
     const missing = ["url", "title", "readAt", "viewer"].filter((key) => typeof f[key] !== "string" || !f[key]);

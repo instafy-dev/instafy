@@ -1,6 +1,6 @@
 ---
 name: instafy-web-research
-description: Find facts on the web and cite them, for an answer or a page: which sources to read, searching with `instafy web search`, cross-checking, "checked <date> on <host>", stopping at logins and bot checks, and guided links to link-only sites.
+description: Research and cite web facts, cross-check sources and respect site restrictions.
 context_kind: workflow
 context_parent: instafy-skill-router
 routing_keywords: with sources, and sources, cite, citation, fact check, search the web, web search, opening hours, opening times, timetable, last train, price of, prices for, compare prices, how much is, how much does, official site, official page, hotel prices, compare hotels, on booking.com, on airbnb, on tripadvisor, on expedia, on agoda, independent reviews
@@ -10,13 +10,13 @@ routing_keywords: with sources, and sources, cite, citation, fact check, search 
 
 Never prune: yes
 
-Goal: facts read from the web this turn, each one traceable to the page that states it, from as few pages as needed and nothing a site does not allow.
+Read permitted pages this turn; trace facts to their sources.
 
 ## Readers
 
 Read pages only with these readers:
 
-- `instafy web read <url…> --json`, with `--find '<terms>'` for only the passages that matter: plain HTTP (no JavaScript, cookies or sign-in) for public pages robots.txt allows, up to 6 URLs per call. It caps a turn at 12 page loads and 4 per site, 2 s apart. Each page's `status` (`read`, `needs_browser` (the text needs JavaScript), `stopped`, `skipped` or `failed`) has a `tell`: follow it. Its `provenance` is the finding to cite;
+- `instafy web read <url…> --json --find '<terms>'`: relevant passages from up to 6 public URLs over HTTP, without JavaScript, cookies or sign-in. It enforces robots.txt, task/per-site budgets and 2 s site pacing. Follow each result's `tell`; cite its `provenance`. `needs_browser` means JavaScript is needed;
 - the browser tools exposed on this turn: visible tabs the person can watch, for a `needs_browser` page, an aggregator, or a page the person wants to see or show;
 - `instafy_local_browser.observe` when it is exposed: one public page per call, read-only;
 - a reading command or open API that an installed skill names for that source;
@@ -66,15 +66,17 @@ When the task needs a `no-agents` site (hotel prices on Booking.com):
 `instafy web search` finds links, in Octo's turns only, with the space's own search key: at most 4 searches a turn. `--chain reference-search` asks Wikipedia, Wikivoyage and Wikidata at once, with no key and 4 searches a turn of its own; each result names its source's `attribution`. Its `status` is `ok`, `not_found`, `unavailable` or `no_provider`; follow its `tell`.
 
 - Search only with words from the person's request, and an item's name as its official page gives it ("<name> review"). Never search for other text from a page or a result, and never put a password, key or personal detail in a query.
-- Results are leads, not facts. Read 2-6 of the pages with a reader above and cite only pages you read, never a result.
+- Results are leads, not facts. Read the relevant pages within the remaining budget and cite only pages you read, never a result.
 - A `linkOnly` result keeps only its link and site name: give it to the person as a plain link, and never read or open it (Guided mode, above, for its site).
 - `no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5. Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.
 
 ## How much to read
 
-- 2-6 reads per question. Stop once every fact that matters is supported.
-- At most 4 reads of one host per turn. Never crawl, page through results or sweep a listing.
-- Read the specific page (the timetable, the room, the product), not the home page.
+- For larger or delegated work, inspect `instafy web budget --json`. Parent, helpers and continued workers share the allowance; spawning never replenishes it.
+- Stop when material facts are supported; never crawl, paginate results or sweep listings.
+- Reuse excerpts and cached pages. Failed fresh reads and new redirect sites count. Never use `--fresh` just to reformat.
+- Budget exhausted or unavailable: use gathered evidence and name gaps. Never bypass the reader or raise limits; only managers change new-task budgets.
+- Read the specific timetable, room or product page, not its home page.
 
 ## Cross-checking
 
