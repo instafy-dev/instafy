@@ -9,12 +9,14 @@
 //
 // Without a browser (a self-hosted machine without Chromium) the page's HTML is read from 127.0.0.1 and its `og:image`
 // is used when it is on the site's own origin and is a real JPEG, PNG or WebP; an image anywhere else is never fetched.
-// `--thumbnail <file>` hands in a picture a skill made itself. The whole capture has a 15 s budget and never changes
-// the command's exit code. Nothing here calls an Instafy server: preview.ts uploads the result.
+// `--thumbnail <file>` hands in a picture a skill made itself. The whole capture has a 15 s budget (up to 30 s for a page
+// that marks when it is drawn) and never changes the command's exit code. Nothing here calls an Instafy server:
+// preview.ts uploads the result.
 import fs from "node:fs";
 import http from "node:http";
 import {
   NoBrowserError,
+  READY_MARK_WAIT_MS,
   THUMBNAIL_HEIGHT,
   THUMBNAIL_WIDTH,
   applyRequestRules,
@@ -30,6 +32,7 @@ import {
   startOffSiteRoute,
   startRequestGate,
   unstoppedRedirect,
+  waitForReadyMark,
   type OffSiteRoute,
   type RequestRules,
 } from "./site-check.js";
@@ -44,6 +47,10 @@ export function thumbnailBudgetMs(env: NodeJS.ProcessEnv = process.env): number 
 }
 const NETWORK_IDLE_MS = 6_000;
 const SETTLE_MS = 1_000;
+// After a page said it is ready (its ready mark), one more paint before the picture.
+const READY_SETTLE_MS = 300;
+// What the picture itself needs once the page is ready: the screenshot and its encoding.
+const SHOT_RESERVE_MS = 3_000;
 /** A picture a skill hands in, or a site's own og:image: at most this big. */
 export const MAX_THUMBNAIL_FILE_BYTES = 512 * 1024;
 const MAX_HTML_BYTES = 512 * 1024;
@@ -257,6 +264,8 @@ export type CaptureOptions = {
   /** test hooks: where to look for a global Playwright, and a proxy for requests off the site */
   globalRoots?: string[];
   proxyServer?: string;
+  /** How long a page with its own ready mark may take in all (default READY_MARK_WAIT_MS). */
+  readyWaitMs?: number;
 };
 
 function errorLine(error: unknown): string {
@@ -265,12 +274,15 @@ function errorLine(error: unknown): string {
 
 /**
  * A picture of the site for its card, within the budget: the page in a headless browser, else (no browser here) the
- * page's own og:image. Never throws.
+ * page's own og:image. A page with its own ready mark (`data-instafy-ready`, see site-check.ts) is pictured once it
+ * says it is ready, and gets up to READY_MARK_WAIT_MS in all for that; any other once its network is quiet. Never
+ * throws.
  */
 export async function captureSiteThumbnail(options: CaptureOptions): Promise<ThumbnailAttempt> {
   const env = options.env ?? process.env;
   const budget = options.budgetMs ?? thumbnailBudgetMs(env);
-  const deadline = Date.now() + budget;
+  const began = Date.now();
+  let deadline = began + budget;
   const host = options.host === "::1" ? "[::1]" : "127.0.0.1";
   const siteOrigin = `http://${host}:${options.port}`;
   const left = () => Math.max(0, deadline - Date.now());
@@ -339,8 +351,19 @@ export async function captureSiteThumbnail(options: CaptureOptions): Promise<Thu
     if (response && response.status() >= 400) {
       return { ok: false, status: "skipped", reason: `the page answered HTTP ${response.status()}` };
     }
-    await page.waitForLoadState("networkidle", { timeout: Math.max(1, Math.min(NETWORK_IDLE_MS, left())) }).catch(() => {});
-    await page.waitForTimeout(Math.min(SETTLE_MS, left()));
+    const mark = await waitForReadyMark(page.mainFrame(), 0);
+    if (mark === "none") {
+      await page.waitForLoadState("networkidle", { timeout: Math.max(1, Math.min(NETWORK_IDLE_MS, left())) }).catch(() => {});
+      await page.waitForTimeout(Math.min(SETTLE_MS, left()));
+    } else {
+      // The page says when it is drawn (a map once its tiles and description are in): a picture before that would show
+      // it half drawn, so none is kept unless it says so in time.
+      deadline = Math.max(deadline, began + (options.readyWaitMs ?? READY_MARK_WAIT_MS));
+      if (mark === "late" && (await waitForReadyMark(page.mainFrame(), Math.max(0, left() - SHOT_RESERVE_MS))) !== "ready") {
+        return { ok: false, status: "skipped", reason: `the page still said it was drawing after ${Math.round((Date.now() - began) / 1000)} s` };
+      }
+      await page.waitForTimeout(Math.min(READY_SETTLE_MS, left()));
+    }
     const description = await readPageDescription(page.mainFrame());
     const shot = await pageThumbnail(page, context);
     if ("skipped" in shot) return { ok: false, status: "skipped", reason: shot.skipped };
@@ -354,8 +377,18 @@ export async function captureSiteThumbnail(options: CaptureOptions): Promise<Thu
       blocked: [...blocked].map(([url, reason]) => `${url.slice(0, 200)} (${reason})`).slice(0, 20),
     };
   })();
+  // The deadline moves once, when the page turns out to have a ready mark.
   const outOfTime = new Promise<ThumbnailAttempt>((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false, status: "failed", reason: `the picture took longer than ${Math.round(budget / 1000)} s` }), budget);
+    const arm = () => {
+      timer = setTimeout(() => {
+        if (Date.now() < deadline) {
+          arm();
+          return;
+        }
+        resolve({ ok: false, status: "failed", reason: `the picture took longer than ${Math.round((deadline - began) / 1000)} s` });
+      }, Math.max(0, deadline - Date.now()));
+    };
+    arm();
   });
   try {
     return await Promise.race([work.catch((error: unknown): ThumbnailAttempt => ({ ok: false, status: "failed", reason: errorLine(error) })), outOfTime]);

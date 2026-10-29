@@ -70,6 +70,9 @@ mod support_workflow_tests;
 #[path = "system_turns_tests.rs"]
 mod system_turns_tests;
 
+#[path = "credits_ledger_tests.rs"]
+mod credits_ledger_tests;
+
 #[path = "notification_platform_http_tests.rs"]
 mod notification_platform_http_tests;
 

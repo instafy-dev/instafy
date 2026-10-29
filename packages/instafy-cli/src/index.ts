@@ -2251,9 +2251,9 @@ failWithGroupHelp(registerWebSearchCommand(registerWebLinkCommand(registerWebCom
 const previewOpenCommand = previewCommand
   .command("open")
   .description(
-    "Open a private preview of a local port (exit 2: nothing listening, 3: port not allowed, 5: previews not available)",
+    "Open a private preview of a local port (exit 2: nothing listening, 3: port not allowed or another site's, 5: previews not available)",
   )
-  .requiredOption("--port <port>", "Local port the site listens on (1024-65535)")
+  .option("--port <port>", "Local port the site listens on (1024-65535); with --start, leave it out and a free one is picked")
   .requiredOption("--title <title>", "Card title (at most 120 characters)")
   .option("--path <path>", "Path the preview opens at (default /)")
   .option("--summary <text>", "One line of facts under the card's title, e.g. \"Trip · 3 days · 14 places\" (at most 80 characters); default: the page's own meta description")
@@ -2269,11 +2269,15 @@ previewOpenCommand
   .option("--rathole-bin <path>", "Path to rathole binary (or set RATHOLE_BIN)")
   .option(
     "--serve-cmd <command>",
-    "How to start the site again when the process that started it exits, or the space sleeps, run from the current directory (one command, no shell); default: read from the process listening on the port",
+    "How to start the site, and to start it again when the process that started it exits or the space sleeps, run from the current directory (one command, no shell); {port} in it is the site's port; default: read from the process listening on the port",
   )
   .option(
     "--start",
-    "Start --serve-cmd in the background, in its own session, without Instafy credentials, logging to .instafy/agent/logs, and wait for the port (nothing is started when the port already answers)",
+    "Start --serve-cmd in the background, in its own session, without Instafy credentials, logging to .instafy/agent/logs, and wait for the port. Without --port it picks a free port (this same site's earlier one, when it has one) and puts it in {port}. A port where this same site already runs is used as it is; one where another site runs is refused",
+  )
+  .option(
+    "--replace",
+    "Show this site on the port even when the port's open preview shows another site (another title or folder); without it that open is refused",
   )
   .option("--json", "Output JSON")
   .action(async (opts) => {
@@ -2289,6 +2293,7 @@ previewOpenCommand
         ratholeBin: opts.ratholeBin,
         serveCmd: opts.serveCmd,
         start: Boolean(opts.start),
+        replace: Boolean(opts.replace),
         summary: opts.summary,
         thumbnail: opts.thumbnail !== false,
         thumbnailFile: typeof opts.thumbnail === "string" ? opts.thumbnail : undefined,
@@ -2324,7 +2329,7 @@ previewListCommand
 
 const previewCloseCommand = previewCommand
   .command("close")
-  .description("Close a preview: stop its local client and revoke it")
+  .description("Close a preview: stop its local client and the site `open --start` started for it, and revoke it")
   .argument("<previewId>", "Preview ID (from `instafy preview list`)");
 
 addSpaceOption(previewCloseCommand, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
@@ -2345,7 +2350,7 @@ previewCloseCommand
         console.log(JSON.stringify(result, null, 2));
         return;
       }
-      console.log(kleur.green(`Preview closed: ${result.previewId}`));
+      console.log(kleur.green(`Preview closed: ${result.previewId}${result.siteStopped ? "; its site was stopped" : ""}`));
     } catch (error) {
       exitWithPreviewError(error);
     }

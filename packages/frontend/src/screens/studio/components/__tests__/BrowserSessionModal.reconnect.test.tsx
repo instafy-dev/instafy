@@ -512,6 +512,11 @@ describe("Shared modal after the space's machine restarts", () => {
     for (let left = ms; left > 0; left -= 1_000) await act(async () => { await vi.advanceTimersByTimeAsync(Math.min(1_000, left)); });
     if (ms === 0) await act(async () => { await vi.advanceTimersByTimeAsync(0); });
   }
+  async function advanceQuietPeriod(ms: number) {
+    // After asserting a terminal state, still run every due timer and promise,
+    // but avoid hundreds of empty React flushes during the no-work window.
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  }
   const latest = () => mocks.cdpProps[mocks.cdpProps.length - 1]!;
   const text = () => document.body.textContent ?? "";
   const retryButton = () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]');
@@ -543,7 +548,7 @@ describe("Shared modal after the space's machine restarts", () => {
     await advance(2_000);
     expect(text()).toContain(sentence);
     const before = { refreshes: refreshesTo("origin-old"), sockets: socketsTo("origin-old") };
-    await advance(15 * 60_000);
+    await advanceQuietPeriod(15 * 60_000);
     expect(refreshesTo("origin-old")).toBe(before.refreshes);
     expect(socketsTo("origin-old")).toBe(before.sockets);
     expect(approvalOn("origin-old")).toBe(false);
@@ -560,7 +565,7 @@ describe("Shared modal after the space's machine restarts", () => {
     }
     expect(text()).toContain(SHARED_BROWSER_HOST_COPY.didNotOpen);
     const before = { refreshes: refreshesTo("origin-old"), sockets: socketsTo("origin-old") };
-    await advance(15 * 60_000);
+    await advanceQuietPeriod(15 * 60_000);
     expect(refreshesTo("origin-old")).toBe(before.refreshes);
     expect(socketsTo("origin-old")).toBe(before.sockets);
     expect(approvalOn("origin-old")).toBe(false);
@@ -588,7 +593,7 @@ describe("Shared modal after the space's machine restarts", () => {
     await advance(2_000);
     expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
     const before = { sockets: socketsTo("origin-old"), refreshes: refreshesTo("origin-old") };
-    await advance(10 * 60_000);
+    await advanceQuietPeriod(10 * 60_000);
     expect(socketsTo("origin-old")).toBe(before.sockets);
     expect(refreshesTo("origin-old")).toBe(before.refreshes);
     expect(approvalOn("origin-old")).toBe(false);
@@ -606,7 +611,7 @@ describe("Shared modal after the space's machine restarts", () => {
     expect(mocks.fetchStatus.mock.calls.length).toBe(reads + 1);
     expect(text()).toContain(SHARED_BROWSER_HOST_COPY.off);
     expect(retryButton()?.textContent).toBe("Open browser");
-    await advance(10 * 60_000);
+    await advanceQuietPeriod(10 * 60_000);
     expect(refreshesTo("origin-old")).toBe(1);
     expect(refreshesTo("origin-new")).toBe(0);
     expect(mocks.fetchStatus.mock.calls.length).toBe(reads + 1);
@@ -632,7 +637,7 @@ describe("Shared modal after the space's machine restarts", () => {
     await advance(272_000);
     expect(refreshesTo("origin-old")).toBe(1);
     expect(text()).toContain(sentence);
-    await advance(10 * 60_000);
+    await advanceQuietPeriod(10 * 60_000);
     expect(refreshesTo("origin-old")).toBe(1);
     expect(mocks.fetchStatus.mock.calls.length).toBe(reads);
     expect(socketsTo("origin-old")).toBeGreaterThan(0);

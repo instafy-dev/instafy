@@ -38,6 +38,30 @@ export function resolveMultiAgentTypingStatus(
   };
 }
 
+/**
+ * What the typing row says for one agent, from the send until the turn's own
+ * line takes over at its first step: "Starting…" however long that takes. The
+ * model reasoning or drafting, or the runtime retrying its request, is the
+ * turn still starting. Only a run held for an approval (its own words) and a
+ * long context rewrite say something else. `waiting` is the waiting copy
+ * (`resolveAgentWaitingActivityCopy`): "Starting…", or the runtime-busy notice.
+ */
+export function resolveSingleAgentTypingStatus(input: {
+  state: TypingIndicatorState | null;
+  runStatus: RunRecord["status"] | null;
+  agentName: string;
+  waiting: { label: string; ariaLabel: string };
+}): { label: string; ariaLabel: string } {
+  const { state, waiting } = input;
+  if (input.runStatus === "awaiting_approval" && state?.label) {
+    return { label: state.label, ariaLabel: `${input.agentName} status: ${state.label}` };
+  }
+  if (state?.phase === "compacting") {
+    return { label: COMPACTION_STATUS_LABEL, ariaLabel: `${input.agentName} is reorganizing context` };
+  }
+  return { label: waiting.label, ariaLabel: waiting.ariaLabel };
+}
+
 export function resolveTypingIndicatorState(
   messages: ChatMessage[],
   fallback: TypingIndicatorState | null = null,

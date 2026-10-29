@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../types";
 import { TURN_ACTIVITY_DETAILS_ROW_CAP, TurnActivityDetails } from "../TurnActivityDetails";
-import type { DetailItem } from "../turnActivity";
+import { turnStepFromMessage, type DetailItem } from "../turnActivity";
 
 function commandItem(index: number): DetailItem {
   const message: ChatMessage = {
@@ -27,6 +27,28 @@ function commandItem(index: number): DetailItem {
     id: `command:item-${index}`,
     step: { kind: "command", message, activity: null, state: "done", label: `Step ${index}` },
   };
+}
+
+function toolItem(index: number, server: string, tool: string, activity: Record<string, unknown> | null): DetailItem {
+  const message: ChatMessage = {
+    id: `tool-${index}`,
+    role: "assistant",
+    authorId: null,
+    content: tool,
+    timestamp: index,
+    files: null,
+    messageType: "mcp_tool_call",
+    metadata: {
+      source: "agent",
+      jobId: "job-1",
+      messageType: "mcp_tool_call",
+      details: { itemId: `tool-item-${index}`, status: "completed", server, tool },
+      ...(activity ? { activity: { v: 1, count: 1, also: [], ...activity } } : {}),
+    },
+  };
+  const step = turnStepFromMessage(message, "job-1");
+  if (!step) throw new Error("not a step");
+  return { kind: "step", id: `tool:${index}`, step };
 }
 
 describe("TurnActivityDetails", () => {
@@ -74,5 +96,44 @@ describe("TurnActivityDetails", () => {
     const firstRow = container.querySelector('[role="listitem"]');
     expect(document.activeElement).not.toBe(document.body);
     expect(firstRow?.contains(document.activeElement) || document.activeElement === firstRow).toBe(true);
+  });
+
+  // A local test: Details read "Used the browser  instafy_shared_browser/list_tabs"
+  // and "Tried using the browser  instafy_shared_browser/snapshot".
+  it("shows a browser step's site, or only its words, never the tool's name", async () => {
+    const items = [
+      toolItem(1, "instafy_shared_browser", "list_tabs", {
+        key: "browser/use", role: "content", live: "Using the browser", done: "used the browser", step: "tabs",
+      }),
+      toolItem(2, "instafy_shared_browser", "list_tabs", {
+        key: "browser/browse", role: "quiet", live: "Browsing {host}", done: "browsed {host}", host: "visitlisboa.com", step: "tabs",
+      }),
+      toolItem(3, "instafy_shared_browser", "snapshot", {
+        key: "browser/use", role: "content", live: "Using the browser", done: "used the browser", step: "snapshot",
+      }),
+      toolItem(4, "instafy_shared_browser", "navigate", {
+        key: "browser/open", role: "content", live: "Opening {host}",
+        done: { one: "opened {host}", other: "opened {n} pages on {host}", some: "opened pages on {host}" },
+        host: "visitlisboa.com", pageKey: "aaaaaaaaaaaaaaaa", step: "navigate", when: "success",
+      }),
+      // An older runtime's browser step, with no label at all.
+      toolItem(5, "instafy_shared_browser", "snapshot", null),
+      // Another tool keeps its name: it is the only thing the row can say.
+      toolItem(6, "github", "create_issue", null),
+    ];
+    await act(async () => {
+      root.render(<TurnActivityDetails id="details" items={items} renderUpdate={() => null} />);
+    });
+
+    const rows = [...container.querySelectorAll('[data-testid="turn-activity-tool"]')].map((row) => row.textContent);
+    expect(rows).toEqual([
+      "Looked at the tabs",
+      "Looked at the tabs",
+      "Used the browser",
+      "Opened visitlisboa.com",
+      "Used the browser",
+      "Used a toolgithub/create_issue",
+    ]);
+    expect(container.textContent).not.toContain("instafy_shared_browser");
   });
 });

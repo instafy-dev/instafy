@@ -109,3 +109,21 @@ export function BrowserSessionReconnecting() {
     </Surface>
   );
 }
+
+/**
+ * Over the blank tab a chat's browser turn starts on, until its first page:
+ * where Octo is going ("Octo is opening visitlisboa.com…"), so the view is
+ * never a blank page with nothing said.
+ */
+export function BrowserSessionArrival({ note }: { note: string }) {
+  return (
+    <div
+      className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-4"
+      data-testid="browser-session-agent-arrival"
+    >
+      <Surface tone="default" radius="xl" shadow="sm" className="max-w-full px-3 py-2">
+        <LoadingStatus>{note}</LoadingStatus>
+      </Surface>
+    </div>
+  );
+}

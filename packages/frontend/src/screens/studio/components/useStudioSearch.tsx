@@ -346,8 +346,8 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
           {loadingMoreMessages ? 'Loading more messages…' : 'Load more message results'}
         </button> : null}
         {!matches.length && !loading && !error ? <p className="studio-search-empty">{remainingSpaces > 0 ? "No results in the spaces searched so far. Search more spaces to continue." : "No results in this scope. Try another query or a wider scope."}</p> : null}
+        <footer className="studio-search-footer">{notice ? <span>{notice}</span> : null}<span>↑ ↓ to move · Enter to open</span></footer>
       </div>
-      <footer className="studio-search-footer">{notice ? <span>{notice}</span> : null}<span>↑ ↓ to move · Enter to open</span></footer>
     </section>
   ) : null;
   return { open, openSearch, closeSearch, changeScope, renderControl, results, scope, query };

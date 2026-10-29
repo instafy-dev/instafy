@@ -122,7 +122,9 @@ describe("chatMessagePresentation", () => {
     ).toEqual(["thinking", "status", "final"]);
   });
 
-  it("shows a card posted before the run's first visible step once, in the transcript and not again in the thread", () => {
+  // A local test: the card of a turn that ran one `instafy preview open`
+  // arrived as its own "octo" message above that turn.
+  it("draws a card posted before the run's first visible step inside the run's turn, once", () => {
     const card = createMessage({
       id: "card",
       content: "Ready to preview",
@@ -165,12 +167,31 @@ describe("chatMessagePresentation", () => {
     const collapsedVisible = collapsedAll.filter((message) => shouldDisplayChatMessage(message));
     const synthesized = synthesizeAgentJobThreadMessages(collapsedAll, collapsedVisible);
 
-    expect(synthesized.map((message) => message.id)).toEqual(["card", "agent-job-thread:job-1"]);
-    const thread = synthesized[1]!;
+    expect(synthesized.map((message) => message.id)).toEqual(["agent-job-thread:job-1"]);
+    const thread = synthesized[0]!;
     const nested = (thread.metadata as Record<string, unknown>).threadMessages as ChatMessage[];
-    expect(nested.map((message) => message.id)).toEqual(["patch", "command-done", "final"]);
+    expect(nested.map((message) => message.id)).toEqual(["patch", "card", "command-done", "final"]);
     // The run still starts when its first update did.
     expect(thread.timestamp).toBe(50);
+  });
+
+  it("leaves a card of a run with no step as its own message", () => {
+    const messages: ChatMessage[] = [
+      createMessage({
+        id: "browser-card",
+        content: "Continue this task in Instafy's browser.",
+        timestamp: 100,
+        messageType: "action_request",
+        metadata: { jobId: "job-2", messageType: "action_request", details: { testId: "browser-request-card" } },
+      }),
+      createMessage({ id: "reply", content: "The browser will open the site.", timestamp: 200, metadata: { jobId: "job-2" } }),
+    ];
+    const collapsedAll = collapseLifecycleMessages(messages);
+    const collapsedVisible = collapsedAll.filter((message) => shouldDisplayChatMessage(message));
+    expect(synthesizeAgentJobThreadMessages(collapsedAll, collapsedVisible).map((message) => message.id)).toEqual([
+      "browser-card",
+      "reply",
+    ]);
   });
 
   it("lists the replies a synthesized job thread row presents, newest first, for read acknowledgement", () => {

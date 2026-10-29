@@ -257,6 +257,10 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
   );
 
   it("gives up the live line once, at completion, together with the reply", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     const running = earlierSteps();
     await renderTurn(running);
     expect(activityLine()?.querySelector(".instafy-status-sweep")).toBeInstanceOf(HTMLElement);
@@ -266,6 +270,11 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
 
     expect(container.querySelector(".instafy-status-sweep")).toBeNull();
     expect(container.querySelector('[data-testid="turn-activity-announcement"]')).toBeNull();
+    // The last running label holds its moment before the done line takes its place.
+    expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+    await act(async () => {
+      vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
+    });
     expect(activityLine()?.textContent).toBe("Ran a command" + "Details");
     expect(container.textContent).not.toContain("Analyzing output schema");
     expect(container.querySelector('[data-testid="message-content"]')?.textContent).toBe(
@@ -279,6 +288,10 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     // the turn: here the run is still in flight and the job's last progress is
     // stamped after the reply (a message's time is when the transaction that
     // wrote it began).
+    vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     const card = agentUpdate("secret-1", "secret_request", "Add the API token.", base + 3_000, {
       name: "SERVICE_API_TOKEN",
     });
@@ -286,6 +299,9 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
 
     await renderTurn(running);
     expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+    await act(async () => {
+      vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
+    });
     const cardWhileRunning = container.querySelector('[data-testid="secret-request-card"]');
     expect(cardWhileRunning).toBeInstanceOf(HTMLElement);
 

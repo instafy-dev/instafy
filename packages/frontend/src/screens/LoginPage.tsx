@@ -35,6 +35,7 @@ import {
 } from "./login/rememberedAccounts";
 import { theme } from "../styles/theme";
 import { useMarketingCanvas } from "../theme/useMarketingCanvas";
+import { useLoginViewport } from "./login/useLoginViewport";
 import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 
 type LoginIntent = "login" | "signup";
@@ -126,9 +127,9 @@ function writeRememberedAccounts(accounts: RememberedAccount[]) {
   writeLocalStorage(REMEMBERED_ACCOUNTS_KEY, JSON.stringify(accounts.slice(0, 5)));
 }
 
-function OrDivider() {
+function OrDivider({ compact = false }: { compact?: boolean }) {
   return (
-    <div className="my-6 flex items-center gap-4 text-xs font-semibold text-slate-500 dark:text-slate-400">
+    <div className={`${compact ? "my-4" : "my-6"} flex items-center gap-4 text-xs font-semibold text-slate-500 dark:text-slate-400`}>
       <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
       <span className="tracking-widest">OR</span>
       <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
@@ -241,6 +242,9 @@ export function LoginPage() {
   // normal signed-in redirect during verification as well as password setup.
   const awaitingSignupPassword = intent === "signup" &&
     (step === "setPassword" || (step === "otp" && pendingControl === "submit"));
+  const { pageRef, compact, visibleHeight, obscuredHeight } = useLoginViewport(
+    !loading && !(user && !recoveryMode && !awaitingSignupPassword), step, error,
+  );
   const allowGuestSignIn = import.meta.env.DEV && !import.meta.env.PROD && step !== "setPassword";
   const normalizedEmail = normalizeEmail(email);
   const passwordType = passwordVisible ? "text" : "password";
@@ -694,7 +698,7 @@ export function LoginPage() {
   const renderForm = () => {
     if (step === "chooseAccount") {
       return (
-        <div className="mt-8 space-y-6">
+        <div className={compact ? "mt-4 space-y-4" : "mt-8 space-y-6"}>
           <div className="space-y-3">
             {rememberedAccounts.map((account) => {
               const initials = buildInitials(account.displayName);
@@ -788,7 +792,7 @@ export function LoginPage() {
             {browserHandoff}
           </div>
 
-          <OrDivider />
+          <OrDivider compact={compact} />
 
           <div className="space-y-3">
             <Button
@@ -818,7 +822,7 @@ export function LoginPage() {
 
     if (step === "password") {
       return (
-        <div className="mt-8 space-y-6">
+        <div className={compact ? "mt-4 space-y-4" : "mt-8 space-y-6"}>
           <div>
             <Text variant="overline" tone="muted">
               Email address
@@ -840,9 +844,9 @@ export function LoginPage() {
             </div>
           </div>
 
-          <form onSubmit={handlePasswordContinue} className="space-y-5">
+          <form onSubmit={handlePasswordContinue} className={compact ? "space-y-3" : "space-y-5"}>
             {error ? (
-              <InlineNotice tone="danger" role="alert" data-testid="login-error">
+              <InlineNotice tone="danger" role="alert" id="login-error" data-testid="login-error">
                 {error}
               </InlineNotice>
             ) : null}
@@ -854,12 +858,14 @@ export function LoginPage() {
                 <Input
                   ref={passwordRef}
                   id="password"
+                  aria-describedby={error ? "login-error" : undefined}
                   type={passwordType}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   required
                   radius="full"
-                  className={`pr-12 ${theme.input} rounded-full`}
+                  size="lg"
+                  className="pr-12"
                   placeholder="Password"
                   autoComplete="current-password"
                 />
@@ -910,7 +916,7 @@ export function LoginPage() {
             </Button>
           </form>
 
-          <OrDivider />
+          <OrDivider compact={compact} />
 
           <div className="space-y-2">
             <Button
@@ -935,8 +941,9 @@ export function LoginPage() {
 
     if (step === "otp") {
       return (
-        <div className="mt-8 space-y-6">
-          <form onSubmit={handleVerifyOtp} className="space-y-5">
+        <div className={compact ? "mt-4 space-y-4" : "mt-8 space-y-6"}>
+          <form onSubmit={handleVerifyOtp} className={compact ? "space-y-3" : "space-y-5"}>
+            {error ? <InlineNotice tone="danger" role="alert" id="login-error" data-testid="login-error">{error}</InlineNotice> : null}
             <div>
               <Text as="label" htmlFor="otp" variant="bodyStrong" className="sr-only">
                 Verification code
@@ -944,12 +951,13 @@ export function LoginPage() {
               <Input
                 ref={otpRef}
                 id="otp"
+                aria-describedby={error ? "login-error" : undefined}
                 value={otpCode}
                 onChange={(event) => setOtpCode(event.target.value)}
                 required
                 aria-label="Verification code"
                 radius="full"
-                className={`${theme.input} min-h-14 rounded-full px-5`}
+                size="lg"
                 placeholder="Enter the code"
                 autoComplete="one-time-code"
                 inputMode="numeric"
@@ -982,7 +990,7 @@ export function LoginPage() {
             Resend email
           </Button>
 
-          <OrDivider />
+          <OrDivider compact={compact} />
 
           <Button
             variant="outline"
@@ -1000,10 +1008,10 @@ export function LoginPage() {
 
     if (step === "recovery" || step === "setPassword") {
       return (
-        <div className="mt-8">
-          <form onSubmit={handlePasswordUpdate} className="space-y-5">
+        <div className={compact ? "mt-4" : "mt-8"}>
+          <form onSubmit={handlePasswordUpdate} className={compact ? "space-y-3" : "space-y-5"}>
             {error ? (
-              <InlineNotice tone="danger" role="alert" data-testid="login-error">
+              <InlineNotice tone="danger" role="alert" id="login-error" data-testid="login-error">
                 {error}
               </InlineNotice>
             ) : null}
@@ -1015,12 +1023,14 @@ export function LoginPage() {
                 <Input
                   ref={passwordRef}
                   id="password"
+                  aria-describedby={error ? "login-error" : undefined}
                   type={passwordType}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   required
                   radius="full"
-                  className={`pr-12 ${theme.input} rounded-full`}
+                  size="lg"
+                  className="pr-12"
                   placeholder="Create a new password"
                   autoComplete="new-password"
                 />
@@ -1053,12 +1063,13 @@ export function LoginPage() {
               </Text>
               <Input
                 id="passwordConfirm"
+                aria-describedby={error ? "login-error" : undefined}
                 type={passwordType}
                 value={passwordConfirm}
                 onChange={(event) => setPasswordConfirm(event.target.value)}
                 required
                 radius="full"
-                className={`${theme.input} rounded-full`}
+                size="lg"
                 placeholder="Repeat your password"
                 autoComplete="new-password"
               />
@@ -1097,8 +1108,9 @@ export function LoginPage() {
     // product is not for them. The developer path survives below the divider at
     // lower weight, where it costs one glance to the people who want it.
     return (
-      <div className="mt-8 space-y-6">
-        <form onSubmit={handleContinueFromEmail} className="space-y-5">
+      <div className={compact ? "mt-4 space-y-4" : "mt-8 space-y-6"}>
+        <form onSubmit={handleContinueFromEmail} className={compact ? "space-y-3" : "space-y-5"}>
+          {error ? <InlineNotice tone="danger" role="alert" id="login-error" data-testid="login-error">{error}</InlineNotice> : null}
           <div>
             <Text as="label" htmlFor="email" variant="overline" tone="muted" className="sr-only">
               Email address
@@ -1106,12 +1118,13 @@ export function LoginPage() {
             <Input
               ref={emailRef}
               id="email"
+              aria-describedby={error ? "login-error" : undefined}
               type="email"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               required
               radius="full"
-              className={`${theme.input} rounded-full`}
+              size="lg"
               placeholder="you@example.com"
               autoComplete="email"
             />
@@ -1140,7 +1153,7 @@ export function LoginPage() {
           {intent === "signup" ? "Already have an account? Log in" : "Create account"}
         </Button>
 
-        <OrDivider />
+        <OrDivider compact={compact} />
 
         <div className="space-y-2">
           <Button
@@ -1178,14 +1191,14 @@ export function LoginPage() {
   const renderBody = () => (
     <div>
       <div className="text-center">
-        {/* 48px on a flat surface (the opaque card, or the plain paper on
-            phones and in extension embeds), so the nodes take the crew colours. */}
-        <OctoMark colorway="crew" className="mx-auto mb-5 h-12 w-12 text-brand-ink dark:text-brand-paper" />
+        {/* A smaller logo leaves room for the form above a software keyboard;
+            both sizes stay on the same flat canvas. */}
+        <OctoMark colorway="crew" className={`${compact ? "mb-2 h-8 w-8" : "mb-5 h-12 w-12"} mx-auto text-brand-ink dark:text-brand-paper`} />
         <Heading level={1} variant="section" className="tracking-tight">
           {stepTitle}
         </Heading>
         {stepDescription ? (
-          <Text variant="bodyLg" tone="secondary" className="mx-auto mt-4 max-w-sm">
+          <Text variant={compact ? "bodyCompact" : "bodyLg"} tone="secondary" className={`mx-auto ${compact ? "mt-2" : "mt-4"} max-w-sm`}>
             {stepDescription}
           </Text>
         ) : null}
@@ -1202,7 +1215,16 @@ export function LoginPage() {
 
   return (
     <div
-      className="relative isolate min-h-screen min-h-[100dvh] w-full overflow-x-hidden bg-[var(--marketing-canvas)] text-slate-900 dark:text-slate-100"
+      ref={pageRef}
+      className="relative isolate w-full overflow-x-clip bg-[var(--marketing-canvas)] text-slate-900 dark:text-slate-100"
+      style={{
+        minHeight: visibleHeight,
+        paddingTop: "var(--instafy-safe-area-inset-top, 0px)",
+        paddingRight: "var(--instafy-safe-area-inset-right, 0px)",
+        paddingBottom: `calc(${obscuredHeight}px + var(--instafy-safe-area-inset-bottom, 0px))`,
+        paddingLeft: "var(--instafy-safe-area-inset-left, 0px)",
+      }}
+      data-compact-layout={compact || undefined}
       data-testid="login-page"
     >
       {!isExtensionEmbed ? (
@@ -1219,11 +1241,12 @@ export function LoginPage() {
 
       <div
         className={[
-          "relative z-10 mx-auto flex min-h-screen min-h-[100dvh] w-full max-w-2xl flex-col items-center px-4 sm:px-6",
-          "justify-start py-6",
-          isExtensionEmbed ? "" : "sm:justify-center sm:py-16",
-          "[@media(max-height:740px)]:justify-start [@media(max-height:740px)]:py-6",
+          "relative z-10 mx-auto flex w-full max-w-2xl flex-col items-center px-4 sm:px-6",
+          compact ? "justify-start py-3" : "justify-start py-6",
+          compact || isExtensionEmbed ? "" : "sm:justify-center sm:py-16",
+          compact ? "" : "[@media(max-height:740px)]:justify-start [@media(max-height:740px)]:py-6",
         ].join(" ")}
+        style={{ minHeight: `max(0px, calc(${visibleHeight}px - var(--instafy-safe-area-inset-top, 0px) - var(--instafy-safe-area-inset-bottom, 0px)))` }}
       >
         <div className="relative w-full max-w-[340px] sm:max-w-[400px]">
           <section
@@ -1234,7 +1257,7 @@ export function LoginPage() {
               // sits on a flat surface. Extension embeds are narrow, plain
               // panels and never reach the sm: card styles.
               "sm:rounded-[32px] sm:border sm:border-slate-200/70 sm:bg-white sm:shadow-[0_18px_60px_rgba(15,23,42,0.12)] sm:dark:border-[color:var(--color-studio-dark-panel-border)] sm:dark:bg-[var(--color-studio-dark-panel)] sm:dark:shadow-[0_18px_60px_rgba(0,0,0,0.5)]",
-              isExtensionEmbed ? "sm:p-6" : "sm:p-8 sm:[@media(max-height:740px)]:p-6",
+              compact ? "sm:p-4" : isExtensionEmbed ? "sm:p-6" : "sm:p-8 sm:[@media(max-height:740px)]:p-6",
             ].join(" ")}
           >
             {showBackToLanding || allowGuestSignIn ? (
@@ -1276,7 +1299,7 @@ export function LoginPage() {
               </div>
             ) : null}
 
-            <div className="mt-6">
+            <div className={compact ? "mt-3" : "mt-6"}>
               {renderBody()}
 
               {message ? (
@@ -1284,14 +1307,14 @@ export function LoginPage() {
                   {message}
                 </InlineNotice>
               ) : null}
-              {error && step !== "password" && step !== "recovery" && step !== "setPassword" ? (
-                <InlineNotice tone="danger" role="alert" className="mt-6" data-testid="login-error">
+              {error && step === "chooseAccount" ? (
+                <InlineNotice tone="danger" role="alert" id="login-error" className="mt-6" data-testid="login-error">
                   {error}
                 </InlineNotice>
               ) : null}
 
               {!recoveryMode ? (
-                <div className="mt-10 flex items-center justify-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+                <div className={`${compact ? "mt-6" : "mt-10"} flex items-center justify-center gap-3 text-xs text-slate-500 dark:text-slate-400`}>
                   <TextLink to="/terms" size="xs" tone="muted" target="_blank" rel="noreferrer">
                     Terms of Use
                   </TextLink>

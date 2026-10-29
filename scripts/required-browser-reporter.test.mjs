@@ -376,9 +376,15 @@ test("a required case or spec missing from every part fails the lane even when b
   const moved = (await browserUiParts(t, (tests) => tests.map((item) => item.location.file.endsWith(requiredFile)
     ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item))).map((part) => part.receipt);
   assert.ok(combineRequiredBrowserParts("browser-ui", moved).failures.includes(`Required spec missing: ${requiredFile}`));
-  const short = (await browserUiParts(t, (tests) => tests.slice(0, -1).map((item) => item))).map((part) => part.receipt);
-  assert.ok(REQUIRED_BROWSER_LANES["browser-ui"].titles.length < REQUIRED_BROWSER_LANES["browser-ui"].minimumTests - 1);
-  assert.ok(combineRequiredBrowserParts("browser-ui", short).failures.includes("Required tests are missing"));
+  const short = (await browserUiParts(t, (tests) => tests.slice(0, -1))).map((part) => part.receipt);
+  assert.equal(short.length, 2);
+  assert.ok(short.every((receipt) => receipt.status === "passed"));
+  const shortCount = short.reduce((count, receipt) => count + receipt.tests.length, 0);
+  assert.equal(shortCount, REQUIRED_BROWSER_LANES["browser-ui"].minimumTests - 1);
+  const incomplete = combineRequiredBrowserParts("browser-ui", short);
+  assert.equal(incomplete.selected, shortCount);
+  assert.equal(incomplete.status, "failed");
+  assert.ok(incomplete.failures.includes("Required tests are missing"));
 });
 
 test("the required check reads every part's receipt from the downloaded artifacts and fails closed", async (t) => {
@@ -411,4 +417,26 @@ test("the required check reads every part's receipt from the downloaded artifact
   fs.writeFileSync(path.join(folder, "browser-ui-rendering-3/required-browser-result.json"), "not json");
   assert.throws(() => quiet(["browser-ui", folder]));
   for (const args of [[], ["browser-ui"], ["browser-ui", folder, "extra"]]) assert.throws(() => quiet(args), /Usage:/u);
+});
+
+test("browser UI requires login and global-search keyboard regressions", async (t) => {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  const files = ["login-keyboard.spec.ts", "search-keyboard.spec.ts"];
+  const titles = [
+    "preserves email and focus, and leaves long errors reachable through document scrolling",
+    "keeps login actions clear of system bars and respects rotated side insets",
+    "keeps the first actual result visible with query and scope controls",
+    "keeps loading, error recovery and empty results reachable within native safe areas",
+  ];
+  for (const file of files) assert.ok(contract.files.includes(file), file);
+  for (const title of titles) assert.ok(contract.titles.includes(title), title);
+  for (const target of [...files, ...titles]) {
+    const run = setup(t, "browser-ui");
+    const selected = browserUiInventory(run).map(item => item.title === target
+      ? { ...item, title: "unrelated passing keyboard case" }
+      : files.includes(target) && item.location.file.endsWith(target)
+        ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item);
+    run.begin(selected); run.pass(selected);
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, target);
+  }
 });

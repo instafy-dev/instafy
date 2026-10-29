@@ -271,6 +271,11 @@ struct CreatePreviewBody {
     /// be woken after the runtime sleeps; without it, it cannot.
     #[serde(default)]
     serve: Option<JsonValue>,
+    /// Show this site on the port even when the port's live preview shows
+    /// another site (`instafy preview open --replace`). Without it such an
+    /// open is refused (`409 port_in_use`): see [`ensure_port_shows_this_site`].
+    #[serde(default)]
+    replace: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1008,6 +1013,17 @@ async fn post_preview(
     // runtime's next lease.
     let tunnel_key = preview_tunnel_key(&runtime_id, port);
     ensure_preview_capacity(&state, &project_id, &runtime_id, &tunnel_key).await?;
+    if !body.replace {
+        ensure_port_shows_this_site(
+            &state.pool,
+            &project_id,
+            &tunnel_key,
+            port,
+            &title,
+            serve.as_ref(),
+        )
+        .await?;
+    }
 
     // What the preview routes trust lives in one controller-owned object
     // the generic tunnel routes can neither set nor drop.
@@ -1144,6 +1160,74 @@ pub(super) async fn ensure_preview_room(
 
 fn preview_tunnel_key(runtime_id: &Uuid, port: u16) -> String {
     format!("preview:{runtime_id}:{port}")
+}
+
+/// Refuse an open that would show another site on a port whose preview is
+/// live. A preview is keyed by its machine and port, so such an open would
+/// take that preview over: its card would show this site, and the card of
+/// the site it showed would stop. Another site is another title, or another
+/// folder its site was started from (when both record one). The error names
+/// the site that holds the port. An open that says it replaces that site
+/// (`replace`) does not come here.
+async fn ensure_port_shows_this_site(
+    pool: &PgPool,
+    project_id: &Uuid,
+    tunnel_key: &str,
+    port: u16,
+    title: &str,
+    serve: Option<&PreviewServe>,
+) -> ApiResult<()> {
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let row = connection
+        .query_opt(
+            "select * from runtime_tunnel_grants
+             where project_id = $1
+               and jsonb_typeof(metadata->'_instafyPreview') = 'object'
+               and metadata->'_instafyPreview'->>'tunnelKey' = $2
+               and not (metadata->'_instafyPreview' ? 'closedAt')
+               and lower(btrim(status)) not in ('revoked', 'expired', 'failed')
+               and expires_at > now()
+             order by created_at desc
+             limit 1",
+            &[project_id, &tunnel_key],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load the port's preview: {error}")))?;
+    match row.as_ref().map(PreviewGrant::from_row) {
+        Some(held) => match port_held_by_another_site(&held, title, serve) {
+            Some(holder) => Err(port_in_use(port, &holder)),
+            None => Ok(()),
+        },
+        None => Ok(()),
+    }
+}
+
+/// The title of the live preview `held` when it shows another site than one
+/// titled `title` and started from `serve`'s folder, else None.
+fn port_held_by_another_site(
+    held: &PreviewGrant,
+    title: &str,
+    serve: Option<&PreviewServe>,
+) -> Option<String> {
+    let other_folder = match (held.serve(), serve) {
+        (Some(held), Some(serve)) => held.cwd != serve.cwd,
+        _ => false,
+    };
+    (held.title() != title || other_folder).then(|| held.title())
+}
+
+fn port_in_use(port: u16, holder: &str) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError::with_details(
+            format!("Port {port} already shows '{holder}'."),
+            "port_in_use",
+            json!({ "port": port, "title": holder }),
+        )),
+    )
 }
 
 fn preview_tunnel_overrides(idempotency_key: String) -> TunnelRequestOverrides {

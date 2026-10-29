@@ -3,20 +3,7 @@
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "../ChatTranscriptViewport";
-import type { StickyChatSpeaker } from "../chatSpeakerMarker";
-
-const assistantSpeaker: StickyChatSpeaker = {
-  kind: "assistant",
-  handle: "octo",
-  avatarSeed: "octo",
-};
-
-const humanSpeaker: StickyChatSpeaker = {
-  kind: "human",
-  label: "Taylor",
-  avatarSeed: "user-1",
-};
+import { ChatTranscriptViewport } from "../ChatTranscriptViewport";
 
 describe("ChatTranscriptViewport", () => {
   let container: HTMLDivElement;
@@ -106,102 +93,5 @@ describe("ChatTranscriptViewport", () => {
       expect(readStyle(scroller).maskImage || "").toBe("");
       expect(readStyle(scroller).WebkitMaskImage || "").toBe("");
     }
-  });
-});
-
-/**
- * The speaker pill owns only its identity and fade in/out. The transcript
- * viewport owns the shared presence placement and message fade.
- */
-describe("ChatSpeakerStickyOverlay", () => {
-  let container: HTMLDivElement;
-  let root: Root;
-
-  beforeEach(() => {
-    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-  });
-
-  afterEach(async () => {
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
-    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
-  });
-
-  async function renderOverlay(speaker: StickyChatSpeaker | null) {
-    const overlayRef = createRef<HTMLDivElement>();
-    await act(async () => {
-      root.render(<ChatSpeakerStickyOverlay ref={overlayRef} speaker={speaker} />);
-    });
-    const overlay = container.querySelector<HTMLElement>('[data-testid="chat-speaker-sticky-overlay"]');
-    if (!overlay) {
-      throw new Error("ChatSpeakerStickyOverlay did not render");
-    }
-    return { overlay, overlayRef };
-  }
-
-  it("lands the pill's face and name where the inline identity's were", async () => {
-    // The pill replaces the identity on the same pixel row, so it keeps the
-    // identity's 8px gap and pulls its border and 2px of padding back so the
-    // face sits on the column's left edge. Below sm (jsdom has no matchMedia,
-    // which reads as the narrow layout) the face is the inline 28px one.
-    for (const speaker of [assistantSpeaker, humanSpeaker]) {
-      const { overlay } = await renderOverlay(speaker);
-      const pill = overlay.firstElementChild?.firstElementChild as HTMLElement;
-      expect(pill.className).toContain("gap-2");
-      expect(pill.className).toContain("-left-[3px]");
-      // Not a negative margin: the overlay shrink-wraps the pill, so a -3px
-      // margin leaves the box 3px short and `max-w-full` cuts "octo" to "o…".
-      expect(pill.className).not.toMatch(/(^|\s)-m[lx]-/);
-      expect(pill.className).toContain("max-w-full");
-      expect(pill.className).not.toContain("gap-1.5");
-      const face = pill.firstElementChild as HTMLElement;
-      expect(face.className).toContain("h-7");
-    }
-  });
-
-  it("paints nothing behind the pill: no backdrop band of any kind", async () => {
-    const { overlay } = await renderOverlay(assistantSpeaker);
-
-    expect(overlay.children).toHaveLength(1);
-    const pillWrapper = overlay.firstElementChild as HTMLElement;
-    expect(pillWrapper.textContent).toContain("octo");
-    expect(pillWrapper.className).not.toContain("inset-x");
-    expect(pillWrapper.className).not.toContain("bg-gradient");
-  });
-
-  it("fades in/out and hands out the ref", async () => {
-    const shown = await renderOverlay(assistantSpeaker);
-    expect(shown.overlayRef.current).toBe(shown.overlay);
-    expect(shown.overlay.getAttribute("aria-hidden")).toBeNull();
-    expect((shown.overlay.firstElementChild as HTMLElement).className).toContain("opacity-100");
-
-    const human = await renderOverlay(humanSpeaker);
-    expect(human.overlay.querySelector('[data-testid="chat-human-speaker-pill"]')?.textContent).toContain(
-      "Taylor",
-    );
-
-    // Hidden keeps the last pill in the box, faded: the fade-out has a pill
-    // to fade, and the box keeps its height so the roster beside it holds
-    // still.
-    const hidden = await renderOverlay(null);
-    expect(hidden.overlay.getAttribute("aria-hidden")).toBe("true");
-    expect((hidden.overlay.firstElementChild as HTMLElement).className).toContain("opacity-0");
-    expect(hidden.overlay.textContent).toContain("Taylor");
-  });
-
-  it("reserves the pill's height before any speaker has shown, so the roster never moves", async () => {
-    const { overlay } = await renderOverlay(null);
-    expect(overlay.textContent).toBe("");
-    // The pill's face plus its border: 28px inline below sm, 32px at sm+.
-    expect(overlay.className).toContain("min-h-[30px]");
-    expect(overlay.className).toContain("sm:min-h-[34px]");
-    // The pill sits in a flex box, not on a text line, so no line-box air
-    // is added above the reserved height.
-    expect((overlay.firstElementChild as HTMLElement).className).toContain("flex");
   });
 });

@@ -253,6 +253,42 @@ describe("AgentJobThreadPreviewLayout", () => {
   });
 
 
+  // A local test: after a reload whose page of history began in the middle
+  // of a map turn, its line read only what the loaded steps said.
+  it("reads a finished turn's line from the steps stored with its reply, whatever part of the turn loaded", async () => {
+    const now = Date.now();
+    const turnSteps = {
+      v: 1,
+      activities: [ADD_POINT_ACTIVITY, WEB_READ_ACTIVITY],
+      steps: [
+        { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+        { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+        { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+        { type: "command_execution", status: "completed", exitCode: 0, activity: 1 },
+      ],
+    };
+    // Only the turn's last step loaded.
+    const message = threadMessage([
+      commandStep("three", WEB_READ_ACTIVITY, { timestamp: now - 2_000 }),
+      {
+        id: "reply",
+        role: "assistant",
+        authorId: null,
+        content: "Here's your Lisbon weekend.",
+        timestamp: now - 1_000,
+        files: null,
+        metadata: { jobId: JOB_ID, source: "agent", kind: "result", outcome: "success", turnSteps },
+      },
+    ]);
+
+    await act(async () => {
+      root.render(<LiveAgentJobThreadPreview message={message} />);
+    });
+
+    const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
+    expect(line?.textContent).toBe("Looked up 3 places, read 6 pages" + "Details");
+  });
+
   it("shows the turn's plain-language line instead of the run rail, chips and command surface", async () => {
     const now = Date.now();
     const message = threadMessage([
@@ -395,7 +431,9 @@ describe("AgentJobThreadPreviewLayout", () => {
 
   // A local test: every turn opened with three labels inside 1.1 s. The line says
   // Starting… until the model has worked a moment with no step.
-  it("opens with Starting…, then says Thinking once the model has worked a moment before its first step", async () => {
+  // A local test: a turn showed "Starting…" and then "Thinking…" before its
+  // first step; another showed nothing at all for 37 s.
+  it("says Starting… until its first step, however long the model works before it", async () => {
     vi.useFakeTimers();
     onTestFinished(() => {
       vi.useRealTimers();
@@ -421,13 +459,10 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(line?.tagName).toBe("DIV");
     expect(line?.textContent).toBe("Starting…");
     await act(async () => {
-      vi.advanceTimersByTime(THINKING_LABEL_DELAY_MS - 100);
+      vi.advanceTimersByTime(THINKING_LABEL_DELAY_MS * 12);
     });
     expect(line?.textContent).toBe("Starting…");
-    await act(async () => {
-      vi.advanceTimersByTime(100);
-    });
-    expect(line?.textContent).toBe("Thinking…");
+    expect(container.textContent).not.toContain("Thinking");
     expect(container.textContent).not.toContain("Planning the Lisbon weekend");
   });
 
@@ -665,7 +700,9 @@ describe("AgentJobThreadPreviewLayout", () => {
       const firstTry = attempts?.querySelector('[data-testid="turn-activity-earlier-attempt"]');
       expect(firstTry?.textContent).toContain("First try");
       expect(firstTry?.querySelectorAll('[data-testid="turn-activity-command"]')).toHaveLength(1);
-      expect(firstTry?.textContent).toContain("Trying again…");
+      // The runtime retrying its request was no step of the turn.
+      expect(firstTry?.textContent).not.toContain("Trying again");
+      expect(firstTry?.textContent).not.toContain("Retrying");
       // The runtime's own sentence lives only here.
       expect(firstTry?.textContent).toContain(RAW_FAILURE);
       expect(attempts?.textContent).toContain("Second try");

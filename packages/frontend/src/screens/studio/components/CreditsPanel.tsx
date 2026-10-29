@@ -9,7 +9,7 @@ import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Text } from "../../../components/Text";
 import { BILLING_PLANS, type BillingPlanDefinition } from "../../../credits/plans";
 import { fetchCreditPolicy, type CreditPolicy } from "../../../credits/creditService";
-import { parseLedgerTokenUsage } from "../../../credits/ledgerTokenUsage";
+import { ledgerActivityRows } from "../../../credits/ledgerActivityRows";
 import {
   requestBillingPortalSession,
   requestCheckoutSession,
@@ -28,11 +28,9 @@ import {
   CreditsUsageRates,
   formatCreditsPerMinute,
   formatIntervalSeconds,
-  formatProviderLabel,
   formatUnits,
 } from "./CreditsUsageRates";
 import { SettingsShell, type SettingsCategory } from "./SettingsShell";
-import { compactIdentifier } from "../../../utils/compactIdentifier";
 
 const CHECKOUT_STATUS_PARAM = "billingCheckout";
 const CHECKOUT_PLAN_PARAM = "billingPlan";
@@ -61,17 +59,9 @@ function formatUsdAmount(value: number, currency: string): string {
   }).format(value);
 }
 
-function formatTokenCount(value: number): string {
-  if (!Number.isFinite(value) || value < 0) {
-    return "0";
-  }
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
-  }
-  if (value >= 1_000) {
-    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`;
-  }
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+/** `unitLabel` for an amount of `value`: "1 credit", "2 credits". */
+function unitFor(value: number, unitLabel: string): string {
+  return Math.abs(value) === 1 ? unitLabel.replace(/s$/, "") : unitLabel;
 }
 
 function formatEstimateSeconds(seconds: number): string {
@@ -303,15 +293,6 @@ export function CreditsPanel() {
     if (!normalized) {
       return "Activity";
     }
-    if (normalized === "managed_ai_prompt") {
-      return "AI usage";
-    }
-    if (normalized === "managed_ai_adjustment") {
-      return "AI adjustment";
-    }
-    if (normalized === "managed_ai_refund") {
-      return "AI refund";
-    }
     if (normalized === "hosted_runtime") {
       return "Hosted runtime";
     }
@@ -329,109 +310,6 @@ export function CreditsPanel() {
     return humanized.charAt(0).toUpperCase() + humanized.slice(1);
   }, []);
 
-  const formatLedgerMetadataDetail = useCallback((entry: Record<string, unknown> | null | undefined) => {
-    if (!entry) {
-      return null;
-    }
-
-    const findStringValue = (...keys: string[]): string | null => {
-      for (const key of keys) {
-        const raw = entry[key];
-        if (typeof raw === "string" && raw.trim().length > 0) {
-          return raw.trim();
-        }
-      }
-      return null;
-    };
-
-    const usage = (() => {
-      const raw = entry["usage"];
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-        return null;
-      }
-      return raw as Record<string, unknown>;
-    })();
-    const { inputTokens, cachedInputTokens, outputTokens, totalTokens } =
-      parseLedgerTokenUsage(usage);
-    const provider = formatProviderLabel(
-      findStringValue("managedAiProvider") ?? findStringValue("provider"),
-    );
-    const managedAiLabel = findStringValue("managedAiLabel");
-    const managedAiModelLabel = findStringValue("managedAiModelLabel");
-
-    if (provider || managedAiLabel || managedAiModelLabel || usage) {
-      const inlineParts = [managedAiLabel, managedAiModelLabel, provider]
-        .filter((value): value is string => Boolean(value && value.trim().length > 0));
-      if (totalTokens > 0) {
-        inlineParts.push(`${formatTokenCount(totalTokens)} tokens`);
-      }
-      if (inlineParts.length > 0) {
-        const fullParts = [...inlineParts];
-        if (usage) {
-          fullParts.push(
-            `in ${inputTokens ?? 0}`,
-            `cached ${cachedInputTokens ?? 0}`,
-            `out ${outputTokens ?? 0}`,
-          );
-        }
-        return {
-          inline: inlineParts.join(" · "),
-          full: fullParts.join(" · "),
-        };
-      }
-    }
-
-    const planId = findStringValue("planId");
-    if (planId) {
-      return {
-        inline: `plan ${planId}`,
-        full: `plan ${planId}`,
-      };
-    }
-
-    const runtimeId = findStringValue("runtimeId", "runtime");
-    if (runtimeId) {
-      return {
-        inline: `runtime ${compactIdentifier(runtimeId)}`,
-        full: `runtime ${runtimeId}`,
-      };
-    }
-
-    const runId = findStringValue("runId");
-    if (runId) {
-      return {
-        inline: `run ${compactIdentifier(runId)}`,
-        full: `run ${runId}`,
-      };
-    }
-
-    const requestId = findStringValue("requestId");
-    if (requestId) {
-      return {
-        inline: `request ${compactIdentifier(requestId)}`,
-        full: `request ${requestId}`,
-      };
-    }
-
-    const jobId = findStringValue("jobId");
-    if (jobId) {
-      return {
-        inline: `job ${compactIdentifier(jobId)}`,
-        full: `job ${jobId}`,
-      };
-    }
-
-    const leaseId = findStringValue("leaseId");
-    if (leaseId) {
-      return {
-        inline: `lease ${compactIdentifier(leaseId)}`,
-        full: `lease ${leaseId}`,
-      };
-    }
-
-    return null;
-  }, []);
-
   const formatDeltaValue = useCallback(
     (delta: number) => {
       if (amountView === "usd") {
@@ -439,13 +317,18 @@ export function CreditsPanel() {
         const sign = usdValue > 0 ? "+" : "";
         return `${sign}${formatUsdAmount(usdValue, displayCurrency)}`;
       }
-      return `${formatDelta(delta)} ${unitLabel}`;
+      return `${formatDelta(delta)} ${unitFor(delta, unitLabel)}`;
     },
     [amountView, displayCurrency, formatDelta, unitLabel, unitsPerUsd],
   );
 
-  const recentLedger = ledger.slice(0, activityRowCount);
-  const hasMoreActivity = ledger.length > recentLedger.length;
+  // One row per Instafy AI turn, named by its chat; other entries as they are.
+  const activityRows = useMemo(
+    () => ledgerActivityRows(ledger, formatLedgerReason),
+    [formatLedgerReason, ledger],
+  );
+  const recentActivity = activityRows.slice(0, activityRowCount);
+  const hasMoreActivity = activityRows.length > recentActivity.length;
   const showMoreActivity = useCallback(() => {
     setActivityFocusRow(activityRowCount);
     setActivityRowCount((count) => count + ACTIVITY_MORE_ROWS);
@@ -918,7 +801,7 @@ export function CreditsPanel() {
                   <span data-testid="credits-balance">{balanceDisplayValue}</span>
                   {amountView === "usd" ? null : (
                     <Text as="span" variant="subtitle" tone="muted" className="ml-2">
-                      {unitLabel}
+                      {unitFor(creditBalance, unitLabel)}
                     </Text>
                   )}
                 </Text>
@@ -944,13 +827,15 @@ export function CreditsPanel() {
               ) : null}
             </div>
           </div>
-          {/* The daily refill tops a balance under the team's own limit back up to
-              it (the ledger's "Daily top-up" row adds the difference), so the
-              line names that level, never an amount added each day. */}
+          {/* Once a UTC day, the first time the controller finds the balance
+              under the team's own limit, it tops it back up to that limit (the
+              ledger's "Daily top-up" row adds the difference; credits.rs
+              attempt_daily_refill). That can be at any hour, so the line names
+              the level and how often, never an hour or an amount added. */}
           {creditsLoaded && creditLimit > 0 ? (
             <Text as="div" variant="caption" tone="muted" data-testid="credits-starter-budget">
               Tops back up to <span data-testid="credits-limit">{limitDisplayValue}</span>
-              {amountView === "usd" ? "" : ` ${unitLabel}`} every day at 00:00 UTC
+              {amountView === "usd" ? "" : ` ${unitFor(creditLimit, unitLabel)}`} once a day
             </Text>
           ) : null}
           {runtimeRunwayDisplay ? (
@@ -1234,7 +1119,7 @@ export function CreditsPanel() {
             <Text variant="body" tone="danger" className="font-medium">
               {ledgerError}
             </Text>
-          ) : recentLedger.length === 0 ? (
+          ) : (activityView === "graph" ? ledger.length === 0 : recentActivity.length === 0) ? (
             <Text variant="body" tone="secondary">
               No balance activity recorded yet.
             </Text>
@@ -1251,13 +1136,12 @@ export function CreditsPanel() {
             />
           ) : (
             <div className="divide-y divide-slate-200/70 dark:divide-slate-800">
-              {recentLedger.map((entry, index) => {
-                const deltaClass = entry.delta >= 0 ? "text-primary-600" : "text-rose-600";
-                const metadataDetail = formatLedgerMetadataDetail(entry.metadata);
+              {recentActivity.map((row, index) => {
+                const deltaClass = row.delta >= 0 ? "text-primary-600" : "text-rose-600";
                 const takesFocus = index === activityFocusRow;
                 return (
                   <div
-                    key={`${entry.createdAt}-${entry.reason}-${index}`}
+                    key={row.key}
                     ref={takesFocus ? activityFocusRowRef : undefined}
                     tabIndex={takesFocus ? -1 : undefined}
                     className={
@@ -1273,33 +1157,18 @@ export function CreditsPanel() {
                           as="p"
                           variant="body"
                           tone="primary"
-                          className="font-medium leading-tight"
+                          className="truncate font-medium leading-tight"
+                          title={row.label}
                         >
-                          {formatLedgerReason(entry.reason)}
+                          {row.label}
                         </Text>
                         <Text
                           as="p"
                           variant="caption"
                           tone="muted"
-                          className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-medium leading-tight"
+                          className="mt-0.5 font-medium leading-tight"
                         >
-                          <span>{new Date(entry.createdAt).toLocaleString()}</span>
-                          {metadataDetail ? (
-                            <>
-                              <span
-                                aria-hidden="true"
-                                className="text-slate-300 dark:text-slate-700"
-                              >
-                                •
-                              </span>
-                              <span
-                                className="font-mono text-xxs tracking-tight text-slate-500 dark:text-slate-400"
-                                title={metadataDetail.full}
-                              >
-                                {metadataDetail.inline}
-                              </span>
-                            </>
-                          ) : null}
+                          {new Date(row.createdAt).toLocaleString()}
                         </Text>
                       </div>
 
@@ -1310,7 +1179,7 @@ export function CreditsPanel() {
                         className={`shrink-0 text-right tabular-nums leading-tight ${deltaClass}`}
                         data-testid="credit-ledger-delta"
                       >
-                        {formatDeltaValue(entry.delta)}
+                        {formatDeltaValue(row.delta)}
                       </Text>
                     </div>
                   </div>

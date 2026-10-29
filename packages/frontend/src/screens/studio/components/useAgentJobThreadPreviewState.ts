@@ -29,7 +29,7 @@ import {
 } from "./threadPreviewHelpers";
 import { resolveThreadPreviewSafeInsetPx } from "./threadPreviewGeometry";
 import { resolveSpineToneFromStatus } from "./ThreadSpine";
-import { summarizeTurnActivity, type TurnActivityPhase } from "./turnActivity";
+import { readTurnStepsRecord, summarizeTurnActivity, type TurnActivityPhase } from "./turnActivity";
 import { useTurnBrowserApproval } from "./turnBrowserApproval";
 import { isAutomaticRetryPending, readEarlierAttempts } from "./automaticRetryFold";
 import type { EarlierAttemptDetails } from "./AgentJobThreadPreviewLayout";
@@ -505,26 +505,37 @@ export function useAgentJobThreadPreviewState({
         : isCompleted && finalSpineTone === "danger"
           ? "failed"
           : "completed";
-  const activity = useMemo(
-    () =>
-      summarizeTurnActivity(threadMessages, {
-        jobId: jobId || null,
-        phase: activityPhase,
-        updates: detailUpdates,
-        viewerCanAnswer: browserApproval.viewerCanAnswer,
-        approvals: browserApproval.settled,
-        retry: earlierAttempts.length > 0,
-      }),
-    [
-      activityPhase,
-      browserApproval.settled,
-      browserApproval.viewerCanAnswer,
-      detailUpdates,
-      earlierAttempts.length,
-      jobId,
-      threadMessages,
-    ],
+  // The steps the controller stored with the turn's reply: all of them, also
+  // when this page of history starts in the middle of the turn.
+  const recordedSteps = useMemo(
+    () => (finalSummaryMessage ? readTurnStepsRecord(finalSummaryMessage, jobId || null) : null),
+    [finalSummaryMessage, jobId],
   );
+  const activity = useMemo(() => {
+    const options = {
+      jobId: jobId || null,
+      phase: activityPhase,
+      updates: detailUpdates,
+      viewerCanAnswer: browserApproval.viewerCanAnswer,
+      approvals: browserApproval.settled,
+    };
+    const loaded = summarizeTurnActivity(threadMessages, options);
+    if (!recordedSteps || (activityPhase !== "completed" && activityPhase !== "cancelled")) {
+      return loaded;
+    }
+    // A finished turn's line is worked out from its stored steps, so a reload
+    // reads the same words as the moment it ended. Details lists what loaded.
+    const recorded = summarizeTurnActivity(recordedSteps, { ...options, updates: [] });
+    return { ...loaded, summary: recorded.summary ?? loaded.summary };
+  }, [
+    activityPhase,
+    browserApproval.settled,
+    browserApproval.viewerCanAnswer,
+    detailUpdates,
+    jobId,
+    recordedSteps,
+    threadMessages,
+  ]);
 
   useEffect(() => {
     const allowed = new Set(detailUpdates.map((entry) => entry.id));

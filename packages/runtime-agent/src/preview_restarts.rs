@@ -15,7 +15,9 @@
 //!    and record it in the CLI's preview state file under the CLI's state
 //!    lock, as `instafy preview open` does, so `instafy preview list/close`
 //!    see it. A recorded client is reused or stopped only while its process
-//!    is still that rathole client.
+//!    is still that rathole client. A site this restart started is recorded
+//!    with it, as `instafy preview open --start` records its own, so
+//!    `instafy preview close` stops that site too.
 //! 4. Report the outcome; the controller probes the site through the tunnel
 //!    before it calls the wake done.
 
@@ -44,7 +46,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_SETTLE: Duration = Duration::from_millis(250);
 /// How long a restart waits for an `instafy preview` command that holds the
 /// CLI's state lock, and when a lock left by one that died is taken over.
-const STATE_LOCK_WAIT: Duration = Duration::from_secs(30);
+/// `instafy preview open --start` holds it while the site it starts comes
+/// up (as long as `PORT_WAIT`) and its preview opens, so a card pressed
+/// meanwhile waits that out rather than failing. With this restart's own
+/// site start it still ends well before the controller claims the wake
+/// again (`WAKE_CLAIM_RETRY_SECONDS`, 180 s).
+const STATE_LOCK_WAIT: Duration = Duration::from_secs(90);
 const STATE_LOCK_STALE: Duration = Duration::from_secs(10 * 60);
 /// Environment a restarted site may see on top of the helper baseline.
 const SITE_EXTRA_ENV_KEYS: &[&str] = &["WORKSPACE_DIR", "WORKSPACE_PROJECT_DIR"];
@@ -297,22 +304,29 @@ pub async fn run_preview_restart(
         "the tunnel credentials were not usable",
     )?;
 
+    let mut site = None;
     if !site_answers(restart.port, &restart.path).await {
         let cwd = plainly(
             resolve_serve_cwd(&environment.workspace_dir, &restart.serve.cwd),
             "the start command's directory is missing or outside the workspace",
         )?;
-        plainly(
+        let pid = plainly(
             start_site(environment, restart, &cwd).await,
             "the start command could not be run",
         )?;
+        // Its command line now that it answers: what `instafy preview close`
+        // checks before it stops the site.
+        site = Some(StartedSite {
+            pid,
+            command: process_command_line(pid),
+        });
     }
     // Waiting for the CLI's state lock and the client's first moments block:
     // off the async workers, so heartbeats and jobs keep running meanwhile.
     let environment = environment.clone();
     let restart = restart.clone();
     let started = tokio::task::spawn_blocking(move || {
-        start_tunnel_client(&environment, &restart, &config_body)
+        start_tunnel_client(&environment, &restart, &config_body, site.as_ref())
     })
     .await
     .map_err(|error| anyhow!("the tunnel client task failed: {error}"));
@@ -347,6 +361,13 @@ pub fn resolve_serve_cwd(workspace_dir: &Path, relative: &str) -> Result<PathBuf
         bail!("the start command's directory {relative:?} is not inside the workspace");
     }
     Ok(resolved)
+}
+
+/// The site a restart started: the process that leads its own process group,
+/// and its command line once the site answered.
+pub struct StartedSite {
+    pub pid: i64,
+    pub command: Option<String>,
 }
 
 /// Any HTTP answer below 500 means a server is there, as the CLI decides.
@@ -401,12 +422,14 @@ fn open_log(path: &Path) -> Result<std::fs::File> {
         .with_context(|| format!("failed to open {}", path.display()))
 }
 
+/// Start the recorded command and wait for the port. The pid of the process
+/// that leads the site's process group.
 #[cfg(unix)]
 async fn start_site(
     environment: &RestartEnvironment,
     restart: &PreviewRestart,
     cwd: &Path,
-) -> Result<()> {
+) -> Result<i64> {
     let log_path = environment
         .instafy_dir()
         .join("cli-preview-logs")
@@ -433,8 +456,11 @@ async fn start_site(
             restart.serve.argv[0], restart.serve.cwd
         )
     })?;
-    let pid = child.id();
-    info!(preview_id = %restart.preview_id, ?pid, "started the preview's site");
+    let pid = child
+        .id()
+        .map(i64::from)
+        .ok_or_else(|| failed("the start command has no process"))?;
+    info!(preview_id = %restart.preview_id, pid, "started the preview's site");
 
     let deadline = Instant::now() + environment.port_wait;
     loop {
@@ -460,7 +486,7 @@ async fn start_site(
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
-    Ok(())
+    Ok(pid)
 }
 
 #[cfg(not(unix))]
@@ -468,7 +494,7 @@ async fn start_site(
     _environment: &RestartEnvironment,
     _restart: &PreviewRestart,
     _cwd: &Path,
-) -> Result<()> {
+) -> Result<i64> {
     Err(failed(
         "restarting a preview's site is not supported on this platform",
     ))
@@ -573,6 +599,11 @@ fn process_command_line(pid: i64) -> Option<String> {
         .ok()?;
     let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!line.is_empty()).then_some(line)
+}
+
+#[cfg(not(unix))]
+fn process_command_line(_pid: i64) -> Option<String> {
+    None
 }
 
 /// The CLI's rule (`commandLineIsRatholeClient`): the line ends with exactly
@@ -755,11 +786,15 @@ fn entry_i64(entry: &JsonValue, key: &str) -> Option<i64> {
 
 /// Start (or keep) the preview's tunnel client and record it the way the CLI
 /// does in `~/.instafy/cli-preview-state.json`, under the CLI's state lock.
+/// The entry records the site too: the one this restart started, else the
+/// one it already recorded (the site answered, so nothing was started); and
+/// it keeps what `instafy preview open` recorded for this preview.
 #[cfg(unix)]
 fn start_tunnel_client(
     environment: &RestartEnvironment,
     restart: &PreviewRestart,
     config_body: &str,
+    site: Option<&StartedSite>,
 ) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
@@ -847,7 +882,7 @@ fn start_tunnel_client(
         .and_then(|entry| entry_str(entry, "startedAt"))
         .map(str::to_string)
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-    let entry = json!({
+    let mut entry = json!({
         "previewId": restart.preview_id,
         "projectId": environment.project_id,
         "title": restart.title,
@@ -860,6 +895,32 @@ fn start_tunnel_client(
         "startedAt": started_at,
         "binary": binary,
     });
+    if let Some(record) = entry.as_object_mut() {
+        // What `instafy preview open` recorded for this same preview stays: how
+        // `--start` starts the site, and the domain and Studio origin its viewers
+        // come from (a site served in preview mode answers only those).
+        let earlier = |key: &str| current.and_then(|entry| entry.get(key)).cloned();
+        for key in ["start", "hostSuffix", "studioOrigin"] {
+            if let Some(value) = earlier(key) {
+                record.insert(key.to_string(), value);
+            }
+        }
+        match site {
+            Some(site) => {
+                record.insert("startedPid".to_string(), json!(site.pid));
+                if let Some(command) = &site.command {
+                    record.insert("startedCommand".to_string(), json!(command));
+                }
+            }
+            None => {
+                for key in ["startedPid", "startedCommand"] {
+                    if let Some(value) = earlier(key) {
+                        record.insert(key.to_string(), value);
+                    }
+                }
+            }
+        }
+    }
     let mut next = vec![entry];
     next.extend(previews.into_iter().filter(|existing| {
         entry_str(existing, "previewId") != Some(restart.preview_id.as_str())
@@ -877,6 +938,7 @@ fn start_tunnel_client(
     _environment: &RestartEnvironment,
     _restart: &PreviewRestart,
     _config_body: &str,
+    _site: Option<&StartedSite>,
 ) -> Result<()> {
     Err(failed(
         "restarting a preview's tunnel is not supported on this platform",
@@ -970,6 +1032,14 @@ mod tests {
                 // SAFETY: test-only; the stand-in client this test started.
                 unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
             }
+            // And the site the restart started, its whole process group, when it is still that site.
+            let site = entry_i64(&entry, "startedPid").unwrap_or(-1);
+            if process_command_line(site).is_some()
+                && process_command_line(site).as_deref() == entry_str(&entry, "startedCommand")
+            {
+                // SAFETY: test-only; the site this test's restart started, checked just above.
+                unsafe { libc::kill(-(site as libc::pid_t), libc::SIGTERM) };
+            }
         }
     }
 
@@ -1056,12 +1126,15 @@ mod tests {
             sleep(Duration::from_millis(100)).await;
         }
         let state = sandbox.state();
+        let site_command =
+            entry_i64(&state["previews"][0], "startedPid").and_then(process_command_line);
+        let answered = site_answers(port, "/").await;
         kill_recorded(&sandbox);
         // SAFETY: as above.
         unsafe { std::env::remove_var("CONTROLLER_ACCESS_TOKEN") };
         outcome?;
 
-        assert!(site_answers(port, "/").await, "the site answers");
+        assert!(answered, "the site answers");
         let listing: Vec<_> = std::fs::read_dir(&site)?
             .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
             .collect();
@@ -1076,6 +1149,15 @@ mod tests {
         assert_eq!(entry["previewId"], json!(restart.preview_id));
         assert_eq!(entry["localPort"], json!(port));
         assert!(entry.get("hostSuffix").is_none());
+        // The site it started is recorded with the preview, as `open --start`
+        // records its own, so `instafy preview close` stops it.
+        assert!(
+            entry["startedPid"].as_i64().is_some_and(|pid| pid > 0),
+            "{entry}"
+        );
+        let site_command = site_command.context("the started site runs")?;
+        assert!(site_command.contains("http.server"), "{site_command}");
+        assert_eq!(entry["startedCommand"], json!(site_command));
         assert_eq!(entry["binary"], json!(environment.rathole_bin));
         assert_eq!(entry["controllerUrl"], "http://controller.test");
         let config = std::fs::read_to_string(sandbox.home.join(
@@ -1122,11 +1204,41 @@ mod tests {
             },
             credentials: Some(credentials("already")),
         };
+        // `open --start` started this site earlier and recorded it.
+        let earlier = json!({
+            "start": { "argv": ["node", "site.mjs", "{port}"], "cwd": "." },
+            "startedPid": 999_999_999,
+            "startedCommand": "node site.mjs 4173",
+            "hostSuffix": "preview.test",
+            "studioOrigin": "https://studio.test",
+        });
+        let mut recorded = earlier.clone();
+        recorded["previewId"] = json!("already");
+        recorded["localPort"] = json!(port);
+        recorded["pid"] = json!(-1);
+        std::fs::create_dir_all(sandbox.home.join(".instafy"))?;
+        std::fs::write(
+            sandbox.home.join(".instafy/cli-preview-state.json"),
+            json!({ "version": 1, "previews": [recorded] }).to_string(),
+        )?;
         let outcome = run_preview_restart(&sandbox.environment(), &restart).await;
+        let state = sandbox.state();
         kill_recorded(&sandbox);
         server.abort();
         outcome?;
         assert!(!marker.exists(), "the start command must not run");
+        // The record of the site that answered is kept, and so is what the
+        // preview's viewers come from.
+        let entry = &state["previews"][0];
+        for key in [
+            "start",
+            "startedPid",
+            "startedCommand",
+            "hostSuffix",
+            "studioOrigin",
+        ] {
+            assert_eq!(entry[key], earlier[key], "{key}");
+        }
         Ok(())
     }
 
@@ -1360,8 +1472,9 @@ mod tests {
         };
         // A live `instafy preview` command holds it: the restart gives up and writes nothing.
         std::fs::write(&lock, std::process::id().to_string())?;
-        let error = start_tunnel_client(&sandbox.environment(), &restart("held"), "[client]\n")
-            .expect_err("must wait for the lock");
+        let error =
+            start_tunnel_client(&sandbox.environment(), &restart("held"), "[client]\n", None)
+                .expect_err("must wait for the lock");
         assert!(format!("{error:#}").contains("still running"), "{error:#}");
         assert!(
             !sandbox
@@ -1373,10 +1486,30 @@ mod tests {
 
         // Its holder died: the lock is taken over, and released after.
         std::fs::write(&lock, "999999999")?;
-        start_tunnel_client(&sandbox.environment(), &restart("free"), "[client]\n")?;
+        start_tunnel_client(&sandbox.environment(), &restart("free"), "[client]\n", None)?;
         kill_recorded(&sandbox);
         assert!(!lock.exists());
         assert_eq!(sandbox.state()["previews"][0]["previewId"], "free");
         Ok(())
+    }
+
+    /// `instafy preview open --start` holds the CLI's state lock from picking
+    /// the site's port until its preview is recorded, so through the site's
+    /// start, which it waits for as long as a restart waits for its own site
+    /// (`PORT_WAIT`), and up to half a minute of asking the server around it.
+    /// A card pressed meanwhile waits that out: its restart does not fail
+    /// because another chat's site is slow to start. And the longest restart
+    /// (its own site's start, that wait, a few seconds of probes) still ends
+    /// before the controller claims the wake again after 180 s.
+    #[test]
+    fn a_restart_waits_for_the_lock_longer_than_an_open_may_hold_it_while_its_site_starts() {
+        assert!(
+            STATE_LOCK_WAIT >= PORT_WAIT + Duration::from_secs(30),
+            "{STATE_LOCK_WAIT:?} must outlast a site's start ({PORT_WAIT:?}) and the open around it"
+        );
+        assert!(
+            PORT_WAIT + STATE_LOCK_WAIT + Duration::from_secs(20) < Duration::from_secs(180),
+            "a restart must end before its wake is claimed again"
+        );
     }
 }

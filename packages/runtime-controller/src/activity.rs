@@ -726,8 +726,10 @@ fn parse_cursor(
 }
 
 /// The viewer's current grants, computed once so the scan is bounded to the
-/// projects and teams they belong to (the same rule the inbox applies).
-const ACCESS_CTE: &str = "with accessible as (
+/// projects and teams they belong to (the same rule the inbox applies). The
+/// Credits panel names a turn's chat by the same rule
+/// (crate::credits::load_turn_chat_names).
+pub(crate) const ACCESS_CTE: &str = "with accessible as (
         select p.id, p.org_id, p.name
         from projects p
         where p.status <> 'deleted'

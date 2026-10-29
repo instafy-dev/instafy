@@ -125,15 +125,7 @@ import {
 } from "../../../location/requestCurrentLocation";
 import { setPendingAgentProfileTarget } from "./agentProfileDeepLink";
 import { ChatBubbleRow } from "./ChatBubbleRow";
-import {
-  CHAT_SPEAKER_MARKER_SELECTOR,
-  isAssistantSpeakerMarker,
-  isHumanSpeakerMarker,
-  hasReachedSpeakerHandoffLine,
-  readStickyChatSpeakerMarker,
-  resolveSpeakerHandoffLine,
-  type StickyChatSpeaker,
-} from "./chatSpeakerMarker";
+import { browserTurnArrival } from "./browserTurnArrival";
 import { ChatColumn } from "./ChatColumn";
 import { ChatLoadingPill } from "./ChatLoadingPill";
 import { ChatMessageContextToolbar } from "./ChatMessageContextToolbar";
@@ -181,10 +173,10 @@ import {
   shouldAssistantMessagesShareVisualGroup,
 } from "./assistantMessageGrouping";
 import {
-  COMPACTION_STATUS_LABEL,
   isTranscriptTailActiveTurnOutcome,
   resolveJobThreadTypingCoverage,
   resolveMultiAgentTypingStatus,
+  resolveSingleAgentTypingStatus,
   resolveTranscriptTailKey,
   resolveTypingIndicatorState,
   type TypingIndicatorPhase,
@@ -409,7 +401,7 @@ import {
   writeBrowserSessionTransport,
   writeBrowserTransportPreference,
 } from "./browserTransportPreference";
-import { CHAT_TRANSCRIPT_HEADER_INSET_PX, ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
+import { ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
@@ -515,25 +507,6 @@ function formatCredentialConnectionFailure(raw: string | null | undefined): stri
   return compact.length <= maxChars
     ? compact
     : `${compact.slice(0, maxChars - 1).trimEnd()}…`;
-}
-
-const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
-function speakersEqual(left: StickyChatSpeaker | null, right: StickyChatSpeaker | null): boolean {
-  if (left === null || right === null) {
-    return left === right;
-  }
-  if (left.kind === "assistant") {
-    return (
-      right.kind === "assistant" &&
-      left.handle === right.handle &&
-      left.avatarSeed === right.avatarSeed
-    );
-  }
-  return (
-    right.kind === "human" &&
-    left.label === right.label &&
-    left.avatarSeed === right.avatarSeed
-  );
 }
 
 function hasVisibleConversationAnchor(messages: ChatMessage[]): boolean {
@@ -3098,6 +3071,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     candidates.sort((left, right) => resolveRunSortTimestamp(right) - resolveRunSortTimestamp(left));
     return candidates;
   }, [activeConversationEntry?.controllerId, activeConversationEntry?.pendingRunIds, messages, runs]);
+  // A browser turn of this chat on its way: the Browser view says where Octo
+  // is going over the blank tab it starts on.
+  const browserArrival = useMemo(
+    () => browserTurnArrival(activeConversationRuns, messages),
+    [activeConversationRuns, messages],
+  );
   const activeConversationRun = activeConversationRuns[0] ?? null;
   const showOutOfCreditsNotice = outOfCredits && activeConversationRuns.length === 0;
   // Keep the complete active-handle set for existing busy/queue overlap
@@ -3449,18 +3428,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           }
         : null,
   });
+  // The row before a turn's first step, which the turn's own line takes over
+  // from: one "Starting…" from the send until then, however long it takes.
+  const singleTypingStatus = resolveSingleAgentTypingStatus({
+    state: typingIndicatorState,
+    runStatus: activeConversationRun?.status ?? null,
+    agentName: typingAgentDisplayName,
+    waiting: waitingActivityCopy,
+  });
   const typingStatusLabel = hasMultipleTypingAgents
     ? (workspaceStarting ? waitingActivityCopy.label : multiTypingStatus.label)
-    : (typingIndicatorState?.label ??
-      (typingIndicatorState?.phase === "finalizing"
-        ? "Finalizing…"
-        : typingIndicatorState?.phase === "compacting"
-          ? COMPACTION_STATUS_LABEL
-        : typingIndicatorState?.phase === "thinking"
-          ? "Thinking…"
-          : typingIndicatorState?.phase === "waiting"
-            ? waitingActivityCopy.label
-            : "Typing…"));
+    : singleTypingStatus.label;
   // Every typing label is one truncated line except the runtime-busy notice,
   // which carries an instruction and is meant to wrap.
   const typingStatusIsRuntimeBusyNotice =
@@ -3469,17 +3447,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ? workspaceStarting
       ? waitingActivityCopy.ariaLabel
       : multiTypingStatus.ariaLabel
-    : typingIndicatorState?.label
-      ? `${typingAgentDisplayName} status: ${typingIndicatorState.label}`
-      : typingIndicatorState?.phase === "finalizing"
-        ? `${typingAgentDisplayName} is finalizing response`
-        : typingIndicatorState?.phase === "compacting"
-          ? `${typingAgentDisplayName} is reorganizing context`
-        : typingIndicatorState?.phase === "thinking"
-          ? `${typingAgentDisplayName} is thinking`
-          : typingIndicatorState?.phase === "waiting"
-            ? waitingActivityCopy.ariaLabel
-            : `${typingAgentDisplayName} is typing`;
+    : singleTypingStatus.ariaLabel;
   const staleStartingRecoveryKey = useMemo(
     () =>
       resolveStaleStartingRecoveryKey({
@@ -3603,93 +3571,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   useEffect(() => {
     setIsThinkingLabelExpanded(false);
   }, [typingIndicatorState?.label, isAssistantTyping]);
-
-  const [stickyChatSpeaker, setStickyChatSpeaker] =
-    useState<StickyChatSpeaker | null>(null);
-  // Presence stays outside the scroller while the message ink fades beneath
-  // it. The overlay's box is also the handoff line the effect below measures.
-  const stickySpeakerOverlayRef = useRef<HTMLDivElement>(null);
-
-  useLayoutEffect(() => {
-    const scrollContainer = scrollContainerRef.current;
-    if (!scrollContainer) {
-      setStickyChatSpeaker(null);
-      return;
-    }
-
-    let animationFrameId: number | null = null;
-    const readAndApplySpeaker = () => {
-      // Hand off the inline identity on the pill's own line, so the pill
-      // appears where the identity was as it fades up the transcript.
-      const containerRect = scrollContainer.getBoundingClientRect();
-      const handoffLine = resolveSpeakerHandoffLine(
-        containerRect.top,
-        stickySpeakerOverlayRef.current?.getBoundingClientRect() ?? null,
-        CHAT_TRANSCRIPT_HEADER_INSET_PX,
-      );
-      const markers = Array.from(
-        scrollContainer.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR),
-      );
-      let nextSpeaker: StickyChatSpeaker | null = null;
-      for (const marker of markers) {
-        const markerTop = marker.getBoundingClientRect().top;
-        const inlineSpeaker =
-          isAssistantSpeakerMarker(marker) || isHumanSpeakerMarker(marker)
-            ? marker.nextElementSibling
-            : null;
-        const visibleInlineSpeaker =
-          inlineSpeaker instanceof HTMLElement && inlineSpeaker.matches(NARROW_SPEAKER_INLINE_SELECTOR)
-            ? inlineSpeaker
-            : null;
-        const hasReachedStickyLine = hasReachedSpeakerHandoffLine(
-          markerTop,
-          visibleInlineSpeaker?.getBoundingClientRect() ?? null,
-          handoffLine,
-        );
-        if (visibleInlineSpeaker) {
-          if (hasReachedStickyLine) {
-            visibleInlineSpeaker.dataset.chatSpeakerCovered = "true";
-          } else {
-            delete visibleInlineSpeaker.dataset.chatSpeakerCovered;
-          }
-        }
-        if (hasReachedStickyLine) {
-          nextSpeaker = readStickyChatSpeakerMarker(marker);
-        }
-      }
-      setStickyChatSpeaker((currentSpeaker) =>
-        speakersEqual(currentSpeaker, nextSpeaker) ? currentSpeaker : nextSpeaker,
-      );
-    };
-    const scheduleSpeakerUpdate = () => {
-      if (animationFrameId !== null) {
-        return;
-      }
-      animationFrameId = window.requestAnimationFrame(() => {
-        animationFrameId = null;
-        readAndApplySpeaker();
-      });
-    };
-
-    readAndApplySpeaker();
-    scrollContainer.addEventListener("scroll", scheduleSpeakerUpdate, { passive: true });
-    window.addEventListener("resize", scheduleSpeakerUpdate);
-
-    return () => {
-      if (animationFrameId !== null) {
-        window.cancelAnimationFrame(animationFrameId);
-      }
-      scrollContainer.removeEventListener("scroll", scheduleSpeakerUpdate);
-      window.removeEventListener("resize", scheduleSpeakerUpdate);
-    };
-  }, [
-    activeConversationId,
-    displayedMessages,
-    isAssistantTyping,
-    scrollContainerRef,
-    typingAgentAvatarSeed,
-    typingAgentHandle,
-  ]);
 
   const conversationLabel = activeConversation?.title ? `Conversation: ${activeConversation.title}` : "Conversation";
 
@@ -6359,27 +6240,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         scrollContainerRef={scrollContainerRef}
         scrollPaddingBottom={chatScrollPaddingBottom}
         header={
-      <div
-        className="px-3 pt-2 sm:px-4"
-        data-testid={conversationWorkspace && !jobThread ? "chat-sticky-speaker-row" : "chat-conversation-roster-row"}
-      >
+      // A turn's own header names who wrote it, so nothing sticks over the
+      // transcript to say it again. The roster rides above it where a chat
+      // shows one.
+      !conversationWorkspace || jobThread ? (
+      <div className="px-3 pt-2 sm:px-4" data-testid="chat-conversation-roster-row">
         {/* Constrain to the shared 56rem chat column so the roster's right
-            edge lands on the message column, not the panel edge. The sticky
-            speaker pill takes the column's left side (fading in/out as the
-            transcript scrolls) and the roster stays right-aligned; the pill's
-            box keeps the pill's height with or without one, so the roster
-            never shifts when the pill appears or disappears. */}
-        <ChatColumn className="pointer-events-none flex items-center justify-between gap-2 [&>:last-child]:pointer-events-auto">
-          <ChatSpeakerStickyOverlay ref={stickySpeakerOverlayRef} speaker={stickyChatSpeaker} />
-          {!conversationWorkspace || jobThread ? (
-            <ConversationRoster
-              agents={conversationRosterAgents}
-              humans={conversationRosterHumans}
-              hasCredentialWarning={participantAgentsHaveCredentialWarning}
-            />
-          ) : null}
+            edge lands on the message column, not the panel edge. */}
+        <ChatColumn className="pointer-events-none flex items-center justify-end gap-2 [&>:last-child]:pointer-events-auto">
+          <ConversationRoster
+            agents={conversationRosterAgents}
+            humans={conversationRosterHumans}
+            hasCredentialWarning={participantAgentsHaveCredentialWarning}
+          />
         </ChatColumn>
       </div>
+      ) : undefined
         }
       >
         <OctoScrollMotionScope
@@ -6733,6 +6609,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     spaceBusy={spaceRunActive}
                     runApproval={browserRunApproval}
                     conversationId={activeConversationId ?? null}
+                    agentArrival={browserArrival}
                   />
                 </div>
               ) : null}

@@ -29,7 +29,7 @@ describe("shared form controls", () => {
     </>));
     for (const id of ["name", "role", "native-role"]) {
       const control = container.querySelector(`[data-testid="${id}"]`)!;
-      for (const rule of ["min-h-11", "sm:pointer-fine:min-h-[38px]", "px-3", "py-2", "text-base", "sm:text-sm", "rounded-xl"]) {
+      for (const rule of ["min-h-11", "sm:pointer-fine:min-h-[38px]", "px-3", "py-2", "text-base", "sm:pointer-fine:text-sm", "rounded-xl"]) {
         expect(control.classList.contains(rule), `${id}: ${rule}`).toBe(true);
       }
     }

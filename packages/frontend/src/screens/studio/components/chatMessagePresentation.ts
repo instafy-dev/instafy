@@ -409,6 +409,9 @@ export function synthesizeAgentJobThreadMessages(
 
   const threadStartMessageIdByJobId = new Map<string, string>();
   const firstVisibleMessageIdByJobId = new Map<string, string>();
+  // A card a run posts before its first step: the preview card of the
+  // `instafy preview open` that is still running, say.
+  const firstCardIdByJobId = new Map<string, string>();
   visible.forEach((message) => {
     if (isWorkerInputQuestion(message)) return;
     const jobId = extractAgentJobId(message);
@@ -425,11 +428,22 @@ export function synthesizeAgentJobThreadMessages(
       return;
     }
     const messageType = (getMessageType(message) ?? "").trim().toLowerCase();
+    if (THREAD_ACTION_CARD_TYPES.has(messageType) && !firstCardIdByJobId.has(jobId)) {
+      firstCardIdByJobId.set(jobId, message.id);
+    }
     const hasFileChanges = Array.isArray(message.files) && message.files.length > 0;
     if (hasFileChanges || threadTriggerTypes.has(messageType)) {
       threadStartMessageIdByJobId.set(jobId, message.id);
     }
   });
+  // A run's card sits inside its turn, never as a message of its own above
+  // it: a run that has a thread starts it where its first card is, when that
+  // card came before its first step.
+  for (const [jobId, cardId] of firstCardIdByJobId) {
+    if (threadStartMessageIdByJobId.has(jobId)) {
+      threadStartMessageIdByJobId.set(jobId, cardId);
+    }
+  }
   // The retry is a turn of its own, whatever it did, so its Details can hold
   // the attempt it replaced.
   const foldedJobIds = new Set<string>();
@@ -482,11 +496,6 @@ export function synthesizeAgentJobThreadMessages(
 
   const output: ChatMessage[] = [];
   const insertedThreads = new Set<string>();
-  // A run thread draws every action card of its job inline. A card that sits
-  // before the thread's first step (one posted while that step's command is
-  // still running) already has its own row in the transcript, so the thread
-  // leaves it out rather than drawing it a second time.
-  const cardsShownBeforeThread = new Set<string>();
 
   visible.forEach((message) => {
     if (isWorkerInputQuestion(message)) {
@@ -524,9 +533,6 @@ export function synthesizeAgentJobThreadMessages(
       return;
     }
     if (message.id !== startMessageId && !insertedThreads.has(jobId)) {
-      if (THREAD_ACTION_CARD_TYPES.has((getMessageType(message) ?? "").trim().toLowerCase())) {
-        cardsShownBeforeThread.add(message.id);
-      }
       output.push(message);
       return;
     }
@@ -536,7 +542,7 @@ export function synthesizeAgentJobThreadMessages(
 
     insertedThreads.add(jobId);
     const jobMessages = threadMessagesByJobId.get(jobId) ?? [message];
-    const threadMessages = jobMessages.filter((candidate) => !cardsShownBeforeThread.has(candidate.id));
+    const threadMessages = jobMessages;
     const startedAt = jobMessages.reduce((minTimestamp, candidate) => {
       if (typeof candidate.timestamp !== "number") {
         return minTimestamp;

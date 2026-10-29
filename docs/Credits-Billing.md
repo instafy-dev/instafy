@@ -313,8 +313,12 @@ Starter guidance with the current defaults:
 - 200 units/day is the whole shared free budget
 - managed AI has a soft cap of 20 prompts/day by default
 - tunnels and hosted runtimes burn from the same pool, so heavy infra usage reduces how much managed AI remains that day
-- once per UTC day the balance tops back up to the daily limit (a balance at or above it gets
-  nothing), so what is left of one day's credits never adds to the next day's
+- once per UTC day the balance tops back up to the daily limit, so what is left of one day's
+  credits never adds to the next day's: the first status read or charge of the day that finds
+  the balance under the limit adds the difference. A balance at or above the limit gets nothing
+  then, but that day's top-up is still to come: the first time a later read or charge finds it
+  under the limit, that day, it is topped back up, at whatever hour that is, by however much it
+  fell (`attempt_daily_refill` and `daily_window_allows` in `credits.rs`)
 
 ### Turns Instafy starts by itself
 
@@ -466,7 +470,12 @@ records which jobs run on the platform key and which tokens they hold:
 
 ## Controller Endpoints
 - `GET /credits/status` — current team credit balance/limit.
-- `GET /credits/ledger` — recent burn/refill events.
+- `GET /credits/ledger` — recent burn/refill events. An Instafy AI turn's rows (its
+  `managed_ai_prompt` reserve, `managed_ai_adjustment` and `managed_ai_refund`, which share the
+  turn's `metadata.promptId`) also carry `chatName`, the title of the chat the turn was sent in,
+  when the viewer may open that chat by Home's rule (a space of theirs, and a chat that is not
+  private or that they created or take part in). Other rows, and a turn in a chat they may not
+  open, carry none.
 - `GET /credits/policy` — refill policy, plan catalog, and configured usage rates for metered services (including managed AI prompt costs).
 - `POST /credits` — burn/refill ledger events.
 - `POST /billing/checkout` — checkout or portal sessions.
@@ -482,13 +491,23 @@ Required envs (GitHub secrets/vars or local env):
 ## Frontend Flow
 - Credits panel calls `/credits/status` and `/credits/ledger` via the controller.
 - Credits panel now supports `Log` and `Graph` views over the same shared ledger data.
-- Under the balance, one line says what the daily refill does: "Tops back up to 800 credits every
-  day at 00:00 UTC", with the team's own `credit_limit`. That is what the ledger does: once per UTC
-  day, on the first status read or burn, a balance under the limit gets the difference as one
-  `auto_refill_daily` row, which the log calls "Daily top-up" (`attempt_daily_refill`). A balance at
-  or above the limit gets nothing that day. The graph's key calls every credit that came in
-  "Added": a top-up, a starting balance or a refund.
-- The log shows the newest 8 rows; Show more reveals the rest of the 100 the panel loads, 20 at a
-  time, and moves focus to the first row it revealed.
+- Under the balance, one line says what the daily refill does: "Tops back up to 800 credits once
+  a day", with the team's own `credit_limit`. That is what the ledger does: once per UTC day, the
+  first status read or burn that finds the balance under the limit adds the difference as one
+  `auto_refill_daily` row, which the log calls "Daily top-up" (`attempt_daily_refill`). That can
+  be at any hour: a day that starts at or above the limit tops up at its first dip below it, so
+  the line names no hour. The graph's key calls every credit that came in "Added": a top-up, a
+  starting balance or a refund.
+- The log shows one row per Instafy AI turn: its reserve, adjustment and refund added up, at the
+  time it was sent, named by its chat (`chatName`), or "A chat" when the viewer may not open that
+  chat. A turn that cost nothing in the end, refunded in full, has no row. Every other ledger row
+  is a row of its own ("Daily top-up", "Starting balance", "Hosted runtime"). A row shows its name,
+  its time and its amount ("1 credit", "14 credits"), never the model, the AI vendor, a token count
+  or an id: the ledger keeps those in each row's metadata, and the Usage section shows the rates.
+- The log shows the newest 8 rows; Show more reveals the rest of the 100 ledger rows the panel
+  loads, 20 at a time, and moves focus to the first row it revealed. A turn whose reserve is
+  older than those 100 rows has no row either: its later rows alone would show the wrong amount
+  (a refunded turn as "+1 credit"). An adjustment's `cost.reservedUnits` and a refund say that
+  the turn had a reserve.
 - Checkout/portal actions call `/billing/checkout` with `action=checkout|portal`.
 - Low-balance copy should direct users to upgrade/refill via the billing flow.
