@@ -328,10 +328,9 @@ reply. There are two:
 Such a turn reserves its credit at dispatch like any other. When it ends with a reply (it
 succeeded, and its reply is not empty or a decline), its usage is reconciled like any turn's.
 When it fails, is stopped, expires or ends without a reply, its reserve and its daily prompt
-slot are given back (refund reason `system_turn_without_reply`), its tokens are not charged, and
-a runtime having held it changes nothing. The turn it continues or retries follows the rules
-for a turn the person sent: a failed turn keeps its charge unless it never reached a model
-(above).
+slot are given back (refund reason `system_turn_without_reply`) and its tokens are not charged,
+even when a runtime already ran it. The turn it continues or retries follows the rules for a
+turn the person sent: a failed turn keeps its charge unless it never reached a model (above).
 
 Billing reads only the controller's own marks on the job (`system_turns.rs`): the
 `browserHandBack` record that dispatch stamps on a hand-back it checked, and
