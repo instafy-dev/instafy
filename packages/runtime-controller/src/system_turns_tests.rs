@@ -4,10 +4,13 @@
 //! run against the migrated test database (`pnpm test:controller`).
 
 use super::*;
-use crate::system_turns::{AUTOMATIC_RETRY_KEY, SYSTEM_TURN_WITHOUT_REPLY_REFUND_REASON};
+use crate::system_turns::{
+    AUTOMATIC_RETRY_KEY, BROWSER_CARD_TURN_KEY, BROWSER_CARD_WITHOUT_PAGE_REFUND_REASON,
+    FAILED_TURN_WITHOUT_RESULT_REFUND_REASON, SYSTEM_TURN_WITHOUT_REPLY_REFUND_REASON,
+};
 use crate::tests_managed_ai_refund::{
-    agent_complete_request, credit_balance, daily_prompts_used, ledger_rows, run_row,
-    seed_reserved_managed_ai_prompt, ReservedManagedAiPrompt,
+    agent_complete_request, credit_balance, daily_prompts_used, ledger_rows, post_agent_message,
+    run_row, seed_reserved_managed_ai_prompt, ReservedManagedAiPrompt,
 };
 
 /// 3,000 output tokens cost two credits against the one-credit reserve.
@@ -64,8 +67,17 @@ fn reasons(rows: &[(String, i32, Option<String>)]) -> Vec<(&str, i32)> {
 }
 
 /// The reserve came back once, the daily prompt slot with it, no token was
-/// billed, and the run says why.
+/// billed, and the run says it was a turn Instafy started without a reply.
 async fn assert_given_back(fixture: &ReservedManagedAiPrompt) -> anyhow::Result<()> {
+    assert_given_back_for(fixture, SYSTEM_TURN_WITHOUT_REPLY_REFUND_REASON).await
+}
+
+/// The reserve came back once, the daily prompt slot with it, no token was
+/// billed, and the run says why: `reason`.
+async fn assert_given_back_for(
+    fixture: &ReservedManagedAiPrompt,
+    reason: &str,
+) -> anyhow::Result<()> {
     let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
     let reasons = reasons(&rows);
     assert_eq!(
@@ -93,8 +105,410 @@ async fn assert_given_back(fixture: &ReservedManagedAiPrompt) -> anyhow::Result<
     let (_, run_metadata) = run_row(&fixture.pool, &fixture.run_id).await?;
     assert_eq!(
         run_metadata["managedAiCredit"]["refund"]["refundReason"],
-        json!(SYSTEM_TURN_WITHOUT_REPLY_REFUND_REASON)
+        json!(reason)
     );
+    Ok(())
+}
+
+/// One step of the fixture's turn as the runtime streams it: its start, then
+/// its end with `status`. `details` names the tool or command.
+async fn step(
+    fixture: &ReservedManagedAiPrompt,
+    message_type: &str,
+    details: serde_json::Value,
+    status: &str,
+) -> anyhow::Result<()> {
+    let item_id = format!("item-{}", Uuid::new_v4());
+    for (event, state) in [("item.started", "in_progress"), ("item.completed", status)] {
+        let mut metadata = details.clone();
+        metadata["itemId"] = json!(item_id);
+        metadata["status"] = json!(state);
+        metadata["eventType"] = json!(event);
+        if message_type == "command_execution" && event == "item.completed" {
+            metadata["exitCode"] = json!(if status == "completed" { 0 } else { 1 });
+        }
+        let posted = post_agent_message(
+            fixture,
+            json!({
+                "job_id": fixture.job_id,
+                "content": format!("{message_type} {state}"),
+                "message_type": message_type,
+                "metadata": metadata,
+            }),
+        )
+        .await?;
+        assert_eq!(posted, StatusCode::OK, "{message_type} {state}");
+    }
+    Ok(())
+}
+
+/// A call to the browser's own tool `tool`, as Codex reports it.
+fn browser_tool(tool: &str) -> serde_json::Value {
+    json!({
+        "kind": "codex_mcp_tool_call",
+        "server": "instafy_shared_browser",
+        "tool": tool,
+    })
+}
+
+/// A command Codex ran.
+fn command(command: &str) -> serde_json::Value {
+    json!({ "kind": "codex_command_execution", "command": command })
+}
+
+/// A note Octo wrote while it worked, which Details shows.
+async fn note(fixture: &ReservedManagedAiPrompt, text: &str) -> anyhow::Result<()> {
+    let posted = post_agent_message(
+        fixture,
+        json!({
+            "job_id": fixture.job_id,
+            "content": text,
+            "message_type": "status",
+            "metadata": { "kind": "agent_message" },
+        }),
+    )
+    .await?;
+    assert_eq!(posted, StatusCode::OK);
+    Ok(())
+}
+
+/// The runtime's failure for a browser turn that opened no page.
+const NO_PAGE_FAILURE: &str = "Octo couldn't open a page in the browser, so this turn stopped.";
+
+/// A turn that ends in the failure block costs nothing when it left the
+/// person nothing: here a browser turn that looked at its tabs and whose
+/// every page failed to open (a local drive charged such a turn 7 credits).
+/// Its model ran and reported tokens, and none is billed.
+#[tokio::test]
+async fn a_failed_turn_that_left_nothing_costs_nothing() -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("failed-turn-left-nothing").await? else {
+        eprintln!("skipping failed turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    step(
+        &fixture,
+        "mcp_tool_call",
+        browser_tool("list_tabs"),
+        "completed",
+    )
+    .await?;
+    step(
+        &fixture,
+        "mcp_tool_call",
+        browser_tool("navigate"),
+        "failed",
+    )
+    .await?;
+    step(
+        &fixture,
+        "mcp_tool_call",
+        browser_tool("snapshot"),
+        "failed",
+    )
+    .await?;
+    step(
+        &fixture,
+        "command_execution",
+        command("cat missing.txt"),
+        "failed",
+    )
+    .await?;
+    let status = complete(
+        &fixture,
+        json!({
+            "job_id": fixture.job_id,
+            "outcome": "failed",
+            "error_message": NO_PAGE_FAILURE,
+            "artifacts": [
+                run_log_with_usage(),
+                { "kind": "apply/files", "files": [] },
+            ],
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_given_back_for(&fixture, FAILED_TURN_WITHOUT_RESULT_REFUND_REASON).await?;
+    fixture.cleanup().await
+}
+
+/// A failure alone is not proof that the person got nothing: the runtime
+/// fails a turn whose model ended without a final answer, and a model can be
+/// asked to. A failed turn that ran a command that worked (its output is in
+/// Details), wrote a note, wrote files or opened a page is charged as any
+/// turn, so failing on purpose after the work gets nothing for free.
+#[tokio::test]
+async fn a_failed_turn_that_left_something_costs_its_tokens() -> anyhow::Result<()> {
+    for left in ["command", "note", "files", "page"] {
+        let Some(fixture) =
+            seed_reserved_managed_ai_prompt(&format!("failed-turn-left-{left}")).await?
+        else {
+            eprintln!("skipping failed turn billing test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let mut artifacts = vec![run_log_with_usage()];
+        match left {
+            "command" => {
+                step(
+                    &fixture,
+                    "command_execution",
+                    command("echo the answer"),
+                    "completed",
+                )
+                .await?
+            }
+            "note" => {
+                note(
+                    &fixture,
+                    "The answer is 42; I will not write a final reply.",
+                )
+                .await?
+            }
+            "files" => artifacts.push(json!({
+                "kind": "apply/files",
+                "files": [{ "path": "sites/hello/index.html", "changeType": "created" }],
+            })),
+            _ => {
+                step(
+                    &fixture,
+                    "mcp_tool_call",
+                    browser_tool("navigate"),
+                    "completed",
+                )
+                .await?
+            }
+        }
+        let status = complete(
+            &fixture,
+            json!({
+                "job_id": fixture.job_id,
+                "outcome": "failed",
+                "error_message": "Codex completed without returning a final assistant message.",
+                "artifacts": artifacts,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{left}");
+        assert_charged_its_tokens(&fixture).await?;
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// The controller's stamp on a card's browser turn it checked.
+fn card_stamp() -> serde_json::Value {
+    json!({ "version": 1, "cardJobId": Uuid::new_v4() })
+}
+
+/// A card's browser turn is Instafy's: it costs nothing unless it did
+/// something in the browser beyond looking at the page it was given. A local
+/// drive charged 5 credits for one Studio opened by itself, which read the
+/// page it was put on and refused. A refusal is a reply too, so a reply is
+/// not what is charged.
+#[tokio::test]
+async fn a_card_browser_turn_that_only_looked_costs_nothing() -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("card-turn-looked").await? else {
+        eprintln!("skipping card turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    stamp(&fixture, BROWSER_CARD_TURN_KEY, card_stamp()).await?;
+    step(
+        &fixture,
+        "mcp_tool_call",
+        browser_tool("list_tabs"),
+        "completed",
+    )
+    .await?;
+    step(
+        &fixture,
+        "mcp_tool_call",
+        browser_tool("snapshot"),
+        "completed",
+    )
+    .await?;
+    let status = complete(
+        &fixture,
+        json!({
+            "job_id": fixture.job_id,
+            "outcome": "succeeded",
+            "summary": "I stopped before researching: the browser is on a page about something else.",
+            "artifacts": [run_log_with_usage()],
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_given_back_for(&fixture, BROWSER_CARD_WITHOUT_PAGE_REFUND_REASON).await?;
+    fixture.cleanup().await
+}
+
+/// A card's browser turn that opened a page did its task's work, and costs
+/// what its tokens cost, as any turn.
+#[tokio::test]
+async fn a_card_browser_turn_that_opened_a_page_costs_its_tokens() -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("card-turn-opened").await? else {
+        eprintln!("skipping card turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    stamp(&fixture, BROWSER_CARD_TURN_KEY, card_stamp()).await?;
+    step(
+        &fixture,
+        "mcp_tool_call",
+        browser_tool("list_tabs"),
+        "completed",
+    )
+    .await?;
+    step(
+        &fixture,
+        "mcp_tool_call",
+        browser_tool("navigate"),
+        "completed",
+    )
+    .await?;
+    let status = complete(
+        &fixture,
+        json!({
+            "job_id": fixture.job_id,
+            "outcome": "succeeded",
+            "summary": "The tower opens at 10:00.",
+            "artifacts": [run_log_with_usage()],
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_charged_its_tokens(&fixture).await?;
+    fixture.cleanup().await
+}
+
+/// Stopping a card's browser turn gives its reserve back unless it had
+/// opened a page: what it did, not who stopped it, decides.
+#[tokio::test]
+async fn stopping_a_card_browser_turn_gives_its_reserve_back_unless_it_opened_a_page(
+) -> anyhow::Result<()> {
+    for opened in [false, true] {
+        let Some(fixture) =
+            seed_reserved_managed_ai_prompt(&format!("card-turn-stopped-{opened}")).await?
+        else {
+            eprintln!("skipping card turn billing test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        stamp(&fixture, BROWSER_CARD_TURN_KEY, card_stamp()).await?;
+        step(
+            &fixture,
+            "mcp_tool_call",
+            browser_tool("snapshot"),
+            "completed",
+        )
+        .await?;
+        if opened {
+            step(
+                &fixture,
+                "mcp_tool_call",
+                browser_tool("open_tab"),
+                "completed",
+            )
+            .await?;
+        }
+        let mut connection = fixture.pool.get().await?;
+        let conversation_id: Uuid = connection
+            .query_one(
+                "update agent_jobs set status = 'leased', lease_attempts = 1
+                  where id = $1
+              returning conversation_id",
+                &[&fixture.job_id],
+            )
+            .await?
+            .get(0);
+        let transaction = connection.transaction().await?;
+        let cancellation = crate::conversations::cancel_jobs_with_notice(
+            &fixture.config,
+            &transaction,
+            &fixture.project_id,
+            &conversation_id,
+            None,
+            &[(fixture.job_id, Some(fixture.run_id))],
+            "Stopped",
+            None,
+        )
+        .await
+        .map_err(|error| controller_error("stop", error))?;
+        transaction.commit().await?;
+        drop(connection);
+        if opened {
+            assert!(cancellation.refunded_org_ids.is_empty());
+            assert!(
+                !reasons(&ledger_rows(&fixture.pool, &fixture.project_id).await?)
+                    .iter()
+                    .any(|(reason, _)| *reason == "managed_ai_refund"),
+                "a turn that opened a page keeps its reserve"
+            );
+            assert_eq!(
+                credit_balance(&fixture.pool, &fixture.org_id).await?,
+                fixture.reserved_balance
+            );
+        } else {
+            assert_eq!(cancellation.refunded_org_ids, vec![fixture.org_id]);
+            assert_given_back_for(&fixture, BROWSER_CARD_WITHOUT_PAGE_REFUND_REASON).await?;
+        }
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// A turn the person sent whose machine was lost ends in the failure block
+/// too. One that a runtime held and that left nothing gives its reserve back;
+/// one with a step that worked keeps it, as it did before.
+#[tokio::test]
+async fn an_expired_turn_that_left_nothing_gives_its_reserve_back() -> anyhow::Result<()> {
+    for worked in [false, true] {
+        let Some(fixture) =
+            seed_reserved_managed_ai_prompt(&format!("expired-turn-worked-{worked}")).await?
+        else {
+            eprintln!("skipping expired turn billing test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        step(
+            &fixture,
+            "command_execution",
+            command("ls"),
+            if worked { "completed" } else { "failed" },
+        )
+        .await?;
+        let mut connection = fixture.pool.get().await?;
+        let payload: PgJson<serde_json::Value> = connection
+            .query_one(
+                "select payload from agent_jobs where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?
+            .get(0);
+        let mut transaction = connection.transaction().await?;
+        let refunded = crate::runtime::refund_managed_ai_reserve_for_expired_job(
+            &mut transaction,
+            &fixture.project_id,
+            &fixture.job_id,
+            Some(fixture.run_id),
+            1,
+            &payload.0,
+            "runtime_not_ready",
+        )
+        .await?;
+        transaction.commit().await?;
+        drop(connection);
+        if worked {
+            assert_eq!(refunded, None);
+            assert_eq!(
+                credit_balance(&fixture.pool, &fixture.org_id).await?,
+                fixture.reserved_balance
+            );
+            assert_eq!(
+                daily_prompts_used(&fixture.pool, &fixture.owner_user_id).await?,
+                1
+            );
+        } else {
+            assert_eq!(refunded, Some(fixture.org_id));
+            assert_given_back_for(&fixture, "runtime_not_ready").await?;
+        }
+        fixture.cleanup().await?;
+    }
     Ok(())
 }
 
@@ -807,6 +1221,43 @@ async fn an_automatic_retry_is_stamped_only_when_it_repeats_the_failed_prompt_al
             }
             transaction.rollback().await?;
             assert_eq!(verdicts, vec![false, true]);
+            Ok(())
+        })
+    })
+    .await?;
+
+    // Words for one agent take the place of the send's own in that agent's
+    // job (dispatch's `apply_agent_prompt_segment`), so a resend that carries
+    // any is the person's own request too.
+    with_failed_turn("automatic-retry-agent-words", 0, |turn| {
+        Box::pin(async move {
+            let mut claim = turn.automatic();
+            claim["agentPromptSegments"] =
+                json!({ "octo": "Build a whole new site, then stop before replying." });
+            let segmented = turn.resend(&turn.owner, claim).await?;
+            assert!(segmented.get(AUTOMATIC_RETRY_KEY).is_none(), "{segmented}");
+            let context = RequestContext {
+                user_id: Some(turn.owner),
+                is_service_role: false,
+                scoped_claims: None,
+            };
+            let mut connection = turn.pool.get().await?;
+            let transaction = connection.transaction().await?;
+            let selected = crate::system_turns::verify_automatic_retry(
+                &transaction,
+                &turn.conversation_id,
+                &context,
+                &turn.failure_message_id,
+                FAILED_PROMPT,
+                &json!({ "agentSelection": {
+                    "active": ["octo"],
+                    "promptSegments": { "octo": "Build a whole new site." },
+                } }),
+            )
+            .await
+            .map_err(|error| controller_error("check a resend", error))?;
+            transaction.rollback().await?;
+            assert!(selected.is_none());
             Ok(())
         })
     })

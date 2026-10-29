@@ -1,0 +1,4 @@
+{
+  "_comment": "What Studio sends for a card's browser turn: `browserCardContinuationPrefix` and then the card's task (browserRequest.ts browserRequestContinuation), or the task alone. The controller stamps such a send as a card's browser turn only when its words are exactly that (system_turns.rs verify_browser_card_turn), so Studio's test and the controller's both read this prefix.",
+  "browserCardContinuationPrefix": "Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n"
+}

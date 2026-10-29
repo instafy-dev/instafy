@@ -417,7 +417,7 @@ pub(crate) async fn agent_complete_request(
 
 /// Posts one of the leased job's progress messages, as the runtime streams
 /// them, through `/agent/message`.
-async fn post_agent_message(
+pub(crate) async fn post_agent_message(
     fixture: &ReservedManagedAiPrompt,
     body: serde_json::Value,
 ) -> anyhow::Result<StatusCode> {
@@ -457,6 +457,14 @@ async fn post_agent_complete(
 }
 
 const PROXY_401_ERROR: &str = "unexpected status 401 Unauthorized: proxy token missing credential_id for BYOC request, url: http://proxy:8789/v1/responses";
+
+/// An artifact saying the turn wrote a file. A failed turn that left the
+/// person nothing costs nothing whatever ended it (crate::system_turns), so a
+/// test of what a refusal refunds gives its turn something it left: then only
+/// the refusal rule can give the reserve back.
+fn wrote_a_file() -> serde_json::Value {
+    json!({ "kind": "apply/files", "files": [{ "path": "notes.md", "changeType": "changed" }] })
+}
 
 #[tokio::test]
 async fn managed_ai_prompt_refunds_when_completion_fails_before_upstream() -> anyhow::Result<()> {
@@ -605,6 +613,8 @@ async fn managed_ai_prompt_refunds_a_sign_in_the_proxy_could_not_renew() -> anyh
             eprintln!("skipping managed AI 424 refund test: TEST_DATABASE_URL not set");
             return Ok(());
         };
+        let mut artifacts = artifacts;
+        artifacts.as_array_mut().unwrap().push(wrote_a_file());
         let completion = json!({
             "job_id": fixture.job_id,
             "outcome": "failed",
@@ -846,7 +856,7 @@ async fn managed_ai_prompt_refunds_when_the_provider_refused_a_spent_limit() -> 
                 "job_id": fixture.job_id,
                 "outcome": "failed",
                 "error_message": case.error_message,
-                "artifacts": [case.receipt],
+                "artifacts": [case.receipt, wrote_a_file()],
             }),
         )
         .await?;
@@ -1009,6 +1019,7 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
         }
         let mut artifacts = case.artifacts;
         artifacts.as_array_mut().unwrap().push(receipt.clone());
+        artifacts.as_array_mut().unwrap().push(wrote_a_file());
 
         let status = post_agent_complete(
             &fixture,
@@ -1107,7 +1118,8 @@ async fn managed_ai_usage_adjustment_signals_credits_after_the_completion_commit
                             }
                         }
                     ]
-                }
+                },
+                wrote_a_file()
             ],
         }),
     )

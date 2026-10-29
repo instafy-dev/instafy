@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../types";
 import {
@@ -17,6 +20,24 @@ import {
   readBrowserRequestOf,
   type BrowserRequest,
 } from "../browserRequest";
+
+// What a card's browser turn sends is the controller's fixture too: it stamps
+// such a send as the card's own browser turn, which costs nothing unless it
+// does something in the browser, only when its words are exactly these
+// (runtime-controller system_turns.rs).
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "../../../../../../..");
+const systemTurnFixtures = JSON.parse(readFileSync(
+  resolve(repo, "packages/runtime-controller/src/system_turns_fixtures.json"), "utf8",
+)) as { browserCardContinuationPrefix: string };
+
+describe("browserRequestContinuation", () => {
+  it("sends the card's task after the prefix the controller checks for, and nothing else", () => {
+    const task = "Open https://app.example.test and find the opening hours.";
+    expect(browserRequestContinuation({ task, location: "auto" }))
+      .toBe(`${systemTurnFixtures.browserCardContinuationPrefix}${task}`);
+  });
+});
 
 function card(browserRequest: Record<string, unknown>, id = "card"): ChatMessage {
   return { id, role: "assistant", content: "Continue this task in Instafy's browser.", timestamp: 2,

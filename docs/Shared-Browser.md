@@ -1661,6 +1661,9 @@ unless the policy is `"covered"`.
   never stack up. The one-line record of a continuation names Octo only when
   Studio opened the browser by itself ("Octo opened Instafy's browser for
   …"); after the person's own press it reads "Opened Instafy's browser for …".
+  Either way the browser turn is the card's, and costs nothing unless it did
+  something in the browser beyond looking at the page it was given
+  ([Credits and Billing](Credits-Billing.md#turns-instafy-starts-by-itself)).
 - **Hand-back.** Only a card Octo builds from hands back: the runtime's card
   carries `browserRequest.continueBuilding` when Octo is building something (a
   page, a map) and continues it from what the browser finds, and its

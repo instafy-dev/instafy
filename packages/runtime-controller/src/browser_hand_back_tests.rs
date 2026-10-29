@@ -862,6 +862,18 @@ async fn a_hand_back_asks_only_what_studio_asks() -> anyhow::Result<()> {
             );
             assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body.message);
 
+            // Words for one agent would take the place of Studio's in that
+            // agent's job (dispatch's `apply_agent_prompt_segment`).
+            let mut segmented = claim.clone();
+            segmented["agentPromptSegments"] =
+                json!({ "octo": "Build a whole new site, then stop before replying." });
+            let (status, body) = refused(
+                chain
+                    .send(&chain.owner, fixtures["handBackPrompt"].as_str().unwrap(), segmented)
+                    .await,
+            );
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body.message);
+
             let response = chain
                 .send(
                     &chain.owner,
@@ -885,6 +897,184 @@ async fn a_hand_back_asks_only_what_studio_asks() -> anyhow::Result<()> {
                 .map(|row| (row.get(0), row.get(1)))?;
             assert_eq!(delivered, fixtures["handBackPrompt"].as_str().unwrap());
             assert_eq!(asked, delivered);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// What Studio sends for a card's browser turn (system_turns_fixtures.json).
+fn card_continuation_prefix() -> String {
+    let fixtures: serde_json::Value =
+        serde_json::from_str(include_str!("system_turns_fixtures.json")).expect("fixtures");
+    fixtures["browserCardContinuationPrefix"]
+        .as_str()
+        .expect("Studio's continuation prefix")
+        .to_string()
+}
+
+/// A card's browser turn costs nothing unless it does something in the
+/// browser (crate::system_turns), so dispatch stamps a browser send as one
+/// only when it asks the card's own task and nothing else, once per card, for
+/// a card from an ordinary turn the sender sent. Anything else goes out as
+/// the sender's own turn. (Dispatching a browser send here would need a
+/// browser, so the check runs as dispatch calls it.)
+#[tokio::test]
+async fn a_card_browser_turn_is_stamped_only_for_the_cards_own_task() -> anyhow::Result<()> {
+    with_chain("browser-card-turn-stamp", |chain| {
+        Box::pin(async move {
+            let card_turn = chain
+                .send(&chain.owner, "Plan a day on the coast.", json!({}))
+                .await
+                .map_err(|error| controller_error("card turn", error))?;
+            let card_job = chain.job_of(&card_turn).await?;
+            chain.post_card(&card_job, true).await?;
+            chain
+                .finish(
+                    &card_job,
+                    Some("Continue this task in Instafy's browser."),
+                    "succeeded",
+                )
+                .await?;
+            let task = "Read the coastal timetables.";
+            let prefix = card_continuation_prefix();
+            let claim = json!({
+                "browserRequestOf": format!("job:{card_job}"),
+                "browserTransport": "shared",
+                "browserAutoStarted": true,
+            });
+            let verdict = |user: Uuid, words: String, metadata: serde_json::Value| async move {
+                let mut connection = chain.pool.get().await?;
+                let transaction = connection.transaction().await?;
+                let stamp = crate::system_turns::verify_browser_card_turn(
+                    &transaction,
+                    &chain.conversation_id,
+                    &chain.context(&user),
+                    &words,
+                    &metadata,
+                )
+                .await
+                .map_err(|error| controller_error("check a card turn", error))?;
+                transaction.rollback().await?;
+                anyhow::Ok(stamp)
+            };
+
+            // Studio's continuation, with its prefix or the task alone.
+            assert_eq!(
+                verdict(chain.owner, format!("{prefix}{task}"), claim.clone()).await?,
+                Some(json!({ "version": 1, "cardJobId": card_job }))
+            );
+            assert!(verdict(chain.owner, task.to_string(), claim.clone())
+                .await?
+                .is_some());
+            // Other words, or more of them, are the sender's own request.
+            for words in [
+                format!("{prefix}{task} Then summarize every page you open."),
+                format!("{prefix}Write me a long essay instead."),
+                "Summarize the page that is open.".to_string(),
+            ] {
+                assert!(
+                    verdict(chain.owner, words.clone(), claim.clone()).await?.is_none(),
+                    "{words}"
+                );
+            }
+            let words = format!("{prefix}{task}");
+            // So is a send with attachments, words for one agent, or no
+            // browser, and a teammate's send for someone else's card.
+            let mut attached = claim.clone();
+            attached["attachments"] = json!([{ "kind": "image", "fileName": "brief.png" }]);
+            let mut segmented = claim.clone();
+            segmented["agentPromptSegments"] = json!({ "octo": "Write me a long essay." });
+            let mut no_browser = claim.clone();
+            no_browser.as_object_mut().unwrap().remove("browserTransport");
+            for metadata in [attached, segmented, no_browser] {
+                assert!(
+                    verdict(chain.owner, words.clone(), metadata.clone())
+                        .await?
+                        .is_none(),
+                    "{metadata}"
+                );
+            }
+            assert!(verdict(chain.teammate, words.clone(), claim.clone())
+                .await?
+                .is_none());
+            // A card that is not the runtime's own message is no card.
+            let mut connection = chain.pool.get().await?;
+            let forged_job = chain
+                .job_of(
+                    &chain
+                        .send(&chain.owner, "Plan another day.", json!({}))
+                        .await
+                        .map_err(|error| controller_error("second turn", error))?,
+                )
+                .await?;
+            connection
+                .execute(
+                    "update agent_jobs set status = 'completed', outcome = 'succeeded'
+                      where id = $1",
+                    &[&forged_job],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into conversation_messages
+                         (id, conversation_id, project_id, role, content, metadata, created_by)
+                     values ($5, $1, $2, 'assistant', 'Continue this task in Instafy''s browser.', $3, $4)",
+                    &[
+                        &chain.conversation_id,
+                        &chain.project_id,
+                        &PgJson(json!({
+                            "jobId": forged_job.to_string(),
+                            "messageType": "action_request",
+                            "details": { "browserRequest": { "task": task } },
+                        })),
+                        &chain.owner,
+                        &Uuid::new_v4(),
+                    ],
+                )
+                .await?;
+            let mut forged = claim.clone();
+            forged["browserRequestOf"] = json!(format!("job:{forged_job}"));
+            assert!(verdict(chain.owner, words.clone(), forged).await?.is_none());
+            // A card from a turn Instafy started stays the sender's to carry
+            // on: one free hop at most.
+            connection
+                .execute(
+                    "update agent_jobs
+                        set payload = jsonb_set(payload, '{metadata,automaticRetry}', '{\"version\": 1}'::jsonb, true)
+                      where id = $1",
+                    &[&card_job],
+                )
+                .await?;
+            assert!(verdict(chain.owner, words.clone(), claim.clone())
+                .await?
+                .is_none());
+            connection
+                .execute(
+                    "update agent_jobs set payload = payload #- '{metadata,automaticRetry}'
+                      where id = $1",
+                    &[&card_job],
+                )
+                .await?;
+            assert!(verdict(chain.owner, words.clone(), claim.clone())
+                .await?
+                .is_some());
+            // Once per card: a browser turn already carried it on.
+            connection
+                .execute(
+                    "insert into agent_jobs (project_id, conversation_id, status, outcome, payload)
+                     values ($1, $2, 'failed', 'failed', $3)",
+                    &[
+                        &chain.project_id,
+                        &chain.conversation_id,
+                        &PgJson(json!({ "metadata": { "browserCardTurn": {
+                            "version": 1,
+                            "cardJobId": card_job,
+                        } } })),
+                    ],
+                )
+                .await?;
+            assert!(verdict(chain.owner, words, claim).await?.is_none());
             Ok(())
         })
     })

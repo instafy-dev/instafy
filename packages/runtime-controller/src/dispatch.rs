@@ -1009,9 +1009,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // "This continues a browser turn" is the controller's to say too: the
     // claim is checked below, under the conversation's dispatch fence.
     let hand_back_claim = crate::browser_hand_back::take_hand_back_claim(&mut request.metadata);
-    // So is "Instafy sent this again by itself", which decides what the turn
-    // costs (crate::system_turns): only the check below stamps it.
-    crate::system_turns::strip_automatic_retry_stamps(&mut request.metadata);
+    // So are "Instafy sent this again by itself" and "this carries on Octo's
+    // card", which decide what the turn costs (crate::system_turns): only the
+    // checks below stamp them.
+    crate::system_turns::strip_system_turn_stamps(&mut request.metadata);
     let automatic_retry_claim = crate::system_turns::automatic_retry_claim(&request.metadata);
     conversations::normalize_human_mention_metadata(&mut request.metadata)?;
     // Parity with the record path: untrusted callers must not persist a forged
@@ -1415,6 +1416,23 @@ pub(crate) async fn process_dispatch_prompt_timed(
             ensure_object(&mut request.metadata)
                 .insert(crate::system_turns::AUTOMATIC_RETRY_KEY.to_string(), record);
         }
+    }
+    // A card's browser turn costs nothing unless it does something in the
+    // browser: stamped only when it asks the card's own task, once per card,
+    // and otherwise the sender's own turn.
+    if let Some(record) = crate::system_turns::verify_browser_card_turn(
+        &transaction,
+        &conversation.id,
+        context,
+        &request.prompt_text,
+        &request.metadata,
+    )
+    .await?
+    {
+        ensure_object(&mut request.metadata).insert(
+            crate::system_turns::BROWSER_CARD_TURN_KEY.to_string(),
+            record,
+        );
     }
 
     // An ambient multi-human turn dispatches to the default agent stamped with
