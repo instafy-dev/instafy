@@ -3,6 +3,7 @@
 //! from the web (and leaves it out of asks that do not). The browser skill says how one card carries several
 //! reads and what the findings look like, within the part of it a snapshot carries.
 
+use super::tests::{test_job_processor, test_lease_job};
 use super::*;
 use tempfile::tempdir;
 
@@ -782,22 +783,33 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
 
 /// The official site that never loads (28 Oct drive 3: every Roborock address failed the TLS handshake, the turn read
 /// nothing else, dropped every model because no price was read and built a page reading "No options yet"): an item
-/// without a price is listed as "price unknown", two failures on the official site send the turn to at least one
-/// independent source, and a page of options has a row per candidate. Unedited earlier copies are upgraded.
+/// without a price is listed as "price unknown", two failures on one site send the turn to another source, and a page
+/// of options has a row per candidate. The last two are the browser skill's "Finding a page" now, which the research
+/// skill points to. Unedited earlier copies are upgraded.
 #[test]
 fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_official_site_fails()
 {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
+    let browser = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     let new_rules = [
-        "an item with no price read this turn is listed as \"price unknown\", never as within it.",
-        "The official site failed twice: read an independent source (a review, or a shop robots.txt allows) before building.",
-        "each fact not read marked unknown with why. A row per candidate a page read names.",
-        "Name: the exact model and generation its official page gives, else the page naming it.",
+        (
+            &research,
+            "an item with no price read this turn is listed as \"price unknown\", never as within it.",
+        ),
+        (
+            &research,
+            "Name: the exact model and generation its official page gives, else the page naming it.",
+        ),
+        (
+            &browser,
+            "Two failed pages on one site: find another source with `instafy web search`",
+        ),
+        (&browser, "Comparing: list the models a page you read names"),
     ];
     let previous = include_str!("legacy/web-research-v7.md");
-    for needle in new_rules {
-        assert!(research.contains(needle), "{needle}");
+    for (skill, needle) in new_rules {
+        assert!(skill.contains(needle), "{needle}");
         assert!(
             !flat(previous).contains(needle),
             "new in this version: {needle}"
@@ -865,4 +877,241 @@ fn the_research_skill_keeps_going_without_a_search_key() {
     fs::write(&skill, previous).unwrap();
     learn::ensure_project_memory_scaffold(tmp.path());
     assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
+}
+
+/// How a page is found, every reader and every lane (29 Oct drive 4: a guessed `/belem-tower` that said "Are you
+/// lost?" and no use of the site's search; google.com tried by itself; sights sourced from a tourist-office kiosk
+/// page; a tram route from memory as "likely"; comparison rows "candidate 1/2/3"; a cookie banner left over the
+/// page). One "Finding a page" section in the part of the browser skill a snapshot carries, which the research skill
+/// points to instead of keeping its own copy. Unedited earlier copies of both are upgraded.
+#[test]
+fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    for needle in [
+        "## Finding a page",
+        "For every reader, browser or not:",
+        "Open an address the person, a skill or a search result gave, a link on a page you read, or the home page of the official site the task is about.",
+        "Never a search engine or a guessed path.",
+        "A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu.",
+        "Two failed pages on one site: find another source with `instafy web search` (no key: `--chain reference-search`)",
+        "with only browser tools, open the home page of another official source (the operator, authority or maker).",
+        "A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page",
+        "Anything not read on a page this turn (from memory or a search result) says \"not checked\" next to it.",
+        "Comparing: list the models a page you read names, and mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
+        "A cookie banner with a reject button (\"Reject all\", \"Only necessary\"): press it so it does not cover the page the person watches.",
+    ] {
+        assert!(carried.contains(needle), "{needle}");
+    }
+    // The section pushed none of the sign-in rules out of the carried part.
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+    // One copy: the Shared Browser command and the research skill point to it.
+    let browser = flat(BROWSER_SKILL);
+    assert_eq!(browser.matches("never through a search engine").count(), 0);
+    assert!(browser.contains("Find pages as \"Finding a page\" says."));
+    let research = flat(RESEARCH_SKILL);
+    assert!(research.contains(
+        "as \"Finding a page\" in `instafy-browser-automation` says (not loaded? read it first: `awk"
+    ));
+    for copy in [
+        "Never present a remembered fact as checked.",
+        "The official site failed twice",
+        "A row per candidate a page read names.",
+    ] {
+        assert!(!research.contains(copy), "{copy}");
+    }
+    assert!(
+        RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        RESEARCH_SKILL.len()
+    );
+
+    let tmp = scaffolded_space();
+    for (relative, previous, current) in [
+        (
+            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+            include_str!("legacy/browser-automation-v11.md"),
+            BROWSER_SKILL,
+        ),
+        (
+            learn::WEB_RESEARCH_RELATIVE_PATH,
+            include_str!("legacy/web-research-v9.md"),
+            RESEARCH_SKILL,
+        ),
+    ] {
+        assert!(!previous.contains("Finding a page"), "{relative}");
+        let skill = tmp.path().join(relative);
+        fs::write(&skill, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
+    }
+}
+
+/// A fresh turn's prompt for `request`, with the job's metadata.
+fn fresh_prompt(tmp: &std::path::Path, request: &str, metadata: JsonValue) -> String {
+    let processor = test_job_processor(tmp);
+    let project_id = Uuid::new_v4();
+    let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+    job.project_id = Some(project_id);
+    let (prompt, _, _) = processor
+        .build_prompt_with_text(&project_id, &job, tmp, request, true, None, &[], None, None)
+        .expect("prompt should build");
+    prompt
+}
+
+/// The router weighs a request's words, and a browser turn's often has none of the browser skill's (29 Oct drive 4:
+/// the tram follow-up loaded no skill at all, and a task that names an address loaded only the research skill). So a
+/// Personal or Shared Browser turn carries the browser skill whatever its words, first and whole (its carried part),
+/// while an ordinary turn with the same words still routes by them.
+#[test]
+fn a_browser_turn_carries_the_browser_skill_whatever_its_words() {
+    let tmp = scaffolded_space();
+    let contexts = build_top_level_context_nodes(tmp.path());
+    let heading = "## Context: instafy-browser-automation (.agents/skills/instafy-browser-automation/SKILL.md)";
+    for request in [
+        "Now find how to get there by tram from Praça do Comércio.",
+        "Open https://www.visitlisboa.com/ and find the Belém Tower opening hours.",
+    ] {
+        assert!(
+            !routed(&contexts, request).contains(&BROWSER.to_string()),
+            "{request}"
+        );
+        assert!(
+            !fresh_prompt(tmp.path(), request, json!({})).contains(heading),
+            "{request}"
+        );
+        for transport in ["shared", "desktop-personal"] {
+            let prompt = fresh_prompt(
+                tmp.path(),
+                request,
+                json!({ "browserTransport": transport }),
+            );
+            let start = prompt
+                .find(heading)
+                .unwrap_or_else(|| panic!("{transport}: {request}: no browser skill"));
+            let loaded = &prompt[start..];
+            assert!(
+                loaded.contains("## Finding a page"),
+                "{transport}: {request}"
+            );
+            assert!(
+                loaded.contains("Never use a sign-in that belongs to someone else in this space"),
+                "{transport}: {request}: carried whole"
+            );
+            // First of the contexts: nothing routed by the words is loaded before it.
+            assert!(
+                !prompt[..start].contains("## Context: instafy-"),
+                "{transport}: {request}: loaded first"
+            );
+        }
+    }
+}
+
+/// A fresh browser turn's prompt is rare: a card's browser turn resumes the thread of the chat whose turn posted the
+/// card. A turn on a restored thread loads no snapshot, and a browser turn gets no skill hints since it cannot read a
+/// file, so it is given the browser skill's "Finding a page" again, from the space's own copy, and only that section.
+/// An ordinary restored turn is not, and a space's copy without the section gives nothing.
+#[test]
+fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
+    let tmp = scaffolded_space();
+    let restored = |metadata: JsonValue| {
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+        job.project_id = Some(project_id);
+        let state = json!({"defaultThreadId": "existing-thread", "threadId": "existing-thread", "historyReplayRequired": false});
+        let request = "Now find how to get there by tram from Praça do Comércio.";
+        let (prompt, _, metrics) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                request,
+                true,
+                Some(&state),
+                &[],
+                None,
+                None,
+            )
+            .expect("prompt should build");
+        assert_eq!(metrics["promptMode"], "stateful_compact");
+        assert!(prompt.contains("Workspace memory snapshot omitted"));
+        prompt
+    };
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    let section = BROWSER_SKILL[start..end].trim_end();
+    for transport in ["shared", "desktop-personal"] {
+        let prompt = restored(json!({ "browserTransport": transport }));
+        assert!(prompt.contains(section), "{transport}");
+        assert!(prompt.contains("From `instafy-browser-automation` (`.agents/skills/instafy-browser-automation/SKILL.md`; this thread may predate it):"), "{transport}");
+        assert!(
+            !prompt.contains("## Shared Browser command"),
+            "{transport}: only the section"
+        );
+    }
+    assert!(!restored(json!({})).contains("## Finding a page"));
+
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    let edited = BROWSER_SKILL.replace(
+        "accepting is the person's choice.\n",
+        "accepting is the person's choice.\n- Start from the city's open-data portal.\n",
+    );
+    assert_ne!(edited, BROWSER_SKILL);
+    fs::write(&skill, &edited).unwrap();
+    assert!(
+        restored(json!({ "browserTransport": "shared" }))
+            .contains("- Start from the city's open-data portal.")
+    );
+    fs::write(
+        &skill,
+        edited.replace("## Finding a page", "## How to find pages"),
+    )
+    .unwrap();
+    assert!(
+        !restored(json!({ "browserTransport": "shared" })).contains("this thread may predate it")
+    );
+}
+
+/// A research turn often loads the research skill without the browser skill (the router gives a turn at most three
+/// skills, and "What are the opening hours of …? Check the official site." routes only the research skill), and the
+/// skill-reading rules say to read only the section a skill needs. So the research skill's pointer is one command that
+/// prints "Finding a page" and nothing else (about 1.2 KB), never the whole 27 KB browser skill.
+#[test]
+fn the_research_skill_reads_finding_a_page_with_one_short_command() {
+    let tmp = scaffolded_space();
+    let contexts = build_top_level_context_nodes(tmp.path());
+    let request = "What are the opening hours of the Belem Tower? Check the official site.";
+    let skills = routed(&contexts, request);
+    assert!(skills.contains(&RESEARCH.to_string()), "{skills:?}");
+    assert!(!skills.contains(&BROWSER.to_string()), "{skills:?}");
+
+    let pointer = RESEARCH_SKILL
+        .lines()
+        .find(|line| line.contains("\"Finding a page\" in `instafy-browser-automation`"))
+        .expect("the research skill points to Finding a page");
+    let command = pointer
+        .split('`')
+        .find(|part| {
+            part.contains(".agents/skills/instafy-browser-automation/SKILL.md")
+                && part.contains(' ')
+        })
+        .unwrap_or_else(|| panic!("no command that prints the section: {pointer}"));
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(tmp.path())
+        .output()
+        .expect("run the pointer's command");
+    assert!(output.status.success(), "{command}");
+    let printed = String::from_utf8(output.stdout).expect("utf-8");
+
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    assert_eq!(
+        printed.trim_end(),
+        BROWSER_SKILL[start..end].trim_end(),
+        "{command}"
+    );
+    assert!(printed.len() < 2_000, "{} bytes", printed.len());
 }

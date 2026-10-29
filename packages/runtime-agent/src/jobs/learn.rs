@@ -344,6 +344,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before it said to give a failed step's plain reason, never a raw error code, and that
     // a Shared page another chat left is not this task's work.
     include_str!("legacy/browser-automation-v10.md"),
+    // From before "Finding a page": a missing page's site search, another source after two
+    // failures, own pages, "not checked", the names a comparison lists and a cookie banner's refusal.
+    include_str!("legacy/browser-automation-v11.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -376,6 +379,9 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v7.md"),
     // Before the controller shared configurable page allowances across helpers.
     include_str!("legacy/web-research-v8.md"),
+    // From before it pointed to the browser skill's "Finding a page" instead of keeping its own copy
+    // of "not checked", the independent source after two failures and the rows a comparison lists.
+    include_str!("legacy/web-research-v9.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

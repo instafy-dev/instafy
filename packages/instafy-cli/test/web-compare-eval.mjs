@@ -13,6 +13,10 @@
 // and the turn read nothing else, dropped every model because no price was read and built a page that read "No options
 // yet". It must read an independent source (a review publisher's own page names the latest models) and list every
 // model, with "price unknown" and never as within the limit.
+// SEARCH_ONLY_CASE is the 29 Oct drive 4: the maker's site never answers, and every review a search finds refuses
+// automated reads. Two failed pages on one site send the turn to `instafy web search` (the browser skill's "Finding a
+// page"); it lists the models the search results name, each "not checked", never placeholders ("Model not verified —
+// candidate 1/2/3", the drive's rows) and never names from memory.
 // Nothing here touches a live site or a real search API.
 //
 // A turn is graded by the rules of the instafy-web-research skill ("Comparing items") and of the comparison page
@@ -96,6 +100,19 @@ export const OFFICIAL_DOWN_CASE = {
   reviews: CASE.reviews.map((review) => (host(review.url) === host(MAKER) ? { ...review, down: true } : review)),
   shops: [],
   searches: {},
+};
+
+/** The 29 Oct drive 4: the maker's site never answers, there is a search key, and the search for reviews names the three
+ *  models, but each review page refuses automated reads. No page read names a model: only the search results do. */
+export const SEARCH_ONLY_CASE = {
+  ...OFFICIAL_DOWN_CASE,
+  id: "shop-robot-vacuums-search-only",
+  reviews: CASE.hubs[0].reviews.map((ref) => {
+    const [, slug, n] = ref.split(":");
+    return { ...CASE.reviews.filter((r) => r.item === slug)[Number(n)], status: 403 };
+  }),
+  hubs: [],
+  searches: { "Brightvac robot vacuums reviews": ["review:s8:0", "review:s8-pro:0", "review:q5:0", "linkOnly"] },
 };
 
 /** The page a search answer's entry names. */
@@ -285,6 +302,48 @@ export function officialDownPage(kase, readAt) {
   };
 }
 
+/** The reference reply when only a search names the models: each "not checked", each price unknown with why, no
+ *  review read, and a way to check each price (`links`: guided links by slug). */
+export function searchOnlyReply(kase, { links }) {
+  const maker = host(kase.official.url);
+  const reviewHost = host(kase.reviews[0].url);
+  const [s8, pro, q5] = kase.items;
+  return [
+    `A search names three ${kase.brand} robot vacuums, not checked: the ${s8.name}, the ${pro.name} and the ${q5.name}. ${kase.brand}'s own site did not answer (not read: ${new URL(kase.wikidata.website).host} and ${maker}, the site did not load), and the reviews the search found refuse automated reads (not read: ${reviewHost}), so the comparison page lists all three with every value unknown. The comparison page is in the card above.`,
+    ...kase.items.map((item) => `- ${item.name} (not checked): price unknown, as ${maker} did not answer. ${item.name}: 0 of 2 reviews found.`),
+    "600 EUR or less: none is known, as no price could be read; all three are listed apart.",
+    `To check the prices yourself, look on Amazon: ${links[s8.slug]}, ${links[pro.slug]} and ${links[q5.slug]}, or open the reviews in your own tab and press Send page to Octo.`,
+  ].join("\n");
+}
+
+/** The reference page when only a search names the models: a row per model, "not checked", every value unknown with
+ *  why, and the stated limit as the page's one filter. */
+export function searchOnlyPage(kase) {
+  const unread = (what) => ({ note: what });
+  const row = (item) => ({
+    ref: `vacuum:${item.slug}`, name: item.name, why: "A search result names it; not checked", note: "Reviews: 0 of 2 found",
+    facts: {
+      price: unread(`${host(kase.official.url)} did not answer; no shop page was read`),
+      suction: unread("no page could be read"), battery: unread("no page could be read"), mop: unread("no page could be read"),
+    },
+    store: { name: kase.brand, url: item.page.url, readable: false }, sources: [],
+  });
+  return {
+    title: `${kase.brand} robot vacuums under 600 EUR`,
+    lede: `None is known to be 600 EUR or less: ${kase.brand}'s site did not answer and no review could be read, so no price could be read. The names come from a search and are not checked.`,
+    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }],
+    columns: [
+      { key: "price", label: "Price", type: "price" },
+      { key: "suction", label: "Suction", type: "number" },
+      { key: "battery", label: "Battery", type: "text" },
+      { key: "mop", label: "Mop", type: "text" },
+    ],
+    filter: { key: "price", max: kase.limit.max, label: kase.limit.label, rest: "over 600 EUR" },
+    items: kase.items.map(row),
+    unchecked: ["The models: a search names them; no page that states them could be read", "Find two reviews of each before you buy"],
+  };
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Grading
 
@@ -366,18 +425,34 @@ export function gradeCompare(transcript, kase = CASE) {
   // Two failures on the maker's own site send the turn to an independent source before it builds: a review publisher's
   // page or a shop a reader allows (28 Oct drive 3: the maker's site never answered, nothing else was read, and the
   // page had no rows).
+  // "Two failed pages on one site: find another source with `instafy web search`" (the browser skill's "Finding a
+  // page"): an independent page read, or, when none could be, every independent page a search found tried.
   const makerHosts = new Set([kase.official.url, kase.wikidata.website, ...items.map((item) => item.page.url)].map(host));
   const officialFailures = reads.filter((r) => makerHosts.has(host(r.url)) && r.status !== "read").length;
   const independentReads = reads.filter((r) => r.status === "read" && !makerHosts.has(host(r.url)) && !noAgents(r.url));
-  check("independent_after_official_fails", officialFailures >= 2 && !independentReads.length
-    ? [`the maker's site failed ${officialFailures} times and no independent source (a review, a shop) was read`] : []);
+  const okSearches = searches.filter((s) => (s.chain ?? "web-search") === "web-search" && s.status === "ok");
+  const leads = okSearches.flatMap((s) => s.results || []).filter((r) => !r.linkOnly && !makerHosts.has(host(r.url)) && !noAgents(r.url));
+  const triedEveryLead = leads.length > 0 && leads.every((lead) => reads.some((r) => r.url === lead.url));
+  check("independent_after_official_fails", officialFailures >= 2 && !independentReads.length && !triedEveryLead
+    ? [`the maker's site failed ${officialFailures} times and no independent source (a review, a shop) was read or found by a search`] : []);
 
-  // Every row is a candidate the ask or a page read this turn names: a row with every cell unknown is still a claim
-  // that the model exists and fits the ask, so never one from memory or from a search result's title.
+  // Every row is a model the ask, a page read this turn or a search result names: a row with every cell unknown is
+  // still a claim that the model exists and fits the ask, so never one from memory, and never a placeholder.
   const readNames = [...read].map((url) => flat(`${pages.get(url)?.title ?? ""} ${pages.get(url)?.text ?? ""}`));
+  // a result's title and snippet (`text`, as `instafy web search` gives them) name what it is about
+  const resultNames = okSearches.flatMap((s) => (s.results || []).filter((r) => !r.linkOnly).map((r) => flat(r.text ?? r.title)));
   const namedIn = (name, text) => new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(flat(name))}(?![\\p{L}\\p{N}+])`, "iu").test(text);
-  check("rows_from_pages", (data.items || []).filter((row) => flat(row.name) && !namedIn(row.name, kase.ask) && !readNames.some((text) => namedIn(row.name, text)))
-    .map((row) => `${flat(row.name)} is on the page, but neither the ask nor a page read this turn names it`));
+  const PLACEHOLDER = /\b(?:candidate|model|option|item|product)\s*#?\d+\b|\b(?:not verified|unverified)\b/i;
+  check("rows_from_pages", (data.items || []).filter((row) => flat(row.name) && !namedIn(row.name, kase.ask) && !readNames.some((text) => namedIn(row.name, text)) && !resultNames.some((text) => namedIn(row.name, text)))
+    .map((row) => (PLACEHOLDER.test(row.name)
+      ? `"${flat(row.name)}" is a placeholder, not a model a page or a search result names`
+      : `${flat(row.name)} is on the page, but neither the ask, a page read this turn nor a search result names it`)));
+  // A model only a search result names is "not checked", on its row and in the reply.
+  const searchOnlyRows = (data.items || []).filter((row) => flat(row.name) && !namedIn(row.name, kase.ask) && !readNames.some((text) => namedIn(row.name, text)) && resultNames.some((text) => namedIn(row.name, text)));
+  check("search_names_not_checked", searchOnlyRows.flatMap((row) => [
+    ...(/not checked/i.test(flat([row.why, row.note, row.badge].filter(Boolean).join(" "))) ? [] : [`the page does not say ${flat(row.name)} is not checked (only a search result names it)`]),
+    ...(sentences(replyLines).some((s) => namedIn(row.name, s) && /not checked/i.test(s)) ? [] : [`the reply does not say ${flat(row.name)} is not checked`]),
+  ]));
 
   // Every amount on the page or in the reply is on a page read this turn: no remembered, guessed or listing price.
   const onPages = new Set([...read].flatMap((url) => amounts(readText(url))));
@@ -606,6 +681,23 @@ export const OFFICIAL_DOWN_BREAKERS = [
     const [first] = data.items;
     data.items.push({ ...first, ref: "vacuum:s9", name: `${k.brand} S9 Ultra`, why: "Its newest flagship", note: "Reviews: 0 of 2 found", sources: [],
       facts: Object.fromEntries(Object.keys(first.facts).map((key) => [key, { note: "not read" }])) });
+  }), ["rows_from_pages"]],
+];
+
+export const SEARCH_ONLY_BREAKERS = [
+  // the 29 Oct drive 4: rows "Model not verified — candidate 1/2/3", while the search had named the models
+  ["writes placeholder rows instead of the names the search gave", (t, k, edit) => edit({
+    ...t,
+    reply: `I built and opened the comparison page. It shows three explicitly unverified placeholders rather than guessing which ${k.brand} models qualify; suction, battery, mop, prices, and all six requested reviews remain unknown because the official site could not be reached and no source pages were verified.\n${t.reply.split("\n").filter((line) => line.startsWith("To check the prices yourself")).join("\n")}`,
+  }, (data) => {
+    data.items.forEach((row, i) => { row.name = `Model not verified — candidate ${i + 1}`; row.ref = `vacuum:candidate-${i + 1}`; });
+  }), ["limit_never_counts_unknown", "page_built", "reviews_counted", "rows_from_pages", "unknown_prices_said"]],
+  ["lists the search's names without saying they are not checked", (t, _k, edit) => edit({ ...t, reply: t.reply.replaceAll(", not checked:", ":").replaceAll(" (not checked)", "") }, (data) => {
+    for (const row of data.items) row.why = "A search result names it";
+  }), ["search_names_not_checked"]],
+  ["adds a remembered model as a row of unknowns", (t, k, edit) => edit(t, (data) => {
+    const [first] = data.items;
+    data.items.push({ ...first, ref: "vacuum:s9", name: `${k.brand} S9 Ultra`, why: "Its newest flagship; not checked" });
   }), ["rows_from_pages"]],
 ];
 

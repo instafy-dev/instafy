@@ -1892,14 +1892,71 @@ fn format_project_memory_snapshot(
     prompt_text: &str,
 ) -> Option<ProjectMemorySnapshot> {
     let preferences = ProjectPreferencesSnapshot::load(workspace_dir);
-    format_project_memory_snapshot_with_preferences(workspace_dir, prompt_text, &preferences)
+    format_project_memory_snapshot_with_preferences(workspace_dir, prompt_text, &preferences, None)
+}
+
+/// A skill a turn carries whatever its words, and the section of it a turn on a
+/// restored thread is given again.
+struct PinnedSkill {
+    /// The skill's folder under `.agents/skills`.
+    id: &'static str,
+    relative_path: &'static str,
+    /// The heading of the section a restored thread is given.
+    section: &'static str,
+}
+
+/// The browser skill, which says how to find a page.
+const BROWSER_TURN_SKILL: PinnedSkill = PinnedSkill {
+    id: "instafy-browser-automation",
+    relative_path: learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+    section: "## Finding a page",
+};
+
+/// A Personal or Shared Browser turn carries the browser skill whatever its
+/// words. The router weighs words, and a browser turn's request often has none
+/// of the skill's ("Now find how to get there by tram", or a task that names an
+/// address).
+fn pinned_skill_for_turn(job: &LeaseJob) -> Option<&'static PinnedSkill> {
+    (crate::personal_browser::payload_requests_personal_browser(&job.payload)
+        || crate::shared_browser::payload_requests_shared_browser(&job.payload))
+    .then_some(&BROWSER_TURN_SKILL)
+}
+
+/// The pinned skill's section, from the space's own copy of the skill, for a
+/// turn on a restored thread. That turn loads no snapshot, the thread may have
+/// begun on a turn that never loaded the skill (a browser turn resumes its
+/// chat's thread), and a browser turn has no tool to read the file. None when
+/// the space's copy has no such section.
+fn pinned_skill_section(workspace_dir: &Path, pinned: &PinnedSkill) -> Option<String> {
+    let (text, _) = read_text_file_lossy_truncated(
+        &workspace_dir.join(pinned.relative_path),
+        PROJECT_MEMORY_MAX_FILE_BYTES,
+    )?;
+    let start = text
+        .match_indices(pinned.section)
+        .map(|(at, _)| at)
+        .find(|&at| {
+            (at == 0 || text[..at].ends_with('\n'))
+                && text[at + pinned.section.len()..].starts_with('\n')
+        })?;
+    let body = &text[start + pinned.section.len()..];
+    let end = body.find("\n## ").unwrap_or(body.len());
+    Some(format!(
+        "\nFrom `{}` (`{}`; this thread may predate it):\n{}{}\n",
+        pinned.id,
+        pinned.relative_path,
+        pinned.section,
+        body[..end].trim_end()
+    ))
 }
 
 fn format_project_memory_snapshot_with_preferences(
     workspace_dir: &Path,
     prompt_text: &str,
     preferences: &ProjectPreferencesSnapshot,
+    pinned_skill: Option<&PinnedSkill>,
 ) -> Option<ProjectMemorySnapshot> {
+    let pinned_skill = pinned_skill.map(|pinned| pinned.id);
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
     if remaining == 0 {
         return None;
@@ -1991,7 +2048,24 @@ fn format_project_memory_snapshot_with_preferences(
                 }
             }
 
-            let selected_contexts = select_recursive_context_nodes(&contexts, prompt_text);
+            let mut selected_contexts = select_recursive_context_nodes(&contexts, prompt_text);
+            // A pinned skill the words did not route is loaded too, under its parent.
+            if let Some(pinned) = pinned_skill
+                && !selected_contexts.iter().any(|context| context.id == pinned)
+                && let Some(context) = contexts.iter().find(|context| context.id == pinned)
+            {
+                selected_contexts.push(SelectedContextNode {
+                    id: context.id.clone(),
+                    label: context
+                        .metadata
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| context.id.clone()),
+                    path: context.path.clone(),
+                    score: 0,
+                    parent: context.metadata.context_parents.first().cloned(),
+                });
+            }
             let has_learned_index = contexts
                 .iter()
                 .any(|context| context.id == "instafy-learned");
@@ -2018,9 +2092,15 @@ fn format_project_memory_snapshot_with_preferences(
             // contexts score 0 and follow, so they can no longer use up the budget before the
             // instructions specific to this request (an imported skill routed for the prompt was
             // otherwise left with a few hundred bytes after the built-in meta skills).
+            // A pinned skill loads first, so the budget never runs out before it.
             let mut ordered_contexts: Vec<&SelectedContextNode> =
                 selected_contexts.iter().collect();
-            ordered_contexts.sort_by(|a, b| b.score.cmp(&a.score));
+            ordered_contexts.sort_by_key(|context| {
+                (
+                    Some(context.id.as_str()) != pinned_skill,
+                    std::cmp::Reverse(context.score),
+                )
+            });
             for context in ordered_contexts {
                 if remaining == 0 {
                     break;
@@ -9323,6 +9403,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 workspace_dir,
                 request_for_selection,
                 preferences,
+                pinned_skill_for_turn(job),
             ) {
                 append_prompt_section(
                     &mut prompt,
@@ -9355,6 +9436,17 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     &hints.text,
                 );
                 skill_hints = Some(("restoredSkillHints", hints.skills));
+            }
+            if include_workspace_memory
+                && let Some(section) = pinned_skill_for_turn(job)
+                    .and_then(|pinned| pinned_skill_section(workspace_dir, pinned))
+            {
+                append_prompt_section(
+                    &mut prompt,
+                    &mut prompt_section_metrics,
+                    "pinnedSkillSection",
+                    &section,
+                );
             }
         } else {
             append_prompt_section(
