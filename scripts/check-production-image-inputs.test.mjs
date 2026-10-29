@@ -444,6 +444,13 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
       `webdev must verify ${pkg} reaches the fixed OpenSSL build`,
     );
   }
+  // The Playwright base's libbrotli1 must be upgraded to the build that fixes CVE-2026-111497.
+  assert.equal(argumentDefaults(source).get("WEBDEV_BROTLI_MIN_VERSION"), "1.1.0-2ubuntu0.1");
+  assert.match(
+    webdevStage,
+    /dpkg-query -W -f='\$\{Version\}' libbrotli1\)" ge "\$\{WEBDEV_BROTLI_MIN_VERSION\}"/u,
+    "webdev must verify libbrotli1 reaches the fixed build",
+  );
   // Each flavor fails the build if any vendored copy is left unpatched.
   assert.equal(
     [...source.matchAll(/unpatched npm tar copies/gu)].length,
