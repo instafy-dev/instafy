@@ -376,6 +376,43 @@ async function testProxy(seen: string[], redirects: Record<string, string> = {})
 }
 
 describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
+  // A page that draws itself after it loads, as a map does once its tiles and description are in.
+  const drawsLater = (ms: number | null) => `<!doctype html><html data-instafy-ready="false"><title>Map</title>
+<meta name="description" content="Loading">
+<body style="margin:0;background:#fff"><div id="m" style="height:100vh"></div>
+<script>${
+    ms === null
+      ? ""
+      : `setTimeout(() => {
+  document.getElementById("m").style.background = "#2a6";
+  document.querySelector('meta[name="description"]').setAttribute("content", "Trip · 3 days · 10 places");
+  document.documentElement.setAttribute("data-instafy-ready", "true");
+}, ${ms});`
+  }</script></body></html>`;
+
+  it("a page with its own ready mark is pictured once it says it is drawn, not when its network is quiet", { timeout: 120_000 }, async () => {
+    const port = await serve({ "/": { body: drawsLater(4_000) } });
+    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 30_000 });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!("thumbnail" in result)) return;
+    expect(result.thumbnail.description).toBe("Trip · 3 days · 10 places");
+  });
+
+  it("a page with its own ready mark gets longer than the usual budget to be drawn", { timeout: 120_000 }, async () => {
+    const port = await serve({ "/": { body: drawsLater(4_000) } });
+    // The usual budget alone ends before the page is drawn; the mark gives it longer.
+    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 3_000, readyWaitMs: 20_000 });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!("thumbnail" in result)) return;
+    expect(result.thumbnail.description).toBe("Trip · 3 days · 10 places");
+  });
+
+  it("a page that never says it is drawn gets no picture, rather than a half-drawn one", { timeout: 120_000 }, async () => {
+    const port = await serve({ "/": { body: drawsLater(null) } });
+    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 2_000, readyWaitMs: 6_000 });
+    expect(result).toMatchObject({ ok: false, status: "skipped", reason: expect.stringMatching(/^the page still said it was drawing after \d+ s$/) });
+  });
+
   it(
     "capture blocks another loopback port, a private address and a link-only host, and loads a public one through the proxy",
     { timeout: 180_000 },

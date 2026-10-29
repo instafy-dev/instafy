@@ -348,6 +348,10 @@ site (an `index.html` and no `bound.json`) gets the client added to its pages.
 - **`serve --detach`** starts the background binder without the runtime job token or other `CONTROLLER_*` secrets
   (it keeps `CONTROLLER_BASE_URL`), `SUPABASE_*` values or credential-like names other than `--allow-env` names (and
   the owner's login only with `--agent-executor`), because every handler can read the binder's `/proc/<pid>/environ`.
+  It reports the site served only once its own binder answers on the port: `__bind/health` names the folder a binder
+  serves and its process to this machine only (a loopback socket and name, never a tunnel's viewer), and `--detach`
+  takes that answer only from the child it started, while that child runs. Another server already on the port is
+  never taken for the site: `--detach` fails, saying the port is in use, and stops its child.
 - **Origins and hosts.** A request authenticated only by the cookie must come from the site's own origin (or a
   `--public-url`); `x-forwarded-host` counts only with `--trust-proxy`. With `--no-token` or `--preview` (localhost
   only) the `Host` header must be a name the binder was started for, which stops DNS rebinding.

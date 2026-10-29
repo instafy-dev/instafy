@@ -19,19 +19,19 @@ Use this whenever a site or server runs in this space (or should) and someone sh
 ## Show it (do this first)
 
 1. From the site's folder inside the workspace (not a temporary folder), start it and show it in one command:
-   `instafy preview open --port <port> --title "<short name>" --serve-cmd "<command>" --start --json`
-   (add `--path /<page>` for a sub-page). The command serves the site on 127.0.0.1 or 0.0.0.0 at that port. See "Keep it running after your turn" for what `--start` does.
+   `instafy preview open --title "<short name>" --serve-cmd "<command>" --start --json`
+   Write `{port}` where the command takes its port (`--serve-cmd "python3 -m http.server {port} --bind 127.0.0.1"`): it picks a free port for this site, starts the command on it, waits for the site, posts the card and takes the card's picture. Never choose a port yourself: the JSON's `port` is the site's. Add `--path /<page>` for a sub-page. See "Keep it running after your turn" for what `--start` does.
    - Add `--summary "<facts>"` for one line under the card's title: numbers and plain words, at most 80 characters, such as `Trip · 3 days · 14 places`. Without it the card shows the page's own `<meta name="description">`.
-   - Once the site is live it takes a picture of the page for the card (`thumbnail` in the JSON says whether it did). `--thumbnail <file>` uses a picture you made instead (JPEG, PNG or WebP); `--no-thumbnail` puts none.
-   - It posts the card in this conversation and prints no URL. Tell the person to open it from the card once `instafy preview check` passes (step 2). Do not paste a preview, tunnel or localhost URL for it.
-   - Running it again for the same port keeps the same preview. In the same turn it reuses that turn's card; in a later turn it posts a new card, and the person opens the newest card. It never refreshes an earlier card. `instafy preview list` lists open previews; `instafy preview close <previewId>` closes one.
-2. Check it: `instafy preview check --port <port>`. Fix what it lists, then run the same `instafy preview open` again. After a later change to the site, run the check again: it also takes a new picture for the card.
-3. Allow the preview host before the person opens the card. Dev servers that check the `Host` header (Vite dev and `vite preview`, webpack-dev-server, Angular) show "Blocked request" to everyone who opens the card, and you cannot see that page yourself. The first time you open a preview for such a server, add `viewerHostSuffix` from the JSON, with a leading dot and without `:port`, to its allowed hosts (Vite: `server.allowedHosts` and `preview.allowedHosts`; webpack-dev-server and Angular: `allowedHosts`), stop the server by its `startedPid` (below), and run the same `instafy preview open` again before you tell the person to open the card. Static file servers need nothing.
-4. Read `status`: `live` means the card works. `not_responding`: check the server is up on that port, then run `instafy preview open` again. `unknown`: tell the person to open the card. Only `status: live` from an `instafy preview open` you ran this turn shows the site is up: never say a preview is live, restarted or refreshed from anything else.
+   - Once the site is live it takes a picture of the page for the card (`thumbnail` in the JSON says whether it did). A page that draws itself after it loads (a map, a chart) marks `<html data-instafy-ready="false">` and sets it to `"true"` once drawn; the picture waits for that. `--thumbnail <file>` uses a picture you made instead (JPEG, PNG or WebP); `--no-thumbnail` puts none.
+   - It posts the card in this conversation and prints no URL. Do not paste a preview, tunnel or localhost URL for it, and do not send the person to the card: it is there when the command succeeded.
+   - The same command again from the same folder is the same site: it keeps its port and preview, and starts nothing while the site runs. In the same turn it reuses that turn's card; in a later turn it posts a new card, and the person opens the newest card. It never refreshes an earlier card. `instafy preview list` lists open previews.
+2. Check it: `instafy preview check --port <port>` (the JSON's). Fix what it lists, then run the same `instafy preview open` again. After a later change to the site, run the check again: it also takes a new picture for the card.
+3. Allow the preview host before you reply. Dev servers that check the `Host` header (Vite dev and `vite preview`, webpack-dev-server, Angular) show "Blocked request" to everyone who opens the card, and you cannot see that page yourself. The first time you open a preview for such a server, add `viewerHostSuffix` from the JSON, with a leading dot and without `:port`, to its allowed hosts (Vite: `server.allowedHosts` and `preview.allowedHosts`; webpack-dev-server and Angular: `allowedHosts`), stop it with `instafy preview close <previewId>`, and run the same `instafy preview open` again before you reply. Static file servers need nothing.
+4. Read `status`: `live` means the card works. `not_responding`: check the server is up on that port, then run `instafy preview open` again. `unknown`: the server did not say. Only `status: live` from an `instafy preview open` you ran this turn shows the site is up: never say a preview is live, restarted or refreshed from anything else.
 5. Read `restartable`. `true` means opening the card starts the site again after it stops or the space sleeps, with no turn: it reruns the recorded command. `false`: `restartNote` says why; run it again with `--serve-cmd "<command>"`.
 6. If it fails:
    - Exit `2`: nothing answers on 127.0.0.1 at that port, the site answers with a server error, or the command `--start` ran exited or stayed silent (the message names its log: read it, fix the cause, run it again). If the message says the site answers only on [::1], do not start a second one; bind it to 127.0.0.1 or 0.0.0.0, restart it, run it again.
-   - Exit `3`: the port is not allowed. Serve on another port from 1024 to 65535.
+   - Exit `3`: the port is not allowed, or another site holds it (the message names it). Run the same command without `--port`: it picks a free one. `--replace` only when this site replaces that one.
    - Exit `5` ("Previews are not available on this server"), or `instafy preview` is not a command here: previews are off. Post the local URL; create a public tunnel only when the person asks for a shareable link, after consent.
    - Exit `1` (any other error): run it once more. If it fails again, say in one plain line that the preview didn't open, and post the local URL. No public tunnel unless asked.
 7. If the person reports "Blocked request" or "host is not allowed" on the card's page, do step 3 for that server.
@@ -40,21 +40,20 @@ Use this whenever a site or server runs in this space (or should) and someone sh
 
 Every process your turn starts is killed with its terminal's process group when the turn ends. A server started in the foreground or with `&` is gone by the next message, and the card goes dark.
 
-- Start a site that must outlive the turn with `instafy preview open --port <port> --title "<name>" --serve-cmd "<command>" --start --json`, run from the site's folder. It starts the command in its own session without Instafy credentials, logs to `.instafy/agent/logs`, waits for the port, posts the card, and returns `startedPid` and `logFile` (`startedPid` is null when the port already answered and nothing was started).
+- Start a site that must outlive the turn with the command above, from the site's folder. It starts the command in its own session without Instafy credentials, logs to `.instafy/agent/logs`, waits for the port, posts the card, and returns `port`, `startedPid` and `logFile` (`startedPid` is null when this same site already ran on its port and nothing was started).
 - `--serve-cmd` is one command and its arguments: no shell syntax, and no secret on the line (the site reads secrets from an env file). A command that needs shell syntax (environment assignments, `cd`, a pipeline) goes in a script file in the site's folder, passed as `--serve-cmd "sh ./serve.sh"`.
 - Do not start a site that must outlive the turn with `&`, `nohup` or `setsid` by hand: it keeps this turn's credentials.
-- In a later turn, check the port first (`curl -fsS http://127.0.0.1:<port>/ > /dev/null`). If it is not running, rerun the same command; it keeps the preview and posts this turn's card. Do not start a second server on another port for the same site.
+- In a later turn, rerun the same command from the same folder: it keeps the site's port and preview, starts the site only if it stopped, and posts this turn's card. Do not start a second server for the same site.
 - When the space's machine stops or restarts, its sites stop: their cards read Stopped and `instafy preview list` no longer lists them. That is expected. Open on a `restartable` card starts the site again with no turn, so tell the person to press it; or rerun the same `instafy preview open ... --start` and read its `status`.
 - When a start fails, read `logFile` before trying again.
-- Stop a site by its `startedPid`: it leads its own process group, so `kill -- -<startedPid>` stops it and its children. Never stop one by a name pattern.
-- If the site has a `bound.json`, `instafy bind serve --detach` already does this.
+- A site with a `bound.json` is served by `--serve-cmd "instafy bind serve . --port {port} --preview"`.
 
 ## Building a site to show
 
-- Don't assume a framework. Inspect the workspace (`package.json`, `vite.config.*`, `next.config.*`, etc) and use its own dev or preview command with an explicit port (Vite often `5173`, Next `3000`) and a reachable host (`--host 0.0.0.0` or `127.0.0.1`).
-- With no toolchain, prefer one `index.html` (React through ESM CDN imports such as `https://esm.sh/react@18` if needed) served by a static file server, for example `--serve-cmd "python3 -m http.server 4173 --bind 127.0.0.1"`.
+- Don't assume a framework. Inspect the workspace (`package.json`, `vite.config.*`, `next.config.*`, etc) and use its own dev or preview command with `{port}` for its port and a reachable host (Vite: `npx vite --host 127.0.0.1 --port {port} --strictPort`).
+- With no toolchain, prefer one `index.html` (React through ESM CDN imports such as `https://esm.sh/react@18` if needed) served by a static file server, for example `--serve-cmd "python3 -m http.server {port} --bind 127.0.0.1"`.
 - Install dependencies only when needed, and say you did.
-- Prefer stable, explicit ports. Reuse a healthy server instead of starting a duplicate.
+- Reuse the running site: rerun the same command instead of starting a duplicate.
 - Never store secrets in the workspace. Request them with `request_secret` actions; if a provider's screens are involved, open Instafy's browser on the provider's public site to show the way.
 - If this is a git repo, make sure `.gitignore` excludes `.instafy/agent/`.
 - A site that uses the person's location, or that people will Present and Follow together in Studio: read `references/studio-host-messages.md` before writing that code.
@@ -78,4 +77,4 @@ Go by what each command returned (its exit code and `status`), not by what you e
 
 ## Cleanup
 
-When asked to stop previews: stop the site by its `startedPid` (never by a name pattern), close the card's preview (`instafy preview close <previewId>`) and stop any tunnel. Then say which site stopped ("Stopped the hello page."), never its process ID or port.
+When asked to stop a site or its preview: `instafy preview close <previewId>` (`instafy preview list` lists them). It stops the site `--start` started, and its card reads Stopped. Never stop a site with `kill`, `pkill` or `pgrep` and a name pattern: that can stop another chat's site. Stop any tunnel too. Then say which site stopped ("Stopped the hello page."), never its process ID or port.

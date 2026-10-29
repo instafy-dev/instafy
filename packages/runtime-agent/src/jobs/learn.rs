@@ -143,8 +143,10 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // before `instafy preview open --start` kept a site running after the turn (and
 // before the location, Present and tunnel material moved to references/),
 // v10 the one that said rerunning `instafy preview open` refreshes the card,
-// v11 the one from before the card showed a picture and a summary of the site, and
-// v12 the one that had the reply report exit codes and a stopped site's process. A
+// v11 the one from before the card showed a picture and a summary of the site,
+// v12 the one that had the reply report exit codes and a stopped site's process, and
+// v13 the one from before `instafy preview open --start` picked the site's port, which
+// sent the person to the card and stopped a site with `kill`. A
 // workspace still holding an unedited earlier bundled copy of this skill,
 // browser automation or skill import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -160,6 +162,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v10.md"),
     include_str!("legacy/frontend-previews-v11.md"),
     include_str!("legacy/frontend-previews-v12.md"),
+    include_str!("legacy/frontend-previews-v13.md"),
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -265,10 +268,14 @@ const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[
     include_str!("legacy/bound-sites-v1.md"),
     // From before each value cited its page and day, and a filter listed unknown values apart.
     include_str!("legacy/bound-sites-v2.md"),
+    // From before one `instafy preview open --start` picked the port, served the site and showed it.
+    include_str!("legacy/bound-sites-v3.md"),
 ];
 const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[
     // From before each value cited its page and day, and a value never was a dash.
     include_str!("legacy/bound-sites-cheatsheet-v1.md"),
+    // From before one `instafy preview open --start` picked the port, served the site and showed it.
+    include_str!("legacy/bound-sites-cheatsheet-v2.md"),
 ];
 /// The hub for pages people tap through: it picks the builder from the installed skills (a skill
 /// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
@@ -292,6 +299,8 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     include_str!("legacy/interactive-artifacts-v1.md"),
     // From before a candidate nothing could be read for stayed a row, so a page of options was never empty.
     include_str!("legacy/interactive-artifacts-v2.md"),
+    // From before one `instafy preview open --start` picked the port, served the site and showed it.
+    include_str!("legacy/interactive-artifacts-v3.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[include_str!("legacy/research-team-v1.md")];
 const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
@@ -2199,8 +2208,20 @@ mod tests {
         assert!(skill.contains("(`agent executor: host`)"));
         assert!(!skill.contains("their own login"));
         // A public link carries the viewer token; the bare tunnel URL is never shared.
-        assert!(skill.contains("share the `public link` it prints, whole: it carries the"));
+        assert!(
+            skill.contains("share the `public link` line of its `logFile`, whole: it carries the")
+        );
         assert!(skill.contains("Never share the bare tunnel URL."));
+        // One command serves the site on a port the CLI picks and shows its card: no
+        // detached serve, no port named by the skill, no sentence pointing at a card.
+        assert!(skill.contains(
+            "`instafy preview open --title '<short title>' --serve-cmd \"instafy bind serve . --port {port} --preview\" --start --json`"
+        ));
+        for gone in ["--detach", "4173", "free port", "from the card"] {
+            assert!(!skill.contains(gone), "{gone}");
+            assert!(!INTERACTIVE_ARTIFACTS_TEMPLATE.contains(gone), "{gone}");
+        }
+        assert!(!BOUND_SITES_CHEATSHEET_TEMPLATE.contains("--detach"));
         // The router picks it by what it is, not by shopping words in one language.
         assert!(skill.contains(
             "routing_keywords: bound site, bound.json, live page, check again, re-check, two-way\n"
@@ -2436,15 +2457,18 @@ mod tests {
     #[test]
     fn scaffold_upgrades_frontend_previews_to_studio_preview_cards() {
         for needle in [
-            "instafy preview open --port <port>",
-            "open it from the card",
+            "instafy preview open --title \"<short name>\" --serve-cmd \"<command>\" --start --json",
+            "Write `{port}` where the command takes its port",
+            "Never choose a port yourself: the JSON's `port` is the site's.",
+            "do not send the person to the card: it is there when the command succeeded",
+            "marks `<html data-instafy-ready=\"false\">`",
             "Previews are not available on this server",
             "viewerHostSuffix",
             "`not_responding`",
             "Exit `1` (any other error): run it once more.",
             "Never auto-create a public tunnel URL. Ask for explicit consent first.",
-            "Allow the preview host before the person opens the card.",
-            "before you tell the person to open the card",
+            "Allow the preview host before you reply.",
+            "stop it with `instafy preview close <previewId>`, and run the same `instafy preview open` again before you reply",
             "answers only on [::1]",
             "`restartable`",
             "--serve-cmd \"<command>\"",
@@ -2501,6 +2525,22 @@ mod tests {
         }
         // A site started by hand with these keeps the turn's credentials.
         assert!(!FRONTEND_PREVIEWS_TEMPLATE.contains("setsid <command>"));
+        // The CLI picks the port, and closing the preview stops the site: no
+        // fixed port, no pointer at a card, no stopping by pid or pattern.
+        for gone in [
+            "--port <port> --title",
+            "4173",
+            "5173",
+            "open it from the card",
+            "kill -- -",
+            "by its `startedPid`",
+            "instafy bind serve --detach",
+        ] {
+            assert!(!FRONTEND_PREVIEWS_TEMPLATE.contains(gone), "{gone}");
+        }
+        assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(
+            "It stops the site `--start` started, and its card reads Stopped. Never stop a site with `kill`, `pkill` or `pgrep` and a name pattern"
+        ));
         let v3 = include_str!("legacy/frontend-previews-v3.md");
         let v4 = include_str!("legacy/frontend-previews-v4.md");
         let v5 = include_str!("legacy/frontend-previews-v5.md");
@@ -2510,7 +2550,8 @@ mod tests {
         let v9 = include_str!("legacy/frontend-previews-v9.md");
         let v10 = include_str!("legacy/frontend-previews-v10.md");
         let v11 = include_str!("legacy/frontend-previews-v11.md");
-        let previous = include_str!("legacy/frontend-previews-v12.md");
+        let v12 = include_str!("legacy/frontend-previews-v12.md");
+        let previous = include_str!("legacy/frontend-previews-v13.md");
         assert!(!v3.contains("instafy preview open"));
         assert!(v4.contains("instafy preview open"));
         assert!(!v4.contains("Allow the preview host before the person opens the card."));
@@ -2529,10 +2570,15 @@ mod tests {
         assert!(v10.contains("refreshes the card"));
         assert!(!v11.contains("refreshes the card"));
         assert!(!v11.contains("--summary"));
-        assert!(previous.contains("--summary"));
+        assert!(v12.contains("--summary"));
         // v12 had the reply report exit codes and a stopped site's process:
         // the person is told in plain words which site stopped.
-        assert!(previous.contains("Report what each command returned (exit code, `status`)"));
+        assert!(v12.contains("Report what each command returned (exit code, `status`)"));
+        // v13 had Octo pick the port, send the person to the card and stop a
+        // site with `kill`.
+        assert!(previous.contains("instafy preview open --port <port> --title"));
+        assert!(previous.contains("Tell the person to open it from the card"));
+        assert!(previous.contains("kill -- -<startedPid>"));
         for needle in [
             "tell the person in plain words (\"the page is up\", \"the page didn't start\"), without the port, exit code or log file",
             "Then say which site stopped (\"Stopped the hello page.\"), never its process ID or port.",

@@ -786,10 +786,12 @@ async fn another_site_opened_on_the_same_port_does_not_show_the_earlier_sites_pi
                 .await?;
             assert_eq!(status, StatusCode::OK, "{body}");
 
-            // Octo serves another site on the same port: the broker hands the
-            // port's key the same tunnel, so it is the same preview id.
+            // Octo serves another site on the same port, saying it replaces
+            // the first: the broker hands the port's key the same tunnel, so
+            // it is the same preview id.
             let mut body = f.open_body(&job, 4173);
             body["title"] = json!("Tiny Hello");
+            body["replace"] = json!(true);
             let (status, created) = f.request(&job.token, "POST", &f.path(""), body).await?;
             assert_eq!(status, StatusCode::CREATED, "{created}");
             assert_eq!(created["previewId"], json!(preview_id));

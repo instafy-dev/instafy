@@ -520,13 +520,25 @@ card with a picture of the site, which opens it beside the chat, and only space 
 Unlike `instafy tunnel`, nothing becomes public and the CLI never prints a URL.
 
 ```bash
-instafy preview open --port 4173 --title "Site preview" --json
+instafy preview open --title "Site preview" --serve-cmd "python3 -m http.server {port} --bind 127.0.0.1" --start --json
+instafy preview open --port 4173 --title "Site preview" --json   # a site that already runs on 4173
 instafy preview list
 instafy preview close <previewId>
 ```
 
 These commands need a server with the previews API. An older server, or one with previews turned off,
 gives exit `5` and nothing else happens.
+
+One site per port. With `--start` and no `--port`, `open` picks the site's port itself and writes it where
+`--serve-cmd` says `{port}` (an agent never chooses one): the port this same site had before, when it still has it,
+else the first free one from a port chosen by the command and its folder (from 20000 to 29999, away from the ports
+dev servers take by themselves). The same command from the same folder is the same site, so it keeps its port, its
+preview and its card. A port another site holds, by its process or by its open preview, is never picked. With
+`--port`, a port where this same site already answers is used as it is, and one where any other server answers is
+refused with exit `3`, naming the preview that shows it ("Port 4173 already shows 'Lisbon in 3 days'."), never
+"already running". The server refuses too: an open whose title, or folder, differs from the open preview on that port
+gets `409 port_in_use` with the same words (exit `3`), unless `--replace` says this site replaces that one. A site
+`--start` started for a preview the server refused is stopped again.
 
 `open`:
 
@@ -548,7 +560,7 @@ it, with a leading dot and without any `:port`, or everyone who opens the card s
 page. Add it the first time, restart the server on the same port, and run `open` again. It is `null` when
 the server does not report it.
 
-`status` is `live` when the server reached the site through the tunnel, `not_responding` when it did not
+`port` is the site's port: `check` takes it. `status` is `live` when the server reached the site through the tunnel, `not_responding` when it did not
 (check the site, then run `open` again), and `unknown` when the server does not say. `httpStatus` is the
 HTTP status the server's check got from the site, or `null`. That check is a `HEAD` request sent with
 `Host: localhost`, so it does not show a dev server's host check.
@@ -564,12 +576,25 @@ The card's picture and facts: `--summary "<text>"` is one line under the card's 
 characters, no control or direction characters), for example `Trip · 3 days · 14 places`; without it the
 card shows the page's own `<meta name="description">`. Once the site is live, `open` loads the page in the
 same headless Chromium `check` uses, under the same request rules, and uploads a 640×400 JPEG of it
-within 15 s (`INSTAFY_PREVIEW_THUMBNAIL_BUDGET_MS`, 1000 to 120000, gives a slow machine longer). Without a
+within 15 s (`INSTAFY_PREVIEW_THUMBNAIL_BUDGET_MS`, 1000 to 120000, gives a slow machine longer). A page that draws
+itself after it loads (a map fetching its tiles, a chart) can mark when it is drawn: `data-instafy-ready="false"` on
+its `<html>` element (in the HTML, or set before the page's load event), then `"true"`. The picture waits for `"true"`
+instead of a quiet network, up to 30 s in all, and a page still drawing then gets no picture rather than a half-drawn
+one; `check` waits for it too. Without a
 browser it uses the page's `og:image` when that is on the site itself. Each `open` replaces the card's
 picture, since a later site on the same port is the same preview. The JSON's `thumbnail` is `uploaded`,
 `skipped` or `failed`, with `thumbnailReason` when it is not uploaded; the exit code never changes. `--thumbnail <file>` uploads a picture you made instead (JPEG, PNG or WebP, at most
 512 KiB and 2000×2000) and `--no-thumbnail` uploads none. See
 [Site previews](Previews.md#the-cards-picture-and-facts).
+
+`--start` with `--serve-cmd "<command>"` starts the site: the command (`{port}` replaced) as argv, never a shell,
+from the current directory in the workspace, in its own session so it outlives the command (and an agent's turn)
+that started it, with its output appended to `.instafy/agent/logs/preview-<port>.log` and without Instafy
+credentials in its environment (the rule `instafy bind serve --detach` uses). It waits up to 60 s for the port and
+exits `2` with the log's path when the command exits first or the port stays silent (then the command is stopped).
+`--json` adds `startedPid` (null when this same site already ran on its port and nothing was started) and `logFile`.
+The preview records the site it started (its pid and command line once it answered), and so does a wake that starts
+it again: `close` stops that site, its whole process group, but only while that pid still runs that command line.
 
 Starting the site again after the space sleeps: `open` also records how the site was started, so a
 member's press on the card can start it again without an Octo turn (see [Site previews](Previews.md#waking-a-stopped-site)).
@@ -592,7 +617,9 @@ Exit codes:
   resolves to `::1`) is named as such: it is running, so bind it to `127.0.0.1` or `0.0.0.0` instead of
   starting it again.
 - `3`: the port is not allowed: outside 1024-65535 or one of Instafy's own (the same rules as `check`,
-  below), or refused by the server (`400` with code `port_not_allowed`).
+  below), or refused by the server (`400` with code `port_not_allowed`); or another site holds it: another
+  server answers on the `--port` given with `--start`, or the server says another site's open preview shows it
+  (`409` with code `port_in_use`). The message names that site.
 - `5`: previews are not available on this server ("Previews are not available on this server"). The server
   has them turned off (`503` with code `previews_unavailable`), or it has no previews API (a `404` without
   the server's own error body). Nothing is downloaded or started and no card is posted. Show the site
@@ -620,7 +647,8 @@ Exit codes:
 - `list` shows the space's open previews from the server. Its `status` is the preview's (`active`
   while it is open), not whether the site answers: `check` does that. `--json` rows carry `restartable`
   when the server sends it. A preview whose machine stopped or restarted is not listed; its card reads
-  Stopped, and pressing a restartable card starts the site again. `close` stops the local client and
+  Stopped, and pressing a restartable card starts the site again. `close` stops the local client and the
+  site `--start` started (`siteStopped` in the JSON; a site started any other way is left running) and
   asks the server to close the preview; the server then also revokes its open viewers and forgets the
   card's picture. A closed preview keeps its recorded start command: its card reads "Stopped · opening
   restarts it", and a press by someone who may change the space starts the site again.
@@ -682,8 +710,8 @@ proxy and stream sender, the loopback MCP proxy and the origin, at their default
 
 ### Bound sites: `instafy bind`
 
-`instafy bind serve <site> --port <port> --preview --detach`, then `instafy preview open --port <port>`, shows a
-bound site in the card: a static page plus `bound.json` whose script buttons run small handlers and stream checked
+`instafy preview open --title "<title>" --serve-cmd "instafy bind serve . --port {port} --preview" --start`, run from
+the site's folder, serves a bound site and shows it in the card: a static page plus `bound.json` whose script buttons run small handlers and stream checked
 records back to every open viewer. `--preview` drops the viewer token and answers only localhost and the capability
 host of the preview opened for that port, on exactly the domain `preview open` recorded; the page takes frame
 messages only from the Studio origin `preview open` recorded with it. "Ask Octo" buttons are asks the page hands to

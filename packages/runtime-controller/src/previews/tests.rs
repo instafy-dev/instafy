@@ -473,6 +473,80 @@ fn a_preview_says_who_may_open_it_only_as_recorded() {
     assert!(body.get("visibility").is_none());
 }
 
+/// The site a live preview shows is its title and, when both opens record
+/// one, the folder its site was started from: an open of another site on that
+/// port is refused with the title of the site that holds it.
+#[test]
+fn another_site_is_another_title_or_another_folder() {
+    let held = |title: &str, cwd: Option<&str>| {
+        let mut preview = json!({ "visibility": "private", "title": title });
+        if let Some(cwd) = cwd {
+            preview["serve"] =
+                json!({ "argv": ["uw", "host", ".", "--port", "24242"], "cwd": cwd });
+        }
+        PreviewGrant {
+            record: RuntimeTunnelGrantRecord {
+                id: Uuid::new_v4(),
+                project_id: Uuid::new_v4(),
+                runtime_id: Some(Uuid::new_v4()),
+                runtime_lease_id: None,
+                provider: "self_hosted".to_string(),
+                tunnel_id: Uuid::new_v4().to_string(),
+                hostname: "abc.rt.test".to_string(),
+                url: "http://abc.rt.test".to_string(),
+                status: "active".to_string(),
+                expires_at: Utc::now(),
+                metadata: Some(json!({ (PREVIEW_TUNNEL_METADATA_KEY): preview })),
+            },
+            created_at: Utc::now(),
+        }
+    };
+    let from = |cwd: &str| {
+        PreviewServe::from_json(&json!({ "argv": ["node", "server.js"], "cwd": cwd })).unwrap()
+    };
+    let map = held("Lisbon in 3 days", Some("sites/lisbon"));
+    let lisbon = Some("Lisbon in 3 days".to_string());
+    assert_eq!(
+        port_held_by_another_site(&map, "Roborock comparison", Some(&from("sites/roborock"))),
+        lisbon
+    );
+    assert_eq!(
+        port_held_by_another_site(&map, "Roborock comparison", None),
+        lisbon
+    );
+    // The same title from another folder is another site.
+    assert_eq!(
+        port_held_by_another_site(&map, "Lisbon in 3 days", Some(&from("sites/other"))),
+        lisbon
+    );
+    // The same site again, whatever command now starts it.
+    assert_eq!(
+        port_held_by_another_site(&map, "Lisbon in 3 days", Some(&from("sites/lisbon"))),
+        None
+    );
+    // Without a folder on both sides, the title decides.
+    assert_eq!(
+        port_held_by_another_site(&map, "Lisbon in 3 days", None),
+        None
+    );
+    let hello = held("Hello page", None);
+    assert_eq!(
+        port_held_by_another_site(&hello, "Hello page", Some(&from("site"))),
+        None
+    );
+    assert_eq!(
+        port_held_by_another_site(&hello, "Lisbon in 3 days", Some(&from("site"))),
+        Some("Hello page".to_string())
+    );
+    let (status, Json(error)) = port_in_use(24242, "Lisbon in 3 days");
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        error.message,
+        "Port 24242 already shows 'Lisbon in 3 days'."
+    );
+    assert_eq!(error.code.as_deref(), Some("port_in_use"));
+}
+
 /// A broker that, like the real one, hands back the same tunnel for a
 /// repeated idempotency key, and records what it was asked.
 #[derive(Default)]
@@ -1916,9 +1990,20 @@ async fn preview_cards_follow_the_conversation_title_and_reopen() -> anyhow::Res
             assert_eq!(metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageId"], second);
             assert_eq!(f.ready(&writer, &preview_id).await?["messageId"], second);
 
-            // A new title is a new card, as is a re-open after close.
-            f.open_for(&writer, &job, other, 4180, "Site preview v2")
+            // A new title is a new card (an open that says it replaces the
+            // site the port showed), as is a re-open after close.
+            let mut renamed_body = f.open_body(&job, 4180);
+            renamed_body["conversationId"] = json!(other);
+            renamed_body["title"] = json!("Site preview v2");
+            let (status, refused) = f
+                .request(&writer, "POST", &f.path(""), renamed_body.clone())
                 .await?;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            renamed_body["replace"] = json!(true);
+            let (status, body) = f
+                .request(&writer, "POST", &f.path(""), renamed_body)
+                .await?;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
             let renamed = f.ready(&writer, &preview_id).await?["messageId"].clone();
             assert_ne!(renamed, second);
             let close = f.path(&format!("/{preview_id}/close"));
@@ -1939,6 +2024,74 @@ async fn preview_cards_follow_the_conversation_title_and_reopen() -> anyhow::Res
             assert_eq!(status, StatusCode::OK, "{preview}");
             assert_eq!(preview["title"], "Site preview v2");
             assert_eq!(preview["messageId"], reopened);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// One site per port: an open of another site on a port whose preview is
+/// live is refused and names the site that holds it, so a second site never
+/// takes over the first's card. The same site again, a site that says it
+/// replaces the first, and any site once the port's preview is closed go
+/// ahead.
+#[tokio::test]
+async fn another_site_on_a_live_previews_port_is_refused_unless_it_replaces_it(
+) -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let mut map = f.open_body(&job, 4173);
+            map["title"] = json!("Lisbon in 3 days");
+            map["serve"] = json!({ "argv": ["uw", "host", ".", "--port", "4173"], "cwd": "sites/lisbon" });
+            let (status, created) = f.request(&job.token, "POST", &f.path(""), map.clone()).await?;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            let preview_id = created["previewId"]
+                .as_str()
+                .context("previewId")?
+                .to_string();
+            let card = f.ready(&job.token, &preview_id).await?["messageId"].clone();
+
+            let mut other = f.open_body(&job, 4173);
+            other["title"] = json!("Roborock comparison");
+            other["serve"] = json!({ "argv": ["instafy", "bind", "serve", ".", "--port", "4173", "--preview"], "cwd": "sites/roborock" });
+            let mut same_title = other.clone();
+            same_title["title"] = json!("Lisbon in 3 days");
+            for body in [other.clone(), same_title] {
+                let (status, refused) = f.request(&job.token, "POST", &f.path(""), body).await?;
+                assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+                assert_eq!(refused["code"], "port_in_use");
+                assert_eq!(refused["message"], "Port 4173 already shows 'Lisbon in 3 days'.");
+            }
+            // The map's preview and card are as they were.
+            let metadata = f.grant_metadata(&preview_id).await?;
+            assert_eq!(metadata[PREVIEW_TUNNEL_METADATA_KEY]["title"], "Lisbon in 3 days");
+            assert_eq!(metadata[PREVIEW_TUNNEL_METADATA_KEY]["serve"]["cwd"], "sites/lisbon");
+            assert_eq!(metadata[PREVIEW_TUNNEL_METADATA_KEY]["messageId"], card);
+
+            // The map itself again keeps its preview and its card.
+            let (status, again) = f.request(&job.token, "POST", &f.path(""), map).await?;
+            assert_eq!(status, StatusCode::CREATED, "{again}");
+            assert_eq!(again["previewId"], json!(preview_id));
+            assert_eq!(f.ready(&job.token, &preview_id).await?["messageId"], card);
+
+            // An open that says it replaces the map goes ahead.
+            let mut replacing = other.clone();
+            replacing["replace"] = json!(true);
+            let (status, replaced) = f.request(&job.token, "POST", &f.path(""), replacing).await?;
+            assert_eq!(status, StatusCode::CREATED, "{replaced}");
+            assert_eq!(replaced["previewId"], json!(preview_id));
+            let metadata = f.grant_metadata(&preview_id).await?;
+            assert_eq!(metadata[PREVIEW_TUNNEL_METADATA_KEY]["title"], "Roborock comparison");
+
+            // Once the port's preview is closed, any site may open on it.
+            let close = f.path(&format!("/{preview_id}/close"));
+            let (status, _) = f.request(&job.token, "POST", &close, json!({})).await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            let mut hello = f.open_body(&job, 4173);
+            hello["title"] = json!("Hello page");
+            let (status, reopened) = f.request(&job.token, "POST", &f.path(""), hello).await?;
+            assert_eq!(status, StatusCode::CREATED, "{reopened}");
             Ok(())
         })
     })

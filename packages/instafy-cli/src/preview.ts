@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import kleur from "kleur";
@@ -14,6 +16,7 @@ import {
   noAnswerMessage,
   parsePreviewPort,
   probeLocalSite,
+  reservedPreviewPorts,
   type LocalSiteProbe,
 } from "./local-site.js";
 import {
@@ -28,11 +31,13 @@ import {
   cleanUrl,
   isRatholeClientFor,
   readEnv,
+  readProcessCommandLine,
   resolveControllerToken,
   resolveProject,
   resolveTunnelControllerUrl,
   spawnRatholeDetached,
   stopRatholeClient,
+  waitForProcessExit,
   type ResolvedTunnelToken,
 } from "./tunnel.js";
 
@@ -51,21 +56,28 @@ export type PreviewOpenOptions = {
   controllerUrl?: string;
   controllerToken?: string;
   conversationId?: string;
+  // The site's port. Required, except with `start`, which picks a free one when it is left out.
   port?: string | number;
   title?: string;
   path?: string;
   ratholeBin?: string;
   // How to start the site again when the process that started it exits, or the space sleeps, when it cannot be read
   // from the process on the port (`--serve-cmd "<command>"`). One command and its arguments, run from the current
-  // directory, never a shell.
+  // directory, never a shell. `{port}` in it is the site's port.
   serveCmd?: string;
   // The directory `serveCmd` runs from (default: the current directory).
   cwd?: string;
-  // `--start`: when nothing answers on the port, start `serveCmd` in the background, in its own session, without
-  // Instafy credentials, logging to .instafy/agent/logs, and wait for the port.
+  // `--start`: start `serveCmd` in the background, in its own session, without Instafy credentials, logging to
+  // .instafy/agent/logs, and wait for the port. Without `port` it picks a free port and puts it in `{port}`. A port that
+  // already answers is used only when it runs this same site; any other site there is refused.
   start?: boolean;
   // How long `start` waits for the port (default 60 s, as a wake does).
   startTimeoutMs?: number;
+  // `--replace`: show this site on the port even when the port's open preview shows another site (another title or
+  // folder). Without it the server refuses that open, so one site never takes over another's card.
+  replace?: boolean;
+  // Test hook: where the process listening on a port is read from (Linux /proc).
+  procRoot?: string;
   // One short line of facts for the card (`--summary`), e.g. "Trip · 3 days · 14 places".
   summary?: string;
   // `--no-thumbnail` (false): no picture on the card. `thumbnailFile`: a picture a skill made itself.
@@ -81,6 +93,13 @@ export type PreviewListOptions = {
 
 export type PreviewCloseOptions = PreviewListOptions & {
   previewId?: string;
+};
+
+export type PreviewCloseResult = {
+  ok: true;
+  previewId: string;
+  // Whether the site `--start` started for it was stopped too.
+  siteStopped: boolean;
 };
 
 export type PreviewSummary = {
@@ -107,8 +126,8 @@ export type PreviewOpenResult = PreviewSummary & {
   restartable: boolean;
   // Why it is not restartable, when it is not.
   restartNote?: string;
-  // With `--start` only: the pid of the site this command started, or null when the port already answered and
-  // nothing was started; and that site's log file (null when nothing was started).
+  // With `--start` only: the pid of the site this command started, or null when this same site already answered on
+  // its port and nothing was started; and that site's log file (null when nothing was started).
   startedPid?: number | null;
   logFile?: string | null;
   // The card's picture: uploaded, skipped (and why), or failed (and why). It never changes the exit code.
@@ -141,6 +160,13 @@ type PreviewStateEntry = {
   // The origin Studio frames this preview from (the controller's studioOrigin). A bound site in the preview accepts
   // frame messages (Ask Octo, location, follow mode) from this origin only, and none when it is missing.
   studioOrigin?: string;
+  // How `--start` starts this site: `--serve-cmd` as given (its `{port}` left in) and the directory it runs from. A later
+  // `--start` of the same command from the same directory is the same site, and gets this preview's port again.
+  start?: PreviewServe;
+  // The process that leads the site's own session, as `--start` (or a wake) started it, and its command line once the
+  // site answered: `instafy preview close` stops that site too, but only while that pid still runs that command line.
+  startedPid?: number;
+  startedCommand?: string;
 };
 
 type PreviewStateFile = {
@@ -160,6 +186,19 @@ const THUMBNAIL_UPLOAD_TIMEOUT_MS = 15_000;
 // by a command that died is taken over.
 const STATE_LOCK_WAIT_MS = 120_000;
 const STATE_LOCK_STALE_MS = 10 * 60_000;
+
+/** Where the site's port goes in `--serve-cmd`: `--start` writes the port it picked there. */
+export const PORT_PLACEHOLDER = "{port}";
+// What to do when another site holds the port.
+const PORT_TAKEN_HINT =
+  "Run it with --start and without --port, so this site gets a free port of its own, or pass --replace to show this site on that port instead.";
+// Where `--start` looks for a free port when no --port is given: away from the ports dev servers take by themselves
+// (3000, 4173, 5173, 8000, 8080…) and below the ports a Linux machine hands out for outgoing connections (32768 and
+// up), so a site started again after the space slept still finds its port free.
+const AUTO_PORT_FIRST = 20_000;
+const AUTO_PORT_COUNT = 10_000;
+// How many ports `--start` tries, from the site's own, before it gives up.
+const AUTO_PORT_TRIES = 64;
 
 function instafyDir(): string {
   return path.join(os.homedir(), ".instafy");
@@ -446,6 +485,13 @@ async function controllerRequest(params: {
     if (response.status === 400 && code === "port_not_allowed") {
       throw new PreviewCommandError(
         `The server does not allow previews on this port: ${extractControllerErrorMessage(text) ?? "port_not_allowed"}`,
+        PREVIEW_EXIT_PORT_NOT_ALLOWED,
+      );
+    }
+    // Another site's open preview holds the port: the server names it.
+    if (response.status === 409 && code === "port_in_use") {
+      throw new PreviewCommandError(
+        `${extractControllerErrorMessage(text) ?? "Another site's preview holds this port."} ${PORT_TAKEN_HINT}`,
         PREVIEW_EXIT_PORT_NOT_ALLOWED,
       );
     }
@@ -947,6 +993,233 @@ export async function startPreviewSite(params: {
   }
 }
 
+/** `argv` with every `{port}` replaced by `port`. */
+export function withPort(argv: string[], port: number): string[] {
+  return argv.map((arg) => arg.split(PORT_PLACEHOLDER).join(String(port)));
+}
+
+function sameArgv(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((arg, index) => arg === b[index]);
+}
+
+/** Whether two start commands are the same site's: the same command (as given, `{port}` left in) from the same directory. */
+function sameStart(a: PreviewServe | undefined, b: PreviewServe): boolean {
+  return Boolean(a && Array.isArray(a.argv) && a.cwd === b.cwd && sameArgv(a.argv, b.argv));
+}
+
+/**
+ * The port `--start` tries first for a site that has none yet: one of AUTO_PORT_COUNT from AUTO_PORT_FIRST, chosen by its
+ * start command and directory, so the same site gets the same port (and so the same preview and card) each time.
+ */
+export function preferredSitePort(start: PreviewServe): number {
+  const digest = createHash("sha256").update(`${start.cwd}\0${start.argv.join("\0")}`).digest();
+  return AUTO_PORT_FIRST + (digest.readUInt32BE(0) % AUTO_PORT_COUNT);
+}
+
+/**
+ * Whether nothing holds `port` on this machine: it can be bound on each loopback and wildcard address there is. Any
+ * server on it, answering or not, makes it taken.
+ */
+export async function portIsFree(port: number): Promise<boolean> {
+  for (const host of ["127.0.0.1", "0.0.0.0", "::1", "::"]) {
+    const result = await new Promise<"free" | "taken" | "absent">((resolve) => {
+      const server = net.createServer();
+      server.once("error", (error: NodeJS.ErrnoException) =>
+        resolve(error.code === "EADDRNOTAVAIL" || error.code === "EAFNOSUPPORT" ? "absent" : "taken"),
+      );
+      server.listen({ port, host, ...(host === "::" ? { ipv6Only: false } : {}) }, () => server.close(() => resolve("free")));
+    });
+    if (result === "taken") return false;
+  }
+  return true;
+}
+
+type StartedSite = { pid: number; logFile: string; command: string | null };
+
+/** The port `--start` settled on, the start command as given, and the site it started (null: this same site already ran). */
+type SiteStart = { port: number; start: PreviewServe; started: StartedSite | null };
+
+/** Whether the site an entry records still runs: its pid still runs the command line recorded when it answered. */
+function startedSiteRuns(entry: Pick<PreviewStateEntry, "startedPid" | "startedCommand">): boolean {
+  return Boolean(entry.startedPid && entry.startedPid > 0 && entry.startedCommand) && readProcessCommandLine(entry.startedPid!) === entry.startedCommand;
+}
+
+/**
+ * What holds `port`, as `--start` sees it: nothing; this same site (a preview here records this start command on the
+ * port and the site it started still runs, or the process listening there runs exactly this command from this
+ * directory); or another site.
+ */
+async function siteOnPort(params: {
+  port: number;
+  start: PreviewServe;
+  root: string;
+  previews: PreviewStateEntry[];
+  procRoot?: string;
+}): Promise<"none" | "same" | "other"> {
+  const { port, start, root, previews, procRoot } = params;
+  if (await portIsFree(port)) return "none";
+  if (previews.some((entry) => entry.localPort === port && sameStart(entry.start, start) && startedSiteRuns(entry))) return "same";
+  const listening = detectListeningProcess(port, procRoot);
+  if (listening && workspaceRelativeDir(root, listening.cwd) === start.cwd && sameArgv(listening.argv, withPort(start.argv, port))) {
+    return "same";
+  }
+  return "other";
+}
+
+/** A port another site holds, named by its preview here when there is one. Never "already running": it is not this site. */
+function portTakenError(port: number, previews: PreviewStateEntry[]): PreviewCommandError {
+  const holder = previews.find((entry) => entry.localPort === port && entry.title);
+  const what = holder ? `Port ${port} already shows '${holder.title}'.` : `Port ${port} is in use by another server.`;
+  return new PreviewCommandError(`${what} Leave out --port: --start picks a free port for this site.`, PREVIEW_EXIT_PORT_NOT_ALLOWED);
+}
+
+/**
+ * `--start`: the port for the site, and the site on it. With --port, that port: the same site already answering there is
+ * used as it is, any other server there is refused, and on a free port the site is started. Without --port, the port
+ * this same site had before (when it still has it), else the first free port from its own (`preferredSitePort`) that
+ * no other site here holds or has a preview open on, and the site is started there with `{port}` replaced. Runs under
+ * the state lock, so two commands never pick the same port.
+ */
+async function startOrFindSite(params: {
+  explicitPort: number | null;
+  start: PreviewServe;
+  root: string;
+  projectId: string;
+  title: string;
+  sitePath: string;
+  timeoutMs?: number;
+  procRoot?: string;
+  openPorts: () => Promise<Map<number, string>>;
+  log: (message: string) => void;
+}): Promise<SiteStart> {
+  const { explicitPort, start, root, projectId, title, sitePath, procRoot, log } = params;
+  const { previews } = readStateFile();
+  const onPort = (port: number) => siteOnPort({ port, start, root, previews, procRoot });
+  const launch = async (port: number): Promise<SiteStart> => {
+    const serve = { argv: withPort(start.argv, port), cwd: start.cwd };
+    const started = await startPreviewSite({ port, sitePath, serve, root, timeoutMs: params.timeoutMs });
+    log(`Started the site on port ${port} (pid ${started.pid}); log: ${displayPath(started.logFile)}`);
+    // Its command line now that it answers (a launcher may have replaced itself): what `close` checks before stopping it.
+    return { port, start, started: { ...started, command: readProcessCommandLine(started.pid) } };
+  };
+
+  if (explicitPort !== null) {
+    const found = await onPort(explicitPort);
+    if (found === "same") return { port: explicitPort, start, started: null };
+    if (found === "other") throw portTakenError(explicitPort, previews);
+    return launch(explicitPort);
+  }
+
+  const tried = new Set<number>();
+  // This same site, started before: its port again, so it keeps its preview and its card.
+  const known = previews.find((entry) => entry.projectId === projectId && sameStart(entry.start, start));
+  if (known) {
+    tried.add(known.localPort);
+    const found = await onPort(known.localPort);
+    if (found === "same") return { port: known.localPort, start, started: null };
+    if (found === "none") return launch(known.localPort);
+  }
+  const reserved = reservedPreviewPorts();
+  const held = new Set(previews.filter((entry) => !sameStart(entry.start, start)).map((entry) => entry.localPort));
+  for (const [port, holder] of await params.openPorts()) {
+    if (holder !== title) held.add(port);
+  }
+  const first = preferredSitePort(start);
+  for (let index = 0; index < AUTO_PORT_TRIES; index += 1) {
+    const port = AUTO_PORT_FIRST + ((first - AUTO_PORT_FIRST + index) % AUTO_PORT_COUNT);
+    if (tried.has(port) || reserved.has(port) || held.has(port)) continue;
+    tried.add(port);
+    const found = await onPort(port);
+    if (found === "same") return { port, start, started: null };
+    if (found === "none") return launch(port);
+  }
+  throw new PreviewCommandError(
+    `No free port was found for the site: ${tried.size} ports from ${first} are taken. Stop a site this space no longer needs (instafy preview close <previewId>), then retry.`,
+    PREVIEW_EXIT_NOT_LISTENING,
+  );
+}
+
+/**
+ * Stops a site `--start` (or a wake) started: SIGTERM to its whole process group (it leads its own), then SIGKILL after
+ * 4 s. Only while `pid` still runs `command`, the command line recorded when the site answered: a pid that now belongs
+ * to anything else is never signalled. Whether it was stopped.
+ */
+async function stopSite(pid: number | undefined, command: string | null | undefined): Promise<boolean> {
+  if (!pid || pid <= 0 || !command) return false;
+  const ours = () => readProcessCommandLine(pid) === command;
+  if (!ours()) return false;
+  const signal = (name: NodeJS.Signals) => {
+    try {
+      process.kill(-pid, name);
+    } catch {
+      try {
+        process.kill(pid, name);
+      } catch {
+        // already gone
+      }
+    }
+  };
+  signal("SIGTERM");
+  if (!(await waitForProcessExit(pid, 4_000)) && ours()) signal("SIGKILL");
+  return true;
+}
+
+/**
+ * What a preview's entry records about its site: the site `--start` just started; else, when the same site was already
+ * running on the port (or no `--start`), the record of the site an entry on this port still runs; else only the start
+ * command.
+ */
+function siteRecordFor(
+  site: SiteStart | null,
+  previews: PreviewStateEntry[],
+  port: number,
+): Pick<PreviewStateEntry, "start" | "startedPid" | "startedCommand"> {
+  if (site?.started) {
+    return { start: site.start, startedPid: site.started.pid, ...(site.started.command ? { startedCommand: site.started.command } : {}) };
+  }
+  const earlier = previews.find(
+    (entry) => entry.localPort === port && (!site || sameStart(entry.start, site.start)) && startedSiteRuns(entry),
+  );
+  if (earlier) return { start: earlier.start, startedPid: earlier.startedPid, startedCommand: earlier.startedCommand };
+  return site ? { start: site.start } : {};
+}
+
+/** This space's open previews on this machine, by port, with their titles. Empty when the server does not say. */
+async function openPreviewPorts(params: {
+  controllerUrl: string;
+  auth: ResolvedTunnelToken;
+  projectId: string;
+}): Promise<Map<number, string>> {
+  const ports = new Map<number, string>();
+  let rows: unknown[] = [];
+  try {
+    const listed = await controllerRequest({
+      controllerUrl: params.controllerUrl,
+      auth: params.auth,
+      method: "GET",
+      route: previewsRoute(params.projectId),
+      retryCommand: "instafy preview list",
+      notFoundMeansUnavailable: true,
+      timeoutMs: 10_000,
+    });
+    rows = Array.isArray(listed.body) ? listed.body : [];
+  } catch (error) {
+    // Previews are off: say so before anything is started.
+    if (error instanceof PreviewCommandError && error.exitCode === PREVIEW_EXIT_UNAVAILABLE) throw error;
+    return ports;
+  }
+  const runtimeId = readEnv("RUNTIME_ID");
+  for (const raw of rows) {
+    if (!raw || typeof raw !== "object") continue;
+    const record = raw as Record<string, unknown>;
+    const onRuntime = stringField(record, "runtimeId");
+    if (runtimeId && onRuntime && onRuntime !== runtimeId) continue;
+    const port = numberField(record, "port");
+    if (port) ports.set(port, stringField(record, "title") ?? "");
+  }
+  return ports;
+}
+
 // Asks the server for the preview and starts (or reuses) its rathole client, then records it. Runs under the state lock.
 async function createAndStartClient(params: {
   opts: PreviewOpenOptions;
@@ -960,15 +1233,17 @@ async function createAndStartClient(params: {
   serverUrl: string;
   log: (message: string) => void;
   serve: PreviewServe | null;
+  // `--start`'s site on this port, when it ran.
+  site: SiteStart | null;
 }): Promise<{
   grant: Record<string, unknown>;
   previewId: string;
   entry: PreviewStateEntry;
   current: PreviewStateEntry | null;
 }> {
-  // The server is asked first, so a server without previews exits 5 before anything is
+  // The server is asked first, so a server without previews exits 5 before a client is
   // downloaded or started here.
-  const { opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve } = params;
+  const { opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve, site } = params;
   const conversationId = opts.conversationId?.trim() || undefined;
   const created = await controllerRequest({
     controllerUrl,
@@ -985,6 +1260,7 @@ async function createAndStartClient(params: {
       ...(opts.summary ? { summary: opts.summary } : {}),
       metadata: { source: "instafy-cli" },
       ...(serve ? { serve } : {}),
+      ...(opts.replace ? { replace: true } : {}),
     },
     retryCommand,
     notFoundMeansUnavailable: true,
@@ -1002,6 +1278,8 @@ async function createAndStartClient(params: {
   const studioOrigin = parseStudioOrigin(grant["studioOrigin"]);
   const state = readStateFile();
   const current = state.previews.find((preview) => preview.previewId === previewId) ?? null;
+  // Read before an older entry on this port is forgotten below: the site's record moves to this preview.
+  const siteRecord = siteRecordFor(site, state.previews, port);
 
   // From here on the server holds a preview. Any failure before the client runs closes it again,
   // so no grant or card is left without a tunnel behind it.
@@ -1075,6 +1353,7 @@ async function createAndStartClient(params: {
     ...(binary ? { binary } : {}),
     ...(hostSuffix ? { hostSuffix } : {}),
     ...(studioOrigin ? { studioOrigin } : {}),
+    ...siteRecord,
   };
   upsertPreviewState(entry);
   return { grant, previewId, entry, current };
@@ -1083,55 +1362,90 @@ async function createAndStartClient(params: {
 export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpenResult> {
   // A port that is out of range or Instafy's own (the same rules as `preview check`) is refused
   // before anything else: no probe, no request. The server decides as well (400 port_not_allowed).
-  const port = parsePreviewPort(opts.port);
+  const explicitPort = opts.port === undefined || String(opts.port).trim() === "" ? null : parsePreviewPort(opts.port);
   const title = parsePreviewTitle(opts.title);
   const sitePath = parsePreviewPath(opts.path);
   const summary = parsePreviewSummary(opts.summary);
   // A malformed --serve-cmd, or one carrying a secret, is refused before anything is probed or asked for.
-  if (opts.serveCmd?.trim()) parseExplicitServeCommand(opts.serveCmd);
+  const serveArgv = opts.serveCmd?.trim() ? parseExplicitServeCommand(opts.serveCmd) : null;
+  if (opts.start && !serveArgv) {
+    throw new PreviewCommandError('--start needs --serve-cmd "<command>" to start the site.', PREVIEW_EXIT_NOT_LISTENING);
+  }
+  if (explicitPort === null) {
+    if (!opts.start) {
+      throw new Error(`A port is required: --port <port>. Or start the site with --start and --serve-cmd, which picks a free port.`);
+    }
+    if (!serveArgv!.some((arg) => arg.includes(PORT_PLACEHOLDER))) {
+      throw new Error(
+        `--serve-cmd needs ${PORT_PLACEHOLDER} where the site's port goes, e.g. --serve-cmd "python3 -m http.server ${PORT_PLACEHOLDER} --bind 127.0.0.1": --start picks the port.`,
+      );
+    }
+  }
   const projectId = resolveProject({ project: opts.project });
-  const retryCommand = `instafy preview open --port ${port} --title ${shellQuote(title)}`;
+  const retryCommand = `instafy preview open${explicitPort === null ? "" : ` --port ${explicitPort}`} --title ${shellQuote(title)}`;
   const { auth, controllerUrl } = resolveAuth(opts, retryCommand);
   const serverUrl = cleanUrl(controllerUrl);
   // Progress goes to stderr so `--json` output stays parseable.
   const log = (message: string) => console.error(kleur.cyan(message));
 
-  // With --start and --serve-cmd, the command is checked (one command, from inside the workspace, no secret) before
-  // anything runs.
-  const explicitServe =
-    opts.start && opts.serveCmd?.trim()
-      ? resolvePreviewServe({ port, serveCmd: opts.serveCmd, projectId, cwd: opts.cwd }).serve
+  // With --start, the command is checked (one command, from inside the workspace, no secret) before anything runs.
+  // Kept as given, `{port}` left in: that, and the directory it runs from, is what makes it this same site next time.
+  const start = opts.start
+    ? resolvePreviewServe({ port: explicitPort ?? 0, serveCmd: opts.serveCmd, projectId, cwd: opts.cwd }).serve
+    : null;
+
+  // From choosing the port to the state write, one `instafy preview` command at a time on this machine: two commands
+  // never pick the same port, start the same site twice or start two clients for one preview.
+  const { grant, previewId, entry, port, site, serve, restartNote } = await withStateLock(async () => {
+    const site = start
+      ? await startOrFindSite({
+          explicitPort,
+          start,
+          root: resolveWorkspaceRoot(process.env, projectId)!,
+          projectId,
+          title,
+          sitePath,
+          timeoutMs: opts.startTimeoutMs,
+          procRoot: opts.procRoot,
+          openPorts: () => openPreviewPorts({ controllerUrl, auth, projectId }),
+          log,
+        })
       : null;
-
-  let probe = await probeLocalSite(port, sitePath, undefined, RATHOLE_LOCAL_HOSTS);
-  let started: { pid: number; logFile: string } | null = null;
-  // --start starts the site only when nothing at all holds the port: a site that answers (even with an error),
-  // takes the connection without answering, or answers only on [::1] is running already.
-  if (!probe.listening && opts.start && probe.status === null && !probe.timedOut) {
-    const ipv6 = await probeLocalSite(port, sitePath, undefined, ["::1"]);
-    if (ipv6.status === null && !ipv6.timedOut) {
-      if (!explicitServe) {
-        throw new PreviewCommandError(
-          `Nothing answers on 127.0.0.1:${port}, and --start needs --serve-cmd "<command>" to start the site.`,
-          PREVIEW_EXIT_NOT_LISTENING,
-        );
+    const port = site?.port ?? explicitPort!;
+    try {
+      const probe = await probeLocalSite(port, sitePath, undefined, RATHOLE_LOCAL_HOSTS);
+      if (!probe.listening) {
+        throw await notListeningError(port, sitePath, probe);
       }
-      const root = resolveWorkspaceRoot(process.env, projectId)!;
-      started = await startPreviewSite({ port, sitePath, serve: explicitServe, root, timeoutMs: opts.startTimeoutMs });
-      log(`Started the site (pid ${started.pid}); log: ${displayPath(started.logFile)}`);
-      probe = await probeLocalSite(port, sitePath, undefined, RATHOLE_LOCAL_HOSTS);
+      // Read before anything else changes on the port: the process listening now is the one to restart later.
+      const { serve, note } = resolvePreviewServe({
+        port,
+        serveCmd: opts.serveCmd?.split(PORT_PLACEHOLDER).join(String(port)),
+        projectId,
+        cwd: opts.cwd,
+        procRoot: opts.procRoot,
+      });
+      const created = await createAndStartClient({
+        opts: { ...opts, summary },
+        port,
+        title,
+        sitePath,
+        projectId,
+        retryCommand,
+        auth,
+        controllerUrl,
+        serverUrl,
+        log,
+        serve,
+        site,
+      });
+      return { ...created, port, site, serve, restartNote: note };
+    } catch (error) {
+      // A site started for a preview that did not open is stopped again: no card shows it, and it would hold the port.
+      if (site?.started) await stopSite(site.started.pid, site.started.command ?? readProcessCommandLine(site.started.pid));
+      throw error;
     }
-  }
-  if (!probe.listening) {
-    throw await notListeningError(port, sitePath, probe);
-  }
-  // Read before anything else changes on the port: the process listening now is the one to restart later.
-  const { serve, note: restartNote } = resolvePreviewServe({ port, serveCmd: opts.serveCmd, projectId, cwd: opts.cwd });
-
-  // From the create call to the state write, one `instafy preview` command at a time on this machine.
-  const { grant, previewId, entry } = await withStateLock(() =>
-    createAndStartClient({ opts: { ...opts, summary }, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve }),
-  );
+  });
 
   // The client stays up if this fails: a re-run reuses it and only repeats the ready call.
   // If the server turned previews off in between, nothing is left running.
@@ -1187,7 +1501,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     viewerHostSuffix: parseViewerHostSuffix(grant["viewerHostSuffix"]) ?? null,
     restartable,
     ...(restartable ? {} : { restartNote: restartNote ?? "the server did not record a start command" }),
-    ...(opts.start ? { startedPid: started?.pid ?? null, logFile: started?.logFile ?? null } : {}),
+    ...(opts.start ? { startedPid: site?.started?.pid ?? null, logFile: site?.started?.logFile ?? null } : {}),
     thumbnail: thumbnail.status,
     ...(thumbnail.reason ? { thumbnailReason: thumbnail.reason } : {}),
   };
@@ -1312,14 +1626,19 @@ export async function previewList(opts: PreviewListOptions): Promise<PreviewSumm
   return rows.map(toPreviewSummary).filter((row): row is PreviewSummary => row !== null);
 }
 
-export async function previewClose(opts: PreviewCloseOptions): Promise<{ ok: true; previewId: string }> {
+export async function previewClose(opts: PreviewCloseOptions): Promise<PreviewCloseResult> {
   const previewId = opts.previewId?.trim() ?? "";
   if (!previewId) {
     throw new Error("Preview id is required. Use `instafy preview list` to find it.");
   }
+  let siteStopped = false;
   const entry = await withStateLock(async () => {
     const removed = removePreviewState(previewId);
-    if (removed) await stopClient(removed);
+    if (removed) {
+      await stopClient(removed);
+      // The site `--start` (or a wake) started for it stops too; a site started some other way is left running.
+      siteStopped = await stopSite(removed.startedPid, removed.startedCommand);
+    }
     return removed;
   });
 
@@ -1331,13 +1650,16 @@ export async function previewClose(opts: PreviewCloseOptions): Promise<{ ok: tru
     );
     await closePreviewOnServer(controllerUrl, auth, projectId, previewId);
   } catch (error) {
-    // The local client is already stopped; keep a record so a retry by id finds the space.
-    if (entry) await withStateLock(async () => upsertPreviewState({ ...entry, pid: -1 }));
+    // The local client (and the site) is already stopped; keep a record so a retry by id finds the space.
+    if (entry) {
+      const { startedPid: _pid, startedCommand: _command, ...rest } = entry;
+      await withStateLock(async () => upsertPreviewState({ ...(siteStopped ? rest : entry), pid: -1 }));
+    }
     throw error;
   }
 
   removeWorkdir(previewId);
-  return { ok: true, previewId };
+  return { ok: true, previewId, siteStopped };
 }
 
 export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
@@ -1351,7 +1673,7 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
       : result.status === "not_responding"
         ? kleur.yellow("Not responding yet")
         : kleur.yellow("Preview opened (the server did not report whether the site answers)");
-  console.log(`${label}: ${result.title} (port ${result.port}). Open it from the card in the conversation.`);
+  console.log(`${label}: ${result.title} (port ${result.port}). Its card is in the conversation.`);
   if (result.thumbnail === "uploaded") {
     console.log(kleur.gray("The card shows a picture of the site; `instafy preview check` takes a new one after a change."));
   } else {
@@ -1360,7 +1682,7 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
   if (result.startedPid) {
     console.log(kleur.gray(`Started the site in the background (pid ${result.startedPid}); log: ${displayPath(result.logFile ?? "")}`));
   } else if (result.startedPid === null) {
-    console.log(kleur.gray("The site was already running; nothing was started."));
+    console.log(kleur.gray("This site was already running on its port; nothing was started."));
   }
   if (result.restartable) {
     console.log(kleur.gray("Open starts the site again when the process that started it exits, or the space sleeps."));

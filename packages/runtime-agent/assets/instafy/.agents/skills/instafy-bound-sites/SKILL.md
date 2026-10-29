@@ -68,16 +68,17 @@ Not for: a one-off answer in chat, or a static page with nothing to check (use `
    place too (a city or postcode field): in Studio's preview card location is not available yet, and the page says
    so. Render strings with `textContent`; only open `https:` links, and take store links from your seed data unless
    the offer is `seller.trust: "curated"`.
-7. **Serve it detached in preview mode, then show it in Studio** (free port 4173-4199):
-   `instafy bind serve <dir> --port <port> --preview --detach` (a server started in the
-   foreground stops when your turn ends), then `instafy preview open --port <port> --title '<short title>' --json`
-   (single quotes: in double quotes the shell expands `$150` to `50`). `--preview` means no viewer token: only space members reach the page,
-   through the card, and the binder refuses every other host. Never post localhost, preview or tunnel URLs;
-   say "Open it from the card above". The binder holds no Instafy login and never runs Ask Octo itself
+7. **Serve it and show it in Studio in one command**, from the site's folder:
+   `instafy preview open --title '<short title>' --serve-cmd "instafy bind serve . --port {port} --preview" --start --json`
+   (single quotes: in double quotes the shell expands `$150` to `50`). It picks the port, keeps the binder serving
+   after your turn, posts the card and takes its picture. `--preview` means no viewer token: only space members reach the page,
+   through the card, and the binder refuses every other host. Never post localhost, preview or tunnel URLs.
+   The binder holds no Instafy login and never runs Ask Octo itself
    (`agent executor: host`); the page hides buttons not in `names`. Do not tell the user to run `instafy login`
    or any other terminal command: they use Studio. A public link only when the user asks (their ask is the
-   go-ahead): follow `instafy-frontend-previews`, `instafy tunnel start --port <port> --json`, then restart serve
-   with `--preview --public-url <tunnel url> --detach` and share the `public link` it prints, whole: it carries the
+   go-ahead): follow `instafy-frontend-previews`, `instafy tunnel start --port <port> --json` (the JSON's port), then
+   `instafy preview close <previewId>` and the same open with `--port <port>` and `--public-url <tunnel url>` added to
+   the serve command; share the `public link` line of its `logFile`, whole: it carries the
    viewer token (`#k=`), so only people with that link can open the data or click its checks, and nobody there can
    ask Octo. The card in Studio stays tokenless. Never share the bare tunnel URL.
    Intents with `confirm: true` wait for `instafy bind confirm <dir> <job>`: set it only on an intent that cannot be
