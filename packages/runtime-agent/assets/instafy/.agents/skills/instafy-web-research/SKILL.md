@@ -10,7 +10,7 @@ routing_keywords: with sources, and sources, cite, citation, fact check, search 
 
 Never prune: yes
 
-Read permitted pages this turn; trace facts to their sources.
+Read permitted pages this turn; trace facts to their sources. Find pages, mark what is not checked and pick the names to compare as "Finding a page" in `instafy-browser-automation` says (`.agents/skills/instafy-browser-automation/SKILL.md`; read it first unless it is loaded).
 
 ## Readers
 
@@ -82,7 +82,6 @@ When the task needs a `no-agents` site (hotel prices on Booking.com):
 
 - Facts that matter (price, opening hours, address, dates and times) need two independent sources, or one official source: the venue's, operator's, shop's or authority's own page.
 - When sources disagree, say so, show both with their dates, and prefer the official one.
-- Never present a remembered fact as checked. Say "not checked" next to it.
 
 ## Comparing items
 
@@ -92,8 +91,7 @@ Say per item what you found:
 - Price: the maker's or a shop's own page. None there, or a stop: say so ("no price on <host>'s page", "<host> blocks automated price checks"), then try a shop robots.txt allows: `instafy web search "<name> price" --json`, or `--chain reference-search` for shops' official sites; a link-only shop gets `instafy web link <site> query=<name>` (Guided mode). Still none: "price unknown", and the page for the person to open and send to Octo; never a remembered or guessed price.
 - Sources asked for ("two independent reviews"): that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count). Short: "<item>: 1 of 2 reviews found", in the reply and on the page.
 - A limit ("under €600"): an item with no price read this turn is listed as "price unknown", never as within it.
-- The official site failed twice: read an independent source (a review, or a shop robots.txt allows) before building.
-- A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why. A row per candidate a page read names.
+- A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.
 
 ## Stops
 

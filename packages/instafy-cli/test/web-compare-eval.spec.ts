@@ -9,6 +9,8 @@
 // for a key and the browser and built nothing) fails exactly the checks for that rule. When the maker's site never
 // answers (the third 28 Oct drive), the turn reads a review publisher's own page and lists every model it names, each
 // price unknown and never within the limit; the drive's turn (the maker's site only, then a page with no rows) fails.
+// When no review can be read either (29 Oct drive 4), the turn searches, tries every review the search found, and lists
+// the models the search results name, each "not checked"; the drive's rows ("candidate 1/2/3") fail.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -41,14 +43,18 @@ type Transcript = Record<string, any>;
 type Edit = (t: Transcript, change: (data: any, dir: string) => void) => Transcript;
 type Breaker = [string, (t: Transcript, k: Kase, edit: Edit) => Transcript, string[]];
 
-const { CASE, OFFICIAL_DOWN_CASE, BREAKERS, NO_PROVIDER_BREAKERS, OFFICIAL_DOWN_BREAKERS, failedIds, gradeCompare, officialDownPage, officialDownReply, referenceAnswer, referencePage, referenceReply, reviewsAsked, writeCompareFixtures } = evalKit as {
+const { CASE, OFFICIAL_DOWN_CASE, SEARCH_ONLY_CASE, BREAKERS, NO_PROVIDER_BREAKERS, OFFICIAL_DOWN_BREAKERS, SEARCH_ONLY_BREAKERS, failedIds, gradeCompare, officialDownPage, officialDownReply, searchOnlyPage, searchOnlyReply, referenceAnswer, referencePage, referenceReply, reviewsAsked, writeCompareFixtures } = evalKit as {
   CASE: Kase;
   OFFICIAL_DOWN_CASE: Kase;
+  SEARCH_ONLY_CASE: Kase;
   BREAKERS: Breaker[];
   NO_PROVIDER_BREAKERS: Breaker[];
   OFFICIAL_DOWN_BREAKERS: Breaker[];
+  SEARCH_ONLY_BREAKERS: Breaker[];
   officialDownPage: (kase: Kase, readAt: string) => Record<string, any>;
   officialDownReply: (kase: Kase, readAt: string, o: { links: Record<string, string> }) => string;
+  searchOnlyPage: (kase: Kase) => Record<string, any>;
+  searchOnlyReply: (kase: Kase, o: { links: Record<string, string> }) => string;
   failedIds: (checks: Check[]) => string[];
   gradeCompare: (transcript: Transcript, kase?: Kase) => Check[];
   referenceAnswer: (kase: Kase, hostname: string) => unknown;
@@ -61,12 +67,14 @@ const { CASE, OFFICIAL_DOWN_CASE, BREAKERS, NO_PROVIDER_BREAKERS, OFFICIAL_DOWN_
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-web-compare-eval-"));
 const FIXTURES = path.join(tmp, "fixtures");
 const FIXTURES_DOWN = path.join(tmp, "fixtures-official-down");
+const FIXTURES_SEARCH_ONLY = path.join(tmp, "fixtures-search-only");
 const START = Date.parse("2026-10-27T09:00:00Z");
 const KEY = "BSAcomparekey00fixtureonly3";
 
 beforeAll(() => {
   writeCompareFixtures(FIXTURES);
   writeCompareFixtures(FIXTURES_DOWN, OFFICIAL_DOWN_CASE);
+  writeCompareFixtures(FIXTURES_SEARCH_ONLY, SEARCH_ONLY_CASE);
 });
 afterAll(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -231,6 +239,38 @@ async function officialDownTurn(): Promise<Transcript> {
   return { searches, reads, findings, links: guided, reply: officialDownReply(kase, readAt, { links }), site, actions: search.offer ? [search.offer] : [] };
 }
 
+/**
+ * Neither the maker's site nor any review answers a reader (29 Oct drive 4): the maker's two addresses, each tried
+ * once; then, as two failed pages on one site say, a search for reviews, every review it found tried (each refuses
+ * automated reads); a guided link per price; and the page built with the compare starter: a row per model the search
+ * results name, each "not checked".
+ */
+async function searchOnlyTurn(): Promise<Transcript> {
+  const kase = SEARCH_ONLY_CASE;
+  const { env, common, searches, reads, read, searchState, officialSite } = startTurn(FIXTURES_SEARCH_ONLY, { key: true });
+  const official = await officialSite(kase);
+  expect((await read([official])).pages[0]).toMatchObject({ status: "failed", code: "unreachable" });
+  expect((await read([wwwSibling(new URL(official))!.href])).pages[0]).toMatchObject({ status: "failed", code: "unreachable" });
+  const search = await webSearch({ query: `${kase.brand} robot vacuums reviews` }, { ...common, stateDir: searchState });
+  searches.push({ query: search.query, status: search.status, results: search.results, tell: search.tell });
+  expect(search.status).toBe("ok");
+  const leads = search.results.filter((r) => !r.linkOnly).map((r) => r.url);
+  expect(leads).toHaveLength(kase.items.length);
+  for (const page of (await read(leads)).pages) expect(page).toMatchObject({ status: "stopped", code: "forbidden" });
+  const links: Record<string, string> = {};
+  const guided: Transcript[] = [];
+  for (const item of kase.items) {
+    const g = webLink("amazon", { query: item.name }, { skillRoots: [], env, cwd: tmp });
+    if (g.ok === false) throw new Error(g.error);
+    links[item.slug] = g.link;
+    guided.push({ site: "amazon", query: item.name, link: g.link });
+  }
+  const site = path.join(tmp, "sites", `compare-${turnNo}`);
+  initSite(site, { starter: "compare" });
+  fs.writeFileSync(path.join(site, "data.json"), JSON.stringify(searchOnlyPage(kase), null, 2));
+  return { searches, reads, findings: [], links: guided, reply: searchOnlyReply(kase, { links }), site, actions: [] };
+}
+
 let edits = 0;
 /** A copy of the transcript whose page is a copy of its folder, changed by `change(data, dir)`. */
 const edit: Edit = (t, change) => {
@@ -337,6 +377,25 @@ describe("the shopping comparison eval (fixtures)", () => {
     }
   });
 
+  it("only a search names the models: the turn tries every review it found and lists the models, each not checked; the drive's placeholder rows fail", async () => {
+    const reference = await searchOnlyTurn();
+    expect(reference.reads.map((r: Transcript) => [new URL(r.url).host, r.status])).toEqual([
+      ["brightvac.example", "failed"],
+      ["www.brightvac.example", "failed"],
+      ["www.review-one.example", "stopped"],
+      ["www.review-one.example", "stopped"],
+      ["www.review-one.example", "stopped"],
+    ]);
+    const data = JSON.parse(fs.readFileSync(path.join(reference.site, "data.json"), "utf8"));
+    expect(data.items.map((row: Transcript) => row.name)).toEqual(SEARCH_ONLY_CASE.items.map((i) => i.name));
+    const checks = gradeCompare(reference, SEARCH_ONLY_CASE);
+    expect(failedIds(checks), JSON.stringify(checks.filter((c) => !c.pass))).toEqual([]);
+    for (const [what, breakIt, expected] of SEARCH_ONLY_BREAKERS) {
+      const result = gradeCompare(breakIt(clone(reference), SEARCH_ONLY_CASE, edit), SEARCH_ONLY_CASE);
+      expect(failedIds(result), `${what}: ${JSON.stringify(result.filter((c) => !c.pass))}`).toEqual([...expected].sort());
+    }
+  });
+
   it("grades by rules the skills and the starter state", () => {
     const flat = (s: string) => s.replace(/\s+/g, " ");
     const skills = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../runtime-agent/assets/instafy/.agents/skills");
@@ -350,8 +409,7 @@ describe("the shopping comparison eval (fixtures)", () => {
       "that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count)",
       "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page.",
       "an item with no price read this turn is listed as \"price unknown\", never as within it",
-      "The official site failed twice: read an independent source (a review, or a shop robots.txt allows) before building.",
-      "each fact not read marked unknown with why. A row per candidate a page read names.",
+      "each fact not read marked unknown with why.",
       "and an item's name as its official page gives it",
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5.",
       "reviews from publishers you know review this kind of item.",
@@ -360,6 +418,17 @@ describe("the shopping comparison eval (fixtures)", () => {
       "A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.",
     ]) {
       expect(research, rule).toContain(rule);
+    }
+    // Another source after two failures, and which names a comparison lists, are the browser skill's "Finding a page",
+    // which the research skill points to.
+    expect(research).toContain('as "Finding a page" in `instafy-browser-automation` says');
+    const browser = flat(fs.readFileSync(path.join(skills, "instafy-browser-automation/SKILL.md"), "utf8"));
+    for (const rule of [
+      "## Finding a page",
+      "Two failed pages on one site: find another source with `instafy web search` (no key: `--chain reference-search`)",
+      "Comparing: list the models a page you read names, and mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
+    ]) {
+      expect(browser, rule).toContain(rule);
     }
     const hub = flat(fs.readFileSync(path.join(skills, "instafy-interactive-artifacts/SKILL.md"), "utf8"));
     for (const rule of [

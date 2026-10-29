@@ -615,6 +615,24 @@ it starts this task's own step (`navigate` that page, or a tab of its own). The
 first run on a page, a later run of the same chat, and a runtime that restarted
 say nothing.
 
+### How Octo finds a page
+
+Every Personal or Shared Browser turn carries the `instafy-browser-automation`
+skill, whatever its words: the router loads a skill by the words of a request,
+and a browser turn's often has none of the skill's ("Now find how to get there
+by tram", or a task that names an address). The skill loads first of the turn's
+skills, so the snapshot's budget never runs out before it. Its "Finding a page"
+section, which the `instafy-web-research` skill points to, says how every reader
+finds a page: an address the person or a skill gave, a link on a page read, or
+the official site's home page, never a search engine or a guessed path; a
+missing page's own site search; another source after two failed pages on one
+site; facts from a place's own page, not a listing or a kiosk page; "not
+checked" on anything not read this turn; and a cookie banner's refusal, so the
+banner does not cover the page. The research and comparison evals
+(`packages/instafy-bind/tests/web-research-eval.test.mjs`,
+`packages/instafy-cli/test/web-compare-eval.spec.ts`) grade these rules on
+fixture sites.
+
 ### Octo's own tabs
 
 Besides the page the person chose for the run, Octo may open up to three tabs

@@ -85,6 +85,29 @@ browser` or `personal browser`; prices with currency and the date seen; no
 secrets), or `{"url", "stopped"}` (`login`, `captcha`, `paywall`, `blocked`,
 `robots`, `download`, `secret`, `link-only`).
 
+## Finding a page
+
+For every reader, browser or not:
+
+- Open an address the person or a skill gave, a link on a page you read, or the
+  home page of the official site the task is about. Never a search engine or a
+  guessed path.
+- A page that says it is missing ("not found", "are you lost?"): use that
+  site's own search box or menu.
+- Two failed pages on one site: find another source with `instafy web search`
+  (no key: `--chain reference-search`); with only browser tools, open the home
+  page of another official source (the operator, authority or maker).
+- A sight, stop, opening hours or price comes from its own page (the venue's,
+  operator's or shop's), not a listing or a kiosk page: those only lead to it.
+- Anything not read on a page this turn (from memory or a search result) says
+  "not checked" next to it.
+- Comparing: list the models a page you read names, and mark one only a search
+  result names "not checked". Never names from memory, never placeholders such
+  as "candidate 1".
+- A cookie banner with a reject button ("Reject all", "Only necessary"): press
+  it so it does not cover the page the person watches. Refusing shares nothing;
+  accepting is the person's choice.
+
 ## Shared Browser command (only when Shared Browser is exposed)
 
 For Shared Browser work, use only the tools exposed by the
@@ -97,10 +120,9 @@ finish from the controller's observed title, URL, visible text, and elements. Ke
 the same visible page focused. The controller accepts only these high-level
 operations and never exposes arbitrary JavaScript execution.
 
-Open a site the person named directly, never through a search engine, and only
-addresses they gave or you saw on a page, not guessed paths. A site asks once
-per run; its pages then open without asking. A declined site stays closed: take
-another route that fits the request, or end the turn and ask.
+Find pages as "Finding a page" says. A site asks once per run; its pages then
+open without asking. A declined site stays closed: take another route that fits
+the request, or end the turn and ask.
 
 ## Core rules
 
@@ -112,19 +134,10 @@ another route that fits the request, or end the turn and ask.
 - Do not reopen `INSTAFY.md`, `AGENTS.md`, or `.agents/skills/**` via shell before the first page action. Project memory and loaded learned blocks are already in context for this run.
 - If a learned block was loaded for this run, trust it first. Only reopen memory files after a concrete browser action failed and the missing cue is still unclear.
 - If the current prompt names exact controls, routes, labels, or query terms, those prompt-provided cues override older learned surface-specific cues. Use learned memory for durable invariants and retrieval guidance, not to overwrite the prompt with an older sibling-surface route.
-- Prefer exact stable cues over broad guesses: selectors, ids, names, relative hrefs, visible labels, or routes you actually observed.
-- On tables, listings, forms, and filtered result sets, prefer the exact visible control text or stable selector when it exists. Do not downgrade `button text "Apply filter"` or `link text "Epsilon account"` into substring regexes, `contains` checks, or vague phrases like `matching result`.
-- For local/dev/test sites, prefer route-level and selector-level memory over full absolute origins or debugger endpoints. Only preserve host/port when the host itself is the learned fact.
+- Prefer exact stable cues you actually observed over broad guesses: selectors, ids, names, relative hrefs, routes, and exact visible control text. Never downgrade `button text "Apply filter"` or `link text "Epsilon account"` into a substring regex, a `contains` check or a vague phrase like `matching result`.
 - In Personal or Shared Browser, reuse the current tab when it already matches the task. If you must open or switch tabs, bring the controlled tab to the front so the user sees the same state.
-- For “find me a good nearby place” style requests, treat a results list as a starting point, not the finish line. Continue until you can name concrete candidates or report a concrete blocker.
-- When the user wants a recommendation, do not stop at a generic results list unless they explicitly asked only for links. Open the most promising venues' own pages and open map data and extract real details; never open a site on `instafy-web-research`'s link-only list.
-- Prefer sources that can support an actual recommendation over repeating a search query or a list of blue links.
-- If you cannot determine a single best option, summarize the strongest observed shortlist with concrete evidence instead of punting back to the user.
-- For Personal or Shared Browser, only treat browser work as a separate session when the user explicitly asks for isolation or incompatible login state requires it. Owner-local observation is always fresh and credential-free.
-- In Personal or Shared Browser, if the user asks for “another window” or “another browser”, clarify the intended level only when it matters:
-  - usually interpret it as a new page/tab in the current session
-  - interpret it as an isolated session only when they mention separate login/account/cookie state
-  - interpret it as a new runtime-backed session only when they explicitly ask for a fully separate visible browser surface or runtime
+- For a recommendation, a results list is a starting point: open the strongest candidates' own pages and open map data until you can name concrete options with evidence (or the strongest observed shortlist), or a concrete blocker; never just links, unless asked. Never open a site on `instafy-web-research`'s link-only list.
+- In Personal or Shared Browser, “another window” or “another browser” usually means a new tab in this session: an isolated session only when they mention separate login or cookie state, a new runtime only when they ask for a fully separate browser.
 - Prefer a compact action path and at most one repair attempt. Do not fall into inspect/retry loops unless a direct attempt produced a concrete blocker.
 - Treat sign-in, one-time codes, consent and payment as the person's steps: pause on them with `request_human_input`, and continue when they choose Let AI continue.
 - Opening, reading and navigating a signed-in site needs no extra confirmation in chat, and the browser's own site and action prompts still apply; ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the person's current message named it.

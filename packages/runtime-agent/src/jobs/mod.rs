@@ -1892,13 +1892,27 @@ fn format_project_memory_snapshot(
     prompt_text: &str,
 ) -> Option<ProjectMemorySnapshot> {
     let preferences = ProjectPreferencesSnapshot::load(workspace_dir);
-    format_project_memory_snapshot_with_preferences(workspace_dir, prompt_text, &preferences)
+    format_project_memory_snapshot_with_preferences(workspace_dir, prompt_text, &preferences, None)
+}
+
+/// The browser skill's folder: the skill a browser turn always carries.
+const BROWSER_SKILL_ID: &str = "instafy-browser-automation";
+
+/// The skill a turn carries whatever its words: a Personal or Shared Browser
+/// turn carries the browser skill, which says how to find a page. The router
+/// weighs words, and a browser turn's request often has none of the skill's
+/// ("Now find how to get there by tram", or a task that names an address).
+fn pinned_skill_for_turn(job: &LeaseJob) -> Option<&'static str> {
+    (crate::personal_browser::payload_requests_personal_browser(&job.payload)
+        || crate::shared_browser::payload_requests_shared_browser(&job.payload))
+    .then_some(BROWSER_SKILL_ID)
 }
 
 fn format_project_memory_snapshot_with_preferences(
     workspace_dir: &Path,
     prompt_text: &str,
     preferences: &ProjectPreferencesSnapshot,
+    pinned_skill: Option<&str>,
 ) -> Option<ProjectMemorySnapshot> {
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
     if remaining == 0 {
@@ -1991,7 +2005,24 @@ fn format_project_memory_snapshot_with_preferences(
                 }
             }
 
-            let selected_contexts = select_recursive_context_nodes(&contexts, prompt_text);
+            let mut selected_contexts = select_recursive_context_nodes(&contexts, prompt_text);
+            // A pinned skill the words did not route is loaded too, under its parent.
+            if let Some(pinned) = pinned_skill
+                && !selected_contexts.iter().any(|context| context.id == pinned)
+                && let Some(context) = contexts.iter().find(|context| context.id == pinned)
+            {
+                selected_contexts.push(SelectedContextNode {
+                    id: context.id.clone(),
+                    label: context
+                        .metadata
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| context.id.clone()),
+                    path: context.path.clone(),
+                    score: 0,
+                    parent: context.metadata.context_parents.first().cloned(),
+                });
+            }
             let has_learned_index = contexts
                 .iter()
                 .any(|context| context.id == "instafy-learned");
@@ -2018,9 +2049,15 @@ fn format_project_memory_snapshot_with_preferences(
             // contexts score 0 and follow, so they can no longer use up the budget before the
             // instructions specific to this request (an imported skill routed for the prompt was
             // otherwise left with a few hundred bytes after the built-in meta skills).
+            // A pinned skill loads first, so the budget never runs out before it.
             let mut ordered_contexts: Vec<&SelectedContextNode> =
                 selected_contexts.iter().collect();
-            ordered_contexts.sort_by(|a, b| b.score.cmp(&a.score));
+            ordered_contexts.sort_by_key(|context| {
+                (
+                    Some(context.id.as_str()) != pinned_skill,
+                    std::cmp::Reverse(context.score),
+                )
+            });
             for context in ordered_contexts {
                 if remaining == 0 {
                     break;
@@ -9323,6 +9360,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 workspace_dir,
                 request_for_selection,
                 preferences,
+                pinned_skill_for_turn(job),
             ) {
                 append_prompt_section(
                     &mut prompt,
