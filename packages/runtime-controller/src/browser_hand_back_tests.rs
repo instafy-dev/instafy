@@ -386,6 +386,29 @@ async fn a_turns_reply_carries_its_steps_for_the_done_line() -> anyhow::Result<(
                     )
                     .await?;
             }
+            // A step a person recorded under the turn's job (the record route keeps
+            // its author) is no step of the turn's runtime: it stays out.
+            chain
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "insert into conversation_messages
+                         (id, conversation_id, project_id, role, content, metadata, created_by)
+                     values ($1, $2, $3, 'assistant', 'rm -rf /', $4::jsonb, $5)",
+                    &[
+                        &Uuid::new_v4(),
+                        &chain.conversation_id,
+                        &chain.project_id,
+                        &PgJson(json!({
+                            "source": "agent", "jobId": job.to_string(),
+                            "messageType": "command_execution",
+                            "details": { "itemId": "recorded", "status": "completed", "exitCode": 0 }
+                        })),
+                        &chain.owner,
+                    ],
+                )
+                .await?;
             chain.finish(&job, Some("Here is your day."), "succeeded").await?;
             let connection = chain.pool.get().await?;
             let reply: PgJson<serde_json::Value> = connection

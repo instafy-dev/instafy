@@ -652,12 +652,28 @@ async fn load_turn_steps_record(
     job_id: &Uuid,
 ) -> Result<Option<JsonValue>, (StatusCode, Json<ApiError>)> {
     let job_id_text = job_id.to_string();
-    // Scoped by project_id (indexed) before the JSONB filter, as the count above.
+    // One more than the record reads, so a read cut short is known as one.
+    let row_limit =
+        i64::try_from(crate::chat_activity::MAX_TURN_STEP_MESSAGES + 1).unwrap_or(i64::MAX);
+    // Scoped by project_id (indexed) before the JSONB filter, as the count above. Only the
+    // messages a runtime or the controller wrote (a person's recorded message has its author),
+    // and of each only the fields the record keeps: a command's output and its event stay put.
     let rows = transaction
         .query(
-            "select metadata
+            "select jsonb_build_object(
+                 'messageType', coalesce(metadata -> 'messageType', metadata -> 'message_type'),
+                 'activity', metadata -> 'activity',
+                 'details', jsonb_build_object(
+                     'itemId', metadata #> '{details,itemId}',
+                     'status', metadata #> '{details,status}',
+                     'exitCode', coalesce(metadata #> '{details,exitCode}', metadata #> '{details,exit_code}'),
+                     'paths', metadata #> '{details,paths}'
+                 )
+             ) as metadata
              from conversation_messages
              where project_id = $1
+               and role = 'assistant'
+               and created_by is null
                and coalesce(metadata #>> '{jobId}', metadata #>> '{job_id}') = $2
                and lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', '')) in (
                    'command_execution',
@@ -666,8 +682,8 @@ async fn load_turn_steps_record(
                    'file_change'
                )
              order by created_at asc, id asc
-             limit 2000",
-            &[project_id, &job_id_text],
+             limit $3",
+            &[project_id, &job_id_text, &row_limit],
         )
         .await
         .map_err(|error| internal_error(format!("failed to read the agent job's steps: {error}")))?;

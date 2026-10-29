@@ -22,6 +22,10 @@ pub(crate) const STEP_MESSAGE_TYPES: [&str; 4] = [
 ];
 /// A turn with more steps than this stores none: Studio words it from what it loaded.
 const MAX_TURN_STEPS: usize = 400;
+/// At most this many step messages are read for a turn's steps (a step posts one when it starts and
+/// one when it ends, a tool call one per update too). A read that holds more is cut short, so it is
+/// not the whole turn and stores none.
+pub(crate) const MAX_TURN_STEP_MESSAGES: usize = 2000;
 /// At most this many of a file edit's files are kept, each at most [`MAX_STEP_PATH_CHARS`].
 const MAX_STEP_PATHS: usize = 20;
 const MAX_STEP_PATH_CHARS: usize = 300;
@@ -74,8 +78,12 @@ fn step_string<'a>(
 /// Stored with the turn's reply when the turn ends, so the line reads the same after a reload:
 /// a page of history ends where it ends, and a long turn's first steps are often on the page
 /// before. Nothing but these fields is kept: never a command, its output or anything a page
-/// said. None for a turn with no steps, or with more than [`MAX_TURN_STEPS`].
+/// said. None for a turn with no steps, with more than [`MAX_TURN_STEPS`], or read from more than
+/// [`MAX_TURN_STEP_MESSAGES`] messages.
 pub(crate) fn turn_steps_record(step_metadata: &[JsonValue]) -> Option<JsonValue> {
+    if step_metadata.len() > MAX_TURN_STEP_MESSAGES {
+        return None;
+    }
     let mut order: Vec<String> = Vec::new();
     let mut newest: std::collections::HashMap<String, JsonMap<String, JsonValue>> =
         std::collections::HashMap::new();
@@ -83,11 +91,17 @@ pub(crate) fn turn_steps_record(step_metadata: &[JsonValue]) -> Option<JsonValue
         let Some(metadata) = metadata.as_object() else {
             continue;
         };
+        // Named as Studio names a message's type: trimmed, in lower case.
         let Some(step_type) = metadata
             .get("messageType")
             .and_then(JsonValue::as_str)
-            .map(str::trim)
-            .filter(|value| STEP_MESSAGE_TYPES.contains(value))
+            .map(|value| value.trim().to_ascii_lowercase())
+            .and_then(|value| {
+                STEP_MESSAGE_TYPES
+                    .iter()
+                    .copied()
+                    .find(|known| *known == value)
+            })
         else {
             continue;
         };
@@ -284,6 +298,28 @@ mod tests {
         let text = record.to_string();
         assert!(
             !text.contains("172.19") && !text.contains("uw add-point") && !text.contains("evil")
+        );
+    }
+
+    // A read cut short at its cap is not the whole turn: a tool call that
+    // posted an update per moment left its later steps out.
+    #[test]
+    fn a_read_cut_short_stores_none() {
+        let updates: Vec<JsonValue> = (0..=MAX_TURN_STEP_MESSAGES)
+            .map(|_| step("mcp_tool_call", "1", "in_progress", None))
+            .collect();
+        assert_eq!(turn_steps_record(&updates), None);
+        assert!(turn_steps_record(&updates[..MAX_TURN_STEP_MESSAGES]).is_some());
+    }
+
+    // Studio reads a message's type trimmed and in lower case, so the record does too.
+    #[test]
+    fn a_step_type_is_read_as_studio_reads_it() {
+        let record = turn_steps_record(&[step(" Command_Execution ", "1", "completed", None)])
+            .expect("record");
+        assert_eq!(
+            record["steps"],
+            json!([{ "type": "command_execution", "status": "completed" }])
         );
     }
 
