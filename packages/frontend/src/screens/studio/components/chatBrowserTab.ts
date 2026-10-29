@@ -139,6 +139,22 @@ function takenByAnotherChat(
 }
 
 /**
+ * Whether another chat took this tab after `sinceMs` (see above). A follow-up
+ * asks it too: it goes on in its turn's tab only while that is still the
+ * chat's own.
+ */
+export function browserTabTakenByAnotherChat(input: {
+  scope: ChatBrowserTabScope;
+  runs: readonly RunRecord[];
+  pageId: string;
+  sinceMs: number;
+}): boolean {
+  const { scope } = input;
+  if (!scopeKey(scope) || !scope.runtimeId) return false;
+  return takenByAnotherChat(input.pageId, input.sinceMs, { ...scope, runtimeId: scope.runtimeId }, input.runs);
+}
+
+/**
  * When a tab chosen on this page counts from: now, and never before a turn on
  * that browser this page knows of, so a clock behind the server's does not
  * make a pick look older than the turns it follows.
@@ -247,6 +263,15 @@ export function useChatBrowserTab(input: {
   /** The person chose this tab in this chat: its later browser turns use it. */
   const choose = useCallback((pageId: string) => give(latest.current.scope, pageId), [give]);
 
+  /** Whether another chat took this tab after `sinceMs`: a follow-up then stays in the chat. */
+  const tabTakenByAnotherChat = useCallback(
+    (pageId: string, sinceMs: number) =>
+      browserTabTakenByAnotherChat({ scope: latest.current.scope, runs: latest.current.runs, pageId, sinceMs }),
+    // Read again when the chat, its runs or the memory change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key, runs, chosenVersion],
+  );
+
   /**
    * The tab a browser turn of this chat is sent for: the chat's own tab, else
    * a blank tab no chat uses, else a new blank tab opened for the chat. Null
@@ -285,5 +310,5 @@ export function useChatBrowserTab(input: {
     return promise;
   }, [give]);
 
-  return { tab, choose, resolveForTurn };
+  return { tab, choose, resolveForTurn, takenByAnotherChat: tabTakenByAnotherChat };
 }

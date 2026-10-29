@@ -4534,6 +4534,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeId: resolvedBrowserRuntimeId,
     userId: currentUserId,
     pages: sharedBrowserChromePages,
+    // A follow-up is a browser turn: never in a tab another chat took since.
+    takenByAnotherChat: chatBrowserTab.takenByAnotherChat,
   });
   const resolveSharedBrowserFollowUp = sharedBrowserFollowUpState.resolve;
   const dismissSharedBrowserFollowUp = sharedBrowserFollowUpState.dismiss;

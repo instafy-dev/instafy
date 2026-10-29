@@ -11,6 +11,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../../../types";
 import { SHARED_BROWSER_FOLLOW_UP_WINDOW_MS } from "../browserHandoffRouting";
+import { browserTabTakenByAnotherChat } from "../chatBrowserTab";
 import { useSharedBrowserFollowUp } from "../useSharedBrowserFollowUp";
 
 const USER_ID = "00000000-0000-4000-8000-0000000000a1";
@@ -105,6 +106,30 @@ describe("useSharedBrowserFollowUp", () => {
     await render(input({ runs: [browserRun(), browserRun(NEXT_RUN_ID, ENDED_AT + 30_000)] }));
     expect(resultRef.current?.followUp).toEqual(expect.objectContaining({ runId: NEXT_RUN_ID }));
     expect(resultRef.current?.resolve()).toEqual(expect.objectContaining({ runId: NEXT_RUN_ID }));
+  });
+
+  // One tab per chat (chatBrowserTab.ts): a follow-up is a browser turn too,
+  // so it never goes on in a tab another chat took after this chat's turn.
+  // Turns from before one tab per chat all ran in the tab on screen, so the
+  // map chat's follow-up would otherwise read the comparison chat's page.
+  it("offers nothing once another chat took the turn's tab", async () => {
+    const otherChatRun: RunRecord = {
+      ...browserRun(NEXT_RUN_ID, ENDED_AT + 30_000),
+      conversationId: "conversation-2",
+    };
+    const runs = [browserRun(), otherChatRun];
+    const takenByAnotherChat = (pageId: string, sinceMs: number) => browserTabTakenByAnotherChat({
+      scope: { userId: USER_ID, projectId: "project-1", conversationId: "conversation-1", runtimeId: "runtime-1" },
+      runs,
+      pageId,
+      sinceMs,
+    });
+    await render(input({ runs, takenByAnotherChat }));
+    expect(resultRef.current?.followUp).toBeNull();
+    expect(resultRef.current?.resolve()).toBeNull();
+    // The tab is still this chat's when no other chat's turn ran there since.
+    await render(input({ runs: [browserRun()], takenByAnotherChat: () => false }));
+    expect(resultRef.current?.followUp).toEqual(expect.objectContaining({ runId: RUN_ID, page: { id: "page-1" } }));
   });
 
   it("offers nothing while the browser is closed", async () => {

@@ -596,8 +596,9 @@ read, so that page would go into this chat's reply and Details):
   a chat, and when the chat gets a new tab, Studio brings the chat's tab to the
   front, unless someone else (Octo included) controls the browser, in which
   case the view shows what they do. It never undoes the person's own pick.
-- A follow-up stays in the tab of the turn it continues, and Let AI continue in
-  the tab the person worked in. A message aimed at a page goes out in the
+- A follow-up stays in the tab of the turn it continues, while no other chat
+  took that tab since the turn started; otherwise the message is an ordinary
+  chat turn. Let AI continue stays in the tab the person worked in. A message aimed at a page goes out in the
   person's own words: the page reaches the turn only as its bound tab, never as
   a sentence naming it, and a card's continuation sends the card's task alone.
 
@@ -1201,7 +1202,8 @@ hidden or stale completion may send it automatically.
 
 A follow-up typed in the chat keeps them too. When the conversation's newest
 run is the person's own Shared Browser run on the browser that is open, it
-succeeded less than ten minutes ago, its tab is still open, and it did not
+succeeded less than ten minutes ago, its tab is still open and no other chat
+took it since (see One tab per chat), and it did not
 continue a card Octo builds from (`browserHandsBack`), a message from the chat
 composer goes on in that tab as a browser turn, as one from the browser's own
 composer would, and names that run (`browserContinuesRunId`,
