@@ -305,6 +305,67 @@ pub(crate) struct CreditLedgerEntry {
     pub(crate) reason: String,
     pub(crate) metadata: Option<JsonValue>,
     pub(crate) created_at: String,
+    /// For an Instafy AI turn's row, the name of the chat it was in, when the
+    /// viewer may open that chat ([`load_turn_chat_names`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chat_name: Option<String>,
+}
+
+/// The reasons of the ledger rows one Instafy AI turn writes, each carrying
+/// the turn's `promptId`: its reserve, its adjustment and its refund.
+const MANAGED_AI_TURN_REASONS: [&str; 3] = [
+    "managed_ai_prompt",
+    "managed_ai_adjustment",
+    MANAGED_AI_REFUND_REASON,
+];
+
+/// The turn a managed-AI ledger row belongs to: its `promptId`.
+fn ledger_turn_prompt_id(reason: &str, metadata: Option<&JsonValue>) -> Option<Uuid> {
+    if !MANAGED_AI_TURN_REASONS.contains(&reason) {
+        return None;
+    }
+    metadata?
+        .get("promptId")?
+        .as_str()
+        .and_then(|raw| Uuid::parse_str(raw.trim()).ok())
+}
+
+/// The names of the chats `prompt_ids` were sent in, for the chats `viewer`
+/// may open: Home's rule (crate::activity::ACCESS_CTE), a space of theirs and
+/// a chat that is not private or is theirs. The ledger is the team's, and a
+/// teammate's private chat, or a chat in a space the viewer is not in, stays
+/// unnamed. A chat without a title is left out too.
+async fn load_turn_chat_names(
+    client: &impl GenericClient,
+    viewer: &Uuid,
+    prompt_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, String>, (StatusCode, Json<ApiError>)> {
+    if prompt_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let sql = format!(
+        "{access}
+         select prompt.id, btrim(chat.metadata ->> 'title') as chat_name
+           from prompts prompt
+           join conversations chat on chat.id = prompt.conversation_id
+           left join conversation_participants participant
+             on participant.conversation_id = chat.id and participant.user_id = $1
+          where prompt.id = any($2)
+            and chat.project_id in (select id from accessible)
+            and (chat.visibility <> 'private'
+                 or chat.created_by = $1
+                 or participant.user_id is not null)
+            and nullif(btrim(chat.metadata ->> 'title'), '') is not null",
+        access = crate::activity::ACCESS_CTE,
+    );
+    let rows = client
+        .query(sql.as_str(), &[viewer, &prompt_ids])
+        .await
+        .map_err(|error| internal_error(format!("failed to name the turns' chats: {error}")))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.get::<_, Uuid>("id"), row.get::<_, String>("chat_name")))
+        .collect())
 }
 
 pub(crate) struct CreditLedgerEntryData {
@@ -849,14 +910,34 @@ pub(crate) async fn credit_ledger(
             );
             (status, json)
         })?;
+    // Each Instafy AI turn's rows name the chat it was in, so the panel can
+    // show one row per turn as the person knows it.
+    let turn_prompt_ids: Vec<Uuid> = {
+        let mut ids: Vec<Uuid> = entries
+            .iter()
+            .filter_map(|entry| ledger_turn_prompt_id(&entry.reason, entry.metadata.as_ref()))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let chat_names = match context.user_id.filter(|_| !context.is_service_role) {
+        Some(viewer) => load_turn_chat_names(&*connection, &viewer, &turn_prompt_ids).await?,
+        None => Default::default(),
+    };
     let response = CreditLedgerResponse {
         entries: entries
             .into_iter()
-            .map(|entry| CreditLedgerEntry {
-                delta: entry.delta,
-                reason: entry.reason,
-                metadata: entry.metadata,
-                created_at: entry.created_at.to_rfc3339(),
+            .map(|entry| {
+                let chat_name = ledger_turn_prompt_id(&entry.reason, entry.metadata.as_ref())
+                    .and_then(|prompt_id| chat_names.get(&prompt_id).cloned());
+                CreditLedgerEntry {
+                    delta: entry.delta,
+                    reason: entry.reason,
+                    metadata: entry.metadata,
+                    created_at: entry.created_at.to_rfc3339(),
+                    chat_name,
+                }
             })
             .collect(),
     };
