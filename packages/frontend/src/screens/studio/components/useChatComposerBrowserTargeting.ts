@@ -79,6 +79,7 @@ export function useChatComposerBrowserTargeting({
     goForward: goForwardInSharedBrowser,
     reloadPage: reloadSharedBrowserPage,
     focusPage: focusBrowserSessionPage,
+    openPage: openSharedBrowserPage,
     keepPage: keepSharedBrowserPage,
   } = useBrowserSessionPages({
     enabled:
@@ -136,10 +137,12 @@ export function useChatComposerBrowserTargeting({
       sharedBrowserTargetingEnabled,
     ],
   );
+  // The person picks a tab: whether it is the tab on screen now (a browser
+  // someone else drives refuses the pick, and says so).
   const handleSelectBrowserSessionPage = useCallback(
-    async (pageId: string) => {
+    async (pageId: string): Promise<boolean> => {
       if (!sharedBrowserTargetingEnabled) {
-        return;
+        return false;
       }
       if (hasHiddenBrowserSession || !browserSessionOpen) {
         openBrowserSession(resolvedBrowserRuntimeId ?? preferredBrowserRuntimeId);
@@ -150,9 +153,11 @@ export function useChatComposerBrowserTargeting({
         if (!focused) {
           showStatus("Unable to focus that browser tab right now.", "error", 3500);
         }
+        return focused;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         showStatus(message || "Unable to focus that browser tab right now.", "error", 4000);
+        return false;
       }
     },
     [
@@ -251,6 +256,19 @@ export function useChatComposerBrowserTargeting({
     goForwardInSharedBrowser,
     reloadSharedBrowserPage,
     keepSharedBrowserPage,
+    /** Opens a blank tab behind the one on screen (a chat's own tab); null when it cannot. */
+    openSharedBrowserPage,
+    /**
+     * Whether this browser opens such a tab: false for an older one that does
+     * not, null until it said (a reading that failed is not a "no").
+     */
+    sharedBrowserCanOpenPage: sharedBrowserCapabilitiesUnsupported
+      ? false
+      : sharedBrowserCapabilities
+        ? sharedBrowserCapabilities.controls.newPage === true
+        : null,
+    /** Brings a tab to the front without a word when it cannot: Studio's own focus, not the person's pick. */
+    focusSharedBrowserPageQuietly: focusBrowserSessionPage,
     setPendingBrowserLaunchMode: updatePendingBrowserLaunchMode,
   };
 }

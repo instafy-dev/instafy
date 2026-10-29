@@ -6,7 +6,6 @@ import type { SubmitConversationRuntimeOverride } from "../../../conversations/u
 import { parseTerminalCommandRequest } from "../../../conversations/terminalCommand";
 import type { ChatMessage } from "../types";
 import {
-  buildBrowserSessionTargetedMessage,
   buildNewBrowserSessionMessage,
   shouldAutoTargetBrowserSessionMessage,
   toBrowserSessionPageTarget,
@@ -136,11 +135,12 @@ export function buildChatSubmitPlan({
     browserLaunchMode === "new_page" &&
     messageRequiresAi &&
     !messageToSend.trimStart().startsWith("/");
+  // A message aimed at a browser page goes out in the person's own words: the
+  // page reaches a browser turn as its bound tab (`browserPageId`), never as a
+  // sentence that names it, which would make the turn about that page.
   const dispatchedMessage = shouldApplyNewBrowserLaunch
     ? buildNewBrowserSessionMessage(messageToSend)
-    : shouldApplyBrowserPageTarget && browserPageTarget
-      ? buildBrowserSessionTargetedMessage(messageToSend, browserPageTarget)
-      : messageToSend;
+    : messageToSend;
   const shouldConsumeNewBrowserLaunch = !override?.browserLaunchMode && shouldApplyNewBrowserLaunch;
 
   return {

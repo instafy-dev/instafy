@@ -236,6 +236,51 @@ describe("useChatSubmitFlow on the Browser tab with only a blank tab", () => {
     );
   });
 
+  // Local drive, Oct 29: "Research the vacuums here", sent from the Browser
+  // view, ran on the map chat's Visit Lisboa page and left the roborock error
+  // page in the map chat's tab. A browser turn runs in this chat's own tab.
+  it("sends the task to this chat's own tab, never the page another chat left on screen", async () => {
+    const chatTab = { id: "PAGE_TARGET_CHAT", url: "about:blank", host: "", label: "New tab" };
+    const resolveSharedBrowserTab = vi.fn(async () => chatTab);
+    const options = createOptions({
+      preferredBrowserPage: LIVE_PAGE,
+      sharedBrowserBindingPage: LIVE_PAGE,
+      resolveSharedBrowserTab,
+    });
+    expect(await submit(options)).toBe(true);
+    expect(resolveSharedBrowserTab).toHaveBeenCalledOnce();
+    const payload = (options.performSubmit as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(payload.message).toBe(DRAFT);
+    expect(payload.metadata).toEqual(
+      expect.objectContaining({ browserPageId: chatTab.id, browserPageUrl: "about:blank" }),
+    );
+  });
+
+  it("keeps the draft and says why when the chat's own tab could not open", async () => {
+    const options = createOptions({
+      preferredBrowserPage: LIVE_PAGE,
+      sharedBrowserBindingPage: LIVE_PAGE,
+      resolveSharedBrowserTab: vi.fn(async () => {
+        throw new Error("Instafy's browser could not open a tab for this chat. Try again.");
+      }),
+    });
+    expect(await submit(options)).toBe(false);
+    expect(options.performSubmit).not.toHaveBeenCalled();
+    expect(options.clearComposerIfUnchanged).not.toHaveBeenCalled();
+    expect(statusMessages(options)).toEqual(["Instafy's browser could not open a tab for this chat. Try again."]);
+  });
+
+  it("keeps the page on screen where the browser cannot open a tab of the chat's own", async () => {
+    const options = createOptions({
+      preferredBrowserPage: LIVE_PAGE,
+      sharedBrowserBindingPage: LIVE_PAGE,
+      resolveSharedBrowserTab: vi.fn(async () => null),
+    });
+    expect(await submit(options)).toBe(true);
+    const payload = (options.performSubmit as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(payload.metadata).toEqual(expect.objectContaining({ browserPageId: LIVE_PAGE.id }));
+  });
+
   it("still keeps the draft when the browser has no tab at all", async () => {
     const options = createOptions({ sharedBrowserBindingPage: null });
     expect(await submit(options)).toBe(false);

@@ -560,18 +560,60 @@ list opens without a prompt, so such an address with side effects can act
 without one, as under routine browsing. A run on the space's own machine cannot
 be switched to Ask yet (see "Remaining work").
 
-### A page another chat left
+### One tab per chat
 
-The Shared Browser is shared by the space's chats, and Studio binds a browser
-task to the browser's current tab, which another chat's run may have left on
-its own page. runtime-agent remembers, per page, which conversation's run held
-it last (in memory, the newest 32 pages). When a run starts on a page a run of
-another conversation held last, its browser policy gets one more line: the page
-was left by a task in another chat, it is not this task's earlier work, so Octo
-does not describe it as resuming there. When the person's message is about that
-page, Octo uses it as it is; otherwise it starts this task's own step
-(`navigate` that page, or a tab of its own). The first run on a page, a later
-run of the same chat, and a runtime that restarted say nothing.
+The Shared Browser is shared by the space's chats, so Studio gives each chat a
+tab of its own, and a chat's browser turns run there, never on a page another
+chat left on screen (under routine browsing nothing asks before a page is
+read, so that page would go into this chat's reply and Details):
+
+- **Later turns** run in the tab the chat's last browser turn ran in (its
+  `browserPageId`), while that tab is open. A tab the person chose in this chat
+  since (the browser's own tab list, or an address typed in its bar) takes its
+  place: that page is theirs to choose. A tab another chat took since (a turn
+  of another chat ran in it later, or the person chose it in another chat
+  later) is that chat's now, and this chat's next turn gets a tab of its own.
+  Turns from before one tab per chat ran in whatever tab was on screen, so
+  several chats' turns may name one tab: it is the chat's whose turn ran there
+  last.
+- **A chat's first browser turn** gets a blank tab: one that no chat's turn was
+  sent for (the one tab of a browser that just started), or a new one Studio
+  opens with `POST /browser/pages/new` (`browser.control`). That opens
+  `about:blank` behind the tab on screen, so whoever watches or drives keeps
+  their page. The browser refuses it while Octo works in it for another task
+  (a page that appears during one of Octo's steps is closed as a window the
+  step opened, and fails the step), when Studio says the browser is busy and
+  sends nothing. Once it has 24 tabs, the tab used least recently makes room:
+  it closes once the new one is open (never the tab on screen, the one used
+  last, or one of Octo's). Nobody closes a tab by hand, and the browser
+  brings its tabs back when it starts again under new ids no chat knows, so
+  tabs would otherwise pile up. A chat whose tab closed gets a new one. The
+  browser advertises it as `controls.newPage` in
+  `GET /browser/capabilities`. The turn
+  then starts on a blank page, and its blank-page rule takes it to the task's
+  address or the official site of what the task is about.
+- **The chat's Browser view shows that tab.** When the view comes on screen for
+  a chat, and when the chat gets a new tab, Studio brings the chat's tab to the
+  front, unless someone else (Octo included) controls the browser, in which
+  case the view shows what they do. It never undoes the person's own pick.
+- A follow-up stays in the tab of the turn it continues, while no other chat
+  took that tab since the turn started; otherwise the message is an ordinary
+  chat turn. Let AI continue stays in the tab the person worked in. A message aimed at a page goes out in the
+  person's own words: the page reaches the turn only as its bound tab, never as
+  a sentence naming it, and a card's continuation sends the card's task alone.
+
+An older browser that cannot open a tab (its capabilities say so) keeps the
+earlier behaviour: the turn is bound to the tab on screen. Until the browser has
+said whether it can, Studio asks it to open one, and when it does not, nothing
+is sent. For an older browser runtime-agent remembers, per page,
+which conversation's run held it last (in memory, the newest 32 pages). When a
+run starts on a page a run of another conversation held last, its browser
+policy gets one more line: the page was left by a task in another chat, it is
+not this task's earlier work, so Octo does not describe it as resuming there.
+When the person's message is about that page, Octo uses it as it is; otherwise
+it starts this task's own step (`navigate` that page, or a tab of its own). The
+first run on a page, a later run of the same chat, and a runtime that restarted
+say nothing.
 
 ### Octo's own tabs
 
@@ -858,9 +900,9 @@ same world the controller reads, and a value in an unknown format with no
 credential word nearby can slip through.
 
 Studio opens the Shared Browser by itself for Octo's `request_browser` card
-only on the conversation's own machine in a space the controller covers, and
-only while nobody else has that browser open, controls it, runs in it or is
-starting it (see "How Studio opens it" below and
+on the conversation's own machine in a space the controller covers, whether
+that browser runs yet or not, unless someone else has it open, controls it,
+runs in it or is starting it (see "How Studio opens it" below and
 [Browser Profiles](Browser-Profiles.md)). It never starts, stops or replaces a
 machine for this, and every other card waits for the person's press. The
 continuation is an ordinary Shared turn with consent version `1`. On the space's
@@ -1160,7 +1202,8 @@ hidden or stale completion may send it automatically.
 
 A follow-up typed in the chat keeps them too. When the conversation's newest
 run is the person's own Shared Browser run on the browser that is open, it
-succeeded less than ten minutes ago, its tab is still open, and it did not
+succeeded less than ten minutes ago, its tab is still open and no other chat
+took it since (see One tab per chat), and it did not
 continue a card Octo builds from (`browserHandsBack`), a message from the chat
 composer goes on in that tab as a browser turn, as one from the browser's own
 composer would, and names that run (`browserContinuesRunId`,
@@ -1625,27 +1668,36 @@ unless the policy is `"covered"`.
   a card attaches an open view that is off or did not open the same way; when
   it asks while the view is still reconnecting by itself, the request waits
   for that attempt and acts once it ends off or failed.
-- **Hands-free.** For Octo's `request_browser` card, Studio opens Instafy's
-  browser by itself only on the conversation's own machine, when that machine
-  is live, can take work, has an origin and reports `sharedBrowserHost`, and
-  the response says `sharedBrowserHostPolicy: "covered"`. It reads
-  `GET browser/host` first (a reading that arrived more than five seconds ago
-  is read again, and a read that does not answer in ten seconds fails) and
-  leaves the card a button when a separate browser session is running,
-  when the browser is poisoned or failed, or while someone else has it open,
-  controls it, runs an agent in it or is starting it. A card held that way is
-  read again every ten seconds while the tab is visible, and opens once the
-  browser is free; a card that keeps failing to read, or stays held, stops
-  being read once it is too old to open by itself. Studio then opens that exact
-  machine's browser as `attachOnly`, so it may start the browser but never the
-  machine, and sends the task only once the browser shows that machine's first
-  page, the browser's roster has connected and a fresh `GET browser/host` read
-  after the open says `ready`. It waits for each of these within the two-minute
-  bound, which also ends a read that has not answered, and refuses only on a
-  known conflict: someone else has it open or controls it, or another person's
-  run works in it. A stopped machine, a machine
-  without `sharedBrowserHost` and an uncovered space keep the press. The
-  person's own Retry or press inside the browser still may start the machine.
+- **Hands-free.** One rule the person can predict: on a space whose browser
+  runs on its own machine, Octo's `request_browser` card opens by itself,
+  whether that browser runs yet or not. Studio opens Instafy's browser by
+  itself on the conversation's own machine when that machine is up (a status
+  that takes work, whatever its last heartbeat said), has an origin and
+  reports `sharedBrowserHost`, and the response says
+  `sharedBrowserHostPolicy: "covered"`. On that machine a press is no
+  approval, so opening by itself skips no check. It reads `GET browser/host`
+  first (a reading that arrived more than five seconds ago is read again, and a
+  read that does not answer in ten seconds fails) and leaves the card a button
+  when a separate browser session is running, when the machine answers it has
+  no browser or the browser is poisoned (only a restart of the machine brings
+  it back), or while someone else has it open, controls it, runs an agent in it
+  or is starting it. An idle, failed or stopping browser is started by the
+  open, as a press would. A card held that way is read again every ten seconds
+  while the tab is visible, and opens once the browser is free; a card that
+  keeps failing to read, or stays held, stops being read once it is too old to
+  open by itself. Studio then opens that exact machine's browser as
+  `attachOnly`, so it may start the browser but never the machine, and sends
+  the task only once the browser shows that machine's first page and a fresh
+  `GET browser/host` read after the open says `ready` (and, while the Browser
+  view is on screen, once its roster has connected). It waits for each of
+  these within the two-minute bound, which also ends a read that has not
+  answered, and refuses only on a known conflict: someone else has it open or
+  controls it, or another person's run works in it. Opening by itself leaves
+  the person in Chat, where the reading line and the Browser tab's dot show
+  the turn; only a press switches to the Browser view. A stopped machine, a
+  machine without `sharedBrowserHost` and an uncovered space keep the press.
+  The person's own Retry or press inside the browser still may start the
+  machine.
   Only a draft in the composer holds a card ("Opens by itself once your draft
   is empty.", shown only on a card that would otherwise open by itself, and
   only while the draft holds it); a narrow pane or side-by-side view turned off
@@ -1654,11 +1706,13 @@ unless the policy is `"covered"`.
   the conversation's machine continues there without a press, even within ten
   minutes of the last automatic start; the declined check, the browser-turn
   check and every check before sending still apply.
-- **Cards after a press.** A card that was continued reads a plain **Opened**
-  in place of its button, also after a reload. A card a newer card followed
-  offers no button and reads **Not opened**, without the line that says what
-  pressing it does: the newer card carries the task on, so two live cards
-  never stack up. The one-line record of a continuation names Octo only when
+- **Cards after a press.** A card says what it is for ("Continue in
+  Instafy's browser", and the site it is headed for), never what pressing it
+  does: older cards carry a line about that, which is not shown. It reads
+  **Opening Instafy's browser…** while it opens and a plain **Opened** once it
+  was continued, also after a reload. A card a newer card followed offers no
+  button and reads **Not opened**: the newer card carries the task on, so two
+  live cards never stack up. The one-line record of a continuation names Octo only when
   Studio opened the browser by itself ("Octo opened Instafy's browser for
   …"); after the person's own press it reads "Opened Instafy's browser for …".
 - **Hand-back.** Only a card Octo builds from hands back: the runtime's card

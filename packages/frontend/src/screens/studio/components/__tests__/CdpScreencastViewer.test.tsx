@@ -657,6 +657,79 @@ describe("CdpScreencastViewer", () => {
     ).toEqual([]);
   });
 
+  // Local drive, Oct 29: after a check at phone size, the remote page stayed
+  // phone-sized on the desktop, a narrow column in the middle. The resize
+  // came while this view could not drive, and the same driver's return sent
+  // nothing.
+  it("sends the size the view has now when the same driver gets its input back", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    const renderViewer = (active: boolean, inputEnabled: boolean) => (
+      <CdpScreencastViewer
+        wsUrl="wss://runtime.test/browser/screencast"
+        connectionGeneration={0}
+        inputWsUrl="wss://runtime.test/browser/input"
+        inputAvailable
+        inputAuthorityKey="human:owner"
+        active={active}
+        inputEnabled={inputEnabled}
+        onConnected={vi.fn()}
+        onDisconnected={vi.fn()}
+        onTransportError={vi.fn()}
+      />
+    );
+    canvasRect = { ...canvasRect, width: 375, height: 640 } as DOMRect;
+    await act(async () => root.render(renderViewer(true, true)));
+    const [inputSocket] = socketsMatching("/browser/input");
+    await act(async () => {
+      inputSocket.emit(
+        "message",
+        Object.assign(new Event("message"), {
+          data: JSON.stringify({ type: "ready", pageId: "PAGE", width: 375, height: 640, dpr: 1, deviceWidth: 375, deviceHeight: 640 }),
+        }),
+      );
+    });
+    const resizes = () =>
+      inputSocket.sent.map((value) => JSON.parse(value)).filter((value) => value.type === "resize");
+    expect(resizes()).toEqual([]);
+
+    // The window grows back to a desktop while this view cannot drive.
+    await act(async () => root.render(renderViewer(true, false)));
+    canvasRect = { ...canvasRect, width: 1024, height: 600 } as DOMRect;
+    FakeResizeObserver.instances[0]?.trigger();
+    await act(async () => {
+      vi.advanceTimersByTime(120);
+    });
+    expect(resizes()).toEqual([]);
+
+    // Its input comes back, for the same driver: the page gets the new size.
+    await act(async () => root.render(renderViewer(true, true)));
+    expect(resizes()).toEqual([{ type: "resize", width: 1024, height: 600, dpr: 1 }]);
+
+    // Off screen and back, nothing changed: nothing is sent again.
+    await act(async () => root.render(renderViewer(false, true)));
+    await act(async () => root.render(renderViewer(true, true)));
+    expect(resizes()).toHaveLength(1);
+
+    // Resized while off screen: shown again, the page follows.
+    await act(async () => root.render(renderViewer(false, true)));
+    canvasRect = { ...canvasRect, width: 1280, height: 720 } as DOMRect;
+    FakeResizeObserver.instances[0]?.trigger();
+    await act(async () => {
+      vi.advanceTimersByTime(120);
+    });
+    expect(resizes()).toHaveLength(1);
+    await act(async () => root.render(renderViewer(true, true)));
+    expect(resizes()).toEqual([
+      { type: "resize", width: 1024, height: 600, dpr: 1 },
+      { type: "resize", width: 1280, height: 720, dpr: 1 },
+    ]);
+  });
+
   it("resizes once for a real control-owner change but not a same-owner reconnect", async () => {
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
       callback(0);

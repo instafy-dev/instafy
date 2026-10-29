@@ -247,7 +247,8 @@ describe("Chat browser request handoff", () => {
     await act(async () => { sent = lastState!.retryContinuation(notice, { retryOfMessageId: "failure-1" }); });
     await advance();
     expect(await sent).toBe(true);
-    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringMatching(/\n\nOpen https:\/\/app\.example\.test\/settings and stop on API keys\.$/), {
+    // The older prompt's opening line stays behind: the task goes alone.
+    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", task, {
       display: "Opened Instafy's browser for app.example.test",
       // Try again is the person's own press, so it is their OK for the site again.
       metadata: { retryOfMessageId: "failure-1", browserRequestOf: "job:old", browserCardSites: ["app.example.test"] },
@@ -583,7 +584,7 @@ describe("Studio starting a request_browser card by itself", () => {
     await advance(10); await render();
   }
   /** The browser opens on the host and shows its first page. */
-  async function openHost(presence: SharedBrowserPresence = KNOWN_ALONE) {
+  async function openHost(presence: SharedBrowserPresence | null = KNOWN_ALONE) {
     auto.presence = presence;
     value.transport = "shared"; value.open = true; value.sharedReady = true; value.sharedRuntimeId = HOST_ID;
     await render(); await advance(); await advance();
@@ -720,7 +721,6 @@ describe("Studio starting a request_browser card by itself", () => {
     ["a host someone else controls", () => { coveredHost({ controlledByOther: true }); }, BROWSER_AUTO_START_COPY.hostInUse],
     ["a host another person's run works in", () => { coveredHost({ agentRunActive: true }); }, BROWSER_AUTO_START_COPY.hostInUse],
     ["a host someone else is starting", () => { coveredHost({ state: "starting" }); }, BROWSER_AUTO_START_COPY.hostInUse],
-    ["a failed host", () => { coveredHost({ state: "failed" }); }, BROWSER_AUTO_START_COPY.hostFailed],
     ["a poisoned host", () => { coveredHost({ state: "poisoned" }); }, BROWSER_AUTO_START_COPY.hostPoisoned],
   ] as const)("leaves the button for %s, with the reason", async (_name, arrange, reason) => {
     arrange();
@@ -880,6 +880,29 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(host.refreshHost).toHaveBeenCalledWith({ force: true });
     expect(value.continueTask).toHaveBeenCalledTimes(1);
     expect(value.onError).not.toHaveBeenCalled();
+  });
+
+  // Local drive, Oct 29: a card that opened by itself also switched to the
+  // Browser view. Now only a press does; Studio stays in Chat, where the
+  // browser's roster does not connect, and a fresh reading of the browser
+  // says who else is there.
+  it("sends the task with the person in Chat, on a fresh reading alone", async () => {
+    const host = coveredHost();
+    await cardArrives(); await settleReading();
+    await openHost(null);
+    expect(host.refreshHost).toHaveBeenCalledWith({ force: true });
+    expect(value.continueTask).toHaveBeenCalledTimes(1);
+    expect(value.onError).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opened" });
+  });
+
+  it("still refuses with the person in Chat when the reading shows someone else there", async () => {
+    const host = coveredHost();
+    await cardArrives(); await settleReading();
+    host.snapshot = snapshot({ othersPresent: true });
+    await openHost(null);
+    expect(value.continueTask).not.toHaveBeenCalled();
+    expect(value.onError).toHaveBeenCalledWith(BROWSER_AUTO_START_COPY.inUse);
   });
 
   it("reads the host again, forced, when the last reading is from before the browser opened or not ready yet", async () => {
@@ -1071,7 +1094,7 @@ describe("Studio starting a request_browser card by itself", () => {
     ["a person on Instafy AI", () => {
       plan.mockReturnValue({ kind: "button", reason: BROWSER_AUTO_START_COPY.personalNeedsOwnAi });
     }, BROWSER_AUTO_START_COPY.personalNeedsOwnAi],
-    ["a failed host", () => { coveredHost({ state: "failed" }); }, BROWSER_AUTO_START_COPY.hostFailed],
+    ["a poisoned host", () => { coveredHost({ state: "poisoned" }); }, BROWSER_AUTO_START_COPY.hostPoisoned],
     ["a browser someone else is using", () => { auto.heldByOther = true; }, BROWSER_AUTO_START_COPY.inUse],
   ] as const)("never says a draft holds a card that would not open by itself: %s", async (_name, arrange, reason) => {
     arrange();

@@ -78,7 +78,11 @@ export type BrowserAutoStartOptions = {
    * start forces one before it sends.
    */
   refreshHost?: SharedBrowserHostRefresh;
-  /** Who else is in Instafy's browser, from its collaboration roster; null before it is open. */
+  /**
+   * Who else is in Instafy's browser, from its collaboration roster, while
+   * the Browser view is on screen; null otherwise (the roster is not
+   * connected then, and a reading of the browser says who else is there).
+   */
   presence?: SharedBrowserPresence | null;
   /**
    * Changes whenever something the decision reads changes (a draft, the
@@ -301,12 +305,13 @@ function autoStartStillApplies(current: Options, key: string): boolean {
  *   and every other case leave the card a button, with the reason;
  * - and, checked again once the browser is ready, only while nobody wrote
  *   after the card, the conversation is idle and no one else holds the
- *   browser. For Instafy's browser, Studio also waits for its roster to
- *   connect and for a fresh reading that says it is ready, and it stays on
- *   the machine it opened; only a known conflict refuses, and the two-minute
- *   bound ends every wait.
+ *   browser. For Instafy's browser, Studio also waits for a fresh reading
+ *   that says it is ready (and for its roster to connect, while the Browser
+ *   view is on screen), and it stays on the machine it opened; only a known
+ *   conflict refuses, and the two-minute bound ends every wait.
  * A start opens with the person's own approval settings, exactly as a press
- * does. A failed start leaves the button and says why.
+ * does, and leaves the person in Chat: only a press switches to the Browser
+ * view. A failed start leaves the button and says why.
  *
  * A press for Instafy's browser never waits silently: when the browser view
  * shows an error, or Instafy's browser keeps answering that it is not
@@ -441,8 +446,10 @@ export function useChatBrowserRequest(options: Options) {
           if (attachRuntimeId) {
             const auto = current.auto!;
             // The roster has not connected yet: wait for it rather than
-            // guess who else is there.
-            let wait = auto.presence?.status !== "known";
+            // guess who else is there. It connects only while the Browser
+            // view is on screen; with the person in Chat, the fresh reading
+            // of the browser below says who else is there.
+            let wait = auto.presence != null && auto.presence.status !== "known";
             if (!wait) {
               const now = Date.now();
               if (now - hostCheckedAtMs >= BROWSER_AUTO_START_HOST_CHECK_MS) {

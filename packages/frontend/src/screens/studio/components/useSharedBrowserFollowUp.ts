@@ -20,21 +20,27 @@ export function useSharedBrowserFollowUp<Page extends { id: string }>(input: {
   runtimeId: string | null;
   userId: string | null;
   pages: readonly Page[];
+  /**
+   * Whether another chat took a tab after a time (chatBrowserTab.ts): the
+   * follow-up then stays in the chat, since a browser turn uses only its own
+   * chat's tab.
+   */
+  takenByAnotherChat?: ((pageId: string, sinceMs: number) => boolean) | null;
 }): {
   followUp: SharedBrowserFollowUp<Page> | null;
   resolve: () => SharedBrowserFollowUp<Page> | null;
   dismiss: () => void;
 } {
-  const { enabled, runs, conversationId, runtimeId, userId, pages } = input;
+  const { enabled, runs, conversationId, runtimeId, userId, pages, takenByAnotherChat } = input;
   const [dismissedRunId, setDismissedRunId] = useState<string | null>(null);
   // Bumped when the window ends, so `followUp` is read again then.
   const [clock, setClock] = useState(0);
 
   const read = useCallback((nowMs: number) => {
     if (!enabled) return null;
-    const followUp = sharedBrowserFollowUp(runs, { conversationId, runtimeId, userId, pages, nowMs });
+    const followUp = sharedBrowserFollowUp(runs, { conversationId, runtimeId, userId, pages, nowMs, takenByAnotherChat });
     return followUp && followUp.runId !== dismissedRunId ? followUp : null;
-  }, [conversationId, dismissedRunId, enabled, pages, runs, runtimeId, userId]);
+  }, [conversationId, dismissedRunId, enabled, pages, runs, runtimeId, takenByAnotherChat, userId]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const followUp = useMemo(() => read(Date.now()), [read, clock]);

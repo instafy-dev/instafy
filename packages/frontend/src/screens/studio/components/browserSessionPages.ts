@@ -417,23 +417,6 @@ export function shouldAutoTargetBrowserSessionMessage(message: string): boolean 
   );
 }
 
-export function buildBrowserSessionTargetedMessage(
-  message: string,
-  target: BrowserSessionPageTarget,
-): string {
-  const trimmed = message.trim();
-  if (!trimmed) {
-    return trimmed;
-  }
-  return [
-    `Use the existing "${target.label}" page in the current shared browser session for this request.`,
-    `That page is ${target.url}. Treat it as a page/tab inside the current browser session, not as a new isolated session or a new runtime-backed browser session unless I explicitly ask for that.`,
-    `Keep any other open browser pages available unless I explicitly ask you to close or replace them.`,
-    "",
-    trimmed,
-  ].join("\n");
-}
-
 export function buildNewBrowserSessionMessage(message: string): string {
   const trimmed = message.trim();
   if (!trimmed) {

@@ -4047,6 +4047,8 @@ fn classify_canonical_origin_proxy_request(
                 Ok(ORIGIN_PROXY_BROWSER_VIEW_SCOPES)
             } else if normalized == "browser/approval/decision"
                 || normalized == BROWSER_HOST_START_PATH
+                // A chat's own tab: one blank tab, behind the one on screen.
+                || normalized == BROWSER_NEW_PAGE_PATH
             {
                 Ok(ORIGIN_PROXY_BROWSER_CONTROL_SCOPES)
             } else if is_exact_browser_page_action(normalized, "focus")
@@ -4111,6 +4113,9 @@ fn ensure_origin_proxy_client_label(
 /// covers the origin's space; see [`ensure_browser_host_route_allowed`].
 const BROWSER_HOST_STATUS_PATH: &str = "browser/host";
 const BROWSER_HOST_START_PATH: &str = "browser/host/start";
+/// One blank tab for a chat whose browser turn has none yet (Studio gives
+/// each chat a tab of its own in the shared browser).
+const BROWSER_NEW_PAGE_PATH: &str = "browser/pages/new";
 
 fn is_browser_host_route(path: &CanonicalOriginProxyPath) -> bool {
     matches!(
@@ -6082,6 +6087,11 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
                 .expect("keeping one of Octo's tabs should be proxyable");
         assert_eq!(keep_scopes, ORIGIN_PROXY_BROWSER_CONTROL_SCOPES);
         assert!(classify_origin_proxy_request(&Method::GET, "/browser/pages/ABC123/keep").is_err());
+        // A chat's own tab: opening a blank one needs control, and only POST.
+        let new_page_scopes = classify_origin_proxy_request(&Method::POST, "/browser/pages/new")
+            .expect("opening a chat's tab should be proxyable");
+        assert_eq!(new_page_scopes, ORIGIN_PROXY_BROWSER_CONTROL_SCOPES);
+        assert!(classify_origin_proxy_request(&Method::GET, "/browser/pages/new").is_err());
 
         for path in [
             "/browser/pages/ABC123/command/",
@@ -6094,6 +6104,9 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
             "/browser/pages/ABC123/keep/",
             "/browser/pages/ABC123/kept",
             "/browser/pages/ABC123/nested/keep",
+            "/browser/pages/new/",
+            "/browser/pages/newer",
+            "/browser/pages/new/tab",
         ] {
             assert!(
                 classify_origin_proxy_request(&Method::POST, path).is_err(),

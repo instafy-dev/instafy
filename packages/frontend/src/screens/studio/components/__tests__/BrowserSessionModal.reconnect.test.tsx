@@ -148,6 +148,33 @@ describe("Shared modal reconnects", () => {
     expect(document.querySelector('[data-testid="browser-session-error-retry"]')?.textContent).toBe("Try again");
   });
 
+  // Studio opens the browser by itself for a card and leaves the person in
+  // Chat. The roster that picks this person's viewer connects only while the
+  // view is on screen, so a view opened off screen does not give up on it:
+  // it stays opening, and the card's turn goes on, until the person looks.
+  it("waits for the roster only while the view is on screen", async () => {
+    const kinds: Array<string | null> = [];
+    const view = (shown: boolean) => (
+      <BrowserSessionModal isOpen onOpenChange={vi.fn()} projectId={projectId} currentUserId="user-1"
+        preferRuntimeId={null} resumeRuntimeId={sessionId} presentation="docked" fillContainer canControlBrowser
+        transportActive={shown} onViewStateChange={(kind) => { kinds.push(kind); }}
+        sharedBrowserCapabilitiesResolved sharedBrowserCapabilitiesAvailable
+        sharedBrowserViewerKind="rfb" sharedBrowserAvailableViewerKinds={["rfb"]} />
+    );
+    // Opened with the person in Chat.
+    await act(async () => { root.render(view(false)); });
+    await advance(SHARED_BROWSER_VIEWER_WAIT_TIMEOUT_MS + 5_000);
+    expect(kinds.length).toBeGreaterThan(0);
+    expect(kinds).not.toContain("failed");
+    // On screen, the wait is bounded as before.
+    await act(async () => { root.render(view(true)); });
+    await advance(SHARED_BROWSER_VIEWER_WAIT_TIMEOUT_MS - 1_000);
+    expect(kinds).not.toContain("failed");
+    await advance(1_500);
+    expect(kinds.at(-1)).toBe("failed");
+    expect(document.querySelector("[data-debug-reason]")?.getAttribute("data-debug-reason")).toBe(SHARED_BROWSER_VIEWER_WAIT_REASON);
+  });
+
   const reconnecting = () => document.querySelector('[data-testid="browser-session-reconnecting"]') !== null;
   const retryShown = () => document.querySelector('[data-testid="browser-session-error-retry"]') !== null;
 

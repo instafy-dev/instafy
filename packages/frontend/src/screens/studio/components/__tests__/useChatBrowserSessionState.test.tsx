@@ -116,6 +116,25 @@ describe("useChatBrowserSessionState", () => {
     expect(resultRef.current?.browserSessionExpandRequestToken).toBeGreaterThan(revealToken);
   });
 
+  // Studio opening the browser by itself for a card leaves the person in Chat.
+  it("opens the browser on a machine without asking to show it when told not to", async () => {
+    await act(async () => {
+      root.render(<TestHarness resultRef={resultRef} />);
+    });
+    const before = resultRef.current?.browserSessionExpandRequestToken ?? 0;
+    await act(async () => {
+      resultRef.current?.resumeBrowserSession("runtime-1", { show: false });
+    });
+    expect(resultRef.current?.browserSessionOpen).toBe(true);
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("runtime-1");
+    expect(resultRef.current?.browserSessionExpandRequestToken).toBe(before);
+    // A press still asks to show it.
+    await act(async () => {
+      resultRef.current?.resumeBrowserSession("runtime-1");
+    });
+    expect(resultRef.current?.browserSessionExpandRequestToken).toBeGreaterThan(before);
+  });
+
   it("distinguishes generic workspace preference from an exact tool-originated open", async () => {
     await act(async () => root.render(<TestHarness resultRef={resultRef} />));
     await act(async () => resultRef.current?.openBrowserSession("generic-runtime"));

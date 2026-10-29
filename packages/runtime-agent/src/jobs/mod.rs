@@ -3223,6 +3223,14 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 ///
 /// It supersedes the consent-first wording older provider threads carry in
 /// their history, so it says so.
+///
+/// A turn without browser tools has nothing the person could switch on, so
+/// it never asks them to: the card is the way on. That is about the browser
+/// and its tools only: the person still presses Allow on their own consent
+/// screens and Enable on a provider's screens they are walked through. Only
+/// the person's own Take over, stop or Deny holds the browser back for a
+/// task, never a browser turn that stopped, failed or refused a page by
+/// itself.
 const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - Whenever a web page would help (to look something up, check a page, or walk the person through a provider's screens), open Instafy's browser yourself, without asking in chat first or waiting for them to mention a browser; this replaces any earlier instruction to offer it first.\n\
 - It opens public web addresses only; its safety policy blocks this space's own addresses (localhost, 127.0.0.1, private addresses, ports here). A site running in this space is shown to people with a private Studio preview card (`instafy preview open`), not this browser.\n\
@@ -3230,7 +3238,8 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - `continueBuilding: true` only when you build something from what it finds (a page, a map); for a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
 - In `summary`, say in one sentence where the browser goes and why; never say a page opened, or what it shows, before a browser tool saw it.\n\
-- Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person closed, paused or stopped it or denied an action there.\n\
+- Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
+- Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
 - The person does their own sign-ins, codes and consent screens; never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
 
 /// A turn nobody is watching as it happens: a scheduled automation or a
@@ -23327,9 +23336,10 @@ mod tests {
         // the rest keeps main's budget. Since Oct 25 it also says the browser
         // opens public addresses only and a site in the space is a preview card.
         // Since Oct 28 it says which card continues building (`continueBuilding`).
+        // Since Oct 29 it says never to ask the person to enable the browser.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 490,
+            browser_choice <= 510,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
@@ -24184,6 +24194,43 @@ mod tests {
             assert!(!BROWSER_CHOICE_CONTRACT.contains(phrase), "{phrase}");
         }
         assert!(!BROWSER_CHOICE_CONTRACT.contains('\u{2014}'));
+    }
+
+    /// A turn without browser tools that needs a page ends with its card, and
+    /// never sends the person to switch something on. Only the person's own
+    /// Take over, stop or Deny holds the browser back for a task: a browser
+    /// turn that stopped or refused a page by itself is no stop.
+    #[test]
+    fn browser_choice_never_asks_to_enable_and_only_the_persons_stop_holds_it_back() {
+        for phrase in [
+            "Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.",
+            "Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.",
+        ] {
+            assert!(BROWSER_CHOICE_CONTRACT.contains(phrase), "{phrase}");
+        }
+        assert!(
+            !BROWSER_CHOICE_CONTRACT
+                .contains("closed, paused or stopped it or denied an action there")
+        );
+    }
+
+    /// The rule against asking to enable something is about the browser and
+    /// its tools only. The same section has the person do their own consent
+    /// screens and walks them through a provider's screens, where pressing
+    /// Allow or Enable is theirs to do; a rule against telling them to allow
+    /// or enable anything at all would contradict both.
+    #[test]
+    fn browser_choice_never_forbids_the_persons_own_allow_or_enable() {
+        assert!(BROWSER_CHOICE_CONTRACT.contains("consent screens"));
+        assert!(BROWSER_CHOICE_CONTRACT.contains("walk the person through a provider's screens"));
+        for line in BROWSER_CHOICE_CONTRACT.lines() {
+            if line.contains("enable") || line.contains(" allow ") {
+                assert!(
+                    line.contains("allow it or its tools"),
+                    "a rule on enabling or allowing names the browser: {line}"
+                );
+            }
+        }
     }
 
     #[test]

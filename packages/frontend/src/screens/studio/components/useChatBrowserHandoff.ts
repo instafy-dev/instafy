@@ -92,6 +92,14 @@ function pageUrl(value: Options) {
   return value.transport === "shared" ? value.page?.url : value.personal.status?.url;
 }
 
+/** The chat and its browser, without the page on screen. */
+function chatIdentity(value: Options) {
+  return JSON.stringify([
+    value.userId, value.projectId, value.conversationId, value.transport, value.open,
+    value.transport === "shared" ? value.runtimeId : value.personal.ownerId,
+  ]);
+}
+
 export function useChatBrowserHandoff(options: Options) {
   const latest = useRef(options);
   latest.current = options;
@@ -108,6 +116,13 @@ export function useChatBrowserHandoff(options: Options) {
   const assertCurrent = useCallback((captured: Options, epoch: number) => {
     if (!mounted.current || generation.current !== epoch || !latest.current.canWrite || !latest.current.open || !captured.userId || !captured.projectId || !captured.conversationId || identity(latest.current) !== identity(captured) || pageUrl(latest.current) !== pageUrl(captured)) {
       throw new Error("The browser or conversation changed. Return to the intended page before continuing.");
+    }
+  }, []);
+  // A turn sent for the chat's own tab does not depend on the page on screen,
+  // which may change meanwhile (Studio brings that tab forward itself).
+  const assertSameChat = useCallback((captured: Options) => {
+    if (!mounted.current || !latest.current.canWrite || !latest.current.open || !captured.userId || !captured.projectId || !captured.conversationId || chatIdentity(latest.current) !== chatIdentity(captured)) {
+      throw new Error("The browser or conversation changed before this task could continue.");
     }
   }, []);
   const sharedJob = sharedBrowserTakeoverJob(options.runs, options.runtimeId, options.page?.id ?? null, {
@@ -148,11 +163,29 @@ export function useChatBrowserHandoff(options: Options) {
     return result?.ok === true && (result.canceledJobIds.includes(job.jobId) || result.canceledRunIds.includes(job.runId));
   }, [assertCurrent]);
 
-  const continueShared = useCallback(async (message: string, extras?: BrowserContinuationExtras | null) => {
+  /**
+   * `resolveTab`: the chat's own tab (chatBrowserTab.ts), which the turn is
+   * sent for. It is read after the chat is captured, and the chat is checked
+   * again once it is in: opening a tab takes a moment, and a chat the person
+   * switched to meanwhile never gets this task. Without one (an older
+   * browser), the page on screen, as Let AI continue after a manual step.
+   */
+  const continueShared = useCallback(async (
+    message: string,
+    extras?: BrowserContinuationExtras | null,
+    resolveTab?: (() => Promise<BrowserSessionPageTarget | null>) | null,
+  ) => {
     const captured = latest.current;
     const epoch = generation.current;
-    assertCurrent(captured, epoch);
-    if (captured.transport !== "shared" || !captured.runtimeId || !captured.page) return false;
+    let tab: BrowserSessionPageTarget | null = null;
+    if (resolveTab) {
+      assertSameChat(captured);
+      tab = await resolveTab();
+    }
+    const assertSendable = tab ? () => assertSameChat(captured) : () => assertCurrent(captured, epoch);
+    assertSendable();
+    const page = tab ?? captured.page;
+    if (captured.transport !== "shared" || !captured.runtimeId || !page) return false;
     const shown = displayOptions(message, extras);
     await captured.onSubmit(captured.conversationId, shown.text, {
       agentHandles: [captured.agentHandle],
@@ -161,17 +194,17 @@ export function useChatBrowserHandoff(options: Options) {
       expectedLaneIdle: true,
       requireDispatch: true,
       ...(shown.dispatchInput ? { dispatchInput: shown.dispatchInput } : {}),
-      assertDispatchCurrent: () => assertCurrent(captured, epoch),
+      assertDispatchCurrent: assertSendable,
       runtimeOverride: { runtimeId: captured.runtimeId, runtimeDisplayName: null, preferRuntime: true },
       metadata: buildSharedBrowserSubmitMetadata({
         baseMetadata: extras?.metadata ?? null,
-        browserPageTarget: captured.page,
+        browserPageTarget: page,
         runtimeId: captured.runtimeId,
         cardSites: captured.browserCardSites,
       }),
     });
     return true;
-  }, [assertCurrent]);
+  }, [assertCurrent, assertSameChat]);
 
   /**
    * Let AI continue in Instafy's browser, after the person took over or did

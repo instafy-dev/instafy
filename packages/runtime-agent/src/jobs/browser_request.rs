@@ -47,8 +47,10 @@ impl BrowserRequest {
                 "messageType": "action_request",
                 "details": {
                     "testId": "browser-request-card",
+                    // No line on what pressing it does: Studio opens the
+                    // browser by itself where it can, and the card then reads
+                    // Opening and Opened in place of its button.
                     "title": "Continue in Instafy's browser",
-                    "description": "Studio opens the browser and continues this task there.",
                     "browserRequest": request,
                     "actions": [{
                         "id": "continue-browser",
@@ -93,6 +95,22 @@ mod tests {
                 .get("runtimeId")
                 .is_none()
         );
+    }
+
+    /// The card says what it is for, not what pressing it does: Studio opens
+    /// it by itself where it can, and it reads Opening and Opened.
+    #[test]
+    fn browser_request_card_has_no_line_about_what_studio_does() {
+        let request = BrowserRequest::parse(
+            json!({"task": "Find the opening hours"})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        let details = request.message().metadata.unwrap()["details"].clone();
+        assert_eq!(details["title"], "Continue in Instafy's browser");
+        assert!(details.get("description").is_none(), "{details}");
+        assert!(!details.to_string().contains("Studio opens"), "{details}");
     }
 
     #[test]
