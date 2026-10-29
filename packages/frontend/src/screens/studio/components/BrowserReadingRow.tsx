@@ -6,7 +6,6 @@ import {
   BROWSER_AGENT_DEFAULT_NAME,
   browserReadingHost,
   browserReadingTitle,
-  sharedBrowserAgentTabLabel,
 } from "./browserAgentTabs";
 
 /**
@@ -35,7 +34,8 @@ export function BrowserAgentTabBadge({ agentName = BROWSER_AGENT_DEFAULT_NAME, l
  * One compact row while the agent holds the browser: the pages it is reading
  * (host and title, as text) and one Take over button. Take over is the same
  * action as the browser's own Take over: it revokes the agent's control of
- * every tab, not just the one on screen.
+ * every tab, not just the one on screen. The row names pages, never a tab's
+ * number: "Octo's tab 1" is the label its prompts use, not the person's.
  */
 export function BrowserReadingRow({
   pages,
@@ -71,16 +71,13 @@ export function BrowserReadingRow({
         {pages.map((page) => {
           const host = browserReadingHost(page);
           const title = browserReadingTitle(page);
-          // A tab the agent opened is named as its prompts name it.
-          const tabLabel = page.openedBy === "agent" && page.agentTabNumber ? `${sharedBrowserAgentTabLabel(page)}: ` : "";
           return (
             <li
               key={page.id}
               className="inline-flex min-w-0 max-w-[11rem] flex-none items-center sm:max-w-[16rem] gap-1 rounded-full border border-violet-500/25 bg-violet-500/5 px-2 py-0.5 text-slate-700 dark:text-slate-200"
               data-testid="browser-reading-page"
-              title={`${tabLabel}${page.title ? `${page.title}\n${page.url}` : page.url}`}
+              title={page.title ? `${page.title}\n${page.url}` : page.url}
             >
-              {tabLabel ? <span className="sr-only">{tabLabel}</span> : null}
               <span className="flex-none font-medium">{host}</span>
               {title ? <span className="truncate text-slate-500 dark:text-slate-400">· {title}</span> : null}
             </li>
@@ -98,7 +95,7 @@ export function BrowserReadingRow({
           data-testid="browser-reading-takeover"
           title={`Stop ${agentName} and use every tab yourself`}
         >
-          {takingOver ? "Stopping AI…" : "Take over"}
+          {takingOver ? `Stopping ${agentName}…` : "Take over"}
         </Button>
       ) : null}
       {error ? (

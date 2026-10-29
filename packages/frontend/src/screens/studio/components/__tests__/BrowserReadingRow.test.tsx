@@ -75,7 +75,7 @@ describe("BrowserReadingRow", () => {
     ));
     expect(container.textContent).toContain("Researcher is reading");
     const takeOver = container.querySelector<HTMLButtonElement>('[data-testid="browser-reading-takeover"]')!;
-    expect(takeOver.textContent).toBe("Stopping AI…");
+    expect(takeOver.textContent).toBe("Stopping Researcher…");
     expect(takeOver.disabled).toBe(true);
     expect(container.querySelector('[role="alert"]')!.textContent).toBe(error);
     expect(container.querySelector('[role="alert"]')!.hasAttribute("title")).toBe(false);
@@ -88,11 +88,14 @@ describe("BrowserReadingRow", () => {
     expect(container.querySelector('[data-testid="browser-reading-row"]')).toBeNull();
   });
 
-  it("labels a tab the agent opened in the row as its prompts do", async () => {
+  // "Octo's tab 1" is the label Octo's own prompts use; the person reads the
+  // page's site and title.
+  it("names the page of a tab the agent opened, never the tab's number", async () => {
     const opened = page("gamma", { openedBy: "agent", agentTabNumber: 3 });
     await act(async () => root.render(<BrowserReadingRow pages={[opened]} canTakeOver onTakeOver={vi.fn()} />));
     const item = container.querySelector<HTMLElement>('[data-testid="browser-reading-page"]')!;
-    expect(item.title.startsWith("Octo's tab 3: ")).toBe(true);
-    expect(item.textContent).toContain("Octo's tab 3:");
+    expect(item.textContent).toBe("gamma.example· gamma title");
+    expect(item.title).toBe("gamma title\nhttps://www.gamma.example/path");
+    expect(container.textContent).not.toContain("tab 3");
   });
 });

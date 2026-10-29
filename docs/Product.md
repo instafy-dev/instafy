@@ -813,7 +813,7 @@ for a person on their own AI connection, or in Instafy's browser on the conversa
 machine in a space the controller covers, while nobody else is using that browser (see
 [Browser Profiles](Browser-Profiles.md)); everywhere else nothing opens before the press.
 The card names the host its task is headed for. The person signs in themselves: the walk
-pauses at the sign-in, they sign in on the page and choose **Let AI continue**, and the
+pauses at the sign-in, they sign in on the page and choose **Let Octo continue**, and the
 agent types no credential. The walk stops on that list: the agent is told never to open, or
 ask the person to open, a screen in Instafy's browser that shows the value itself, because
 others watching that browser can see it, it often cannot be copied out, and a browser turn

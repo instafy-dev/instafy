@@ -49,14 +49,14 @@ for (const {width, dark} of [{width:390,dark:false}, {width:390,dark:true}, {wid
     expect(box).not.toBeNull();
     await page.mouse.click(box!.x + 10, box!.y + 10);
     await expect(page.getByRole("dialog", { name: "Take over browser" })).toBeVisible();
-    await page.getByRole("button", { name: "Keep AI working" }).click();
+    await page.getByRole("button", { name: "Keep Octo working" }).click();
     await expect(target).toBeFocused();
     await expect(field).toHaveValue("Preserve this note");
     await target.press("Enter");
     await page.getByRole("button", { name: "Take over", exact: true }).click();
     await expect(surface).toHaveCount(0);
     await field.fill("Manual changes survive continuation");
-    const continueButton = page.getByRole("button", { name: "Let AI continue", exact: true });
+    const continueButton = page.getByRole("button", { name: "Let Octo continue", exact: true });
     expect(await continueButton.evaluate(el => ({coarse: matchMedia("(pointer: coarse)").matches, minHeight: getComputedStyle(el).minHeight}))).toEqual({coarse: true, minHeight: "44px"});
     await continueButton.click();
     await expect(surface).toBeVisible();

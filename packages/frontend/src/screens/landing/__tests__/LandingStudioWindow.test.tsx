@@ -212,7 +212,7 @@ describe("landing studio window turn column", () => {
     expect(container.querySelector('[data-testid="landing-message-link"]')?.textContent).toBe(site.browser!.url);
     const request = container.querySelector('[data-testid="landing-browser-request"]');
     expect(request?.textContent).toContain("Continue in browser");
-    expect(request?.textContent).toContain("Open your browser and let the AI continue this task there.");
+    expect(request?.textContent).toContain("Open your browser and let Octo continue this task there.");
     expect(request?.textContent).toContain("Open browser and continue");
     const thread = container.querySelector('[data-testid="landing-octo-thread"]');
     expect(thread?.contains(request!)).toBe(true);

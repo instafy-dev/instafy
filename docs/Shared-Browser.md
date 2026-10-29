@@ -101,7 +101,7 @@ Pending requests show a badge for the current driver. A compact page-count picke
 beside the address switches browser tabs. **Browser options** contains history
 navigation, reload, **Expand browser** and where the browser runs, so the toolbar
 stays on one row. AI
-takeover and **Let AI continue** are in the same participant controls;
+takeover and **Let Octo continue** are in the same participant controls;
 clicking the shared page can still open the takeover confirmation.
 
 ### The agent's tabs
@@ -115,7 +115,8 @@ bound to (`browserPageId`) and every tab the page list reports with
 `openedBy: "agent"`; `openedBy` is optional, only `agent` and `person` are
 kept, and an absent value is the person's tab. A compact **Octo is reading**
 row under the toolbar lists those tabs as host and title text (page titles are
-shown as text only, never followed) with one **Take over** button. A tab an
+shown as text only, never followed; never a tab's number such as "Octo's tab 1",
+the label Octo's own prompts use) with one **Take over** button. A tab an
 earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
 earlier tab" in the tab picker. Take over
 is the same action as the toolbar's take-over, without a confirmation: it
@@ -423,7 +424,7 @@ routine browsing, which is what users' spaces get.
 Routine browsing is a grant across HTTP(S) sites for the exact current run,
 initiating user, runtime generation and selected page—not permanent site
 trust, a project-wide default, or permission inherited by the next turn (only a
-run that continues it with **Let AI continue** keeps it, see "Manual input
+run that continues it with **Let Octo continue** keeps it, see "Manual input
 handoff"). A run on the space's own machine starts with it; the runtime still
 honours a decision of `allow_routine` on a site prompt from an older client. Under routine browsing,
 ordinary navigation, clicks, non-sensitive field filling and non-activation keys
@@ -592,13 +593,26 @@ read, so that page would go into this chat's reply and Details):
   `GET /browser/capabilities`. The turn
   then starts on a blank page, and its blank-page rule takes it to the task's
   address or the official site of what the task is about.
-- **The chat's Browser view shows that tab.** When the view comes on screen for
-  a chat, and when the chat gets a new tab, Studio brings the chat's tab to the
-  front, unless someone else (Octo included) controls the browser, in which
-  case the view shows what they do. It never undoes the person's own pick.
+- **The chat's Browser view shows that tab**, never a tab another chat left in
+  front. When the view comes on screen for a chat, and when the chat gets a new
+  tab, Studio brings the chat's tab to the front. While someone else (Octo
+  included) controls the browser the view shows what they do, and the chat's
+  tab comes forward once they are done. A chat with no tab yet gets its own
+  blank one (as for its first browser turn), once while the view is on screen,
+  and "Octo is starting…" shows over it while a turn of the chat is on its way.
+  It never undoes the person's own pick.
+- **The page a browser turn leaves the chat.** A turn works on the chat's tab
+  (see Octo's own tabs). When it ends with that tab still blank, because Octo
+  read in tabs of its own, the tab Octo worked in last stays open (see Closed
+  at the end, unless kept). Studio saw that tab as Octo's while the chat's turn
+  held the browser (only while that turn was the one under way on the
+  machine), so once the turn has ended and the tab is no longer Octo's, it is
+  the chat's tab: the page the person is left with is the one Octo read. A tab
+  the person kept by taking over there counts the same way. A reload forgets
+  it, like a pick.
 - A follow-up stays in the tab of the turn it continues, while no other chat
   took that tab since the turn started; otherwise the message is an ordinary
-  chat turn. Let AI continue stays in the tab the person worked in. A message aimed at a page goes out in the
+  chat turn. Let Octo continue stays in the tab the person worked in. A message aimed at a page goes out in the
   person's own words: the page reaches the turn only as its bound tab, never as
   a sentence naming it, and a card's continuation sends the card's task alone.
 
@@ -640,9 +654,11 @@ fixture sites.
 
 ### Octo's own tabs
 
-Besides the page the person chose for the run, Octo may open up to three tabs
-of its own in the same browser, to read related pages side by side (the
-`instafy-web-research` and `instafy-browser-automation` skills say when). The
+Octo works on the page the person chose for the run, the chat's own tab, so the
+page the person is left with is one it read (`navigate`; the browser policy and
+the `instafy-browser-automation` skill say so). Only to keep a second page open
+at the same time does it open a tab of its own, up to three, in the same
+browser. The
 Shared Browser MCP server has `list_tabs`, `open_tab {url}`, `select_tab {tabId}`
 and `close_tab {tabId}`; `snapshot` and `navigate` also take a `tabId`, and every
 other tool acts on the tab `open_tab` or `select_tab` last chose. The Personal
@@ -747,7 +763,15 @@ Browser has tabs of its own (see Personal-Browser.md).
   `kept-tabs.json`). Studio keeps the tab on screen when the person takes over
   on one of Octo's tabs; it shows no separate **Keep tab** button, which was
   unexplained to a first-time user, since the person now watches Octo's tab
-  live while Octo works in it. A kept tab stays
+  live while Octo works in it. When the person kept none and the run's page
+  (the chat's own tab) is still blank (`GET /json/list` says `about:blank` or a
+  new-tab page), the tab Octo worked in last (`currentTabId`, else its newest)
+  is kept the same way, as the chat's page, with no reload: it stays as Octo
+  left it, a refused cookie banner included. Then that tab, or else the run's
+  page once any of Octo's tabs closed, comes to the front
+  (`GET /json/activate/<id>`): Chromium would otherwise show a neighbouring
+  tab, which may be another chat's page. A tab the person kept stays where they
+  are. A kept tab stays
   an ordinary tab no later run can use, and both records are cleared with the
   run's approval directory.
 - **No orphan tabs.** A tab of Octo's that is still open when its run's
@@ -933,7 +957,7 @@ own machine it starts in routine browsing, as every run there does (see "Human
 approval policy" above); elsewhere it starts in **Ask**, with the per-run origin
 approval, and **Allow routine browsing** stays the person's own choice. Studio
 never answers a site or action prompt for the person, and neither Studio nor the
-job metadata chooses the starting mode (Let AI continue only names the run it
+job metadata chooses the starting mode (Let Octo continue only names the run it
 continues; runtime-agent decides what carries, see "Manual input handoff").
 Under routine browsing, steps in a named
 risk category still ask, because the browser runtime enforces them.
@@ -1185,9 +1209,15 @@ The cue is presentation only; it does not grant input or block local viewer pan
 and zoom. Human control still uses the existing request/grant/release actions.
 For AI control, clicking the page or toolbar control icon opens a **Take over** dialog.
 Canceling leaves control unchanged; confirming starts the existing handoff.
-**Let AI continue** then appears in the existing toolbar. Reduced-motion
+**Let Octo continue** then appears in the existing toolbar. Reduced-motion
 preferences use a static edge glow. Agent-requested handoff
-uses `request_human_input` with one to eight indices from a fresh snapshot. The
+uses `request_human_input` with one to eight indices from a fresh snapshot. When
+it comes in while the chat is open, Studio switches to the Browser view, where
+the highlighted fields are (once per pause; history and a reload switch
+nothing). While it waits on the person's fields, the Shared Browser's controls
+add one line: "This space's browser keeps you signed in for its chats until you
+clear it.", or "…for its chats and members…" when other people can open the
+space (see Sign-ins on a browser host). The
 trusted helper highlights those exact editable elements with fixed amber outlines
 and emits bounded, page/initiator-bound guidance through the existing action feed.
 The guidance contains generic labels, not field values or page text. Highlights
@@ -1200,7 +1230,7 @@ in the toolbar. It remains disabled while another participant controls the tab.
 The tool latches later agent observation and action for that turn. It does not
 remove the agent-control marker: manual input remains locked until the existing
 confirmed-shutdown path restores the human driver. A canceled controller run alone
-is not release proof. **Let AI continue** explicitly starts a new turn on the same
+is not release proof. **Let Octo continue** explicitly starts a new turn on the same
 runtime/page with a fresh observation. It sends only a fixed continuation message,
 never the user's entered values, and says only what is true whether or not the
 person used the browser meanwhile. Account, conversation, runtime or page changes
@@ -1845,6 +1875,8 @@ endpoint. Details and limits are in
 [Shared-Browser-CDP-Screencast.md](./Shared-Browser-CDP-Screencast.md).
 
 Besides being WebRTC's first failure fallback, CDP is the deliberate compact-viewport renderer. It changes Chromium's logical viewport so responsive sites reflow at narrow widths instead of stretching a fixed-aspect video frame.
+
+The viewer that drives sends its size whenever its view is on screen with its input, unless the browser already took that size: its answer to a resize (`viewport`), or, for a view that could already drive when its input socket connected, the size the origin set then. The origin's `ready` echoes the size a view asked for even when it set nothing (it sets it only for the current driver), so a view that gets its input later sends its size once `ready` is in. A phone's view then re-renders the page at phone width, and a desktop's at desktop size again.
 
 ## Adaptive HiDPI RFB
 

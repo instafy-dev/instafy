@@ -2,7 +2,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BrowserHumanInputControls } from "../BrowserHumanInputControls";
+import { BrowserHumanInputControls, sharedBrowserSignInNote } from "../BrowserHumanInputControls";
 import { SharedBrowserCollaborationControls } from "../SharedBrowserCollaborationControls";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
@@ -35,6 +35,38 @@ describe("BrowserHumanInputControls", () => {
     </SharedBrowserCollaborationControls>
   );
   const finishFocusRestoration = async () => act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+
+  // Instafy's browser is the space's: a sign-in the person finishes there
+  // stays for its other chats, and for its members in a team space. The pause
+  // on their fields is the one place that says so.
+  it("says what a sign-in leaves in the space's browser while it waits on the person's fields", async () => {
+    const note = () => container.querySelector('[data-testid="browser-human-input-sign-in-note"]');
+    props.signInNote = sharedBrowserSignInNote(false);
+    await render();
+    expect(note()).toBeNull();
+    props.request = { version: 1, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Username" }, { label: "Password" }] };
+    props.humanControlConfirmed = true;
+    await render();
+    expect(note()?.textContent).toBe("This space's browser keeps you signed in for its chats until you clear it.");
+    expect(container.textContent).toContain("Let Octo continue");
+    props.signInNote = sharedBrowserSignInNote(true);
+    await render();
+    expect(note()?.textContent).toBe("This space's browser keeps you signed in for its chats and members until you clear it.");
+    // A browser only this person uses says nothing of the kind.
+    props.signInNote = null;
+    await render();
+    expect(note()).toBeNull();
+  });
+
+  it("names Octo in the take-over dialog", async () => {
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-request"]')!.click());
+    const dialog = document.querySelector('[role="dialog"][aria-label="Take over browser"]')!;
+    expect(dialog.textContent).toContain("Octo will pause so you can use the page.");
+    expect(dialog.textContent).toContain("Let Octo continue");
+    expect(dialog.textContent).toContain("Keep Octo working");
+    expect(dialog.textContent).not.toContain("AI");
+  });
 
   it("keeps a surface-triggered takeover dialog available while compact controls are closed", async () => {
     vi.stubGlobal("CSS", { escape: (value: string) => value });
@@ -73,7 +105,7 @@ describe("BrowserHumanInputControls", () => {
   });
 
   it("hands the browser back with words that are true whether or not the person used it", () => {
-    // Let AI continue also follows a take-over where the person only watched.
+    // Let Octo continue also follows a take-over where the person only watched.
     expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).not.toMatch(/\bI have finished\b|\bI entered\b/);
     expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toMatch(/^Continue the previous browser task on this same page\./);
     expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toMatch(/Take a fresh snapshot before acting/);
@@ -126,7 +158,7 @@ describe("BrowserHumanInputControls", () => {
     expect(props.onContinue).not.toHaveBeenCalled();
     await click("browser-human-input-continue");
     expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
-    expect(container.textContent).not.toContain("Let AI continue");
+    expect(container.textContent).not.toContain("Let Octo continue");
   });
 
   it("does not continue automatically or duplicate an in-flight explicit continuation", async () => {
@@ -139,24 +171,24 @@ describe("BrowserHumanInputControls", () => {
     expect(props.onContinue).toHaveBeenCalledTimes(1);
     props.humanControlConfirmed = false; await render();
     expect(container.textContent).toContain("Continuing…");
-    expect(container.textContent).not.toContain("Stopping AI");
+    expect(container.textContent).not.toContain("Stopping Octo");
     expect(container.textContent).not.toContain("Waiting for agent control to stop");
     expect(container.querySelector('[data-testid="browser-human-input-continue"]')).toBeNull();
     props.humanControlConfirmed = true; await render();
     await act(async () => finish(false));
     expect(container.textContent).toContain("was not sent");
-    expect(container.textContent).toContain("Let AI continue");
+    expect(container.textContent).toContain("Let Octo continue");
   });
 
   it("clears user-initiated continuation when page/identity changes", async () => {
     await render(); await click("browser-human-input-takeover");
     props = { ...props, identityKey: "another-page", humanControlConfirmed: true }; await render();
-    expect(container.textContent).not.toContain("Let AI continue");
+    expect(container.textContent).not.toContain("Let Octo continue");
     expect(props.onContinue).not.toHaveBeenCalled();
   });
 
   it("keeps a failed continuation readable beside its retry action without relying on a tooltip", async () => {
-    const message = "The connection was lost while continuing the browser task. Your changes are still on the page; reconnect and let the AI continue when ready.";
+    const message = "The connection was lost while continuing the browser task. Your changes are still on the page; reconnect and let Octo continue when ready.";
     props.request = { version: 1, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] };
     props.humanControlConfirmed = true;
     props.onContinue = vi.fn().mockRejectedValueOnce(new Error(message)).mockResolvedValueOnce(true);
@@ -179,7 +211,7 @@ describe("BrowserHumanInputControls", () => {
     await render();
     await act(async () => reject(new Error("Failure from the previous browser")));
     expect(container.textContent).not.toContain("Failure from the previous browser");
-    expect(container.textContent).not.toContain("Let AI continue");
+    expect(container.textContent).not.toContain("Let Octo continue");
     expect(props.onContinue).not.toHaveBeenCalled();
   });
 
@@ -192,7 +224,7 @@ describe("BrowserHumanInputControls", () => {
     props = { ...props, identityKey: "different-browser", request: { ...props.request, handoffId: "second" }, onContinue: vi.fn(async () => true) };
     await render();
     await act(async () => finish(true));
-    expect(container.textContent).toContain("Let AI continue");
+    expect(container.textContent).toContain("Let Octo continue");
     expect(props.onContinue).not.toHaveBeenCalled();
     await click("browser-human-input-continue");
     expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
@@ -207,7 +239,7 @@ describe("BrowserHumanInputControls", () => {
     await render();
     expect(container.textContent).not.toContain("highlighted field");
     expect(container.textContent).toContain("Finish your changes on the page");
-    expect(container.textContent).toContain("Let AI continue");
+    expect(container.textContent).toContain("Let Octo continue");
     expect(props.onContinue).not.toHaveBeenCalled();
     await click("browser-human-input-continue");
     expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
@@ -220,7 +252,7 @@ describe("BrowserHumanInputControls", () => {
     expect(container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')!.disabled).toBe(true);
     await act(async () => vi.advanceTimersByTime(1001));
     expect(container.textContent).not.toContain("highlighted field");
-    expect(container.textContent).toContain("Let AI continue");
+    expect(container.textContent).toContain("Let Octo continue");
     expect(container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')!.disabled).toBe(true);
     expect(props.onContinue).not.toHaveBeenCalled();
   });

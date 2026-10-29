@@ -73,10 +73,10 @@ describe("SharedBrowserCollaborationControls", () => {
   });
 
   it("keeps participants and release control inline on a wide surface", async () => {
-    await render({ compact: false, children: <button>Let AI continue</button> });
+    await render({ compact: false, children: <button>Let Octo continue</button> });
     expect(find("shared-browser-participants")?.getAttribute("aria-label")).toContain("Taylor, Anna");
     expect(status()?.textContent).toBe("You control");
-    expect(container.textContent).toContain("Let AI continue");
+    expect(container.textContent).toContain("Let Octo continue");
     expect(action()?.dataset.action).toBe("release");
     await click(action()!);
     expect(props.onReleaseControl).toHaveBeenCalledOnce();
@@ -86,14 +86,14 @@ describe("SharedBrowserCollaborationControls", () => {
   it("uses one compact presence button and reveals names, ownership, and actions on demand", async () => {
     await render({
       client: client({ state: { ...client().state!, participants: [participant("self", "Taylor"), participant("peer", "Anna"), participant("third", "Grace")] } }),
-      children: <button>Let AI continue</button>,
+      children: <button>Let Octo continue</button>,
     });
     expect(container.querySelectorAll("button")).toHaveLength(1);
     expect(trigger().getAttribute("aria-label")).toContain("You control. Taylor, Anna, Grace");
     expect(find("shared-browser-participants")?.textContent).toContain("+2");
     expect(status()).toBeNull();
     expect(action()).toBeNull();
-    expect(container.textContent).not.toContain("Let AI continue");
+    expect(container.textContent).not.toContain("Let Octo continue");
 
     await openControls();
     expect(status()?.textContent).toBe("You control");
@@ -104,12 +104,12 @@ describe("SharedBrowserCollaborationControls", () => {
     expect(controller()?.closest("li")?.dataset.participantId).toBe("self");
     expect(document.querySelectorAll('[data-testid="shared-browser-controller-indicator"]')).toHaveLength(1);
     expect(participantsList().compareDocumentPosition(action()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    const continueControl = Array.from(document.querySelectorAll("button")).find(button => button.textContent === "Let AI continue")!;
+    const continueControl = Array.from(document.querySelectorAll("button")).find(button => button.textContent === "Let Octo continue")!;
     expect(participantsList().compareDocumentPosition(continueControl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(participantRow("self").textContent).toContain("Taylor (you)");
     expect(participantRow("peer").textContent).toBe("Anna");
     expect(participantRow("third").textContent).toBe("Grace");
-    expect(document.body.textContent).toContain("Let AI continue");
+    expect(document.body.textContent).toContain("Let Octo continue");
     expect(action()?.textContent).toBe("Release control");
     await click(action()!);
     expect(props.onReleaseControl).toHaveBeenCalledOnce();

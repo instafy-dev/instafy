@@ -703,7 +703,7 @@ export function PersonalBrowserSurface({
                   {model.status?.tabControlActive
                     ? "Take back control before continuing the AI task."
                     : humanInputState.active
-                    ? "When ready, choose Let AI continue in the browser toolbar."
+                    ? "When ready, choose Let Octo continue in the browser toolbar."
                     : humanInputLocked
                     ? "Take over to change approvals."
                     : ownerTierApproval

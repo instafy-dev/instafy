@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RunRecord } from "../../../types";
 import {
   browserSessionPageIsPlaceholder,
@@ -26,6 +26,12 @@ import {
  * that just started shows or a new one Studio opens for it, and the turn's
  * blank-page rule takes it to the task's site. The chat's Browser view shows
  * that tab (ChatPanel brings it forward).
+ *
+ * When a browser turn ends with the chat's tab still blank (Octo read in tabs
+ * of its own), the runtime keeps the tab Octo worked in last open, as Take
+ * over keeps a tab. Studio saw that tab as Octo's while the chat's turn held
+ * the browser, so once the turn has ended it is the chat's tab: the page the
+ * person is left with is the one Octo read.
  */
 
 /** A tab a chat chose or ran in, and when. */
@@ -49,9 +55,19 @@ function remember(tab: RememberedTab): void {
   }
 }
 
+/**
+ * Octo's own tabs this page saw while one chat's browser turn held the
+ * browser, by browser and run, newest last: the tab in front last, and every
+ * one of them.
+ */
+type OctoRunTabs = { tabIds: string[]; frontTabId: string | null };
+const octoRunTabs = new Map<string, OctoRunTabs>();
+const MAX_OCTO_RUNS = 100;
+
 /** Empties what this page remembers, as a reload would. Tests only. */
 export function forgetChatBrowserTabsForTests(): void {
   rememberedTabs.clear();
+  octoRunTabs.clear();
 }
 
 export type ChatBrowserTabScope = {
@@ -85,6 +101,84 @@ function sharedBrowserPageId(run: RunRecord, runtimeId: string): string | null {
   const pageId = metadata?.browserPageId;
   return metadata?.browserTransport === "shared" && metadata.browserRuntimeId === runtimeId &&
     typeof pageId === "string" && pageId.trim() ? pageId.trim() : null;
+}
+
+/** A run that has not ended, and one that may hold the browser now. */
+const RUN_ON_ITS_WAY = new Set(["queued", "in_progress", "awaiting_approval"]);
+const RUN_UNDER_WAY = new Set(["in_progress", "awaiting_approval"]);
+
+/** The chat's newest browser turn on this browser. */
+function newestChatBrowserRun(
+  runs: readonly RunRecord[],
+  scope: { conversationId: string | null; runtimeId: string | null },
+): RunRecord | null {
+  if (!scope.conversationId || !scope.runtimeId) return null;
+  let newest: RunRecord | null = null;
+  for (const run of runs) {
+    if (run.conversationId !== scope.conversationId || !sharedBrowserPageId(run, scope.runtimeId)) continue;
+    if (!newest || runStartedAt(run) > runStartedAt(newest)) newest = run;
+  }
+  return newest;
+}
+
+/**
+ * Records the tabs Octo has open now (numbered, not left from an earlier run)
+ * for the one browser turn running on this browser. With two turns under way
+ * at once nothing is recorded: the tabs could be either's. Returns
+ * whether anything new was recorded.
+ */
+export function noteOctoRunTabs(input: {
+  scope: ChatBrowserTabScope;
+  runs: readonly RunRecord[];
+  pages: readonly BrowserSessionPage[];
+}): boolean {
+  const browser = browserKey(input.scope);
+  const runtimeId = input.scope.runtimeId;
+  if (!browser || !runtimeId) return false;
+  const running = input.runs.filter((run) => RUN_UNDER_WAY.has(run.status) && sharedBrowserPageId(run, runtimeId));
+  const run = running.length === 1 ? running[0]! : null;
+  if (!run) return false;
+  const octos = input.pages.filter((page) =>
+    page.openedBy === "agent" && page.leftover !== true && typeof page.agentTabNumber === "number");
+  if (octos.length === 0) return false;
+  const key = JSON.stringify([browser, run.id]);
+  const known = octoRunTabs.get(key) ?? { tabIds: [], frontTabId: null };
+  const tabIds = [...known.tabIds, ...octos.map((page) => page.id).filter((id) => !known.tabIds.includes(id))];
+  const frontTabId = octos.find((page) => page.isActive)?.id ?? known.frontTabId;
+  if (tabIds.length === known.tabIds.length && frontTabId === known.frontTabId) return false;
+  octoRunTabs.delete(key);
+  octoRunTabs.set(key, { tabIds, frontTabId });
+  while (octoRunTabs.size > MAX_OCTO_RUNS) {
+    const oldest = octoRunTabs.keys().next().value;
+    if (oldest === undefined) break;
+    octoRunTabs.delete(oldest);
+  }
+  return true;
+}
+
+/**
+ * The tab the chat's newest browser turn left it, once that turn has ended:
+ * one of Octo's tabs from that turn still open, no longer Octo's (the runtime
+ * kept it as the chat's page, or the person kept it by taking over there),
+ * the one in front last first. It counts from just after the turn started,
+ * so it takes the place of the tab the turn was sent for.
+ */
+function tabLeftForChat(
+  scope: ChatBrowserTabScope,
+  runs: readonly RunRecord[],
+  pages: readonly { id: string; openedBy?: string }[],
+): ChosenTab | null {
+  const browser = browserKey(scope);
+  const run = newestChatBrowserRun(runs, scope);
+  if (!browser || !run || RUN_ON_ITS_WAY.has(run.status)) return null;
+  const seen = octoRunTabs.get(JSON.stringify([browser, run.id]));
+  if (!seen) return null;
+  const left = (id: string | null) =>
+    id !== null && pages.some((page) => page.id === id && page.openedBy !== "agent");
+  const pageId = left(seen.frontTabId)
+    ? seen.frontTabId
+    : [...seen.tabIds].reverse().find((id) => left(id)) ?? null;
+  return pageId ? { pageId, atMs: runStartedAt(run) + 1 } : null;
 }
 
 /** The tab a chat's newest browser turn on this browser ran in, and when it started. */
@@ -168,11 +262,12 @@ function chosenAt(runs: readonly RunRecord[], runtimeId: string): number {
 }
 
 /**
- * The chat's own tab among the browser's open tabs: the newer of the one the
- * person chose here and the one its last browser turn ran in, while it is
- * open and no other chat took it since. Null when the chat has none.
+ * The chat's own tab among the browser's open tabs: the newest of the one the
+ * person chose here, the one its last browser turn ran in and the one that
+ * turn left it (see above), while it is open and no other chat took it since.
+ * Null when the chat has none.
  */
-export function chatBrowserTab<Page extends { id: string }>(input: {
+export function chatBrowserTab<Page extends { id: string; openedBy?: string }>(input: {
   scope: ChatBrowserTabScope;
   runs: readonly RunRecord[];
   pages: readonly Page[];
@@ -182,7 +277,8 @@ export function chatBrowserTab<Page extends { id: string }>(input: {
   const owned = { ...scope, runtimeId: scope.runtimeId };
   const chosen = chosenChatBrowserTab(scope);
   const ran = lastChatBrowserTab(input.runs, scope);
-  const candidates = [chosen, ran]
+  const left = tabLeftForChat(scope, input.runs, input.pages);
+  const candidates = [chosen, left, ran]
     .filter((entry): entry is ChosenTab => entry !== null)
     .sort((left, right) => right.atMs - left.atMs);
   for (const candidate of candidates) {
@@ -210,6 +306,43 @@ export function unusedBlankBrowserTab<Page extends BrowserSessionPage>(input: {
   const blank = input.pages.filter((page) =>
     browserSessionPageIsPlaceholder(page) && page.openedBy !== "agent" && !used.has(page.id));
   return blank.find((page) => page.isActive) ?? blank[0] ?? null;
+}
+
+/** What the chat's Browser view did so far while on screen: the chat's tab it brought forward, and the chat it asked a blank tab for. */
+export type ChatBrowserViewState = { shown: string | null; blankTabFor: string | null };
+
+export const CHAT_BROWSER_VIEW_START: ChatBrowserViewState = { shown: null, blankTabFor: null };
+
+/**
+ * The chat's Browser view shows the chat's own tab, never the tab another
+ * chat left in front: once when the view comes on screen for the chat, and
+ * once for each new tab the chat gets (the page its browser turn left it
+ * included), unless it is in front already. Never over the person's own pick
+ * (a pick is the chat's tab), and not while someone else, Octo included,
+ * controls the browser: the view then shows what they do, and the chat's tab
+ * comes forward once they are done. A chat with no tab yet gets its own blank
+ * one, once while the view is on screen.
+ */
+export function nextChatBrowserViewStep(input: {
+  onScreen: boolean;
+  /** Who is in the browser is known, and nobody else controls it. */
+  free: boolean;
+  chatId: string | null;
+  tab: { id: string; isActive: boolean } | null;
+  /** The browser's tabs are read, and this person may open one. */
+  canOpenTab: boolean;
+  state: ChatBrowserViewState;
+}): { state: ChatBrowserViewState; step: "none" | "open-blank-tab" | "focus" } {
+  const { state } = input;
+  if (!input.onScreen) return { state: CHAT_BROWSER_VIEW_START, step: "none" };
+  if (!input.free) return { state, step: "none" };
+  if (!input.tab) {
+    if (!input.chatId || !input.canOpenTab || state.blankTabFor === input.chatId) return { state, step: "none" };
+    return { state: { ...state, blankTabFor: input.chatId }, step: "open-blank-tab" };
+  }
+  const shown = JSON.stringify([input.chatId, input.tab.id]);
+  if (state.shown === shown) return { state, step: "none" };
+  return { state: { ...state, shown }, step: input.tab.isActive ? "none" : "focus" };
 }
 
 const BLANK_TAB_TARGET = { url: "about:blank", host: "", label: "New tab" } as const;
@@ -250,6 +383,13 @@ export function useChatBrowserTab(input: {
     [key, runs, pages, chosenVersion],
   );
   const opening = useRef<{ key: string; promise: Promise<BrowserSessionPageTarget | null> } | null>(null);
+  // Octo's tabs in the browser turn holding the browser, so the one the turn
+  // leaves the chat is known once it ends.
+  useEffect(() => {
+    if (noteOctoRunTabs({ scope, runs, pages })) setChosenVersion((version) => version + 1);
+    // `scope` is read through its key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, runs, pages]);
 
   /** Gives this chat the tab: its later browser turns use it, and no other chat's do. */
   const give = useCallback((scope: ChatBrowserTabScope, pageId: string) => {

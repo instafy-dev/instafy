@@ -438,12 +438,12 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.equal(runPage.url(), `${sources.origin}/hotel`);
     assert.ok(linkOnly.requests.includes("GET /map"), "The page's own frame loaded");
 
-    // 13. Take over, then Let AI continue, then approve a navigation. Run A
+    // 13. Take over, then Let Octo continue, then approve a navigation. Run A
     // approves a site on the person's page and one in a tab of its own; the
     // person takes over while a prompt is on screen. runtime-agent ends the
     // run as it does after a confirmed shutdown: Octo's tabs close through
     // the DevTools endpoint, the run's records are revoked and the marker is
-    // removed. Let AI continue names run A, and runtime-agent starts the new
+    // removed. Let Octo continue names run A, and runtime-agent starts the new
     // run with what A approved on the person's page (the record it keeps for
     // that; its rules are unit-tested), written here the same way.
     const startRun = (approvedOrigins) => {
@@ -480,7 +480,7 @@ export async function runSharedBrowserAgentTabsFixture() {
     const promptsBeforeRunB = prompts.length;
     // The site the person approved on their page opens without asking again.
     await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, []);
-    assert.equal(prompts.length, promptsBeforeRunB, "Let AI continue kept the run's approval");
+    assert.equal(prompts.length, promptsBeforeRunB, "Let Octo continue kept the run's approval");
     // A new site asks once, naming the exact page; the person's one answer
     // completes the step, so no approval is lost to a second prompt.
     const tram = await ok("POST", "/v1/navigate", { url: `${transport.origin}/tram-15` }, ["allow_origin"]);
@@ -525,7 +525,7 @@ export async function runSharedBrowserAgentTabsFixture() {
         "the person's page: link-only refused before any prompt, through a redirect, and once the page is on one",
         "a page that frames a link-only site loads and Octo's step succeeds, reading nothing of the frame",
         "a plain navigation asks at most once, and its prompt names the exact page",
-        "take over mid-prompt, Let AI continue keeps the page's approvals, and one answer completes an approved navigation",
+        "take over mid-prompt, Let Octo continue keeps the page's approvals, and one answer completes an approved navigation",
       ],
       limitations: [
         "No model, Studio UI, origin keep endpoint or runtime shutdown guard; those are unit-tested.",

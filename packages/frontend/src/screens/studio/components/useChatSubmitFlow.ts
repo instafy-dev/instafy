@@ -363,7 +363,7 @@ export function useChatSubmitFlow({
    * The chat is a skill setup (`isSkillSetupConversation`). Its composer
    * answers the setup: a reply is a chat turn even while a browser is shown,
    * and none is aimed at the browser page by its words. The browser's own
-   * controls (the card's button, Let AI continue) carry a walk on there.
+   * controls (the card's button, Let Octo continue) carry a walk on there.
    */
   skillSetupConversation?: boolean;
   softPrefillSuggestion: string | null | undefined;

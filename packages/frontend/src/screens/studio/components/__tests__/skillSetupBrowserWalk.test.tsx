@@ -167,7 +167,7 @@ function Harness({ messages, busy, input, humanInput, performSubmit, onSubmit, c
     continueTask: (transport, message) => transport === "shared" ? handoff.continueShared(message) : Promise.resolve(false),
     onError: vi.fn(),
   });
-  // The Shared Browser's Let AI continue (BrowserSessionModal) is wired to the
+  // The Shared Browser's Let Octo continue (BrowserSessionModal) is wired to the
   // same handoff as the card.
   const signIn = useBrowserHumanInput({
     identityKey: handoff.identityKey, request: humanInput, canTakeOver: false, humanControlConfirmed: true,
@@ -232,7 +232,7 @@ describe("a skill setup's browser walk", () => {
     await render({ busy: true });
     await render({ busy: false, humanInput: signInPause() });
     const afterPause = { surface: container.textContent, reply: await reply(SIGNED_IN_REPLY) };
-    // The person signs in on the page and chooses Let AI continue.
+    // The person signs in on the page and chooses Let Octo continue.
     await act(async () => { await controlsRef.current!.signIn.continueTask(); });
     await render({ humanInput: null, busy: true });
     await render({ busy: false });
@@ -243,7 +243,7 @@ describe("a skill setup's browser walk", () => {
   it("sends the setup's replies as chat turns and continues the walk only through the browser", async () => {
     const { onSubmit, afterPause, afterWalk } = await walk(conversation("/skills import https://github.com/acme/skills --start"));
 
-    // The walk itself: the card's press, then Let AI continue after sign-in.
+    // The walk itself: the card's press, then Let Octo continue after sign-in.
     expect(onSubmit).toHaveBeenCalledTimes(2);
     expect(onSubmit.mock.calls[0][1]).toContain(TASK);
     expect(onSubmit.mock.calls[1][1]).toBe(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);

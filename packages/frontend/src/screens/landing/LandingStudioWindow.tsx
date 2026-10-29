@@ -615,7 +615,7 @@ function BrowserRequestCard({
           Continue in browser
         </Text>
         <Text as="div" variant="caption" tone="muted" className="leading-snug">
-          Open your browser and let the AI continue this task there.
+          Open your browser and let Octo continue this task there.
         </Text>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">

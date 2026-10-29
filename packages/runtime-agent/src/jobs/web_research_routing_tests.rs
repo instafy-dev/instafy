@@ -558,22 +558,25 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
     }
 }
 
-/// In the Shared or Personal Browser a card's pages are read side by side in Octo's own tabs, within the part of the
-/// browser skill a snapshot carries, and an unedited earlier copy of the skill is upgraded.
+/// In the Shared Browser a card's pages are read one by one on the chat's own page, so the person is left on the last
+/// page read (Octo's own tabs close with the turn), and a tab of Octo's own only holds a second page at once. It is
+/// within the part of the browser skill a snapshot carries, and an unedited earlier copy of the skill is upgraded.
 #[test]
-fn the_browser_skill_reads_a_cards_pages_in_octos_own_shared_browser_tabs() {
+fn the_browser_skill_reads_a_cards_pages_on_the_chats_own_page() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(
-        "In the Shared or Personal Browser, read them side by side in your own tabs (`open_tab`, 3 at most, then `close_tab`)."
+        "In the Shared Browser, read them one by one on the chat's own page (`navigate`); open your own tab (`open_tab`, 3 at most) only to hold two pages at once."
     ));
+    assert!(!BROWSER_SKILL.contains("side by side in your own tabs"));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 
     for previous in [
         include_str!("legacy/browser-automation-v7.md"),
         include_str!("legacy/browser-automation-v8.md"),
+        include_str!("legacy/browser-automation-v12.md"),
     ] {
-        assert!(!previous.contains("read them side by side in your own tabs"));
+        assert!(!previous.contains("read them one by one on the chat's own page"));
         let tmp = scaffolded_space();
         let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
         fs::write(&skill, previous).unwrap();
@@ -945,6 +948,27 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         learn::ensure_project_memory_scaffold(tmp.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
     }
+}
+
+/// The button that goes on after a sign-in is named as Studio names it ("Let Octo continue"), in the browser skill and
+/// the setup skill. A space still holding a copy that says "Let AI continue" gets the current one.
+#[test]
+fn a_space_holding_the_earlier_setup_skill_names_let_octo_continue() {
+    let onboarding = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-integration-onboarding/SKILL.md"
+    ));
+    for current in [BROWSER_SKILL, onboarding] {
+        assert!(current.contains("Let Octo continue"));
+        assert!(!current.contains("Let AI continue"));
+    }
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::INTEGRATION_ONBOARDING_RELATIVE_PATH);
+    let previous = include_str!("legacy/integration-onboarding-v5.md");
+    assert!(previous.contains("Let AI continue"));
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), onboarding);
 }
 
 /// A fresh turn's prompt for `request`, with the job's metadata.

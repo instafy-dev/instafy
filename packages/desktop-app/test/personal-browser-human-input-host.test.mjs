@@ -240,7 +240,7 @@ function routineStarts(dialogs) {
   return dialogs.filter((options) => options.buttons?.length === 3).length;
 }
 
-test("Let AI continue after a routine handoff keeps routine without a second start dialog", async () => {
+test("Let Octo continue after a routine handoff keeps routine without a second start dialog", async () => {
   const { host, dialogs } = await fixture(undefined, { mode: "routine", knownHosts: ["example.test"] });
   assert.equal(routineStarts(dialogs), 1);
   await host.handleControlOperation("request_human_input", { indices: [0] });

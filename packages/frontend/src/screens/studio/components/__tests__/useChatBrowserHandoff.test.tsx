@@ -159,7 +159,7 @@ describe("useChatBrowserHandoff", () => {
     expect(cancelAgentJob).toHaveBeenCalledTimes(1);
   });
 
-  it("names the browser run that Let AI continue continues, so the runtime can keep its approvals", async () => {
+  it("names the browser run that Let Octo continue continues, so the runtime can keep its approvals", async () => {
     const value = options();
     const base = value.runs[0];
     const stopped: RunRecord = {
@@ -355,7 +355,7 @@ describe("useChatBrowserHandoff", () => {
     await render(value);
     expect(value.personal.status?.humanInputRequest).toBeUndefined();
     await expect(resultRef.current!.startPersonal("Continue shopping")).rejects.toThrow(
-      "Finish the current manual step and choose Let AI continue, or pause the browser, before starting another browser task.",
+      "Finish the current manual step and choose Let Octo continue, or pause the browser, before starting another browser task.",
     );
     expect(value.personal.setAgentControlEnabled).not.toHaveBeenCalled();
     expect(value.onSubmit).not.toHaveBeenCalled();

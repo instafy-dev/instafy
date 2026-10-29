@@ -42,7 +42,7 @@ import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { observeBrowserRfbFrames } from "./browserSessionRfbFrame";
 import { BrowserExpandButton } from "./BrowserExpandButton";
-import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
+import { BrowserHumanInputStatus, sharedBrowserSignInNote } from "./BrowserHumanInputControls";
 import { RemoteControlSurface } from "./RemoteControlSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { BrowserReadingRow } from "./BrowserReadingRow";
@@ -489,6 +489,7 @@ export function BrowserSessionModal({
   runApproval = null,
   conversationId = null,
   agentArrival = null,
+  spaceHasTeammates = false,
 }: {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
@@ -589,6 +590,8 @@ export function BrowserSessionModal({
    * over a blank tab the stage says where Octo is going until its first page.
    */
   agentArrival?: BrowserTurnArrival | null;
+  /** Other people can open this space, and with it this browser's sign-ins. */
+  spaceHasTeammates?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -1172,6 +1175,8 @@ export function BrowserSessionModal({
     onContinue: async (message: string) => onContinueAfterHumanInput ? onContinueAfterHumanInput(message) : false,
   };
   const browserHumanInputState = useBrowserHumanInput(browserHumanInputOptions);
+  // A sign-in in this browser stays in the space's one browser profile.
+  const signInNote = sharedBrowserSignInNote(spaceHasTeammates);
   // The pages the agent is reading while it holds this browser: its own tabs
   // and the tab its run is bound to. Take over there is the same action as
   // the toolbar's, and the origin's runtime-wide agent marker it ends covers
@@ -3388,7 +3393,7 @@ export function BrowserSessionModal({
   );
 
   const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
-    ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} /> : null;
+    ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} signInNote={signInNote} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (
     <div aria-hidden="true" className="pointer-events-none h-px w-px overflow-hidden opacity-0">
       <div ref={setContainerElement} className="h-full w-full overflow-hidden" />
@@ -3464,7 +3469,7 @@ export function BrowserSessionModal({
           toolbarActions={(compactNavigation) => (
             <>
               {humanInputIdentityKey ? (
-                <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState}
+                <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} signInNote={signInNote}
                   renderControls={collaborationControlsShown ? renderCollaborationControls : undefined} />
               ) : collaborationControlsShown ? renderCollaborationControls(null) : null}
               {renderSessionControls(sharedBrowserChrome.compact ? <>

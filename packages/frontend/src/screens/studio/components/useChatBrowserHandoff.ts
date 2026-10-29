@@ -168,7 +168,7 @@ export function useChatBrowserHandoff(options: Options) {
    * sent for. It is read after the chat is captured, and the chat is checked
    * again once it is in: opening a tab takes a moment, and a chat the person
    * switched to meanwhile never gets this task. Without one (an older
-   * browser), the page on screen, as Let AI continue after a manual step.
+   * browser), the page on screen, as Let Octo continue after a manual step.
    */
   const continueShared = useCallback(async (
     message: string,
@@ -207,7 +207,7 @@ export function useChatBrowserHandoff(options: Options) {
   }, [assertCurrent, assertSameChat]);
 
   /**
-   * Let AI continue in Instafy's browser, after the person took over or did
+   * Let Octo continue in Instafy's browser, after the person took over or did
    * a manual step: the new run names the run it continues, so the runtime
    * can keep that run's approvals (it checks that the run is the last one
    * that held this browser, for this person on this page).
@@ -311,7 +311,7 @@ export function useChatBrowserHandoff(options: Options) {
     // The pending handoff outlives the status request, which Desktop clears
     // on the navigations that follow a sign-in.
     if (captured.personal.status?.humanInputRequest || captured.personal.pendingHandoff) {
-      throw new Error("Finish the current manual step and choose Let AI continue, or pause the browser, before starting another browser task.");
+      throw new Error("Finish the current manual step and choose Let Octo continue, or pause the browser, before starting another browser task.");
     }
     const runtimeOverride = captured.personal.runtimeOverride;
     if (!runtimeOverride) {

@@ -12,7 +12,20 @@ type BrowserHumanInputPresentation = {
   // A compact toolbar can place actions in a popover without unmounting the
   // takeover dialog that also opens from a click on the browser surface.
   renderControls?: (controls: ReactNode) => ReactNode;
+  /**
+   * What a pause on the person's fields says stays behind once they sign in:
+   * Instafy's browser is the space's, so a sign-in there reaches its other
+   * chats (and members). Null for a browser only this person uses.
+   */
+  signInNote?: string | null;
 };
+
+/** What a pause on the person's fields in the space's browser says stays behind. */
+export function sharedBrowserSignInNote(spaceHasTeammates: boolean): string {
+  return spaceHasTeammates
+    ? "This space's browser keeps you signed in for its chats and members until you clear it."
+    : "This space's browser keeps you signed in for its chats until you clear it.";
+}
 
 export function BrowserHumanInputControls(props: BrowserHumanInputOptions & BrowserHumanInputPresentation) {
   const state = useBrowserHumanInput(props);
@@ -26,10 +39,10 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
   useLayoutEffect(() => dialogOpen ? registerOverlay?.() : undefined, [dialogOpen, registerOverlay]);
   if (!state.active && !props.canTakeOver) return props.renderControls?.(null) ?? null;
   const manualGuidance = state.request
-    ? `Fill the ${state.request.fields.length === 1 ? "highlighted field" : `${state.request.fields.length} highlighted fields`} on the page, then let the AI continue. Keep passwords and codes out of chat.`
-    : "You control the browser. Finish your changes on the page, then let the AI continue.";
+    ? `Fill the ${state.request.fields.length === 1 ? "highlighted field" : `${state.request.fields.length} highlighted fields`} on the page, then let Octo continue. Keep passwords and codes out of chat.`
+    : "You control the browser. Finish your changes on the page, then let Octo continue.";
   const waitingGuidance = state.busy === "continue"
-    ? "Continuing the AI task. Input remains locked."
+    ? "Continuing Octo's task. Input remains locked."
     : "Waiting for agent control to stop. Input remains locked.";
   const controls = (
     <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2" data-testid="browser-human-input-controls" data-browser-session-safe-zone="true">
@@ -38,10 +51,10 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
           isDisabled={state.busy !== null || props.canContinue === false} title={manualGuidance}
           onPress={() => void state.continueTask()} data-testid="browser-human-input-continue">
           <Play className="h-3.5 w-3.5" aria-hidden="true" />
-          {state.busy === "continue" ? "Continuing…" : "Let AI continue"}
+          {state.busy === "continue" ? "Continuing…" : "Let Octo continue"}
         </Button>
       ) : state.active && !state.error ? (
-        <Text as="span" variant="caption" tone="muted" role="status">{state.busy === "continue" ? "Continuing…" : "Stopping AI…"}</Text>
+        <Text as="span" variant="caption" tone="muted" role="status">{state.busy === "continue" ? "Continuing…" : "Stopping Octo…"}</Text>
       ) : props.canTakeOver ? (
         <IconButton type="button" size="sm" variant="ghost"
           aria-label="Take over browser" title="Take over browser" onPress={state.requestTakeOver} data-testid="browser-human-input-request">
@@ -49,6 +62,9 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
         </IconButton>
       ) : null}
       {state.active ? <span className="sr-only" role="status">{props.humanControlConfirmed ? manualGuidance : waitingGuidance}</span> : null}
+      {state.request && props.signInNote ? (
+        <Text as="p" variant="caption" tone="muted" className="basis-full" data-testid="browser-human-input-sign-in-note">{props.signInNote}</Text>
+      ) : null}
       {state.error ? <InlineNotice tone="danger" appearance="inline" role="alert" className="basis-full">{state.error}</InlineNotice> : null}
     </div>
   );
@@ -60,11 +76,11 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
         dialogAriaLabel="Take over browser" size="sm" gutter="responsive" layout="editor" data-browser-session-safe-zone="true">
         <StudioDialogBody scrollable>
           <Text as="h2" variant="subtitle" tone="primary">Take over the browser?</Text>
-          <Text as="p" variant="body" tone="muted" className="mt-2">The AI will pause so you can use the page. When you’re ready, choose <strong>Let AI continue</strong> in the browser controls.</Text>
+          <Text as="p" variant="body" tone="muted" className="mt-2">Octo will pause so you can use the page. When you’re ready, choose <strong>Let Octo continue</strong> in the browser controls.</Text>
           {state.error ? <InlineNotice tone="danger" appearance="inline" role="alert" className="mt-3">{state.error}</InlineNotice> : null}
           <div className="mt-5 flex flex-wrap justify-end gap-2">
-            <Button type="button" preset="form" variant="ghost" isDisabled={state.busy !== null} onPress={state.dismissTakeOver} data-testid="browser-human-input-cancel">Keep AI working</Button>
-            <Button type="button" preset="form" variant="primary" isDisabled={state.busy !== null} onPress={() => void state.takeOver()} data-testid="browser-human-input-takeover">{state.busy === "takeover" ? "Stopping AI…" : "Take over"}</Button>
+            <Button type="button" preset="form" variant="ghost" isDisabled={state.busy !== null} onPress={state.dismissTakeOver} data-testid="browser-human-input-cancel">Keep Octo working</Button>
+            <Button type="button" preset="form" variant="primary" isDisabled={state.busy !== null} onPress={() => void state.takeOver()} data-testid="browser-human-input-takeover">{state.busy === "takeover" ? "Stopping Octo…" : "Take over"}</Button>
           </div>
         </StudioDialogBody>
       </StudioDialogModal>

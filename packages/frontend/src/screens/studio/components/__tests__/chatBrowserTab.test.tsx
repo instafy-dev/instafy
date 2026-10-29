@@ -7,9 +7,12 @@ import type { RunRecord } from "../../../../types";
 import type { BrowserSessionPage } from "../browserSessionPages";
 import {
   CHAT_BROWSER_TAB_COPY,
+  CHAT_BROWSER_VIEW_START,
   chatBrowserTab,
   forgetChatBrowserTabsForTests,
   lastChatBrowserTab,
+  nextChatBrowserViewStep,
+  noteOctoRunTabs,
   unusedBlankBrowserTab,
   useChatBrowserTab,
   type ChatBrowserTabScope,
@@ -235,5 +238,111 @@ describe("useChatBrowserTab", () => {
     await act(async () => { target = await latest!.resolveForTurn(); });
     expect(target).toBeNull();
     expect(props.openPage).not.toHaveBeenCalled();
+  });
+});
+
+// A browser turn that read in Octo's own tabs while the chat's tab stayed
+// blank: the runtime keeps the tab Octo worked in last open, and that tab is
+// the chat's page once the turn has ended.
+describe("the page a browser turn leaves its chat", () => {
+  const TRAM_CHAT = "chat-tram";
+  const chatBlank = page("PAGE-CHAT", "about:blank");
+  const metro = page("TAB-METRO", "https://www.metro.example/maps", { openedBy: "agent", agentTabNumber: 1 });
+  const planner = page("TAB-PLANNER", "https://www.trams.example/planner", { openedBy: "agent", agentTabNumber: 2, isActive: true });
+  const running = browserRun("run-tram", TRAM_CHAT, chatBlank.id, "2026-10-29T19:47:34Z", { status: "in_progress" });
+  const ended = { ...running, status: "success" as const };
+
+  beforeEach(() => forgetChatBrowserTabsForTests());
+
+  it("is the tab Octo worked in last, once the turn has ended and the tab is no longer Octo's", () => {
+    expect(noteOctoRunTabs({ scope: scope(TRAM_CHAT), runs: [running], pages: [chatBlank, metro, planner] })).toBe(true);
+    // Seen again, nothing new.
+    expect(noteOctoRunTabs({ scope: scope(TRAM_CHAT), runs: [running], pages: [chatBlank, metro, planner] })).toBe(false);
+    // While the turn runs, the chat's tab is the one it was sent for.
+    expect(chatBrowserTab({ scope: scope(TRAM_CHAT), runs: [running], pages: [chatBlank, metro, planner] })?.id)
+      .toBe(chatBlank.id);
+    // Ended, with the tab still badged as Octo's (its closing pass is not done): not yet.
+    expect(chatBrowserTab({ scope: scope(TRAM_CHAT), runs: [ended], pages: [chatBlank, metro, planner] })?.id)
+      .toBe(chatBlank.id);
+    // The run let go: the planner tab stayed open as an ordinary tab, the other closed.
+    const kept = { ...planner, openedBy: undefined, agentTabNumber: undefined };
+    expect(chatBrowserTab({ scope: scope(TRAM_CHAT), runs: [ended], pages: [chatBlank, kept] })?.id).toBe(kept.id);
+    // Never another chat's.
+    expect(chatBrowserTab({ scope: scope(MAP_CHAT), runs: [MAP_RUN, ended], pages: [LISBON, chatBlank, kept] })?.id)
+      .toBe(LISBON.id);
+  });
+
+  it("is the chat's own tab when every tab of Octo's closed", () => {
+    noteOctoRunTabs({ scope: scope(TRAM_CHAT), runs: [running], pages: [chatBlank, metro, planner] });
+    expect(chatBrowserTab({ scope: scope(TRAM_CHAT), runs: [ended], pages: [chatBlank] })?.id).toBe(chatBlank.id);
+  });
+
+  it("is never taken from tabs seen while two turns were under way", () => {
+    const other = browserRun("run-other", MAP_CHAT, LISBON.id, "2026-10-29T19:47:40Z", { status: "in_progress" });
+    expect(noteOctoRunTabs({ scope: scope(TRAM_CHAT), runs: [running, other], pages: [chatBlank, LISBON, metro, planner] }))
+      .toBe(false);
+    const kept = { ...planner, openedBy: undefined, agentTabNumber: undefined };
+    expect(chatBrowserTab({ scope: scope(TRAM_CHAT), runs: [ended], pages: [chatBlank, kept] })?.id).toBe(chatBlank.id);
+  });
+
+  it("gives way to a later pick of the person's", async () => {
+    noteOctoRunTabs({ scope: scope(TRAM_CHAT), runs: [running], pages: [chatBlank, metro, planner] });
+    const kept = { ...planner, openedBy: undefined, agentTabNumber: undefined };
+    const picked = page("PAGE-PICKED", "https://example.com/");
+    let latest: ReturnType<typeof useChatBrowserTab> | null = null;
+    function Harness() {
+      latest = useChatBrowserTab({
+        scope: scope(TRAM_CHAT), runs: [ended], pages: [chatBlank, kept, picked], canOpenPage: true,
+        openPage: vi.fn(async () => null),
+      });
+      return null;
+    }
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      expect(latest!.tab?.id).toBe(kept.id);
+      await act(async () => latest!.choose(picked.id));
+      expect(latest!.tab?.id).toBe(picked.id);
+    } finally {
+      await act(async () => root.unmount());
+      delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+    }
+  });
+});
+
+describe("the chat's Browser view", () => {
+  const view = (overrides: Partial<Parameters<typeof nextChatBrowserViewStep>[0]>) => nextChatBrowserViewStep({
+    onScreen: true, free: true, chatId: MAP_CHAT, tab: null, canOpenTab: true, state: CHAT_BROWSER_VIEW_START, ...overrides,
+  });
+
+  // A chat with no tab of its own used to show whatever tab another chat
+  // left in front. It gets its own blank tab, once.
+  it("opens a chat's own blank tab instead of showing the tab another chat left in front", () => {
+    const first = view({});
+    expect(first.step).toBe("open-blank-tab");
+    expect(view({ state: first.state }).step).toBe("none");
+    expect(view({ canOpenTab: false }).step).toBe("none");
+    expect(view({ chatId: null }).step).toBe("none");
+  });
+
+  // Octo's turn held the browser while the view was on screen. Once it is
+  // done, the chat's tab comes forward, never the neighbour another chat left.
+  it("brings the chat's tab forward once whoever else controls the browser is done", () => {
+    const tab = { id: "PAGE-CHAT", isActive: false };
+    const busy = view({ tab, free: false });
+    expect(busy.step).toBe("none");
+    const done = view({ tab, state: busy.state });
+    expect(done.step).toBe("focus");
+    expect(view({ tab, state: done.state }).step).toBe("none");
+    // A new tab for the chat (the page its turn left it) comes forward too.
+    expect(view({ tab: { id: "PAGE-LEFT", isActive: false }, state: done.state }).step).toBe("focus");
+    // Already in front: nothing to do.
+    expect(view({ tab: { ...tab, isActive: true } }).step).toBe("none");
+    // Off screen and back: again once.
+    const off = view({ tab, onScreen: false, state: done.state });
+    expect(off.state).toEqual(CHAT_BROWSER_VIEW_START);
+    expect(view({ tab, state: off.state }).step).toBe("focus");
   });
 });

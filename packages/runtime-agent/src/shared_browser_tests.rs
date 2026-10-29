@@ -6292,7 +6292,7 @@ async fn a_run_keeps_the_last_runs_approvals_only_when_it_continues_that_run_for
     end(run);
     assert!(state().is_none(), "the run's own records are revoked");
 
-    // Let AI continue names that run: the new run starts with its grants,
+    // Let Octo continue names that run: the new run starts with its grants,
     // bound to the new run.
     let second = Uuid::new_v4();
     let run = acquire(second, person, "page-target", Some(first));
@@ -6402,7 +6402,7 @@ async fn let_ai_continue_keeps_the_site_the_person_approved_and_a_fresh_turn_ask
     assert_eq!(requests.len(), 1);
     end(run);
 
-    // Let AI continue: the approved site opens without asking again.
+    // Let Octo continue: the approved site opens without asking again.
     let run = acquire(Uuid::new_v4(), Some(first));
     let (page, requests) = navigate("https://transport.example/tram-15", &[]);
     assert_eq!(page["url"], "https://transport.example/tram-15");
@@ -6885,6 +6885,126 @@ async fn the_end_of_a_run_closes_octos_tabs_apart_from_those_the_person_kept() {
     );
     drop(guard);
     assert!(requests.lock().expect("requests").is_empty());
+}
+
+/// A loopback stand-in for Chromium's DevTools HTTP endpoint whose tab list
+/// (`/json/list`) shows the run's page at `run_page_url`; every other request
+/// succeeds. It records the request line of every connection.
+fn devtools_listing_run_page(run_page_url: &str) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("fake devtools");
+    let port = listener.local_addr().expect("fake devtools address").port();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let list = json!([
+        { "id": "TAB-OTHER-CHAT", "type": "page", "url": "https://roborock.example/" },
+        { "id": "page-target", "type": "page", "url": run_page_url },
+        { "id": "TAB-A", "type": "page", "url": "https://metro.example/maps" },
+        { "id": "TAB-B", "type": "page", "url": "https://trams.example/planner" }
+    ])
+    .to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut line = String::new();
+            let mut reader = BufReader::new(stream.try_clone().expect("stream"));
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let line = line.trim().to_string();
+            let body = if line.starts_with("GET /json/list ") {
+                list.clone()
+            } else {
+                String::new()
+            };
+            seen.lock().expect("requests").push(line);
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    (port, requests)
+}
+
+/// A browser turn that read only in its own tabs, while the chat's own tab
+/// (the run's page) stayed blank: the tab it worked in last stays open as the
+/// chat's page, untouched (a cookie banner it refused stays refused), and
+/// comes to the front. Without this, every tab Octo read closed and Chromium
+/// showed its neighbour, another chat's page.
+#[tokio::test]
+async fn a_run_that_read_only_in_its_own_tabs_leaves_the_last_one_as_the_chats_page() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    let end_run = |run_page_url: &str, current: JsonValue| {
+        let (port, requests) = devtools_listing_run_page(run_page_url);
+        let cancel_signal = JobCancelSignal::new();
+        let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+            directory.path().join("agent-control.json"),
+            approval_dir.clone(),
+            ApprovalStart::Routine,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "page-target",
+            "Octo",
+            cancel_signal.clone(),
+            Duration::from_secs(60),
+        )
+        .expect("acquire run");
+        guard.cdp_base = Some(("127.0.0.1".to_string(), port));
+        write_run_record(
+            &approval_dir,
+            "tabs.json",
+            &guard,
+            json!({
+                "currentTabId": current,
+                "tabs": [
+                    { "tabId": "TAB-A", "approvedOrigins": [] },
+                    { "tabId": "TAB-B", "approvedOrigins": [] }
+                ]
+            }),
+        );
+        cancel_signal.confirm_shared_browser_shutdown();
+        drop(guard);
+        let seen = requests.lock().expect("requests").clone();
+        seen
+    };
+
+    // Octo worked in tab B last: it stays, A closes, and B comes to the front.
+    assert_eq!(
+        end_run("about:blank", json!("TAB-B")),
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-A HTTP/1.1",
+            "GET /json/activate/TAB-B HTTP/1.1",
+        ])
+    );
+    // Back on the chat's own page at the end: the newest of its tabs stays.
+    assert_eq!(
+        end_run("chrome://newtab/", JsonValue::Null),
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-A HTTP/1.1",
+            "GET /json/activate/TAB-B HTTP/1.1",
+        ])
+    );
+    // The chat's page shows a page of its own: every tab of Octo's closes, and
+    // that page comes to the front, never the neighbour Chromium would show.
+    assert_eq!(
+        end_run(
+            "https://www.visitlisboa.example/en/places/belem",
+            json!("TAB-B")
+        ),
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-A HTTP/1.1",
+            "GET /json/close/TAB-B HTTP/1.1",
+            "GET /json/activate/page-target HTTP/1.1",
+        ])
+    );
 }
 
 // Hardening of Octo's tabs: the link-only guard in every tab Octo drives,

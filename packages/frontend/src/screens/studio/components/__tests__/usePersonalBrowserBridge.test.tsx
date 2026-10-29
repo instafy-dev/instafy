@@ -108,7 +108,7 @@ describe("Personal Browser approval policy", () => {
     { status: ownerTier, choice: null, automatic: false, expected: "routine" },
     { status: older, choice: null, automatic: false, expected: "ask" },
     { status: legacy, choice: null, automatic: false, expected: "ask" },
-    // A choice is kept for a press, Resume, Retry and Let AI continue.
+    // A choice is kept for a press, Resume, Retry and Let Octo continue.
     { status: older, choice: "routine", automatic: false, expected: "routine" },
     { status: ownerTier, choice: "ask", automatic: false, expected: "ask" },
     { status: legacy, choice: "routine", automatic: false, expected: "ask" },

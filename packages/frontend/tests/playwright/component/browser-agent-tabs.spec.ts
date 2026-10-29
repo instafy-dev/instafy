@@ -100,7 +100,7 @@ for (const { width, dark } of [{ width: 390, dark: false }, { width: 390, dark: 
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(shared.getByTestId("browser-reading-row")).toHaveCount(0);
     await expect(options).toHaveText(["My own page", "Parks and gardens | City of Example", "Octo's tab 2: Timetable with a very long title that keeps going past the edge of a phone screen"]);
-    await expect(shared.getByRole("button", { name: "Let AI continue" })).toBeVisible();
+    await expect(shared.getByRole("button", { name: "Let Octo continue" })).toBeVisible();
 
     // Personal: the page the resumed turn reads, and the same one-press take-over (Pause).
     const personal = page.getByTestId("personal-fixture");

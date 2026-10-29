@@ -45,7 +45,7 @@ function runTimestamp(run: RunRecord): number {
 }
 
 /**
- * The browser run that Let AI continue continues: the newest Shared Browser
+ * The browser run that Let Octo continue continues: the newest Shared Browser
  * run of this conversation on this machine and page that the person started
  * and that has ended (they took over, or it stopped for their input). Studio
  * names it in the continuation's metadata (`browserContinuesRunId`); the

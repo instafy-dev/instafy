@@ -906,7 +906,7 @@ fn card_site_origin(host: &str) -> Option<String> {
     is_normalized_web_origin(&origin).then_some(origin)
 }
 
-/// The run a Shared Browser job continues, as Studio's Let AI continue names
+/// The run a Shared Browser job continues, as Studio's Let Octo continue names
 /// it. A value that is not one UUID names none.
 pub fn continued_run_id_from_payload(payload: &JsonValue) -> Option<Uuid> {
     payload
@@ -1020,7 +1020,7 @@ impl SharedBrowserAgentControlGuard {
     /// process's own decision (an attested browser host starts in routine
     /// browsing), never the job's or the model's, and its state is written
     /// before any Codex or MCP process starts. `continues_run_id` is the run
-    /// Studio's Let AI continue names: its grants carry over only as
+    /// Studio's Let Octo continue names: its grants carry over only as
     /// [`take_continued_run_grants`] allows.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire(
@@ -1451,6 +1451,143 @@ impl SharedBrowserAgentControlGuard {
             }
         }
     }
+
+    /// The tab Octo worked in last, kept open as the chat's page when the
+    /// page the person chose for the run (the chat's own tab) is still blank:
+    /// Octo read in its own tabs, and closing them all would leave the person
+    /// a blank tab, or another chat's page in front. It is kept the way a
+    /// Take over keeps a tab (`kept-tabs.json`): an ordinary tab no later run
+    /// can use, as Octo left it, with no reload. None when the person kept a
+    /// tab themselves, the run opened none, or the page is not known to be
+    /// blank.
+    fn tab_kept_for_the_chat(&self, run_tabs: &[String]) -> Option<String> {
+        let binding = self.binding();
+        if person_kept_a_tab(&self.approval_dir, &binding) {
+            return None;
+        }
+        let current = read_run_record(&self.approval_dir, AGENT_TABS_FILE, &[1, 2], &binding)
+            .ok()
+            .flatten()
+            .and_then(|record| {
+                record
+                    .get("currentTabId")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string)
+            });
+        let last = current
+            .filter(|tab_id| run_tabs.contains(tab_id))
+            .or_else(|| run_tabs.last().cloned())?;
+        let (host, port) = self.cdp_base.as_ref()?;
+        match browser_page_url(host, *port, &self.browser_page_id) {
+            Ok(Some(url)) if is_blank_page_url(&url) => Some(last),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Shared Browser could not read the run's page; Octo's tabs close as usual"
+                );
+                None
+            }
+        }
+    }
+}
+
+/// Whether the person kept one of this run's tabs (`kept-tabs.json`). A
+/// record that cannot be read counts as their choice: nothing then moves.
+fn person_kept_a_tab(approval_dir: &Path, binding: &RunBinding) -> bool {
+    match read_run_record(approval_dir, KEPT_AGENT_TABS_FILE, &[1], binding) {
+        Ok(None) => false,
+        Ok(Some(record)) => record
+            .get("tabIds")
+            .and_then(JsonValue::as_array)
+            .is_none_or(|ids| !ids.is_empty()),
+        Err(_) => true,
+    }
+}
+
+/// Whether a page shows nothing yet: a new tab, or one no address loaded in.
+fn is_blank_page_url(url: &str) -> bool {
+    matches!(
+        url.trim().to_ascii_lowercase().as_str(),
+        "" | "about:blank" | "chrome://newtab/" | "chrome://new-tab-page/"
+    )
+}
+
+/// The most of DevTools' tab list read: well over the 24 tabs Studio keeps.
+const DEVTOOLS_LIST_MAX_BYTES: usize = 256 * 1024;
+
+/// The address one tab shows, from the browser's loopback DevTools HTTP
+/// endpoint (`/json/list`); None when no tab has that id.
+fn browser_page_url(host: &str, port: u16, page_id: &str) -> Result<Option<String>> {
+    let page_id = validate_page_id(page_id)?;
+    let body = devtools_get(host, port, "/json/list", DEVTOOLS_LIST_MAX_BYTES)?;
+    let targets: Vec<JsonValue> =
+        serde_json::from_slice(&body).context("DevTools tab list is not JSON")?;
+    Ok(targets
+        .iter()
+        .find(|target| target.get("id").and_then(JsonValue::as_str) == Some(page_id.as_str()))
+        .map(|target| {
+            target
+                .get("url")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string()
+        }))
+}
+
+/// Brings one tab to the front through the browser's loopback DevTools HTTP
+/// endpoint (`/json/activate/<id>`).
+fn activate_browser_tab(host: &str, port: u16, tab_id: &str) -> Result<()> {
+    let tab_id = validate_page_id(tab_id)?;
+    devtools_get(host, port, &format!("/json/activate/{tab_id}"), 1024).map(|_| ())
+}
+
+/// One bounded `GET` on the browser's loopback DevTools HTTP endpoint, with
+/// the same wait as closing a tab. Synchronous, like closing, because it runs
+/// while the run's guard is dropped.
+fn devtools_get(host: &str, port: u16, path: &str, max_body_bytes: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+
+    let address: SocketAddr = format!("{host}:{port}")
+        .to_socket_addrs()
+        .context("DevTools address is invalid")?
+        .next()
+        .context("DevTools address did not resolve")?;
+    if !address.ip().is_loopback() {
+        bail!("DevTools address is not loopback");
+    }
+    let mut stream = TcpStream::connect_timeout(&address, AGENT_TAB_CLOSE_TIMEOUT)
+        .context("failed to reach the browser's DevTools endpoint")?;
+    stream.set_read_timeout(Some(AGENT_TAB_CLOSE_TIMEOUT))?;
+    stream.set_write_timeout(Some(AGENT_TAB_CLOSE_TIMEOUT))?;
+    stream.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
+    )?;
+    let limit = max_body_bytes + 4096;
+    let mut response = Vec::new();
+    stream
+        .take(limit as u64 + 1)
+        .read_to_end(&mut response)
+        .context("failed to read the DevTools answer")?;
+    if response.len() > limit {
+        bail!("DevTools answer is too large");
+    }
+    let split = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .context("DevTools answer has no header end")?;
+    let head = String::from_utf8_lossy(&response[..split]);
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_default();
+    if status != "200" {
+        bail!("DevTools answered {status}");
+    }
+    Ok(response[split + 4..].to_vec())
 }
 
 /// `earlier` followed by the tabs of `later` it does not name yet, bounded to
@@ -1917,18 +2054,38 @@ impl Drop for SharedBrowserAgentControlGuard {
             .shared_browser_shutdown_is_confirmed()
         {
             // Every tool process of the run is gone, so nothing opens another
-            // tab. Octo's tabs close now, apart from those the person kept,
-            // and so do earlier runs' leftover tabs. A tab that does not close
-            // stays open, badged as Octo's in the leftover record, and no
-            // later run can use it.
-            let run_tabs = self.agent_tabs_to_close();
+            // tab. Octo's tabs close now, apart from those the person kept
+            // and the one kept as the chat's page while the run's page is
+            // still blank, and so do earlier runs' leftover tabs. A tab that
+            // does not close stays open, badged as Octo's in the leftover
+            // record, and no later run can use it.
+            let mut run_tabs = self.agent_tabs_to_close();
+            let kept_for_chat = self.tab_kept_for_the_chat(&run_tabs);
+            run_tabs.retain(|tab_id| Some(tab_id) != kept_for_chat.as_ref());
+            let closed_any = !run_tabs.is_empty();
             close_agent_tabs_and_settle_leftovers(
                 &self.approval_dir,
                 self.cdp_base.as_ref(),
                 run_tabs,
             );
+            // Chromium shows a neighbouring tab when the one in front closes,
+            // which may be another chat's page. The page the chat is left
+            // with comes to the front instead: the tab kept for it, else the
+            // run's page. A tab the person kept stays where they are.
+            let front = kept_for_chat.or_else(|| {
+                (closed_any && !person_kept_a_tab(&self.approval_dir, &self.binding()))
+                    .then(|| self.browser_page_id.clone())
+            });
+            if let (Some(front), Some((host, port))) = (front, self.cdp_base.as_ref()) {
+                if let Err(error) = activate_browser_tab(host, *port, &front) {
+                    tracing::warn!(
+                        ?error,
+                        "Shared Browser could not bring the chat's page to the front"
+                    );
+                }
+            }
             // What the person approved on their page stays available to the
-            // run that continues this one (Let AI continue), and only to it.
+            // run that continues this one (Let Octo continue), and only to it.
             // It is read before the run's records are revoked, and kept only
             // once the run has let go of the browser.
             let ended = ended_run_grants(&self.approval_dir, &self.binding());

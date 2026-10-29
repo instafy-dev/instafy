@@ -21,7 +21,7 @@ const CONNECTOR_SETUP_TITLES: ReadonlySet<string> = new Set(
  * In a skill setup the composer answers the setup. A reply goes out as a chat
  * turn even while the browser is shown, so it runs with the workspace's values
  * and without a page snapshot; a walk in the browser goes on only through the
- * browser's own controls (the card's button, Let AI continue, a new browser
+ * browser's own controls (the card's button, Let Octo continue, a new browser
  * page). Any other chat keeps the browser composer as it is.
  *
  * The opener is looked for in the loaded messages. While older messages of a

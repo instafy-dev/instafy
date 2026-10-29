@@ -1167,12 +1167,12 @@ describe("PersonalBrowserSurface", () => {
       <PersonalBrowserSurface active model={model} humanInputIdentityKey="conversation-b" onContinueAfterHumanInput={onContinue} />,
     ));
     await render();
-    expect(container.textContent).not.toContain("Let AI continue");
+    expect(container.textContent).not.toContain("Let Octo continue");
     expect(container.textContent).not.toContain("highlighted field");
     model.ownerId = "replacement-owner";
     model.status = { ...model.status!, ownerId: "replacement-owner", humanInputRequest: undefined };
     await render();
-    expect(container.textContent).not.toContain("Let AI continue");
+    expect(container.textContent).not.toContain("Let Octo continue");
     expect(onContinue).not.toHaveBeenCalled();
   });
 
@@ -1199,12 +1199,12 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-takeover"]')!.click());
     model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
     await render();
-    expect(container.textContent).toContain("Let AI continue");
+    expect(container.textContent).toContain("Let Octo continue");
 
     model.status = { ...model.status!, humanControlReady: false, tabControlActive: true };
     await render();
-    expect(container.textContent).not.toContain("Let AI continue");
-    expect(container.textContent).not.toContain("Stopping AI");
+    expect(container.textContent).not.toContain("Let Octo continue");
+    expect(container.textContent).not.toContain("Stopping Octo");
     expect(container.textContent).not.toContain("Waiting for agent control to stop");
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(document.body.textContent).toContain("Take back control before continuing the AI task.");
@@ -1213,7 +1213,7 @@ describe("PersonalBrowserSurface", () => {
 
     model.status = { ...model.status!, humanControlReady: true, tabControlActive: false };
     await render();
-    expect(container.textContent).toContain("Let AI continue");
+    expect(container.textContent).toContain("Let Octo continue");
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')!.click());
     expect(onContinue).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Take a fresh snapshot"), "routine");
   });
@@ -1236,7 +1236,7 @@ describe("PersonalBrowserSurface", () => {
     expect(document.querySelector('[aria-label="Resume agent control"]')).toBeNull();
     expect(document.querySelector('[aria-label="Retry agent control"]')).toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
-    expect(document.body.textContent).toContain("choose Let AI continue in the browser toolbar");
+    expect(document.body.textContent).toContain("choose Let Octo continue in the browser toolbar");
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(container.textContent).not.toContain("Choose before Resume");
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
