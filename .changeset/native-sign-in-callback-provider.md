@@ -1,4 +1,0 @@
----
----
-
-Signing in with GitHub or Google from the phone apps and Desktop no longer reports the wrong provider or a failure after a good sign-in. On Android both the app-wide handler and the login page received the same `instafy://auth` deep link and each exchanged its code; the second found it spent and could show "Sign-in could not be completed on this device" over a session that had just started. A callback is now claimed once, synchronously, by whichever handler hears it first, and a code is keyed by itself so a remounted login page replaying the launch URL cannot spend it again. The started attempt, which names the provider, now lives in localStorage for up to 30 minutes instead of sessionStorage, so a Google sign-in still says "Google" when Android ended the app's process while the sign-in sheet was open. Desktop records the same attempt, so its Google sign-in errors and telemetry no longer say GitHub. No package changes.
