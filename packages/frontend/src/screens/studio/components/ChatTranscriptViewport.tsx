@@ -54,7 +54,11 @@ export function ChatSpeakerStickyOverlay({
           shown.kind === "assistant" ? (
             <AssistantSpeakerIdentityPill
               handle={shown.handle}
-              agentIdentity={{ handle: shown.handle, avatarSeed: shown.avatarSeed }}
+              agentIdentity={{
+                handle: shown.handle,
+                avatarSeed: shown.avatarSeed,
+                ...(shown.agentId ? { id: shown.agentId } : {}),
+              }}
             />
           ) : (
             <HumanSpeakerIdentityPill avatarSeed={shown.avatarSeed} label={shown.label} />

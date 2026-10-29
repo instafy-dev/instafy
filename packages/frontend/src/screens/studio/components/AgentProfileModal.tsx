@@ -1,5 +1,5 @@
 import { AgentAvatar } from "../../../components/AgentAvatar";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { IdentityPhotoButton } from "../../../components/IdentityPhotoButton";
 import { SettingsFormLayout, SettingsIdentityRow } from "../../../components/SettingsFormLayout";
 import { SettingsFormActions } from "../../../components/SettingsFormActions";
@@ -17,8 +17,10 @@ import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import type { ControllerCredentialListItem } from "../../../sdk/instafy";
-import { resolveAgentAvatarImageSrc } from "../../../utils/agentAvatar";
+import { normalizeCustomAgentAvatarSrc } from "../../../utils/agentAvatar";
+import { hatchlingSeed, type Hatchling } from "../../../utils/aiFace";
 import type { AiModelOption, AiProviderId } from "../../../utils/aiProviderModels";
+import { AgentFacePicker } from "./AgentFacePicker";
 import { CredentialMenuSelect } from "./CredentialMenuSelect";
 import { ModelMenuSelect } from "./ModelMenuSelect";
 import { ProviderMenuSelect } from "./ProviderMenuSelect";
@@ -61,6 +63,12 @@ type AgentProfileModalProps = {
   avatarFile?: File | null;
   onAvatarFileChange?: (file: File | null) => void;
   avatarSeed?: string;
+  /**
+   * The hatchling the bot wears without a picture, with onFaceChange: the
+   * editor offers all eight while no picture is set. Octo's editor has none.
+   */
+  face?: Hatchling | null;
+  onFaceChange?: (face: Hatchling) => void;
   dirty?: boolean;
   bio?: string;
   onBioChange?: (value: string) => void;
@@ -101,6 +109,8 @@ export function AgentProfileModal({
   avatarFile = null,
   onAvatarFileChange,
   avatarSeed,
+  face = null,
+  onFaceChange,
   dirty = true,
   bio = "",
   onBioChange,
@@ -131,10 +141,22 @@ export function AgentProfileModal({
 
   const showModelPicker =
     Boolean(modelOptions?.length) && typeof onModelChange === "function";
-  const avatarPreviewSrc = previewUrl ?? resolveAgentAvatarImageSrc({
-    handle,
-    avatarSeed: avatarImageUrl,
-  });
+  // The picture being chosen, else the saved one; with neither, AgentAvatar
+  // shows the bot's own face: the hatchling picked below, or Octo's tile.
+  const avatarPreviewSrc = previewUrl ?? normalizeCustomAgentAvatarSrc(avatarImageUrl);
+  const hasPicture = Boolean(avatarImageUrl || avatarFile);
+  const previewSeed = face && !hasPicture ? hatchlingSeed(face) : avatarSeed;
+  // Removing a picture takes its button away with it. Focus then goes on to
+  // what the bot wears now, its face below (for Octo, its picture button),
+  // rather than back to the top of the dialog.
+  const photoButtonRef = useRef<HTMLButtonElement>(null);
+  const facePickerRef = useRef<HTMLFieldSetElement>(null);
+  const pictureRemovedRef = useRef(false);
+  useLayoutEffect(() => {
+    if (!pictureRemovedRef.current || hasPicture) return;
+    pictureRemovedRef.current = false;
+    (facePickerRef.current?.querySelector<HTMLInputElement>("input:checked") ?? photoButtonRef.current)?.focus();
+  }, [hasPicture]);
 
   const onOpenChange = (open: boolean) => {
     if (!open && !pending) onClose();
@@ -149,8 +171,9 @@ export function AgentProfileModal({
             {/* A bot is an AI, so its photo target is the AI tile, never a
                 person's circle. */}
             <IdentityPhotoButton
+              buttonRef={photoButtonRef}
               shape="aiTile"
-              label={avatarImageUrl || avatarFile ? "Change bot picture" : "Upload bot picture"}
+              label={hasPicture ? "Change bot picture" : "Upload bot picture"}
               accept={IDENTITY_IMAGE_ACCEPT}
               disabled={pending || !onAvatarFileChange}
               inputTestId="agent-profile-picture-input"
@@ -160,7 +183,7 @@ export function AgentProfileModal({
                 if (!error) onAvatarFileChange?.(file);
               }}
             >
-              <AgentAvatar agent={{ handle, displayName, avatarSeed }} size="lg" imageSrc={avatarPreviewSrc} />
+              <AgentAvatar agent={{ handle, displayName, avatarSeed: previewSeed }} size="lg" imageSrc={avatarPreviewSrc} />
             </IdentityPhotoButton>
             <Field label="Display name" htmlFor="agent-profile-display-name">
               <Input id="agent-profile-display-name" value={displayName}
@@ -170,12 +193,22 @@ export function AgentProfileModal({
           </SettingsIdentityRow>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <Text as="p" variant="caption" tone="muted">PNG, JPEG or WebP, up to 2 MB.</Text>
-            {avatarImageUrl || avatarFile ? <Button variant="ghost" size="md" radius="xl" isDisabled={pending}
-              onPress={() => { onAvatarFileChange?.(null); onAvatarImageUrlChange(""); setPhotoError(null); }}>
+            {hasPicture ? <Button variant="ghost" size="md" radius="xl" isDisabled={pending}
+              onPress={() => {
+                pictureRemovedRef.current = true;
+                onAvatarFileChange?.(null);
+                onAvatarImageUrlChange("");
+                setPhotoError(null);
+              }}>
               Remove picture
             </Button> : null}
           </div>
           {photoError ? <Text as="p" role="alert" variant="caption" tone="danger">{photoError}</Text> : null}
+          {/* A picture is the bot's face; without one it wears the hatchling
+              chosen here (docs/Brand.md, "Octo's hatchlings"). */}
+          {face && onFaceChange && !hasPicture
+            ? <AgentFacePicker ref={facePickerRef} value={face} onChange={onFaceChange} disabled={pending} />
+            : null}
           <Field label="Handle" htmlFor="agent-profile-handle" hint={handleHelpText || undefined}>
             <Input
               id="agent-profile-handle"

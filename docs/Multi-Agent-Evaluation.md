@@ -177,7 +177,9 @@ Replies accept text; attachments remain in the composer until removed or sent as
 chat message. Replies are task information, never tool approvals or credential entry. Use
 the existing credential flow for secrets.
 Workstream chips show the plan's task label, retaining the agent handle as identity and as
-the fallback for older plans without labels.
+the fallback for older plans without labels. A chip opens its helper's run trace (or its
+details); its "…" menu shows on hover or keyboard focus, and on a touch screen, which has
+no hover, a long-press on the chip opens it.
 
 An ordinary single-recipient chat turn can also answer pending worker questions naturally.
 The controller supplies the existing routing preflight with a bounded set of questions owned

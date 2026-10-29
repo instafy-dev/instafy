@@ -1,20 +1,8 @@
 import { useCallback, useMemo } from "react";
-import {
-  resolveAgentAvatarGradient,
-  resolveAgentAvatarImageSrc,
-  resolveAgentAvatarText,
-} from "../../../utils/agentAvatar";
 import type { QueuedChatPrompt } from "./ChatSendQueue";
 import { buildCollapsedQueuedMessageSummary } from "./chatSendQueueSummary";
 import type { QueuedChatSendItem } from "./chatSendQueueStorage";
 import { isServerQueuedChatSendItem } from "./useChatServerSendQueue";
-
-type AgentProfileLike = {
-  handle?: string | null;
-  avatarSeed?: string | null;
-  avatarUrl?: string | null;
-  displayName?: string | null;
-};
 
 type QueueStatusAction = {
   label: string;
@@ -25,15 +13,11 @@ type QueueStatusAction = {
 type QueueSummaryItem = {
   handle: string;
   count: number;
-  avatarImageSrc: string | null;
-  avatarText: string;
-  avatarGradient: string;
 };
 
 export function useChatSendQueuePresentation({
   activeConversationControllerId,
   activeConversationRun,
-  agentByHandle,
   chatSendQueue,
   currentRuntime,
   hostedRuntimeEnsuring,
@@ -47,7 +31,6 @@ export function useChatSendQueuePresentation({
 }: {
   activeConversationControllerId: string | null;
   activeConversationRun: unknown;
-  agentByHandle: Map<string, AgentProfileLike>;
   chatSendQueue: QueuedChatSendItem[];
   currentRuntime: { isLikelyLocal?: boolean | null } | null;
   hostedRuntimeEnsuring: boolean;
@@ -107,17 +90,8 @@ export function useChatSendQueuePresentation({
   const queuedSummaryItems = useMemo<QueueSummaryItem[]>(() => {
     return Array.from(queuedByAgentHandle.entries())
       .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-      .map(([handle, count]) => {
-        const profile = agentByHandle.get(handle) ?? null;
-        const avatarImageSrc = resolveAgentAvatarImageSrc(profile ?? { handle, avatarSeed: handle });
-        const avatarText = resolveAgentAvatarText({
-          handle: profile?.handle ?? handle,
-          displayName: profile?.displayName ?? null,
-        });
-        const avatarGradient = resolveAgentAvatarGradient(profile?.avatarSeed ?? handle);
-        return { handle, count, avatarImageSrc, avatarText, avatarGradient };
-      });
-  }, [agentByHandle, queuedByAgentHandle]);
+      .map(([handle, count]) => ({ handle, count }));
+  }, [queuedByAgentHandle]);
 
   const totalQueuedCount = chatSendQueue.length;
   const queueQuickSendItem = chatSendQueueDisplay[0] ?? null;

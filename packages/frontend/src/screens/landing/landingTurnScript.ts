@@ -10,6 +10,8 @@
 // sends the browser turn, which is how the studio really reaches a browser
 // (runtime-agent/src/jobs/browser_request.rs, useChatBrowserRequest.ts).
 
+import type { Hatchling } from "../../utils/aiFace";
+
 export type TurnBeatId =
   | "rest"
   | "typing"
@@ -246,10 +248,15 @@ export interface SessionScenario {
   // shows it under the team): Finance, Checkout, Website.
   space: string;
   prompt: string;
-  // The scenario's own agent: its roster coin (crew flame) and the coin's
-  // name follow the active scenario. Octo keeps its own ink coin.
+  // The scenario's own agent: its roster face and the face's name follow the
+  // active scenario. Like any AI other than Octo without a picture of its
+  // own, it wears one of Octo's hatchlings (docs/Brand.md, "Octo's
+  // hatchlings"), never a crew colour. presenceSeed stamps the face, the way
+  // a real row's metadata.agent.avatarSeed does, so each scenario's agent
+  // keeps one face. Octo keeps its own tile.
   presenceAgent: string;
   presenceHandle: string;
+  presenceSeed: `hatchling:${Hatchling}`;
   opener: string;
   steps: [TurnStep, TurnStep, TurnStep, TurnStep, TurnStep];
   /** The run's done line ("Edited 3 files, ran tests"), before Details. */
@@ -407,6 +414,7 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
     // is never mistaken for the ledger the scenario is about.
     presenceAgent: "Quill",
     presenceHandle: "quill",
+    presenceSeed: "hatchling:5",
     opener: "February's bank export is in the ledger folder. Two card payments look doubled.",
     // A tool reads the bank export, a script reconciles it, Quill's tool
     // checks the VAT lines and the review file is written.
@@ -443,6 +451,7 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
     prompt: "Give checkout its own package, and make sure the payment flow still works.",
     presenceAgent: "Canary",
     presenceHandle: "canary",
+    presenceSeed: "hatchling:2",
     opener: "Checkout still lives inside the API package. Can we split it before launch?",
     // Octo moves the code, runs checkout's tests, Canary runs the payment
     // tests, and the type check is a command with no label of its own.
@@ -493,6 +502,7 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
     prompt: "Build a pricing page for the new plans and share a preview link, then click through it in the browser.",
     presenceAgent: "Pixel",
     presenceHandle: "pixel",
+    presenceSeed: "hatchling:1",
     opener: "Plans are final: Starter 19, Team 49. Copy is in notes/pricing.md.",
     // Octo writes the page, starts its server, Pixel does the layout and
     // the tunnel makes the preview link.

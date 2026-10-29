@@ -7,6 +7,8 @@ export type ChatSpeakerMarker =
       kind: "assistant";
       handle: string;
       avatarSeed: string;
+      /** The row's agent id, so the pill draws a saved agent as the gutter does. */
+      agentId?: string;
     }
   | {
       kind: "human";
@@ -22,6 +24,7 @@ export type StickyChatSpeaker =
       kind: "assistant";
       handle: string;
       avatarSeed: string;
+      agentId?: string;
     }
   | {
       kind: "human";
@@ -42,8 +45,15 @@ export function readStickyChatSpeakerMarker(
 ): StickyChatSpeaker | null {
   if (isAssistantSpeakerMarker(marker)) {
     const handle = normalizeAssistantHandleLabel(marker.dataset.agentHandle);
-    const avatarSeedValue = marker.dataset.agentAvatarSeed?.trim() ?? "";
-    return { kind: "assistant", handle, avatarSeed: avatarSeedValue || handle };
+    // The seed as the row stamps it: a face stamp is read raw (utils/aiFace.ts).
+    const avatarSeedValue = marker.dataset.agentAvatarSeed ?? "";
+    const agentId = marker.dataset.agentId?.trim();
+    return {
+      kind: "assistant",
+      handle,
+      avatarSeed: avatarSeedValue.trim() ? avatarSeedValue : handle,
+      ...(agentId ? { agentId } : {}),
+    };
   }
   if (isHumanSpeakerMarker(marker)) {
     const label = marker.dataset.humanLabel?.trim() || "Teammate";

@@ -22,9 +22,6 @@ export const AI_TILE_SHAPE_CLASS = "rounded-[30%]";
  */
 export const AI_TILE_EDGE_CLASS = "outline-1 -outline-offset-1 outline-ai-tile-edge dark:outline-octo-coin-ring-dark";
 
-/** Shape and edge of every AI face; fills and contents are the caller's. */
-export const AI_TILE_CLASS = `${AI_TILE_SHAPE_CLASS} ${AI_TILE_EDGE_CLASS}`;
-
 /**
  * Octo's tile: the canonical Octo avatar, a white rounded square holding the
  * one-ink mark (docs/Brand.md, "Octo agent avatar/chip"). Every themed surface
@@ -46,6 +43,11 @@ export const AI_TILE_CLASS = `${AI_TILE_SHAPE_CLASS} ${AI_TILE_EDGE_CLASS}`;
  * covers which. There is no border; a caller that stacks faces adds its own
  * separator ring on the face, which follows the tile's corners. The mark is
  * always the one-ink colorway, never crew nodes.
+ *
+ * Every other AI wears this same tile (AiFace, docs/Brand.md "Octo's
+ * hatchlings"): one of Octo's hatchlings drawn at 75% in the mark's place, or
+ * the AI's own picture clipped to it. So these two classes style every AI
+ * face's tile and drawing, and nothing else spells them.
  */
 export const OCTO_COIN_CLASS = [
   `shrink-0 items-center justify-center overflow-hidden ${AI_TILE_SHAPE_CLASS}`,
@@ -54,7 +56,7 @@ export const OCTO_COIN_CLASS = [
   AI_TILE_EDGE_CLASS,
 ].join(" ");
 
-/** The mark inside the tile: 75% of the tile, positive ink on light, reverse on dark. */
+/** The drawing inside the tile, Octo's mark or a hatchling: 75% of the tile, positive ink on light, reverse on dark. */
 export const OCTO_COIN_MARK_CLASS = "h-3/4 w-3/4 text-brand-ink dark:text-brand-paper";
 
 type OctoCoinProps = {

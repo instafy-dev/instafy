@@ -30,9 +30,10 @@ export default defineConfig({
     // chrome also reaches use-sync-external-store's CommonJS shim through
     // react-aria-components, so optimize that package boundary as a unit.
     // The icon barrel otherwise loads over 1,600 individual modules on each
-    // fixture navigation, exhausting the serial suite's budget on CI.
+    // fixture navigation, exhausting the serial suite's budget on CI. Its
+    // solid set is a separate entry point, so it is listed as well.
     entries: [],
-    include: ["react", "react-dom/client", "react-aria-components", "react-router-dom", "iconoir-react"],
+    include: ["react", "react-dom/client", "react-aria-components", "react-router-dom", "iconoir-react", "iconoir-react/solid"],
     noDiscovery: true,
   },
   server: {

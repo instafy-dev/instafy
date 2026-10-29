@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { resolveAiFace } from "../../../../utils/aiFace";
 import {
+  resolveConversationRosterAgents,
   resolveConversationRosterHumans,
   shouldShowConversationRoster,
   type ConversationRosterAgent,
@@ -148,5 +150,35 @@ describe("shouldShowConversationRoster", () => {
         ],
       }),
     ).toBe(true);
+  });
+});
+
+describe("resolveConversationRosterAgents", () => {
+  const ownBuild = { id: "own-bot", handle: "build", displayName: "My build bot", avatarSeed: "hatchling:8" };
+  const face = (agent: ConversationRosterAgent | undefined) =>
+    resolveAiFace({ handle: agent?.handle, avatarSeed: agent?.avatarSeed, agentId: agent?.agentId, textOnly: agent?.textOnly });
+
+  it("draws the viewer's own saved agent as its profile has it, once per handle", () => {
+    const agents = resolveConversationRosterAgents({
+      agentHandles: ["build", " BUILD "],
+      agentByHandle: new Map([["build", ownBuild]]),
+    });
+    expect(agents).toEqual([
+      { handle: "build", displayName: "My build bot", avatarSeed: "hatchling:8", agentId: "own-bot" },
+    ]);
+    expect(face(agents[0])).toEqual({ kind: "hatchling", n: 8, reason: "stamp" });
+  });
+
+  it("draws a handle the viewer has no saved agent for with the hollow face, as the mention picker does", () => {
+    // Not the handle's hash (kimbot is 2): nothing the Studio has says which
+    // face the AI's rows wear.
+    const [kimbot] = resolveConversationRosterAgents({ agentHandles: ["kimbot"], agentByHandle: new Map() });
+    expect(kimbot).toMatchObject({ handle: "kimbot", displayName: "@kimbot", agentId: null, textOnly: true });
+    expect(face(kimbot)).toEqual({ kind: "unknown" });
+    expect(resolveAiFace({ handle: "kimbot" })).toMatchObject({ kind: "hatchling", n: 2 });
+    // Octo is Octo all the same.
+    const [octo] = resolveConversationRosterAgents({ agentHandles: ["octo"], agentByHandle: new Map() });
+    expect(octo).toMatchObject({ displayName: "Octo", textOnly: true });
+    expect(face(octo)).toEqual({ kind: "octo" });
   });
 });

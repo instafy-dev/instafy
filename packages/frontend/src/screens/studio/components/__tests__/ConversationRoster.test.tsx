@@ -2,12 +2,14 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationRoster } from "../ConversationRoster";
 import {
   classTokens,
   expectAiTile,
   expectAvatarCoinLightEdge,
+  expectCanonicalOctoCoin,
+  expectHatchling,
   expectPersonCircle,
 } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
@@ -110,7 +112,7 @@ describe("ConversationRoster", () => {
       expect(classTokens(slot)).not.toContain("rounded-full");
       expectAiTile(slot?.firstElementChild);
     }
-    expect(reviewer?.firstElementChild?.textContent).toBe("R");
+    expect(expectHatchling(reviewer?.firstElementChild)).toBe("3");
   });
 
   it("collapses members past five into a +N overflow", async () => {
@@ -198,10 +200,59 @@ describe("ConversationRoster", () => {
       trigger?.querySelectorAll('[data-testid="chat-avatar-assistant"]') ?? [],
     );
     expect(agentAvatars.length).toBe(3);
-    const scoutStyle = agentAvatars[1]?.getAttribute("style") ?? "";
-    const medicStyle = agentAvatars[2]?.getAttribute("style") ?? "";
-    expect(scoutStyle).toContain("linear-gradient");
-    expect(scoutStyle).not.toBe(medicStyle);
+    // Each seed is its own hatchling (seed-scout 4, seed-medic 8), not the
+    // hatchling of the handle beside it.
+    expect(agentAvatars.slice(1).map(expectHatchling)).toEqual(["4", "8"]);
+  });
+
+  it("keys AIs by agent id and folds a repeated face into the +N", async () => {
+    // Two of the viewer's agents that wear one hatchling, a picture and Octo.
+    await renderRoster(
+      [human("user-self", "Taylor", true)],
+      [
+        agent("octo", "Octo", "octo"),
+        { agentId: "agent-scout", handle: "scout", displayName: "Scout", avatarSeed: "hatchling:6" },
+        { agentId: "agent-medic", handle: "medic", displayName: "Medic", avatarSeed: "hatchling:6" },
+        { agentId: "agent-pia", handle: "pia", displayName: "Pia", avatarSeed: "/pia.png" },
+      ],
+    );
+    const trigger = container.querySelector('[data-testid="conversation-roster"]');
+    expect(trigger?.getAttribute("aria-label")).toBe("Conversation members (5)");
+    const agentAvatars = Array.from(trigger?.querySelectorAll('[data-testid="chat-avatar-assistant"]') ?? []);
+    expect(agentAvatars).toHaveLength(3);
+    expect(expectHatchling(agentAvatars[1])).toBe("6");
+    expect(agentAvatars[2]?.querySelector("img")?.getAttribute("src")).toBe("/pia.png");
+    // Medic is counted, not drawn beside its twin.
+    expect(container.querySelector('[data-testid="conversation-roster-overflow"]')?.textContent).toBe("+1");
+
+    // Two people's agents can share a handle; the id tells them apart.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await renderRoster([], [
+        { agentId: "own-pia", handle: "pia", displayName: "Pia", avatarSeed: "hatchling:2" },
+        { agentId: "peer-pia", handle: "pia", displayName: "Pia", avatarSeed: "hatchling:5" },
+      ]);
+      const faces = Array.from(container.querySelectorAll('[data-testid="chat-avatar-assistant"]'));
+      expect(faces.map(expectHatchling)).toEqual(["2", "5"]);
+      expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("draws an AI the viewer knows only by its handle with the hollow face, and folds a second one into the +N", async () => {
+    await renderRoster(
+      [human("user-self", "Taylor", true)],
+      [
+        { ...agent("octo", "Octo", "octo"), textOnly: true },
+        { ...agent("kimbot", "@kimbot", "kimbot"), agentId: null, textOnly: true },
+        { ...agent("zed", "@zed", "zed"), agentId: null, textOnly: true },
+      ],
+    );
+    const faces = Array.from(container.querySelectorAll('[data-testid="chat-avatar-assistant"]'));
+    expectCanonicalOctoCoin(faces[0]);
+    expect(faces.slice(1).map(expectHatchling)).toEqual(["unknown"]);
+    expect(container.querySelector('[data-testid="conversation-roster-overflow"]')?.textContent).toBe("+1");
   });
 
   it("renders a persistent open-participants button when there are no members", async () => {

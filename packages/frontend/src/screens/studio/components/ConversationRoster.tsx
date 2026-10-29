@@ -1,6 +1,7 @@
 import { Group } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
+import { aiFaceKey, stackAiFaces, type AiFaceIdentity } from "../../../utils/aiFace";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import {
   toggleParticipantsDrawer,
@@ -12,6 +13,10 @@ import type {
 } from "./conversationRosterMembers";
 
 const MAX_STACK_AVATARS = 5;
+
+function rosterAgentFaceIdentity(agent: ConversationRosterAgent): AiFaceIdentity {
+  return { handle: agent.handle, avatarSeed: agent.avatarSeed, agentId: agent.agentId, textOnly: agent.textOnly };
+}
 
 /**
  * "Who is in this room": a compact overlapping avatar stack in the conversation
@@ -68,6 +73,10 @@ export function ConversationRoster({
     );
   }
 
+  // AIs are keyed by agent id (else handle and seed), and the stack never
+  // draws one face twice: a repeat folds into the +N (docs/Brand.md, "Octo's
+  // hatchlings").
+  const agentFaces = stackAiFaces(agents, rosterAgentFaceIdentity, agents.length);
   const stackEntries = [
     ...humans.map((human) => ({
       key: `human:${human.userId}`,
@@ -76,13 +85,13 @@ export function ConversationRoster({
         <ChatMessageAvatar kind="human" seed={human.userId} label={human.label} size="2xs" />
       ),
     })),
-    ...agents.map((agent) => ({
-      key: `agent:${agent.handle}`,
+    ...agentFaces.shown.map((agent) => ({
+      key: `ai:${aiFaceKey(rosterAgentFaceIdentity(agent))}`,
       shapeClassName: AI_TILE_SHAPE_CLASS,
       avatar: (
         <ChatMessageAvatar
           kind="assistant"
-          agent={{ handle: agent.handle, avatarSeed: agent.avatarSeed }}
+          agent={{ handle: agent.handle, avatarSeed: agent.avatarSeed, id: agent.agentId, textOnly: agent.textOnly }}
           size="2xs"
         />
       ),

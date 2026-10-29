@@ -9,6 +9,7 @@ import type { NotificationInboxItem } from "../../../../sdk/instafy";
 import type { ActivityItem } from "../../../../services/runtimeController/activity";
 import type { ProductNotification } from "../../../../notifications/notificationContract";
 import type { HomeNotifications } from "../../../../notifications/useNotificationCenter";
+import { expectHatchling } from "../../../../components/__tests__/octoCoinExpectations";
 import { HomePanel } from "../HomePanel";
 import { PageTitleInNavigationContext } from "../../../../components/PageTitleContext";
 
@@ -261,6 +262,15 @@ describe("HomePanel activity states", () => {
     expect(query("home-attention-section")?.textContent).toContain("Local unread work");
     expect(query("home-continue-working")).toBeNull();
     expect(container.textContent?.match(/Local unread work/g)).toHaveLength(1);
+  });
+
+  it("draws a thread's owner that has not written yet with the hollow face, not its handle's", async () => {
+    mocks.conversationWorkspace = true;
+    mocks.conversations = [localConversation({ ownerAgent: { id: null, handle: "ada" } })];
+    mocks.activeConversationId = "local-unread";
+    await render({}, true);
+    const face = query("home-attention-section")?.querySelector('[data-testid="chat-avatar-assistant"]');
+    expect(expectHatchling(face)).toBe("unknown");
   });
 
   // A run in a chat listed above Recent activity: its In progress row steps

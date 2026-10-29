@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type JSX, type ReactNode } from "react";
 import { CompressLines } from "iconoir-react";
 import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
-import { OCTO_AVATAR_SRC, resolveAgentAvatarImageSrc } from "../../../utils/agentAvatar";
+import { aiFaceKey, resolveAiFace, stackAiFaces, type AiFaceIdentity } from "../../../utils/aiFace";
 import { ChatActivityBubble } from "./ChatActivityBubble";
 import { ChatBubbleRow } from "./ChatBubbleRow";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
@@ -25,6 +25,15 @@ type AssistantTypingStatusSnapshot = {
 
 const ASSISTANT_STATUS_LINGER_MS = 12_000;
 
+/** How many faces the multi-agent stack draws; the label counts every lane. */
+const TYPING_STACK_FACES = 2;
+
+function typingAgentFaceIdentity(agent: AssistantTypingAgent): AiFaceIdentity {
+  return { handle: agent.handle, avatarSeed: agent.avatarSeed, agentId: agent.id };
+}
+
+// Only Octo's face moves (docs/Brand.md, "Octo's hatchlings"), so only Octo
+// has the phone-only thinking face; Octo wearing a picture of its own has none.
 function usesCanonicalOctoAvatar({
   handle,
   avatarSeed,
@@ -32,7 +41,7 @@ function usesCanonicalOctoAvatar({
   handle: string;
   avatarSeed: string;
 }): boolean {
-  return resolveAgentAvatarImageSrc({ handle, avatarSeed }) === OCTO_AVATAR_SRC;
+  return resolveAiFace({ handle, avatarSeed }).kind === "octo";
 }
 
 function AssistantTypingStatusLine({
@@ -110,6 +119,7 @@ export function ChatTypingRows({
   hasMultipleTypingAgents,
   typingAgentHandle,
   typingAgentAvatarSeed,
+  typingAgentId,
   typingIndicatorState,
   typingStatusLabel,
   typingStatusAriaLabel,
@@ -128,6 +138,8 @@ export function ChatTypingRows({
   hasMultipleTypingAgents: boolean;
   typingAgentHandle: string;
   typingAgentAvatarSeed: string;
+  /** The single typing agent's id, as its run is stamped. */
+  typingAgentId?: string;
   typingIndicatorState: TypingIndicatorState | null;
   typingStatusLabel: string;
   typingStatusAriaLabel: string;
@@ -284,6 +296,11 @@ export function ChatTypingRows({
     : lingeringAssistantStatus;
   const assistantAvatarMotion =
     showAssistantStatus && assistantStatusToRender?.phase === "thinking" ? "thinking" : "idle";
+  // Two lanes that wear the same face (one persona in two plans) draw it
+  // once; the label's count still names every lane.
+  const stackedTypingAgents = hasMultipleTypingAgents
+    ? stackAiFaces(typingAgents, typingAgentFaceIdentity, TYPING_STACK_FACES).shown
+    : [];
 
   return (
     <>
@@ -320,15 +337,18 @@ export function ChatTypingRows({
                   kind: "assistant",
                   handle: typingAgentHandle,
                   avatarSeed: typingAgentAvatarSeed || typingAgentHandle,
+                  ...(typingAgentId ? { agentId: typingAgentId } : {}),
                 }
           }
           avatar={(
             <div className="self-center">
               {hasMultipleTypingAgents ? (
-                <span aria-hidden="true" className="flex h-8 shrink-0 -space-x-4">
-                  {typingAgents.slice(0, 2).map((agent) => (
+                // The next face covers a quarter of the one before, as in the
+                // roster: half of a one-ink face is a fragment no one reads.
+                <span aria-hidden="true" className="flex h-8 shrink-0 -space-x-2">
+                  {stackedTypingAgents.map((agent) => (
                     <span
-                      key={`typing-agent-${agent.handle}`}
+                      key={`typing-agent-${agent.key ?? aiFaceKey(typingAgentFaceIdentity(agent))}`}
                       data-testid="assistant-typing-stack-face"
                       // The same separator the conversation roster paints on
                       // each face: a thin ring in the chat surface's own
@@ -338,7 +358,7 @@ export function ChatTypingRows({
                     >
                       <ChatMessageAvatar
                         kind="assistant"
-                        agent={{ handle: agent.handle, avatarSeed: agent.avatarSeed }}
+                        agent={{ handle: agent.handle, avatarSeed: agent.avatarSeed, id: agent.id }}
                         motion={showAssistantStatus && agent.isThinking ? "thinking" : "idle"}
                         scrollReactive
                       />
@@ -348,7 +368,11 @@ export function ChatTypingRows({
               ) : (
                 renderAssistantAvatar(
                   null,
-                  { handle: typingAgentHandle, avatarSeed: typingAgentAvatarSeed },
+                  {
+                    handle: typingAgentHandle,
+                    avatarSeed: typingAgentAvatarSeed,
+                    ...(typingAgentId ? { id: typingAgentId } : {}),
+                  },
                   { motion: assistantAvatarMotion, scrollReactive: true },
                 )
               )}
