@@ -15,6 +15,7 @@ import { installDesktopUpdateBootstrap } from "./desktop/updates/bootstrap";
 import { installNativeOtaBootstrap } from "./mobile/ota/bootstrap";
 import { installNativeDeepLinkBootstrap } from "./native/nativeDeepLinks";
 import { installNativeKeyboardAccessory } from "./native/nativeKeyboardAccessory";
+import { NativeStatusBarBackground } from "./native/NativeStatusBarBackground";
 import { installStudioPerformanceNavigation } from "./telemetry/studioPerformanceNavigation";
 // Installs the visibility and idle gate into React Query's focusManager before
 // any query mounts, so interval queries pause while nobody is looking.
@@ -94,6 +95,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
+        <NativeStatusBarBackground />
         <AuthProvider>
           <ConversationHistoryCacheLifecycle />
           <ProfileProvider>

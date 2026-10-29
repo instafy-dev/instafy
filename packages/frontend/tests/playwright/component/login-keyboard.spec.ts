@@ -53,6 +53,37 @@ for (const width of [320, 390]) {
   test.describe(`${width}px resized phone keyboard`, () => {
     test.use({ viewport: { width, height: 438 }, hasTouch: true });
     for (const theme of ["light", "dark"] as const) {
+      test(`${theme}: scrolled login content cannot paint through the Android status area`, async ({ page }) => {
+        await page.addInitScript(() => {
+          document.addEventListener("DOMContentLoaded", () => {
+            document.documentElement.style.setProperty("--safe-area-inset-top", "24px");
+          });
+        });
+        const errors = await openLogin(page, theme);
+        await page.evaluate(() => document.fonts.ready);
+        const backdrop = page.getByTestId("native-status-bar-background");
+        await expect(backdrop).toHaveCSS("height", "24px");
+        const guest = page.getByRole("button", { name: "Continue as guest" });
+        await page.evaluate(() => window.scrollTo(0, 0));
+        const clip = { x: 0, y: 0, width, height: 24 };
+        const clearStatusArea = await page.screenshot({ clip });
+        await guest.evaluate(element => {
+          const box = element.getBoundingClientRect();
+          window.scrollBy(0, box.top + box.height / 2 - 12);
+        });
+        await expect.poll(async () => guest.evaluate(element => {
+          const box = element.getBoundingClientRect();
+          return scrollY > 0 && box.top < 24 && box.bottom > 0;
+        })).toBe(true);
+        expect(await page.screenshot({ clip })).toEqual(clearStatusArea);
+        await oneScrollOwner(page);
+
+        // Rotation/older shells with no top overlap must not gain a status strip.
+        await page.evaluate(() => document.documentElement.style.setProperty("--safe-area-inset-top", "0px"));
+        await expect(backdrop).toHaveCSS("height", "0px");
+        expect(errors).toEqual([]);
+      });
+
       test(`${theme}: email, password and invalid-credential recovery keep the action reachable`, async ({ page }) => {
         const errors = await openLogin(page, theme);
         const email = page.getByRole("textbox", { name: "Email address" });

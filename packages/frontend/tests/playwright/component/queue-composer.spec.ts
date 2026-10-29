@@ -356,6 +356,121 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
   });
 }
 
+for (const width of [320, 390]) for (const theme of ["light", "dark"]) for (const fontSize of [24, 32]) {
+  test(`composer preserves a readable draft with ${fontSize}px root text in ${theme} at ${width}px`, async ({ page }) => {
+    const draft = "Compare these screenshots and keep my unfinished draft.";
+    const { errors } = await openFixture(page, { width, theme, count: 3, attachments: 4, draft });
+    const input = editor(page);
+    const originalInput = (await input.boundingBox())!;
+    const originalLeading = (await page.getByTestId("chat-composer-leading-controls").boundingBox())!;
+    const originalTrailing = (await page.getByTestId("chat-composer-trailing-controls").boundingBox())!;
+    expect(originalLeading.x + originalLeading.width).toBeLessThanOrEqual(originalInput.x);
+    expect(originalTrailing.x).toBeGreaterThanOrEqual(originalInput.x + originalInput.width);
+    await input.focus();
+    const retainedInput = (await input.elementHandle())!;
+    await page.evaluate(size => { document.documentElement.style.fontSize = `${size}px`; }, fontSize);
+    await expect(input).toBeFocused();
+    await expect(input).toHaveText(draft);
+    const row = (await page.getByTestId("chat-composer-text-row").boundingBox())!;
+    const text = (await input.boundingBox())!;
+    // Enlarged controls must yield their own row rather than squeezing the
+    // draft into a few characters per line. Keep room for actual writing.
+    expect(text.width).toBeGreaterThanOrEqual(row.width * 0.8);
+    expect(text.width).toBeGreaterThanOrEqual(160);
+    const metadata = page.locator('.chat-composer-attachment-metadata').first();
+    expect((await metadata.boundingBox())!.width).toBeGreaterThanOrEqual(160);
+    for (const name of ["Chat", "Browser"]) {
+      // Overflowing tabs can scroll horizontally at extreme rem sizes; the
+      // attachment tray must not push their whole row above the screen.
+      const tab = (await page.getByRole("tab", { name, exact: true }).boundingBox())!;
+      expect(tab.y).toBeGreaterThanOrEqual(0);
+      expect(tab.y + tab.height).toBeLessThanOrEqual(900);
+    }
+    for (const id of ["chat-composer-leading-controls", "chat-composer-trailing-controls"]) {
+      const controls = page.getByTestId(id);
+      const bounds = (await controls.boundingBox())!;
+      expect(bounds.y).toBeGreaterThanOrEqual(text.y + text.height);
+      for (const button of await controls.getByRole("button").all()) {
+        await expect(button).toBeInViewport({ ratio: 1 });
+      }
+    }
+    for (const name of ["Browser", "Chat"]) {
+      await page.getByRole("tab", { name, exact: true }).click();
+      await expect(input).toHaveText(draft);
+      await expect(page.getByTestId("chat-image-upload-remove")).toHaveCount(4);
+    }
+    expect(await retainedInput.evaluate(node => node.isConnected)).toBe(true);
+    await page.getByTestId("chat-image-upload-remove").last().click();
+    await expect(page.getByTestId("chat-image-upload-remove")).toHaveCount(3);
+    await expect(input).toHaveText(draft);
+    await page.evaluate(() => { document.documentElement.style.fontSize = "16px"; });
+    expect((await input.boundingBox())!.width).toBeCloseTo(originalInput.width, 0);
+    expect(await retainedInput.evaluate(node => node.isConnected)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const fontSize of [16, 32]) for (const theme of ["light", "dark"]) {
+  test(`attachment tray follows a short visual viewport without clipping targets with ${fontSize}px root text in ${theme}`, async ({ page }) => {
+    const draft = "Keep this draft while the keyboard opens";
+    const { errors } = await openFixture(page, { width: 320, theme, count: 0, attachments: 4, draft });
+    await page.evaluate(size => { document.documentElement.style.fontSize = `${size}px`; }, fontSize);
+    const input = editor(page);
+    await input.focus();
+    // Keep the layout viewport unchanged to cover visual-only keyboard
+    // resize. This proves the tray cap, not native keyboard lifecycle.
+    await page.evaluate(() => {
+      Object.defineProperty(window.visualViewport!, "height", { configurable: true, value: 300 });
+      window.visualViewport!.dispatchEvent(new Event("resize"));
+    });
+    const list = page.getByTestId("chat-image-upload-list");
+    await expect.poll(async () => (await list.boundingBox())!.height).toBe(Math.max(4 * fontSize, 75));
+    await expect(input).toBeFocused();
+    const preview = page.getByTestId("chat-image-upload-preview-item-3");
+    const remove = page.getByTestId("chat-image-upload-remove").last();
+    for (const action of [preview, remove]) {
+      await action.focus();
+      await expect(action).toBeInViewport({ ratio: 1 });
+    }
+    await remove.press("Enter");
+    await expect(page.getByTestId("chat-image-upload-remove")).toHaveCount(3);
+    await expect(input).toHaveText(draft);
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const width of [320, 390]) for (const theme of ["light", "dark"]) {
+  test(`queue actions remain reachable with enlarged text in ${theme} at ${width}px`, async ({ page }) => {
+    const draft = "Keep my unfinished draft";
+    const { errors } = await openFixture(page, { width, theme, draft });
+    // Exercise browser text/rem resizing; native OS font scaling has a
+    // separate device runbook because it does not resize every rem control.
+    await page.evaluate(() => { document.documentElement.style.fontSize = "24px"; });
+    await trigger(page).click();
+    const row = page.getByTestId("chat-send-queue-item").first();
+    const bubble = (await row.boundingBox())!;
+    const controls = row.getByRole("button");
+    await expect(controls).toHaveCount(4);
+    for (const button of await controls.all()) {
+      const bounds = (await button.boundingBox())!;
+      expect(bounds.x).toBeGreaterThanOrEqual(bubble.x);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(bubble.x + bubble.width);
+      await button.scrollIntoViewIfNeeded();
+      await expect(button).toBeInViewport({ ratio: 1 });
+    }
+    // A pointer user can reach Remove without horizontal scrolling or a
+    // forced click, and removing one queued item must preserve the draft.
+    await row.getByTestId("chat-send-queue-remove").click();
+    await expect.poll(() => order(page)).toEqual(["queue-2", "queue-3"]);
+    await expect(editor(page)).toHaveText(draft);
+    await page.keyboard.press("Escape");
+    await expect(trigger(page)).toBeFocused();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+}
+
 for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
   test(`joined queue preserves draft, order and actions in ${theme} at ${width}px`, async ({ page }) => {
     const { errors } = await openFixture(page, { width, theme });

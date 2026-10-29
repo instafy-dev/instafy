@@ -3,11 +3,13 @@ import { createRoot } from "react-dom/client";
 import { Capacitor } from "@capacitor/core";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { LoginPage } from "../../../src/screens/LoginPage";
+import { NativeStatusBarBackground } from "../../../src/native/NativeStatusBarBackground";
 import "../../../src/styles/tailwind.css";
 
 const params = new URLSearchParams(location.search);
 // Only the platform flag is inert; no native plugin is called by this review.
 Capacitor.isNativePlatform = () => params.get("native") !== "0";
+Capacitor.getPlatform = () => Capacitor.isNativePlatform() ? "android" : "web";
 document.documentElement.classList.toggle("dark", params.get("theme") === "dark");
 const longFailure = "We could not send your verification email. Check the address and try again. If the problem continues, contact your administrator with this reference: verification-email-delivery-reference-0123456789abcdefghijklmnopqrstuvwxyz.";
 type Failure = "none" | "password" | "send" | "verify" | "update";
@@ -55,9 +57,9 @@ const review: Window["__loginKeyboardReview"] = {
 };
 window.__loginKeyboardReview = review;
 const recovery = params.get("surface") === "recovery";
-createRoot(document.getElementById("root")!).render(<MemoryRouter initialEntries={[recovery ? "/login?type=recovery" : "/login"]}>
+createRoot(document.getElementById("root")!).render(<><NativeStatusBarBackground /><MemoryRouter initialEntries={[recovery ? "/login?type=recovery" : "/login"]}>
   <Routes>
     <Route path="/login" element={<LoginPage />} />
     <Route path="/studio" element={<p data-testid="login-destination">Signed in to the inert review workspace.</p>} />
   </Routes>
-</MemoryRouter>);
+</MemoryRouter></>);

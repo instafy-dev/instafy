@@ -242,6 +242,10 @@ plugin with native viewport resizing and requires an updated native binary. Olde
 shells and Safari keep their system behavior; Android's keyboard policy is unchanged.
 
 Login keeps the document as its only scroll owner and respects the shared native safe-area insets.
+On Android, a shared fixed backdrop paints the top status area using the page canvas, so scrolling
+content cannot show through the transparent system bar. It uses the existing top inset without
+adding layout padding or another scroller, sits below modal scrims, and disappears when the native
+top inset is zero. Browser and iOS status-area behavior is unchanged.
 Its spacing follows the visible viewport,
 so a software keyboard or short landscape window leaves less room for the logo and gaps without
 hiding sign-in choices. Focused email, password and verification-code fields retain their DOM nodes
