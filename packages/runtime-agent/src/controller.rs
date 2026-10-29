@@ -322,12 +322,14 @@ struct AgentSecretInventoryItemResponse {
     description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AgentSecretsResponse {
     env: Option<JsonValue>,
     inventory: Option<Vec<AgentSecretInventoryItemResponse>>,
     #[serde(default, rename = "runtimeSettings")]
     runtime_settings: AgentRuntimeSettings,
+    #[serde(default, rename = "researchBudgetToken")]
+    research_budget_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +346,7 @@ pub struct JobSecrets {
     pub inventory_complete: bool,
     /// Controller-owned policy, separate from granted project secrets.
     pub runtime_settings: AgentRuntimeSettings,
+    pub research_budget: crate::research_budget::ResearchBudgetAccess,
 }
 
 /// The code the controller's refusals carry once the runtime's space was
@@ -1303,10 +1306,17 @@ impl ControllerClient {
             }
         }
 
+        let research_budget = crate::research_budget::ResearchBudgetAccess::from_controller(
+            parsed.runtime_settings.research_budget.is_some(),
+            self.base_url.as_str(),
+            parsed.research_budget_token,
+        );
+        research_budget.validate(self.base_url.as_str())?;
         Ok(JobSecrets {
             env,
             inventory,
             inventory_complete,
+            research_budget,
             runtime_settings: parsed.runtime_settings,
         })
     }
@@ -1621,6 +1631,43 @@ fn truncate_agent_payload_text(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_budget_is_advertised_only_by_the_typed_controller_response() {
+        let legacy: AgentSecretsResponse = serde_json::from_value(json!({
+            "env": {
+                "INSTAFY_RESEARCH_SHARED": "1",
+                "INSTAFY_RESEARCH_ACCESS_TOKEN": "granted-token"
+            },
+            "metadata": {"researchBudget": {"maxPageLoads": 200, "maxPageLoadsPerSite": 200}}
+        }))
+        .unwrap();
+        assert!(legacy.runtime_settings.research_budget.is_none());
+        assert!(legacy.research_budget_token.is_none());
+        let current: AgentSecretsResponse = serde_json::from_value(json!({
+            "runtimeSettings": {"researchBudget": {"maxPageLoads": 24, "maxPageLoadsPerSite": 8}},
+            "researchBudgetToken": "research-only-token"
+        }))
+        .unwrap();
+        assert!(current.runtime_settings.research_budget.is_some());
+        assert_eq!(
+            current.research_budget_token.as_deref(),
+            Some("research-only-token")
+        );
+        let missing_token: AgentSecretsResponse = serde_json::from_value(json!({
+            "runtimeSettings": {"researchBudget": {"maxPageLoads": 24, "maxPageLoadsPerSite": 8}}
+        }))
+        .unwrap();
+        let mut environment = HashMap::new();
+        crate::research_budget::ResearchBudgetAccess::from_controller(
+            missing_token.runtime_settings.research_budget.is_some(),
+            "http://127.0.0.1:8787",
+            missing_token.research_budget_token,
+        )
+        .apply(&mut environment);
+        assert_eq!(environment["INSTAFY_RESEARCH_SHARED"], "1");
+        assert!(!environment.contains_key("INSTAFY_RESEARCH_ACCESS_TOKEN"));
+    }
 
     #[test]
     fn native_subagent_limit_comes_only_from_validated_controller_settings() {

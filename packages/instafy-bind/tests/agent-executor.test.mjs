@@ -447,7 +447,11 @@ test("--dry-run prints the prompt and emits error dry_run without calling the co
 
 test("with --agent-executor but without a login, agent intents are not run, and the owner hears why", async () => {
   const dir = site();
-  const binder = await startBinder(dir, { agentExecutor: true, lookup: publicLookup });
+  // An empty env still permits the developer's saved CLI login. Select an absent
+  // test profile without moving or modifying that login.
+  const profile = path.basename(dir);
+  assert.equal(fs.existsSync(path.join(os.homedir(), ".instafy", "profiles", `${profile}.json`)), false);
+  const binder = await startBinder(dir, { agentExecutor: true, lookup: publicLookup, env: { INSTAFY_PROFILE: profile } });
   try {
     assert.equal(binder.agentState, "unavailable");
     const health = await (await fetch(`${binder.url}/__bind/health`)).json();

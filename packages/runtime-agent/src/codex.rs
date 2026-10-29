@@ -7337,6 +7337,10 @@ mod tests {
                 "verified-job-token".to_string(),
             ),
             (
+                "INSTAFY_RESEARCH_ACCESS_TOKEN".to_string(),
+                "verified-research-only-token".to_string(),
+            ),
+            (
                 "CODEX_API_KEY".to_string(),
                 "proxy-envelope-token".to_string(),
             ),
@@ -7365,6 +7369,12 @@ mod tests {
         assert_eq!(
             child_env.get("CONTROLLER_ACCESS_TOKEN").map(String::as_str),
             Some("verified-job-token")
+        );
+        assert_eq!(
+            child_env
+                .get("INSTAFY_RESEARCH_ACCESS_TOKEN")
+                .map(String::as_str),
+            Some("verified-research-only-token")
         );
         assert_eq!(
             child_env.get("CODEX_API_KEY").map(String::as_str),

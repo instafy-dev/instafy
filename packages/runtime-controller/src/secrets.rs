@@ -109,6 +109,7 @@ struct AgentSecretsResponse {
     env: JsonValue,
     inventory: Vec<AgentSecretInventoryItem>,
     runtime_settings: runtime_contracts::multi_agent::AgentRuntimeSettings,
+    research_budget_token: Option<String>,
 }
 
 pub(crate) fn router() -> Router<AppState> {
@@ -1229,7 +1230,7 @@ async fn agent_secrets(
     let row = transaction
         .query_opt(
             "select id, status, leased_by_runtime_id, lease_expires_at, payload, credential_id,
-                    intent
+                    intent, run_id
              from agent_jobs
              where id = $1 and project_id = $2
              for share",
@@ -1264,6 +1265,9 @@ async fn agent_secrets(
             .max_native_subagents
             .try_into()
             .map_err(internal_error)?,
+        research_budget: Some(
+            crate::research_budget::job_settings(&transaction, project_id, job_id).await?,
+        ),
     };
 
     let payload: JsonValue = row.get::<_, PgJson<JsonValue>>("payload").0;
@@ -1272,6 +1276,36 @@ async fn agent_secrets(
     let touch = body.touch.unwrap_or(true);
 
     let (user_id, agent_handle_raw, agent_id) = parse_agent_job_identity(&payload);
+    // A separate narrow credential lets isolated research workers reserve pages without
+    // receiving the model-facing prompt/dispatch or runtime registration credentials.
+    let research_subject = payload
+        .get("user_id")
+        .and_then(JsonValue::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .or(state.config.service_runtime_user_id);
+    let research_budget_token = match (research_subject, row.get::<_, Option<Uuid>>("run_id")) {
+        (Some(subject), Some(run_id)) => Some(
+            crate::tokens::mint_scoped_token_with_runtime_generation(
+                &state.config,
+                crate::tokens::ScopedTokenRequest {
+                    audience: runtime_id.to_string(),
+                    subject: subject.to_string(),
+                    project_id: project_id.to_string(),
+                    origin_id: None,
+                    runtime_id: Some(runtime_id.to_string()),
+                    protocol: None,
+                    scopes: vec![runtime_contracts::research::RESEARCH_RESERVE_SCOPE.to_string()],
+                    lease_id: claims.lease_id.map(|id| id.to_string()),
+                    run_id: Some(run_id.to_string()),
+                    prefer_runtime: None,
+                    ttl_seconds: Some(state.config.agent_token_ttl_seconds.max(3600)),
+                },
+                claims.runtime_generation,
+            )?
+            .token,
+        ),
+        _ => None,
+    };
     let agent_handle = agent_handle_raw
         .as_deref()
         .map(|value| value.trim().trim_start_matches('@').trim())
@@ -1293,6 +1327,7 @@ async fn agent_secrets(
             env: JsonValue::Object(env),
             inventory: Vec::new(),
             runtime_settings,
+            research_budget_token,
         }));
     }
 
@@ -1461,6 +1496,7 @@ async fn agent_secrets(
         env: JsonValue::Object(env),
         inventory,
         runtime_settings,
+        research_budget_token,
     }))
 }
 

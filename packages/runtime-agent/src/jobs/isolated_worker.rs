@@ -169,11 +169,13 @@ impl JobProcessor {
             proxy_base_url: proxy_base,
             proxy_token: proxy.token.clone(),
             controller_base_url: self.config.controller_base_url.to_string(),
-            // This lane has no controller/MCP tools. Publication authority stays here.
+            // No general controller/MCP tools. Research accounting uses its own
+            // narrow capability; publication authority stays here.
             controller_token: None,
             controller_token_scopes: Vec::new(),
             controller_token_expires_at: None,
             job_environment: worker_config.environment,
+            research_budget: worker_config.research_budget,
             model,
             reasoning_effort: Some(reasoning_effort),
             // the project's skill-pack folder, shared with its other turns on this runtime

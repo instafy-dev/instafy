@@ -65,6 +65,7 @@ mod tests {
     async fn native_subagent_settings_are_per_job_and_restore_after_the_scope() {
         let settings = |limit| AgentRuntimeSettings {
             max_native_subagents: NativeSubagentLimit::try_from(limit).unwrap(),
+            ..Default::default()
         };
         let observe = || async {
             tokio::task::yield_now().await;

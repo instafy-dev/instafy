@@ -276,6 +276,7 @@ async fn exercise(case: Case) -> Result<()> {
             controller_token: None,
             controller_token_scopes: Vec::new(),
             controller_token_expires_at: None,
+            research_budget: Default::default(),
             job_environment: HashMap::from([(
                 "FIXTURE_JOB_SENTINEL".into(),
                 format!("job-secret-{lane}"),

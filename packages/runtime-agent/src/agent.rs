@@ -1540,6 +1540,7 @@ impl RuntimeAgent {
                                         inventory: Vec::new(),
                                         inventory_complete: true,
                                         runtime_settings: AgentRuntimeSettings::default(),
+                                        research_budget: Default::default(),
                                     };
                                     apply_job_secrets(&secret_env_keys, &empty);
                                 }
@@ -1642,6 +1643,7 @@ impl RuntimeAgent {
                 inventory: Vec::new(),
                 inventory_complete: true,
                 runtime_settings: AgentRuntimeSettings::default(),
+                research_budget: Default::default(),
             };
             apply_job_secrets(&secret_env_keys, &empty);
         }
@@ -2060,11 +2062,13 @@ pub(crate) fn resolved_job_environment(secrets: &JobSecrets) -> HashMap<String, 
     const SECRET_INVENTORY_ENV_KEY: &str = "INSTAFY_PROJECT_SECRET_INVENTORY";
 
     let mut resolved_env = secrets.env.clone();
+    crate::research_budget::ResearchBudgetAccess::scrub(&mut resolved_env);
     apply_canonical_secret_aliases(&mut resolved_env, &secrets.inventory);
     if let Some(serialized_inventory) = serialize_secret_inventory(&secrets.inventory) {
         resolved_env.insert(SECRET_INVENTORY_ENV_KEY.to_string(), serialized_inventory);
     }
 
+    secrets.research_budget.apply(&mut resolved_env);
     resolved_env
 }
 
@@ -2072,7 +2076,8 @@ pub(crate) fn resolved_job_environment(secrets: &JobSecrets) -> HashMap<String, 
 /// earlier job installed (its model and its secrets) instead of letting this
 /// job run on them; the model then falls back visibly (see `job_model`). Without
 /// current controller settings, use the minimum native capacity so a configured
-/// lower limit is never expanded by the failed fetch.
+/// lower limit is never expanded by the failed fetch. Research remains in shared
+/// mode without a token, so a failed fetch cannot create a fresh local allowance.
 fn install_fetched_job_secrets(
     managed_keys: &Mutex<HashSet<String>>,
     fetched: Result<JobSecrets>,
@@ -2093,7 +2098,7 @@ fn install_fetched_job_secrets(
             warn!(
                 ?error,
                 job_id = %job_id,
-                "failed to fetch job secrets; running without an earlier job's secrets or model and with minimum native helper capacity"
+                "failed to fetch job secrets; cleared earlier credentials, using minimum native helper capacity and blocking fresh research loads"
             );
             let empty = JobSecrets {
                 env: HashMap::new(),
@@ -2101,7 +2106,9 @@ fn install_fetched_job_secrets(
                 inventory_complete: true,
                 runtime_settings: AgentRuntimeSettings {
                     max_native_subagents: NativeSubagentLimit::MIN,
+                    ..Default::default()
                 },
+                research_budget: crate::research_budget::ResearchBudgetAccess::unavailable(),
             };
             apply_job_secrets(managed_keys, &empty);
             empty.runtime_settings
@@ -2149,11 +2156,13 @@ pub(crate) fn resolved_worker_job_config(
             "invalid controller-provided isolated worker model"
         );
     }
+    crate::research_budget::ResearchBudgetAccess::scrub(&mut environment);
     crate::isolated_tool_worker::validate_job_environment(&environment)?;
     Ok(crate::isolated_tool_worker::IsolatedWorkerJobConfig {
         environment,
         model,
         reasoning_effort,
+        research_budget: secrets.research_budget.clone(),
     })
 }
 
@@ -2161,7 +2170,12 @@ fn apply_job_secrets(managed_keys: &Mutex<HashSet<String>>, secrets: &JobSecrets
     let resolved_env = resolved_job_environment(secrets);
     let mut guard = managed_keys.lock();
 
-    let previous: Vec<String> = guard.iter().cloned().collect();
+    // Host-owned research fields never inherit process launch or granted-secret values.
+    let previous: Vec<String> = guard
+        .iter()
+        .cloned()
+        .chain(crate::research_budget::ENV_KEYS.map(str::to_owned))
+        .collect();
     for key in previous {
         if resolved_env.contains_key(&key) {
             continue;
@@ -2396,7 +2410,9 @@ mod tests {
                     runtime_settings: AgentRuntimeSettings {
                         max_native_subagents: NativeSubagentLimit::try_from(previous_limit)
                             .unwrap(),
+                        ..Default::default()
                     },
+                    research_budget: Default::default(),
                 }),
                 Uuid::new_v4(),
             );
@@ -2408,10 +2424,69 @@ mod tests {
                 Uuid::new_v4(),
             );
             assert!(std::env::var(KEY).is_err());
-            assert!(managed.lock().is_empty());
+            assert_eq!(
+                *managed.lock(),
+                HashSet::from([crate::research_budget::ENV_KEYS[0].to_string()])
+            );
+            assert_eq!(
+                std::env::var(crate::research_budget::ENV_KEYS[0]).as_deref(),
+                Ok("1")
+            );
             assert_eq!(fallback.max_native_subagents, NativeSubagentLimit::MIN);
             assert!(fallback.max_native_subagents.get() <= previous_limit);
         }
+        apply_job_secrets(
+            &managed,
+            &JobSecrets {
+                env: HashMap::new(),
+                inventory: Vec::new(),
+                inventory_complete: true,
+                runtime_settings: Default::default(),
+                research_budget: Default::default(),
+            },
+        );
+    }
+
+    #[test]
+    fn research_capability_is_separate_from_granted_secrets_in_every_worker_path() {
+        let keys = crate::research_budget::ENV_KEYS;
+        let mut secrets = JobSecrets {
+            env: HashMap::from([
+                (keys[0].into(), "0".into()),
+                (keys[1].into(), "https://untrusted.invalid".into()),
+                (keys[2].to_ascii_lowercase(), "granted-token".into()),
+            ]),
+            inventory: Vec::new(),
+            inventory_complete: true,
+            runtime_settings: Default::default(),
+            research_budget: crate::research_budget::ResearchBudgetAccess::from_controller(
+                true,
+                "http://127.0.0.1:8787",
+                Some("job-one-research-token".into()),
+            ),
+        };
+        let environment = resolved_job_environment(&secrets);
+        assert_eq!(environment[keys[0]], "1");
+        assert_eq!(environment[keys[1]], "http://127.0.0.1:8787");
+        assert_eq!(environment[keys[2]], "job-one-research-token");
+        assert!(!environment.values().any(|value| value == "granted-token"));
+        let isolated = resolved_worker_job_config(&secrets).unwrap();
+        assert!(
+            keys.iter()
+                .all(|key| !isolated.environment.contains_key(*key))
+        );
+        let mut isolated_environment = isolated.environment;
+        isolated.research_budget.apply(&mut isolated_environment);
+        assert_eq!(isolated_environment, environment);
+        assert!(!isolated_environment.contains_key("CONTROLLER_ACCESS_TOKEN"));
+        secrets.research_budget = Default::default();
+        assert!(resolved_job_environment(&secrets).is_empty());
+        let mut later_environment = environment;
+        resolved_worker_job_config(&secrets)
+            .unwrap()
+            .research_budget
+            .apply(&mut later_environment);
+        assert!(later_environment.is_empty());
     }
 
     #[test]
@@ -2429,6 +2504,7 @@ mod tests {
             }],
             inventory_complete: true,
             runtime_settings: AgentRuntimeSettings::default(),
+            research_budget: Default::default(),
         };
         let mut config = resolved_worker_job_config(&secrets).unwrap();
         assert_eq!(config.model.as_deref(), Some("configured-model"));
@@ -2471,6 +2547,7 @@ mod tests {
                 }],
                 inventory_complete: true,
                 runtime_settings: AgentRuntimeSettings::default(),
+                research_budget: Default::default(),
             };
             let error = resolved_worker_job_config(&secrets).err().unwrap();
             assert!(
@@ -2494,6 +2571,7 @@ mod tests {
                 inventory: Vec::new(),
                 inventory_complete: true,
                 runtime_settings: AgentRuntimeSettings::default(),
+                research_budget: Default::default(),
             };
             let error = resolved_worker_job_config(&secrets).err().unwrap();
             assert!(
@@ -2516,6 +2594,7 @@ mod tests {
                 inventory: Vec::new(),
                 inventory_complete: true,
                 runtime_settings: AgentRuntimeSettings::default(),
+                research_budget: Default::default(),
             };
             let error = resolved_worker_job_config(&secrets).err().unwrap();
             assert!(!error.to_string().contains(value));
@@ -2529,6 +2608,7 @@ mod tests {
             inventory: Vec::new(),
             inventory_complete: false,
             runtime_settings: AgentRuntimeSettings::default(),
+            research_budget: Default::default(),
         };
         let error = resolved_worker_job_config(&secrets).err().unwrap();
         assert!(
