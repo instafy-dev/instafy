@@ -30,23 +30,25 @@ describe("OctoCoin", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("is a white coin with the shared coin shadow in light and the reverse coin in dark, in one ink", async () => {
+  it("is a white AI tile with the shared coin shadow and hairline in light and the reverse tile in dark, in one ink", async () => {
     await act(async () => root.render(<OctoCoin className="h-8 w-8" testId="coin" />));
     const coin = container.querySelector('[data-testid="coin"]');
     expectCanonicalOctoCoin(coin);
-    expect(classTokens(coin)).toEqual(expect.arrayContaining(["flex", "rounded-full", "h-8", "w-8"]));
-    // The coin is not positioned and has no ::after, so in an overlapping
+    expect(classTokens(coin)).toEqual(expect.arrayContaining(["flex", "rounded-[30%]", "h-8", "w-8"]));
+    // The tile is not positioned and has no ::after, so in an overlapping
     // stack tree order decides which face covers which.
-    expect(OCTO_COIN_CLASS.split(" ")).toEqual(expect.arrayContaining(["overflow-hidden", "rounded-full"]));
+    expect(OCTO_COIN_CLASS.split(" ")).toEqual(expect.arrayContaining(["overflow-hidden", "rounded-[30%]"]));
+    expect(OCTO_COIN_CLASS.split(" ")).not.toContain("rounded-full");
     expect(OCTO_COIN_CLASS.split(" ").filter((token) => /^(relative|absolute|after:)/.test(token))).toEqual([]);
     // The mark fills 75% of the coin.
     expect(OCTO_COIN_MARK_CLASS.split(" ")).toEqual(expect.arrayContaining(["h-3/4", "w-3/4"]));
     expect(coin?.querySelector("svg")?.getAttribute("aria-label")).toBe("Octo");
   });
 
-  it("keeps its tokens: #262626 coin and a 22% white ring in dark", () => {
+  it("keeps its tokens: #262626 tile and a 22% white ring in dark, a 14% ink hairline in light", () => {
     expect(css).toMatch(/--color-octo-coin-dark:\s*#262626;/);
     expect(css).toMatch(/--color-octo-coin-ring-dark:\s*rgb\(255 255 255 \/ 0\.22\);/);
+    expect(css).toMatch(/--color-ai-tile-edge:\s*rgb\(15 23 42 \/ 0\.14\);/);
   });
 
   it("takes its light edge from the one avatar coin shadow, which is empty in dark", () => {

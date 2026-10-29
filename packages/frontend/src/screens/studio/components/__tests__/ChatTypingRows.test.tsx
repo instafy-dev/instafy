@@ -16,10 +16,11 @@ import {
   resolveTranscriptTailKey,
   resolveTypingIndicatorState,
 } from "../typingIndicatorState";
-import { expectCanonicalOctoCoin } from "../../../../components/__tests__/octoCoinExpectations";
+import { expectAiTile, expectCanonicalOctoCoin } from "../../../../components/__tests__/octoCoinExpectations";
+import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 
-// The face is Octo's coin (OctoCoin, docs/Brand.md): white with the shared
-// avatar coin shadow in light, reversed in dark, one ink. jsdom cannot resolve dark: variants, so the coin
+// The face is Octo's tile (OctoCoin, docs/Brand.md): white with the shared
+// avatar coin shadow in light, reversed in dark, one ink. jsdom cannot resolve dark: variants, so the tile
 // is read from its classes (octoCoinExpectations).
 function expectOctoCoinFace(face: Element | null) {
   expect(face).toBeInstanceOf(Element);
@@ -422,14 +423,20 @@ describe("ChatTypingRows", () => {
     expect(boundary?.getAttribute("data-chat-speaker-kind")).toBe("boundary");
     expect(container.querySelector('[data-testid="chat-speaker-marker"]')).toBeNull();
     // The two overlapping faces keep the roster's separator ring, painted in
-    // the chat surface's own background, so the coins never merge.
+    // the chat surface's own background, so the tiles never merge; each slot
+    // takes the AI tile's shape, so the ring follows its corners.
     const faces = Array.from(container.querySelectorAll('[data-testid="assistant-typing-stack-face"]'));
     expect(faces).toHaveLength(2);
     for (const face of faces) {
       expect(face.className.split(/\s+/)).toEqual(
-        expect.arrayContaining(["rounded-full", "*:ring-1", "*:ring-white", "dark:*:ring-[var(--color-studio-dark-panel)]"]),
+        expect.arrayContaining([AI_TILE_SHAPE_CLASS, "*:ring-1", "*:ring-white", "dark:*:ring-[var(--color-studio-dark-panel)]"]),
       );
+      expect(face.className.split(/\s+/)).not.toContain("rounded-full");
+      // One rule for faces: Octo and the reviewer are both AI tiles.
+      expectAiTile(face.firstElementChild);
     }
+    expectOctoCoinFace(faces[0]!.firstElementChild);
+    expect(faces[1]?.firstElementChild?.textContent).toBe("R");
   });
 
   it("animates only the Octo run that is actually in progress in a multi-agent row", async () => {

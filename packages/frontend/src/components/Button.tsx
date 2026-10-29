@@ -5,12 +5,13 @@ import {
   composeRenderProps,
   type ButtonProps as AriaButtonProps
 } from "react-aria-components";
+import { AI_TILE_SHAPE_CLASS } from "./OctoCoin";
 import { Spinner, type SpinnerSize } from "./Spinner";
 
 type ButtonVariant = "primary" | "secondary" | "outline" | "ghost" | "text" | "danger";
 type ButtonTone = "neutral" | "muted" | "danger" | "accent";
 type ButtonSize = "xs" | "sm" | "md" | "lg" | "icon";
-type ButtonRadius = "none" | "md" | "lg" | "xl" | "2xl" | "full";
+type ButtonRadius = "none" | "md" | "lg" | "xl" | "2xl" | "full" | "aiTile";
 type ButtonElevation = "none" | "raised";
 export type ButtonPreset = "inline" | "form" | "toolbar";
 
@@ -113,7 +114,11 @@ const RADIUS_CLASSES: Record<ButtonRadius, string> = {
   lg: "rounded-lg",
   xl: "rounded-xl",
   "2xl": "rounded-2xl",
-  full: "rounded-full"
+  full: "rounded-full",
+  // A button that wraps an AI face alone takes the face's own corners, so its
+  // hover fill and focus ring follow the tile (docs/Brand.md, "One rule for
+  // faces"), as `full` does for a person's circle.
+  aiTile: AI_TILE_SHAPE_CLASS,
 };
 
 // The pending glyph takes the leading icon's place at the icon's size. A button

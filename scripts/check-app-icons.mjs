@@ -416,10 +416,24 @@ expectNotContains(
 
 const avatarSvgPath = "packages/frontend/src/assets/octo-avatar.svg";
 const avatarSvg = readText(avatarSvgPath);
-expectContains(
+// One rule for faces (docs/Brand.md): every AI is a rounded square, Octo's
+// avatar included, with the corners the product's AI tile draws.
+const aiTileShape = readText("packages/frontend/src/components/OctoCoin.tsx").match(
+  /export const AI_TILE_SHAPE_CLASS = "rounded-\[(\d+(?:\.\d+)?)%\]";/,
+);
+if (!aiTileShape) {
+  failures.push("packages/frontend/src/components/OctoCoin.tsx must export AI_TILE_SHAPE_CLASS as a percentage radius.");
+} else {
+  expectContains(
+    avatarSvg,
+    `<rect width="64" height="64" rx="${formatSvgNumber((64 * Number(aiTileShape[1])) / 100)}" fill="${brandConfig.colors?.paper}"/>`,
+    "The in-product Octo avatar must sit on the white AI tile (a rounded square with the product tile's corners).",
+  );
+}
+expectNotContains(
   avatarSvg,
-  `<circle cx="32" cy="32" r="32" fill="${brandConfig.colors?.paper}"/>`,
-  "The in-product Octo avatar must retain its white circular background.",
+  '<circle cx="32" cy="32" r="32"',
+  "The in-product Octo avatar is a tile, never the retired circular coin.",
 );
 expectContains(
   avatarSvg,

@@ -249,8 +249,14 @@ enum MarkFit {
   case fullBleed
 }
 
+/// Every AI face is a rounded square whose corners round off at 30% of its
+/// size (docs/Brand.md, "One rule for faces"; AI_TILE_SHAPE_CLASS in
+/// packages/frontend/src/components/OctoCoin.tsx), Octo's avatar included.
+let aiTileCornerRatio = 0.3
+
 /// Draw the mark as a 64-unit SVG at `fit`. `nodeColors` (crew slots 1-4)
 /// fills the nodes; without it every piece takes the one ink.
+/// `backgroundColor` puts the mark on the AI tile in that color.
 func makeOctoSvg(
   ariaLabel: String,
   fit: MarkFit = .distribution,
@@ -271,7 +277,11 @@ func makeOctoSvg(
     ]
   }
   if let backgroundColor {
-    lines.append("  <circle cx=\"32\" cy=\"32\" r=\"32\" fill=\"\(backgroundColor)\"/>")
+    let side = svgNumber(canvasSide)
+    let corner = svgNumber(canvasSide * aiTileCornerRatio)
+    lines.append(
+      "  <rect width=\"\(side)\" height=\"\(side)\" rx=\"\(corner)\" fill=\"\(backgroundColor)\"/>"
+    )
   }
   var indent = "  "
   let distributed = fit == .distribution
@@ -321,7 +331,7 @@ try makeOctoSvg(
   darkModeInkColor: brandWhiteHex
 )
   .write(to: sourceURL, atomically: true, encoding: .utf8)
-// Octo's coin is one participant, so its avatar stays one ink.
+// Octo's tile is one participant, so its avatar stays one ink.
 try makeOctoSvg(
   ariaLabel: "Octo",
   backgroundColor: brandWhiteHex
