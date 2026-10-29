@@ -206,8 +206,7 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
     expect(query("studio-mobile-history-bar")).toBeNull();
     await click("mobile-header-more");
-    expect(query("chat-new-chat-private")).not.toBeNull();
-    expect(query("chat-new-chat-public")).not.toBeNull();
+    expect(query("mobile-header-new-chat")).not.toBeNull();
     expect(query("topbar-tab-overflow")).not.toBeNull();
   });
 
@@ -399,42 +398,16 @@ describe("StudioTopBar mobile navigation integration", () => {
     }
   });
 
-  it("keeps public creation, the existing private picker and parent navigation behind More", async () => {
-    await render(); await click("mobile-header-more"); await click("chat-new-chat-public");
+  it("keeps one New chat and parent navigation behind More, with no private choice", async () => {
+    await render(); await click("mobile-header-more");
+    expect(query("chat-new-chat-private")).toBeNull();
+    expect(document.body.textContent).not.toContain("Private chat");
+    await click("mobile-header-new-chat");
     expect(mocks.controls().onStartNewConversation).toHaveBeenCalledTimes(1);
+    expect(mocks.projectMembers).not.toHaveBeenCalled();
     await click("mobile-header-more"); await click("topbar-parent-conversation-button");
     expect(mocks.tabs().requestUrlPush).toHaveBeenCalledTimes(1);
     expect(mocks.tabs().openConversationTab).toHaveBeenCalledExactlyOnceWith("parent");
-    await click("mobile-header-more"); await click("chat-new-chat-private");
-    expect(document.querySelector('[role="dialog"][aria-label="Start private chat"]')).not.toBeNull();
-    expect(mocks.projectMembers).toHaveBeenCalledExactlyOnceWith("space-a");
-    expect(mocks.controls().onStartPrivateConversation).not.toHaveBeenCalled();
-  });
-
-  it("dismisses the private picker on native Back without navigating the conversation", async () => {
-    await render(); await click("mobile-header-more");
-    mocks.nativeBack.mockClear();
-    await click("chat-new-chat-private");
-    const dialog = () => document.querySelector('[role="dialog"][aria-label="Start private chat"]');
-    expect(dialog()).not.toBeNull();
-    const enabled = mocks.nativeBack.mock.calls.filter(([active]) => active).at(-1);
-    expect(enabled).toBeDefined();
-    await act(async () => enabled![1]());
-    expect(dialog()).toBeNull();
-    expect(props.mobileNavigation!.history.goBack).not.toHaveBeenCalled();
-    expect(mocks.tabs().requestUrlPush).not.toHaveBeenCalled();
-    expect(mocks.controls().onStartPrivateConversation).not.toHaveBeenCalled();
-    await click("mobile-header-more"); await click("chat-new-chat-private");
-    expect(dialog()).not.toBeNull();
-    expect(document.querySelector<HTMLInputElement>('[data-testid="chat-private-chat-search"]')?.value).toBe("");
-  });
-
-  it("dismisses the private picker when the underlying touch visit changes", async () => {
-    await render(); await click("mobile-header-more"); await click("chat-new-chat-private");
-    expect(document.querySelector('[role="dialog"][aria-label="Start private chat"]')).not.toBeNull();
-    props.mobileNavigation = { ...props.mobileNavigation!, visitKey: "visit-b" };
-    await render();
-    expect(document.querySelector('[role="dialog"][aria-label="Start private chat"]')).toBeNull();
     expect(mocks.controls().onStartPrivateConversation).not.toHaveBeenCalled();
   });
 

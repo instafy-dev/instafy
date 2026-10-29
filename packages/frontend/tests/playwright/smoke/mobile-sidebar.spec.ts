@@ -122,7 +122,7 @@ test.describe("Mobile sidebar drawer", () => {
     await input.fill("First chat draft");
     const firstChatId = await activeConversationId(page);
     await page.getByTestId("mobile-header-more").click();
-    await page.getByTestId("chat-new-chat-public").click();
+    await page.getByTestId("mobile-header-new-chat").click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     await expect(input).toHaveText("");
     await input.fill("Second chat draft");

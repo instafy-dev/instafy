@@ -1,6 +1,6 @@
 import { useState, type ReactNode, type RefObject } from "react";
 import { DialogTrigger } from "react-aria-components";
-import { ChatLines, Lock, MoreHoriz, NavArrowUp, Settings, SidebarCollapse, SidebarExpand } from "iconoir-react";
+import { MoreHoriz, NavArrowUp, Plus, Settings, SidebarCollapse, SidebarExpand } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { EntityRow } from "../../../components/EntityRow";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
@@ -31,7 +31,6 @@ export interface MobileStudioNavigationHeaderProps {
   sidebarOpen?: boolean;
   onOpenSettings?: () => void;
   onNewChat?: () => void;
-  onNewPrivateChat?: () => void;
   parentConversation?: { title: string; onOpen: () => void };
   tabsAction?: ReactNode;
   onMoreOpenChange?: (open: boolean) => void;
@@ -44,7 +43,7 @@ const TOUCH_TARGET = "!min-h-12 !min-w-12";
 export function MobileStudioNavigationHeader({
   history, historyInMenu = false, title, titleIcon, conversationSwitcher, primaryActions, pageMenuActions, spaceName, teamName, showSpaceName = true, moreButtonRef, onOpenPicker,
   sidebarOpen = false, onOpenSettings,
-  onNewChat, onNewPrivateChat, parentConversation, tabsAction, onMoreOpenChange,
+  onNewChat, parentConversation, tabsAction, onMoreOpenChange,
 }: MobileStudioNavigationHeaderProps) {
   const [moreOpen, setMoreOpen] = useState(false);
   const historyInOverflow = historyInMenu || Boolean(primaryActions);
@@ -111,10 +110,8 @@ export function MobileStudioNavigationHeader({
             {pageMenuActions?.map(action => <EntityRow key={action.label} title={action.label}
               start={action.icon} surface="interactive" pressable className={TOUCH_TARGET}
               onPress={() => actAndClose(action.onPress)} data-testid={action.testId} />)}
-            {onNewChat ? <EntityRow title="Public chat" surface="interactive" pressable className={TOUCH_TARGET}
-              start={<ChatLines className="h-5 w-5" aria-hidden="true" />} onPress={() => actAndClose(onNewChat)} data-testid="chat-new-chat-public" /> : null}
-            {onNewPrivateChat ? <EntityRow title="Private chat" surface="interactive" pressable className={TOUCH_TARGET}
-              start={<Lock className="h-5 w-5" aria-hidden="true" />} onPress={() => actAndClose(onNewPrivateChat)} data-testid="chat-new-chat-private" /> : null}
+            {onNewChat ? <EntityRow title="New chat" surface="interactive" pressable className={TOUCH_TARGET}
+              start={<Plus className="h-5 w-5" aria-hidden="true" />} onPress={() => actAndClose(onNewChat)} data-testid="mobile-header-new-chat" /> : null}
             {parentConversation ? <EntityRow title="Open parent conversation" subtitle={parentConversation.title} surface="interactive" pressable className={TOUCH_TARGET}
               aria-label={`Open parent conversation: ${parentConversation.title}`} start={<NavArrowUp className="h-5 w-5" aria-hidden="true" />}
               onPress={() => actAndClose(parentConversation.onOpen)} data-testid="topbar-parent-conversation-button" /> : null}

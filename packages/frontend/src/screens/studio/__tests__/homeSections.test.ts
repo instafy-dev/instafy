@@ -20,7 +20,7 @@ function activityEvent(id: number, chat: string | null, overrides: Partial<HomeF
     key: `activity:${id}`, lane: "activity", kind: "reply", title: "Follow site", preview: item.preview,
     at: Date.parse(item.at) - id, project: { id: PROJECT, name: "Space" }, team: { key: "personal", name: "Personal" },
     actor: null, isNew: false, testId: `home-recent-item-${id}`, dismissible: false,
-    group: { count: 2, newCount: 0, ids: [id, id - 100] },
+    group: { count: 2, ids: [id, id - 100] },
     source: { type: "activity", item }, ...overrides,
   };
 }
@@ -52,14 +52,14 @@ describe("arrangeHomeSections", () => {
   it("merges rows in a row for the same chat into one that stands for all their updates", () => {
     const sections = arrangeHomeSections({
       feed: { needs: [], hasCut: false, activity: [day("today", [
-        activityEvent(30, CHAT_A), notificationEvent("n1", CHAT_A), activityEvent(20, CHAT_A), activityEvent(10, CHAT_B),
+        activityEvent(30, CHAT_A), notificationEvent("n1", CHAT_A), activityEvent(20, CHAT_A), activityEvent(10, CHAT_B, { title: "Lisbon trip" }),
       ])] },
       conversations: [], resumeChatKey: null, recentChats: [],
     });
     const rows = sections.activity[0].events;
     expect(rows.map((row) => row.key)).toEqual(["activity:30", "activity:10"]);
     // The newest row stands for 2 + 1 + 2 updates, and keeps every durable alert it covers.
-    expect(rows[0].group).toEqual({ count: 5, newCount: 1, ids: [30, -70, 20, -80] });
+    expect(rows[0].group).toEqual({ count: 5, ids: [30, -70, 20, -80] });
     expect(rows[0].isNew).toBe(true);
     expect(rows[0].notifications?.map((item) => item.id)).toEqual(["n1"]);
   });
@@ -67,13 +67,59 @@ describe("arrangeHomeSections", () => {
   it("never merges rows about no chat, or rows for one chat with another chat between them", () => {
     const sections = arrangeHomeSections({
       feed: { needs: [], hasCut: false, activity: [day("today", [
-        activityEvent(40, null), activityEvent(30, null), activityEvent(20, CHAT_A), activityEvent(15, CHAT_B), activityEvent(10, CHAT_A),
+        activityEvent(40, null), activityEvent(30, null), activityEvent(20, CHAT_A), activityEvent(15, CHAT_B, { title: "Lisbon trip" }), activityEvent(10, CHAT_A),
       ])] },
       conversations: [], resumeChatKey: null, recentChats: [],
     });
     expect(sections.activity[0].events.map((row) => row.key)).toEqual(
       ["activity:40", "activity:30", "activity:20", "activity:15", "activity:10"],
     );
+  });
+
+  it("merges past rows in a row for different chats that would read exactly the same", () => {
+    // Five untitled chats in one space, each with the same last update, read
+    // as five identical rows: they become one, standing for all their updates.
+    const chats = [CHAT_A, CHAT_B, "66666666-6666-4666-8666-666666666666", "77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888"];
+    const sections = arrangeHomeSections({
+      feed: { needs: [], hasCut: false, activity: [
+        day(HOME_LIVE_DAY_KEY, [activityEvent(90, chats[0], { kind: "running" }), activityEvent(80, chats[1], { kind: "running" })]),
+        day("today", [
+          activityEvent(30, chats[0]), activityEvent(20, chats[1]), activityEvent(10, chats[2]),
+          activityEvent(5, chats[3], { title: "Lisbon trip" }), activityEvent(4, chats[4]),
+        ]),
+      ] },
+      conversations: [], resumeChatKey: null, recentChats: [],
+    });
+    // Work in flight stays one row per chat.
+    expect(sections.activity[0].events.map((row) => row.key)).toEqual(["activity:90", "activity:80"]);
+    const rows = sections.activity[1].events;
+    expect(rows.map((row) => row.key)).toEqual(["activity:30", "activity:5", "activity:4"]);
+    // The row says it stands for three chats, not six updates of the one it opens.
+    expect(rows[0].group).toEqual({ count: 6, ids: [30, -70, 20, -80, 10, -90], chats: 3 });
+    expect(rows[0].title).toBe("Follow site");
+    // A row for one chat counts its updates only.
+    expect(rows[1].group).toEqual({ count: 2, ids: [5, -95] });
+
+    // A chat is counted once, however many of its rows the merged row covers.
+    const again = arrangeHomeSections({
+      feed: { needs: [], hasCut: false, activity: [day("today", [
+        activityEvent(30, chats[0]), activityEvent(20, chats[1]), activityEvent(10, chats[1]),
+      ])] },
+      conversations: [], resumeChatKey: null, recentChats: [],
+    });
+    expect(again.activity[0].events.map((row) => [row.key, row.group?.chats])).toEqual([["activity:30", 2]]);
+
+    // A different update, space or kind keeps the rows apart.
+    const apart = arrangeHomeSections({
+      feed: { needs: [], hasCut: false, activity: [day("today", [
+        activityEvent(30, chats[0]),
+        activityEvent(20, chats[1], { preview: "Lisbon map is ready to preview." }),
+        activityEvent(10, chats[2], { project: { id: "99999999-9999-4999-8999-999999999999", name: "Other space" } }),
+        activityEvent(5, chats[3], { kind: "run_failed", statusLabel: "Run failed" }),
+      ])] },
+      conversations: [], resumeChatKey: null, recentChats: [],
+    });
+    expect(apart.activity[0].events.map((row) => row.key)).toEqual(["activity:30", "activity:20", "activity:10", "activity:5"]);
   });
 
   it("lists each chat once: Unread, then Continue working, Recent chats, Recent activity", () => {

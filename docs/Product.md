@@ -151,6 +151,8 @@ outer rail. Opening search shows the full team/space path for adjusting search s
 The controls stay in place when the inner sidebar collapses. The adjacent sidebar
 contains a Chats entry and workspace tools. Its expand/collapse control stays at the same
 position in either width, with **New chat** beside it when expanded and below it when compact.
+New chat makes a chat at once, here, in the tab bar and in the phone's More menu alike; a private
+chat starts from the composer's Invite menu, where **New private chat** lists the space's teammates.
 New chat stays available for the active accessible space when another tab, including personal
 Settings, is selected. It is unavailable on Home or when no space in the selected team is active.
 Existing saved collapse preferences are preserved.
@@ -649,7 +651,10 @@ not repeat it, and comes first there when Continue working gave way to it; **Rec
 out both; and **Recent activity** leaves out every chat listed above it, stepping aside rather than
 reading "Quiet so far" when that leaves it empty. A chat listed above that is running says so on its
 own row ("Run in progress"), in place of its In progress row. Rows that follow each other for the
-same chat read as one row that counts their updates.
+same chat read as one row that counts their updates. Past rows that follow each other for different
+chats that would read exactly the same (the same name, space and last update) show as one row that
+counts the chats and opens the newest; the others stay in Chats. A row never calls an update new:
+only **Unread** lists what is unread.
 
 Narrow panels initially show four unread rows with **View all**; wide panels show up to
 eight. Previews can wrap to two lines in narrow panels. When team filters are available,

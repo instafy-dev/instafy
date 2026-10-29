@@ -630,58 +630,52 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
           </div>
         </div>
       ) : mobileNavigation ? (
-        <StudioNewChatButton
-          dismissalKey={mobileNavigation.visitKey}
-          renderTrigger={({ onNewChat, onNewPrivateChat }) => (
-            <MobileStudioNavigationHeader
-              key={JSON.stringify([currentUserId, activeProjectId, mobileNavigation.visitKey])}
-              {...mobileNavigation}
-              historyInMenu={Boolean(compactMobileContext) || showTouchBottomDock && !topbarLocationOverride && (
-                activeWorkspaceTab?.kind === "conversation" ||
-                activeWorkspaceTab?.kind === "jobThread" ||
-                (activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "chat")
-              )}
-              onOpenPicker={onToggleSidebar ?? mobileNavigation.onOpenPicker}
-              title={mobilePageHeader?.title ?? topbarLocationTitle}
-              conversationSwitcher={showConversationQuickTabs && !mobilePageHeader && !topbarLocationOverride && !controllerProjectMissing ? {
-                tabs: openChatTabs.map(tab => ({ ...tab, spaceName: "spaceName" in tab ? tab.spaceName : resolvedProjectName })),
-                activeId: activeChatTabId,
-                onSelect: selectOpenChat,
-                onBrowseChats,
-                onSwitchSpace: mobileNavigation.onSwitchSpace,
-              } : undefined}
-              titleIcon={mobilePageHeader || compactMobileContext ? undefined : topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
-              primaryActions={mobilePageHeader?.actions ?? participantsControl}
-              pageMenuActions={[
-                ...(compactMobileContext ? [
-                  ...(onOpenHome ? [{ label: "Home, all teams", icon: <span aria-hidden="true"><OctoMark className="h-5 w-5" /></span>, onPress: onOpenHome }] : []),
-                  { label: "Search", icon: <Search className="h-5 w-5" aria-hidden="true" />, onPress: compactMobileContext.onSearch, testId: "mobile-header-search" },
-                ] : []),
-                ...(mobilePageHeader?.menuActions ?? []),
-              ]}
-              spaceName={resolvedProjectName}
-              teamName={compactMobileContext ? resolvedTeamName : undefined}
-              showSpaceName={!contextHeaderAbove}
-              moreButtonRef={compactMobileContext?.searchTriggerRef}
-              sidebarOpen={sidebarOpen}
-              onOpenSettings={onOpenProjectSettings}
-              onNewChat={onNewChat}
-              onNewPrivateChat={onNewPrivateChat}
-              parentConversation={parentConversation ? {
-                title: parentConversation.title || "Conversation",
-                onOpen: handleOpenParentConversation,
-              } : undefined}
-              onMoreOpenChange={(open) => { if (!open) setTabMenuOpen(false); }}
-              tabsAction={workspaceTabs.length > 0 && !controllerProjectMissing ? (
-                <DialogTrigger isOpen={tabMenuOpen} onOpenChange={setTabMenuOpen}>
-                  <Button variant="ghost" className="!min-h-12 !min-w-12 justify-start px-3" aria-label="Browse tabs" data-testid="topbar-tab-overflow">
-                    Browse tabs
-                  </Button>
-                  {tabsMenu}
-                </DialogTrigger>
-              ) : undefined}
-            />
+        <MobileStudioNavigationHeader
+          key={JSON.stringify([currentUserId, activeProjectId, mobileNavigation.visitKey])}
+          {...mobileNavigation}
+          historyInMenu={Boolean(compactMobileContext) || showTouchBottomDock && !topbarLocationOverride && (
+            activeWorkspaceTab?.kind === "conversation" ||
+            activeWorkspaceTab?.kind === "jobThread" ||
+            (activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "chat")
           )}
+          onOpenPicker={onToggleSidebar ?? mobileNavigation.onOpenPicker}
+          title={mobilePageHeader?.title ?? topbarLocationTitle}
+          conversationSwitcher={showConversationQuickTabs && !mobilePageHeader && !topbarLocationOverride && !controllerProjectMissing ? {
+            tabs: openChatTabs.map(tab => ({ ...tab, spaceName: "spaceName" in tab ? tab.spaceName : resolvedProjectName })),
+            activeId: activeChatTabId,
+            onSelect: selectOpenChat,
+            onBrowseChats,
+            onSwitchSpace: mobileNavigation.onSwitchSpace,
+          } : undefined}
+          titleIcon={mobilePageHeader || compactMobileContext ? undefined : topbarLocationOverride ? topbarLocationOverride.icon : activeWorkspaceTab?.icon}
+          primaryActions={mobilePageHeader?.actions ?? participantsControl}
+          pageMenuActions={[
+            ...(compactMobileContext ? [
+              ...(onOpenHome ? [{ label: "Home, all teams", icon: <span aria-hidden="true"><OctoMark className="h-5 w-5" /></span>, onPress: onOpenHome }] : []),
+              { label: "Search", icon: <Search className="h-5 w-5" aria-hidden="true" />, onPress: compactMobileContext.onSearch, testId: "mobile-header-search" },
+            ] : []),
+            ...(mobilePageHeader?.menuActions ?? []),
+          ]}
+          spaceName={resolvedProjectName}
+          teamName={compactMobileContext ? resolvedTeamName : undefined}
+          showSpaceName={!contextHeaderAbove}
+          moreButtonRef={compactMobileContext?.searchTriggerRef}
+          sidebarOpen={sidebarOpen}
+          onOpenSettings={onOpenProjectSettings}
+          onNewChat={showChatActions && onStartNewConversation ? onStartNewConversation : undefined}
+          parentConversation={parentConversation ? {
+            title: parentConversation.title || "Conversation",
+            onOpen: handleOpenParentConversation,
+          } : undefined}
+          onMoreOpenChange={(open) => { if (!open) setTabMenuOpen(false); }}
+          tabsAction={workspaceTabs.length > 0 && !controllerProjectMissing ? (
+            <DialogTrigger isOpen={tabMenuOpen} onOpenChange={setTabMenuOpen}>
+              <Button variant="ghost" className="!min-h-12 !min-w-12 justify-start px-3" aria-label="Browse tabs" data-testid="topbar-tab-overflow">
+                Browse tabs
+              </Button>
+              {tabsMenu}
+            </DialogTrigger>
+          ) : undefined}
         />
       ) : (
         <div className="flex min-w-0 items-center gap-1 px-3 py-2 max-[375px]:px-2" data-testid="topbar-workspace-navigation">

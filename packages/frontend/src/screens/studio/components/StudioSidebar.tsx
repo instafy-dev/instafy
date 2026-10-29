@@ -1096,7 +1096,6 @@ export function StudioSidebar({
     testId="sidebar-new-chat" size="sm" radius="lg"
     label={mobileSheet || desktopRail && !showLabels ? undefined : "New chat"}
     isDisabled={mobileDrillInOpen}
-    dismissalKey={JSON.stringify([activeOrgKey, activeProjectId, activePanel, navigationPage, mobileDrillInOpen])}
     runAction={runHeaderChatAction}
     className={mobileSheet ? "!h-12 !w-11 !min-h-12 !min-w-11 shrink-0" : desktopRail && !showLabels
       ? "!h-11 !w-11 !min-h-11 !min-w-11 shrink-0"

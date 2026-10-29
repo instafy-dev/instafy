@@ -56,7 +56,7 @@ function updateCount(event: HomeFeedEvent): number {
   return event.group?.count ?? 1;
 }
 
-/** Two rows in a row for one chat read as one: the newer row, standing for both. */
+/** Two rows in a row that read as one: the newer row, standing for both. */
 function mergeRows(newer: HomeFeedEvent, older: HomeFeedEvent): HomeFeedEvent {
   const notifications = new Map([...(newer.notifications ?? []), ...(older.notifications ?? [])].map((item) => [item.id, item]));
   return {
@@ -65,11 +65,24 @@ function mergeRows(newer: HomeFeedEvent, older: HomeFeedEvent): HomeFeedEvent {
     dismissible: newer.dismissible || older.dismissible,
     group: {
       count: updateCount(newer) + updateCount(older),
-      newCount: (newer.group?.newCount ?? (newer.isNew ? 1 : 0)) + (older.group?.newCount ?? (older.isNew ? 1 : 0)),
       ids: [...(newer.group?.ids ?? []), ...(older.group?.ids ?? [])],
     },
     ...(notifications.size ? { notifications: [...notifications.values()] } : {}),
   };
+}
+
+/**
+ * What a chat's row shows apart from its time and update count. Chats that
+ * share a name, a space and a last update ("New chat · Follow site is ready
+ * to preview.") would otherwise list as identical rows nobody can tell apart.
+ */
+function rowLook(event: HomeFeedEvent): string {
+  const item = event.source.type === "activity" ? event.source.item : null;
+  return JSON.stringify([
+    event.title.trim(), event.project.id, event.team.key, event.kind, event.statusLabel ?? null,
+    event.preview?.trim() || null, event.actor?.kind ?? null, event.actor?.handle ?? null,
+    item?.actor.userId ?? null, item?.conversation?.threadKind ?? null,
+  ]);
 }
 
 /**
@@ -78,7 +91,8 @@ function mergeRows(newer: HomeFeedEvent, older: HomeFeedEvent): HomeFeedEvent {
  * Unread list still shows it; the chat Continue working resumes is not listed
  * again below it; Recent chats leaves out both; and Recent activity leaves out
  * every chat listed above it, whose In progress row the listing row speaks for.
- * Rows that remain in a row for the same chat merge into one.
+ * Rows that remain in a row for the same chat merge into one, and so do past
+ * rows in a row for chats that would read exactly the same.
  */
 export function arrangeHomeSections({
   feed,
@@ -111,6 +125,9 @@ export function arrangeHomeSections({
   const liveByChat = new Map<string, HomeFeedEvent>();
   for (const day of feed.activity) {
     const events: HomeFeedEvent[] = [];
+    // The chats the last row stands for. A row standing for several says so
+    // ("5 chats"): opening it shows only the newest of them.
+    let lastChats = new Set<string>();
     for (const event of day.events) {
       const key = chatKey(event);
       if (key !== null && listed.has(key)) {
@@ -119,10 +136,17 @@ export function arrangeHomeSections({
         continue;
       }
       const previous = events.at(-1);
-      if (key !== null && previous && chatKey(previous) === key) {
-        events[events.length - 1] = mergeRows(previous, event);
+      const previousKey = previous ? chatKey(previous) : null;
+      if (key !== null && previous && previousKey !== null && (previousKey === key ||
+        (day.key !== HOME_LIVE_DAY_KEY && rowLook(previous) === rowLook(event)))) {
+        lastChats.add(key);
+        const merged = mergeRows(previous, event);
+        events[events.length - 1] = lastChats.size > 1 && merged.group
+          ? { ...merged, group: { ...merged.group, chats: lastChats.size } }
+          : merged;
         continue;
       }
+      lastChats = new Set(key === null ? [] : [key]);
       events.push(event);
     }
     if (events.length) activity.push({ ...day, events });

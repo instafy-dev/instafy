@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef, type ReactNode } from "react";
+import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceControlsContextValue } from "../../workspaceControls";
@@ -87,7 +87,7 @@ vi.mock("../../../../conversations/ConversationsProvider", () => ({
   useConversations: () => ({ conversations: mocks.conversations, activeConversationId: "conversation-1", projectKey: mocks.conversationsProjectKey }),
 }));
 vi.mock("../StudioNewChatButton", () => ({
-  StudioNewChatButton: ({ testId, renderTrigger }: { testId?: string; renderTrigger?: (actions: Record<string, never>) => ReactNode }) => renderTrigger ? renderTrigger({}) : <button data-testid={testId} aria-label="New chat" />,
+  StudioNewChatButton: ({ testId }: { testId?: string }) => <button data-testid={testId} aria-label="New chat" />,
 }));
 vi.mock("../../../../workspace/WorkspaceTabs", () => ({
   WorkspaceTabs: ({ leading, emptyStateContent, tabStripActions, actions, titleBarInset, flushStart }: WorkspaceTabsProps) => (
