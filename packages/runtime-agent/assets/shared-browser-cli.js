@@ -1962,7 +1962,7 @@ function blankPageResult(page, extra = {}) {
     secretScreen: false,
     interactiveElements: [],
     message:
-      "The page is blank. Call navigate with the http(s) address the task names; any approval the browser asks for applies there.",
+      "The page is blank. Call navigate with the http(s) address the task names, or, when it names none, with the official site of what the task is about; any approval the browser asks for applies there.",
   };
 }
 

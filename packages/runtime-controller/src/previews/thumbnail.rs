@@ -755,11 +755,59 @@ pub(super) async fn load_thumbnail_view(
     }))
 }
 
-/// Forget the pictures of previews that were closed, replaced or opened
-/// again (a later site on the same port shares the preview's id). A closed or
-/// replaced card reads Stopped; the next open of the port takes a new picture.
-/// Logged, never fatal: a picture left behind is unreadable while its preview
-/// is closed.
+/// Forget the pictures of the earlier previews of a port's key that a newer
+/// tunnel replaced, closed ones included. A preview closed on purpose keeps
+/// its picture for a wake, and once another tunnel holds its port no wake can
+/// bring it back (`preview_replaced`); the retirement leaves a closed grant as
+/// it is, so without this its picture stayed, never shown, until the space
+/// went. Only grants recorded before the successor: a late retirement for an
+/// older issue of the key never touches a newer preview. Logged, never fatal.
+pub(super) async fn delete_replaced_preview_thumbnails(
+    pool: &PgPool,
+    project_id: &Uuid,
+    tunnel_key: &str,
+    successor_tunnel_id: &str,
+) {
+    let result = match pool.get().await {
+        Ok(connection) => connection
+            .execute(
+                "delete from runtime_preview_thumbnails thumbnail
+                 using runtime_tunnel_grants earlier
+                 where thumbnail.project_id = $1
+                   and earlier.project_id = $1
+                   and earlier.tunnel_id = thumbnail.tunnel_id
+                   and jsonb_typeof(earlier.metadata->'_instafyPreview') = 'object'
+                   and earlier.metadata->'_instafyPreview'->>'tunnelKey' = $2
+                   and earlier.tunnel_id <> $3
+                   and earlier.created_at < (
+                     select successor.created_at from runtime_tunnel_grants successor
+                     where successor.project_id = $1 and successor.tunnel_id = $3
+                   )",
+                &[project_id, &tunnel_key, &successor_tunnel_id],
+            )
+            .await
+            .map(|_| ())
+            .or_else(|error| {
+                if is_undefined_table(&error) {
+                    Ok(())
+                } else {
+                    Err(error.to_string())
+                }
+            }),
+        Err(error) => Err(error.to_string()),
+    };
+    if let Err(error) = result {
+        warn!(%project_id, %error, "failed to delete replaced preview pictures");
+    }
+}
+
+/// Forget the pictures of previews that were replaced, opened again (a later
+/// site on the same port shares the preview's id) or closed for good. A
+/// closed or replaced card reads Stopped; the next open of the port takes a
+/// new picture. A preview closed on purpose that a wake can start again keeps
+/// its picture for when it does (`forget_closed_preview_picture`). Logged,
+/// never fatal: a picture left behind is unreadable while its preview is
+/// closed.
 pub(super) async fn delete_preview_thumbnails(
     pool: &PgPool,
     project_id: &Uuid,

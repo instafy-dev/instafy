@@ -6,6 +6,7 @@ import type { CdpScreencastViewerProps } from "../CdpScreencastViewer";
 
 type Viewer = {
   canvas: HTMLCanvasElement;
+  background: string;
   listeners: Record<string, () => void>;
   disconnect: ReturnType<typeof vi.fn>;
   viewOnly: boolean;
@@ -43,6 +44,8 @@ vi.mock("../CdpScreencastViewer", () => ({ CdpScreencastViewer: (props: CdpScree
 vi.mock("@novnc/novnc/lib/rfb", () => ({ default: class {
   canvas: HTMLCanvasElement;
   get _canvas() { return this.canvas; }
+  // noVNC paints its screen this dark grey around the page unless told otherwise.
+  background = "rgb(40, 40, 40)";
   listeners: Record<string, () => void> = {};
   viewOnly = false;
   _FBU = { encoding: 0 };
@@ -114,6 +117,23 @@ describe("Shared browser retained frames", () => {
     expect(stateCard()).not.toBeNull();
     await act(async () => latest()._framebufferUpdate());
     expect(stateCard()).toBeNull();
+  });
+
+  // A local test on a phone in light mode: around the live page the Browser
+  // view stayed black, so its chrome read as dark while Chat turned light.
+  it("puts a live page, and its retained picture, on a stage that follows the theme", async () => {
+    await render();
+    await paint();
+    const stage = document.querySelector('[data-testid="browser-session-viewport"]')!.className.split(/\s+/);
+    expect(stage).toEqual(expect.arrayContaining(["bg-slate-100", "dark:bg-black"]));
+    expect(stage).not.toContain("bg-black");
+    // The live viewer paints nothing of its own around the page: its dark grey
+    // filled the bands above and below the page, whatever the stage's colour.
+    expect(latest().background).toBe("transparent");
+    await render({ active: false });
+    const retained = frozen()!.className.split(/\s+/);
+    expect(retained).toEqual(expect.arrayContaining(["bg-slate-100", "dark:bg-black"]));
+    expect(retained).not.toContain("bg-black");
   });
 
   it("disconnects when hidden and retains pixels while the returning collaboration roster loads", async () => {

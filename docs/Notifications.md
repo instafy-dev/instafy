@@ -127,7 +127,9 @@ when it actually becomes visible; the center entry remains unread until read.
 A notification about the conversation open on screen (its target names that
 `conversationControllerId`: a reply, a failed run, an automation outcome) shows no
 toast while the app is in the foreground; the chat already shows it, so the
-center marks it seen instead.
+center marks it seen instead. The conversation counts as on screen while its Chat
+view or its Browser view is in front (the reply belongs to the turn the person is
+watching there), not while one of its files or previews is.
 
 The worker's `NotificationTransport` interface accepts an account-bound, static
 envelope and returns a classified delivery result. Its registered implementation

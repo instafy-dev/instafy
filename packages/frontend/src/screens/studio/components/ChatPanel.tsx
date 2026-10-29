@@ -23,7 +23,6 @@ import { Spinner } from "../../../components/Spinner";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import { useStudioChatPerformance } from "../../../telemetry/useStudioChatPerformance";
 import { useConversationNotificationRead } from "../../../notifications/useConversationNotificationRead";
-import { registerOpenConversation } from "../../../notifications/openConversations";
 import {
   addFloatingSurfaceViewportChangeListener,
   clampFloatingSurfacePositionToStudioViewport,
@@ -304,6 +303,7 @@ import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollO
 import { useChatNewerHistoryPaging } from "./useChatNewerHistoryPaging";
 import { useChatNewMessages } from "./useChatNewMessages";
 import { ChatNewMessagesButton } from "./ChatNewMessagesButton";
+import { useConversationOnScreen } from "./useConversationOnScreen";
 import { useMessageContext } from "../../../conversations/useMessageContext";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { revealCanonicalMessageTarget } from "./messageContextPresentation";
@@ -2116,14 +2116,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     rootRef: scrollContainerRef,
     enabled: chatVisible && !jobThread,
   });
-  // While this transcript is on screen the chat itself presents its replies:
-  // the notification center skips the banner for it and asks it to re-read
-  // when the durable feed sees a reply the live stream may have missed.
-  const showsConversationTranscript = chatVisible && !jobThread;
-  useEffect(() => {
-    if (!showsConversationTranscript || !activeConversationControllerId) return;
-    return registerOpenConversation(activeConversationControllerId);
-  }, [activeConversationControllerId, showsConversationTranscript]);
+  useConversationOnScreen(activeConversationControllerId, { chatVisible, browserVisible, jobThread: Boolean(jobThread) });
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.localId === activeConversationId) ?? null,

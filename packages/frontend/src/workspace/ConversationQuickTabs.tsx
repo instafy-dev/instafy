@@ -27,6 +27,8 @@ export function ConversationQuickTabs({ tabs, activeId, scopeName, onSelect, onC
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const restoreFocus = useRef(false);
   const multipleSpaces = new Set(tabs.map(tab => tab.projectId).filter(Boolean)).size > 1;
+  // A tab names its space only beside another space's tab.
+  const named = (tab: ConversationQuickTab) => `${tab.title}${multipleSpaces && tab.spaceName ? ` · ${tab.spaceName}` : ""}`;
   useLayoutEffect(() => {
     if (!restoreFocus.current) return;
     restoreFocus.current = false;
@@ -48,8 +50,8 @@ export function ConversationQuickTabs({ tabs, activeId, scopeName, onSelect, onC
         className="conversation-quick-tab">
         <button type="button" ref={node => { if (node) buttons.current.set(tab.id, node); else buttons.current.delete(tab.id); }}
           aria-current={tab.id === activeId ? "page" : undefined}
-          aria-label={`${tab.title}${tab.spaceName ? ` · ${tab.spaceName}` : ""}`}
-          title={`${tab.title}${tab.spaceName ? ` · ${tab.spaceName}` : ""}${tab.preview ? " — preview; double-click to keep open" : ""}`}
+          aria-label={named(tab)}
+          title={`${named(tab)}${tab.preview ? " — preview; double-click to keep open" : ""}`}
           className={`flex h-11 min-w-0 items-center gap-2 px-3 text-sm ${tab.preview ? "italic" : "font-medium"} ${TAB_FOCUS_CLASS}`}
           onClick={() => onSelect(tab.id)} onDoubleClick={() => onKeep(tab.id)}
           onKeyDown={event => {
@@ -63,8 +65,8 @@ export function ConversationQuickTabs({ tabs, activeId, scopeName, onSelect, onC
           {tab.badge ? <span className="text-[10px] not-italic" aria-label={`${tab.badge} unread`}>{tab.badge}</span> : null}
           {tab.dirty ? <span aria-label="Unsaved draft" className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" /> : null}
         </button>
-        {tab.preview ? <IconButton variant="ghost" size="xs" radius="full" aria-label={`Keep ${tab.title}${tab.spaceName ? ` · ${tab.spaceName}` : ""} open`} title="Keep chat open" onPress={() => onKeep(tab.id)} className="shrink-0"><Pin className="h-3.5 w-3.5" /></IconButton> : null}
-        <TabCloseButton label={`Close ${tab.title}${tab.spaceName ? ` · ${tab.spaceName}` : ""} tab`} className="mr-1 shrink-0 text-inherit" onClose={() => { restoreFocus.current = true; onClose(tab.id); }} />
+        {tab.preview ? <IconButton variant="ghost" size="xs" radius="full" aria-label={`Keep ${named(tab)} open`} title="Keep chat open" onPress={() => onKeep(tab.id)} className="shrink-0"><Pin className="h-3.5 w-3.5" /></IconButton> : null}
+        <TabCloseButton label={`Close ${named(tab)} tab`} className="mr-1 shrink-0 text-inherit" onClose={() => { restoreFocus.current = true; onClose(tab.id); }} />
       </div>)}
     </HorizontalTabStrip>
   </nav>;

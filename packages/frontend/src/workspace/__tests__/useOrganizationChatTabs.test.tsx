@@ -22,41 +22,47 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT; });
 
-it("retains distinct same-ID chats across spaces and filters by the current organization", async () => {
+// A local test: after switching spaces the tab bar kept the other space's 5
+// chats beside this one's, 9 tabs from two spaces.
+it("lists only the open space's chats, and brings a space's chats back with it", async () => {
   await render(); await visit("b");
-  expect(ids()).toEqual([organizationChatId("a", "same"), organizationChatId("b", "same")]);
-  expect(result.tabs.map(tab => tab.spaceName)).toEqual(["Autofix", "Design"]);
+  expect(ids()).toEqual([organizationChatId("b", "same")]);
+  expect(result.tabs.map(tab => tab.spaceName)).toEqual(["Design"]);
   await visit("c", "two"); expect(ids()).toEqual([organizationChatId("c", "same")]);
-  await visit("a"); expect(ids()).toHaveLength(2);
+  await visit("a"); expect(ids()).toEqual([organizationChatId("a", "same")]);
+  expect(result.tabs[0].spaceName).toBe("Autofix");
+});
+it("lists no chats when no space is open", async () => {
+  await render();
+  props = { ...props, projectId: null, ready: false, tabs: [], conversations: [] }; await render();
+  expect(result.tabs).toEqual([]);
 });
 it("does not overwrite references with an old or incomplete destination history", async () => {
-  await render(); await visit("b");
-  props = { ...props, projectId: "a", ready: false, tabs: [], conversations: [] }; await render();
-  expect(ids()).toHaveLength(2);
+  await render(); await visit("b"); await visit("a");
+  props = { ...props, ready: false, tabs: [], conversations: [] }; await render();
+  expect(ids()).toEqual([organizationChatId("a", "same")]);
   props = { ...props, ready: true, tabs: [tab()], conversations: [chat("Renamed")] }; await render();
   expect(result.tabs[0].title).toBe("Renamed");
-  props = { ...props, tabs: [] }; await render(); expect(ids()).toEqual([organizationChatId("b", "same")]);
+  props = { ...props, tabs: [] }; await render(); expect(result.tabs).toEqual([]);
 });
-it("keeps and closes background references, retaining per-user references through remount", async () => {
+it("keeps references per user through remount", async () => {
   await render(); await visit("b");
-  await act(async () => result.updateInactive(result.tabs[0], "keep"));
-  expect(result.tabs[0].preview).toBe(false);
   await act(async () => root.unmount()); root = createRoot(node); await render();
-  expect(ids()).toHaveLength(2); expect(result.tabs[0].preview).toBe(false);
-  await act(async () => result.updateInactive(result.tabs[0], "close")); expect(ids()).toEqual([organizationChatId("b", "same")]);
+  expect(ids()).toEqual([organizationChatId("b", "same")]);
   props = { ...props, userId: "different", ready: false }; await render(); expect(result.tabs).toEqual([]);
   props = { ...props, userId: "user" }; await render(); expect(ids()).toEqual([organizationChatId("b", "same")]);
 });
 it("hides inaccessible or moved spaces and does not retain a deleted chat", async () => {
   await render(); await visit("b");
-  props = { ...props, projects: projects.filter(item => item.id !== "a") }; await render(); expect(ids()).toEqual([organizationChatId("b", "same")]);
-  props = { ...props, projects: projects.map(item => item.id === "a" ? { ...item, orgId: "two" } : item), orgKey: "two", ready: false }; await render(); expect(result.tabs).toEqual([]);
-  props = { ...props, orgKey: "one", ready: true, conversations: [{ ...chat(), lifecycleStatus: "deleted" }] }; await render(); expect(result.tabs).toEqual([]);
+  props = { ...props, projects: projects.filter(item => item.id !== "b") }; await render(); expect(result.tabs).toEqual([]);
+  props = { ...props, projects: projects.map(item => item.id === "b" ? { ...item, orgId: "two" } : item), ready: false }; await render(); expect(result.tabs).toEqual([]);
+  props = { ...props, projects, ready: true, conversations: [{ ...chat(), lifecycleStatus: "deleted" }] }; await render(); expect(result.tabs).toEqual([]);
 });
 it("remembers only matching owned views, and clears a view when Chat is explicitly selected", async () => {
   props.activeTab = { id: "diff-a", kind: "gitDiff", workspaceOwner: { userId: "user", projectId: "a", conversationId: "same" } } as WorkspaceTabState;
   await render(); expect(result.tabs[0].viewTabId).toBe("diff-a");
-  await visit("b"); expect(result.tabs[0].viewTabId).toBe("diff-a"); expect(result.tabs[1].viewTabId).toBeUndefined();
+  await visit("b"); expect(result.tabs[0].viewTabId).toBeUndefined();
+  props = { ...props, projectId: "a", ready: false }; await render(); expect(result.tabs[0].viewTabId).toBe("diff-a");
   await visit("a"); expect(result.tabs[0].viewTabId).toBeUndefined();
 });
 it("recovers from malformed session storage without trusting stored IDs or extra data", async () => {
