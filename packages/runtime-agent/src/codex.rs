@@ -1933,6 +1933,7 @@ impl CodexClient {
                 self.workspace_dir(),
             )?;
         }
+        hold_code_mode_cells_for_browser_steps(&mut config);
         scope_browser_capabilities_from_shell_environment(
             &mut config.permissions.shell_environment_policy,
         );
@@ -3928,6 +3929,28 @@ fn install_browser_mcp_servers(
         .set(servers)
         .context("failed to install the bounded browser MCP server set")?;
     Ok(shared_browser_process_groups)
+}
+
+/// A code-mode cell that waits on a browser tool hands the turn back to the model once the cell's
+/// yield time is up (Codex's default is 30 s), although the step is still running. Each hand-back
+/// is one more model call with the whole context, which can only wait again: a step that ran for two
+/// minutes cost four more calls. A Personal or Shared Browser step answers within its
+/// server's tool timeout (the step's own time, or the person's answer at a prompt), so in such a
+/// turn a cell waits that long before it yields. Other turns keep Codex's default.
+fn hold_code_mode_cells_for_browser_steps(config: &mut Config) {
+    let longest_step = [
+        PERSONAL_BROWSER_MCP_SERVER_NAME,
+        SHARED_BROWSER_MCP_SERVER_NAME,
+    ]
+    .into_iter()
+    .filter_map(|name| config.mcp_servers.get().get(name))
+    .filter_map(|server| server.tool_timeout_sec)
+    .max();
+    if let Some(timeout) = longest_step {
+        let millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        config.code_mode.default_exec_yield_time_ms =
+            config.code_mode.default_exec_yield_time_ms.max(millis);
+    }
 }
 
 /// Makes the grants' broker a granted turn's only MCP server, replacing the project's own, and
@@ -7112,6 +7135,65 @@ mod tests {
         granted_turn(vec![leased_grant()], "grant-token-secret")
             .expect("grants the broker serves")
             .expect("a granted turn")
+    }
+
+    /// A code-mode cell that waits on a browser step is not handed back to the model while the step
+    /// runs: in a Shared or Personal Browser turn its yield time outlasts the server's tool timeout.
+    /// Any other turn keeps Codex's own default.
+    #[tokio::test]
+    async fn a_browser_turns_cells_wait_for_their_step_without_another_model_call() {
+        let home = tempfile::tempdir().expect("codex home");
+        let load = || {
+            load_hardened_codex_config(
+                home.path(),
+                Vec::new(),
+                ConfigOverrides {
+                    cwd: Some(home.path().to_path_buf()),
+                    ..Default::default()
+                },
+            )
+        };
+        let transport = || McpServerTransportConfig::StreamableHttp {
+            url: "http://127.0.0.1/contract-only".to_string(),
+            bearer_token_env_var: None,
+            http_headers: None,
+            env_http_headers: None,
+            http_headers_helper: None,
+        };
+        let ordinary = load()
+            .await
+            .expect("config")
+            .code_mode
+            .default_exec_yield_time_ms;
+        assert!(ordinary < 60_000, "{ordinary}");
+        for (name, server, expected) in [
+            (
+                SHARED_BROWSER_MCP_SERVER_NAME,
+                shared_browser_mcp_server_config(transport(), None),
+                180_000,
+            ),
+            (
+                PERSONAL_BROWSER_MCP_SERVER_NAME,
+                personal_browser_mcp_server_config(transport()),
+                40_000,
+            ),
+        ] {
+            let mut config = load().await.expect("config");
+            config
+                .mcp_servers
+                .set(HashMap::from([(name.to_string(), server)]))
+                .expect("servers");
+            hold_code_mode_cells_for_browser_steps(&mut config);
+            assert_eq!(
+                config.code_mode.default_exec_yield_time_ms, expected,
+                "{name}"
+            );
+            assert!(expected > ordinary);
+        }
+        // No browser server: Codex's default stays.
+        let mut config = load().await.expect("config");
+        hold_code_mode_cells_for_browser_steps(&mut config);
+        assert_eq!(config.code_mode.default_exec_yield_time_ms, ordinary);
     }
 
     #[tokio::test]

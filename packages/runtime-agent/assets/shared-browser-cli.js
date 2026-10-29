@@ -130,6 +130,78 @@ let actionOrdinal = 0;
 // The browser could not be reached over CDP, or the run's page target is gone.
 class BrowserUnavailableError extends Error {}
 
+// One step's time. A page can keep a step busy far longer than any step needs:
+// a script that holds the page, or a load that never settles. The turn would
+// then wait with the view and its line frozen. So a step's own time ends after
+// STEP_TIME_MS, and the step answers with the page as it is (pageAsItIs). A
+// prompt waiting for the person is not the step's time: the clock stops while
+// one waits, and the approval keeps its own deadline. Once the time is up the
+// step takes no further action (assertStepOnTime), so nothing it was about to
+// do happens after it answered.
+const STEP_TIME_MS = 20_000;
+// How long reading the page as it is may take once the step's time is up.
+const LATE_READ_MS = 8_000;
+class StepTimeUp extends Error {
+  constructor() {
+    super("This step's time was up, so it took no further action.");
+  }
+}
+function createStepClock(limitMs) {
+  let left = limitMs;
+  // "idle" before the step starts, "running" while its time counts, "paused"
+  // while a prompt waits, and "over" once it answered or its time ran out.
+  let state = "idle";
+  let startedAt = 0;
+  let timer = null;
+  let prompts = 0;
+  let up = false;
+  let expire;
+  const expired = new Promise((resolve) => {
+    expire = resolve;
+  });
+  const run = () => {
+    state = "running";
+    startedAt = Date.now();
+    timer = setTimeout(() => {
+      state = "over";
+      up = true;
+      expire();
+    }, Math.max(left, 0));
+  };
+  const pause = () => {
+    clearTimeout(timer);
+    left -= Date.now() - startedAt;
+    state = "paused";
+  };
+  return {
+    // Resolves when the step's time is up; never while a prompt waits.
+    expired,
+    isUp: () => up,
+    start() {
+      if (state === "idle") run();
+    },
+    stop() {
+      clearTimeout(timer);
+      state = "over";
+    },
+    // Runs `wait` (a prompt) with the clock stopped.
+    async whilePersonAnswers(wait) {
+      if (prompts++ === 0 && state === "running") pause();
+      try {
+        return await wait();
+      } finally {
+        if (--prompts === 0 && state === "paused") run();
+      }
+    },
+  };
+}
+const stepClock = createStepClock(STEP_TIME_MS);
+function assertStepOnTime() {
+  if (stepClock.isUp()) {
+    throw new StepTimeUp();
+  }
+}
+
 // The run's page as resolveExpectedPage last found it.
 let resolvedPage = null;
 // The page this command acts on: the page the person chose for the run
@@ -341,14 +413,15 @@ const FAILED_STEP_KINDS = new Set(["search", "submit"]);
 let stepKind = null;
 
 async function ensureSiteApproved(rawUrl, label, { destinationUrl = null } = {}) {
+  assertStepOnTime();
   // A site the run already uses, or routine browsing, opens without a prompt.
   const prompts = !siteApproved(rawUrl);
-  const origin = await approvalProtocol.ensureOriginApproved(
+  const origin = await stepClock.whilePersonAnswers(() => approvalProtocol.ensureOriginApproved(
     rawUrl,
     () => tabLabel(typeof label === "function" ? label() : label),
     inAgentTab() ? activePageId : null,
     { destinationUrl },
-  );
+  ));
   if (prompts) {
     stepAllowedAtPrompt = true;
   }
@@ -380,18 +453,19 @@ function refuseUnlessReadingStep(readingStep) {
 }
 
 async function allowStepOnce(details, options) {
+  assertStepOnTime();
   // Routine browsing takes a routine step without a prompt; every other step
   // waits for the person's answer.
   const prompts = !(options?.routine === true && approvalProtocol.routineBrowsingAllowed());
-  const request = inAgentTab()
-    ? await approvalProtocol.allowOnce({
+  const request = await stepClock.whilePersonAnswers(() => (inAgentTab()
+    ? approvalProtocol.allowOnce({
       ...details,
       label: tabLabel(details.label),
       payloadFingerprint: approvalProtocol.sha256(
         JSON.stringify({ tabId: activePageId, payload: details.payloadFingerprint }),
       ),
     }, options)
-    : await approvalProtocol.allowOnce(details, options);
+    : approvalProtocol.allowOnce(details, options)));
   if (prompts) {
     stepAllowedAtPrompt = true;
   }
@@ -2866,6 +2940,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
     // The tab opens blank in the run's own browser context, where every
     // viewer sees it, and is recorded before anything asks or loads, so the
     // end of the run closes it whatever happens next.
+    assertStepOnTime();
     const page = await runPage.context().newPage();
     const tabId = await cdpTargetIdForPage(page).catch(() => "");
     if (!validTabId(tabId) || tabId === EXPECTED_BROWSER_PAGE_ID) {
@@ -2891,6 +2966,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
       const opened = await resolveExpectedPage(browser);
       const documents = await guardStepDocuments(opened);
       try {
+        assertStepOnTime();
         emitAction({ type: "navigate", label: `Open a tab: ${url}`, url });
         loading = true;
         await opened.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -2933,6 +3009,78 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
   }
 
   throw new Error("Unsupported Shared Browser method/path combination");
+}
+
+// The step within its time (STEP_TIME_MS): its own answer, or, once its time is
+// up, the page as it is.
+async function executeWithinStepTime(browser, browserSession, method, requestPath, body) {
+  stepClock.start();
+  const step = execute(browser, browserSession, method, requestPath, body);
+  const finished = await Promise.race([
+    step.then((value) => ({ value }), (error) => ({ error })),
+    stepClock.expired.then(() => null),
+  ]);
+  stepClock.stop();
+  if (finished) {
+    if ("error" in finished) throw finished.error;
+    return finished.value;
+  }
+  // What the step still does stops at its next action (assertStepOnTime), and
+  // its own answer no longer reaches anyone.
+  step.catch(() => {});
+  return await pageAsItIs(browser);
+}
+
+// The answer of a step whose time ran out: the page as it is now, read like a
+// snapshot within LATE_READ_MS, or its address alone when the page is too busy
+// to be read. It says that the step's time ran out, so Octo checks what the step
+// did before it acts again, and its activity is a read of the page: nothing new
+// on the turn's line.
+async function pageAsItIs(browser) {
+  const read = (async () => snapshotForResult(await resolveExpectedPage(browser)))();
+  read.catch(() => {});
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), LATE_READ_MS);
+  });
+  let view;
+  try {
+    view = (await Promise.race([read, late])) ?? addressOnly(resolvedPage);
+  } finally {
+    clearTimeout(timer);
+  }
+  emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
+  const note = `This step was still running after ${STEP_TIME_MS / 1000} seconds, so it stopped where it was. This is the page as it is now: check what the step did before you act again.`;
+  return withActivity(
+    { ...view, stepTimedOut: true, message: [view.message, note].filter(Boolean).join(" ") },
+    stepActivity(resolvedPage, "snapshot", null),
+  );
+}
+
+// The address alone of a page too busy to be read, checked and masked as a
+// snapshot's is. It lists no text and no controls, so no action can use it.
+function addressOnly(page) {
+  if (!page || page.isClosed()) {
+    throw new Error("The page could not be read in time, so nothing was read. Take a snapshot.");
+  }
+  if (isBlankPage(page)) {
+    return blankPageResult(page);
+  }
+  refuseLinkOnlyPage(page);
+  if (!siteApproved(page.url())) {
+    return approvalProtocol.redactedPageResult(tabField());
+  }
+  return {
+    snapshotId: snapshotFingerprint(page.url(), []),
+    browserPageId: EXPECTED_BROWSER_PAGE_ID,
+    ...tabField(),
+    url: redaction.redactUrl(page.url()).text,
+    title: "",
+    visibleText: "",
+    secretScreen: false,
+    interactiveElements: [],
+    message: "The page is still busy, so it could not be read yet. Take a snapshot in a moment.",
+  };
 }
 
 async function execute(browser, browserSession, method, requestPath, body) {
@@ -3210,6 +3358,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       throw new Error("Human input targets must be observed editable fields");
     }
     await clearHumanInputHighlights(page);
+    assertStepOnTime();
     for (const entry of selected) {
       await entry.locator.evaluate((element) => {
         // Fixed native DOM styling follows scrolling/reflow. No values or
@@ -3282,6 +3431,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (!inAgentTab()) {
       approvalProtocol.clearWithholdNextDocument();
     }
+    assertStepOnTime();
     emitAction({ type: "navigate", label: `Go to ${url}`, url });
     await page.goto(revalidatedUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await settleAfterAction(page);
@@ -3354,6 +3504,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       : stepPostOrigins(readingStep, sourceOrigin, clickSubmission, destination));
     const box = target.description.box;
     const size = await viewport(page);
+    assertStepOnTime();
     emitAction({
       type: "click",
       label: `Click "${controlLabel(target.description)}"`,
@@ -3454,6 +3605,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       submitting ? "target-or-page" : "none",
     );
     assertSafeTypeTarget(target.description);
+    assertStepOnTime();
     emitAction({
       type: "type",
       label: `Type into "${controlLabel(target.description)}"`,
@@ -3475,8 +3627,10 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     documents?.limitFormPosts(freeSearch
       ? FREE_SEARCH_POST_ORIGINS
       : stepPostOrigins(readingStep, sourceOrigin, typeSubmission, destination));
+    assertStepOnTime();
     await target.locator.fill(body.text);
     if (submitting) {
+      assertStepOnTime();
       await target.locator.press("Enter");
       await settleAfterAction(page);
       page = await resolveExpectedPage(browser);
@@ -3579,6 +3733,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     documents?.limitFormPosts(freeSearch
       ? FREE_SEARCH_POST_ORIGINS
       : stepPostOrigins(readingStep, sourceOrigin, pressSubmission, destination));
+    assertStepOnTime();
     emitAction({
       type: "type",
       label: `Press ${pressKey}`,
@@ -3604,6 +3759,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     assertSameOrigin(page.url(), sourceOrigin);
     const x = Number.isFinite(body.x) ? body.x : 0;
     const y = Number.isFinite(body.y) ? body.y : 0;
+    assertStepOnTime();
     emitAction({ type: "scroll", label: "Scroll", url: page.url() });
     await page.mouse.wheel(x, y);
     await page.waitForTimeout(200);
@@ -3649,7 +3805,7 @@ async function main() {
     const browserSession = await denyDownloads(browser);
     let result;
     try {
-      result = await execute(browser, browserSession, method, requestPath, body || {});
+      result = await executeWithinStepTime(browser, browserSession, method, requestPath, body || {});
     } catch (error) {
       if (!(error instanceof BrowserUnavailableError) && (await browserWentAway(browser))) {
         // The message is kept, so an approval code in it still ends the run.

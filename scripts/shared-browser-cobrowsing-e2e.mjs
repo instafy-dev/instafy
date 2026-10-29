@@ -893,6 +893,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     // (scripts/shared-browser-form-submission-e2e.mjs).
     const { runSharedBrowserFormSubmissionFixture } = await import("./shared-browser-form-submission-e2e.mjs");
     console.log(JSON.stringify(await runSharedBrowserFormSubmissionFixture(), null, 2));
+    // And that one step answers within its time, while a prompt waits as long
+    // as the person takes (scripts/shared-browser-step-time-e2e.mjs).
+    const { runSharedBrowserStepTimeFixture } = await import("./shared-browser-step-time-e2e.mjs");
+    console.log(JSON.stringify(await runSharedBrowserStepTimeFixture(), null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
     fs.writeFileSync(path.join(resultDirectory, "result.json"), `${JSON.stringify({ status: "failed", fixtureVersion: 1 })}\n`);

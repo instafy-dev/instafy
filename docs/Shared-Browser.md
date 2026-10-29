@@ -958,6 +958,27 @@ that follow the last answer (180 seconds by default), well inside the
 600-second turn cap. `INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS` overrides the
 window for tests, from 100 ms to 300 seconds; production never sets it.
 
+A step's own work has one time limit: 20 seconds, not counting a prompt that
+waits for the person (the clock stops while one is on screen). A page can hold
+a step far longer, with a script that keeps the page busy or a load that never
+settles, and the view and the turn's line would freeze while the step waited.
+When the time is up, the step takes no further action (no prompt, click, key,
+typing or navigation it had not started) and answers with the page as it is: a
+snapshot read within 8 more seconds, or, when the page is too busy to be read,
+its masked address alone, with no text and no controls. The answer carries
+`stepTimedOut: true` and a note that tells Octo to check what the step did
+before it acts again. It reads as a page read on the turn's line, so it adds
+no new wording there. `scripts/shared-browser-step-time-e2e.mjs` shows both
+sides in Chromium: a search whose results page keeps the page busy for a
+minute answers after about 28 seconds, and a prompt answered after 23 seconds
+is waited for.
+
+In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
+step yields to the model only after the browser server's tool timeout (180
+seconds for the Shared Browser, 40 for the Personal Browser), not after Codex's
+default 30 seconds. Each earlier yield was one more model call, with the whole
+context, that could only wait for the same step again.
+
 A declined site is the one denial a run survives, once. The site stays closed
 for the rest of the run without another prompt (the run's state lists it in
 `declinedOrigins`), and the tool tells Octo to take another route that fits the
