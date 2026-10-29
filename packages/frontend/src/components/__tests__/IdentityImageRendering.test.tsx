@@ -32,11 +32,13 @@ describe("identity image rendering", () => {
     expect(normalizeIdentityImageSrc(src)).toBeNull();
   });
 
+  // A space falls back to its initial; a bot to its hatchling (reviewer is 3),
+  // never an initial (docs/Brand.md, "Octo's hatchlings").
   const avatars = [
-    ["bot", (src: string) => <AgentAvatar agent={{ handle: "reviewer", displayName: "<Review>" }} imageSrc={src} />],
-    ["space", (src: string) => <SpaceIdentity name="<Review>" avatarUrl={src} />],
+    ["bot", (src: string) => <AgentAvatar agent={{ handle: "reviewer", displayName: "<Review>" }} imageSrc={src} />, "3", ""],
+    ["space", (src: string) => <SpaceIdentity name="<Review>" avatarUrl={src} />, null, "<"],
   ] as const;
-  it.each(avatars)("renders %s upload previews as URLs, falls back safely, and accepts a replacement", async (_kind, avatar) => {
+  it.each(avatars)("renders %s upload previews as URLs, falls back safely, and accepts a replacement", async (_kind, avatar, hatchling, text) => {
     await render(avatar('blob:https://app.example/preview"><script>alert(1)</script>'));
     const img = container.querySelector("img")!;
     expect(img.getAttribute("src")).toContain("%22%3E%3Cscript%3E");
@@ -44,7 +46,8 @@ describe("identity image rendering", () => {
     expect(container.querySelector("script")).toBeNull();
     await act(async () => { img.dispatchEvent(new Event("error")); });
     expect(container.querySelector("img")).toBeNull();
-    expect(container.textContent).toBe("<");
+    expect(container.querySelector('svg[data-ai-face="hatchling"]')?.getAttribute("data-hatchling") ?? null).toBe(hatchling);
+    expect(container.textContent).toBe(text);
     expect(container.querySelector("script")).toBeNull();
     await render(avatar("https://images.example/replacement.png"));
     expect(container.querySelector("img")?.getAttribute("src")).toBe("https://images.example/replacement.png");

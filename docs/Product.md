@@ -711,6 +711,23 @@ them by runtime), the Shared Browser's participant list and agent profile cards.
 sentences never carry it; there the rounded square face says it. AI faces and controls with an
 accessible name add ", AI" to it, so a screen reader hears "Pia, AI".
 
+Every AI other than Octo that has no picture of its own wears one of Octo's hatchlings on Octo's
+tile ([Octo's hatchlings](Brand.md#octos-hatchlings)), and no AI face carries a gradient or an
+initial. Plan helpers and saved agents wear one of eight numbered faces. A row's face comes from
+the seed it carries, on every surface that draws the row and on every reload. A chat draws the
+viewer's own saved agents from their current profile, so a newly picked face shows there at
+once; another member's agent keeps the face each of its rows was stamped with, and only its
+profile card shows a face picked since. A plan's workstream chips show each helper's face before
+its task label. Stacks of faces (the typing row, a thread's branch row and the header roster)
+never draw one face twice: a repeat folds into the stack's count, the typing row's "3 working"
+or a "+N". Two AIs that share a handle, such as two members' @pia, each show their own face in
+the transcript. Two members' Octos are two speakers in the same way: back to back, each one's
+reply shows Octo's tile and name. An AI known only by its handle (one a chat names that the
+viewer has no saved agent for, in the mention picker, the header roster and the participants
+drawer alike; the AI on a mention chip's profile card; or a thread's owner before any of its rows
+carries a face) wears the hollow hatchling, unless it is Octo or, in a chat, one of the viewer's
+own saved agents.
+
 The Studio corner-radius scale uses 6px for compact search scope chips, 8px for menu rows,
 12px for form controls and profile actions, and 16px for cards and dialogs. People's avatars
 remain circular, every AI's face (Octo's included) is a rounded square tile

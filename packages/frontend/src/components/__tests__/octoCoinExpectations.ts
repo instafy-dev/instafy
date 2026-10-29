@@ -62,6 +62,35 @@ export function expectAvatarCoinLightEdge(face: Element | null | undefined, allo
   return tokens;
 }
 
+/**
+ * Octo's tile without Octo (docs/Brand.md, "Octo's hatchlings"): what every
+ * other AI's hatchling or picture sits on. It never carries Octo's hooks, and
+ * never a gradient or an initial.
+ */
+export function expectHatchlingTile(tile: Element | null | undefined) {
+  expectAiTile(tile);
+  expectAvatarCoinLightEdge(tile);
+  const tokens = classTokens(tile);
+  expect(tokens).toEqual(expect.arrayContaining(OCTO_COIN_CLASS.split(" ")));
+  // In dark only the hairline edges it, as it does Octo's.
+  expect(tokens.filter((token) => /^dark:(border|shadow|ring|outline)/.test(token))).toEqual(
+    AI_TILE_EDGE_TOKENS.filter((token) => token.startsWith("dark:")),
+  );
+  expect(tile!.hasAttribute("data-octo-coin")).toBe(false);
+  expect(tile!.querySelector(".octo-mark")).toBeNull();
+  expect((tile as HTMLElement).style.backgroundImage).toBe("");
+  expect(tile!.textContent).toBe("");
+  return tokens;
+}
+
+/** The hatchling an AI's tile draws: "1" to "8", or "unknown" for the hollow face. */
+export function expectHatchling(tile: Element | null | undefined) {
+  expectHatchlingTile(tile);
+  const drawing = tile!.querySelector(':scope > svg[data-ai-face="hatchling"]');
+  expect(drawing).not.toBeNull();
+  return drawing!.getAttribute("data-hatchling");
+}
+
 export function expectCanonicalOctoCoin(coin: Element | null | undefined) {
   expect(coin).toBeInstanceOf(Element);
   expect(coin!.hasAttribute("data-octo-coin")).toBe(true);

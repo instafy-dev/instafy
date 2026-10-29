@@ -2,9 +2,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { expectHatchling } from "../../../../components/__tests__/octoCoinExpectations";
 import type { RunRecord } from "../../../../types";
 import type { ChatMessage } from "../../types";
 import { MultiAgentPlanEntry, MultiAgentRunsContext } from "../MultiAgentPlanEntry";
+import { ViewerAgentsContext } from "../viewerAgents";
 
 const controller = vi.hoisted(() => ({ fetchPlanGroupStatus: vi.fn(), cancelPlanGroup: vi.fn() }));
 vi.mock("../../../../services/runtimeController/jobs", () => controller);
@@ -299,6 +301,84 @@ describe("multi-agent lifecycle from persisted runs", () => {
       await render([run("poet09", "success"), stopped()]);
       expect(status("poet10")).toContain("status failed");
       expect(notice()).toBeNull();
+    });
+  });
+
+  describe("the legend", () => {
+    const face = (handle: string) =>
+      container.querySelector(`[data-agent-handle="@${handle}"] > [data-testid="multi-agent-chip-face"]`);
+    const stampedRun = (handle: string, status: RunRecord["status"], avatarSeed: string) => {
+      const value = run(handle, status);
+      value.metadata = { ...value.metadata, agent: { handle, avatarSeed } };
+      return value;
+    };
+    const update = (handle: string, jobId: string, avatarSeed: string): ChatMessage => ({
+      id: `${jobId}-update`, role: "assistant", content: "", timestamp: 2, metadata: {
+        jobId, kind: "update", agent: { handle, avatarSeed },
+        multiAgentPlan: { parentJobId: "parent-job", groupId: "parent-job-group", role: "worker" } },
+    });
+
+    it("puts each lane's face before its label: the face its run is stamped with, else its handle's", async () => {
+      await render([stampedRun("poet09", "success", "hatchling:3"), run("poet10", "queued")], [], plan, undefined, {
+        ...details, agents: [{ handle: "poet09", label: "Refrain poem" }, { handle: "poet10", label: "Moon poem" }],
+      });
+      expect(expectHatchling(face("poet09"))).toBe("3");
+      // A lane from before stamps wears the face its rows do: its handle's (poet10 is 1).
+      expect(expectHatchling(face("poet10"))).toBe("1");
+      // The chip's label names the lane, so the face beside it is decorative.
+      expect(face("poet09")?.getAttribute("aria-hidden")).toBe("true");
+      expect(face("poet09")?.nextElementSibling?.textContent).toBe("Refrain poem");
+      expect(container.querySelector('[data-agent-handle="@poet09"]')?.textContent).toBe("Refrain poem");
+      // Only lanes carry the legend; the lead's chip is its status alone.
+      expect(container.querySelectorAll('[data-testid="multi-agent-chip-face"]')).toHaveLength(2);
+    });
+
+    it("takes a lane's face from the plan-group status before any loaded stamp", async () => {
+      // poet10 has no run in the feed, so the card reads the group's status.
+      controller.fetchPlanGroupStatus.mockResolvedValue({ groupId: "parent-job-group", workers: [
+        { jobId: "parent-job-poet09-job", handle: "poet09", status: "completed", avatarSeed: "hatchling:6" },
+        { jobId: "job-ten", handle: "poet10", status: "leased", avatarSeed: "hatchling:2" },
+      ] });
+      await render([stampedRun("poet09", "success", "hatchling:4")], [update("poet10", "job-ten", "hatchling:5")]);
+      expect(controller.fetchPlanGroupStatus).toHaveBeenCalledWith("parent-job-group", expect.any(AbortSignal));
+      expect(expectHatchling(face("poet09"))).toBe("6");
+      expect(expectHatchling(face("poet10"))).toBe("2");
+    });
+
+    it("draws a lane that ran as the viewer's own saved agent from its current profile, its id kept under a status seed", async () => {
+      // poet09 ran as the viewer's bot, stamped with its id and the face it
+      // wore then; its owner has picked another face since. poet10 has no run
+      // in the feed, so the card reads the group's status, whose seed for
+      // poet09 is the one the run carries.
+      const own = run("poet09", "success");
+      own.metadata = { ...own.metadata, agent: { handle: "poet09", id: "own-bot", avatarSeed: "hatchling:4" } };
+      controller.fetchPlanGroupStatus.mockResolvedValue({ groupId: "parent-job-group", workers: [
+        { jobId: "parent-job-poet09-job", handle: "poet09", status: "completed", avatarSeed: "hatchling:4" },
+        { jobId: "job-ten", handle: "poet10", status: "leased", avatarSeed: "hatchling:2" },
+      ] });
+      await act(async () => root.render(
+        <ViewerAgentsContext.Provider value={new Map([["own-bot", { avatarSeed: "hatchling:7", handle: "poet09" }]])}>
+          <MultiAgentRunsContext.Provider value={{ runs: { [own.id]: own }, scopeKey: "viewer-project-conversation" }}>
+            <MultiAgentPlanEntry details={details} planMessage={plan} conversationMessages={[]}
+              conversationLocalId="local" onOpenWorkerRunTrace={openRun} />
+          </MultiAgentRunsContext.Provider>
+        </ViewerAgentsContext.Provider>,
+      ));
+      expect(controller.fetchPlanGroupStatus).toHaveBeenCalled();
+      expect(expectHatchling(face("poet09"))).toBe("7");
+      // A helper is no one's saved agent: its status seed.
+      expect(expectHatchling(face("poet10"))).toBe("2");
+    });
+
+    it("keeps the loaded stamps when the status comes from a controller from before faces", async () => {
+      controller.fetchPlanGroupStatus.mockResolvedValue({ groupId: "parent-job-group", workers: [
+        { jobId: "parent-job-poet09-job", handle: "poet09", status: "completed" },
+        { jobId: "job-ten", handle: "poet10", status: "leased", avatarSeed: null },
+      ] });
+      await render([stampedRun("poet09", "success", "hatchling:4")], [update("poet10", "job-ten", "hatchling:5")]);
+      expect(controller.fetchPlanGroupStatus).toHaveBeenCalled();
+      expect(expectHatchling(face("poet09"))).toBe("4");
+      expect(expectHatchling(face("poet10"))).toBe("5");
     });
   });
 

@@ -169,6 +169,7 @@ export function ChatBubbleRow({
               data-chat-speaker-kind={speakerMarker.kind}
               data-agent-avatar-seed={assistantSpeakerMarker?.avatarSeed}
               data-agent-handle={assistantSpeakerMarker?.handle}
+              data-agent-id={assistantSpeakerMarker?.agentId}
               data-human-avatar-seed={humanSpeakerMarker?.avatarSeed ?? undefined}
               data-human-label={humanSpeakerMarker?.label}
               data-testid={

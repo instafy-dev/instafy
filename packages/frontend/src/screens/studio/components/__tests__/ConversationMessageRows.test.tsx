@@ -577,6 +577,48 @@ describe("ConversationMessageRows", () => {
     expect(speakerIdentityNodes).toEqual(["chat-speaker-marker", "chat-speaker-inline"]);
   });
 
+  it("marks the row's speaker with its agent id and its seed as stamped", async () => {
+    const message = createMessage({
+      id: "assistant-pia",
+      role: "assistant",
+      content: "Here is the summary.",
+      timestamp: 1,
+      metadata: { agent: { handle: "pia", id: "own-pia", avatarSeed: "hatchling:2" } },
+    });
+    await act(async () => {
+      root.render(
+        <ConversationMessageRows
+          messages={[message]}
+          currentUserId="user-1"
+          chatClientSessionId="session-1"
+          projectId="project-1"
+          runtimeId={null}
+          conversationLocalId="conversation-local"
+          conversationControllerId="conversation-controller"
+          firstPlanMessageId={null}
+          humanLabelByUserId={new Map()}
+          runAgentIdentityByRunId={new Map()}
+          runAgentHandleByRunId={new Map()}
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+          onRequestActions={vi.fn()}
+          onRequestActionsAtPoint={vi.fn()}
+          onCancelTerminalCommand={null}
+          onMessageContextMenu={vi.fn()}
+        />,
+      );
+    });
+    // The marker names the exact agent the row was written as, not only its
+    // handle, and carries its seed as stamped.
+    const marker = container.querySelector('[data-testid="chat-speaker-marker"]');
+    expect(marker?.getAttribute("data-agent-id")).toBe("own-pia");
+    expect(readSpeakerMarker(marker)).toEqual({
+      kind: "assistant",
+      handle: "pia",
+      avatarSeed: "hatchling:2",
+    });
+  });
+
   it("names the human author at an assistant-to-human boundary", async () => {
     const assistantMessage = createMessage({
       id: "assistant-response",
@@ -1319,6 +1361,74 @@ describe("ConversationMessageRows", () => {
     expect(
       inlineSpeakers.map((node) => node.querySelector("[data-agent-handle]")?.getAttribute("data-agent-handle")),
     ).toEqual(["octo", "reviewer"]);
+  });
+
+  it("gives two AIs that share a handle each its own face, and keeps one AI's rows under one", async () => {
+    const reply = (id: string, agent: Record<string, unknown>, multiAgentPlan?: Record<string, unknown>) =>
+      createMessage({ id, role: "assistant", content: `Answer ${id}.`, timestamp: 1, metadata: { agent, ...(multiAgentPlan ? { multiAgentPlan } : {}) } });
+    const renderRows = async (messages: ChatMessage[]) => {
+      await act(async () => {
+        root.render(
+          <ConversationMessageRows
+            messages={messages}
+            currentUserId="user-1"
+            chatClientSessionId="session-1"
+            projectId="project-1"
+            runtimeId={null}
+            conversationLocalId="conversation-local"
+            conversationControllerId="conversation-controller"
+            firstPlanMessageId={null}
+            humanLabelByUserId={new Map()}
+            runAgentIdentityByRunId={new Map()}
+            runAgentHandleByRunId={new Map()}
+            renderAssistantAvatar={(_metadata, identity) => (
+              <span data-testid="assistant-avatar" data-agent-id={identity?.id} data-seed={identity?.avatarSeed} />
+            )}
+            assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+            onRequestActions={vi.fn()}
+            onRequestActionsAtPoint={vi.fn()}
+            onCancelTerminalCommand={null}
+            onMessageContextMenu={vi.fn()}
+          />,
+        );
+      });
+      return Array.from(container.querySelectorAll('[data-testid="assistant-avatar"]'));
+    };
+
+    // Two members' @pia, back to back: two speakers, two faces.
+    const members = await renderRows([
+      reply("own", { handle: "pia", id: "own-pia", avatarSeed: "hatchling:2" }),
+      reply("peer", { handle: "pia", id: "peer-pia", avatarSeed: "hatchling:5" }),
+      reply("peer-again", { handle: "pia", id: "peer-pia", avatarSeed: "hatchling:5" }),
+    ]);
+    expect(members.map((face) => face.getAttribute("data-agent-id"))).toEqual(["own-pia", "peer-pia"]);
+    expect(container.querySelectorAll('[data-testid="chat-speaker-inline"]')).toHaveLength(2);
+    // Two members' Octos (each member's own Octo profile) are two speakers too.
+    const octos = await renderRows([
+      reply("octo-a", { handle: "octo", id: "octo-of-member-a", avatarSeed: "octo" }),
+      reply("octo-b", { handle: "octo", id: "octo-of-member-b", avatarSeed: "octo" }),
+    ]);
+    expect(octos.map((face) => face.getAttribute("data-agent-id"))).toEqual(["octo-of-member-a", "octo-of-member-b"]);
+    // Two plans' @reviewer, stamped apart.
+    const helpers = await renderRows([
+      reply("a", { handle: "reviewer", avatarSeed: "hatchling:2" }),
+      reply("b", { handle: "reviewer", avatarSeed: "hatchling:5" }),
+    ]);
+    expect(helpers.map((face) => face.getAttribute("data-seed"))).toEqual(["hatchling:2", "hatchling:5"]);
+    // The same two as a plan's helper rows draw them: on the avatar rail.
+    const railHelpers = await renderRows([
+      reply("rail-a", { handle: "reviewer", avatarSeed: "hatchling:2" }, { groupId: "group-1", role: "worker" }),
+      reply("rail-b", { handle: "reviewer", avatarSeed: "hatchling:5" }, { groupId: "group-2", role: "worker" }),
+    ]);
+    expect(railHelpers.map((face) => face.getAttribute("data-seed"))).toEqual(["hatchling:2", "hatchling:5"]);
+    // One saved agent whose face was picked again between its rows, and one
+    // row that names it without its id, are still one speaker.
+    const oneAgent = await renderRows([
+      reply("before", { handle: "pia", id: "own-pia", avatarSeed: "hatchling:2" }),
+      reply("after", { handle: "pia", id: "own-pia", avatarSeed: "hatchling:7" }),
+      reply("no-id", { handle: "pia" }),
+    ]);
+    expect(oneAgent).toHaveLength(1);
   });
 
   it("restores visible speaker identity for agent job thread rows after a short user turn", async () => {

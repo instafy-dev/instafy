@@ -259,7 +259,7 @@ test("the expanded browser UI inventory has a bounded suite budget without relax
   assert.match(config, /^\s+forbidOnly: true,$/m);
   assert.match(config, /^\s+testMatch: REQUIRED_BROWSER_UI_SPECS,$/m);
   assert.match(config, /required-browser-reporter\.mjs", \{ lane: "browser-ui" \}/);
-  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 53);
+  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 55);
   // Each part keeps the lane's former 40-minute job budget; the aggregate has five.
   for (const key of partKeys) {
     assert.match(jobSource(key), /\|\| 'ubuntu-24\.04' }}/);

@@ -2,9 +2,10 @@
 import { act, useState, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { classTokens, expectAiTile } from "../../../../components/__tests__/octoCoinExpectations";
+import { classTokens, expectAiTile, expectCanonicalOctoCoin, expectHatchling } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
-import { AgentProfileModal } from "../AgentProfileModal";
+import type { Hatchling } from "../../../../utils/aiFace";
+import { AgentProfileModal, type AgentProfileModalMode } from "../AgentProfileModal";
 
 const onSave = vi.fn();
 const onClose = vi.fn();
@@ -88,5 +89,87 @@ describe("bot profile picture editor", () => {
     expect(document.querySelector<HTMLButtonElement>('button[aria-label="Change bot picture"]')?.disabled).toBe(true);
     expect(document.querySelector<HTMLInputElement>('#agent-profile-display-name')?.disabled).toBe(true);
     expect(document.querySelector<HTMLButtonElement>('button[aria-label="Close"]')?.disabled).toBe(true);
+  });
+});
+
+const onFaceChange = vi.fn();
+function FaceEditor({ mode = "create", initialFace = 8, picture = "", pending = false }: {
+  mode?: AgentProfileModalMode; initialFace?: Hatchling | null; picture?: string; pending?: boolean;
+}) {
+  const [face, setFace] = useState<Hatchling | null>(initialFace);
+  const [url, setUrl] = useState(picture);
+  return <AgentProfileModal isOpen mode={mode} title="New agent" pending={pending}
+    handle={mode === "octo" ? "@octo" : "@writer"} displayName="" onHandleChange={() => {}} onDisplayNameChange={() => {}}
+    avatarImageUrl={url} onAvatarImageUrlChange={setUrl} onAvatarFileChange={() => {}}
+    avatarSeed={mode === "octo" ? "octo" : undefined}
+    face={face} onFaceChange={(next) => { onFaceChange(next); setFace(next); }}
+    description="" onDescriptionChange={() => {}} onSave={onSave} onClose={onClose} />;
+}
+
+describe("bot face picker", () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    onFaceChange.mockReset();
+    container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  });
+  afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+  const picker = () => document.querySelector<HTMLFieldSetElement>('[data-testid="agent-face-picker"]');
+  const preview = () => document.querySelector('button[aria-label$="bot picture"]')?.firstElementChild ?? null;
+  const radios = () => Array.from(picker()?.querySelectorAll<HTMLInputElement>('input[type="radio"]') ?? []);
+
+  it("offers all eight faces as named radios, with the bot's own face chosen and previewed", async () => {
+    await act(async () => root.render(<FaceEditor initialFace={8} />));
+    expect(picker()?.querySelector("legend")?.textContent).toBe("Face");
+    expect(radios().map((radio) => radio.getAttribute("aria-label"))).toEqual(
+      ["Hooray", "Drift", "Kick", "Twirl", "Wave", "Catch", "Rest", "Swim"],
+    );
+    // One group: arrow keys move between faces, and only one is checked.
+    expect(new Set(radios().map((radio) => radio.name)).size).toBe(1);
+    expect(radios().filter((radio) => radio.checked).map((radio) => radio.value)).toEqual(["8"]);
+    expect(radios().map((radio) => expectHatchling(radio.nextElementSibling))).toEqual(["1", "2", "3", "4", "5", "6", "7", "8"]);
+    // Each choice is a 44px target edged on the AI tile's corners when chosen.
+    const choice = radios()[0]?.parentElement;
+    expect(classTokens(choice)).toEqual(expect.arrayContaining(["h-11", "w-11", AI_TILE_SHAPE_CLASS, "has-checked:border-primary-600"]));
+    expect(expectHatchling(preview())).toBe("8");
+  });
+
+  it("previews the face picked, before anything is saved", async () => {
+    await act(async () => root.render(<FaceEditor initialFace={8} />));
+    await act(async () => radios()[2]!.click());
+    expect(onFaceChange).toHaveBeenCalledExactlyOnceWith(3);
+    expect(radios().filter((radio) => radio.checked).map((radio) => radio.value)).toEqual(["3"]);
+    expect(expectHatchling(preview())).toBe("3");
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("puts the faces away behind a picture, and offers them again once it is removed", async () => {
+    await act(async () => root.render(<FaceEditor mode="edit" initialFace={5} picture="https://example.test/bot.png" />));
+    expect(picker()).toBeNull();
+    expect(preview()?.querySelector("img")?.getAttribute("src")).toBe("https://example.test/bot.png");
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove picture")!.click());
+    expect(radios().filter((radio) => radio.checked).map((radio) => radio.value)).toEqual(["5"]);
+    expect(expectHatchling(preview())).toBe("5");
+    // The removed button took focus with it; the face the bot wears now has
+    // it, rather than the top of the dialog.
+    expect(document.activeElement).toBe(radios()[4]);
+  });
+
+  it("hands focus to Octo's picture button once its picture is removed, since Octo has no faces", async () => {
+    await act(async () => root.render(<FaceEditor mode="octo" initialFace={null} picture="https://example.test/octo.png" />));
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove picture")!.click());
+    expect(document.activeElement).toBe(document.querySelector('button[aria-label="Upload bot picture"]'));
+  });
+
+  it("disables the faces while saving", async () => {
+    await act(async () => root.render(<FaceEditor pending />));
+    expect(picker()?.disabled).toBe(true);
+  });
+
+  it("keeps Octo's editor on Octo's own tile, with no faces to pick", async () => {
+    await act(async () => root.render(<FaceEditor mode="octo" initialFace={null} />));
+    expect(picker()).toBeNull();
+    expectCanonicalOctoCoin(preview());
   });
 });

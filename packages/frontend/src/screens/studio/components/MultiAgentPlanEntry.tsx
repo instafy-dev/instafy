@@ -1,6 +1,7 @@
 import { createContext, Fragment, useContext, useEffect, useMemo, useState } from "react";
 import { CheckCircle, GitBranch, MoreHoriz, WarningTriangle, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
+import { AiFace } from "../../../components/AiFace";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
@@ -9,9 +10,11 @@ import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
 import { cancelPlanGroup, fetchPlanGroupStatus, type ControllerPlanGroupStatus } from "../../../services/runtimeController/jobs";
 import type { ChatMessage } from "../types";
 import type { RunRecord } from "../../../types";
+import { aiFaceIdentityFromMetadata, withSavedAgentFace, type AiFaceIdentity } from "../../../utils/aiFace";
 import { extractAgentJobId } from "./chatMessagePresentation";
 import { collectPlanReruns, type PlanRerun } from "./planReruns";
 import { PlanRerunNotice } from "./PlanRerunNotice";
+import { ViewerAgentsContext } from "./viewerAgents";
 
 // Supplied by the chat's existing hydrated run feed. Message bodies do not
 // need to subscribe to composer/history providers or start separate polling.
@@ -570,6 +573,17 @@ function collectTeamActivity({
   const workerHandleByJobId = new Map<string, string>();
   const workerMessagesByHandle = new Map<string, ChatMessage[]>();
   const leadMessages: ChatMessage[] = [];
+  // Each lane's face for the card's legend (docs/Brand.md, "Octo's
+  // hatchlings"): the seed the plan-group status reports for its newest job,
+  // else the agent stamped on its newest loaded run, else on its newest
+  // loaded message. A job the controller runs again keeps its face, so a
+  // superseded job still names the lane's.
+  const stampedFaceByHandle = new Map<string, AiFaceIdentity>();
+  const statusSeedByHandle = new Map<string, string>();
+  const noteStampedFace = (handle: string, source: Pick<ChatMessage, "metadata">) => {
+    const stamped = aiFaceIdentityFromMetadata(source.metadata);
+    if (stamped) stampedFaceByHandle.set(handle, stamped);
+  };
   const planRuns = Object.values(runs).filter(run => {
     const planMeta = extractMultiAgentPlanMeta(run);
     return declaredGroupId ? stringField(planMeta?.groupId) === declaredGroupId
@@ -618,6 +632,7 @@ function collectTeamActivity({
       const jobId = extractAgentJobId(message);
       const handle = jobId ? workerHandleByJobId.get(jobId) : null;
       if (handle) {
+        noteStampedFace(handle, message);
         const existing = workerMessagesByHandle.get(handle);
         if (existing) {
           existing.push(message);
@@ -640,6 +655,7 @@ function collectTeamActivity({
       if (!handle) {
         continue;
       }
+      noteStampedFace(handle, message);
       const existing = workerMessagesByHandle.get(handle);
       if (existing) {
         existing.push(message);
@@ -732,6 +748,8 @@ function collectTeamActivity({
   let leadActivity = buildActivity("lead", leadMessages);
   for (const worker of snapshot?.workers ?? []) {
     const key = normalizeHandleKey(worker.handle);
+    const statusSeed = typeof worker.avatarSeed === "string" ? worker.avatarSeed : "";
+    if (key && statusSeed.trim()) statusSeedByHandle.set(key, statusSeed);
     if (supersededLane(key, worker.jobId)) continue;
     const evidence = workerActivityByHandle.get(key);
     const status: TeamActivityStatus = worker.status === "leased" ? "working"
@@ -756,6 +774,7 @@ function collectTeamActivity({
     const key = role === "worker" ? extractAgentHandle(run) : "lead";
     if (!key || (role !== "worker" && role !== "lead_continuation")) continue;
     const jobId = stringField(run.metadata?.jobId ?? run.metadata?.job_id);
+    if (role === "worker") noteStampedFace(key, run);
     if (role === "worker" && supersededLane(key, jobId)) continue;
     const evidence = role === "worker" ? workerActivityByHandle.get(key) : leadActivity;
     const inputRequest = isRecord(run.metadata?.userInputRequest) ? run.metadata.userInputRequest : null;
@@ -784,10 +803,18 @@ function collectTeamActivity({
     else leadActivity = activity;
   }
 
+  // A status seed names the lane's face; the stamp it overrides still says
+  // which agent ran it, so a saved agent's lane keeps its id.
+  const workerFaceByHandle = new Map(stampedFaceByHandle);
+  for (const [key, avatarSeed] of statusSeedByHandle) {
+    workerFaceByHandle.set(key, { handle: key, avatarSeed, agentId: stampedFaceByHandle.get(key)?.agentId ?? null });
+  }
+
   return {
     workerActivityByHandle,
     workerRunHandles,
     rerunByHandle,
+    workerFaceByHandle,
     leadActivity,
     groupId: [...groupIds][0] ?? null,
   };
@@ -927,6 +954,7 @@ export function MultiAgentPlanEntry({
   onOpenWorkerRunTrace?: (params: { jobId: string; title: string }) => void;
 }) {
   const { runs, scopeKey } = useContext(MultiAgentRunsContext);
+  const savedAgents = useContext(ViewerAgentsContext);
   const planDetails = normalizeMultiAgentPlanDetails(details) ?? normalizeMultiAgentPlanDetails(extractMetadata(planMessage));
   const plan = parseMultiAgentPlan(planDetails);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(() => {
@@ -1113,6 +1141,12 @@ export function MultiAgentPlanEntry({
         const canOpenRunTrace = Boolean(conversationLocalId && activity?.jobId && onOpenWorkerRunTrace);
         const isInteractive = canShowEvidence || canOpenRunTrace;
         const label = agent.label;
+        // A lane that ran as one of the viewer's own saved agents wears its
+        // current profile, as its rows do in the transcript.
+        const face = withSavedAgentFace(
+          teamActivity.workerFaceByHandle.get(handleKey) ?? { handle: agent.handle || handleKey },
+          savedAgents,
+        );
         const taskIdentity = agent.handle && agent.handle !== label ? `${label} (${agent.handle})` : label;
         const evidenceText = activity?.evidence ?? "";
         const compactEvidenceDetail = summarizeEvidenceDetail(evidenceText);
@@ -1141,7 +1175,7 @@ export function MultiAgentPlanEntry({
             >
               <button
                 type="button"
-                className={`inline-flex min-w-0 max-w-full items-center gap-1 rounded-full px-2 py-1 font-medium ring-1 ring-inset transition ${statusChipClassName(status, isInteractive)}`}
+                className={`inline-flex min-w-0 max-w-full items-center gap-1 rounded-full px-2 py-0.5 font-medium ring-1 ring-inset transition ${statusChipClassName(status, isInteractive)}`}
                 onClick={() => {
                   if (canOpenRunTrace && activity?.jobId) {
                     onOpenWorkerRunTrace?.({
@@ -1162,6 +1196,10 @@ export function MultiAgentPlanEntry({
                 data-agent-handle={agent.handle}
               >
                 <StatusGlyph status={status} />
+                {/* The legend: the lane's face, the one its rows wear where no
+                    name is printed (the typing row, branch rows). 20px, so the
+                    chip keeps its height. */}
+                <AiFace identity={face} className="h-5 w-5" testId="multi-agent-chip-face" />
                 <span className="min-w-0 truncate">{label}</span>
                 {status === "canceled" ? <span>canceled</span> : null}
               </button>

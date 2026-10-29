@@ -4,11 +4,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentAvatar } from "../AgentAvatar";
 import {
-  AI_TILE_EDGE_TOKENS,
   classTokens,
   expectAiTile,
-  expectAvatarCoinLightEdge,
   expectCanonicalOctoCoin,
+  expectHatchling,
 } from "./octoCoinExpectations";
 
 
@@ -44,19 +43,19 @@ describe("AgentAvatar", () => {
     },
   );
 
-  it("draws other agents as the AI tile around their generated face", async () => {
-    await act(async () =>
-      root.render(<AgentAvatar agent={{ handle: "reviewer", displayName: "Reviewer", avatarSeed: "reviewer" }} />));
-    const face = container.firstElementChild as HTMLElement | null;
-    expect(face?.querySelector(".octo-mark")).toBeNull();
-    expect(face?.textContent).toBe("R");
-    expect(face?.style.backgroundImage).toContain("linear-gradient");
-    expect(classTokens(face)).not.toContain("bg-white");
-    // One rule for faces: Octo's rounded square and inside hairline, the same
-    // light shadow, and in dark only the hairline (no border or shadow).
-    const tokens = expectAiTile(face);
-    expectAvatarCoinLightEdge(face);
-    expect(tokens.filter((token) => token.startsWith("dark:") && !AI_TILE_EDGE_TOKENS.includes(token))).toEqual([]);
+  it.each([
+    ["the hash of its seed", { handle: "reviewer", displayName: "Reviewer", avatarSeed: "reviewer" }, "3"],
+    ["the face it was given", { handle: "reviewer", displayName: "Reviewer", avatarSeed: "hatchling:6" }, "6"],
+    // As the controller stamps its rows: the seed, else the id.
+    ["the hash of its id when it has no seed", { id: "reviewer-id", handle: "reviewer", displayName: "Reviewer" }, "1"],
+  ])("draws another agent as one of Octo's hatchlings on Octo's tile: %s", async (_why, agent, hatchling) => {
+    // docs/Brand.md, "Octo's hatchlings": no gradient and no initial, and the
+    // tile is Octo's own (light shadow and hairline, only the hairline in dark).
+    await act(async () => root.render(<AgentAvatar agent={agent} />));
+    const face = container.firstElementChild;
+    expect(expectHatchling(face)).toBe(hatchling);
+    expect(classTokens(face)).toEqual(expect.arrayContaining(["inline-flex", "h-9", "w-9"]));
+    expect(face?.getAttribute("aria-hidden")).toBe("true");
   });
 
   it("clips an uploaded picture to the AI tile, under its hairline", async () => {
@@ -66,5 +65,23 @@ describe("AgentAvatar", () => {
     expect(face?.querySelector("img")?.getAttribute("src")).toBe("https://images.example/pia.png");
     expect(face?.style.backgroundImage).toBe("");
     expect(expectAiTile(face)).toEqual(expect.arrayContaining(["overflow-hidden", "h-16", "w-16"]));
+  });
+
+  it("shows the agent's own face behind a picture that fails, or that the editor took away", async () => {
+    // A saved picture's agent falls back by its id, as its rows do: agent-pia
+    // is 6, where its handle would be 2.
+    const agent = { id: "agent-pia", handle: "pia", displayName: "Pia", avatarSeed: "https://images.example/pia.png" };
+    await act(async () => root.render(<AgentAvatar agent={agent} imageSrc="blob:https://app.example/preview" />));
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:https://app.example/preview");
+    await act(async () => { container.querySelector("img")!.dispatchEvent(new Event("error")); });
+    expect(expectHatchling(container.firstElementChild)).toBe("6");
+
+    await act(async () => root.render(<AgentAvatar agent={agent} imageSrc={null} />));
+    expect(container.querySelector("img")).toBeNull();
+    expect(expectHatchling(container.firstElementChild)).toBe("6");
+
+    // Octo's editor shows Octo's tile until a picture is chosen.
+    await act(async () => root.render(<AgentAvatar agent={{ handle: "octo", avatarSeed: "octo" }} imageSrc={null} size="lg" />));
+    expectCanonicalOctoCoin(container.firstElementChild);
   });
 });

@@ -56,6 +56,7 @@ import {
 } from "./controllerConversationNotice";
 import { resolveSpineToneFromStatus, ThreadSpine, type ThreadSpineTone } from "./ThreadSpine";
 import { buildAgentThreadBranchRows } from "./agentThreadBranchRows";
+import { ViewerAgentsContext } from "./viewerAgents";
 import { extractThreadRunStatus } from "./threadPreviewHelpers";
 import { useAgentJobThreadPreviewState } from "./useAgentJobThreadPreviewState";
 import { useAuthorizedImage, useNearViewport } from "./useAuthorizedImage";
@@ -652,10 +653,11 @@ function AgentJobThreadPreviewEntry({
     hideThreadSpine,
   });
   const { conversations } = useConversations();
+  const savedAgents = useContext(ViewerAgentsContext);
   const { openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const branchThreads = useMemo(
-    () => buildAgentThreadBranchRows({ message, conversations }),
-    [conversations, message],
+    () => buildAgentThreadBranchRows({ message, conversations, savedAgents }),
+    [conversations, message, savedAgents],
   );
   const handleOpenBranchThread = useCallback(
     (threadLocalId: string) => {
