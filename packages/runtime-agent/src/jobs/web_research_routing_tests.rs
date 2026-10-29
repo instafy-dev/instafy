@@ -891,6 +891,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
     for needle in [
         "## Finding a page",
         "For every reader, browser or not:",
+        "Open an address the person, a skill or a search result gave, a link on a page you read, or the home page of the official site the task is about.",
         "Never a search engine or a guessed path.",
         "A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu.",
         "Two failed pages on one site: find another source with `instafy web search` (no key: `--chain reference-search`)",
@@ -910,7 +911,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
     assert!(browser.contains("Find pages as \"Finding a page\" says."));
     let research = flat(RESEARCH_SKILL);
     assert!(research.contains(
-        "as \"Finding a page\" in `instafy-browser-automation` says (`.agents/skills/instafy-browser-automation/SKILL.md`; read it first unless it is loaded)."
+        "as \"Finding a page\" in `instafy-browser-automation` says (not loaded? read it first: `awk"
     ));
     for copy in [
         "Never present a remembered fact as checked.",
@@ -1070,4 +1071,47 @@ fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
     assert!(
         !restored(json!({ "browserTransport": "shared" })).contains("this thread may predate it")
     );
+}
+
+/// A research turn often loads the research skill without the browser skill (the router gives a turn at most three
+/// skills, and "What are the opening hours of …? Check the official site." routes only the research skill), and the
+/// skill-reading rules say to read only the section a skill needs. So the research skill's pointer is one command that
+/// prints "Finding a page" and nothing else (about 1.2 KB), never the whole 27 KB browser skill.
+#[test]
+fn the_research_skill_reads_finding_a_page_with_one_short_command() {
+    let tmp = scaffolded_space();
+    let contexts = build_top_level_context_nodes(tmp.path());
+    let request = "What are the opening hours of the Belem Tower? Check the official site.";
+    let skills = routed(&contexts, request);
+    assert!(skills.contains(&RESEARCH.to_string()), "{skills:?}");
+    assert!(!skills.contains(&BROWSER.to_string()), "{skills:?}");
+
+    let pointer = RESEARCH_SKILL
+        .lines()
+        .find(|line| line.contains("\"Finding a page\" in `instafy-browser-automation`"))
+        .expect("the research skill points to Finding a page");
+    let command = pointer
+        .split('`')
+        .find(|part| {
+            part.contains(".agents/skills/instafy-browser-automation/SKILL.md")
+                && part.contains(' ')
+        })
+        .unwrap_or_else(|| panic!("no command that prints the section: {pointer}"));
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(tmp.path())
+        .output()
+        .expect("run the pointer's command");
+    assert!(output.status.success(), "{command}");
+    let printed = String::from_utf8(output.stdout).expect("utf-8");
+
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    assert_eq!(
+        printed.trim_end(),
+        BROWSER_SKILL[start..end].trim_end(),
+        "{command}"
+    );
+    assert!(printed.len() < 2_000, "{} bytes", printed.len());
 }

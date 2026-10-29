@@ -626,11 +626,12 @@ Most browser turns resume their chat's thread instead (a card's turn follows the
 turn that posted the card), which loads no snapshot, and a browser turn cannot
 read a skill file, so such a turn is given the skill's "Finding a page" section
 again, from the space's own copy. That section, which the
-`instafy-web-research` skill points to, says how every reader
-finds a page: an address the person or a skill gave, a link on a page read, or
-the official site's home page, never a search engine or a guessed path; a
-missing page's own site search; another source after two failed pages on one
-site; facts from a place's own page, not a listing or a kiosk page; "not
+`instafy-web-research` skill points to (a research turn without the browser
+skill prints just that section with one command), says how every reader finds a
+page: an address the person, a skill or a search result gave, a link on a page
+read, or the official site's home page, never a search engine or a guessed
+path; a missing page's own site search; another source after two failed pages
+on one site; facts from a place's own page, not a listing or a kiosk page; "not
 checked" on anything not read this turn; and a cookie banner's refusal, so the
 banner does not cover the page. The research and comparison evals
 (`packages/instafy-bind/tests/web-research-eval.test.mjs`,

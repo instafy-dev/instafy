@@ -116,10 +116,11 @@ const CITED = /\b(?:checked|seen)\b|\bnot read\b/i;
 
 /**
  * Grades one answer. `answer` = { findings: [{url,title,readAt,viewer,facts} | {url,stopped}], reply, items?,
- * opened? } where an item is { name, url?, price?: {amount,currency,seen}, coords?: {lat,lng,from} } and `opened` is
- * every address the turn opened, in order, in a browser tab or with a reader (the "Finding a page" checks run only on
- * an answer that has it). `keyFacts` are the facts that matter for the case: [{ name, pattern }], and `ask` the
- * person's request. Returns [{ id, pass, detail }].
+ * opened?, searched? } where an item is { name, url?, price?: {amount,currency,seen}, coords?: {lat,lng,from} },
+ * `opened` is every address the turn opened, in order, in a browser tab or with a reader (the "Finding a page" checks
+ * run only on an answer that has it), and `searched` the addresses its searches (`instafy web search`) gave.
+ * `keyFacts` are the facts that matter for the case: [{ name, pattern }], and `ask` the person's request. Returns
+ * [{ id, pass, detail }].
  */
 export async function gradeAnswer(answer, { web, keyFacts = [], ask = "" }) {
   const checks = [];
@@ -195,15 +196,17 @@ export async function gradeAnswer(answer, { web, keyFacts = [], ask = "" }) {
   // "Finding a page" (the browser skill), on the addresses the turn opened.
   const opened = (answer.opened || []).map((url) => new URL(url).href);
   const askUrls = new Set((flat(ask).match(/https?:\/\/\S+/g) || []).map((url) => new URL(url.replace(/[.,;:!?)]+$/, "")).href));
+  // a search result's address, never a search engine's own page
+  const searched = new Set((answer.searched || []).map((url) => new URL(url)).filter((at) => !isSearchEngine(at.host)).map((at) => at.href));
   const seen = new Set();
   check("no_guessed_paths", opened.flatMap((url, i) => {
     const at = new URL(url);
     const site = web.siteOf(url);
     const ok = isSearchEngine(at.host) // graded by no_search_engine
-      || askUrls.has(url) || seen.has(url) || (at.pathname === "/" && !at.search)
+      || askUrls.has(url) || searched.has(url) || seen.has(url) || (at.pathname === "/" && !at.search)
       || (site?.search && at.pathname === site.search && opened.slice(0, i).some((o) => new URL(o).host === at.host));
     if (!web.isMissing(url)) for (const link of web.linksOf(url)) seen.add(link);
-    return ok ? [] : [`${url} is neither the person's, a home page, the site's own search nor a link on a page opened before it`];
+    return ok ? [] : [`${url} is neither the person's, a search result, a home page, the site's own search nor a link on a page opened before it`];
   }));
   check("missing_page_searched", opened.flatMap((url, i) => {
     if (!web.isMissing(url)) return [];

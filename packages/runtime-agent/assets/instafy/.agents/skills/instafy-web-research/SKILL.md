@@ -10,7 +10,7 @@ routing_keywords: with sources, and sources, cite, citation, fact check, search 
 
 Never prune: yes
 
-Read permitted pages this turn; trace facts to their sources. Find pages, mark what is not checked and pick the names to compare as "Finding a page" in `instafy-browser-automation` says (`.agents/skills/instafy-browser-automation/SKILL.md`; read it first unless it is loaded).
+Read permitted pages this turn; trace facts to their sources. Find pages, mark what is not checked and pick the names to compare as "Finding a page" in `instafy-browser-automation` says (not loaded? read it first: `awk '/^## /{p=$0=="## Finding a page"}p' .agents/skills/instafy-browser-automation/SKILL.md`).
 
 ## Readers
 

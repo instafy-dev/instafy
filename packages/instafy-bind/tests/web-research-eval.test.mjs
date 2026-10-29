@@ -126,6 +126,22 @@ test("the fixture web answers a missing address with the site's own page for it,
   assert.equal(web.pageOf(web.url("tourism", "/")).kind, "official");
 });
 
+test("an address a search result gave is not a guessed path, and a search engine's page still is no source", async () => {
+  // A research turn finds another source with `instafy web search` after two failed pages, then opens what it found.
+  const kase = CASES.find((c) => c.id === "tram-from-the-operator");
+  const reference = await referenceAnswer(kase, web);
+  const ask = fillCase(kase.ask, web);
+  const line = web.url("tram", "/lines/7");
+  const fromSearch = { ...clone(reference), searched: [line], opened: [line] };
+  assert.deepEqual(failed(await gradeAnswer(fromSearch, { web, keyFacts: kase.keyFacts, ask })), []);
+  // Without that result, the same address is a guess.
+  const guessed = { ...clone(reference), opened: [line] };
+  assert.deepEqual(failed(await gradeAnswer(guessed, { web, keyFacts: kase.keyFacts, ask })), ["no_guessed_paths"]);
+  // A search engine's own page never counts as a result.
+  const engine = { ...clone(reference), searched: ["https://www.google.com/search?q=tram+7"], opened: ["https://www.google.com/search?q=tram+7", line] };
+  assert.deepEqual(failed(await gradeAnswer(engine, { web, keyFacts: kase.keyFacts, ask })), ["no_guessed_paths", "no_search_engine"]);
+});
+
 test("search engines come from the skill's own list", () => {
   for (const host of ["google.com", "www.google.com", "www.bing.com", "duckduckgo.com", "search.brave.com"]) assert.ok(isSearchEngine(host), host);
   for (const host of ["www.visit-harbour.example", "notgoogle.com", "127.0.0.1:8080"]) assert.ok(!isSearchEngine(host), host);
@@ -231,7 +247,7 @@ test("every rule the eval grades is a rule the skills state", () => {
   // "Finding a page" is the browser skill's, and the research skill points to it.
   const browser = flat(BROWSER_SKILL);
   const finding = {
-    no_guessed_paths: ["Open an address the person or a skill gave, a link on a page you read, or the home page of the official site the task is about.", "Never a search engine or a guessed path."],
+    no_guessed_paths: ["Open an address the person, a skill or a search result gave, a link on a page you read, or the home page of the official site the task is about.", "Never a search engine or a guessed path."],
     missing_page_searched: ["A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu."],
     no_search_engine: ["Never a search engine or a guessed path."],
     facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page: those only lead to it."],

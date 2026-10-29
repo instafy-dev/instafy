@@ -89,9 +89,9 @@ secrets), or `{"url", "stopped"}` (`login`, `captcha`, `paywall`, `blocked`,
 
 For every reader, browser or not:
 
-- Open an address the person or a skill gave, a link on a page you read, or the
-  home page of the official site the task is about. Never a search engine or a
-  guessed path.
+- Open an address the person, a skill or a search result gave, a link on a page
+  you read, or the home page of the official site the task is about. Never a
+  search engine or a guessed path.
 - A page that says it is missing ("not found", "are you lost?"): use that
   site's own search box or menu.
 - Two failed pages on one site: find another source with `instafy web search`
