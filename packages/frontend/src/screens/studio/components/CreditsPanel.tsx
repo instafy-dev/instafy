@@ -36,6 +36,10 @@ import { compactIdentifier } from "../../../utils/compactIdentifier";
 
 const CHECKOUT_STATUS_PARAM = "billingCheckout";
 const CHECKOUT_PLAN_PARAM = "billingPlan";
+// The Activity log opens on the newest rows; "Show more" reveals the rest of
+// what the panel loaded, a page at a time.
+const ACTIVITY_FIRST_ROWS = 8;
+const ACTIVITY_MORE_ROWS = 20;
 
 function formatMonthlyPrice(cents: number, currency: string): string {
   if (!Number.isFinite(cents) || cents <= 0) {
@@ -109,6 +113,11 @@ export function CreditsPanel() {
   const [activityView, setActivityView] = useState<"log" | "graph">("log");
   const [graphRange, setGraphRange] = useState<CreditActivityRange>("7d");
   const [amountView, setAmountView] = useState<"units" | "usd">("units");
+  const [activityRowCount, setActivityRowCount] = useState(ACTIVITY_FIRST_ROWS);
+  // "Show more" moves focus to the first row it revealed, as Details' "Show
+  // earlier steps" does, since the button itself may go away.
+  const [activityFocusRow, setActivityFocusRow] = useState<number | null>(null);
+  const activityFocusRowRef = useRef<HTMLDivElement | null>(null);
   const policyInFlightRef = useRef(false);
   const lastPolicyProjectRef = useRef<string | null>(null);
   const didInitSelectionRef = useRef(false);
@@ -313,7 +322,8 @@ export function CreditsPanel() {
       return "Starting balance";
     }
     if (normalized === "auto_refill_daily") {
-      return "Daily refill";
+      // Says what the panel's refill line says: the balance tops back up.
+      return "Daily top-up";
     }
     const humanized = normalized.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
     return humanized.charAt(0).toUpperCase() + humanized.slice(1);
@@ -434,7 +444,18 @@ export function CreditsPanel() {
     [amountView, displayCurrency, formatDelta, unitLabel, unitsPerUsd],
   );
 
-  const recentLedger = ledger.slice(0, 8);
+  const recentLedger = ledger.slice(0, activityRowCount);
+  const hasMoreActivity = ledger.length > recentLedger.length;
+  const showMoreActivity = useCallback(() => {
+    setActivityFocusRow(activityRowCount);
+    setActivityRowCount((count) => count + ACTIVITY_MORE_ROWS);
+  }, [activityRowCount]);
+
+  useEffect(() => {
+    if (activityFocusRow !== null) {
+      activityFocusRowRef.current?.focus();
+    }
+  }, [activityFocusRow]);
 
   const planCatalog = useMemo<BillingPlanDefinition[]>(() => {
     const policyPlans = policy?.plans;
@@ -555,6 +576,8 @@ export function CreditsPanel() {
     didInitSelectionRef.current = false;
     setActivation(null);
     setArmedPlanChangeId(null);
+    setActivityRowCount(ACTIVITY_FIRST_ROWS);
+    setActivityFocusRow(null);
   }, [activeProjectId]);
 
   // Two-step plan-change confirmation resets when the selection moves.
@@ -816,7 +839,7 @@ export function CreditsPanel() {
       perHour,
     );
     if (creditBalance <= 0) {
-      return `Hosted machine costs ≈${perHourLabel} ${unitLabel}/hour — balance is empty until the daily refill.`;
+      return `Hosted machine costs ≈${perHourLabel} ${unitLabel}/hour — balance is empty until the daily top-up.`;
     }
     const minutesLeft = creditBalance / creditsPerMinute;
     const runway =
@@ -921,10 +944,12 @@ export function CreditsPanel() {
               ) : null}
             </div>
           </div>
-          {/* What the daily refill tops the balance up to, from the team's own limit. */}
+          {/* The daily refill tops a balance under the team's own limit back up to
+              it (the ledger's "Daily top-up" row adds the difference), so the
+              line names that level, never an amount added each day. */}
           {creditsLoaded && creditLimit > 0 ? (
             <Text as="div" variant="caption" tone="muted" data-testid="credits-starter-budget">
-              Refills to <span data-testid="credits-limit">{limitDisplayValue}</span>
+              Tops back up to <span data-testid="credits-limit">{limitDisplayValue}</span>
               {amountView === "usd" ? "" : ` ${unitLabel}`} every day at 00:00 UTC
             </Text>
           ) : null}
@@ -1052,7 +1077,7 @@ export function CreditsPanel() {
               Plans
             </Heading>
             <Text variant="body" tone="secondary">
-              Your shared balance refills daily (UTC) up to the selected plan limit. Limits shown below are defaults;
+              Your shared balance tops back up daily (UTC) to the selected plan limit. Limits shown below are defaults;
               team-specific overrides may apply.
             </Text>
             <Text variant="caption" tone="muted" data-testid="billing-hosted-runtime-definition">
@@ -1229,10 +1254,17 @@ export function CreditsPanel() {
               {recentLedger.map((entry, index) => {
                 const deltaClass = entry.delta >= 0 ? "text-primary-600" : "text-rose-600";
                 const metadataDetail = formatLedgerMetadataDetail(entry.metadata);
+                const takesFocus = index === activityFocusRow;
                 return (
                   <div
                     key={`${entry.createdAt}-${entry.reason}-${index}`}
-                    className="py-2.5"
+                    ref={takesFocus ? activityFocusRowRef : undefined}
+                    tabIndex={takesFocus ? -1 : undefined}
+                    className={
+                      takesFocus
+                        ? "py-2.5 focus:outline-none focus-visible:rounded-lg focus-visible:ring-2 focus-visible:ring-primary-400 dark:focus-visible:ring-primary-300/80"
+                        : "py-2.5"
+                    }
                     data-testid="credit-ledger-entry"
                   >
                     <div className="flex items-center justify-between gap-3">
@@ -1286,6 +1318,17 @@ export function CreditsPanel() {
               })}
             </div>
           )}
+          {!ledgerError && activityView === "log" && hasMoreActivity ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              radius="xl"
+              onPress={showMoreActivity}
+              data-testid="credits-activity-show-more"
+            >
+              Show more
+            </Button>
+          ) : null}
         </Card>
       ) : null}
     </SettingsShell>
