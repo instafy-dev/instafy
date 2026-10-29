@@ -1006,6 +1006,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // "This continues a browser turn" is the controller's to say too: the
     // claim is checked below, under the conversation's dispatch fence.
     let hand_back_claim = crate::browser_hand_back::take_hand_back_claim(&mut request.metadata);
+    // So is "Instafy sent this again by itself", which decides what the turn
+    // costs (crate::system_turns): only the check below stamps it.
+    crate::system_turns::strip_automatic_retry_stamps(&mut request.metadata);
+    let automatic_retry_claim = crate::system_turns::automatic_retry_claim(&request.metadata);
     conversations::normalize_human_mention_metadata(&mut request.metadata)?;
     // Parity with the record path: untrusted callers must not persist a forged
     // controller participation marker through gate-bypassing dispatches (e.g.
@@ -1387,6 +1391,21 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .await?;
         ensure_object(&mut request.metadata)
             .insert(crate::browser_hand_back::HAND_BACK_KEY.to_string(), record);
+    }
+    // An automatic retry costs nothing unless it ends with a reply: stamped
+    // only after its failure checks out, and otherwise an ordinary turn.
+    if let Some(failure_message_id) = automatic_retry_claim.as_ref() {
+        if let Some(record) = crate::system_turns::verify_automatic_retry(
+            &transaction,
+            &conversation.id,
+            context,
+            failure_message_id,
+        )
+        .await?
+        {
+            ensure_object(&mut request.metadata)
+                .insert(crate::system_turns::AUTOMATIC_RETRY_KEY.to_string(), record);
+        }
     }
 
     // An ambient multi-human turn dispatches to the default agent stamped with

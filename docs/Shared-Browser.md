@@ -1622,8 +1622,10 @@ unless the policy is `"covered"`.
   who ran the browser turn, and whose turn sent the card, can send it, once per
   browser turn, within 30 minutes, only while no prompt was sent in the
   conversation after the browser turn (`browser_hand_back_superseded`), and
-  never as a send-queue entry. It also refuses a card without
-  `continueBuilding` (`browser_hand_back_not_building`) and a browser turn
+  never as a send-queue entry. Like any turn Instafy starts by itself, a hand-back costs nothing
+  unless it ends with Octo's reply
+  ([Credits and Billing](Credits-Billing.md#turns-instafy-starts-by-itself)). It also refuses a
+  card without `continueBuilding` (`browser_hand_back_not_building`) and a browser turn
   whose findings name no page it read (`browser_hand_back_nothing_read`). The
   runtime shows that record to the building turn as quoted page data: not the
   person's words, not their consent, and no instruction; the turn says what it

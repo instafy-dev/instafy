@@ -222,6 +222,7 @@ pub(crate) async fn cancel_project_work_in_transaction(
         work.canceled_job_ids.extend(canceled.job_ids);
         work.canceled_run_ids
             .extend(canceled.pairs.iter().map(|(_, run_id)| *run_id));
+        work.refunded_org_ids.extend(canceled.refunded_org_ids);
     }
 
     if !without_conversation.is_empty() {
@@ -233,6 +234,7 @@ pub(crate) async fn cancel_project_work_in_transaction(
         .await?;
         work.canceled_job_ids.extend(canceled.job_ids);
         work.canceled_run_ids.extend(canceled.run_ids);
+        work.refunded_org_ids.extend(canceled.refunded_org_ids);
     }
 
     // Completed workers release their lease while awaiting a human. They no

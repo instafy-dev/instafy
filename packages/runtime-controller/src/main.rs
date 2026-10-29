@@ -90,6 +90,7 @@ mod site_intent;
 mod skills_discovery;
 mod speech_proxy;
 mod state;
+mod system_turns;
 mod task_usage;
 mod telemetry;
 #[cfg(test)]

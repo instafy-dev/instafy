@@ -3557,6 +3557,27 @@ pub(crate) async fn agent_complete(
         crate::group_participation::job_payload_marks_agent_declined(&job_payload),
     );
 
+    // A turn Instafy started by itself (a hand-back, an automatic retry) is
+    // charged only when it ends with Octo's reply (crate::system_turns): one
+    // that does not gets its reserve back, and its tokens are not billed.
+    let system_turn_without_reply = crate::system_turns::system_turn_of(&job_payload).is_some()
+        && !crate::system_turns::completion_is_a_reply(&outcome_lower, summary.as_deref());
+    if system_turn_without_reply {
+        if let Some(org_id) = crate::system_turns::give_back_reserve_without_reply(
+            &transaction,
+            &project_id,
+            &job_uuid,
+            run_id,
+            run_prompt_id.or(job_prompt_id),
+            leased_runtime_id,
+            &job_payload,
+        )
+        .await?
+        {
+            completion_credit_org_id = Some(org_id);
+        }
+    }
+
     let provider_value = extract_provider_from_metadata(&proxy_metadata);
     let credit_snapshot_value = extract_credit_snapshot(&proxy_metadata);
     let suggested_replies = extract_ui_suggested_replies(&proxy_metadata);
@@ -3622,8 +3643,11 @@ pub(crate) async fn agent_complete(
         };
 
         if let Some(usage) = extract_turn_usage_from_artifacts(&artifacts_value) {
-            // Billed once the reply is visible (CompletionSettlement).
-            usage_to_reconcile = Some(usage);
+            // Billed once the reply is visible (CompletionSettlement), unless
+            // Instafy started the turn and it ended without one.
+            if !system_turn_without_reply {
+                usage_to_reconcile = Some(usage);
+            }
 
             if !should_swallow_evaluation_decline {
                 let usage_content = format!(
@@ -4265,18 +4289,22 @@ fn artifacts_show_a_completed_codex_turn(artifacts: &JsonValue) -> bool {
         .any(|event| event.get("type").and_then(JsonValue::as_str) == Some("turn.completed"))
 }
 
+/// The usage a turn is charged for: the last `turn.completed` of the first
+/// Codex run log that has one. An artifact of another kind, or a run log
+/// without events, is passed over rather than ending the search.
 fn extract_turn_usage_from_artifacts(artifacts: &JsonValue) -> Option<TurnUsage> {
     let artifacts = artifacts.as_array()?;
     for artifact in artifacts {
         let Some(map) = artifact.as_object() else {
             continue;
         };
-        let kind = map.get("kind").and_then(JsonValue::as_str)?;
-        if kind != "codex/run-log" {
+        if map.get("kind").and_then(JsonValue::as_str) != Some("codex/run-log") {
             continue;
         }
 
-        let events = map.get("events").and_then(JsonValue::as_array)?;
+        let Some(events) = map.get("events").and_then(JsonValue::as_array) else {
+            continue;
+        };
         for event in events.iter().rev() {
             let Some(event_map) = event.as_object() else {
                 continue;
@@ -6722,6 +6750,29 @@ mod tests {
         assert!(zero.reserve_units > 0);
         assert_eq!(zero.charged_units, 0);
         assert_eq!(zero.adjustment_units, -zero.reserve_units);
+    }
+
+    #[test]
+    fn turn_usage_is_read_past_an_artifact_without_a_kind_or_a_log_without_events() {
+        let usage = json!({"input_tokens":86_110,"cached_input_tokens":63_488,"output_tokens":339});
+        let artifacts = json!([
+            {"payload": {}},
+            {"kind": 7},
+            {"kind": "codex/run-log", "metadata": {"attempt": 1}},
+            {"kind": "codex/run-log", "events": [
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "Stopped."}},
+                {"type": "turn.completed", "usageScope": "turn", "usage": usage}
+            ]}
+        ]);
+        let usage = extract_turn_usage_from_artifacts(&artifacts).expect("the turn's usage");
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.cached_input_tokens,
+                usage.output_tokens
+            ),
+            (86_110, 63_488, 339)
+        );
     }
 
     #[test]

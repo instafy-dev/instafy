@@ -1236,6 +1236,8 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     // Nor can a recorded message continue a browser turn: a hand-back always
     // dispatches (crate::browser_hand_back).
     crate::browser_hand_back::take_hand_back_claim(&mut metadata);
+    // Only a dispatch stamps a resend as Instafy's own (crate::system_turns).
+    crate::system_turns::strip_automatic_retry_stamps(&mut metadata);
     // Only the controller says a message belongs to a team's plan: Studio reads a message's
     // `multiAgentPlan` for the team card's lanes and for which lane a later run replaced, so a
     // member's own record must not claim one.
@@ -1919,6 +1921,9 @@ pub(crate) struct JobCancellationSet {
     pub(crate) notice: ConversationMessageRow,
     pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
     pub(crate) provider_requests: Vec<ProviderRequestRecord>,
+    /// Orgs whose credits a canceled turn Instafy started by itself gave back
+    /// ([`CanceledJobs::refunded_org_ids`]).
+    pub(crate) refunded_org_ids: Vec<Uuid>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1980,6 +1985,7 @@ pub(crate) async fn cancel_jobs_with_notice(
         pairs,
         job_input_state_updates,
         provider_requests: job_requests,
+        refunded_org_ids,
     } = cancel_jobs_and_runs(transaction, jobs, reason).await?;
     provider_requests.extend(job_requests);
 
@@ -2012,6 +2018,7 @@ pub(crate) async fn cancel_jobs_with_notice(
         notice,
         job_input_state_updates,
         provider_requests,
+        refunded_org_ids,
     })
 }
 
@@ -2024,6 +2031,10 @@ pub(crate) struct CanceledJobs {
     /// The jobs' pending and claimed provider requests, canceled; publish
     /// them once the transaction commits.
     pub(crate) provider_requests: Vec<ProviderRequestRecord>,
+    /// Orgs whose credits changed: a canceled turn Instafy started by itself
+    /// ends without a reply, so its reserve goes back (crate::system_turns).
+    /// Announce `credits.updated` for them once the transaction commits.
+    pub(crate) refunded_org_ids: Vec<Uuid>,
 }
 
 /// Cancel `jobs` and their runs with `reason` as the summary, reject the
@@ -2048,7 +2059,7 @@ pub(crate) async fn cancel_jobs_and_runs(
 
     let summary_ref: Option<&str> = Some(reason);
 
-    let granted_job_ids: Vec<Uuid> = transaction
+    let canceled_rows = transaction
         .query(
             "update agent_jobs
              set status = 'canceled',
@@ -2061,11 +2072,12 @@ pub(crate) async fn cancel_jobs_and_runs(
                  active_input_ready_turn_id = null,
                  heartbeat_at = now()
              where id = any($1)
-             returning id, grant_ids is not null as holds_grants",
+             returning id, project_id, run_id, payload, grant_ids is not null as holds_grants",
             &[&job_ids, &summary_ref],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to cancel agent jobs: {error}")))?
+        .map_err(|error| internal_error(format!("failed to cancel agent jobs: {error}")))?;
+    let granted_job_ids: Vec<Uuid> = canceled_rows
         .iter()
         .filter(|row| row.get("holds_grants"))
         .map(|row| row.get("id"))
@@ -2104,12 +2116,35 @@ pub(crate) async fn cancel_jobs_and_runs(
         persist_canceled_run_metadata(transaction, &run_ids, reason).await?;
     }
 
+    // A turn Instafy started by itself that is stopped never ends with a
+    // reply, so it costs nothing (crate::system_turns).
+    let mut refunded_org_ids = Vec::new();
+    for row in &canceled_rows {
+        let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
+        if let Some(org_id) = crate::system_turns::give_back_reserve_without_reply(
+            transaction,
+            &row.get::<_, Uuid>("project_id"),
+            &row.get::<_, Uuid>("id"),
+            row.get("run_id"),
+            None,
+            None,
+            &payload,
+        )
+        .await?
+        {
+            if !refunded_org_ids.contains(&org_id) {
+                refunded_org_ids.push(org_id);
+            }
+        }
+    }
+
     Ok(CanceledJobs {
         job_ids,
         run_ids,
         pairs,
         job_input_state_updates,
         provider_requests,
+        refunded_org_ids,
     })
 }
 
@@ -2146,6 +2181,13 @@ where
         state,
         &cancellation.provider_requests,
     );
+    for org_id in &cancellation.refunded_org_ids {
+        crate::credits::spawn_credits_updated(
+            state,
+            *org_id,
+            crate::credits::CREDITS_UPDATED_LEDGER,
+        );
+    }
 
     canceled_run_ids
 }

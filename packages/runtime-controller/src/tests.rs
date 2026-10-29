@@ -67,6 +67,9 @@ mod browser_profile_e2e_fixture;
 #[path = "support_workflow_tests.rs"]
 mod support_workflow_tests;
 
+#[path = "system_turns_tests.rs"]
+mod system_turns_tests;
+
 #[path = "notification_platform_http_tests.rs"]
 mod notification_platform_http_tests;
 
