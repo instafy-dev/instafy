@@ -44,7 +44,7 @@ Every process your turn starts is killed with its terminal's process group when 
 - `--serve-cmd` is one command and its arguments: no shell syntax, and no secret on the line (the site reads secrets from an env file). A command that needs shell syntax (environment assignments, `cd`, a pipeline) goes in a script file in the site's folder, passed as `--serve-cmd "sh ./serve.sh"`.
 - Do not start a site that must outlive the turn with `&`, `nohup` or `setsid` by hand: it keeps this turn's credentials.
 - In a later turn, rerun the same command from the same folder: it keeps the site's port and preview, starts the site only if it stopped, and posts this turn's card. Do not start a second server for the same site.
-- When the space's machine stops or restarts, its sites stop: their cards read Stopped and `instafy preview list` no longer lists them. That is expected. Open on a `restartable` card starts the site again with no turn, so tell the person to press it; or rerun the same `instafy preview open ... --start` and read its `status`.
+- When the space's machine stops or restarts, its sites stop: their cards read Stopped and `instafy preview list` no longer lists them. That is expected. Open on a `restartable` card starts the site again with no turn, and the card says so itself; or rerun the same `instafy preview open ... --start` and read its `status`.
 - When a start fails, read `logFile` before trying again.
 - A site with a `bound.json` is served by `--serve-cmd "instafy bind serve . --port {port} --preview"`.
 

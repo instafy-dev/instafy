@@ -532,13 +532,15 @@ gives exit `5` and nothing else happens.
 One site per port. With `--start` and no `--port`, `open` picks the site's port itself and writes it where
 `--serve-cmd` says `{port}` (an agent never chooses one): the port this same site had before, when it still has it,
 else the first free one from a port chosen by the command and its folder (from 20000 to 29999, away from the ports
-dev servers take by themselves). The same command from the same folder is the same site, so it keeps its port, its
-preview and its card. A port another site holds, by its process or by its open preview, is never picked. With
+dev servers take by themselves). The same command from the same folder of the same space is the same site, so it
+keeps its port, its preview and its card; a site of another space on the same machine (a desktop runtime runs several
+as one user) never is, whatever its command and folder name. A port another site holds, by its process or by its open
+preview, is never picked. With
 `--port`, a port where this same site already answers is used as it is, and one where any other server answers is
 refused with exit `3`, naming the preview that shows it ("Port 4173 already shows 'Lisbon in 3 days'."), never
 "already running". The server refuses too: an open whose title, or folder, differs from the open preview on that port
-gets `409 port_in_use` with the same words (exit `3`), unless `--replace` says this site replaces that one. A site
-`--start` started for a preview the server refused is stopped again.
+gets `409 port_in_use` with the same words (exit `3`), unless `--replace` says this site replaces that one (this same
+site under a new title, for example). A site `--start` started for a preview the server refused is stopped again.
 
 `open`:
 

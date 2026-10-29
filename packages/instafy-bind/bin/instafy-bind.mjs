@@ -48,9 +48,9 @@ serve      Serve the site (or every subfolder with a bound.json) with the binder
            given). --agent-conversation <id> uses an existing conversation instead. --agent-budget caps Octo
            turns per site per hour (repairs included). --dry-run prints those prompts instead.
            --detach: start the binder in the background (its own session, output to --log, default
-           <tmp>/instafy-bind-<port>.log), wait until it answers as itself (another server already on the port
-           is refused), print where it serves and exit. A server started in an agent turn without it stops when
-           the turn ends.
+           <tmp>/instafy-bind-<port>.log), wait until it answers as itself, print where it serves and exit. A
+           binder of this folder already serving on the port is kept; another server there is refused. A server
+           started in an agent turn without it stops when the turn ends.
            In a folder of an Instafy space, the binder saves the data files it writes for clicks (records,
            data/version.json): it commits them to the space's checkout a few seconds after the last write, and
            the space's next save publishes them. --no-save leaves them as changed files.
@@ -155,15 +155,24 @@ async function serveDetached(dir, flags) {
   let up = false;
   // Whether something else answered on the port: another site's server, or another binder.
   let other = false;
+  // A binder of this same folder that was already serving on the port (an earlier --detach): it is kept.
+  let earlier = null;
   while (Date.now() < deadline && running()) {
     try {
       const response = await fetch(`http://${host.includes(":") ? `[${host}]` : host}:${port}${prefix}/__bind/health`, { signal: AbortSignal.timeout(2_000) });
-      // Only this binder's own answer counts: the folder it serves and the process it runs in, from the child started
-      // here while it still runs. Any other answer on the port is another server, never this site being served.
+      // Only this site's own binder counts: the folder it serves and the process it runs in. The child started here
+      // while it still runs, or a binder of this same folder that already held the port, whose answer is never taken
+      // for the child's. Any other answer on the port is another server, never this site being served.
       const binder = (await response.json().catch(() => null))?.binder;
-      if (response.ok && binder?.pid === child.pid && realOr(binder.root) === folder && running()) {
-        up = true;
-        break;
+      if (response.ok && binder && realOr(binder.root) === folder && Number.isInteger(binder.pid)) {
+        if (binder.pid === child.pid && running()) {
+          up = true;
+          break;
+        }
+        if (binder.pid !== child.pid) {
+          earlier = binder.pid;
+          break;
+        }
       }
       other = true;
     } catch {
@@ -186,6 +195,10 @@ async function serveDetached(dir, flags) {
       } catch {
         // already gone
       }
+    }
+    if (earlier !== null) {
+      process.stdout.write(`instafy-bind already serves ${dir} on port ${port} in the background (pid ${earlier}); it keeps running after this turn.\n`);
+      return;
     }
     if (other) fail(`port ${port} is in use by another server, so ${dir} is not served there; pick another --port (log ${logFile}):\n${tail()}`);
     fail(`the background binder did not start (log ${logFile}):\n${tail()}`);

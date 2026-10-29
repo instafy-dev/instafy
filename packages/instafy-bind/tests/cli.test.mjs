@@ -146,6 +146,34 @@ test("serve --detach takes only its own binder's answer: another server on the p
   }
 });
 
+test("serve --detach again for a folder its earlier binder still serves keeps that binder and says so: it is not another server", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-cli-detach-again-"));
+  const site = path.join(dir, "site");
+  const free = http.createServer();
+  await new Promise((resolve) => free.listen(0, "127.0.0.1", resolve));
+  const port = free.address().port;
+  await new Promise((resolve) => free.close(resolve));
+  let pid = null;
+  try {
+    execFileSync(process.execPath, [BIN, "init", site], { env: cleanEnv });
+    const args = ["serve", site, "--port", String(port), "--preview", "--dry-run", "--detach"];
+    const first = await runBin([...args, "--log", path.join(dir, "first.log")]);
+    assert.equal(first.code, 0, `${first.stdout}${first.stderr}`);
+    pid = Number(first.stdout.match(/pid (\d+)/)[1]);
+    // A later turn runs the same command while that binder still serves the folder.
+    const again = await runBin([...args, "--log", path.join(dir, "again.log")]);
+    assert.equal(again.code, 0, `${again.stdout}${again.stderr}`);
+    assert.match(again.stdout, new RegExp(`already serves .*site on port ${port} in the background \\(pid ${pid}\\)`));
+    assert.doesNotMatch(`${again.stdout}${again.stderr}`, /another server|pick another --port/);
+    // The earlier binder keeps the port and still serves the site.
+    process.kill(pid, 0);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200);
+  } finally {
+    if (pid) try { process.kill(pid, "SIGTERM"); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a binder's health names its folder and process only to this machine", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-cli-health-"));
   const { createBinder } = await import("../src/server.mjs");

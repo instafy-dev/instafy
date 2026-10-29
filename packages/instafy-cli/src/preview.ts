@@ -192,6 +192,9 @@ export const PORT_PLACEHOLDER = "{port}";
 // What to do when another site holds the port.
 const PORT_TAKEN_HINT =
   "Run it with --start and without --port, so this site gets a free port of its own, or pass --replace to show this site on that port instead.";
+// The same, on a port `--start` picked itself: leaving out --port again would pick it again.
+const PICKED_PORT_TAKEN_HINT =
+  "Pass --replace if this site replaces that one (this same site under a new title, for example); otherwise give this site a title of its own.";
 // Where `--start` looks for a free port when no --port is given: away from the ports dev servers take by themselves
 // (3000, 4173, 5173, 8000, 8080…) and below the ports a Linux machine hands out for outgoing connections (32768 and
 // up), so a site started again after the space slept still finds its port free.
@@ -447,6 +450,8 @@ async function controllerRequest(params: {
   // A 404 on the previews collection means the server has no previews API at all (an older server).
   notFoundMeansUnavailable?: boolean;
   timeoutMs?: number;
+  // What to do when the server says another site's preview holds the port (default PORT_TAKEN_HINT).
+  portTakenHint?: string;
 }): Promise<{ status: number; body: Record<string, unknown> | unknown[] | null }> {
   const { response } = await fetchWithControllerAuth({
     url: `${cleanUrl(params.controllerUrl)}${params.route}`,
@@ -491,7 +496,7 @@ async function controllerRequest(params: {
     // Another site's open preview holds the port: the server names it.
     if (response.status === 409 && code === "port_in_use") {
       throw new PreviewCommandError(
-        `${extractControllerErrorMessage(text) ?? "Another site's preview holds this port."} ${PORT_TAKEN_HINT}`,
+        `${extractControllerErrorMessage(text) ?? "Another site's preview holds this port."} ${params.portTakenHint ?? PORT_TAKEN_HINT}`,
         PREVIEW_EXIT_PORT_NOT_ALLOWED,
       );
     }
@@ -1045,20 +1050,29 @@ function startedSiteRuns(entry: Pick<PreviewStateEntry, "startedPid" | "startedC
 }
 
 /**
- * What holds `port`, as `--start` sees it: nothing; this same site (a preview here records this start command on the
- * port and the site it started still runs, or the process listening there runs exactly this command from this
- * directory); or another site.
+ * What holds `port`, as `--start` sees it: nothing; this same site (a preview of this space records this start command
+ * on the port and the site it started still runs, or the process listening there runs exactly this command from this
+ * directory of this space's workspace); or another site. One machine can run several spaces as one user (a desktop
+ * runtime), so they share the CLI's state and its ports: another space's site is never this one, whatever its command
+ * and the name of its folder.
  */
 async function siteOnPort(params: {
   port: number;
   start: PreviewServe;
   root: string;
+  projectId: string;
   previews: PreviewStateEntry[];
   procRoot?: string;
 }): Promise<"none" | "same" | "other"> {
-  const { port, start, root, previews, procRoot } = params;
+  const { port, start, root, projectId, previews, procRoot } = params;
   if (await portIsFree(port)) return "none";
-  if (previews.some((entry) => entry.localPort === port && sameStart(entry.start, start) && startedSiteRuns(entry))) return "same";
+  if (
+    previews.some(
+      (entry) => entry.projectId === projectId && entry.localPort === port && sameStart(entry.start, start) && startedSiteRuns(entry),
+    )
+  ) {
+    return "same";
+  }
   const listening = detectListeningProcess(port, procRoot);
   if (listening && workspaceRelativeDir(root, listening.cwd) === start.cwd && sameArgv(listening.argv, withPort(start.argv, port))) {
     return "same";
@@ -1066,9 +1080,12 @@ async function siteOnPort(params: {
   return "other";
 }
 
-/** A port another site holds, named by its preview here when there is one. Never "already running": it is not this site. */
-function portTakenError(port: number, previews: PreviewStateEntry[]): PreviewCommandError {
-  const holder = previews.find((entry) => entry.localPort === port && entry.title);
+/**
+ * A port another site holds, named by this space's preview on it when there is one (another space's is not named).
+ * Never "already running": it is not this site.
+ */
+function portTakenError(port: number, previews: PreviewStateEntry[], projectId: string): PreviewCommandError {
+  const holder = previews.find((entry) => entry.projectId === projectId && entry.localPort === port && entry.title);
   const what = holder ? `Port ${port} already shows '${holder.title}'.` : `Port ${port} is in use by another server.`;
   return new PreviewCommandError(`${what} Leave out --port: --start picks a free port for this site.`, PREVIEW_EXIT_PORT_NOT_ALLOWED);
 }
@@ -1094,7 +1111,7 @@ async function startOrFindSite(params: {
 }): Promise<SiteStart> {
   const { explicitPort, start, root, projectId, title, sitePath, procRoot, log } = params;
   const { previews } = readStateFile();
-  const onPort = (port: number) => siteOnPort({ port, start, root, previews, procRoot });
+  const onPort = (port: number) => siteOnPort({ port, start, root, projectId, previews, procRoot });
   const launch = async (port: number): Promise<SiteStart> => {
     const serve = { argv: withPort(start.argv, port), cwd: start.cwd };
     const started = await startPreviewSite({ port, sitePath, serve, root, timeoutMs: params.timeoutMs });
@@ -1106,7 +1123,7 @@ async function startOrFindSite(params: {
   if (explicitPort !== null) {
     const found = await onPort(explicitPort);
     if (found === "same") return { port: explicitPort, start, started: null };
-    if (found === "other") throw portTakenError(explicitPort, previews);
+    if (found === "other") throw portTakenError(explicitPort, previews, projectId);
     return launch(explicitPort);
   }
 
@@ -1120,7 +1137,10 @@ async function startOrFindSite(params: {
     if (found === "none") return launch(known.localPort);
   }
   const reserved = reservedPreviewPorts();
-  const held = new Set(previews.filter((entry) => !sameStart(entry.start, start)).map((entry) => entry.localPort));
+  // Every port another site has a preview on here: any other start command of this space, and any site of another.
+  const held = new Set(
+    previews.filter((entry) => entry.projectId !== projectId || !sameStart(entry.start, start)).map((entry) => entry.localPort),
+  );
   for (const [port, holder] of await params.openPorts()) {
     if (holder !== title) held.add(port);
   }
@@ -1166,19 +1186,21 @@ async function stopSite(pid: number | undefined, command: string | null | undefi
 
 /**
  * What a preview's entry records about its site: the site `--start` just started; else, when the same site was already
- * running on the port (or no `--start`), the record of the site an entry on this port still runs; else only the start
- * command.
+ * running on the port (or no `--start`), the record of the site an entry of this space on this port still runs (never
+ * another space's: `close` stops the site recorded); else only the start command.
  */
 function siteRecordFor(
   site: SiteStart | null,
   previews: PreviewStateEntry[],
   port: number,
+  projectId: string,
 ): Pick<PreviewStateEntry, "start" | "startedPid" | "startedCommand"> {
   if (site?.started) {
     return { start: site.start, startedPid: site.started.pid, ...(site.started.command ? { startedCommand: site.started.command } : {}) };
   }
   const earlier = previews.find(
-    (entry) => entry.localPort === port && (!site || sameStart(entry.start, site.start)) && startedSiteRuns(entry),
+    (entry) =>
+      entry.projectId === projectId && entry.localPort === port && (!site || sameStart(entry.start, site.start)) && startedSiteRuns(entry),
   );
   if (earlier) return { start: earlier.start, startedPid: earlier.startedPid, startedCommand: earlier.startedCommand };
   return site ? { start: site.start } : {};
@@ -1235,6 +1257,8 @@ async function createAndStartClient(params: {
   serve: PreviewServe | null;
   // `--start`'s site on this port, when it ran.
   site: SiteStart | null;
+  // Whether `--start` picked the port itself (no --port was given).
+  portPicked: boolean;
 }): Promise<{
   grant: Record<string, unknown>;
   previewId: string;
@@ -1243,7 +1267,7 @@ async function createAndStartClient(params: {
 }> {
   // The server is asked first, so a server without previews exits 5 before a client is
   // downloaded or started here.
-  const { opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve, site } = params;
+  const { opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve, site, portPicked } = params;
   const conversationId = opts.conversationId?.trim() || undefined;
   const created = await controllerRequest({
     controllerUrl,
@@ -1264,6 +1288,7 @@ async function createAndStartClient(params: {
     },
     retryCommand,
     notFoundMeansUnavailable: true,
+    ...(portPicked ? { portTakenHint: PICKED_PORT_TAKEN_HINT } : {}),
   });
   const grant = (created.body && !Array.isArray(created.body) ? created.body : {}) as Record<string, unknown>;
   const previewId = stringField(grant, "previewId");
@@ -1279,7 +1304,7 @@ async function createAndStartClient(params: {
   const state = readStateFile();
   const current = state.previews.find((preview) => preview.previewId === previewId) ?? null;
   // Read before an older entry on this port is forgotten below: the site's record moves to this preview.
-  const siteRecord = siteRecordFor(site, state.previews, port);
+  const siteRecord = siteRecordFor(site, state.previews, port, projectId);
 
   // From here on the server holds a preview. Any failure before the client runs closes it again,
   // so no grant or card is left without a tunnel behind it.
@@ -1438,6 +1463,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
         log,
         serve,
         site,
+        portPicked: explicitPort === null,
       });
       return { ...created, port, site, serve, restartNote: note };
     } catch (error) {

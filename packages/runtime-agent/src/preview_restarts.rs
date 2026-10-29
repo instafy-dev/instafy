@@ -46,7 +46,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_SETTLE: Duration = Duration::from_millis(250);
 /// How long a restart waits for an `instafy preview` command that holds the
 /// CLI's state lock, and when a lock left by one that died is taken over.
-const STATE_LOCK_WAIT: Duration = Duration::from_secs(30);
+/// `instafy preview open --start` holds it while the site it starts comes
+/// up (as long as `PORT_WAIT`) and its preview opens, so a card pressed
+/// meanwhile waits that out rather than failing. With this restart's own
+/// site start it still ends well before the controller claims the wake
+/// again (`WAKE_CLAIM_RETRY_SECONDS`, 180 s).
+const STATE_LOCK_WAIT: Duration = Duration::from_secs(90);
 const STATE_LOCK_STALE: Duration = Duration::from_secs(10 * 60);
 /// Environment a restarted site may see on top of the helper baseline.
 const SITE_EXTRA_ENV_KEYS: &[&str] = &["WORKSPACE_DIR", "WORKSPACE_PROJECT_DIR"];
@@ -1486,5 +1491,25 @@ mod tests {
         assert!(!lock.exists());
         assert_eq!(sandbox.state()["previews"][0]["previewId"], "free");
         Ok(())
+    }
+
+    /// `instafy preview open --start` holds the CLI's state lock from picking
+    /// the site's port until its preview is recorded, so through the site's
+    /// start, which it waits for as long as a restart waits for its own site
+    /// (`PORT_WAIT`), and up to half a minute of asking the server around it.
+    /// A card pressed meanwhile waits that out: its restart does not fail
+    /// because another chat's site is slow to start. And the longest restart
+    /// (its own site's start, that wait, a few seconds of probes) still ends
+    /// before the controller claims the wake again after 180 s.
+    #[test]
+    fn a_restart_waits_for_the_lock_longer_than_an_open_may_hold_it_while_its_site_starts() {
+        assert!(
+            STATE_LOCK_WAIT >= PORT_WAIT + Duration::from_secs(30),
+            "{STATE_LOCK_WAIT:?} must outlast a site's start ({PORT_WAIT:?}) and the open around it"
+        );
+        assert!(
+            PORT_WAIT + STATE_LOCK_WAIT + Duration::from_secs(20) < Duration::from_secs(180),
+            "a restart must end before its wake is claimed again"
+        );
     }
 }

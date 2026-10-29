@@ -57,9 +57,9 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    else under `.instafy/`. `instafy preview close` stops the site it started (and one a wake started), but only while
    its recorded pid still runs the command line recorded when the site answered.
 9. **One site per port.** Without `--port`, `--start` picks the port and writes it where the command says `{port}`:
-   this same site's port when it still has it (the same command from the same folder), else the first free port from
-   one chosen by the command and its folder, between 20000 and 29999, that no other site here holds or has an open
-   preview on. With `--port`, a port where another server answers is refused (exit 3) and names the site that holds
+   this same site's port when it still has it (the same command from the same folder of the same space; another
+   space's site on the same machine never is), else the first free port from one chosen by the command and its folder,
+   between 20000 and 29999, that no other site here holds or has an open preview on. With `--port`, a port where another server answers is refused (exit 3) and names the site that holds
    it. The controller refuses an open whose title or folder differs from the open preview on that port with
    `409 port_in_use` ("Port 4173 already shows 'Lisbon in 3 days'."), unless the open says it replaces that site
    (`replace`, `--replace`): a preview is keyed by machine and port, so such an open would take the other site's
@@ -180,8 +180,9 @@ again** in its pane), Studio calls `POST /projects/:id/previews/:pid/wake`, then
 
 No agent job, run, chat message or model call is involved. Limits: 6 new wakes per preview per 10 minutes and 30 per
 person per space per hour (`429`); a wake not claimed within 10 minutes fails, and a claim without a result is retried
-after 180 s (well past the agent's longest restart: 60 s for the port, 30 s for the CLI's lock), at most 3 times. An
-agent that sees a re-claim of a preview it is still restarting reports that restart's outcome for it. Each runtime
+after 180 s (well past the agent's longest restart: 60 s for the port, 90 s for the CLI's lock, which `--start` holds
+while its own site starts), at most 3 times. An agent that sees a re-claim of a preview it is still restarting reports
+that restart's outcome for it. Each runtime
 agent asks for claims every 3 s: one indexed update of `runtime_preview_wakes` plus the agent token's runtime check
 (`ensure_runtime_can_heartbeat`), whether or not it has previews. A preview whose tunnel a newer one replaced never
 wakes (`409 not_restartable`), even one someone had closed before the newer one opened on its port: its wake would get

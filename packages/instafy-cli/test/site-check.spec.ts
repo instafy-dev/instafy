@@ -490,7 +490,7 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
 
   it("a page that never says it is drawn is said to be, and does not replace the card's picture", { timeout: 90_000 }, async () => {
     const port = await serve({ "/": { body: drawsLater(null) } });
-    const result = await check({ port, outDir: path.join(tmp, "never-ready"), timeoutMs: 4_000, thumbnail: true });
+    const result = await check({ port, outDir: path.join(tmp, "never-ready"), timeoutMs: 8_000, thumbnail: true });
     const desktop = result.report!.viewports.find((v) => v.name === "desktop")!;
     expect(desktop.warnings.join("\n")).toMatch(/still said it was drawing \(data-instafy-ready\)/);
     expect(result.thumbnail).toEqual({ skipped: "the page never said it was ready, so the card keeps its picture" });

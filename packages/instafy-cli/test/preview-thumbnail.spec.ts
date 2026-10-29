@@ -399,9 +399,10 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
   });
 
   it("a page with its own ready mark gets longer than the usual budget to be drawn", { timeout: 120_000 }, async () => {
-    const port = await serve({ "/": { body: drawsLater(4_000) } });
-    // The usual budget alone ends before the page is drawn; the mark gives it longer.
-    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 3_000, readyWaitMs: 20_000 });
+    const port = await serve({ "/": { body: drawsLater(9_000) } });
+    // The usual budget alone ends before the page is drawn; the mark gives it longer. (The budget also covers the
+    // browser's start, so it leaves a slow machine a few seconds to reach the page.)
+    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 6_000, readyWaitMs: 30_000 });
     expect(result.ok, JSON.stringify(result)).toBe(true);
     if (!("thumbnail" in result)) return;
     expect(result.thumbnail.description).toBe("Trip · 3 days · 10 places");
@@ -409,7 +410,7 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
 
   it("a page that never says it is drawn gets no picture, rather than a half-drawn one", { timeout: 120_000 }, async () => {
     const port = await serve({ "/": { body: drawsLater(null) } });
-    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 2_000, readyWaitMs: 6_000 });
+    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 6_000, readyWaitMs: 9_000 });
     expect(result).toMatchObject({ ok: false, status: "skipped", reason: expect.stringMatching(/^the page still said it was drawing after \d+ s$/) });
   });
 

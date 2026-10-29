@@ -2532,6 +2532,8 @@ mod tests {
             "4173",
             "5173",
             "open it from the card",
+            // A stopped card says itself that opening restarts it.
+            "tell the person to press it",
             "kill -- -",
             "by its `startedPid`",
             "instafy bind serve --detach",

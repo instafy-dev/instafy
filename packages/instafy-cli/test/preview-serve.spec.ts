@@ -605,8 +605,11 @@ describe("instafy preview open --start picks the site's port, and close stops th
     'http.createServer((_req, res) => res.end(name)).listen(Number(port), "127.0.0.1");',
   ].join("\n");
 
-  /** A space with a `site` folder holding SITE, a controller that keeps a preview per port, and a HOME for the CLI. */
-  async function space() {
+  /**
+   * A space with a `site` folder holding SITE, a controller that keeps a preview per port, and a HOME for the CLI
+   * (`home`: another space's, as on a machine that runs several spaces as one user).
+   */
+  async function space(shared: { home?: string } = {}) {
     const ws = workspace();
     fs.writeFileSync(path.join(ws.root, "site", "site.mjs"), SITE);
     const bodies: Array<Record<string, unknown>> = [];
@@ -644,7 +647,7 @@ describe("instafy preview open --start picks the site's port, and close stops th
       });
     });
     const controllerUrl = `http://127.0.0.1:${await listenOn(controller)}`;
-    const home = tempDir("instafy-home-");
+    const home = shared.home ?? tempDir("instafy-home-");
     const rathole = stubRathole();
     const withEnv = async <T>(run: () => Promise<T>): Promise<T> => {
       const saved = { HOME: process.env.HOME, WORKSPACE_DIR: process.env.WORKSPACE_DIR };
@@ -678,13 +681,27 @@ describe("instafy preview open --start picks the site's port, and close stops th
         stopLater(result.startedPid);
         return result;
       });
+    // `instafy preview open --port <port>` of a site already running there: nothing is started.
+    const openOnly = (params: { port: number; title: string }) =>
+      withEnv(() =>
+        previewOpen({
+          project: ws.projectId,
+          controllerUrl,
+          controllerToken: "test-token",
+          port: params.port,
+          title: params.title,
+          ratholeBin: rathole,
+          cwd: path.join(ws.root, "site"),
+          thumbnail: false,
+        }),
+      );
     const close = (previewId: string) =>
       withEnv(() => previewClose({ previewId, project: ws.projectId, controllerUrl, controllerToken: "test-token" }));
     const state = () =>
       JSON.parse(fs.readFileSync(path.join(home, ".instafy", "cli-preview-state.json"), "utf8")) as {
         previews: Array<Record<string, unknown>>;
       };
-    return { ws, home, bodies, requests, open, close, state, refuseWith: (status: number, body: unknown) => (refuse = { status, body }) };
+    return { ws, home, bodies, requests, open, openOnly, close, state, refuseWith: (status: number, body: unknown) => (refuse = { status, body }) };
   }
 
   async function failure(promise: Promise<unknown>): Promise<{ message: string; exitCode?: number }> {
@@ -785,10 +802,79 @@ describe("instafy preview open --start picks the site's port, and close stops th
     const { message, exitCode } = await failure(s.open({ serveCmd: `${node} site.mjs {port} late`, title: "Roborock comparison" }));
     expect(exitCode).toBe(3);
     expect(message).toMatch(/^Port 24242 already shows 'Lisbon in 3 days'\. .*--replace/);
+    // It picked that port itself, so leaving out --port again would only pick it again: never sent back there.
+    expect(message).not.toMatch(/without --port/);
+    expect(message).toMatch(/a title of its own/);
     const port = Number(s.bodies[0]!["port"]);
     // No card shows it, so it does not keep the port.
     await until("the started site to stop", async () => !(await answers(port)));
     expect(await portIsFree(port)).toBe(true);
+
+    // On a port given by hand, leaving out --port is the way to a port of its own.
+    const given = await freePort();
+    const byHand = await failure(s.open({ serveCmd: `${node} site.mjs {port} late`, title: "Roborock comparison", port: given }));
+    expect(byHand.exitCode).toBe(3);
+    expect(byHand.message).toMatch(/without --port/);
+  }, 60000);
+
+  it("never takes another space's site on this machine for this one, even from the same command and folder name, and close never stops it", async () => {
+    // Two spaces run on one machine as one user (a desktop runtime): one HOME, so one CLI state, and one set of ports.
+    const WHO = [
+      'import fs from "node:fs";',
+      'import http from "node:http";',
+      "const [port] = process.argv.slice(2);",
+      'http.createServer((_req, res) => res.end(fs.readFileSync("who.txt", "utf8"))).listen(Number(port), "127.0.0.1");',
+    ].join("\n");
+    const a = await space();
+    const b = await space({ home: a.home });
+    for (const [s, who] of [
+      [a, "space A"],
+      [b, "space B"],
+    ] as const) {
+      fs.writeFileSync(path.join(s.ws.root, "site", "who.mjs"), WHO);
+      fs.writeFileSync(path.join(s.ws.root, "site", "who.txt"), who);
+    }
+    const serveCmd = `${node} who.mjs {port}`;
+    const mine = await a.open({ serveCmd, title: "Hello page" });
+    expect(await (await fetch(`http://127.0.0.1:${mine.port}/`)).text()).toBe("space A");
+
+    // The same command from a folder of the same name in another space is another site: its own port and process.
+    const theirs = await b.open({ serveCmd, title: "Hello page" });
+    expect(theirs.port).not.toBe(mine.port);
+    expect(theirs.startedPid).toEqual(expect.any(Number));
+    expect(theirs.startedPid).not.toBe(mine.startedPid);
+    expect(await (await fetch(`http://127.0.0.1:${theirs.port}/`)).text()).toBe("space B");
+
+    // Closing the other space's preview stops its own site, never this space's.
+    const closed = await b.close(theirs.previewId);
+    expect(closed.siteStopped).toBe(true);
+    await until("the other space's site to stop", async () => !(await answers(theirs.port)));
+    expect(await (await fetch(`http://127.0.0.1:${mine.port}/`)).text()).toBe("space A");
+    expect(isAlive(mine.startedPid!)).toBe(true);
+  }, 60000);
+
+  it("a preview of another space's site, opened without --start, never takes that site's record, so its close leaves the site running", async () => {
+    const a = await space();
+    const b = await space({ home: a.home });
+    const mine = await a.open({ serveCmd: `${node} site.mjs {port} hello`, title: "Hello page" });
+    // The other space shows that port by hand: it started nothing there.
+    const shown = await b.openOnly({ port: mine.port, title: "Their page" });
+    expect(shown.startedPid).toBeUndefined();
+    const closed = await b.close(shown.previewId);
+    expect(closed.siteStopped).toBe(false);
+    expect(isAlive(mine.startedPid!)).toBe(true);
+    expect(await (await fetch(`http://127.0.0.1:${mine.port}/`)).text()).toBe("hello");
+  }, 60000);
+
+  it("refuses another space's site on a port given by hand, without naming that space's preview", async () => {
+    const a = await space();
+    const b = await space({ home: a.home });
+    const serveCmd = `${node} site.mjs {port} hello`;
+    const mine = await a.open({ serveCmd, title: "A private plan" });
+    const refused = await failure(b.open({ serveCmd, title: "Hello page", port: mine.port }));
+    expect(refused.exitCode).toBe(3);
+    expect(refused.message).toBe(`Port ${mine.port} is in use by another server. Leave out --port: --start picks a free port for this site.`);
+    expect(await (await fetch(`http://127.0.0.1:${mine.port}/`)).text()).toBe("hello");
   }, 60000);
 
   async function freePort(): Promise<number> {
