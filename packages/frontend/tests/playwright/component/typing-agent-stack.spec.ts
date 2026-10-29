@@ -98,6 +98,10 @@ for (const theme of ["light", "dark"] as const) {
           return {
             label: bounds(label),
             faces: [...element.querySelectorAll('[data-testid="assistant-typing-stack-face"]')].filter(visible).map(bounds),
+            // One rule for faces: every typing AI is a rounded square, with
+            // the stack's separator ring on the tile itself.
+            faceShapes: [...element.querySelectorAll('[data-testid="assistant-typing-stack-face"] > *')].filter(visible)
+              .map((face) => ({ radius: getComputedStyle(face).borderTopLeftRadius, outline: getComputedStyle(face).outlineStyle })),
             singleFace: [...element.querySelectorAll('[data-testid="chat-avatar-assistant"]')].filter(visible).map(bounds),
             compactOcto: [...element.querySelectorAll('[data-testid="assistant-thinking-octo-compact"]')].filter(visible).map(bounds),
             clippedLabel: label.scrollWidth > label.clientWidth,
@@ -108,6 +112,7 @@ for (const theme of ["light", "dark"] as const) {
         expect(layout.label.right).toBeLessThanOrEqual(width);
         if (width >= 640 && count > 1) {
           expect(layout.faces).toHaveLength(2);
+          expect(layout.faceShapes).toEqual([{ radius: "30%", outline: "solid" }, { radius: "30%", outline: "solid" }]);
           // Preserve avatar-to-avatar overlap, reserving the whole stack
           // before text starts. The fixed 32px gutter regresses here.
           expect(layout.faces[0].right).toBeGreaterThan(layout.faces[1].left);

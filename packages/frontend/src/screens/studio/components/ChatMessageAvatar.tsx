@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { OctoCoin } from "../../../components/OctoCoin";
+import { AI_TILE_CLASS, OctoCoin } from "../../../components/OctoCoin";
 import { HumanAvatar } from "../../../components/HumanAvatar";
 import {
   OCTO_AVATAR_SRC,
@@ -99,11 +99,11 @@ export function ChatMessageAvatar({
     kind === "assistant" && assistantAvatarImageSrc === OCTO_AVATAR_SRC;
   const testId =
     testIdOverride ?? (kind === "assistant" ? "chat-avatar-assistant" : "chat-avatar-human");
-  // Light: no border, only the avatar coin shadow (below). Dark keeps its
-  // hairline border and small shadow.
+  // An uploaded picture sits on white (slate in dark) behind any
+  // transparency; a generated face is its gradient with a white initial.
   const wrapperClass = usesAssistantImageAvatar
-    ? "bg-white dark:border-slate-700 dark:bg-slate-900"
-    : "text-white dark:border-slate-800";
+    ? "bg-white dark:bg-slate-900"
+    : "text-white";
 
   const gradientStyle = useMemo(() => {
     if (kind !== "assistant" || usesAssistantImageAvatar || !agentIdentity) {
@@ -131,9 +131,7 @@ export function ChatMessageAvatar({
       data-testid={testId} className={`${sizeClassName} ${textClassName} dark:shadow-sm`} />;
   }
 
-  // Octo is its coin (OctoCoin, docs/Brand.md): the coin draws its own edge
-  // (the shared avatar coin shadow in light, its faint ring in dark), so it
-  // takes none of the shell's dark border or shadow below.
+  // Octo is its tile (OctoCoin, docs/Brand.md), which draws its own edges.
   if (usesCanonicalOctoAvatar) {
     return (
       <OctoCoin
@@ -145,11 +143,15 @@ export function ChatMessageAvatar({
     );
   }
 
+  // Every other agent is the same AI tile as Octo (AI_TILE_CLASS, the one
+  // rule for faces): the rounded square, its inside hairline over the
+  // gradient or picture, and the avatar coin shadow in light. No border, so
+  // the hairline is the tile's only edge in dark, as it is Octo's.
   return (
     <div
       data-testid={testId}
       aria-hidden="true"
-      className={`flex ${sizeClassName} shrink-0 items-center justify-center overflow-hidden rounded-full shadow-avatar-coin dark:border dark:shadow-sm ${wrapperClass}`}
+      className={`flex ${sizeClassName} shrink-0 items-center justify-center overflow-hidden ${AI_TILE_CLASS} shadow-avatar-coin ${wrapperClass}`}
       style={gradientStyle}
     >
       {usesAssistantImageAvatar && assistantAvatarImageSrc ? (

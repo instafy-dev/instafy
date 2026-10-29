@@ -55,17 +55,24 @@
   --color-studio-dark-rail-hover: rgb(255 255 255 / 0.075);
   --color-studio-dark-control-hover: rgb(255 255 255 / 0.09);
 
-  /* Octo's coin in dark mode (src/components/OctoCoin.tsx, docs/Brand.md): a
-     neutral raised coin that reads on the #141414 canvas and the #1D1D1D
-     panel, edged by a faint light ring. In light mode the coin is white and
-     its edge is the shared avatar coin shadow below. */
+  /* Octo's tile in dark mode (src/components/OctoCoin.tsx, docs/Brand.md): a
+     neutral raised tile that reads on the #141414 canvas and the #1D1D1D
+     panel, edged by a faint light ring, which is every AI tile's dark
+     hairline. In light mode the tile is white, edged by the shared avatar coin
+     shadow below and the AI tile's ink hairline. */
   --color-octo-coin-dark: #262626;
   --color-octo-coin-ring-dark: rgb(255 255 255 / 0.22);
 
-  /* shadow-avatar-coin: the light-mode edge of every avatar coin, Octo's,
-     people's and other agents' alike (docs/Brand.md). It reads from
-     --avatar-coin-shadow, which is empty in dark, so a coin keeps whatever
-     dark edge its own dark: classes give it. */
+  /* The AI tile's edge (AI_TILE_CLASS in src/components/OctoCoin.tsx,
+     docs/Brand.md): every AI face is a rounded square, and a 1px hairline
+     drawn just inside its edge keeps a white tile's corners on white. Ink at
+     14% in light; in dark the tile uses the faint light ring above. */
+  --color-ai-tile-edge: rgb(15 23 42 / 0.14);
+
+  /* shadow-avatar-coin: the light-mode shadow of every face, people's round
+     coins and every AI's tile alike (docs/Brand.md); a tile adds its inside
+     hairline above. It reads from --avatar-coin-shadow, which is empty in
+     dark, so a face keeps whatever dark edge its own classes give it. */
   --shadow-avatar-coin: var(--avatar-coin-shadow);
 
   --color-primary-500: var(--color-brand-blue);

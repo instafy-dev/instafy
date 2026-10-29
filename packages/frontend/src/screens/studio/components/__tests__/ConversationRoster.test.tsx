@@ -6,8 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConversationRoster } from "../ConversationRoster";
 import {
   classTokens,
+  expectAiTile,
   expectAvatarCoinLightEdge,
+  expectPersonCircle,
 } from "../../../../components/__tests__/octoCoinExpectations";
+import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import { setParticipantsDrawerOpen } from "../chatParticipantsStore";
 import type {
   ConversationRosterAgent,
@@ -87,12 +90,27 @@ describe("ConversationRoster", () => {
       // the face's own avatar coin shadow instead of under it, and the slot
       // stays unpositioned so tree order decides the overlap.
       expect(classTokens(slot)).toEqual(
-        expect.arrayContaining(["rounded-full", "*:ring-1", "*:ring-white", "dark:*:ring-[var(--color-studio-dark-panel)]"]),
+        expect.arrayContaining(["*:ring-1", "*:ring-white", "dark:*:ring-[var(--color-studio-dark-panel)]"]),
       );
       expect(classTokens(slot).filter((token) => /^(relative|absolute|z-|ring-|shadow-)/.test(token))).toEqual([]);
       expectAvatarCoinLightEdge(slot.firstElementChild);
     }
     expect(slots[1]?.firstElementChild?.hasAttribute("data-octo-coin")).toBe(true);
+  });
+
+  it("keeps people round and draws every AI as a tile, each slot in its face's shape", async () => {
+    await renderRoster([human("user-peer", "Ada")], [agent("octo", "Octo", "octo"), agent("reviewer", "Reviewer", "reviewer")]);
+    const slots = Array.from(container.querySelector('[data-testid="conversation-roster"] > span')?.children ?? []);
+    const [person, octo, reviewer] = slots;
+    // One rule for faces: the separator ring follows each face's own shape.
+    expect(classTokens(person)).toContain("rounded-full");
+    expectPersonCircle(person?.firstElementChild);
+    for (const slot of [octo, reviewer]) {
+      expect(classTokens(slot)).toContain(AI_TILE_SHAPE_CLASS);
+      expect(classTokens(slot)).not.toContain("rounded-full");
+      expectAiTile(slot?.firstElementChild);
+    }
+    expect(reviewer?.firstElementChild?.textContent).toBe("R");
   });
 
   it("collapses members past five into a +N overflow", async () => {

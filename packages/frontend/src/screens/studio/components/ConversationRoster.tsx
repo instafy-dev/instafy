@@ -1,5 +1,6 @@
 import { Group } from "iconoir-react";
 import { Button } from "../../../components/Button";
+import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import {
   toggleParticipantsDrawer,
@@ -21,11 +22,13 @@ const MAX_STACK_AVATARS = 5;
  * budget). An amber dot rides the stack when an agent's credential needs
  * attention, so that state is visible without opening anything.
  *
- * A quiet toolbar trigger supplies the hover/focus surface around the round
- * avatars, without a permanent panel, border or shadow. Each avatar carries a thin ring painted in the chat surface's
- * own background to separate overlapping faces. The ring sits on the face
- * itself, above the face's own avatar coin shadow (light mode), so the
- * separator stays clean white and the soft shadow falls outside it.
+ * A quiet toolbar trigger supplies the hover/focus surface around the faces
+ * (people round, every AI a rounded square: docs/Brand.md, "One rule for
+ * faces"), without a permanent panel, border or shadow. Each face carries a
+ * thin ring painted in the chat surface's own background to separate
+ * overlapping faces. The ring sits on the face itself, so it follows the
+ * face's own shape and draws above the face's own avatar coin shadow (light
+ * mode): the separator stays clean white and the soft shadow falls outside it.
  */
 export function ConversationRoster({
   agents,
@@ -68,12 +71,14 @@ export function ConversationRoster({
   const stackEntries = [
     ...humans.map((human) => ({
       key: `human:${human.userId}`,
+      shapeClassName: "rounded-full",
       avatar: (
         <ChatMessageAvatar kind="human" seed={human.userId} label={human.label} size="2xs" />
       ),
     })),
     ...agents.map((agent) => ({
       key: `agent:${agent.handle}`,
+      shapeClassName: AI_TILE_SHAPE_CLASS,
       avatar: (
         <ChatMessageAvatar
           kind="assistant"
@@ -102,7 +107,7 @@ export function ConversationRoster({
         {visibleStackEntries.map((entry) => (
           <span
             key={entry.key}
-            className="rounded-full *:ring-1 *:ring-white dark:*:ring-[var(--color-studio-dark-panel)]"
+            className={`${entry.shapeClassName} *:ring-1 *:ring-white dark:*:ring-[var(--color-studio-dark-panel)]`}
           >
             {entry.avatar}
           </span>

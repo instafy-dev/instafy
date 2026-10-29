@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { AiTag } from "../../../../components/AiTag";
 import { HumanAvatar } from "../../../../components/HumanAvatar";
-import { OctoCoin } from "../../../../components/OctoCoin";
+import { AI_TILE_CLASS, OctoCoin } from "../../../../components/OctoCoin";
 import { LexicalTypeaheadMenuPlugin, MenuOption, useBasicTypeaheadTriggerMatch } from "@lexical/react/LexicalTypeaheadMenuPlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import { useLexicalTextEntity } from "@lexical/react/useLexicalTextEntity";
@@ -83,16 +84,20 @@ class AssistantMentionOption extends MenuOption {
   }
 }
 
-// A face's edge is the shared avatar coin shadow in light (docs/Brand.md) and
-// a hairline border with a small shadow in dark.
-const MENTION_FACE_SHELL_CLASS =
-  "flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-white text-3xs font-semibold text-slate-700 shadow-avatar-coin dark:border dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:shadow-sm";
+// An option's 24px face shell clips its contents to the face's own shape and
+// carries the shared avatar coin shadow in light (docs/Brand.md, "One rule for
+// faces"): a person's is a circle with a hairline border and small shadow in
+// dark; an AI's is the AI tile, whose inside hairline is its only edge in dark.
+const MENTION_FACE_SHELL_BASE_CLASS =
+  "flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden bg-white text-3xs font-semibold text-slate-700 shadow-avatar-coin dark:bg-slate-900 dark:text-slate-200";
+const MENTION_PERSON_FACE_SHELL_CLASS = `${MENTION_FACE_SHELL_BASE_CLASS} rounded-full dark:border dark:border-slate-700 dark:shadow-sm`;
+const MENTION_AI_FACE_SHELL_CLASS = `${MENTION_FACE_SHELL_BASE_CLASS} ${AI_TILE_CLASS}`;
 
 function MentionOptionImage({ src }: { src: string }) {
   return <img src={src} alt="" className="h-full w-full object-cover" decoding="async" draggable={false} />;
 }
 
-/** An option's 24px face. Octo is its coin (OctoCoin, docs/Brand.md), never the static avatar file. */
+/** An option's 24px face: a person's circle or an AI's tile. Octo is its tile (OctoCoin, docs/Brand.md), never the static avatar file. */
 export function MentionOptionFace({
   option,
   agentProfilesByHandle,
@@ -102,7 +107,7 @@ export function MentionOptionFace({
 }) {
   if (option.kind === "user") {
     return (
-      <span className={MENTION_FACE_SHELL_CLASS}>
+      <span className={MENTION_PERSON_FACE_SHELL_CLASS}>
         <HumanAvatar userId={option.userId} displayName={option.displayName} className="h-full w-full text-3xs" />
       </span>
     );
@@ -120,13 +125,13 @@ export function MentionOptionFace({
   }
   if (option.kind === "assistant") {
     return (
-      <span className={MENTION_FACE_SHELL_CLASS}>
+      <span className={MENTION_AI_FACE_SHELL_CLASS}>
         {imageSrc ? <MentionOptionImage src={imageSrc} /> : option.label.trim().slice(0, 1).toUpperCase() || "@"}
       </span>
     );
   }
   return (
-    <span className={MENTION_FACE_SHELL_CLASS}>
+    <span className={MENTION_AI_FACE_SHELL_CLASS}>
       {imageSrc ? (
         <MentionOptionImage src={imageSrc} />
       ) : (
@@ -146,6 +151,23 @@ export function MentionOptionFace({
         </span>
       )}
     </span>
+  );
+}
+
+/**
+ * An option's second line, under its @token: the name. The picker mixes people
+ * and AI, so an AI's name carries the AI tag (docs/Brand.md, "One rule for
+ * faces"), and the row reads "@pia Pia, AI" to a screen reader.
+ */
+export function MentionOptionDescription({ option }: { option: Pick<AssistantMentionOption, "kind" | "label"> }) {
+  if (option.kind === "user") {
+    return <>{option.label}</>;
+  }
+  return (
+    <>
+      {option.label}
+      <AiTag className="ml-1.5 inline-block align-middle" />
+    </>
   );
 }
 
@@ -422,7 +444,7 @@ function AssistantMentionsMenu({
           data-token={option.token}
           isHighlighted={selectedIndex === index}
           label={option.token}
-          description={option.label}
+          description={<MentionOptionDescription option={option} />}
           start={<MentionOptionFace option={option} agentProfilesByHandle={agentProfilesByHandle} />}
           onClick={() => selectOptionAndCleanUp(option)}
           onMouseEnter={() => setHighlightedIndex(index)}
