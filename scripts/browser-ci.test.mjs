@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { browserCiEnvironment, personalBrowserFixtureEnvironment, runBrowserCi } from "../packages/frontend/scripts/browser-ci.mjs";
+import { browserCiArguments, browserCiEnvironment, personalBrowserFixtureEnvironment, runBrowserCi } from "../packages/frontend/scripts/browser-ci.mjs";
 
 test("browser CI keeps OS/display settings but cannot inherit credentials or development endpoints", () => {
   const source = {
@@ -46,7 +46,22 @@ test("both browser CI environment boundaries preserve display authorization with
 
 test("browser CI rejects filters, reporter overrides, unknown lanes and missing lane", async () => {
   for (const args of [[], ["unknown"], ["constructor"], ["personal", "--grep", "one"],
-    ["browser-ui", "--reporter=list"], ["personal", "--pass-with-no-tests"]]) {
-    await assert.rejects(runBrowserCi(args), /Usage:/);
+    ["browser-ui", "--reporter=list"], ["personal", "--pass-with-no-tests"],
+    // Only a lane CI runs in parts takes a part, only as one of its own parts,
+    // and never together with anything else.
+    ["personal", "--shard=1/2"], ["browser-ui", "--shard=3/2"], ["browser-ui", "--shard=0/2"],
+    ["browser-ui", "--shard=1/3"], ["browser-ui", "--shard=1/1"], ["browser-ui", "--shard=01/2"],
+    ["browser-ui", "--shard", "1/2"], ["browser-ui", "--shard=1/2 "], ["browser-ui", "--shard=1/2", "--grep", "one"],
+    ["browser-ui", "--shard=1/2", "--shard=2/2"], ["--shard=1/2", "browser-ui"]]) {
+    await assert.rejects(runBrowserCi(args), /Usage:/, JSON.stringify(args));
+  }
+});
+
+test("browser CI runs a whole lane, or one of the parts CI splits the browser UI lane into", () => {
+  assert.deepEqual(browserCiArguments(["personal"]), ["test", "--config", "playwright.personal-ci.config.ts"]);
+  assert.deepEqual(browserCiArguments(["--", "browser-ui"]), ["test", "--config", "playwright.ci-ui.config.ts"]);
+  for (const part of ["1/2", "2/2"]) {
+    assert.deepEqual(browserCiArguments(["browser-ui", `--shard=${part}`]), ["test", "--config", "playwright.ci-ui.config.ts", `--shard=${part}`]);
+    assert.deepEqual(browserCiArguments(["--", "browser-ui", `--shard=${part}`]), ["test", "--config", "playwright.ci-ui.config.ts", `--shard=${part}`]);
   }
 });

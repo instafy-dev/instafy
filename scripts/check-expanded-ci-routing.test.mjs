@@ -148,7 +148,8 @@ test("only the four short jobs use the expanded switch and existing identities s
   assert.match(read("public-boundary.yml"), /vars\.CI_BOOTSTRAP_SELF_HOSTED == 'true'/u);
   assert.doesNotMatch(read("public-boundary.yml"), /CI_EXPANDED_SELF_HOSTED|public-secret-scan|public-go|public-npm-policy|public-rust-fmt/u);
   assert.doesNotMatch(read("browser-e2e.yml"), /CI_EXPANDED_SELF_HOSTED/u);
-  assert.equal((read("browser-e2e.yml").match(/vars\.CI_BROWSER_SELF_HOSTED/g) ?? []).length, 2);
+  // Personal, the required Browser UI aggregate and its two parts.
+  assert.equal((read("browser-e2e.yml").match(/vars\.CI_BROWSER_SELF_HOSTED/g) ?? []).length, 4);
 });
 
 test("the main scanner preserves the boundary's pinned x64 and ARM64 installer", () => {

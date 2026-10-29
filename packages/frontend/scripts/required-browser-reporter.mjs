@@ -18,6 +18,10 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
   },
   "browser-ui": {
     minimumTests: 53,
+    // CI runs this lane as two Playwright shards, one job each. Each part
+    // proves only its own tests; the required job checks this contract on
+    // both parts' receipts together (combineRequiredBrowserParts).
+    parts: 2,
     files: [
       "browser-agent-tabs.spec.ts",
       "browser-approval-feedback.spec.ts",
@@ -111,6 +115,79 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
   },
 });
 
+/**
+ * Coverage failures for the tests a lane ran, as `{ file, title }` items with
+ * spec basenames: too few tests, or a required spec or case that did not run.
+ */
+export function requiredCoverageFailures(contract, tests) {
+  const failures = [];
+  const files = new Set(tests.map((test) => test.file));
+  const titles = new Set(tests.map((test) => test.title));
+  if (tests.length < contract.minimumTests) failures.push("Required tests are missing");
+  for (const file of contract.files) {
+    if (!files.has(file)) failures.push(`Required spec missing: ${file}`);
+  }
+  for (const title of contract.titles) {
+    if (!titles.has(title)) failures.push(`Required case missing: ${title}`);
+  }
+  return failures;
+}
+
+const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/**
+ * A lane that CI runs in parts is complete only when every part passed on its
+ * own and the tests of all parts together meet the lane's contract. `receipts`
+ * are the parts' required-browser-result.json contents, in any order.
+ */
+export function combineRequiredBrowserParts(lane, receipts) {
+  const contract = Object.hasOwn(REQUIRED_BROWSER_LANES, lane) ? REQUIRED_BROWSER_LANES[lane] : undefined;
+  const failures = [];
+  if (!contract?.parts) failures.push("Unknown required browser lane, or one that does not run in parts");
+  if (!Array.isArray(receipts)) receipts = [];
+  const parts = new Set();
+  const ids = new Set();
+  const tests = [];
+  for (const receipt of receipts) {
+    const part = isRecord(receipt) ? receipt.part : undefined;
+    const valid = isRecord(part) && Number.isSafeInteger(part.current) && part.total === contract?.parts
+      && part.current >= 1 && part.current <= part.total;
+    if (!isRecord(receipt) || receipt.schemaVersion !== 1 || receipt.lane !== lane || !valid) {
+      failures.push("A receipt is not a part of this lane");
+      continue;
+    }
+    if (parts.has(part.current)) failures.push(`Part ${part.current} reported more than once`);
+    parts.add(part.current);
+    if (receipt.status !== "passed" || !Array.isArray(receipt.failures) || receipt.failures.length
+      || !Array.isArray(receipt.tests) || !receipt.tests.length) {
+      failures.push(`Part ${part.current} did not pass`);
+      continue;
+    }
+    for (const test of receipt.tests) {
+      if (!isRecord(test) || typeof test.id !== "string" || typeof test.file !== "string"
+        || typeof test.title !== "string" || test.passed !== true) {
+        failures.push(`Part ${part.current} did not pass`);
+        continue;
+      }
+      if (ids.has(test.id)) failures.push("A test ran in more than one part");
+      ids.add(test.id);
+      tests.push(test);
+    }
+  }
+  for (let current = 1; current <= (contract?.parts ?? 0); current += 1) {
+    if (!parts.has(current)) failures.push(`Part ${current} of ${contract.parts} is missing`);
+  }
+  if (contract) failures.push(...requiredCoverageFailures(contract, tests));
+  const unique = [...new Set(failures)];
+  return {
+    lane: contract ? lane : "unknown",
+    status: unique.length ? "failed" : "passed",
+    parts: parts.size,
+    selected: tests.length,
+    failures: unique,
+  };
+}
+
 export default class RequiredBrowserReporter {
   constructor(options = {}) {
     this.lane = options.lane;
@@ -144,22 +221,15 @@ export default class RequiredBrowserReporter {
     if (!this.config) failures.push("Test discovery did not complete");
     if (result.status !== "passed") failures.push(`Runner status: ${result.status}`);
     if (this.globalErrors) failures.push("Runner reported an infrastructure/global error");
-    const files = new Set(this.tests.map((test) => path.basename(test.location.file)));
-    const titles = new Set(this.tests.map((test) => test.title));
-    if (this.contract) {
-      if (this.tests.length < this.contract.minimumTests) failures.push("Required tests are missing");
-      for (const file of this.contract.files) {
-        if (!files.has(file)) failures.push(`Required spec missing: ${file}`);
-      }
-      for (const title of this.contract.titles) {
-        if (!titles.has(title)) failures.push(`Required case missing: ${title}`);
-      }
-    }
+    // Playwright's --shard runs one part of the lane; its config says which.
+    const shard = this.config?.shard;
+    const part = shard ? { current: shard.current, total: shard.total } : undefined;
     const tests = this.tests.map((test) => {
       const attempts = this.attempts.get(test.id) ?? [];
       const passed = test.expectedStatus === "passed" && attempts.length === 1
         && attempts[0].status === "passed" && attempts[0].retry === 0;
       return {
+        id: test.id,
         file: path.basename(test.location.file),
         title: test.title,
         expectedStatus: test.expectedStatus,
@@ -167,12 +237,22 @@ export default class RequiredBrowserReporter {
         passed,
       };
     });
+    if (this.contract && part) {
+      // A part proves only its own tests. The lane's contract is checked on
+      // all parts' receipts together, so a part of a lane that is not run in
+      // exactly that many parts, or an empty part, can never pass.
+      if (part.total !== this.contract.parts) failures.push("This lane does not run in that many parts");
+      if (!tests.length) failures.push("Required tests are missing");
+    } else if (this.contract) {
+      failures.push(...requiredCoverageFailures(this.contract, tests));
+    }
     if (tests.some((test) => !test.passed)) {
       failures.push("Every selected test must execute and pass once; skips, expected failures and retries are forbidden");
     }
     const summary = {
       schemaVersion: 1,
       lane: this.contract ? this.lane : "unknown",
+      ...(part ? { part } : {}),
       status: failures.length ? "failed" : "passed",
       selected: tests.length,
       passed: tests.filter((test) => test.passed).length,
@@ -192,7 +272,8 @@ export default class RequiredBrowserReporter {
       failures.push("Could not write the required browser result receipt");
       summary.status = "failed";
     }
-    process.stdout.write(`[required-browser] ${summary.lane}: ${summary.passed}/${summary.selected} passed; ${summary.skipped} skipped; ${summary.status}\n`);
+    const label = part ? `${summary.lane} part ${part.current} of ${part.total}` : summary.lane;
+    process.stdout.write(`[required-browser] ${label}: ${summary.passed}/${summary.selected} passed; ${summary.skipped} skipped; ${summary.status}\n`);
     for (const failure of failures) process.stderr.write(`[required-browser] ${failure}\n`);
     return { status: summary.status };
   }

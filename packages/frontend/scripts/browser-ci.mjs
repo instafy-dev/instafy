@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { REQUIRED_BROWSER_LANES } from "./required-browser-reporter.mjs";
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(path.join(frontendRoot, "package.json"));
@@ -46,14 +47,27 @@ export function personalBrowserFixtureEnvironment(source = process.env) {
   return env;
 }
 
-export async function runBrowserCi(args = process.argv.slice(2)) {
+/**
+ * Playwright arguments for a lane, or for one part of a lane CI runs in parts:
+ * `browser-ui --shard=1/2` runs the first of the lane's two parts. Anything
+ * else, such as a test filter or a reporter override, is rejected.
+ */
+export function browserCiArguments(args) {
   if (args[0] === "--") args = args.slice(1);
-  if (args.length !== 1 || !Object.hasOwn(configs, args[0])) {
-    throw new Error("Usage: pnpm test:browser:ci <personal|browser-ui>; test filters and reporter overrides are not allowed");
+  const [lane, part, ...rest] = args;
+  const parts = Object.hasOwn(configs, lane ?? "") ? REQUIRED_BROWSER_LANES[lane]?.parts : undefined;
+  const shard = /^--shard=([1-9][0-9]*)\/([1-9][0-9]*)$/u.exec(part ?? "");
+  if (!Object.hasOwn(configs, lane ?? "") || rest.length
+    || (part !== undefined && !(parts && shard && Number(shard[2]) === parts && Number(shard[1]) <= parts))) {
+    throw new Error("Usage: pnpm test:browser:ci <personal|browser-ui> [--shard=<part>/<parts> for a lane CI runs in parts]; test filters and reporter overrides are not allowed");
   }
-  const lane = args[0];
+  return ["test", "--config", configs[lane], ...(part === undefined ? [] : [part])];
+}
+
+export async function runBrowserCi(args = process.argv.slice(2)) {
+  const playwrightArgs = browserCiArguments(args);
   const playwrightCli = require.resolve("@playwright/test/cli");
-  const child = spawn(process.execPath, [playwrightCli, "test", "--config", configs[lane]], {
+  const child = spawn(process.execPath, [playwrightCli, ...playwrightArgs], {
     cwd: frontendRoot,
     env: browserCiEnvironment(),
     stdio: "inherit",

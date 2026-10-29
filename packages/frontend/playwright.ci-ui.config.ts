@@ -73,8 +73,9 @@ export default defineConfig({
   timeout: 30_000,
   // Required cases run serially. Leave room for startup and teardown while
   // bounding the complete lane without extending any individual test. At 227
-  // cases the serial run takes 17-20 min on hosted runners, so 20 min stopped
-  // passing runs short; 30 min still fits the job's 40.
+  // cases the serial run took 17-20 min on hosted runners, so 20 min stopped
+  // passing runs short; 30 min still fits the job's 40. CI now runs the lane
+  // in two parts (`--shard`), each well inside this budget.
   globalTimeout: 1_800_000,
   outputDir: "test-results/browser-ci/browser-ui",
   reporter: [

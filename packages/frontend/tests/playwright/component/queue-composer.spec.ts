@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { RUN_STOP_FIXTURE_STUBS } from "../../fixtures/run-stop-control/dataStubs";
 
 const fixture = "/tests/fixtures/conversation-view-tabs/index.html?context=composer&navigation=compact";
@@ -6,6 +6,13 @@ const originalOrder = ["queue-1", "queue-2", "queue-3"];
 const trigger = (page: Page) => page.getByTestId("chat-send-queue-agent-summary");
 const editor = (page: Page) => page.getByRole("textbox", { name: "Ask Octo" });
 const order = async (page: Page): Promise<string[]> => JSON.parse(await page.getByTestId("queue-order").textContent() ?? "[]");
+// The shared Button's focus ring transitions in. Read it only once no
+// transition runs: mid-transition Chromium reports the same ring in other
+// colour formats (rgba(255, 255, 255, 1) for the settled rgb(255, 255, 255)).
+const settledBoxShadow = (locator: Locator) => locator.evaluate(async node => {
+  await Promise.all(node.getAnimations().map(animation => animation.finished));
+  return getComputedStyle(node).boxShadow;
+});
 
 async function openFixture(page: Page, options: { width: number; theme?: string; count?: number; draft?: string; readonly?: boolean; stash?: boolean; utilities?: boolean; attachments?: number; sending?: boolean; messages?: boolean }) {
   const errors: string[] = [];
@@ -108,11 +115,11 @@ for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
       await thumbnail.focus();
       await expect(thumbnail).toBeFocused();
       expect(await thumbnail.evaluate(node => node.matches(":focus-visible"))).toBe(true);
-      // Wait for the shared Button's focus transition to reach its 2px ring
-      // plus 2px offset before comparing the two sizes.
-      await expect.poll(() => thumbnail.evaluate(node => getComputedStyle(node).boxShadow)).toMatch(/ 0px 0px 0px 4px(?:,|$)/);
-      if (sharedFocusRing) await expect(thumbnail).toHaveCSS("box-shadow", sharedFocusRing);
-      else sharedFocusRing = await thumbnail.evaluate(node => getComputedStyle(node).boxShadow);
+      // Compare the settled 2px ring plus 2px offset of both thumbnails.
+      await expect.poll(() => settledBoxShadow(thumbnail)).toMatch(/ 0px 0px 0px 4px(?:,|$)/);
+      const focusRing = await settledBoxShadow(thumbnail);
+      if (sharedFocusRing) expect(focusRing).toBe(sharedFocusRing);
+      else sharedFocusRing = focusRing;
       await thumbnail.press("Enter");
       const preview = page.getByRole("dialog", { name: "Image preview", exact: true });
       await expect(preview).toBeVisible();
