@@ -311,7 +311,8 @@ Starter guidance with the current defaults:
 - 200 units/day is the whole shared free budget
 - managed AI has a soft cap of 20 prompts/day by default
 - tunnels and hosted runtimes burn from the same pool, so heavy infra usage reduces how much managed AI remains that day
-- the balance resets once per day in UTC; there is no carry-over
+- once per UTC day the balance tops back up to the daily limit (a balance at or above it gets
+  nothing), so what is left of one day's credits never adds to the next day's
 
 ### Measuring root-call usage
 
@@ -441,5 +442,13 @@ Required envs (GitHub secrets/vars or local env):
 ## Frontend Flow
 - Credits panel calls `/credits/status` and `/credits/ledger` via the controller.
 - Credits panel now supports `Log` and `Graph` views over the same shared ledger data.
+- Under the balance, one line says what the daily refill does: "Tops back up to 800 credits every
+  day at 00:00 UTC", with the team's own `credit_limit`. That is what the ledger does: once per UTC
+  day, on the first status read or burn, a balance under the limit gets the difference as one
+  `auto_refill_daily` row, which the log calls "Daily top-up" (`attempt_daily_refill`). A balance at
+  or above the limit gets nothing that day. The graph's key calls every credit that came in
+  "Added": a top-up, a starting balance or a refund.
+- The log shows the newest 8 rows; Show more reveals the rest of the 100 the panel loads, 20 at a
+  time, and moves focus to the first row it revealed.
 - Checkout/portal actions call `/billing/checkout` with `action=checkout|portal`.
 - Low-balance copy should direct users to upgrade/refill via the billing flow.
