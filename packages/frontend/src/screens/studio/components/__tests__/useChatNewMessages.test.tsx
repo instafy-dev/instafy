@@ -249,6 +249,21 @@ describe("new arrivals above the composer", () => {
     expect(action()).toBeNull();
   });
 
+  // The chat finds its place a frame or two after it shows again, with no
+  // render of its own: a reply that came while it was hidden still gets its
+  // pill once that place turns out to be above the newest message.
+  it("shows once the chat has found its place above the newest message, with no render after", async () => {
+    let ready = false;
+    await update({ enabled: false, isReadingReady: () => ready, arrivalMessages: [message(1), message(2)] });
+    await update({ enabled: true });
+    expect(action()).toBeNull();
+    ready = true;
+    await act(async () => {
+      await new Promise((resolve) => window.requestAnimationFrame(() => resolve(null)));
+    });
+    expect(action()).not.toBeNull();
+  });
+
   it("clears when a reply grows the content under a reader at the bottom", async () => {
     await update({ arrivalMessages: [message(1), message(2)] });
     expect(action()).not.toBeNull();

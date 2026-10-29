@@ -4,6 +4,8 @@ import { isUUID } from "../../../utils/uuid";
 import type { ChatMessage } from "../types";
 
 const LIVE_BOTTOM_THRESHOLD_PX = 24;
+/** How many frames the pill waits on the chat finding its place before it waits on the next render. */
+const PLACE_LOOK_MAX_FRAMES = 300;
 
 interface NewMessagesOptions {
   visitKey: string | null;
@@ -126,6 +128,26 @@ export function useChatNewMessages(options: NewMessagesOptions) {
   useLayoutEffect(() => {
     if (pending) settle();
   });
+  // Whether the chat had found its place when it last rendered. It finds it
+  // with no render of its own, so while the pill waits on it the hook looks
+  // each frame (for a few seconds at most) and renders once it has: the pill
+  // then shows, or the render's own look above clears it.
+  const placeFound = options.messageTargetActive || options.isReadingReady();
+  const [, setPlaceLooks] = useState(0);
+  useLayoutEffect(() => {
+    if (!pending || !enabled || placeFound || typeof window.requestAnimationFrame !== "function") return;
+    let frames = 0;
+    let frame = window.requestAnimationFrame(function look() {
+      const current = latest.current;
+      if (current.messageTargetActive || current.isReadingReady()) {
+        setPlaceLooks((looks) => looks + 1);
+        return;
+      }
+      frames += 1;
+      if (frames < PLACE_LOOK_MAX_FRAMES) frame = window.requestAnimationFrame(look);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [enabled, pending, placeFound]);
 
   const jumpToLatest = useCallback(() => {
     const current = latest.current;
@@ -140,7 +162,7 @@ export function useChatNewMessages(options: NewMessagesOptions) {
   return {
     // Never while the chat is still finding its place: whether the arrival is
     // out of view is known only once it has.
-    hasNewMessages: pending && enabled && hasResolvedHistory && (options.messageTargetActive || options.isReadingReady()),
+    hasNewMessages: pending && enabled && hasResolvedHistory && placeFound,
     jumpToLatest,
   };
 }
