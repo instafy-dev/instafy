@@ -295,10 +295,11 @@ tool update (the routing pre-observation, a command the runtime runs and shows b
 model's first call, does not count), and no call in the job's usage receipt that did not end in
 an error or that recorded usage (a call records usage only from a model response that
 completed). Codex stores only the proxy's message, not its JSON code, so each code's fixed
-sentence counts as the code. A timeout (408), a throttling 429, a 5xx or a dropped connection
-keeps the reserve: it may have cut a paid answer short. The refund row is keyed per prompt, so a
-completion delivered again, or the expiry sweep reaching the same prompt, never writes a second
-one. The Studio tells a managed-AI run that hit the limit that Instafy AI is unavailable
+sentence counts as the code. A timeout (408), a throttling 429, a 5xx or a dropped connection is
+no such refusal: it may have cut a paid answer short. A failed turn that left the person nothing
+is refunded anyway, under the rule in "Failed turns" below, which covers every failure. The
+refund row is keyed per prompt, so a completion delivered again, the other rule, or the expiry
+sweep reaching the same prompt, never writes a second one. The Studio tells a managed-AI run that hit the limit that Instafy AI is unavailable
 (`aiAccessMode` on the run's final message), with no "Try again", since a resend before the
 window reopens fails the same way.
 
@@ -320,43 +321,131 @@ Starter guidance with the current defaults:
   under the limit, that day, it is topped back up, at whatever hour that is, by however much it
   fell (`attempt_daily_refill` and `daily_window_allows` in `credits.rs`)
 
+### Failed turns
+
+A turn that ends in a failure ("…so this turn stopped." with **Try again**) costs nothing when it
+left the person nothing: no reply or note, no step that worked and no file written. A step is a
+command, a tool call, a web search or a file change, and it worked unless its last report is a
+failure or a command's non-zero exit (one whose end never arrived counts, since it may have
+worked). Looking at the browser's tabs, its state or
+the page it is on (`list_tabs`, `status`, `snapshot`) is not a step that worked, and neither is the
+routing pre-observation the runtime runs itself before the model. Such a turn gets its reserve and
+its daily prompt slot back (refund reason `failed_turn_without_result`), and its tokens are not
+charged, even though its model ran: a browser turn whose every page failed to open is one. A turn
+the sweep fails after its machine was lost is judged the same way, whether or not a runtime held
+it, under the sweep's own refund reason (`system_turns.rs` `turn_left_nothing`). So is a browser
+turn that a stop of its machine fails on the spot, since it cannot move to another machine ("The
+Shared Browser closed when its machine stopped."; `give_back_reserve_of_lost_browser_turn`).
+
+A failure alone is not proof that the person got nothing. The runtime fails a turn whose model
+ended without a final answer, and a model can be asked to do that after doing the work: the files
+stay in the space, and a command's output and Octo's notes stay in Details. So a failed turn that
+left any of these is charged as any turn is, from its own tokens. The refusals above leave nothing
+by definition, so they keep their own refund reasons.
+
 ### Turns Instafy starts by itself
 
-A turn Instafy starts by itself, not the person, costs nothing unless it ends with Octo's
-reply. There are two:
+A turn Instafy starts by itself, not the person, costs nothing unless it does what it is
+charged for. There are three:
 
 - a browser hand-back, which takes what a browser turn read back to the turn that is building a
   page or a map ("Hand-back" in [Shared Browser](Shared-Browser.md));
 - an automatic retry, which Studio sends once when a turn fails for a passing reason, a dropped
-  reply or a short rate limit ([Chat activity](Chat-Activity.md)).
+  reply or a short rate limit ([Chat activity](Chat-Activity.md));
+- a card's browser turn: the browser turn that carries on Octo's `request_browser` card with the
+  card's own task. Studio opens it by itself, or the person presses the card; billing cannot tell
+  the two apart, and both ask only what Octo asked.
 
-A browser turn that Studio opens by itself for Octo's card is not one of them: it carries on the
-person's own request, as their press would, and is charged as their turn.
+Each kind reserves its credit at dispatch like any other. A hand-back or an automatic retry is
+charged when it ends with a reply (it succeeded and posted something that is not empty), and its
+usage is then reconciled like any turn's. `NO_RESPONSE` is no reply only where the controller
+swallows it and posts nothing, as for an evaluation turn in a group chat; any other turn posts it
+as its message, so it is a reply. A team plan it writes is its reply once the plan goes out. One
+that ends without a reply is charged all the same when it left the person something, by the test
+in "Failed turns" above: a note, a step that worked or a file written. Otherwise it could do the
+work and then fail, or be stopped, for free; and since the failed turn an automatic retry repeats
+costs nothing when it left nothing, the whole request would be free. A decline the controller
+swallows still costs nothing, as it does for an evaluation turn the person sent.
 
-Either kind reserves its credit at dispatch like any other. When it ends with a reply (it
-succeeded and posted something that is not empty), its usage is reconciled like any turn's.
-`NO_RESPONSE` is no reply only where the controller swallows it and posts nothing, as for an
-evaluation turn in a group chat; any other turn posts it as its message, so it is a reply. A
-team plan it writes is its reply once the plan goes out. When it fails, is stopped, expires, ends
-without a reply or has its plan refused, its reserve and its daily prompt slot are given back
-(refund reason `system_turn_without_reply`) and its tokens are not charged, even when a runtime
-already ran it; the runtime's later receipt for a refused plan bills nothing either. The turn it
-continues or retries follows the rules for a turn the person sent: a failed turn keeps its
-charge unless it never reached a model (above).
+A card's browser turn is charged when it did something in the browser beyond looking at the page
+it was given: it opened a page or a tab, clicked, typed, pressed a key or scrolled, or ran any
+other step that worked. Looking at the tabs, the browser's state or the page does not count, and
+neither does its reply: a refusal is a reply too, as when the turn finds the browser on a page that
+has nothing to do with its task and stops.
 
-Billing reads only the controller's own marks on the job (`system_turns.rs`): the
-`browserHandBack` record that dispatch stamps on a hand-back it checked, and
-`metadata.automaticRetry`, which dispatch stamps on a resend marked `retryAutomatic: true` only
-when the message its `retryOfMessageId` names is this conversation's and belongs to a failed run
-of a prompt the sender sent, at most 10 minutes ago; the resend repeats that prompt's words, with
-no attachments and no browser, as Studio's own resend does; that run was not itself a turn
-Instafy started; nobody has sent a prompt in the conversation since; and no other automatic
-retry of it was dispatched. A resend that fails a check still goes out, as an ordinary turn. A
-client's own copy of either mark is dropped at dispatch and on recorded messages. Nothing of the
-person's rides on a hand-back either: whatever words it was sent with, it asks only Studio's
-"Continue building with what the browser turn found.", and one that carries attachments is
-refused. Words someone sends into either kind while it runs (a steer) make it theirs: the steer
-marks the job `steeredByPerson`, and from then on it is charged as a turn they sent.
+A turn of any of these kinds that is not charged (a hand-back or an automatic retry that left
+nothing and fails, is stopped, expires, ends without a reply or has its plan refused, or a card's
+browser turn that did nothing in the browser, including one that a stop of its machine failed)
+gets its reserve and its daily prompt slot back (refund reason `system_turn_without_reply`, or
+`browser_card_without_page` for a card's browser turn), and its tokens are not charged, even when
+a runtime already ran it; the runtime's later receipt for a refused plan bills nothing either. The
+turn it continues or retries follows the rules for a turn the person sent ("Failed turns" above).
+
+Billing reads only the controller's own marks on the job (`system_turns.rs`):
+
+- the `browserHandBack` record that dispatch stamps on a hand-back it checked;
+- `metadata.automaticRetry`, which dispatch stamps on a resend marked `retryAutomatic: true` only
+  when the message its `retryOfMessageId` names is this conversation's and belongs to a failed run
+  of a prompt the sender sent, at most 10 minutes ago; the resend repeats that prompt's words, with
+  no attachments and no browser, as Studio's own resend does; that run was not itself a turn
+  Instafy started; nobody has sent a prompt in the conversation since; and no other automatic
+  retry of it was dispatched;
+- `metadata.browserCardTurn`, which dispatch stamps on a browser send that names its card in
+  `browserRequestOf` (`"job:<card job>"`) only when the card is the `action_request` message that
+  turn's runtime posted, the card's turn is one the sender sent and not itself a turn Instafy
+  started, the send asks the card's task and nothing else (the task alone, or after Studio's
+  continuation prefix, `system_turns_fixtures.json`), it carries no attachments, and no browser
+  turn carried that card on before. A card a turn Instafy started posted stays the person's own
+  to carry on, so free turns never chain.
+
+A send that fails a check still goes out, as an ordinary turn, and a client's own copy of any mark
+is dropped at dispatch and on recorded messages. Nothing of the person's rides on these turns:
+whatever words a hand-back was sent with, it asks only Studio's "Continue building with what the
+browser turn found.", and one that carries attachments is refused. A send that carries words for
+one agent (`agentPromptSegments`, or `agentSelection.promptSegments`, which dispatch hands that
+agent in place of the send's own words) is never stamped as an automatic retry or a card's browser
+turn, and a hand-back that carries some is refused. Words someone sends into any of these turns
+while it runs (a steer) make it theirs: the steer marks the job `steeredByPerson`, and from then on
+it is charged as a turn they sent.
+
+### What one turn is billed for
+
+A turn is billed once, from the tokens of its first attempt: the `turn.completed` usage at the end
+of its first Codex run log (`extract_turn_usage_from_artifacts`). When the runtime tries again
+inside the same turn (a recovery retry, which Studio shows as "Trying again…", or a final wrap-up
+pass after a missing answer), that attempt is not billed, and neither is the routing check the
+runtime makes with the model before a building turn. An automatic retry that Studio sends is a turn
+of its own (above).
+
+### Why a short follow-up can cost as much as a long turn
+
+Uncached input sets the floor of a turn's price: $0.10 per million tokens, against $0.01 cached.
+A chat's turns share one Codex thread, and every request of a turn sends that thread's history
+again; the provider bills it as cached only from the start of the request up to where it first
+differs from a request it saw before. That start depends on the turn's lane (runtime-agent
+`final_output_mode_for_runtime_job` and `runtime_base_instructions`):
+
+- a turn that writes files runs `plain_text_write`, with its own base instructions and no output
+  schema;
+- a question or a one-command turn runs `strict_structured`, with other base instructions and the
+  final JSON schema, which the provider puts ahead of the instructions;
+- a browser turn runs with the model's own prompt, the browser's developer instructions and the
+  browser's tools, and resumes the same thread (its mode falls back to the thread keys the default
+  mode writes).
+
+So a lane's requests reuse only that lane's own earlier requests, and only while the provider
+still holds them (a few minutes). The first request of a turn pays the uncached price for the part
+of the history its lane has not sent in that time: all of it, the first time a chat uses the lane
+or after a pause, and only what other lanes added since, when the lane ran a few minutes before.
+The requests after it are cached. A one-command turn ("open the map"), the chat's first in its
+lane, sent its 75k-token history uncached once and cached once, and cost 9 credits; with the start
+cached it would cost about 2. A building turn a few minutes after the chat's last turn in the
+same lane was 98% cached, although a browser turn came between, and a browser follow-up after a
+browser turn was 97% cached. A chat that moves between building, asking and browsing pays the whole
+history again at the first turn of each lane, and more the longer the chat. Making the start the
+same for every lane of a thread (the same base instructions, tools and output format, with each
+lane's rules later in the request), or giving each lane its own thread, would remove it; both
+change what every turn is told, so they are left to a change of their own.
 
 ### Measuring root-call usage
 

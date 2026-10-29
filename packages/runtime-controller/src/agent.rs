@@ -3607,19 +3607,29 @@ pub(crate) async fn agent_complete(
         crate::group_participation::job_payload_marks_agent_declined(&job_payload),
     );
 
-    // A turn Instafy started by itself (a hand-back, an automatic retry) is
-    // charged only when it ends with Octo's reply (crate::system_turns): one
-    // that does not gets its reserve back, and its tokens are not billed. A
-    // decline is no reply only where it posts nothing, as it does below.
-    let system_turn_without_reply = if crate::system_turns::system_turn_of(&job_payload).is_some() {
-        let swallowed = silent_completion
-            && !run_has_visible_assistant_message(&transaction, &project_id, run_id).await?;
-        !crate::system_turns::completion_is_a_reply(&outcome_lower, summary.as_deref(), swallowed)
-    } else {
-        false
-    };
-    if system_turn_without_reply {
-        if let Some(org_id) = crate::system_turns::give_back_reserve_without_reply(
+    // Some turns cost nothing (crate::system_turns): a turn Instafy started by
+    // itself (a hand-back, an automatic retry) that does not end with Octo's
+    // reply and left nothing else, a card's browser turn that did nothing in
+    // the browser beyond looking, and a failed turn that left the person
+    // nothing. Such a turn
+    // gets its reserve back, and its tokens are not billed. A decline is no
+    // reply only where it posts nothing, as it does below.
+    let swallowed = silent_completion
+        && !run_has_visible_assistant_message(&transaction, &project_id, run_id).await?;
+    let costs_nothing = crate::system_turns::completion_refund_reason(
+        &transaction,
+        &project_id,
+        &job_uuid,
+        run_id,
+        &job_payload,
+        &outcome_lower,
+        summary.as_deref(),
+        swallowed,
+        &artifacts_value,
+    )
+    .await?;
+    if let Some(reason) = costs_nothing {
+        if let Some(org_id) = crate::system_turns::give_back_reserve(
             &transaction,
             &project_id,
             &job_uuid,
@@ -3627,6 +3637,7 @@ pub(crate) async fn agent_complete(
             run_prompt_id.or(job_prompt_id),
             leased_runtime_id,
             &job_payload,
+            reason,
         )
         .await?
         {
@@ -3700,8 +3711,8 @@ pub(crate) async fn agent_complete(
 
         if let Some(usage) = extract_turn_usage_from_artifacts(&artifacts_value) {
             // Billed once the reply is visible (CompletionSettlement), unless
-            // Instafy started the turn and it ended without one.
-            if !system_turn_without_reply {
+            // the turn costs nothing (above).
+            if costs_nothing.is_none() {
                 usage_to_reconcile = Some(usage);
             }
 

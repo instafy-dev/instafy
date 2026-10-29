@@ -95,9 +95,10 @@ pub(super) async fn store(
             .and_then(|id| Uuid::parse_str(id).ok())
     });
     // A turn Instafy started by itself whose plan was refused ended without
-    // a reply: it costs nothing, so its tokens are not billed and its reserve
-    // goes back, if the refusal could not give it back (crate::system_turns).
-    // A plan that went out was its reply, billed below as any turn's.
+    // a reply: its tokens are not billed, and its reserve goes back when it
+    // left the person nothing else, if the refusal could not give it back
+    // (crate::system_turns). A plan that went out was its reply, billed below
+    // as any turn's.
     let system_turn_without_reply = crate::system_turns::system_turn_of(&payload).is_some()
         && row.get::<_, String>("status") == "failed";
     let credit_org_id = if system_turn_without_reply {

@@ -497,8 +497,8 @@ async fn finish_parent_plan_job(
         .unwrap_or_else(|| json!({}));
     // A plan that goes out is the planning turn's reply. A turn Instafy
     // started by itself whose plan is refused ends without one, so it costs
-    // nothing (crate::system_turns); its late receipt bills no tokens either
-    // (agent::planning_receipts).
+    // nothing when it left the person nothing else (crate::system_turns); its
+    // late receipt bills no tokens either (agent::planning_receipts).
     let refunded_org_id = match (refusal, completed_row.as_ref()) {
         (Some(_), Some(row)) => {
             crate::system_turns::give_back_reserve_without_reply(

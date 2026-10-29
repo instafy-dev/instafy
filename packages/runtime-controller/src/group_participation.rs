@@ -801,7 +801,8 @@ pub(crate) async fn cancel_covered_default_octo_job(
     )
     .await?;
     // A turn Instafy started by itself that a human answer covers ends
-    // without Octo's reply, so it costs nothing (crate::system_turns).
+    // without Octo's reply, so it costs nothing unless it left the person
+    // something else (crate::system_turns).
     let refunded_org_id = crate::system_turns::give_back_reserve_without_reply(
         transaction,
         project_id,
