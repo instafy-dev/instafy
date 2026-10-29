@@ -220,7 +220,10 @@ the protocol instead of passing it through: RFB 3.8 with no security, a shared
 session whatever the client asked, and then only the messages that ask for
 pixels (pixel format, encodings, update requests, continuous updates and
 fences). Key and pointer events, clipboard text, desktop resizes and power
-requests are dropped, and any message the lane does not know closes it.
+requests are dropped, and any message the lane does not know closes it. The
+server's half is passed through, so the display sends no clipboard: RFB would
+send every viewer the text copied or selected in the browser, and the runtime
+starts Xtigervnc with `-SendCutText=0` (no Instafy viewer reads that text).
 Capabilities advertise it as `rfb.viewOnly: true`. Studio uses it while Octo or
 another person drives: noVNC connects with `viewOnly` and scales the picture
 instead of resizing the shared screen, and moves to the driver's lane when

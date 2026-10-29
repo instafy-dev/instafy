@@ -8,7 +8,9 @@
 //! (what the runtime's Xtigervnc offers on loopback), a shared session, and
 //! then only the messages that ask for pixels. Key and pointer events,
 //! clipboard text, desktop resizes and power requests are dropped; anything
-//! the lane does not know closes it. The server's half is passed through.
+//! the lane does not know closes it. The server's half is passed through:
+//! the runtime starts its display with `-SendCutText=0`, so that half carries
+//! no text copied or selected in the browser.
 //!
 //! The display shows the tab in front, and Octo brings the tab it works in
 //! to the front, so a viewer on this lane follows Octo across its own tabs.
@@ -209,6 +211,8 @@ fn client_message(bytes: &[u8]) -> Result<Option<Verdict>, &'static str> {
             }
             need(9 + payload).then_some(Verdict::Forward(9 + payload))
         }
+        // xvp: shutdown, reboot or reset of the machine.
+        250 => need(4).then_some(Verdict::Drop(4, 0)),
         // SetDesktopSize: resizes the screen everyone shares.
         251 => {
             if !need(8) {
@@ -217,8 +221,6 @@ fn client_message(bytes: &[u8]) -> Result<Option<Verdict>, &'static str> {
             let length = 8 + 16 * usize::from(bytes[6]);
             need(length).then_some(Verdict::Drop(length, 0))
         }
-        // xvp: shutdown, reboot or reset of the machine.
-        252 => need(4).then_some(Verdict::Drop(4, 0)),
         // QEMU extended key event; other QEMU messages are not passed.
         255 => {
             if !need(2) {
@@ -373,8 +375,8 @@ mod tests {
         // SetDesktopSize with one screen.
         input.extend([251, 0, 0x05, 0x00, 0x02, 0xd0, 1, 0]);
         input.extend([0u8; 16]);
-        // xvp and a QEMU extended key event.
-        input.extend([252, 0, 1, 2]);
+        // xvp (shutdown, reboot or reset) and a QEMU extended key event.
+        input.extend([250, 0, 1, 2]);
         input.extend([255, 0, 0, 1, 0, 0, 0, 0x0d, 0, 0, 0, 0x1c]);
         assert_eq!(filter.feed(&input).expect("input"), Vec::<u8>::new());
     }
@@ -446,7 +448,14 @@ mod tests {
         let mut vnc_auth = RFB_VERSION_3_8.to_vec();
         vnc_auth.push(2);
         assert!(refused(&vnc_auth));
-        for message in [vec![7u8, 0], vec![253, 0, 0, 0], vec![255, 1, 0, 0]] {
+        // Another message type, tight's (variable length), gii's and a QEMU
+        // message other than its extended key event.
+        for message in [
+            vec![7u8, 0],
+            vec![252, 0, 0, 0],
+            vec![253, 0, 0, 0],
+            vec![255, 1, 0, 0],
+        ] {
             let mut bytes = handshake();
             bytes.extend(message);
             assert!(refused(&bytes), "{bytes:?}");

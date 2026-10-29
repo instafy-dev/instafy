@@ -711,8 +711,9 @@ export function BrowserSessionModal({
   const [browserRestarting, setBrowserRestarting] = useState(false);
   const [runtimeLimitDetails, setRuntimeLimitDetails] =
     useState<HostedRuntimeLimitErrorDetails | null>(null);
+  // `viewOnly`: an RFB address is for its view-only lane (see rfbViewOnlyLane).
   const [resolvedViewerUrl, setResolvedViewerUrl] = useState<{
-    kind: SupportedSharedBrowserViewerKind; url: string | null;
+    kind: SupportedSharedBrowserViewerKind; url: string | null; viewOnly: boolean;
   } | null>(null);
   const wsUrl = resolvedViewerUrl?.url ?? null;
   const [browserInputWsUrl, setBrowserInputWsUrl] = useState<string | null>(null);
@@ -1002,8 +1003,10 @@ export function BrowserSessionModal({
   const sharedBrowserConnectionPageId =
     activeSharedBrowserViewerKind === "rfb" ? null : sharedBrowserPageId;
   // URL resolution follows renderer selection in an effect. Never mount the
-  // newly selected protocol with the previous renderer's URL in between.
-  const resolvedSharedBrowserViewerKind = resolvedViewerUrl?.kind === activeSharedBrowserViewerKind
+  // newly selected protocol with the previous renderer's URL in between, nor
+  // one RFB lane with the other's: control changing hands switches the lane.
+  const resolvedSharedBrowserViewerKind = resolvedViewerUrl?.kind === activeSharedBrowserViewerKind &&
+    (activeSharedBrowserViewerKind !== "rfb" || resolvedViewerUrl.viewOnly === rfbViewOnlyLane)
     ? activeSharedBrowserViewerKind : null;
   // The viewer this render mounts (its kind and URL), or null when none is.
   const mountedViewerTargetRef = useRef<string | null>(null);
@@ -2260,7 +2263,11 @@ export function BrowserSessionModal({
       setStatus("connecting");
       setFailure(null);
     }
-    setResolvedViewerUrl({ kind: activeSharedBrowserViewerKind, url });
+    setResolvedViewerUrl({
+      kind: activeSharedBrowserViewerKind,
+      url,
+      viewOnly: activeSharedBrowserViewerKind === "rfb" && rfbViewOnlyLane,
+    });
     setBrowserInputWsUrl(inputUrl);
 
     if (activeSharedBrowserViewerKind === "webrtc") {

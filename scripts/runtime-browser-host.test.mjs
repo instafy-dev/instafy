@@ -230,6 +230,8 @@ test("a started host reports ready, keeps a persisted profile and stops every ch
   const xArgs = read(fixture, "Xtigervnc.args").trim().split("\n");
   assert.deepEqual(xArgs.slice(0, 3), [":47", "-rfbport", env.INSTAFY_BROWSER_HOST_VNC_PORT]);
   assert.ok(xArgs.includes("-localhost"));
+  // Text copied or selected in the browser never reaches a viewer.
+  assert.ok(xArgs.includes("-SendCutText=0"));
   assert.equal(envOf(fixture, "browser-egress-proxy").get("INSTAFY_BROWSER_EGRESS_PROXY_BIND"), `127.0.0.1:${env.INSTAFY_BROWSER_HOST_EGRESS_PORT}`);
 
   // Every helper gets the positive allowlist and this host's HOME and display.
@@ -480,4 +482,17 @@ test("the boot-time and on-demand Chromium share one flag list", () => {
   const launches = [...entrypoint.matchAll(/env -i "\$\{MODEL_SAFE_ENV\[@\]\}" "\$\{chrome_path\}" \\\n {4}"\$\{CHROMIUM_LAUNCH_FLAGS\[@\]\}" \\\n/gu)];
   assert.equal(launches.length, 2);
   assert.equal([...entrypoint.matchAll(/--no-sandbox/gu)].length, 1);
+});
+
+// The display sends every RFB viewer the text copied or selected in the
+// browser (the X clipboard and selection) unless told not to, and everyone who
+// may watch the browser has an RFB lane: the view-only one needs only
+// browser.view. No Instafy viewer reads that text, so no display sends it.
+test("no display sends the browser's copied or selected text to its viewers", () => {
+  // Each launch, with its flag lines up to the redirection.
+  const launches = [...entrypoint.matchAll(/ Xtigervnc "\$\{DISPLAY\}" \\\n((?:[ \t]+-[^\n]*\\\n)+)/gu)];
+  assert.equal(launches.length, 2);
+  for (const [, flags] of launches) {
+    assert.ok(flags.split("\n").map((line) => line.trim()).includes("-SendCutText=0 \\"), flags);
+  }
 });

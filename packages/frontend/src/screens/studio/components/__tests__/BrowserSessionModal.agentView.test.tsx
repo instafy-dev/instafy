@@ -58,6 +58,10 @@ vi.mock("@novnc/novnc/lib/rfb", () => ({ default: class {
   }
 } }));
 
+// The event loop React schedules its work on, kept before the fake timers
+// replace it.
+const realSetImmediate: (callback: () => void) => void = globalThis.setImmediate;
+
 import { BrowserSessionModal } from "../BrowserSessionModal";
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "../hostedBrowserViewState";
 import type { BrowserSessionPage } from "../browserSessionPages";
@@ -331,5 +335,45 @@ describe("Shared Browser view while Octo drives", () => {
     });
     await advance(50);
     expect(ticker()).toBeNull();
+  });
+  /**
+   * Control changes hands as the browser reports it, with React rendering on
+   * its own schedule as it does in a browser (act flushes every render at
+   * once, which hides a lane opened in between). Returns the lanes opened.
+   */
+  async function handOverOutsideAct(owner: SharedBrowserCollaborationControlOwner, props: HostProps) {
+    const before = mocks.rfb.length;
+    const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      server.owner = owner;
+      for (const socket of server.sockets) socket.pushState();
+      root.render(<Host {...props} />);
+      for (let turn = 0; turn < 40; turn += 1) await new Promise<void>((resolve) => realSetImmediate(resolve));
+    } finally {
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+    }
+    return mocks.rfb.slice(before).map((rfb) => `${rfb.viewOnly ? "watching" : "driving"} ${new URL(rfb.url).pathname}`);
+  }
+
+  it("opens only the view-only lane when Octo takes control, never the driver's lane in between", async () => {
+    await act(async () => root.render(<Host agentHolds={false} viewOnly agentPageIds={["PAGE1"]} />));
+    await advance(1_000);
+    const driving = mocks.rfb.at(-1)!;
+    expect(driving.url).toMatch(/\/browser\/vnc\?/);
+    await act(async () => { driving.listeners.connect?.(); driving.frame(); });
+    await advance(100);
+    expect(await handOverOutsideAct({ kind: "agent", displayName: "Octo" },
+      { agentHolds: true, viewOnly: true, agentPageIds: ["PAGE1"] })).toEqual(["watching /browser/vnc/view"]);
+  });
+
+  it("opens only the driver's lane when the person takes control back, never the view-only lane in between", async () => {
+    await octoTakesControl({ viewOnly: true, agentPageIds: ["PAGE1"] });
+    const lane = mocks.rfb.at(-1)!;
+    expect(lane.url).toMatch(/\/browser\/vnc\/view\?/);
+    await act(async () => { lane.listeners.connect?.(); lane.frame(); });
+    await advance(50);
+    expect(await handOverOutsideAct({ kind: "human", participantId: "self" },
+      { agentHolds: false, viewOnly: true, agentPageIds: ["PAGE1"] })).toEqual(["driving /browser/vnc"]);
   });
 });
