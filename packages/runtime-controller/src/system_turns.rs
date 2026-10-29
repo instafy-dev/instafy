@@ -10,9 +10,13 @@
 //!   marked `retryAutomatic: true` with `retryOfMessageId` naming the failed
 //!   message (Studio's `useRunFailureAutoRetry`).
 //!
+//! A browser turn Studio opens by itself for Octo's card is not one of them:
+//! it carries on the person's own request, as their press would.
+//!
 //! Such a turn reserves its credit at dispatch like any other, and costs what
-//! any turn costs only when it ends with Octo's reply. One that fails, is
-//! stopped, expires or ends without a reply gets its reserve and its daily
+//! any turn costs only when it ends with Octo's reply; a team plan it writes
+//! is its reply once the plan goes out. One that fails, is stopped, expires,
+//! ends without a reply or has its plan refused gets its reserve and its daily
 //! prompt slot back, and its tokens are never charged (docs/Credits-Billing.md,
 //! "Turns Instafy starts by itself").
 //!
@@ -122,6 +126,29 @@ pub(crate) fn automatic_retry_claim(metadata: &JsonValue) -> Option<Uuid> {
         .and_then(|raw| Uuid::parse_str(raw).ok())
 }
 
+/// The rest of an automatic retry's checks, for conversation `$1`, the failed
+/// run `$2` (and as text, `$4`) and the failure's time `$3`: whether that run
+/// was itself a turn Instafy started, whether a prompt was sent since, and
+/// whether the run was already retried automatically. Each reads only the
+/// conversation's rows, through its index: `agent_jobs` has none on `run_id`.
+const AUTOMATIC_RETRY_CHECKS_SQL: &str = "select
+     exists (
+         select 1 from agent_jobs
+          where conversation_id = $1
+            and run_id = $2
+            and (payload #> '{metadata,automaticRetry}' is not null
+                 or payload #> '{metadata,browserHandBack}' is not null)
+     ) as failed_turn_was_instafys,
+     exists (
+         select 1 from prompts
+          where conversation_id = $1 and created_at > $3
+     ) as written_after,
+     exists (
+         select 1 from agent_jobs
+          where conversation_id = $1
+            and payload #>> '{metadata,automaticRetry,failedRunId}' = $4
+     ) as already_retried";
+
 /// Checks an automatic retry's claim and returns the stamp to put on its job,
 /// or None for a resend that goes out as an ordinary turn. Runs inside the
 /// dispatch transaction, after the conversation's dispatch fence, so two
@@ -163,22 +190,7 @@ pub(crate) async fn verify_automatic_retry(
     }
     let checks = transaction
         .query_one(
-            "select
-                 exists (
-                     select 1 from agent_jobs
-                      where run_id = $2
-                        and (payload #> '{metadata,automaticRetry}' is not null
-                             or payload #> '{metadata,browserHandBack}' is not null)
-                 ) as failed_turn_was_instafys,
-                 exists (
-                     select 1 from prompts
-                      where conversation_id = $1 and created_at > $3
-                 ) as written_after,
-                 exists (
-                     select 1 from agent_jobs
-                      where conversation_id = $1
-                        and payload #>> '{metadata,automaticRetry,failedRunId}' = $4
-                 ) as already_retried",
+            AUTOMATIC_RETRY_CHECKS_SQL,
             &[
                 conversation_id,
                 &failed_run_id,
@@ -398,6 +410,28 @@ mod tests {
             json!({"retryAutomatic": true, "retryOfMessageId": [failure.to_string()]}),
         ] {
             assert_eq!(automatic_retry_claim(&metadata), None, "{metadata}");
+        }
+    }
+
+    // agent_jobs has no index on run_id: a check that does not first narrow
+    // to the conversation reads the whole table, inside the dispatch
+    // transaction and under the conversation's dispatch fence.
+    #[test]
+    fn every_check_of_an_automatic_retry_reads_only_its_conversation() {
+        let subqueries = AUTOMATIC_RETRY_CHECKS_SQL
+            .split("select 1 from ")
+            .skip(1)
+            .collect::<Vec<_>>();
+        assert_eq!(subqueries.len(), 3);
+        for subquery in subqueries {
+            let filter = subquery
+                .split_once("where")
+                .map(|(_, filter)| filter.trim_start())
+                .unwrap_or_default();
+            assert!(
+                filter.starts_with("conversation_id = $1"),
+                "not narrowed to the conversation first: {subquery}"
+            );
         }
     }
 

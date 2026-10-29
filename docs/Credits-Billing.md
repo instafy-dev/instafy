@@ -325,12 +325,17 @@ reply. There are two:
 - an automatic retry, which Studio sends once when a turn fails for a passing reason, a dropped
   reply or a short rate limit ([Chat activity](Chat-Activity.md)).
 
-Such a turn reserves its credit at dispatch like any other. When it ends with a reply (it
-succeeded, and its reply is not empty or a decline), its usage is reconciled like any turn's.
-When it fails, is stopped, expires or ends without a reply, its reserve and its daily prompt
-slot are given back (refund reason `system_turn_without_reply`) and its tokens are not charged,
-even when a runtime already ran it. The turn it continues or retries follows the rules for a
-turn the person sent: a failed turn keeps its charge unless it never reached a model (above).
+A browser turn that Studio opens by itself for Octo's card is not one of them: it carries on the
+person's own request, as their press would, and is charged as their turn.
+
+Either kind reserves its credit at dispatch like any other. When it ends with a reply (it
+succeeded, and its reply is not empty or a decline), its usage is reconciled like any turn's. A
+team plan it writes is its reply once the plan goes out. When it fails, is stopped, expires, ends
+without a reply or has its plan refused, its reserve and its daily prompt slot are given back
+(refund reason `system_turn_without_reply`) and its tokens are not charged, even when a runtime
+already ran it; the runtime's later receipt for a refused plan bills nothing either. The turn it
+continues or retries follows the rules for a turn the person sent: a failed turn keeps its
+charge unless it never reached a model (above).
 
 Billing reads only the controller's own marks on the job (`system_turns.rs`): the
 `browserHandBack` record that dispatch stamps on a hand-back it checked, and

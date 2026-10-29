@@ -495,6 +495,25 @@ async fn finish_parent_plan_job(
         .as_ref()
         .map(|row| row.get::<_, PgJson<JsonValue>>("payload").0)
         .unwrap_or_else(|| json!({}));
+    // A plan that goes out is the planning turn's reply. A turn Instafy
+    // started by itself whose plan is refused ends without one, so it costs
+    // nothing (crate::system_turns); its late receipt bills no tokens either
+    // (agent::planning_receipts).
+    let refunded_org_id = match (refusal, completed_row.as_ref()) {
+        (Some(_), Some(row)) => {
+            crate::system_turns::give_back_reserve_without_reply(
+                &transaction,
+                &project_id,
+                &job_id,
+                run_id,
+                row.get::<_, Option<Uuid>>("prompt_id"),
+                row.get::<_, Option<Uuid>>("leased_by_runtime_id"),
+                &job_payload,
+            )
+            .await?
+        }
+        _ => None,
+    };
     if let Some(run_id) = run_id {
         // Home's feed: the planning turn finished.
         crate::activity::record_run_completed(
@@ -582,6 +601,13 @@ async fn finish_parent_plan_job(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit planning job completion: {error}"))
     })?;
+    if let Some(org_id) = refunded_org_id {
+        crate::credits::spawn_credits_updated(
+            state,
+            org_id,
+            crate::credits::CREDITS_UPDATED_LEDGER,
+        );
+    }
     crate::send_intents::publish_job_input_state_updates(state, &job_input_state_updates);
     if let Some(message) = plan_message_row {
         crate::conversations::publish_conversation_message_event(&state.events, &message);

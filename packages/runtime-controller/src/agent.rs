@@ -4291,7 +4291,9 @@ fn artifacts_show_a_completed_codex_turn(artifacts: &JsonValue) -> bool {
 
 /// The usage a turn is charged for: the last `turn.completed` of the first
 /// Codex run log that has one. An artifact of another kind, or a run log
-/// without events, is passed over rather than ending the search.
+/// without events, is passed over rather than ending the search. When that
+/// event has no `usage` (the runtime leaves it out for a turn with no count
+/// of its own), there is none, and the reserve stands as the charge.
 fn extract_turn_usage_from_artifacts(artifacts: &JsonValue) -> Option<TurnUsage> {
     let artifacts = artifacts.as_array()?;
     for artifact in artifacts {
