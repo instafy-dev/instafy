@@ -63,7 +63,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   rate limit are sent again by themselves: a turn that did not make its changes already had the
   runtime's second try inside it, so its "Try again" is the person's to press, since a resend they
   ask for is a turn they pay for. Instafy's own resend costs nothing unless it ends with a reply
-  ([Credits and Billing](Credits-Billing.md#turns-instafy-starts-by-itself)). The resent prompt is
+  ([Credits and Billing](Credits-Billing.md#turns-instafy-starts-by-itself)). A hand-back is never
+  sent again by itself: its words alone would go out as a turn of their own, without what the
+  browser found, and be charged (`isRunFailurePromptAutoResendable`). The resent prompt is
   marked `retryAutomatic` and the chat leaves it out, since it repeats the person's own words, and
   the failed attempt moves into the Details of the turn that replaced it, under "First try"
   (`automaticRetryFold.ts`). The mark is the sender's

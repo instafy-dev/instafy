@@ -725,6 +725,21 @@ describe("isRunFailurePromptAutoResendable", () => {
     ).toBe(false);
   });
 
+  // A failed hand-back's words alone would go out as a turn of their own,
+  // without what the browser found, and be charged as one.
+  it("is false for a hand-back, which a text-only resend would send without the browser's findings", () => {
+    const words = "Continue building with what the browser turn found.";
+    expect(
+      isRunFailurePromptAutoResendable({ content: words, metadata: { continuesFromBrowserJob: "job-1" } }),
+    ).toBe(false);
+    expect(
+      isRunFailurePromptAutoResendable({
+        content: words,
+        metadata: { browserHandBack: { version: 1, browserJobId: "job-1" }, dispatchContent: words },
+      }),
+    ).toBe(false);
+  });
+
   it("is false for a browser-routed or rewritten prompt", () => {
     expect(
       isRunFailurePromptAutoResendable({
