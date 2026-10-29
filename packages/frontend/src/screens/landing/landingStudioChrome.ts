@@ -415,11 +415,12 @@ export const BROWSER_PARTICIPANT_STACK = "flex shrink-0 items-center -space-x-1.
 export const BROWSER_PARTICIPANT = "inline-flex h-5 w-5 items-center justify-center rounded-full border-2 border-slate-50 text-[9px] font-semibold dark:border-[color:var(--color-studio-dark-panel-soft)]";
 export const BROWSER_PARTICIPANT_MORE = "inline-flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-slate-50 bg-slate-600 px-1 text-[9px] font-semibold text-white dark:border-[color:var(--color-studio-dark-panel-soft)]";
 export const BROWSER_OPTIONS = "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-700 dark:text-slate-200";
-// BrowserSessionModal.tsx:2335 the viewport: black under a live page, slate
-// while the session starts (dark cool-slate 950 replaced by the canvas tier).
+// BrowserSessionModal.tsx the viewport: slate under a live page, black only in
+// dark mode (BROWSER_LIVE_STAGE_CLASS), and slate while the session starts
+// (dark cool-slate 950 replaced by the canvas tier).
 export const BROWSER_VIEWPORT = "relative min-h-0 flex-1 overflow-hidden";
 export const BROWSER_VIEWPORT_STARTING = `bg-slate-100 ${DARK_CANVAS_CLASS}`;
-export const BROWSER_VIEWPORT_LIVE = "bg-black";
+export const BROWSER_VIEWPORT_LIVE = "bg-slate-100 dark:bg-black";
 // :2855-2941 the starting card.
 export const BROWSER_STATE_WRAP = "pointer-events-none absolute inset-0 flex items-center justify-center p-6";
 export const BROWSER_STATE_CARD = `w-full max-w-md rounded-2xl border border-slate-200 bg-white p-4 text-left text-sm text-slate-700 shadow-xl ${DARK_PANEL_SURFACE_CLASS} dark:text-slate-200`;

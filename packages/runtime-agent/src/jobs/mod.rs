@@ -7609,11 +7609,9 @@ impl JobProcessor {
                 "transient_upstream_error"
             };
             let retry_message = if personal_browser_execution_missing {
-                "Retrying: the Personal Browser turn did not execute its dedicated browser tools."
-                    .to_string()
+                PERSONAL_BROWSER_NOT_USED_RETRY_STATUS.to_string()
             } else if shared_browser_execution_missing {
-                "Retrying: the Shared Browser turn did not produce instrumented browser action evidence."
-                    .to_string()
+                SHARED_BROWSER_NO_PAGE_RETRY_STATUS.to_string()
             } else if command_execution_missing {
                 "Retrying: accepted execution evidence is still missing. Existing successful evidence and workspace work will be preserved.".to_string()
             } else if generic_mcp_tool_execution_missing {
@@ -8406,9 +8404,7 @@ impl JobProcessor {
                     }
                 }));
                 return Err(JobFailureWithArtifacts {
-                    message:
-                        "Codex did not execute the dedicated Personal Browser tools after retry."
-                            .to_string(),
+                    message: PERSONAL_BROWSER_NOT_USED_FAILURE.to_string(),
                     artifacts: retry_artifacts,
                 }
                 .into());
@@ -8421,9 +8417,7 @@ impl JobProcessor {
                     }
                 }));
                 return Err(JobFailureWithArtifacts {
-                    message:
-                        "Codex did not execute the dedicated Shared Browser tools after retry."
-                            .to_string(),
+                    message: SHARED_BROWSER_NO_PAGE_FAILURE.to_string(),
                     artifacts: retry_artifacts,
                 }
                 .into());
@@ -13099,13 +13093,29 @@ fn codex_missing_final_inert_write_task_retry_prompt(prompt: &str) -> String {
     )
 }
 
+/// What the person reads when a browser turn ended, after its retry, without
+/// having used the browser: plain words, shown inline on the failed turn
+/// (Studio keeps a reason that names the AI vendor or a tool behind Details).
+/// The artifact beside it keeps the machine-readable reason.
+const SHARED_BROWSER_NO_PAGE_FAILURE: &str =
+    "Octo couldn't open a page in the browser, so this turn stopped.";
+const PERSONAL_BROWSER_NOT_USED_FAILURE: &str =
+    "Octo couldn't use the browser on this device, so this turn stopped.";
+/// The status a retry for the same reason leaves in Details.
+const SHARED_BROWSER_NO_PAGE_RETRY_STATUS: &str =
+    "Trying again: Octo hadn't opened a page in the browser yet.";
+const PERSONAL_BROWSER_NOT_USED_RETRY_STATUS: &str =
+    "Trying again: Octo hadn't used the browser on this device yet.";
+
 fn shared_browser_execution_retry_prompt(prompt: &str) -> String {
     // A browser that has just started is on a blank page: the snapshot says so
-    // and the agent has to navigate before there is anything to act on.
+    // and the agent has to navigate before there is anything to act on. A
+    // task that names no address (research, a comparison) gets no address
+    // from its card either, so the agent picks the page to start from.
     format!(
         "{prompt}\n\nIMPORTANT SHARED BROWSER RETRY REQUIREMENT:\n\
         - Your previous response did not produce any instrumented Shared Browser action evidence.\n\
-        - Use `instafy_shared_browser.snapshot` now. If it reports a blank page, call `instafy_shared_browser.navigate` with the http(s) address the task names before anything else.\n\
+        - Use `instafy_shared_browser.snapshot` now. If it reports a blank page, call `instafy_shared_browser.navigate` before anything else: with the http(s) address the task names, or, when it names none, with the official site of what the task is about. A blank page is never a reason to stop.\n\
         - Complete the requested interaction with the same dedicated MCP server and fresh snapshot indices.\n\
         - Do not use shell, Playwright, direct CDP, or merely narrate the action.\n\
         - Finish only after the controller response provides the final observed page title and URL.\n\n\
@@ -25349,9 +25359,54 @@ mod tests {
         assert!(retry.starts_with("Open https://app.example.test\n\n"));
         assert!(retry.contains("Use `instafy_shared_browser.snapshot` now."));
         assert!(retry.contains(
-            "If it reports a blank page, call `instafy_shared_browser.navigate` with the http(s) address the task names"
+            "If it reports a blank page, call `instafy_shared_browser.navigate` before anything else: with the http(s) address the task names"
         ));
         assert!(retry.ends_with("Retry the latest user request now."));
+    }
+
+    #[test]
+    fn shared_browser_retry_prompt_opens_a_page_for_a_task_that_names_no_address() {
+        // Drive, Oct 28: a research card named no address, the browser had
+        // just started on a blank tab, and both attempts stopped there ("the
+        // task provides no page address to open"), so the turn failed.
+        let retry = shared_browser_execution_retry_prompt(
+            "Research the three latest robot vacuums under 600 euros and build a comparison page.",
+        );
+        assert!(
+            retry.contains(
+                "or, when it names none, with the official site of what the task is about"
+            )
+        );
+        assert!(retry.contains("A blank page is never a reason to stop."));
+    }
+
+    #[test]
+    fn browser_turn_failures_read_as_plain_words() {
+        // Studio shows a plain reason inline and keeps one that names the AI
+        // vendor, a tool or the plumbing behind Details.
+        for text in [
+            SHARED_BROWSER_NO_PAGE_FAILURE,
+            PERSONAL_BROWSER_NOT_USED_FAILURE,
+            SHARED_BROWSER_NO_PAGE_RETRY_STATUS,
+            PERSONAL_BROWSER_NOT_USED_RETRY_STATUS,
+        ] {
+            let lower = text.to_ascii_lowercase();
+            for word in [
+                "codex",
+                "mcp",
+                "tool",
+                "instafy_",
+                "shared browser",
+                "personal browser",
+                "evidence",
+            ] {
+                assert!(!lower.contains(word), "{text:?} names {word:?}");
+            }
+            assert!(
+                text.starts_with("Octo ") || text.starts_with("Trying again: Octo "),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]
