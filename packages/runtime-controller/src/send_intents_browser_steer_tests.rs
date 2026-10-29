@@ -374,3 +374,47 @@ async fn steering_a_turn_instafy_started_makes_it_the_senders() -> anyhow::Resul
     })
     .await
 }
+
+/// A card's browser turn costs nothing unless it does something in the
+/// browser (crate::system_turns). Words someone sends into it while it runs
+/// make it theirs, so their request never rides on a turn that may be free.
+#[tokio::test]
+async fn steering_a_card_browser_turn_makes_it_the_senders() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.run(async {
+        let stamp = json!({ "version": 1, "cardJobId": Uuid::new_v4() });
+        let job = f
+            .active_job(
+                Some(f.owner),
+                json!({ crate::system_turns::BROWSER_CARD_TURN_KEY: stamp }),
+            )
+            .await?;
+        let payload = || async {
+            anyhow::Ok(
+                f.state
+                    .pool
+                    .get()
+                    .await?
+                    .query_one("select payload from agent_jobs where id = $1", &[&job])
+                    .await?
+                    .get::<_, PgJson<JsonValue>>(0)
+                    .0,
+            )
+        };
+        assert_eq!(
+            crate::system_turns::system_turn_of(&payload().await?),
+            Some(crate::system_turns::SystemTurn::BrowserCard)
+        );
+
+        let (status, body) = f.steer(&f.owner_token, job).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let steered = payload().await?;
+        assert_eq!(
+            crate::system_turns::system_turn_of(&steered),
+            None,
+            "{steered}"
+        );
+        Ok(())
+    })
+    .await
+}

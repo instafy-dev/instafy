@@ -386,9 +386,10 @@ export function ActionRequestEntry({
       icon={icon}
       overline={parsed.overline}
       title={fallbackTitle}
-      // A card a newer card followed no longer offers to open anything, so it
-      // no longer says what pressing it does.
-      description={browserPhase === "superseded" ? null : parsed.description}
+      // A browser card says what it is for, never what pressing it does:
+      // Studio opens it by itself where it can, and it reads Opening and
+      // Opened. Older cards carry a line about that; it is not shown.
+      description={browserRequest ? null : parsed.description}
       children={
         parsed.input || parsed.context || (browserPhase === "button" && browserDestinations.length > 0) ||
           browserUnavailableNote || browserPhase !== "button" || browserReason ? (

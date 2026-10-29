@@ -140,12 +140,20 @@ export function browserRequestDestinations(task: string): string[] {
   return hosts.slice(0, 3);
 }
 
-const CONTINUATION_PREFIX =
-  "Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n";
-
+/**
+ * What a card's continuation sends: its task alone, in Octo's words for the
+ * person's request. `browserRequestOf` in its metadata marks it as the card's,
+ * and its tab reaches the browser turn as the turn's own page, so nothing goes
+ * in front: a line about "the browser attached to this turn" came back in
+ * replies as "the attached browser".
+ */
 export function browserRequestContinuation(request: BrowserRequest): string {
-  return `${CONTINUATION_PREFIX}${request.task}`;
+  return request.task;
 }
+
+/** What went in front of a continuation's task before, read back from older prompts only. */
+const OLDER_CONTINUATION_PREFIX =
+  "Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.";
 
 /**
  * Prompt metadata naming the card a continuation was sent for, by
@@ -303,19 +311,22 @@ export function browserRequestContinuedKeys(messages: readonly ChatMessage[]): S
 
 /**
  * The task a continuation sent, read back from its own prompt: the stored
- * prompt keeps what it dispatched as `dispatchContent`. Its browser is the
- * one it ran in. Null when the prompt is not a continuation or carries no
- * task, so a retry never resends the notice in its place.
+ * prompt keeps what it dispatched as `dispatchContent` (after the line older
+ * continuations put in front). Its browser is the one it ran in. Null when
+ * the prompt is not a continuation or carries no task (its dispatched text is
+ * its own notice), so a retry never resends the notice in its place.
  */
 export function browserRequestFromContinuationPrompt(
-  message: Pick<ChatMessage, "role" | "metadata">,
+  message: Pick<ChatMessage, "role" | "metadata" | "content">,
 ): BrowserRequest | null {
   if (!readBrowserRequestOf(message)) return null;
+  const notice = typeof message.content === "string" ? message.content.trim() : "";
   for (const record of promptMetadataRecords(message.metadata)) {
     const dispatched = record["dispatchContent"];
-    if (typeof dispatched !== "string" || !dispatched.trim().startsWith(CONTINUATION_PREFIX.trim())) continue;
-    const task = dispatched.trim().slice(CONTINUATION_PREFIX.trim().length).trim();
-    if (!task || task.length > 8_000) continue;
+    if (typeof dispatched !== "string") continue;
+    let task = dispatched.trim();
+    if (task.startsWith(OLDER_CONTINUATION_PREFIX)) task = task.slice(OLDER_CONTINUATION_PREFIX.length).trim();
+    if (!task || task.length > 8_000 || task === notice) continue;
     const transport = record["browserTransport"] ?? record["browser_transport"];
     const location = transport === "shared" ? "workspace" : transport === "desktop-personal" ? "device" : "auto";
     const continueBuilding = promptMetadataRecords(message.metadata)

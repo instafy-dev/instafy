@@ -6,7 +6,6 @@ import type { SharedBrowserHostSnapshot } from "../../../services/runtimeControl
 import type { ChatMessage } from "../types";
 import {
   isManagedInstafyCloudProvider,
-  listBrowserRuntimeCandidates,
   listBrowserSessionCandidates,
   runtimeEntryIsLazyBrowserHost,
   runtimeEntryLooksLikeBrowserSession,
@@ -71,7 +70,6 @@ export const BROWSER_AUTO_START_COPY = {
   personalNeedsOwnAi: "The browser on this device needs your own AI connection.",
   unseenAddress: "Octo found this address itself. Check where it goes, then open it.",
   timedOut: "Instafy's browser did not start in time. Open it from the message to try again.",
-  hostFailed: "Instafy's browser stopped unexpectedly. Open it to start it again.",
   hostPoisoned: "Instafy's browser needs this space's machine to restart before it can open again.",
   presenceUnavailable: "Studio could not check who else is in Instafy's browser. Open it from the message to continue.",
   draftHeld: "Opens by itself once your draft is empty.",
@@ -123,18 +121,33 @@ function isLiveHostedMachine(entry: ControllerRuntimeStatusEntry): boolean {
 }
 
 /**
+ * A space machine that runs Instafy's browser on demand and is up: a managed
+ * machine, not a person's own, that the controller reports as the browser's
+ * host, with an origin and a status that takes work. Its last heartbeat does
+ * not count: a reading of the browser says whether it answers, and the open
+ * waits for it either way.
+ */
+function isLiveBrowserHostMachine(entry: ControllerRuntimeStatusEntry): boolean {
+  const status = (entry.status ?? "").trim().toLowerCase();
+  return runtimeEntryIsLazyBrowserHost(entry) &&
+    isManagedInstafyCloudProvider(entry.provider) &&
+    entry.isPrivateSelfHosted !== true &&
+    (status === "" || status === "ready" || status === "running") &&
+    Boolean(entry.origin?.originId?.trim());
+}
+
+/**
  * The conversation's own machine when the space is covered and that machine
- * is a live, dispatchable machine with an origin that starts Instafy's
- * browser on demand; null otherwise.
+ * is a live machine with an origin that starts Instafy's browser on demand;
+ * null otherwise.
  */
 export function conversationBrowserHostId(
   input: Pick<BrowserAutoStartPlanInput, "sharedBrowserHostPolicy" | "conversationRuntimeId" | "runtimes">,
 ): string | null {
   const runtimeId = input.conversationRuntimeId?.trim() ?? "";
   if (input.sharedBrowserHostPolicy !== "covered" || !runtimeId || !input.runtimes) return null;
-  const candidate = listBrowserRuntimeCandidates([...input.runtimes])
-    .find((entry) => entry.runtimeId === runtimeId && entry.mode === "lazy");
-  return candidate ? candidate.runtimeId : null;
+  const machine = input.runtimes.find((entry) => entry.runtimeId === runtimeId);
+  return machine && isLiveBrowserHostMachine(machine) ? machine.runtimeId : null;
 }
 
 /**
@@ -159,9 +172,15 @@ export function sharedBrowserHostHeldByOther(host: SharedBrowserHostSnapshot): b
  * | 3 | the conversation's machine is not a live host               | today's hosted buttons          |
  * | 4 | a separate browser session is running                       | button (other or several)       |
  * | 5 | no reading of the host, or one older than five seconds     | pending                         |
- * | 6 | the host is poisoned, failed or in an unknown state         | button                          |
+ * | 6 | the host says it has no browser, or it is poisoned          | button                          |
  * | 7 | someone else has it, controls it, runs in it or starts it   | button (opens once free)        |
- * | 8 | otherwise (idle, ready, starting by you, stopping)          | attach                          |
+ * | 8 | otherwise, running or not (idle, failed, stopping, ready)   | attach                          |
+ *
+ * One rule the person can predict: on a space whose browser runs on its own
+ * machine, a card opens by itself, and the open starts the browser when it
+ * is not running, as a press does. On that machine a press is no approval, so
+ * opening by itself skips no check. Only someone else holding the browser
+ * (row 7) leaves the button, and the card opens once it is free.
  */
 export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserAutoStartPlan {
   if (input.transport === "personal") {
@@ -186,12 +205,13 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
   // The machine answered that it has no such browser right now: a press
   // takes the usual path.
   if (!host) return { kind: "button", reason: null };
+  // Only the machine's restart brings it back, and Studio never restarts one.
   if (host.state === "poisoned") return { kind: "button", reason: BROWSER_AUTO_START_COPY.hostPoisoned };
-  if (host.state === "failed") return { kind: "button", reason: BROWSER_AUTO_START_COPY.hostFailed };
-  if (host.state === "unknown") return { kind: "button", reason: null };
   // Held for now: decided again with the next reading, so the copy says it
   // opens by itself.
   if (sharedBrowserHostHeldByOther(host)) return { kind: "button", reason: BROWSER_AUTO_START_COPY.hostInUse };
+  // Idle, stopped after a failure, stopping or in a state Studio does not
+  // know: the open starts it, as a press does, and waits until it is ready.
   return { kind: "attach", runtimeId: hostRuntimeId };
 }
 

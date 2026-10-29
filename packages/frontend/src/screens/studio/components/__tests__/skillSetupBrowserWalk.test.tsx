@@ -265,7 +265,8 @@ describe("a skill setup's browser walk", () => {
     const { afterPause, afterWalk } = await walk(conversation("Compare the two plans on their pricing pages"));
     for (const after of [afterPause, afterWalk]) {
       expect(after.reply.metadata).toMatchObject({ browserTransport: "shared", browserRuntimeId: "shared-runtime" });
-      expect(after.reply.message).toContain('Use the existing "Connected apps" page in the current shared browser session');
+      // The person's own words: the page goes as the turn's bound tab.
+      expect(after.reply.message).not.toContain("Use the existing");
     }
   });
 });

@@ -248,6 +248,45 @@ describe("useChatComposerBrowserTargeting", () => {
     expect(focusPageMock).not.toHaveBeenCalled();
   });
 
+  // The person's pick of a tab makes it their chat's tab (chatBrowserTab.ts),
+  // which takes it from the chat it was. A pick the browser refused (someone
+  // else drives it) moved nothing, so it must not count.
+  it("says whether the person's pick of a tab reached the browser", async () => {
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" />);
+    });
+    let focused: unknown = null;
+    await act(async () => { focused = await latestResult?.handleSelectBrowserSessionPage("shared-page-1"); });
+    expect(focused).toBe(true);
+    focusPageMock.mockResolvedValueOnce(false);
+    await act(async () => { focused = await latestResult?.handleSelectBrowserSessionPage("shared-page-1"); });
+    expect(focused).toBe(false);
+    focusPageMock.mockRejectedValueOnce(new Error("Shared Browser control is held by another participant"));
+    await act(async () => { focused = await latestResult?.handleSelectBrowserSessionPage("shared-page-1"); });
+    expect(focused).toBe(false);
+  });
+
+  // A chat's first browser turn gets a tab of its own where the browser opens
+  // one. Until the browser said whether it can, that is not known: never
+  // taken for "it cannot", which would bind the turn to the page on screen.
+  it("says whether the browser opens a chat's own tab only once the browser said so", async () => {
+    const controls = { navigate: true, history: true, reload: true, focusPage: true };
+    const canOpen = async (value: Record<string, unknown>) => {
+      useBrowserSessionPagesMock.mockReturnValue({ pages: browserPages, resolved: true, focusPage: focusPageMock, ...value });
+      await act(async () => {
+        root.render(<Harness browserTransport="shared" />);
+      });
+      return latestResult?.sharedBrowserCanOpenPage;
+    };
+    expect(await canOpen({ capabilities: null, capabilitiesResolved: false })).toBeNull();
+    // A reading that failed and is read again.
+    expect(await canOpen({ capabilities: null, capabilitiesResolved: true })).toBeNull();
+    expect(await canOpen({ capabilities: { controls: { ...controls, newPage: true } }, capabilitiesResolved: true })).toBe(true);
+    // An older browser.
+    expect(await canOpen({ capabilities: { controls }, capabilitiesResolved: true })).toBe(false);
+    expect(await canOpen({ capabilities: null, capabilitiesResolved: true, capabilitiesUnsupported: true })).toBe(false);
+  });
+
   it("describes a pending request without changing the current page and lets it be canceled", async () => {
     await act(async () => {
       root.render(<Harness browserTransport="shared" />);

@@ -431,15 +431,16 @@ fn api_error_to_anyhow(context: &str, error: (StatusCode, Json<crate::ApiError>)
     anyhow::anyhow!("{context} ({status}): {}", body.message)
 }
 
-/// Refund the managed-AI reserve of a job that is ending without ever having
-/// run: a requeued job that expired (`refund_reason` "runtime_not_ready") or
-/// a queued job of a deleted space ("space_deleted"). A runtime stop requeues
-/// leased jobs too (`payload.requeuedAt` is stamped on both), and a job that
-/// was leased may already have spent a model turn, so the refund is gated on
-/// the same evidence `agent_complete` uses: never leased, no visible
-/// assistant message, no tool updates, and no usage adjustment on the ledger.
-/// A turn Instafy started by itself is refunded without those gates: it ends
-/// here without a reply (crate::system_turns).
+/// Refund the managed-AI reserve of a job that is ending here without a
+/// completion: a requeued job that expired (`refund_reason`
+/// "runtime_not_ready") or a queued job of a deleted space ("space_deleted").
+/// A runtime stop requeues leased jobs too (`payload.requeuedAt` is stamped on
+/// both), and a job a runtime held may already have spent a model turn. Such
+/// a turn ends in a failure, and a failed turn costs nothing when it left the
+/// person nothing (crate::system_turns::turn_left_nothing): no reply or note
+/// and no step that worked. Its tokens never reached the ledger, so its
+/// reserve is all it was charged. A turn Instafy started by itself follows
+/// its own rule (crate::system_turns).
 /// Idempotent through the ledger key; runs in a savepoint so a ledger failure
 /// is logged and the caller's transaction still completes. Returns the org id
 /// when this call wrote the refund, for a `credits.updated` once the caller
@@ -454,8 +455,9 @@ pub(crate) async fn refund_managed_ai_reserve_for_expired_job(
     refund_reason: &str,
 ) -> AnyResult<Option<Uuid>> {
     // A turn Instafy started by itself that ends here never ended with a
-    // reply, so it costs nothing, even after a runtime held it
-    // (crate::system_turns).
+    // reply, so it follows its own rule, even after a runtime held it: it
+    // costs nothing unless it left the person something else, or did
+    // something in the browser (crate::system_turns).
     if crate::system_turns::system_turn_of(payload).is_some() {
         return crate::system_turns::give_back_reserve_without_reply(
             transaction,
@@ -483,37 +485,29 @@ pub(crate) async fn refund_managed_ai_reserve_for_expired_job(
     else {
         return Ok(None);
     };
-    // The lease path increments lease_attempts and a stop-requeue does not
-    // reset it, so a non-zero count means a runtime held this job and may
-    // have called the model before the stop. That charge stands.
-    if lease_attempts > 0 {
-        debug!(
-            project_id = %project_id,
-            job_id = %job_id,
-            prompt_id = %prompt_id,
-            lease_attempts,
-            refund_reason,
-            "job was leased before; keeping its managed AI reserve"
-        );
-        return Ok(None);
-    }
-
     let savepoint = transaction
         .savepoint("managed_ai_refund")
         .await
         .context("failed to open managed AI refund savepoint")?;
     let mut refunded_org_id = None;
     let outcome: AnyResult<ManagedAiRefundOutcome> = async {
-        if crate::agent::run_has_visible_assistant_message(&savepoint, project_id, run_id)
-            .await
-            .map_err(|error| api_error_to_anyhow("check run output for managed AI refund", error))?
-            || crate::agent::count_job_model_tool_update_messages(&savepoint, project_id, job_id)
-                .await
-                .map_err(|error| {
-                    api_error_to_anyhow("count tool updates for managed AI refund", error)
-                })?
-                > 0
+        // The lease path increments lease_attempts and a stop-requeue does not
+        // reset it, so a non-zero count means a runtime held this job and may
+        // have called the model before the stop: what it left decides.
+        if !crate::system_turns::turn_left_nothing(
+            &savepoint, project_id, job_id, run_id, None, true,
+        )
+        .await
+        .map_err(|error| api_error_to_anyhow("read what an expired turn left", error))?
         {
+            debug!(
+                project_id = %project_id,
+                job_id = %job_id,
+                prompt_id = %prompt_id,
+                lease_attempts,
+                refund_reason,
+                "expired job left the person something; keeping its managed AI reserve"
+            );
             return Ok(ManagedAiRefundOutcome::NotRefundable);
         }
         let project = crate::projects::load_project_record(&savepoint, project_id)
@@ -630,7 +624,7 @@ pub(super) struct SettledExpiredJobs {
 /// runtime running them now: reject their unacknowledged inputs, fail their
 /// runs (without this a run stays "in_progress" forever and Home lists it as
 /// live work), cancel the open provider requests an earlier lease left, and
-/// give back a managed-AI reserve no model ever used.
+/// give back the managed-AI reserve of a turn that left the person nothing.
 ///
 /// `rows` must carry `id, project_id, run_id, conversation_id, payload,
 /// error_message, lease_attempts, grant_ids` from the failing
@@ -694,9 +688,10 @@ pub(super) async fn settle_expired_queued_jobs(
             .await;
         }
 
-        // No runtime picked the job up. If none ever had it, a managed-AI
-        // prompt it carried never reached a model: give the credit and daily
-        // slot back.
+        // No runtime picked the job up again, so the turn ends in a failure.
+        // A managed-AI prompt it carried costs nothing when the turn left the
+        // person nothing (it never ran, or ran without anything to show):
+        // give the credit and daily slot back.
         let lease_attempts: i32 = row.get("lease_attempts");
         if let Some(org_id) = refund_managed_ai_reserve_for_expired_job(
             transaction,
@@ -3687,8 +3682,10 @@ mod tests {
     }
 
     /// A runtime stop requeues leased jobs as well as queued ones. A job that
-    /// was leased may already have spent a model turn before the stop, so its
-    /// expiry must not refund the reserve.
+    /// was leased may already have done something for the person before the
+    /// stop: one with a step that worked keeps its reserve when it expires.
+    /// (One that left nothing gets it back: system_turns_tests,
+    /// `an_expired_turn_that_left_nothing_gives_its_reserve_back`.)
     #[tokio::test]
     async fn expired_requeued_job_keeps_managed_ai_charge_after_a_lease() -> anyhow::Result<()> {
         use crate::tests_managed_ai_refund::{
@@ -3703,10 +3700,34 @@ mod tests {
         };
 
         // A runtime leased the job (the lease path bumps lease_attempts), ran
-        // for a while, then its stop requeued the job; nothing came back and
-        // no live runtime remains for the project.
+        // a command that worked, then its stop requeued the job; nothing else
+        // came back and no live runtime remains for the project.
         {
             let connection = fixture.pool.get().await?;
+            connection
+                .execute(
+                    "insert into conversation_messages
+                         (id, conversation_id, project_id, run_id, role, content, metadata)
+                     select $2, job.conversation_id, job.project_id, job.run_id, 'assistant',
+                            'git status --short', $3
+                       from agent_jobs job
+                      where job.id = $1",
+                    &[
+                        &fixture.job_id,
+                        &uuid::Uuid::new_v4(),
+                        &tokio_postgres::types::Json(json!({
+                            "jobId": fixture.job_id.to_string(),
+                            "messageType": "command_execution",
+                            "details": {
+                                "kind": "codex_command_execution",
+                                "itemId": "item-1",
+                                "status": "completed",
+                                "exitCode": 0,
+                            },
+                        })),
+                    ],
+                )
+                .await?;
             connection
                 .execute(
                     "update runtimes set status = 'stopped' where project_id = $1",
@@ -3761,7 +3782,7 @@ mod tests {
         assert!(
             rows.iter()
                 .all(|(reason, _, _)| reason != "managed_ai_refund"),
-            "a job that was leased is not refunded on expiry, got {rows:?}"
+            "a job that did something is not refunded on expiry, got {rows:?}"
         );
         assert_eq!(
             credit_balance(&fixture.pool, &fixture.org_id).await?,

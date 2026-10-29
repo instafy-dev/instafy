@@ -102,7 +102,10 @@ export type SharedBrowserFollowUp<Page> = { runId: string; page: Page; endsAtMs:
  * naming the run it continues (`browserContinuesRunId`), so the runtime
  * carries the run's approvals over and no card or press stands in between;
  * the composer says so while it applies (useSharedBrowserFollowUp). Null
- * otherwise: the message is an ordinary chat turn.
+ * otherwise: the message is an ordinary chat turn. Also null once another
+ * chat took that tab after the turn started (`takenByAnotherChat`, from
+ * chatBrowserTab.ts): a follow-up is a browser turn, and a browser turn uses
+ * only its own chat's tab.
  */
 export function sharedBrowserFollowUp<Page extends { id: string }>(
   runs: readonly RunRecord[],
@@ -112,6 +115,7 @@ export function sharedBrowserFollowUp<Page extends { id: string }>(
     userId: string | null;
     pages: readonly Page[];
     nowMs?: number;
+    takenByAnotherChat?: ((pageId: string, sinceMs: number) => boolean) | null;
   },
 ): SharedBrowserFollowUp<Page> | null {
   if (!scope.conversationId || !scope.runtimeId || !scope.userId) return null;
@@ -134,7 +138,8 @@ export function sharedBrowserFollowUp<Page extends { id: string }>(
   const endsAtMs = endedAt + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS;
   if (!endedAt || (scope.nowMs ?? Date.now()) > endsAtMs) return null;
   const page = scope.pages.find((candidate) => candidate.id === metadata.browserPageId);
-  return page ? { runId: newest.id, page, endsAtMs } : null;
+  if (!page || scope.takenByAnotherChat?.(page.id, runStartedAt(newest))) return null;
+  return { runId: newest.id, page, endsAtMs };
 }
 
 function activeSharedBrowserRuns(runs: readonly RunRecord[], runtimeId: string): RunRecord[] {

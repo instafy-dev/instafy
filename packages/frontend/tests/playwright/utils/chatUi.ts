@@ -7,14 +7,6 @@ export async function createPublicChatFromTopBar(page: Page) {
     .or(page.getByTestId("sidebar-new-chat"))
     .or(page.getByTestId("conversation-history-new-chat"))
     .filter({ visible: true }).first().click();
-  const popover = page.getByTestId("chat-new-chat-menu-popover");
-  const menuOpened = await popover
-    .waitFor({ state: "visible", timeout: 1_500 })
-    .then(() => true)
-    .catch(() => false);
-  if (menuOpened) {
-    await page.getByRole("button", { name: "Public chat" }).click();
-  }
   await expect.poll(() => {
     const current = new URL(page.url()).searchParams.get("conversationId");
     return Boolean(current && current !== previous);

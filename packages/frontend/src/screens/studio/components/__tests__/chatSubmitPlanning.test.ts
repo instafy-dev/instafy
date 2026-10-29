@@ -81,9 +81,11 @@ describe("buildChatSubmitPlan page targeting by words", () => {
     softPrefillSuggestion: null,
   });
 
-  it("aims a message that reads like a browser instruction at the open page", () => {
+  it("aims a message that reads like a browser instruction at the open page, in the person's own words", () => {
     expect(plan().shouldApplyBrowserPageTarget).toBe(true);
-    expect(plan().dispatchedMessage).toContain('Use the existing "Example" page in the current shared browser session');
+    // The page reaches a browser turn as its bound tab, never as a sentence
+    // that would make the turn about another chat's page.
+    expect(plan().dispatchedMessage).toBe("I copied both values from that page in my own tab");
   });
 
   it("leaves it as written in a skill setup, whose replies answer the setup", () => {

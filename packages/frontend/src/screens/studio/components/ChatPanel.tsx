@@ -202,6 +202,8 @@ import { shouldSuppressOuterAvatarForConversationThread } from "./conversationTh
 import { resolveComposerGhostSuggestion } from "./composerGhostSuggestion";
 import { useChatBrowserSessionState } from "./useChatBrowserSessionState";
 import { useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeting";
+import { useChatBrowserTab } from "./chatBrowserTab";
+import { useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
 import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
 import { canUseDesktopCodexAuthJson } from "./desktopCodexAuthJson";
@@ -816,11 +818,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const generatedChatPanelId = useId();
   const browserPanelId = conversationWorkspace ? "conversation-workspace-browser" : generatedBrowserPanelId;
   const chatPanelId = conversationWorkspace ? "conversation-workspace-chat" : generatedChatPanelId;
-  useLayoutEffect(() => {
-    if (browserSessionOpen && browserSessionExpandRequestToken > 0) {
-      setBrowserSubtab("browser");
-    }
-  }, [browserSessionExpandRequestToken, browserSessionOpen, setBrowserSubtab]);
+  const showBrowserSubtab = useCallback(() => setBrowserSubtab("browser"), [setBrowserSubtab]);
+  useShowBrowserOnRequest(browserSessionOpen, browserSessionExpandRequestToken, showBrowserSubtab);
   const handleBrowserSubtabChange = useCallback(
     (tab: string) => {
       setBrowserSubtab(tab);
@@ -1826,6 +1825,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     goForwardInSharedBrowser,
     reloadSharedBrowserPage,
     keepSharedBrowserPage,
+    openSharedBrowserPage,
+    sharedBrowserCanOpenPage,
+    focusSharedBrowserPageQuietly,
     setPendingBrowserLaunchMode,
   } = useChatComposerBrowserTargeting({
     activeConversationId,
@@ -1850,6 +1852,53 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       sharedBrowserPresence?.othersPresent === true,
     sharedBrowserSurfaceVisible: browserVisible,
   });
+  // This chat's own tab in Instafy's browser (chatBrowserTab.ts): its browser
+  // turns go there, never to a page another chat left on screen.
+  const projectRuns = useMemo(() => Object.values(runs ?? {}), [runs]);
+  const chatBrowserTab = useChatBrowserTab({
+    scope: {
+      userId: currentUserId,
+      projectId: activeProjectId ?? null,
+      conversationId: activeConversationControllerId,
+      runtimeId: resolvedBrowserRuntimeId,
+    },
+    runs: projectRuns,
+    pages: sharedBrowserChromePages,
+    canOpenPage: sharedBrowserCanOpenPage,
+    openPage: openSharedBrowserPage,
+  });
+  const chooseChatBrowserTab = chatBrowserTab.choose;
+  const resolveChatBrowserTab = chatBrowserTab.resolveForTurn;
+  // The chat's Browser view shows the chat's tab: once when the view comes on
+  // screen for this chat, and once for each new tab the chat gets. Never over
+  // the person's own pick, and never while someone else (Octo included)
+  // controls the browser: the view then shows what they do.
+  const shownChatBrowserTabRef = useRef<string | null>(null);
+  const chatBrowserTabId = chatBrowserTab.tab?.id ?? null;
+  const chatBrowserTabActive = chatBrowserTab.tab?.isActive === true;
+  const sharedBrowserPresenceKnown = sharedBrowserPresence?.status === "known";
+  const sharedBrowserRemoteController = sharedBrowserPresence?.remoteController === true;
+  useEffect(() => {
+    if (!browserVisible || browserTransport !== "shared") {
+      shownChatBrowserTabRef.current = null;
+      return;
+    }
+    if (!chatBrowserTabId || !sharedBrowserPresenceKnown) return;
+    const shown = JSON.stringify([activeConversationControllerId, chatBrowserTabId]);
+    if (shownChatBrowserTabRef.current === shown) return;
+    shownChatBrowserTabRef.current = shown;
+    if (chatBrowserTabActive || sharedBrowserRemoteController) return;
+    void focusSharedBrowserPageQuietly(chatBrowserTabId).catch(() => false);
+  }, [
+    activeConversationControllerId,
+    browserTransport,
+    browserVisible,
+    chatBrowserTabActive,
+    chatBrowserTabId,
+    focusSharedBrowserPageQuietly,
+    sharedBrowserPresenceKnown,
+    sharedBrowserRemoteController,
+  ]);
   const browserModeActive = browserSessionOpen && browserVisible;
   // A skill setup's composer answers the setup: its replies stay chat turns
   // while the browser is shown, and a walk there goes on only through the
@@ -1892,7 +1941,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       controls,
       compact: compactBrowserBar,
       onNavigate: (pageId, url) => {
-        void navigateSharedBrowserPage(pageId, url);
+        // The person sends this tab somewhere: it is this chat's tab now,
+        // once the browser took the address.
+        void navigateSharedBrowserPage(pageId, url).then((sent) => {
+          if (sent) chooseChatBrowserTab(pageId);
+        });
       },
       onBack: (pageId) => {
         void goBackInSharedBrowser(pageId);
@@ -1904,11 +1957,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         void reloadSharedBrowserPage(pageId);
       },
       onFocusPage: (pageId) => {
-        void handleSelectBrowserSessionPage(pageId);
+        // The person picks this tab: this chat's next browser turn uses it,
+        // once it is the tab on screen.
+        void handleSelectBrowserSessionPage(pageId).then((focused) => {
+          if (focused) chooseChatBrowserTab(pageId);
+        });
       },
       onClearError: clearSharedBrowserCommandError,
     };
   }, [
+    chooseChatBrowserTab,
     clearSharedBrowserCommandError,
     compactBrowserBar,
     goBackInSharedBrowser,
@@ -4476,6 +4534,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeId: resolvedBrowserRuntimeId,
     userId: currentUserId,
     pages: sharedBrowserChromePages,
+    // A follow-up is a browser turn: never in a tab another chat took since.
+    takenByAnotherChat: chatBrowserTab.takenByAnotherChat,
   });
   const resolveSharedBrowserFollowUp = sharedBrowserFollowUpState.resolve;
   const dismissSharedBrowserFollowUp = sharedBrowserFollowUpState.dismiss;
@@ -4558,6 +4618,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       browserTransport === "shared" && browserComposerActive,
     sharedBrowserBindingPage,
     resolveSharedBrowserFollowUp,
+    resolveSharedBrowserTab: resolveChatBrowserTab,
     sharedBrowserRuntimeId: resolvedBrowserRuntimeId,
     showCredentialsGate: showChatCredentialsGate,
     showStatus,
@@ -4739,7 +4800,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       nowMs: Date.now(),
     }),
     refreshHost: sharedBrowserHost.refresh,
-    presence: sharedBrowserPresence,
+    // The roster connects only while the Browser view is on screen.
+    presence: browserVisible && browserTransport === "shared" ? sharedBrowserPresence : null,
     revision: JSON.stringify([
       browserAutoStartBlocked,
       browserHeldByOther,
@@ -4782,12 +4844,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       if (plan?.kind === "attach") {
         // Studio opens Instafy's browser on the conversation's own machine
         // by itself: exactly that machine, and never starting it. A view that
-        // is open but off or did not open attaches again by itself too.
+        // is open but off or did not open attaches again by itself too. Only
+        // a press switches to the Browser view: this stays in Chat, with the
+        // reading line and the Browser tab's dot, as a follow-up does.
         setBrowserTransport("shared");
         setSharedBrowserActivated(true);
         setBrowserAttachOnly(true);
-        resumeBrowserSession(plan.runtimeId);
-        setBrowserSubtab("browser");
+        resumeBrowserSession(plan.runtimeId, { show: false });
         if (browserSessionOpen) requestSharedBrowserAutoAttach();
         return;
       }
@@ -4799,9 +4862,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       openBrowserSession(transport === "shared" ? resolvedBrowserRuntimeId : null);
       setBrowserSubtab("browser");
     },
+    // A card's turn in Instafy's browser runs in this chat's own tab: the
+    // one its last browser turn used, or a blank one opened for it now.
     continueTask: (transport, message, extras) => transport === "personal"
       ? browserHandoff.startPersonal(message, extras)
-      : browserHandoff.continueShared(message, extras),
+      : browserHandoff.continueShared(message, extras, resolveChatBrowserTab),
     onError: (message) => showStatus(message, "error", 6000),
     auto: browserAutoStart,
   });

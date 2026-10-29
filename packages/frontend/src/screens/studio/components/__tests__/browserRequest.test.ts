@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../types";
 import {
@@ -17,6 +20,25 @@ import {
   readBrowserRequestOf,
   type BrowserRequest,
 } from "../browserRequest";
+
+// What a card's browser turn sends is checked against the controller's
+// fixture: the controller stamps such a send as the card's own browser turn,
+// which costs nothing unless it does something in the browser, only when its
+// words are the card's task alone or after this prefix (runtime-controller
+// system_turns.rs).
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "../../../../../../..");
+const systemTurnFixtures = JSON.parse(readFileSync(
+  resolve(repo, "packages/runtime-controller/src/system_turns_fixtures.json"), "utf8",
+)) as { browserCardContinuationPrefix: string };
+
+describe("browserRequestContinuation", () => {
+  it("sends the card's task in words the controller takes as the card's own", () => {
+    const task = "Open https://app.example.test and find the opening hours.";
+    expect([task, `${systemTurnFixtures.browserCardContinuationPrefix}${task}`])
+      .toContain(browserRequestContinuation({ task, location: "auto" }));
+  });
+});
 
 function card(browserRequest: Record<string, unknown>, id = "card"): ChatMessage {
   return { id, role: "assistant", content: "Continue this task in Instafy's browser.", timestamp: 2,
@@ -168,6 +190,22 @@ describe("browserRequestFromContinuationPrompt", () => {
       prompt_metadata: { browserRequestOf: "job:job-1", dispatchContent: dispatched, browserTransport: "shared",
         browserHandsBack: true },
     }))).toEqual({ task: "Open https://app.example.test and stop on API keys.", location: "workspace", continueBuilding: true });
+  });
+
+  // Local drive, Oct 29: three replies said "the attached browser", echoing
+  // the line Studio put in front of every continuation.
+  it("sends a card's task alone, with no line about an attached browser in front", () => {
+    expect(dispatched).toBe("Open https://app.example.test and stop on API keys.");
+    expect(dispatched).not.toMatch(/attached|Continue this browser task/);
+  });
+
+  it("reads the task an older continuation sent after its opening line", () => {
+    const older = "Continue this browser task using the browser attached to this turn. Inspect its current state first, "
+      + "preserve existing session state, and avoid repeating work that is already complete.\n\n"
+      + "Open https://app.example.test and stop on API keys.";
+    expect(browserRequestFromContinuationPrompt(continuation({
+      prompt_metadata: { browserRequestOf: "job:job-1", dispatchContent: older, browserTransport: "shared" },
+    }))).toEqual({ task: "Open https://app.example.test and stop on API keys.", location: "workspace" });
   });
 
   it("finds nothing for an ordinary prompt or one without the task", () => {

@@ -97,28 +97,24 @@ for (const { width, hasTouch } of [{ width: 390, hasTouch: true }, { width: 1280
       await expect(invite).toHaveCount(0);
       if (!baseline) await expect(inviteTrigger).toBeFocused();
 
+      // A private chat starts from the invite menu of an ordinary chat, with its teammate.
+      const publicInviteTrigger = page.getByTestId("open-invite-public");
+      await publicInviteTrigger.click();
+      await inViewport(invite, width);
+      const startPrivate = page.getByRole("button", { name: "Start a private chat with Taylor Morgan", exact: true });
+      await startPrivate.scrollIntoViewIfNeeded();
+      await inViewport(startPrivate, width);
+      await capture("invite-start-private-chat");
+      await startPrivate.click();
+      await expect(invite).toHaveCount(0);
+      await expect(page.getByTestId("review-status")).toContainText("Private chat selected: Taylor Morgan");
+
+      // New chat makes a chat at once: no Public or Private menu.
       await page.getByRole("button", { name: "Navigation", exact: true }).click();
       const newChat = page.getByTestId("topbar-new-conversation");
       await keyboardOpen(page, newChat);
-      const newChatMenu = page.getByTestId("chat-new-chat-menu-popover");
-      await inViewport(newChatMenu, width);
-      await capture("new-chat-menu");
-      await page.getByTestId("chat-new-chat-private").click();
-      const privateDialog = page.getByRole("dialog", { name: "Start private chat", exact: true });
-      await inViewport(privateDialog, width);
-      const search = page.getByTestId("chat-private-chat-search");
-      await search.fill("Taylor");
-      await expect(page.getByTestId("chat-private-chat-target-review-teammate")).toBeVisible();
-      await expect(page.getByTestId("chat-private-chat-target-review-researcher")).toHaveCount(0);
-      await capture("private-chat-picker");
-      await page.getByRole("button", { name: "Close private chat picker", exact: true }).click();
-      await expect(privateDialog).toHaveCount(0);
-      await keyboardOpen(page, newChat);
-      await page.getByTestId("chat-new-chat-private").click();
-      await expect(page.getByTestId("chat-private-chat-search")).toHaveValue("");
-      await page.getByTestId("chat-private-chat-target-review-teammate").click();
-      await expect(privateDialog).toHaveCount(0);
-      await expect(page.getByTestId("review-status")).toContainText("Private chat selected: Taylor Morgan");
+      await expect(page.getByTestId("review-status")).toContainText("New chat selected in local review.");
+      await expect(page.getByRole("dialog")).toHaveCount(0);
 
       const spaces = page.getByTestId("sidebar-space-button");
       await keyboardOpen(page, spaces);
@@ -163,17 +159,15 @@ for (const width of [320, 390]) test(`${width}px long feedback and short navigat
   await inViewport(page.getByTestId("org-invite-role-conflict-apply"), width);
   await inViewport(page.getByTestId("org-invite-role-conflict-dismiss"), width);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-  await page.getByRole("button", { name: "Navigation", exact: true }).click();
-  await keyboardOpen(page, page.getByTestId("topbar-new-conversation"));
-  await inViewport(page.getByTestId("chat-new-chat-menu-popover"), width);
-  await page.getByTestId("chat-new-chat-private").click();
+  await page.getByRole("button", { name: "Dialogs", exact: true }).click();
+  await page.getByTestId("open-invite-public").click();
   await page.setViewportSize({ width, height: 420 });
-  const close = page.getByRole("button", { name: "Close private chat picker", exact: true });
-  const headerBefore = (await close.boundingBox())!.y;
-  await page.getByTestId("chat-private-chat-target-review-member-17").scrollIntoViewIfNeeded();
-  await expect(page.getByTestId("chat-private-chat-target-review-member-17")).toBeInViewport();
-  expect((await close.boundingBox())!.y).toBeCloseTo(headerBefore, 0);
-  await close.click();
+  const lastTeammate = page.getByRole("button", { name: "Start a private chat with Team member 17", exact: true });
+  await lastTeammate.scrollIntoViewIfNeeded();
+  await expect(lastTeammate).toBeInViewport();
+  await inViewport(lastTeammate, width);
+  await page.getByRole("button", { name: "Close invite modal", exact: true }).click();
+  await page.getByRole("button", { name: "Navigation", exact: true }).click();
   const spaces = page.getByTestId("sidebar-space-button");
   await keyboardOpen(page, spaces);
   await page.getByTestId("sidebar-space-search").fill("Team planning");

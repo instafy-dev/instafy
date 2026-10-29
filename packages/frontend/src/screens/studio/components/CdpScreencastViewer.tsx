@@ -119,7 +119,7 @@ export function CdpScreencastViewer({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const activeRef = useRef(active);
   const inputEnabledRef = useRef(inputEnabled);
-  const requestInputResizeRef = useRef<(() => void) | null>(null);
+  const requestInputResizeRef = useRef<((force: boolean) => void) | null>(null);
   const inputSocketStartedWithAuthorityRef = useRef(false);
   const lastObservedInputAuthorityKeyRef = useRef<string | null>(null);
   const callbacksRef = useRef({ onConnected, onDisconnected, onTransportError });
@@ -345,7 +345,7 @@ export function CdpScreencastViewer({
       lastSentViewport = currentViewport;
       authorityResizePending = false;
     };
-    requestInputResizeRef.current = () => sendResize(true);
+    requestInputResizeRef.current = sendResize;
     const scheduleResize = () => {
       if (resizeTimer !== null) {
         window.clearTimeout(resizeTimer);
@@ -429,14 +429,16 @@ export function CdpScreencastViewer({
     if (!active || !inputAvailable || !inputEnabled) {
       return;
     }
-    if (
-      !normalizedAuthorityKey ||
-      normalizedAuthorityKey === previousAuthorityKey ||
-      (previousAuthorityKey === null && inputSocketStartedWithAuthorityRef.current)
-    ) {
-      return;
-    }
-    const frame = window.requestAnimationFrame(() => requestInputResizeRef.current?.());
+    // A new driver sets the page's size again. The same driver coming back
+    // (the view on screen again, or its input back) sends the size this view
+    // has now when it differs from the last one it sent: a resize while it
+    // could not drive never reached the page, which kept a phone's width on
+    // a desktop.
+    const authorityChanged =
+      Boolean(normalizedAuthorityKey) &&
+      normalizedAuthorityKey !== previousAuthorityKey &&
+      !(previousAuthorityKey === null && inputSocketStartedWithAuthorityRef.current);
+    const frame = window.requestAnimationFrame(() => requestInputResizeRef.current?.(authorityChanged));
     return () => window.cancelAnimationFrame(frame);
   }, [active, inputAuthorityKey, inputAvailable, inputEnabled]);
 

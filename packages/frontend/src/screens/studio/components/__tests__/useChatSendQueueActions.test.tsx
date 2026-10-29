@@ -16,7 +16,7 @@ function hydratedPickerItem() {
   const composer = queuedMentionComposer();
   const browserPageTarget = { id: "page-1", url: "https://example.test/", host: "example.test", label: "Example" };
   const body = buildServerSendQueuePromptBody({
-    message: queuedComposerDispatchMessage({ message: composer.message, browserPageTarget, browserLaunchMode: null }),
+    message: queuedComposerDispatchMessage({ message: composer.message, browserLaunchMode: null }),
     composerMessage: composer.message, editorState: composer.editorState, browserPageTarget,
     targetAgentHandles: ["octo"], metadata: { mentionedUserIds: [QUEUED_MENTION_USER_ID] },
   });

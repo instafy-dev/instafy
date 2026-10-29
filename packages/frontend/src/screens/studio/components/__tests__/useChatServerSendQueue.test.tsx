@@ -877,7 +877,7 @@ describe("mapServerSendQueueEntryToQueuedItem", () => {
     const composer = queuedMentionComposer();
     const browserPageTarget = mode === "page" ? { id: "page-1", url: "https://example.test/", host: "example.test", label: "Example" } : null;
     const browserLaunchMode = mode === "new_page" ? "new_page" as const : null;
-    const message = queuedComposerDispatchMessage({ message: composer.message, browserPageTarget, browserLaunchMode });
+    const message = queuedComposerDispatchMessage({ message: composer.message, browserLaunchMode });
     const body = buildServerSendQueuePromptBody({
       message, composerMessage: composer.message, editorState: composer.editorState,
       browserPageTarget, browserLaunchMode, targetAgentHandles: ["octo"],
@@ -886,6 +886,24 @@ describe("mapServerSendQueueEntryToQueuedItem", () => {
     const hydrated = mapServerSendQueueEntryToQueuedItem(createEntry({ message: body }));
     expect(hydrated).toMatchObject({ ...composer, browserPageTarget, browserLaunchMode, metadata: { mentionedUserIds: [QUEUED_MENTION_USER_ID] } });
     expect(hydrated?.metadata?.queuedComposer).toBeUndefined();
+  });
+
+  it("restores the draft of an item an older Studio queued with a page's prelude", () => {
+    const composer = queuedMentionComposer();
+    const browserPageTarget = { id: "page-1", url: "https://example.test/", host: "example.test", label: "Example" };
+    const olderDispatch = [
+      'Use the existing "Example" page in the current shared browser session for this request.',
+      "That page is https://example.test/. Treat it as a page/tab inside the current browser session, not as a new isolated session or a new runtime-backed browser session unless I explicitly ask for that.",
+      "Keep any other open browser pages available unless I explicitly ask you to close or replace them.",
+      "",
+      composer.message,
+    ].join("\n");
+    const body = buildServerSendQueuePromptBody({
+      message: olderDispatch, composerMessage: composer.message, editorState: composer.editorState,
+      browserPageTarget, browserLaunchMode: null, targetAgentHandles: ["octo"],
+      metadata: { mentionedUserIds: [QUEUED_MENTION_USER_ID] },
+    });
+    expect(mapServerSendQueueEntryToQueuedItem(createEntry({ message: body }))).toMatchObject({ ...composer, browserPageTarget });
   });
 
   it("does not restore sidecar editor text over a different authoritative queued message", () => {

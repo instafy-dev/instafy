@@ -152,15 +152,13 @@ describe("a request_browser card", () => {
     expect(card.button).toBeNull();
     expect(card.destination).toBeNull();
     expect(card.opened).toBeNull();
-    // It never opened, and it no longer promises to: a plain "Not opened" in
-    // place of "Studio opens the browser and continues this task there."
+    // It never opened, and it no longer promises to: a plain "Not opened".
     expect(card.notOpened).toBe("Not opened");
     expect(container.textContent).not.toContain("Studio opens the browser");
     card = await render(task, { ...web, newestCardKey: "job:job-1" });
     expect(card.button?.disabled).toBe(false);
     expect(card.destination).toBe("For dashboard.stripe.com");
     expect(card.notOpened).toBeNull();
-    expect(container.textContent).toContain("Studio opens the browser and continues this task there.");
     // No reason or warning on a card that offers nothing to press.
     card = await render(task, { ...web, sharedUnavailable: true, newestCardKey: "job:job-2", cardStates: new Map([[
       "job:job-1", { kind: "button", reason: "This starts a second cloud machine for this space." } as const,
@@ -168,6 +166,23 @@ describe("a request_browser card", () => {
     expect(card.button).toBeNull();
     expect(card.reason).toBeNull();
     expect(card.unavailable).toBeNull();
+  });
+
+  // Local drive, Oct 29: every card said "Studio opens the browser and
+  // continues this task there.", whether it opened by itself or waited for a
+  // press. The card says what it is for; Opening and Opened say the rest.
+  it("never says what Studio does, as a button, while opening or once opened, an older card included", async () => {
+    for (const host of [
+      web,
+      { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) },
+      { ...web, continuedKeys: new Set(["job:job-1"]) },
+    ]) {
+      await render(task, host);
+      expect(container.textContent).toContain("Continue in Instafy's browser");
+      expect(container.textContent).not.toContain("Studio opens the browser");
+    }
+    const opening = await render(task, { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) });
+    expect(opening.opening).toBe("Opening Instafy's browser for dashboard.stripe.com");
   });
 
   it("keeps the button with the reason Studio did not open it by itself", async () => {

@@ -130,6 +130,9 @@ pub(crate) struct StopOutcome {
     pub(crate) failed_personal_browser_jobs: Vec<Uuid>,
     pub(crate) failed_shared_browser_jobs: Vec<Uuid>,
     pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    /// Orgs that a browser turn this stop failed gave a managed-AI reserve
+    /// back to, each owed a `credits.updated` once the stop commits.
+    pub(crate) refunded_org_ids: Vec<Uuid>,
     pub(crate) skip_reason: Option<String>,
     pub(crate) released_runtime_lease_id: Option<Uuid>,
 }
@@ -144,6 +147,7 @@ impl StopOutcome {
             failed_personal_browser_jobs: Vec::new(),
             failed_shared_browser_jobs: Vec::new(),
             job_input_state_updates: Vec::new(),
+            refunded_org_ids: Vec::new(),
             skip_reason: Some(reason.into()),
             released_runtime_lease_id: None,
         }
@@ -194,6 +198,9 @@ pub(super) struct UnavailableRuntimeJobDisposition {
     pub(super) failed_personal_browser_jobs: Vec<Uuid>,
     pub(super) failed_shared_browser_jobs: Vec<Uuid>,
     pub(super) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    /// Orgs a failed browser turn gave its reserve back to
+    /// (crate::system_turns::give_back_reserve_of_lost_browser_turn).
+    pub(super) refunded_org_ids: Vec<Uuid>,
 }
 
 enum StopAuth {
@@ -523,6 +530,7 @@ const AGENT_SHUTDOWN_STOP_REASON: &str = "agent_shutdown";
 /// keeps (see [`quarantine_runtime_for_provider_release`]).
 struct Quarantine {
     job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    refunded_org_ids: Vec<Uuid>,
     earlier_stop_reason: Option<String>,
 }
 
@@ -672,6 +680,7 @@ async fn quarantine_runtime_for_provider_release(
 
     Ok(Quarantine {
         job_input_state_updates: job_disposition.job_input_state_updates,
+        refunded_org_ids: job_disposition.refunded_org_ids,
         earlier_stop_reason,
     })
 }
@@ -866,9 +875,10 @@ async fn stop_after_flush(
         if let Some(reason) = quarantine.earlier_stop_reason {
             options.reason = Some(reason);
         }
-        crate::send_intents::publish_job_input_state_updates(
+        publish_after_stop(
             state,
             &quarantine.job_input_state_updates,
+            &quarantine.refunded_org_ids,
         );
         drop(connection);
 
@@ -932,9 +942,10 @@ async fn stop_after_flush(
         final_transaction.commit().await.map_err(|error| {
             internal_error(format!("failed to commit stop finalization: {error}"))
         })?;
-        crate::send_intents::publish_job_input_state_updates(
+        publish_after_stop(
             state,
             &outcome.job_input_state_updates,
+            &outcome.refunded_org_ids,
         );
         return Ok((runtime_snapshot, outcome));
     }
@@ -946,9 +957,10 @@ async fn stop_after_flush(
             .await
             .map_err(|error| internal_error(format!("failed to commit runtime stop: {error}")))?;
         *fenced = true;
-        crate::send_intents::publish_job_input_state_updates(
+        publish_after_stop(
             state,
             &outcome.job_input_state_updates,
+            &outcome.refunded_org_ids,
         );
     } else {
         transaction.rollback().await.map_err(|error| {
@@ -1332,9 +1344,10 @@ pub(crate) async fn runtime_stop(
             if let Some(reason) = quarantine.earlier_stop_reason {
                 stop_options.reason = Some(reason);
             }
-            crate::send_intents::publish_job_input_state_updates(
+            publish_after_stop(
                 &state,
                 &quarantine.job_input_state_updates,
+                &quarantine.refunded_org_ids,
             );
             drop(connection);
             announce_committed_stop(&state, &runtime, &stop_options, None).await;
@@ -1418,9 +1431,10 @@ pub(crate) async fn runtime_stop(
                     "failed to commit runtime stop finalization: {error}"
                 ))
             })?;
-            crate::send_intents::publish_job_input_state_updates(
+            publish_after_stop(
                 &state,
                 &outcome.job_input_state_updates,
+                &outcome.refunded_org_ids,
             );
             // `revoke_tunnels_for_scope` acquires its own pool connection.
             // Release the stop-finalization connection first so this path also
@@ -1433,9 +1447,10 @@ pub(crate) async fn runtime_stop(
             transaction.commit().await.map_err(|error| {
                 internal_error(format!("failed to commit runtime stop: {error}"))
             })?;
-            crate::send_intents::publish_job_input_state_updates(
+            publish_after_stop(
                 &state,
                 &outcome.job_input_state_updates,
+                &outcome.refunded_org_ids,
             );
             drop(connection);
             announce_committed_stop(
@@ -1605,9 +1620,10 @@ pub(crate) async fn stop_runtime_for_project(
             if let Some(reason) = quarantine.earlier_stop_reason {
                 stop_options.reason = Some(reason);
             }
-            crate::send_intents::publish_job_input_state_updates(
+            publish_after_stop(
                 state,
                 &quarantine.job_input_state_updates,
+                &quarantine.refunded_org_ids,
             );
             drop(connection);
 
@@ -1664,9 +1680,10 @@ pub(crate) async fn stop_runtime_for_project(
                     "failed to commit runtime stop finalization: {error}"
                 ))
             })?;
-            crate::send_intents::publish_job_input_state_updates(
+            publish_after_stop(
                 state,
                 &outcome.job_input_state_updates,
+                &outcome.refunded_org_ids,
             );
             // Tunnel revocation below acquires a fresh pool connection.
             drop(final_connection);
@@ -1676,9 +1693,10 @@ pub(crate) async fn stop_runtime_for_project(
             transaction.commit().await.map_err(|error| {
                 internal_error(format!("failed to commit runtime stop: {error}"))
             })?;
-            crate::send_intents::publish_job_input_state_updates(
+            publish_after_stop(
                 state,
                 &outcome.job_input_state_updates,
+                &outcome.refunded_org_ids,
             );
             drop(connection);
             (outcome, ProviderReleaseOutcome::default())
@@ -1997,9 +2015,10 @@ pub(crate) async fn runtime_remove(
                 if let Some(reason) = quarantine.earlier_stop_reason {
                     stop_options.reason = Some(reason);
                 }
-                crate::send_intents::publish_job_input_state_updates(
+                publish_after_stop(
                     &state,
                     &quarantine.job_input_state_updates,
+                    &quarantine.refunded_org_ids,
                 );
                 drop(connection);
                 announce_committed_stop(&state, &runtime, &stop_options, None).await;
@@ -2070,9 +2089,10 @@ pub(crate) async fn runtime_remove(
                 final_transaction.commit().await.map_err(|error| {
                     internal_error(format!("failed to commit runtime removal: {error}"))
                 })?;
-                crate::send_intents::publish_job_input_state_updates(
+                publish_after_stop(
                     &state,
                     &outcome.job_input_state_updates,
+                    &outcome.refunded_org_ids,
                 );
                 // Runtime preferences and tunnel revocation may perform nested
                 // work; never retain the sole database connection across them.
@@ -2130,9 +2150,10 @@ pub(crate) async fn runtime_remove(
         transaction.commit().await.map_err(|error| {
             internal_error(format!("failed to commit runtime removal: {error}"))
         })?;
-        crate::send_intents::publish_job_input_state_updates(
+        publish_after_stop(
             &state,
             &outcome.job_input_state_updates,
+            &outcome.refunded_org_ids,
         );
         drop(connection);
         announce_committed_stop(
@@ -2300,13 +2321,31 @@ pub(crate) async fn runtime_idle_reaper(
     Ok(Json(response))
 }
 
+/// What a stop publishes once its transaction commits: the inputs it
+/// rejected, and a `credits.updated` for each org a browser turn it failed
+/// gave a reserve back to.
+fn publish_after_stop(
+    state: &AppState,
+    job_input_state_updates: &[crate::send_intents::JobInputStateUpdate],
+    refunded_org_ids: &[Uuid],
+) {
+    crate::send_intents::publish_job_input_state_updates(state, job_input_state_updates);
+    for org_id in refunded_org_ids {
+        crate::credits::spawn_credits_updated(
+            state,
+            *org_id,
+            crate::credits::CREDITS_UPDATED_LEDGER,
+        );
+    }
+}
+
 async fn fail_browser_jobs_for_unavailable_runtime(
     transaction: &Transaction<'_>,
     runtime: &RuntimeDetails,
     browser_transport: &str,
     error_message: &str,
     browser_label: &str,
-) -> Result<(Vec<Uuid>, Vec<Uuid>), (StatusCode, Json<ApiError>)> {
+) -> Result<FailedBrowserJobs, (StatusCode, Json<ApiError>)> {
     let failed_rows = transaction
         .query(
             "update agent_jobs
@@ -2332,7 +2371,7 @@ async fn fail_browser_jobs_for_unavailable_runtime(
                    payload #>> '{metadata,browser_transport}',
                    ''
                   )), '_', '-')) = $4
-             returning id, run_id",
+             returning id, run_id, payload",
             &[
                 &runtime.id,
                 &runtime.project_id,
@@ -2379,7 +2418,40 @@ async fn fail_browser_jobs_for_unavailable_runtime(
             })?;
     }
 
-    Ok((failed_jobs, failed_runs))
+    // A failed browser turn is judged as any failed turn: it costs nothing
+    // when it left the person nothing, and a card's browser turn follows its
+    // own rule (crate::system_turns).
+    let mut refunded_org_ids = Vec::new();
+    for row in &failed_rows {
+        let payload = row
+            .get::<_, tokio_postgres::types::Json<JsonValue>>("payload")
+            .0;
+        if let Some(org_id) = crate::system_turns::give_back_reserve_of_lost_browser_turn(
+            transaction,
+            &runtime.project_id,
+            &row.get::<_, Uuid>("id"),
+            row.get::<_, Option<Uuid>>("run_id"),
+            &payload,
+        )
+        .await?
+        {
+            refunded_org_ids.push(org_id);
+        }
+    }
+
+    Ok(FailedBrowserJobs {
+        jobs: failed_jobs,
+        runs: failed_runs,
+        refunded_org_ids,
+    })
+}
+
+/// The browser turns a stop failed, their runs, and the orgs whose reserve
+/// they gave back.
+struct FailedBrowserJobs {
+    jobs: Vec<Uuid>,
+    runs: Vec<Uuid>,
+    refunded_org_ids: Vec<Uuid>,
 }
 
 pub(super) async fn resolve_jobs_for_unavailable_runtime(
@@ -2391,24 +2463,33 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
     // tied to a device-local profile, while Shared is tied to the exact page
     // and browser process visible to the user. Fail both transports closed and
     // leave their exact target recorded for diagnostics.
-    let (failed_personal_browser_jobs, failed_personal_browser_runs) =
-        fail_browser_jobs_for_unavailable_runtime(
-            transaction,
-            runtime,
-            "desktop-personal",
-            PERSONAL_BROWSER_DISCONNECTED_ERROR,
-            "Personal Browser",
-        )
-        .await?;
-    let (failed_shared_browser_jobs, failed_shared_browser_runs) =
-        fail_browser_jobs_for_unavailable_runtime(
-            transaction,
-            runtime,
-            "shared",
-            SHARED_BROWSER_DISCONNECTED_ERROR,
-            "Shared Browser",
-        )
-        .await?;
+    let FailedBrowserJobs {
+        jobs: failed_personal_browser_jobs,
+        runs: failed_personal_browser_runs,
+        mut refunded_org_ids,
+    } = fail_browser_jobs_for_unavailable_runtime(
+        transaction,
+        runtime,
+        "desktop-personal",
+        PERSONAL_BROWSER_DISCONNECTED_ERROR,
+        "Personal Browser",
+    )
+    .await?;
+    let FailedBrowserJobs {
+        jobs: failed_shared_browser_jobs,
+        runs: failed_shared_browser_runs,
+        refunded_org_ids: shared_refunded_org_ids,
+    } = fail_browser_jobs_for_unavailable_runtime(
+        transaction,
+        runtime,
+        "shared",
+        SHARED_BROWSER_DISCONNECTED_ERROR,
+        "Shared Browser",
+    )
+    .await?;
+    refunded_org_ids.extend(shared_refunded_org_ids);
+    refunded_org_ids.sort_unstable();
+    refunded_org_ids.dedup();
 
     let requeued_rows = transaction
         .query(
@@ -2511,6 +2592,7 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
         failed_personal_browser_jobs,
         failed_shared_browser_jobs,
         job_input_state_updates,
+        refunded_org_ids,
     })
 }
 
@@ -2558,6 +2640,7 @@ pub(crate) async fn perform_runtime_stop(
     let failed_personal_browser_jobs = job_disposition.failed_personal_browser_jobs;
     let failed_shared_browser_jobs = job_disposition.failed_shared_browser_jobs;
     let job_input_state_updates = job_disposition.job_input_state_updates;
+    let refunded_org_ids = job_disposition.refunded_org_ids;
 
     if should_skip_stop_for_terminal_runtime(runtime) {
         // Job reconciliation may still have changed rows that must commit, but
@@ -2576,6 +2659,7 @@ pub(crate) async fn perform_runtime_stop(
             failed_personal_browser_jobs,
             failed_shared_browser_jobs,
             job_input_state_updates,
+            refunded_org_ids,
             skip_reason: Some("already_stopped".to_string()),
             released_runtime_lease_id: None,
         });
@@ -2705,6 +2789,7 @@ pub(crate) async fn perform_runtime_stop(
         failed_personal_browser_jobs,
         failed_shared_browser_jobs,
         job_input_state_updates,
+        refunded_org_ids,
         skip_reason: None,
         released_runtime_lease_id,
     })
@@ -3105,6 +3190,7 @@ mod tests {
             failed_personal_browser_jobs: Vec::new(),
             failed_shared_browser_jobs: Vec::new(),
             job_input_state_updates: Vec::new(),
+            refunded_org_ids: Vec::new(),
             skip_reason: Some("active_jobs".to_string()),
             released_runtime_lease_id: None,
         };
@@ -3182,6 +3268,7 @@ mod tests {
             failed_personal_browser_jobs: Vec::new(),
             failed_shared_browser_jobs: Vec::new(),
             job_input_state_updates: Vec::new(),
+            refunded_org_ids: Vec::new(),
             skip_reason: None,
             released_runtime_lease_id: None,
         }
@@ -3784,9 +3871,10 @@ pub(crate) async fn runtime_mark_offline(
     // The provider release below is network I/O; never keep a pool slot
     // checked out while it runs.
     drop(connection);
-    crate::send_intents::publish_job_input_state_updates(
+    publish_after_stop(
         &state,
         &job_disposition.job_input_state_updates,
+        &job_disposition.refunded_org_ids,
     );
 
     publish_controller_event(

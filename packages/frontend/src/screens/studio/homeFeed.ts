@@ -58,9 +58,10 @@ export interface HomeFeedEvent {
   notifications?: ProductNotification[];
   /**
    * One row per conversation: this event is the thread's newest ledger row
-   * and stands for `count` rows, `newCount` of them newer than the cut.
+   * and stands for `count` rows. `chats` is set when the row also stands for
+   * other chats that read exactly like it (see arrangeHomeSections).
    */
-  group?: { count: number; newCount: number; ids: number[] };
+  group?: { count: number; ids: number[]; chats?: number };
   source:
     | { type: "conversation"; localConversationId: string; entry: HomeAttentionEntry }
     | { type: "inbox"; entry: HomeAttentionEntry }
@@ -544,7 +545,7 @@ export function buildHomeFeed({
   const serverRecent: HomeFeedEvent[] = [
     ...Array.from(folded.values()).map(({ latest, ids }) => ({
       ...latest,
-      group: { count: ids.length, newCount: 0, ids },
+      group: { count: ids.length, ids },
     })),
     ...singles,
   ];
@@ -734,12 +735,7 @@ export function buildHomeFeed({
     if (event.source.type === "activity") {
       const cutUsable = serverCut !== null && Number.isFinite(serverCut);
       const ids = event.group?.ids ?? [activityEventId(event.source.item)].filter((id): id is number => id !== null);
-      const newCount = cutUsable ? ids.filter((id) => id > serverCut).length : 0;
-      return {
-        ...event,
-        isNew: newCount > 0,
-        group: event.group ? { ...event.group, newCount } : undefined,
-      };
+      return { ...event, isNew: cutUsable && ids.some((id) => id > serverCut) };
     }
     return {
       ...event,

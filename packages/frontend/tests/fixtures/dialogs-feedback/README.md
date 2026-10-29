@@ -23,7 +23,8 @@ to save generated screenshots. Do not commit generated images.
 
 Coverage includes 390px touch, 1280/2560px mouse, light/dark, 320px overflow and reduced-height dialogs.
 Checks exercise focus return, safe initial confirmation focus, form drafts across resize, nested QR
-return, private-chat search/selection, space search, More dismissal and invitation recovery states.
+return, starting a private chat from the invite menu, space search, More dismissal and invitation
+recovery states.
 This is component coverage, not authenticated integration or physical-device keyboard testing.
 
 `button-presets.spec.ts` checks actual conflict, invitation, member and agent-footer actions:
