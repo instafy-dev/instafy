@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type JSX, type ReactNode } from "react";
 import { CompressLines } from "iconoir-react";
+import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
 import { OCTO_AVATAR_SRC, resolveAgentAvatarImageSrc } from "../../../utils/agentAvatar";
 import { ChatActivityBubble } from "./ChatActivityBubble";
 import { ChatBubbleRow } from "./ChatBubbleRow";
@@ -332,8 +333,9 @@ export function ChatTypingRows({
                       data-testid="assistant-typing-stack-face"
                       // The same separator the conversation roster paints on
                       // each face: a thin ring in the chat surface's own
-                      // background keeps the overlapping coins apart.
-                      className="shrink-0 rounded-full *:ring-1 *:ring-white dark:*:ring-[var(--color-studio-dark-panel)]"
+                      // background keeps the overlapping tiles apart and
+                      // follows their corners.
+                      className={`shrink-0 ${AI_TILE_SHAPE_CLASS} *:ring-1 *:ring-white dark:*:ring-[var(--color-studio-dark-panel)]`}
                     >
                       <ChatMessageAvatar
                         kind="assistant"

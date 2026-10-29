@@ -1,4 +1,6 @@
 import { WarningTriangle } from "iconoir-react";
+import { formatAiAccessibleName } from "../../../components/AiTag";
+import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { requestAgentProfile } from "./agentProfileOpen";
 import type {
@@ -76,9 +78,9 @@ export function AssistantSpeakerIdentityLabel({
         type="button"
         onClick={() => requestAgentProfile(normalizedHandle,
           resolveObservedAgentIdentity(agentIdentity, extractAgentIdentityFromMetadata(metadata)))}
-        aria-label={`View profile for ${normalizedHandle}`}
+        aria-label={formatAiAccessibleName(`View profile for ${normalizedHandle}`)}
         data-testid="chat-speaker-agent-profile"
-        className={`flex-none rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 ${
+        className={`flex-none ${AI_TILE_SHAPE_CLASS} outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 ${
           avatarVisibility === "narrow" ? "sm:hidden" : ""
         }`.trim()}
       >

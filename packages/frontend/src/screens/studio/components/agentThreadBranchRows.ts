@@ -150,6 +150,9 @@ function collectConversationParticipants(conversation: ConversationState): Agent
   const participants = new Map<string, AgentThreadBranchParticipant>();
   addParticipant(participants, conversation.ownerAgent?.handle);
 
+  // Faces come only from the agent stamped on a message, never from @words in
+  // its text: a person's mention is written @handle too, and so is a package
+  // such as @types/node, and the stack draws every participant as an AI tile.
   conversation.messages.forEach((message) => {
     const metadata = isRecord(message.metadata) ? message.metadata : null;
     const agent = metadata && isRecord(metadata.agent) ? metadata.agent : null;
@@ -157,9 +160,6 @@ function collectConversationParticipants(conversation: ConversationState): Agent
       avatarSeed: typeof agent?.avatarSeed === "string" ? agent.avatarSeed : null,
       avatarUrl: typeof agent?.avatarUrl === "string" ? agent.avatarUrl : null,
     });
-    for (const match of message.content.matchAll(/@([a-z0-9][a-z0-9_-]{0,19})/gi)) {
-      addParticipant(participants, match[1]);
-    }
   });
 
   return Array.from(participants.values());

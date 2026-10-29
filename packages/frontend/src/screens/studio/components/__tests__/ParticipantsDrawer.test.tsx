@@ -5,7 +5,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PROJECT_AI_MODEL } from "../../../../ai/modelDefaults";
 import { ParticipantsDrawer } from "../ParticipantsDrawer";
-import { expectCanonicalOctoCoin } from "../../../../components/__tests__/octoCoinExpectations";
+import {
+  classTokens,
+  expectAiTile,
+  expectCanonicalOctoCoin,
+  expectPersonCircle,
+} from "../../../../components/__tests__/octoCoinExpectations";
+import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import {
   clearChatParticipants,
   publishChatParticipants,
@@ -179,6 +185,39 @@ describe("ParticipantsDrawer", () => {
     );
     expect(pixelFace?.querySelector(".octo-mark")).toBeNull();
     expect(pixelFace?.textContent).toBe("P");
+  });
+
+  it("keeps people round, draws every AI as a tile and names the AI as AI", async () => {
+    await act(async () => {
+      publishChatParticipants(snapshot());
+    });
+    await render();
+
+    // One rule for faces: people are circles, every AI a rounded square.
+    const people = container.querySelector('section[aria-label="People"]');
+    const personFaces = Array.from(people?.querySelectorAll("[data-human-avatar]") ?? []);
+    expect(personFaces).toHaveLength(2);
+    for (const face of personFaces) expectPersonCircle(face);
+    expect(people?.querySelector('[data-testid="ai-tag"]')).toBeNull();
+
+    // The list mixes people and AI, so the AI section is headed AI and each
+    // AI's name carries the quiet AI tag, read as "@pixel, AI".
+    const section = container.querySelector('section[aria-label="AI"]');
+    expect(section?.firstElementChild?.textContent).toBe("AI");
+    for (const handle of ["octo", "pixel"]) {
+      const button = container.querySelector(`[data-testid="participants-agent-profile-${handle}"]`);
+      expect(button?.getAttribute("aria-label")).toBe(`View profile for @${handle}, AI`);
+      // The profile button's focus ring follows the tile, not a circle.
+      expect(button?.getAttribute("class")?.split(/\s+/)).toContain(AI_TILE_SHAPE_CLASS);
+      expect(button?.getAttribute("class")?.split(/\s+/)).not.toContain("rounded-full");
+      expectAiTile(button?.querySelector(':scope > [aria-hidden="true"]'));
+    }
+    const tags = Array.from(section?.querySelectorAll('[data-testid="ai-tag"]') ?? []);
+    expect(tags).toHaveLength(2);
+    for (const tag of tags) {
+      expect(tag.textContent).toBe(", AI");
+      expect(tag.previousElementSibling?.textContent).toMatch(/^@(octo|pixel)$/);
+    }
   });
 
   it("surfaces only the windows that are running low, with reset times", async () => {
@@ -464,9 +503,9 @@ describe("ParticipantsDrawer", () => {
     expect(footer?.textContent).toContain("All on Instafy Cloud · shared");
     // Healthy machine → no status word.
     expect(footer?.textContent).not.toContain("online");
-    const section = container.querySelector('section[aria-label="Agents"]');
-    expect(section?.textContent).toContain("Agents");
-    expect(section?.textContent).not.toContain("Runtimes & agents");
+    const section = container.querySelector('section[aria-label="AI"]');
+    expect(section?.firstElementChild?.textContent).toBe("AI");
+    expect(section?.textContent).not.toContain("Runtimes & AI");
   });
 
   it("hosts the conversation's assistant switch and the manage-agents door", async () => {
@@ -602,8 +641,11 @@ describe("ParticipantsDrawer", () => {
     const groups = container.querySelectorAll('[data-testid="participants-runtime-group"]');
     expect(groups.length).toBe(2);
     expect(container.querySelector('[data-testid="participants-machine-footer"]')).toBeNull();
-    const text = container.querySelector('section[aria-label="Agents"]')?.textContent ?? "";
-    expect(text).toContain("Runtimes & agents");
+    // Grouped by runtime, the heading keeps the AI word (docs/Brand.md, "One
+    // rule for faces").
+    const section = container.querySelector('section[aria-label="AI"]');
+    expect(section?.firstElementChild?.textContent).toBe("Runtimes & AI");
+    const text = section?.textContent ?? "";
     expect(text).toContain("Instafy Cloud");
     expect(text).toContain("Shared · 2");
     expect(text).toContain("Your Mac");
@@ -613,5 +655,11 @@ describe("ParticipantsDrawer", () => {
     expect(text).toContain("@octo");
     expect(text).toContain("@scout");
     expect(text).toContain("@pixel");
+    // The AI word wears the drawer's own quiet tag, the one that marks a
+    // runtime's kind.
+    const kindTag = Array.from(section?.querySelectorAll("span") ?? []).find((span) => span.textContent === "Native");
+    const aiTag = section?.querySelector('[data-testid="ai-tag"]');
+    expect(kindTag).toBeDefined();
+    expect(classTokens(aiTag)).toEqual(classTokens(kindTag));
   });
 });

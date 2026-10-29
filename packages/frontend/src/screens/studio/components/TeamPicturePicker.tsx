@@ -28,7 +28,7 @@ export function TeamPicturePicker({
     <div className="space-y-2" data-testid={testId}>
       <Text variant="caption" tone="muted">Team picture (optional)</Text>
       <div className="flex flex-wrap items-center gap-3">
-        <IdentityPhotoButton square label={file ? "Change team picture" : "Upload team picture"}
+        <IdentityPhotoButton shape="square" label={file ? "Change team picture" : "Upload team picture"}
           accept={IDENTITY_IMAGE_ACCEPT} disabled={disabled} inputTestId={`${testId}-input`}
           onSelect={next => {
             const invalid = validateTeamAvatar(next); setError(invalid);

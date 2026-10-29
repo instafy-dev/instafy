@@ -89,9 +89,9 @@ const AVATAR_SIZE: Record<AvatarSize, string> = { "2xs": chrome.AVATAR_2XS, sm: 
 
 // ChatMessageAvatar.tsx:102-166 for a human: the crew colour stands in for the
 // app's muted ID-hashed palette so Ada and Kim keep one colour across the whole
-// page, with the label colour that reads on that fill. An agent other than
-// Octo is the same coin as a rounded square (docs/Brand.md): its crew fill and
-// its initial, never Octo's mark in a crew colour.
+// page, with the label colour that reads on that fill. People are round; an
+// agent other than Octo wears Octo's AI tile (docs/Brand.md, "One rule for
+// faces"): its crew fill and its initial, never Octo's mark in a crew colour.
 function CrewAvatar({
   initial,
   crew,
@@ -404,6 +404,8 @@ export function MiniPhoneBar({ title }: { title: ReactNode }) {
 // left of him. The scenario agent's slot is laid out from the first frame and
 // slides in at step4. Each coin names its participant in data-roster-coin so
 // the hero can find Octo's coin and the others without reaching into classes.
+// The separator ring takes each face's shape: round for people, the AI tile
+// for Octo and the agent.
 export function RosterStack({ scenario, agentVisible }: { scenario: SessionScenario; agentVisible: boolean }) {
   return (
     <div aria-hidden="true" data-testid="landing-roster" className={chrome.ROSTER}>
@@ -413,7 +415,7 @@ export function RosterStack({ scenario, agentVisible }: { scenario: SessionScena
       <span data-roster-coin="kim" data-cub-anchor="coin" className={chrome.ROSTER_RING}>
         <CrewAvatar initial="K" crew={KIM} size="roster" />
       </span>
-      <span data-roster-coin="octo" data-testid="landing-roster-octo" data-cub-anchor="coin" className={chrome.ROSTER_RING}>
+      <span data-roster-coin="octo" data-testid="landing-roster-octo" data-cub-anchor="coin" className={chrome.ROSTER_RING_AGENT}>
         <OctoAvatar size="roster" />
       </span>
       <span

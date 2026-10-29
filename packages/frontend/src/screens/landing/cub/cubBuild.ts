@@ -252,7 +252,7 @@ export function build(c: Cub, t: number): { P: Pose; pts: V3[] } {
       const stillW = 1 - sstep(0, 0.15, Math.max(tp.dip, tp.fl));
       const co = L.octoCoin;
       // The coin as drawn: popped while Octo works, pressed (smaller and a
-      // pixel lower) under each tap, so a tap lands on the ring it sees.
+      // pixel lower) under each tap, so a tap lands on the tile's edge it sees.
       const coin = coinDrawn(c, pop, hold * pressW(tl, td));
       const gap =
         lerp(REACH_GAP, HOLD_GAP, hold) - hold * tp.dip * (HOLD_GAP + TAP_LAND) + 0.25 * hold * stillW * Math.sin(t * 1.3);
