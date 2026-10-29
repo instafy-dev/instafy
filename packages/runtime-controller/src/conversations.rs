@@ -2849,6 +2849,7 @@ pub(crate) async fn post_conversation_message(
 
     request.conversation_is_new = false;
     request.expected_lane_idle = expected_lane_idle;
+    request.delegating_job_id = active_job.as_ref().map(|job| job.job_id);
     // From the caller's own credential, never `access_context`: a job token
     // acts as its subject there, but is no person typing.
     request.trigger =

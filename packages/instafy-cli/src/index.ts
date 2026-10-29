@@ -46,6 +46,7 @@ import { runInstafyGit, runInstafyGitSync } from "./git-wrapper.js";
 import { runBind } from "./bind.js";
 import { registerPreviewCheckCommand } from "./site-check.js";
 import { registerWebCommand } from "./web-read.js";
+import { researchSettings } from "./research-settings.js";
 import { registerWebLinkCommand } from "./web-link.js";
 import { registerWebSearchCommand } from "./web-search.js";
 import { historyConversations, historyMessages, historyRuns } from "./history.js";
@@ -2246,7 +2247,25 @@ failWithGroupHelp(previewCommand);
 // A check of a site with an open preview refreshes the picture on its card.
 registerPreviewCheckCommand(previewCommand, { hasOpenPreview: hasOpenPreviewFor, uploadThumbnail: uploadCheckThumbnail });
 
-failWithGroupHelp(registerWebSearchCommand(registerWebLinkCommand(registerWebCommand(program))));
+const webCommand = registerWebSearchCommand(registerWebLinkCommand(registerWebCommand(program)));
+failWithGroupHelp(webCommand);
+const webSettingsCommand = webCommand.command("settings")
+  .description("Inspect or change the space's shared research budget for new tasks");
+addSpaceOption(webSettingsCommand, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
+addServerUrlOptions(webSettingsCommand);
+addAccessTokenOptions(webSettingsCommand, "Instafy access token");
+webSettingsCommand
+  .option("--max-page-loads <n>", "Fresh pages allowed across the parent and all helpers")
+  .option("--max-page-loads-per-site <n>", "Fresh pages allowed from one site across the task")
+  .option("--interactive", "Interactively edit the shared research budget")
+  .option("--json", "Output JSON (noninteractive)")
+  .action(async (opts) => {
+    try {
+      await researchSettings({ project: resolveSpaceIdOption(opts), controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken, maxPageLoads: opts.maxPageLoads,
+        maxPageLoadsPerSite: opts.maxPageLoadsPerSite, interactive: opts.interactive, json: opts.json });
+    } catch (error) { console.error(kleur.red(String(error))); process.exit(1); }
+  });
 
 const previewOpenCommand = previewCommand
   .command("open")

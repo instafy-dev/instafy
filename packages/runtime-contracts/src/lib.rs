@@ -6,6 +6,7 @@ pub use proto::*;
 pub mod chat_activity;
 pub mod multi_agent;
 pub mod own_ai_model;
+pub mod research;
 pub mod types;
 pub use types::{AccessTokenClaims, CreditSnapshotPayload, ProxyEnvelopePayload};
 
