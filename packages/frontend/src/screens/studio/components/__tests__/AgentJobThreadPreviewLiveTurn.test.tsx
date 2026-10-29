@@ -2,11 +2,12 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi, type MockInstance } from "vitest";
 import type { RunRecord } from "../../../../types";
 import type { ChatMessage } from "../../types";
 import { AgentJobThreadPreviewLayout } from "../AgentJobThreadPreviewLayout";
 import { useAgentJobThreadPreviewState } from "../useAgentJobThreadPreviewState";
+import { ACTIVITY_LABEL_HOLD_MS } from "../useSteadyActivityLabel";
 
 // One live turn at phone width, replayed message by message through the live
 // hook, the way production showed it: the rail moved while commands started
@@ -205,6 +206,10 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
       // is running. The turn used to swap rails, rows and output blocks at
       // each switch, and gain and lose the spine's end cap.
       clientWidth.mockReturnValue(width);
+      vi.useFakeTimers();
+      onTestFinished(() => {
+        vi.useRealTimers();
+      });
       const betweenCommands = earlierSteps();
       const commandRunning = [
         ...earlierSteps(),
@@ -227,6 +232,12 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
       expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
 
       await renderTurn(commandRunning);
+      expect(turnStructure(container)).toEqual(waitingShape);
+      // The line holds its label a moment, so a quick step never flashes past.
+      expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+      await act(async () => {
+        vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
+      });
       expect(turnStructure(container)).toEqual(waitingShape);
       expect(activityLine()?.textContent).toBe("Working…" + "Details");
 

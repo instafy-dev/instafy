@@ -53,6 +53,7 @@ import {
   formatProxyUpstreamErrorSummary,
   resolveProxyUpstreamErrorGuidance,
 } from "./proxyError";
+import { sitePreviewFromMessage } from "./sitePreviewRequest";
 import { isTransientThreadUpdate } from "./threadPreviewProxyError";
 import { TurnActivityDetails } from "./TurnActivityDetails";
 import { TurnActivityLine } from "./TurnActivityLine";
@@ -230,6 +231,8 @@ export type ChatFileChangeListProps = {
   unsavedReason?: ChatMessageUnsavedReason | null;
   messageId?: string | null;
   messageTimestamp?: number | null;
+  /** The turn opened a site in a preview: files it created read as the site it made. */
+  madeSite?: boolean;
 };
 
 export type AgentJobThreadPreviewLayoutProps = {
@@ -462,6 +465,8 @@ export function AgentJobThreadPreviewLayout({
   // above it would read like a turn that went fine.
   const showActivityLine = activityText.length > 0 && runFailurePresentation === null;
   const showDetailsPanel = detailsOpen && activityLineOpensDetails;
+  // The turn's preview card: the files it created are that site.
+  const madeSite = cards.some((card) => sitePreviewFromMessage(card) !== null);
   const normalizeThreadPlaceholderText = (value: string) =>
     value
       .trim()
@@ -831,6 +836,7 @@ export function AgentJobThreadPreviewLayout({
               text={activityText}
               live={activity.live !== null}
               animate={shouldAnimateThreadLiveState}
+              noStepsYet={activity.stepCount === 0}
               interactive={activityLineOpensDetails}
               detailsOpen={showDetailsPanel}
               detailsId={detailsId}
@@ -918,6 +924,7 @@ export function AgentJobThreadPreviewLayout({
                 unsavedReason={latestUnsavedReason ?? null}
                 messageId={latestFilesMessageId ?? null}
                 messageTimestamp={latestFilesMessageTimestamp ?? null}
+                madeSite={madeSite}
               />
             </div>
           </div>

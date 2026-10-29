@@ -161,8 +161,9 @@ places" once the turn is done. It names its commands in `bin` and labels their s
   placeholder and is allowed only in `other`; `some` (the count is not known, as in a loop) is
   required with `other`. A single string is used for any count.
 - Plain words only: no links, addresses, markup, brackets, control or bidi characters.
-- `role` is `content` (the default), `outcome` or `quiet`; `when: "success"` counts the step only
-  when the command exits 0.
+- `role` is `content` (the default), `outcome` (what the turn made; it leads the line) or `quiet`
+  (shown while it runs and in Details; a quiet label's `done`, when it has one, is its row's past
+  tense there); `when: "success"` counts the step only when the command exits 0.
 
 A pack whose `activity` breaks a rule still loads; the runtime drops its labels with a warning, and
 the installer warns too. Only packs installed with the runtime supply labels: a pack a space

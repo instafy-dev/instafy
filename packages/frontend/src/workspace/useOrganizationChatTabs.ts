@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ConversationState } from "../conversations/conversationState";
 import type { ProjectListItem } from "../projects/useProjects";
 import type { WorkspaceTabState } from "./workspaceTabFactories";
@@ -86,23 +86,15 @@ export function useOrganizationChatTabs({ userId, orgKey, projects, projectId, r
     try { sessionStorage.setItem(key(userId), JSON.stringify(currentState)); } catch { /* session memory still works */ }
   }, [currentState, userId]);
 
+  // The tab bar shows the open space's chats only. Another space's chats stay
+  // remembered here and come back with their space, but never sit beside this
+  // one's: after a switch the bar read like one list of two spaces' chats.
   const visible = useMemo(() => {
-    const available = new Map(projects.filter(item => (item.orgId ?? "personal") === orgKey).map(item => [item.id, item]));
-    return Object.entries(currentState).flatMap(([id, entries]) => {
-      const space = available.get(id);
-      return space ? entries.filter(tab => tab.orgKey === orgKey).map(tab => ({ ...tab, badge: id === projectId ? tab.badge : null, spaceName: space.name })) : [];
-    });
+    const space = projects.find(item => item.id === projectId && (item.orgId ?? "personal") === orgKey);
+    if (!space || !projectId) return [];
+    return (currentState[projectId] ?? [])
+      .filter(tab => tab.orgKey === orgKey)
+      .map(tab => ({ ...tab, spaceName: space.name }));
   }, [currentState, orgKey, projectId, projects]);
-  const updateInactive = useCallback((tab: OrganizationChatTab, action: "close" | "keep") => {
-    // Only background references visible in this scope can be edited here.
-    if (tab.projectId === projectId || !visible.some(item => item.id === tab.id)) return;
-    setSnapshot(previous => {
-      if (previous.userId !== userId) return previous;
-      const items = previous.state[tab.projectId] ?? [];
-      return { userId, state: { ...previous.state, [tab.projectId]: action === "close"
-        ? items.filter(item => item.id !== tab.id)
-        : items.map(item => item.id === tab.id ? { ...item, preview: false } : item) } };
-    });
-  }, [projectId, userId, visible]);
-  return { tabs: visible, updateInactive };
+  return { tabs: visible };
 }
