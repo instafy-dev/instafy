@@ -212,6 +212,39 @@ describe("useBrowserSessionActions", () => {
     expect(resultRef.current?.latestClick).toBeNull();
   });
 
+  it("reports the newest step in the whole log once read, and nothing before the surface reads it", async () => {
+    // The browser view captions only steps newer than this while Octo holds
+    // the browser, so a step on any page counts, and an unread log says so.
+    fetchActions.mockResolvedValueOnce({
+      actions: [action({ seq: 7, pageId: "other-page" }), action({ seq: 5, pageId: "other-page" })],
+      cursor: 100,
+    });
+    const resultRef = await render({ ...options, pageId: "page-1", transportActive: false });
+    expect(resultRef.current?.logSeq).toBeNull();
+    await act(async () => {
+      root.render(<Harness options={{ ...options, pageId: "page-1" }} resultRef={resultRef} />);
+    });
+    expect(resultRef.current?.actions).toEqual([]);
+    expect(resultRef.current?.logSeq).toBe(7);
+    // A read that finds nothing new keeps it.
+    fetchActions.mockResolvedValueOnce({ actions: [], cursor: 100 });
+    await act(async () => {
+      await resultRef.current?.refresh();
+    });
+    expect(resultRef.current?.logSeq).toBe(7);
+    // Hidden: unread again.
+    await act(async () => {
+      root.render(<Harness options={{ ...options, pageId: "page-1", transportActive: false }} resultRef={resultRef} />);
+    });
+    expect(resultRef.current?.logSeq).toBeNull();
+  });
+
+  it("reports an empty log as read", async () => {
+    fetchActions.mockResolvedValueOnce({ actions: [], cursor: 0 });
+    const resultRef = await render();
+    expect(resultRef.current?.logSeq).toBe(0);
+  });
+
   it("never polls a hidden transport and resumes when the mounted surface becomes visible", async () => {
     vi.useFakeTimers();
     fetchActions.mockResolvedValue({ actions: [action({ seq: 1 })], cursor: 100 });

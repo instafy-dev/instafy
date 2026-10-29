@@ -23,6 +23,7 @@ import {
   BROWSER_HANDS_BACK_METADATA_KEY,
   BROWSER_REQUEST_OF_METADATA_KEY,
   browserRequestContinuation,
+  BROWSER_CARD_SITES_METADATA_KEY,
   browserRequestContinuedKeys,
   browserRequestDestinations,
   browserRequestFromContinuationPrompt,
@@ -483,15 +484,19 @@ export function useChatBrowserRequest(options: Options) {
             throw new Error(BROWSER_AUTO_START_COPY.inUse);
           }
           const sending = latest.current;
+          const destinations = browserRequestDestinations(request.task);
           const sent = await sending.continueTask(transport, browserRequestContinuation(request), {
             display: browserRequestNotice(sending.agentName ?? "Octo", request.task, { automatic: autoStarted }),
             metadata: {
               ...(extraMetadata ?? {}),
               [BROWSER_REQUEST_OF_METADATA_KEY]: key,
+              // The person pressed a card that names its site: that press is
+              // their OK for the site. A card Studio opened by itself is not.
               ...(autoStarted ? { [BROWSER_AUTO_STARTED_METADATA_KEY]: true } : {}),
+              ...(!autoStarted && destinations.length > 0 ? { [BROWSER_CARD_SITES_METADATA_KEY]: destinations } : {}),
               ...(request.continueBuilding ? { [BROWSER_HANDS_BACK_METADATA_KEY]: true } : {}),
             },
-            knownHosts: browserRequestDestinations(request.task),
+            knownHosts: destinations,
           });
           if (!sent) throw new Error("The browser task was not sent. You can retry from its message.");
           return;

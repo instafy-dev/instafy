@@ -3,6 +3,7 @@ import {
 } from "../../../conversations/conversationRuntimeExpectations";
 import type { SubmitConversationRuntimeOverride } from "../../../conversations/useConversation";
 import type { BrowserSessionPageTarget } from "./browserSessionPages";
+import { BROWSER_CARD_SITES_METADATA_KEY, mergeBrowserCardSites } from "./browserRequest";
 
 export const SHARED_BROWSER_CONSENT_VERSION = 1;
 
@@ -92,10 +93,14 @@ export function buildSharedBrowserSubmitMetadata(input: {
   baseMetadata: Record<string, unknown> | null;
   browserPageTarget: BrowserSessionPageTarget | null;
   runtimeId: string;
+  /** The sites of the cards the person pressed in this chat (pressedBrowserCardSites). */
+  cardSites?: readonly string[];
 }): Record<string, unknown> {
   const pageTarget = input.browserPageTarget;
+  const cardSites = mergeBrowserCardSites(input.cardSites, input.baseMetadata?.[BROWSER_CARD_SITES_METADATA_KEY]);
   const metadata = {
     ...(input.baseMetadata ?? {}),
+    ...(cardSites.length > 0 ? { [BROWSER_CARD_SITES_METADATA_KEY]: cardSites } : {}),
     browserTransport: "shared",
     browserConsentVersion: SHARED_BROWSER_CONSENT_VERSION,
     browserRuntimeId: input.runtimeId,

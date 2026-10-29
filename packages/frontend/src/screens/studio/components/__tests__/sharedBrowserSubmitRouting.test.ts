@@ -8,6 +8,18 @@ import {
 } from "../sharedBrowserSubmitRouting";
 
 describe("Shared Browser submit routing", () => {
+  it("carries the sites of the cards the person pressed in the chat, with the card's own", () => {
+    const metadata = buildSharedBrowserSubmitMetadata({
+      baseMetadata: { browserCardSites: ["www.carris.pt"] },
+      browserPageTarget: null,
+      runtimeId: "shared-runtime-1",
+      cardSites: ["www.visitlisboa.com", "www.carris.pt"],
+    });
+    expect(metadata.browserCardSites).toEqual(["www.visitlisboa.com", "www.carris.pt"]);
+    const none = buildSharedBrowserSubmitMetadata({ baseMetadata: null, browserPageTarget: null, runtimeId: "shared-runtime-1" });
+    expect(none).not.toHaveProperty("browserCardSites");
+  });
+
   it("pins an active browser task to the exact resolved runtime", () => {
     expect(
       resolveSharedBrowserSubmitRouting({

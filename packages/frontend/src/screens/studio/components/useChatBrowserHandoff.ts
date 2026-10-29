@@ -44,13 +44,41 @@ type Options = {
   open: boolean;
   canWrite: boolean;
   runtimeId: string | null;
-  /** The page on screen; `openedBy` lets Take over on the agent's own tab find its run. */
-  page: (BrowserSessionPageTarget & Pick<BrowserSessionPage, "openedBy">) | null;
+  /**
+   * The page on screen; `openedBy` lets Take over on the agent's own tab find
+   * its run, and keep that tab unless it is `kept` already.
+   */
+  page: (BrowserSessionPageTarget & Partial<Pick<BrowserSessionPage, "openedBy" | "kept">>) | null;
   runs: RunRecord[];
+  /** The sites of the cards the person pressed in this chat: their OK for each one. */
+  browserCardSites?: readonly string[];
   personal: ReturnType<typeof usePersonalBrowserBridge>;
   agentHandle: string;
   onSubmit: (id: string | null, message: string, options?: SubmitConversationOptions) => Promise<void>;
+  /**
+   * Keeps one of the agent's tabs open past the end of its turn. Take over
+   * on such a tab keeps it, so the page the person took stays on screen.
+   */
+  keepAgentTab?: ((pageId: string) => Promise<unknown>) | null;
 };
+
+/**
+ * How long Take over waits to keep the agent's tab on screen before it stops
+ * the turn anyway: the turn's end closes the agent's tabs that are not kept.
+ */
+export const TAKE_OVER_KEEP_TAB_WAIT_MS = 1_500;
+
+async function keepAgentTabBriefly(keep: (pageId: string) => Promise<unknown>, pageId: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      keep(pageId).catch(() => false),
+      new Promise((resolve) => { timer = setTimeout(resolve, TAKE_OVER_KEEP_TAB_WAIT_MS); }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
 
 function identity(value: Options) {
   return JSON.stringify([
@@ -107,6 +135,12 @@ export function useChatBrowserHandoff(options: Options) {
       agentHoldsBrowser,
     });
     if (!job) return false;
+    // Taking over on one of the agent's own tabs keeps that tab: the turn's
+    // end would otherwise close it under the person who just took it.
+    const page = captured.page;
+    if (captured.keepAgentTab && page?.openedBy === "agent" && page.kept !== true) {
+      await keepAgentTabBriefly(captured.keepAgentTab, page.id);
+    }
     const result = await cancelAgentJob(job.jobId, "User taking over the browser");
     assertCurrent(captured, epoch);
     // This acknowledges the cancellation request only. The surface separately
@@ -133,6 +167,7 @@ export function useChatBrowserHandoff(options: Options) {
         baseMetadata: extras?.metadata ?? null,
         browserPageTarget: captured.page,
         runtimeId: captured.runtimeId,
+        cardSites: captured.browserCardSites,
       }),
     });
     return true;

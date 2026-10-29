@@ -415,12 +415,6 @@ export const BROWSER_PARTICIPANT_STACK = "flex shrink-0 items-center -space-x-1.
 export const BROWSER_PARTICIPANT = "inline-flex h-5 w-5 items-center justify-center rounded-full border-2 border-slate-50 text-[9px] font-semibold dark:border-[color:var(--color-studio-dark-panel-soft)]";
 export const BROWSER_PARTICIPANT_MORE = "inline-flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-slate-50 bg-slate-600 px-1 text-[9px] font-semibold text-white dark:border-[color:var(--color-studio-dark-panel-soft)]";
 export const BROWSER_OPTIONS = "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-700 dark:text-slate-200";
-// BrowserSessionModal.tsx:2669 the routine-browsing status row, which wraps
-// rather than truncates (dark cool-slate border 800 replaced by the divider
-// tier). Landing-only: it opens and closes with a height transition, so the
-// stage under it slides rather than jumps when the turn ends.
-export const BROWSER_ROUTINE_COLLAPSE = "grid shrink-0 transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none";
-export const BROWSER_ROUTINE_ROW = `border-b border-slate-200 px-3 py-1 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`;
 // BrowserSessionModal.tsx the viewport: slate under a live page, black only in
 // dark mode (BROWSER_LIVE_STAGE_CLASS), and slate while the session starts
 // (dark cool-slate 950 replaced by the canvas tier).
@@ -463,23 +457,14 @@ export const TICKER_DOT_TONE = {
 // animated content remain noninteractive so the demo holds no tab stop.
 export const APPROVAL_SCRIM = "absolute inset-0 z-30 flex items-end justify-center overflow-hidden bg-slate-950/60 p-2 backdrop-blur-[2px] sm:items-center sm:p-4";
 export const APPROVAL_SHEET = "flex max-h-full w-full max-w-md flex-col overflow-hidden";
-// StudioDialogBody's responsive gutter and scrolling geometry. The studio's
-// content scrolls (overflow-y-auto); the landing's
-// is drawn scrolled (APPROVAL_CONTENT_SCROLL, eased as Ada scrolls it to the
-// routine browsing box) and never user-scrollable, so it holds no tab stop.
-// Landing-only: where the content is still cut off below, it fades out at the
-// cut (APPROVAL_CONTENT_CUT) instead of slicing a line.
+// StudioDialogBody's responsive gutter and geometry. The studio's content
+// scrolls (overflow-y-auto); the landing's never does, so it holds no tab stop.
 export const APPROVAL_CONTENT = "min-h-0 flex-1 overflow-hidden overscroll-contain px-4 py-4 sm:px-5 space-y-4";
-export const APPROVAL_CONTENT_CUT = "[mask-image:linear-gradient(to_bottom,#000_calc(100%-1rem),transparent)]";
-export const APPROVAL_CONTENT_SCROLL = "space-y-4 transition-transform duration-500 ease-in-out motion-reduce:transition-none";
 export const APPROVAL_LOCK = "mt-0.5 h-4 w-4 shrink-0";
+// The sentence the studio's sheet asks with (its title).
+export const APPROVAL_SENTENCE = "min-w-0 flex-1 break-words";
 export const APPROVAL_SITE = "px-3 py-2.5";
 export const APPROVAL_SITE_TEXT = "mt-0.5 break-all";
-// Checkbox.tsx's labelled small control, drawn without an input or tab stop.
-export const APPROVAL_ROUTINE = "flex min-h-11 min-w-11 items-start gap-2 py-3 text-slate-700 dark:text-slate-200 sm:pointer-fine:min-h-0 sm:pointer-fine:min-w-0 sm:pointer-fine:py-0";
-export const APPROVAL_CHECKBOX = "mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors duration-150 motion-reduce:transition-none";
-export const APPROVAL_CHECKBOX_OFF = "border-slate-300 bg-white text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200";
-export const APPROVAL_CHECKBOX_ON = "border-primary-500 bg-primary-500 text-white";
 export const APPROVAL_ACTIONS = "flex flex-col gap-2 min-[420px]:flex-row min-[420px]:justify-end";
 // Button preset=form: flat 12px corners and pointer-adaptive targets. These
 // spans retain the landing's simulation rather than introducing real controls.

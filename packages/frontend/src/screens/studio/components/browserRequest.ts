@@ -156,6 +156,16 @@ export const BROWSER_REQUEST_OF_METADATA_KEY = "browserRequestOf";
 /** Prompt metadata on a continuation Studio sent by itself, without a press. */
 export const BROWSER_AUTO_STARTED_METADATA_KEY = "browserAutoStarted";
 /**
+ * Prompt metadata naming the sites of the browser cards the person pressed
+ * in this chat. A card names its site, so pressing it is the person's OK for
+ * that site: the runtime starts each later Instafy's browser turn of the chat
+ * with those sites approved on the person's page. Only a press counts, never
+ * a card Studio opened by itself, and the controller keeps it only on the
+ * person's own message.
+ */
+export const BROWSER_CARD_SITES_METADATA_KEY = "browserCardSites";
+const MAX_BROWSER_CARD_SITES = 8;
+/**
  * Prompt metadata on a continuation of a card that continues building: the
  * browser turn ends with labelled findings for the hand-back (runtime-agent
  * `browser_hand_back.rs`), and only such a turn is handed back.
@@ -217,6 +227,51 @@ export function readBrowserRequestOf(message: Pick<ChatMessage, "role" | "metada
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return null;
+}
+
+function isAutoStartedContinuation(message: Pick<ChatMessage, "metadata">): boolean {
+  return promptMetadataRecords(message.metadata).some((record) => record[BROWSER_AUTO_STARTED_METADATA_KEY] === true);
+}
+
+/**
+ * The sites of the cards the person pressed in a chat, oldest first: each
+ * continuation they sent by pressing a card, read back from its own prompt.
+ * Only the person's own presses count: in a shared chat, a teammate's press
+ * is that teammate's OK, never this person's.
+ */
+export function pressedBrowserCardSites(
+  messages: readonly ChatMessage[],
+  currentUserId: string | null | undefined,
+): string[] {
+  const person = currentUserId?.trim() ?? "";
+  if (!person) return [];
+  const sites: string[] = [];
+  for (const message of messages) {
+    if (message.authorId?.trim() !== person || !readBrowserRequestOf(message) ||
+        isUnsentBrowserRequestNotice(message) || isAutoStartedContinuation(message)) {
+      continue;
+    }
+    const request = browserRequestFromContinuationPrompt(message);
+    if (request) sites.push(...browserRequestDestinations(request.task));
+  }
+  return mergeBrowserCardSites(sites);
+}
+
+/** One list of card sites, without repeats, at most the runtime's bound (the newest kept). */
+export function mergeBrowserCardSites(...lists: ReadonlyArray<unknown>): string[] {
+  const merged: string[] = [];
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const site of list) {
+      if (typeof site !== "string") continue;
+      const host = site.trim().toLowerCase();
+      if (!host) continue;
+      const seen = merged.indexOf(host);
+      if (seen >= 0) merged.splice(seen, 1);
+      merged.push(host);
+    }
+  }
+  return merged.slice(-MAX_BROWSER_CARD_SITES);
 }
 
 /** True when a prompt's metadata routes it to a browser or continues a card. */

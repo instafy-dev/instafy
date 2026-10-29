@@ -108,6 +108,9 @@ struct BrowserRfbCapabilitiesResponse {
     /// Hard ceiling for a remotely requested framebuffer. The client preserves
     /// aspect ratio when it needs to fit a larger local surface under this cap.
     max_framebuffer_pixels: u64,
+    /// `/browser/vnc/view` serves a view-only RFB lane to anyone with
+    /// `browser.view`, so a person who does not drive still sees the page.
+    view_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -247,6 +250,12 @@ pub fn view_routes() -> Router<AppState> {
             get(crate::browser_host::handle_browser_host),
         )
         .route("/browser/pages", get(handle_browser_pages))
+        // RFB for a person who does not drive: the pixels only, every input
+        // message dropped on the way in (`browser_rfb_view`).
+        .route(
+            "/browser/vnc/view",
+            get(crate::browser_rfb_view::handle_vnc_view_ws),
+        )
         .route("/browser/actions", get(handle_browser_actions))
         .route(
             "/browser/approval/pending",
@@ -311,9 +320,11 @@ pub fn control_routes() -> Router<AppState> {
         )
 }
 
-/// RFB multiplexes pixels and raw input without a message boundary the origin
-/// can safely filter. Keep it driver-exclusive. CDP screencast and WebRTC are
-/// observation routes; their bounded input is separately lease-gated.
+/// RFB multiplexes pixels and raw input on one stream, so the lane that
+/// passes the client's bytes through stays driver-exclusive. Everyone else
+/// watches on `/browser/vnc/view`, which reads the client's half of the
+/// protocol and drops its input. CDP screencast and WebRTC are observation
+/// routes; their bounded input is separately lease-gated.
 pub fn interactive_transport_routes() -> Router<AppState> {
     Router::new().route("/browser/vnc", get(handle_vnc_ws))
 }
@@ -515,7 +526,7 @@ fn normalize_vnc_host(raw: Option<String>) -> String {
     host
 }
 
-fn resolve_vnc_target() -> (String, u16) {
+pub(crate) fn resolve_vnc_target() -> (String, u16) {
     let host = normalize_vnc_host(std::env::var("INSTAFY_VNC_HOST").ok());
     let port = std::env::var("INSTAFY_VNC_PORT")
         .ok()
@@ -621,6 +632,7 @@ fn browser_capabilities(
         rfb: BrowserRfbCapabilitiesResponse {
             render_scale: browser_rfb_render_scale(),
             max_framebuffer_pixels: browser_rfb_max_framebuffer_pixels(),
+            view_only: true,
         },
         webrtc,
         controls: BrowserControlsResponse {
@@ -1868,7 +1880,8 @@ mod tests {
                 "viewportOnly": true,
                 "rfb": {
                     "renderScale": 1.0,
-                    "maxFramebufferPixels": 8294400
+                    "maxFramebufferPixels": 8294400,
+                    "viewOnly": true
                 },
                 "controls": {
                     "navigate": true,

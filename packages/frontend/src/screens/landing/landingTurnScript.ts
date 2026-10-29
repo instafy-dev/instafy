@@ -31,7 +31,6 @@ export type TurnBeatId =
   | "handoff"
   | "browse"
   | "approve"
-  | "routine"
   | "allowPress"
   | "allowed"
   | "navigate"
@@ -101,9 +100,8 @@ export const BEAT = {
 // Ada presses it (tap is her press going down, press is the button busy and
 // the browser opening), the Shared Browser starts beside the chat, her
 // continuation goes out once it is connected, and Octo's browser run asks her
-// to approve the preview's site: the prompt opens at its top (approve), she
-// scrolls it to the routine browsing box and ticks it (routine), then presses
-// Allow. Octo goes to the page, scrolls to the plans and clicks Choose Team,
+// to approve the preview's site in its own words ("Octo wants to use …",
+// approve), and she presses Allow site. Octo goes to the page, scrolls to the plans and clicks Choose Team,
 // each ticker caption up long enough to read (about 1.1 s), so its cursor
 // rests on the button it clicked, and posts what it saw. In one view Ada then
 // taps Chat (browseDone to kimTyping) to read it; Kim, whose pointer is on the
@@ -117,7 +115,6 @@ export const BROWSER_TURN_BEATS: readonly TurnBeat[] = [
   { id: "handoff", atMs: 8100 },
   { id: "browse", atMs: 8200 },
   { id: "approve", atMs: 8350 },
-  { id: "routine", atMs: 9350 },
   { id: "allowPress", atMs: 10200 },
   { id: "allowed", atMs: 10450 },
   { id: "navigate", atMs: 10600 },

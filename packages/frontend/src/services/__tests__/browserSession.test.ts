@@ -236,6 +236,22 @@ describe("runtime browser session capabilities", () => {
     expect(mapRuntimeBrowserSessionCapabilitiesPayload({ version: 1 })).toBeNull();
   });
 
+  it("reads the view-only RFB lane only from an exact true", () => {
+    const withLane = mapRuntimeBrowserSessionCapabilitiesPayload({
+      ...capabilitiesPayload,
+      rfb: { ...capabilitiesPayload.rfb, viewOnly: true },
+    });
+    expect(withLane?.rfb).toEqual({ ...capabilitiesPayload.rfb, viewOnly: true });
+    for (const viewOnly of [undefined, false, "true", 1]) {
+      expect(
+        mapRuntimeBrowserSessionCapabilitiesPayload({
+          ...capabilitiesPayload,
+          rfb: { ...capabilitiesPayload.rfb, viewOnly },
+        })?.rfb?.viewOnly,
+      ).toBeUndefined();
+    }
+  });
+
   it("enables routine approval only with the negotiated capability", () => {
     expect(mapRuntimeBrowserSessionCapabilitiesPayload({ ...capabilitiesPayload, approvalModes: ["ask", "routine"] })?.approvalModes).toEqual(["ask", "routine"]);
     for (const approvalModes of [undefined, null, "routine", ["routine"], ["ask", "unknown"], ["ask", "routine", "unknown"]]) {

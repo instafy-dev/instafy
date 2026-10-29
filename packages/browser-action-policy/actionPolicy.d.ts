@@ -38,6 +38,13 @@ export type PersonalBrowserStepClassification = {
    * disclosure or menu opener, or navigation-area item.
    */
   commit?: boolean;
+  /**
+   * Set on a cookie or consent banner's button that refuses consent ("Reject
+   * all", "Only necessary"), found by its words and by the describer's
+   * `consentContext`. It shares nothing, so a host may take it without a
+   * prompt in every approval mode.
+   */
+  consentRejection?: boolean;
 };
 
 export type PersonalBrowserStepContext = {

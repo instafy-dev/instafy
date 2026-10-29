@@ -8,9 +8,8 @@
 //   reference opens the result with its lines selected;
 // - the Shared Browser opens only from Ada's press on Octo's "Continue in
 //   browser" card, starts ("Starting Shared Browser"), asks her to approve
-//   the preview's site before Octo may read it (the prompt opens with routine
-//   browsing unticked; she scrolls to it, ticks it and presses Allow), then
-//   shows Octo's work: the edge glow while it controls the page, its cursor at
+//   the preview's site before Octo may read it (the prompt asks in Octo's
+//   words, and she presses Allow site), then shows Octo's work: the edge glow while it controls the page, its cursor at
 //   each click (lingering 4 s), and the ticker's captions in the runtime's own
 //   words ("Go to …", the page title, Scroll, Click "…");
 // - Kim's named pointer is on the same page, never on the control Octo
@@ -52,16 +51,10 @@ export interface BrowserStage {
   connected: boolean;
   /** The preview is loaded (before that, a blank page). */
   page: boolean;
-  /**
-   * The site approval over the page: its first prompt (scrolled to its top,
-   * routine browsing unticked), then scrolled to the routine browsing box,
-   * which Ada has ticked (her choice for the turn).
-   */
-  approval: "none" | "site" | "routine";
+  /** The site approval over the page, in Octo's words. */
+  approval: "none" | "site";
   /** Ada's press on the approval's Allow button is going down. */
   allowPressed: boolean;
-  /** "Routine browsing allowed for this turn" under the toolbar while the turn runs. */
-  routineRow: boolean;
   /** Octo controls the page (the edge glow). */
   glow: boolean;
   /** The address field: null shows the placeholder. */
@@ -120,9 +113,8 @@ function browserStage(scenario: SessionScenario, beat: number): BrowserStage {
   return {
     connected,
     page: at("navigate"),
-    approval: at("allowed") ? "none" : at("routine") ? "routine" : at("approve") ? "site" : "none",
+    approval: at("allowed") ? "none" : at("approve") ? "site" : "none",
     allowPressed: at("allowPress") && !at("allowed"),
-    routineRow: at("allowed") && !at("browseDone"),
     glow: working,
     address: at("navigate") ? script.url : null,
     placeholder: connected ? "Enter an address" : "Connecting to Shared Browser…",

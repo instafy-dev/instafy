@@ -6,13 +6,9 @@ import type {
   RuntimeSharedBrowserApprovalDecision,
   RuntimeSharedBrowserApprovalRequest,
 } from "../../../sdk/instafy";
-import { displayActivityHost } from "./activityHost";
-import { splitBrowserApprovalLabel } from "./browserApprovalLabel";
-import {
-  sharedBrowserApprovalAllowDecision,
-  sharedBrowserApprovalTargetAddress,
-} from "./SharedBrowserApprovalPrompt";
-import { isActivityHost, type BrowserApprovalOutcome, type SessionBrowserApproval } from "./turnActivity";
+import { activityHostOf, browserApprovalSentence } from "./browserApprovalWords";
+import { sharedBrowserApprovalAllowDecision } from "./SharedBrowserApprovalPrompt";
+import type { BrowserApprovalOutcome, SessionBrowserApproval } from "./turnActivity";
 import type { SharedBrowserApprovalState } from "./useSharedBrowserApproval";
 
 /**
@@ -23,8 +19,6 @@ import type { SharedBrowserApprovalState } from "./useSharedBrowserApproval";
 export const BROWSER_APPROVAL_GONE_GRACE_MS = 2_000;
 /** The row says when a prompt is about to expire only in its last minute. */
 export const BROWSER_APPROVAL_EXPIRY_NOTICE_MS = 60_000;
-/** The page's own words in a prompt are cut to this many characters. */
-const MAX_LABEL_CHARS = 40;
 
 export const BROWSER_APPROVAL_ROW_COPY = {
   deny: "Deny",
@@ -37,81 +31,7 @@ export const BROWSER_APPROVAL_ROW_COPY = {
 
 type Phase = "pending" | BrowserApprovalOutcome;
 
-function hostOf(origin: string | null | undefined): string | null {
-  const value = origin?.trim();
-  if (!value) return null;
-  try {
-    const host = new URL(value).hostname.toLowerCase();
-    return host ? host.replace(/^www\./u, "") : null;
-  } catch {
-    return null;
-  }
-}
-
-/** A host for the activity line: only a name the line's rules accept. */
-function activityHostOf(origin: string | null | undefined): string | null {
-  const host = hostOf(origin);
-  return isActivityHost(host) ? host : null;
-}
-
-function shownHost(origin: string | null | undefined): string | null {
-  const host = hostOf(origin);
-  return host ? displayActivityHost(host) : null;
-}
-
-function cut(label: string): string {
-  const characters = [...label.trim()];
-  return characters.length <= MAX_LABEL_CHARS ? characters.join("") : `${characters.slice(0, MAX_LABEL_CHARS - 1).join("")}…`;
-}
-
-/**
- * What the agent waits to do, in one sentence: "Octo wants to send the form
- * “Search” on visitlisboa.com." The label is the runtime's already-masked
- * name of the control, the only place the page's own words appear, because
- * the person needs them to decide.
- */
-export function browserApprovalSentence(agent: string, request: RuntimeSharedBrowserApprovalRequest): string {
-  // The step's category leads the runtime's label ("Delete, cancel or sign
-  // out: Delete account"): only the control's name goes in quotes, and the
-  // category, when it adds something, follows as its own sentence.
-  const { label: name, note } = splitBrowserApprovalLabel(request.display.label);
-  const sentence = stepSentence(agent, request, name);
-  return note ? `${sentence} ${note}` : sentence;
-}
-
-function stepSentence(agent: string, request: RuntimeSharedBrowserApprovalRequest, name: string): string {
-  const destination = shownHost(request.display.destinationOrigin) ?? shownHost(request.destinationOrigin);
-  const site = shownHost(request.sourceOrigin) ?? destination ?? "this site";
-  const label = cut(name);
-  const quoted = label ? ` “${label}”` : "";
-  // The exact page a site prompt or a navigation will load, when the runtime names it.
-  const page = sharedBrowserApprovalTargetAddress(request);
-  switch (request.operation) {
-    case "approve-origin":
-      return page ? `${agent} wants to open ${page}.` : `${agent} wants to use ${destination ?? site}.`;
-    case "navigate":
-      return `${agent} wants to open ${page ?? destination ?? "a page"}.`;
-    case "click":
-      return `${agent} wants to click${quoted} on ${site}.`;
-    case "type":
-      return `${agent} wants to type into${quoted || " a field"} on ${site}.`;
-    case "form-submit": {
-      const elsewhere = destination && destination !== site ? ` It goes to ${destination}.` : "";
-      return `${agent} wants to send ${label ? `the form${quoted}` : "a form"} on ${site}.${elsewhere}`;
-    }
-    case "press-enter":
-      return `${agent} wants to press Enter on${quoted || " a control"} on ${site}.`;
-    case "press-space":
-      return `${agent} wants to press Space on${quoted || " a control"} on ${site}.`;
-    case "press-key": {
-      // The runtime names the key itself: "Press Tab on Search".
-      const key = cut(name.replace(/^Press /u, ""));
-      return `${agent} wants to press ${key || "a key"} on ${site}.`;
-    }
-    default:
-      return `${agent} wants to take a step${quoted} on ${site}.`;
-  }
-}
+export { browserApprovalSentence };
 
 /** What the turn's line keeps of an answered prompt: the operation and the sites, never its label. */
 function settlement(request: RuntimeSharedBrowserApprovalRequest, outcome: BrowserApprovalOutcome): SessionBrowserApproval {

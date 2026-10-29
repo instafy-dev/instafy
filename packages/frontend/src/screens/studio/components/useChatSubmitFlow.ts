@@ -27,6 +27,7 @@ import {
 import { resolvePrivateConversationInvitePrompt } from "./chatPrivateConversationInvitePrompt";
 import { buildChatSubmitPlan, type ChatSubmitOverride } from "./chatSubmitPlanning";
 import { runChatSubmitPreflight } from "./chatSubmitPreflight";
+import { pressedBrowserCardSites } from "./browserRequest";
 import {
   buildSharedBrowserSubmitMetadata,
   resolveSharedBrowserSubmitRouting,
@@ -571,6 +572,9 @@ export function useChatSubmitFlow({
             browserPageTarget:
               browserLaunchMode === "new_page" ? null : sharedBrowserPageTarget,
             runtimeId: submitRuntimeOverride.runtimeId,
+            // A follow-up in this chat keeps the person's OK for the sites
+            // of the cards they pressed earlier in it.
+            cardSites: pressedBrowserCardSites(activeConversationMessages, currentUserId),
           })
       : resolvedBaseSubmitMetadata;
     const queuedSubmitMetadata = {

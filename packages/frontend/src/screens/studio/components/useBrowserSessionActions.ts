@@ -56,6 +56,9 @@ export function useBrowserSessionActions(params: {
   } = params;
   const pollingEnabled = enabled && transportActive;
   const [actions, setActions] = useState<RuntimeBrowserSessionAction[]>([]);
+  // The newest step in the whole log as this surface last read it (any
+  // page): 0 for a log read empty, null before the surface has read it.
+  const [logSeq, setLogSeq] = useState<number | null>(null);
   const cursorRef = useRef<number>(0);
   const unavailableSuspendedRef = useRef(false);
   const generationRef = useRef(0);
@@ -65,6 +68,7 @@ export function useBrowserSessionActions(params: {
     unavailableSuspendedRef.current = suspendOnUnavailable;
     cursorRef.current = 0;
     setActions([]);
+    setLogSeq(null);
     onUnavailable?.();
     return false;
   }, [onUnavailable, suspendOnUnavailable]);
@@ -74,6 +78,7 @@ export function useBrowserSessionActions(params: {
       cursorRef.current = 0;
       unavailableSuspendedRef.current = false;
       setActions([]);
+      setLogSeq(null);
       return false;
     }
     if (unavailableSuspendedRef.current) {
@@ -120,6 +125,8 @@ export function useBrowserSessionActions(params: {
     const sessionReset = result.cursor < cursorRef.current;
     cursorRef.current = result.cursor;
 
+    const readSeq = result.actions.reduce((latest, action) => Math.max(latest, action.seq), 0);
+    setLogSeq((previous) => Math.max(sessionReset ? 0 : previous ?? 0, readSeq));
     if (result.actions.length === 0) {
       if (sessionReset) {
         setActions([]);
@@ -148,6 +155,7 @@ export function useBrowserSessionActions(params: {
     generationRef.current += 1;
     cursorRef.current = 0;
     setActions([]);
+    setLogSeq(null);
     return () => {
       generationRef.current += 1;
     };
@@ -157,6 +165,7 @@ export function useBrowserSessionActions(params: {
     if (!pollingEnabled || !projectId) {
       cursorRef.current = 0;
       setActions([]);
+      setLogSeq(null);
     }
   }, [pollingEnabled, projectId]);
 
@@ -205,5 +214,5 @@ export function useBrowserSessionActions(params: {
     return null;
   }, [visibleActions]);
 
-  return { actions: visibleActions, latestClick, refresh };
+  return { actions: visibleActions, latestClick, refresh, logSeq: pollingEnabled && projectId ? logSeq : null };
 }

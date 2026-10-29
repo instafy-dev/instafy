@@ -58,9 +58,11 @@ describe("SharedBrowserApprovalPrompt", () => {
       );
     });
 
-    expect(container.querySelector('[role="alertdialog"]')).not.toBeNull();
-    expect(container.textContent).toContain("Allow the AI agent to use this site?");
-    expect(container.textContent).toContain("https://example.test");
+    // The chat row's words: Octo asks, in one sentence, for the site.
+    const dialog = container.querySelector('[role="alertdialog"]');
+    expect(dialog).not.toBeNull();
+    expect(container.querySelector("#shared-browser-approval-title")?.textContent).toBe("Octo wants to use example.test.");
+    expect(container.querySelector('[data-testid="shared-browser-approval-allow"]')?.textContent).toBe("Allow site");
     const deny = container.querySelector<HTMLButtonElement>(
       '[data-testid="shared-browser-approval-deny"]',
     );
@@ -74,7 +76,10 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(onDecision).toHaveBeenCalledWith("allow_origin");
   });
 
-  it("shows the exact page a site prompt opens, and says that pages on an allowed site open without asking", async () => {
+  it("names the exact page a site prompt opens, and nothing a first-time reader has to decode", async () => {
+    // Drive, Oct 28: "Allow the AI agent to use this site? Shared Browser is
+    // paused before the AI agent can read or act on a new site." with an
+    // "Always allow routine browsing for this turn" box under it.
     await act(async () => {
       root.render(
         <SharedBrowserApprovalPrompt
@@ -87,11 +92,16 @@ describe("SharedBrowserApprovalPrompt", () => {
         />,
       );
     });
+    expect(container.querySelector("#shared-browser-approval-title")?.textContent)
+      .toBe("Octo wants to open example.test/en/places/belem-tower?lang=en.");
+    // The exact page the answer is about stays in view.
     expect(container.querySelector('[data-testid="shared-browser-approval-destination"]')?.textContent)
       .toBe("example.test/en/places/belem-tower?lang=en");
-    expect(container.textContent).toContain("Page");
-    expect(container.textContent).toContain("its pages open without asking again. Other actions still ask.");
-    expect(container.textContent).not.toContain("You will still approve actions separately.");
+    for (const words of ["the AI agent", "Shared Browser", "routine browsing", "AI turn", "This approval is used once"]) {
+      expect(container.textContent).not.toContain(words);
+    }
+    expect(container.querySelector('[data-testid="shared-browser-approval-routine"]')).toBeNull();
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
   });
 
   it("reads the page from the label only when it is on the prompt's own site", () => {
@@ -126,8 +136,9 @@ describe("SharedBrowserApprovalPrompt", () => {
       );
     });
 
-    expect(container.textContent).toContain("The AI agent is waiting to click “Sign in”.");
-    expect(container.textContent).toContain("This approval is used once.");
+    expect(container.querySelector("#shared-browser-approval-title")?.textContent)
+      .toBe("Octo wants to click “Sign in” on example.test.");
+    expect(container.querySelector('[data-testid="shared-browser-approval-allow"]')?.textContent).toBe("Allow");
     await act(async () => {
       container
         .querySelector('[data-testid="shared-browser-approval-scrim"]')
@@ -136,38 +147,19 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(onDecision).toHaveBeenCalledWith("deny");
   });
 
-  it("offers explicit routine approval at the first site prompt and scopes it to that request", async () => {
-    const onDecision = vi.fn();
-    const render = (request = originRequest) => root.render(
-      <SharedBrowserApprovalPrompt routineApprovalAvailable onDecision={onDecision} request={request} submitting={false} />,
-    );
-    await act(async () => render());
-    const checkbox = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-approval-routine"]');
-    expect(checkbox?.checked).toBe(false);
-    expect(document.activeElement).toBe(container.querySelector('[data-testid="shared-browser-approval-deny"]'));
-    await act(async () => checkbox?.click());
-    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-allow"]')?.click());
-    expect(onDecision).toHaveBeenLastCalledWith("allow_routine");
-    await act(async () => render({ ...originRequest, approvalId: "new-request" }));
-    expect(container.querySelector<HTMLInputElement>('[data-testid="shared-browser-approval-routine"]')?.checked).toBe(false);
-    await act(async () => render({ ...originRequest, kind: "action", operation: "click" }));
-    expect(container.querySelector('[data-testid="shared-browser-approval-routine"]')).toBeNull();
+  it("asks in the name of the agent that holds the browser", async () => {
+    await act(async () => root.render(
+      <SharedBrowserApprovalPrompt agentName="Ada" onDecision={vi.fn()} request={originRequest} submitting={false} />,
+    ));
+    expect(container.querySelector("#shared-browser-approval-title")?.textContent).toBe("Ada wants to use example.test.");
   });
 
-  it("never offers routine approval without runtime support", async () => {
-    await act(async () => root.render(
-      <SharedBrowserApprovalPrompt onDecision={vi.fn()} request={originRequest} submitting={false} />,
-    ));
-    expect(container.querySelector('[data-testid="shared-browser-approval-routine"]')).toBeNull();
-  });
-
-  it.each([false, true])("wraps keyboard focus inside the prompt with routine consent available: %s", async (routineApprovalAvailable) => {
+  it("wraps keyboard focus inside the prompt", async () => {
     const onDecision = vi.fn();
     await act(async () => root.render(
-      <SharedBrowserApprovalPrompt routineApprovalAvailable={routineApprovalAvailable} onDecision={onDecision} request={originRequest} submitting={false} />,
+      <SharedBrowserApprovalPrompt onDecision={onDecision} request={originRequest} submitting={false} />,
     ));
-    const first = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-approval-routine"]')
-      ?? container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-deny"]')!;
+    const first = container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-deny"]')!;
     const last = container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-allow"]')!;
     const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
     await act(async () => {
@@ -185,17 +177,15 @@ describe("SharedBrowserApprovalPrompt", () => {
   });
 
   it.each([
-    ["type", "Search", "type into “Search”"],
-    ["form-submit", "Email", "submit the form from “Email”"],
-    ["press-enter", "Continue", "press Enter on “Continue”"],
-    ["press-space", "Remember me", "press Space on “Remember me”"],
-    ["press-key", "Press Backspace on Search", "press the requested key (Press Backspace on Search)"],
+    ["type", "Search", "Octo wants to type into “Search” on example.test."],
+    ["form-submit", "Email", "Octo wants to send the form “Email” on example.test."],
+    ["press-enter", "Continue", "Octo wants to press Enter on “Continue” on example.test."],
+    ["press-space", "Remember me", "Octo wants to press Space on “Remember me” on example.test."],
+    ["press-key", "Press Backspace on Search", "Octo wants to press Backspace on Search on example.test."],
     // The runtime's category leads its label: only the name is quoted, and
     // the category says what it adds after it.
-    ["click", "Change something: unnamed button in the top right", "click “unnamed button in the top right”"],
-    ["click", "Delete, cancel or sign out: Delete account",
-      "click “Delete account”. It may delete, cancel or sign out of something"],
-  ])("states the %s operation even when the runtime supplies a label", async (operation, label, expected) => {
+    ["click", "Change something: unnamed button in the top right", "Octo wants to click “unnamed button in the top right” on example.test."],
+  ])("states the %s operation in the chat row's words", async (operation, label, expected) => {
     await act(async () => {
       root.render(
         <SharedBrowserApprovalPrompt
@@ -205,6 +195,7 @@ describe("SharedBrowserApprovalPrompt", () => {
             approvalId: "22222222-2222-4222-8222-222222222222",
             kind: "action",
             operation,
+            sourceOrigin: "https://example.test",
             display: { label, destinationOrigin: null },
           }}
           submitting={false}
@@ -212,7 +203,7 @@ describe("SharedBrowserApprovalPrompt", () => {
       );
     });
 
-    expect(container.textContent).toContain(`The AI agent is waiting to ${expected}.`);
+    expect(container.querySelector("#shared-browser-approval-title")?.textContent).toBe(expected);
   });
 
   it("keeps both decisions disabled while a decision is being written", async () => {
@@ -223,7 +214,6 @@ describe("SharedBrowserApprovalPrompt", () => {
           error="The request changed."
           onDecision={onDecision}
           request={originRequest}
-          routineApprovalAvailable
           submitting
         />,
       );
@@ -232,15 +222,11 @@ describe("SharedBrowserApprovalPrompt", () => {
     const buttons = Array.from(container.querySelectorAll("button"));
     expect(buttons).toHaveLength(2);
     expect(buttons.every((button) => button.disabled)).toBe(true);
-    const checkbox = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-approval-routine"]')!;
-    expect(checkbox.disabled).toBe(true);
     await act(async () => {
-      checkbox.click();
       buttons.forEach((button) => button.click());
       container.querySelector('[data-testid="shared-browser-approval-scrim"]')
         ?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
-    expect(checkbox.checked).toBe(false);
     expect(onDecision).not.toHaveBeenCalled();
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       "The request changed.",

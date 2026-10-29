@@ -97,6 +97,11 @@ export function resolveSharedBrowserViewerForParticipant(params: {
   requested: SupportedSharedBrowserViewerKind | null;
   available: readonly SupportedSharedBrowserViewerKind[];
   humanOwnsControl: boolean;
+  /**
+   * The runtime serves a view-only RFB lane, so RFB stays this person's
+   * viewer while someone else (Octo) drives, without their input.
+   */
+  rfbViewOnly?: boolean;
 }): SupportedSharedBrowserViewerKind | null {
   if (!params.requested) {
     return null;
@@ -104,7 +109,8 @@ export function resolveSharedBrowserViewerForParticipant(params: {
   if (params.requested !== "rfb" || params.humanOwnsControl) {
     return params.requested;
   }
-  return params.available.find((viewer) => viewer !== "rfb") ?? null;
+  return params.available.find((viewer) => viewer !== "rfb") ??
+    (params.rfbViewOnly === true && params.available.includes("rfb") ? "rfb" : null);
 }
 
 export function webRtcInputTargetsActivePage(

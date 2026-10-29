@@ -238,7 +238,8 @@ It fills the app viewport; it does not create a different browser, profile or
 OS window. Collapse returns to the docked browser with the same page.
 
 On the space's own machine, Shared starts every turn in routine browsing. Elsewhere it
-offers **Always allow routine browsing** at the first site prompt for that turn. Personal
+asks for each site and step (a pressed card's site and a cookie banner's refusal
+never ask; see docs/Shared-Browser.md). Personal
 Browser keeps the routine choice in Browser settings. Until the person chooses, it is on for a Desktop reporting approval policy version 2 and
 off (Ask) for an older one; a choice either way is kept. On a version 2 Desktop
 the setting reads **Let Octo browse and read without asking for each site**:
