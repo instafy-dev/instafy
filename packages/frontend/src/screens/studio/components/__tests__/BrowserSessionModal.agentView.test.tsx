@@ -339,21 +339,27 @@ describe("Shared Browser view while Octo drives", () => {
   /**
    * Control changes hands as the browser reports it, with React rendering on
    * its own schedule as it does in a browser (act flushes every render at
-   * once, which hides a lane opened in between). Returns the lanes opened.
+   * once, which hides a lane opened in between). Waits for the lane that
+   * should open (`path`), then a little more, and returns the lanes opened.
    */
-  async function handOverOutsideAct(owner: SharedBrowserCollaborationControlOwner, props: HostProps) {
+  async function handOverOutsideAct(owner: SharedBrowserCollaborationControlOwner, props: HostProps, path: string) {
     const before = mocks.rfb.length;
+    const opened = () => mocks.rfb.slice(before);
     const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
     actEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
     try {
       server.owner = owner;
       for (const socket of server.sockets) socket.pushState();
       root.render(<Host {...props} />);
-      for (let turn = 0; turn < 40; turn += 1) await new Promise<void>((resolve) => realSetImmediate(resolve));
+      let after = 0;
+      for (let turn = 0; turn < 400 && after < 20; turn += 1) {
+        await new Promise<void>((resolve) => realSetImmediate(resolve));
+        if (opened().some((rfb) => new URL(rfb.url).pathname === path)) after += 1;
+      }
     } finally {
       actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
     }
-    return mocks.rfb.slice(before).map((rfb) => `${rfb.viewOnly ? "watching" : "driving"} ${new URL(rfb.url).pathname}`);
+    return opened().map((rfb) => `${rfb.viewOnly ? "watching" : "driving"} ${new URL(rfb.url).pathname}`);
   }
 
   it("opens only the view-only lane when Octo takes control, never the driver's lane in between", async () => {
@@ -364,7 +370,7 @@ describe("Shared Browser view while Octo drives", () => {
     await act(async () => { driving.listeners.connect?.(); driving.frame(); });
     await advance(100);
     expect(await handOverOutsideAct({ kind: "agent", displayName: "Octo" },
-      { agentHolds: true, viewOnly: true, agentPageIds: ["PAGE1"] })).toEqual(["watching /browser/vnc/view"]);
+      { agentHolds: true, viewOnly: true, agentPageIds: ["PAGE1"] }, "/browser/vnc/view")).toEqual(["watching /browser/vnc/view"]);
   });
 
   it("opens only the driver's lane when the person takes control back, never the view-only lane in between", async () => {
@@ -374,6 +380,6 @@ describe("Shared Browser view while Octo drives", () => {
     await act(async () => { lane.listeners.connect?.(); lane.frame(); });
     await advance(50);
     expect(await handOverOutsideAct({ kind: "human", participantId: "self" },
-      { agentHolds: false, viewOnly: true, agentPageIds: ["PAGE1"] })).toEqual(["driving /browser/vnc"]);
+      { agentHolds: false, viewOnly: true, agentPageIds: ["PAGE1"] }, "/browser/vnc")).toEqual(["driving /browser/vnc"]);
   });
 });
