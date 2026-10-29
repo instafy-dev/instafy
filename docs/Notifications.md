@@ -156,7 +156,10 @@ endpoint tables directly.
 
 iOS uses APNs. Android token registration is explicitly disabled until an FCM
 adapter is implemented and verified. Historical Android tokens can still be
-unregistered. Android's durable in-app center remains available.
+removed from the controller during sign-out. Android does not call the native FCM
+register/unregister methods, so builds without Firebase configuration can sign out
+safely. iOS continues to detach its OS token before server cleanup. Android's durable
+in-app center remains available.
 
 Registrations and presentation state are scoped to the authenticated account.
 Sign-out/account changes remove the previous account's registration and clear

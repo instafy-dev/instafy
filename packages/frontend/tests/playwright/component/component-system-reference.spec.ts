@@ -169,10 +169,15 @@ test.describe("shared control contracts with a fine pointer", () => {
 
 test.describe("shared control contracts with a coarse pointer", () => {
   test.use({ hasTouch: true });
-  for (const width of [390, 1280]) {
+  for (const width of [390, 768, 1280]) {
     test(`touch layouts retain full targets at ${width}px`, async ({ page }) => {
       await openReference(page, width);
       await expectFormSizes(page, 44);
+      for (const control of [page.getByRole("textbox", { name: "Name", exact: true }),
+        page.getByTestId("reference-select"), page.getByRole("combobox", { name: "Native access", exact: true }),
+        page.getByTestId("reference-picker")]) {
+        await expect(control).toHaveCSS("font-size", "16px");
+      }
       await expectButtonTargets(page, true);
       await expectCheckboxTouchTarget(page);
       await expectSelectChoices(page, true);

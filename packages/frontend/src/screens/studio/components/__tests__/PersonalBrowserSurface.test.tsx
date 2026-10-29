@@ -949,6 +949,45 @@ describe("PersonalBrowserSurface", () => {
     expect(model.navigate).not.toHaveBeenCalled();
   });
 
+  it("announces opening once and preserves retry focus while recovery is pending", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, state: "opening", visible: false };
+    const renderStatus = async () => {
+      await act(async () => root.render(<PersonalBrowserSurface active model={model} locationOptions={<span>Personal</span>} />));
+      return document.querySelector<HTMLElement>('[data-testid="personal-browser-state-card"]')!;
+    };
+    const opening = await renderStatus();
+    expect(opening.querySelector('[role="status"]')?.textContent).toContain("Opening Personal Browser");
+    expect(opening.querySelector('[role="alert"]')).toBeNull();
+    const openingToolbarStatus = document.querySelector('[data-testid="personal-browser-agent-status"]')!;
+    expect(openingToolbarStatus.getAttribute("aria-label")).toBe("Starting…");
+    expect(openingToolbarStatus.querySelector("svg")).toBeNull();
+
+    model.status = { ...model.status, state: "error", error: "Browser process exited" };
+    const error = await renderStatus();
+    const retry = error.querySelector<HTMLButtonElement>('button')!;
+    await act(async () => { retry.focus(); retry.click(); });
+    expect(model.retryOpen).toHaveBeenCalledTimes(1);
+    model.recovering = true;
+    model.available = false;
+    const recovering = await renderStatus();
+    expect(recovering.querySelector('[role="status"]')?.textContent).toContain("Reopening Personal Browser");
+    expect(recovering.querySelector('[role="alert"]')?.textContent).toContain("Browser process exited");
+    expect(recovering.querySelector<HTMLButtonElement>('button')).toBe(retry);
+    expect(retry.disabled).toBe(false);
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    expect(retry.hasAttribute("data-pending")).toBe(true);
+    expect(document.activeElement).toBe(retry);
+    expect(retry.textContent).toContain("Retry Personal Browser");
+    await act(async () => retry.click());
+    expect(model.retryOpen).toHaveBeenCalledTimes(1);
+
+    model.recovering = false;
+    const unavailable = await renderStatus();
+    expect(unavailable.querySelector<HTMLButtonElement>('button')?.disabled).toBe(true);
+    expect(unavailable.querySelector('[role="status"]')).toBeNull();
+  });
+
   it("offers recovery actions and keeps Pause reachable while native control is still enabled", async () => {
     const retryOpen = vi.fn();
     const errorModel = createModel();
@@ -973,6 +1012,13 @@ describe("PersonalBrowserSurface", () => {
       (button) => button.textContent?.includes("Retry Personal Browser"),
     );
     expect(browserRetry).toBeTruthy();
+    const errorCard = document.querySelector('[data-testid="personal-browser-state-card"]')!;
+    expect(errorCard.querySelector('[role="alert"]')?.textContent).toContain("Browser process exited");
+    expect(errorCard.textContent?.match(/Browser process exited/g)).toHaveLength(1);
+    const toolbarStatus = document.querySelector('[data-testid="personal-browser-agent-status"]')!;
+    expect(toolbarStatus.getAttribute("aria-label")).toBe("Unavailable");
+    expect(toolbarStatus.getAttribute("title")).toBe("Unavailable");
+    expect(Array.from(document.querySelectorAll('[role="alert"]')).filter((alert) => alert.textContent?.includes("Browser process exited"))).toHaveLength(1);
     await act(async () => browserRetry?.click());
     expect(retryOpen).toHaveBeenCalledTimes(1);
     const errorPause = document.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]');

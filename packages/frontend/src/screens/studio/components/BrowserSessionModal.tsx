@@ -11,7 +11,8 @@ import { Expand, Safari, Xmark } from "iconoir-react";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { IconButton } from "../../../components/Button";
 import { StudioMenuSeparator } from "../../../components/aria/StudioMenu";
-import { Spinner } from "../../../components/Spinner";
+import { LoadingStatus } from "../../../components/LoadingStatus";
+import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import {
   controllerClient,
@@ -3257,111 +3258,71 @@ export function BrowserSessionModal({
     <BrowserSessionRecovery presentation="compact" viewState={viewState} reason={error}
       runtimeLimit={recoveryRuntimeLimit} onRetry={retryConnection} onHide={closeBrowserSession} />
   ) : (
-    <div
-      className="absolute inset-0 rounded-[1.35rem] border border-slate-200/70 bg-white/96 shadow-sm dark:border-slate-800 dark:bg-slate-950/95"
+    <Surface
+      tone="default"
+      radius="2xl"
+      shadow="none"
+      className="absolute inset-0 flex items-center"
       data-testid="browser-session-collapsed-card"
     >
-          {collapsedCardMode === "connecting" ? (
-            <div
-              className="flex items-center justify-between gap-3 px-3.5 py-3"
-              role={shouldUseDesktopDockedCard ? "button" : undefined}
-              tabIndex={shouldUseDesktopDockedCard ? 0 : undefined}
-              onClick={shouldUseDesktopDockedCard ? expandDockedViewer : undefined}
-              onKeyDown={
-                shouldUseDesktopDockedCard
-                  ? (event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        expandDockedViewer();
-                      }
-                    }
-                  : undefined
-              }
+      <div
+        className={[
+          "flex w-full items-center justify-between gap-3 p-3",
+          shouldUseDesktopDockedCard ? "cursor-pointer" : "",
+        ].join(" ")}
+        role={shouldUseDesktopDockedCard ? "button" : undefined}
+        tabIndex={shouldUseDesktopDockedCard ? 0 : undefined}
+        onClick={shouldUseDesktopDockedCard ? expandDockedViewer : undefined}
+        onKeyDown={shouldUseDesktopDockedCard ? (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            expandDockedViewer();
+          }
+        } : undefined}
+      >
+        <div className="flex min-w-0 items-center gap-3">
+          <Surface tone="muted" radius="xl" shadow="none" className="flex h-10 w-10 flex-none items-center justify-center">
+            <Safari className="h-4 w-4" aria-hidden="true" />
+          </Surface>
+          <div className="min-w-0">
+            {collapsedCardMode === "connecting" ? (
+              <LoadingStatus>{viewState.sentence}</LoadingStatus>
+            ) : <>
+              <Text variant="bodyStrong" tone="primary" className="truncate">Browser</Text>
+              <Text as="span" variant="caption" tone="success" className="inline-flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-current" aria-hidden="true" />
+                Connected
+              </Text>
+            </>}
+          </div>
+        </div>
+        <div className="flex flex-none items-center gap-2">
+          {collapsedCardMode === "connected" ? (
+            <IconButton
+              variant="ghost"
+              size="sm"
+              onPress={closeBrowserSession}
+              aria-label="Hide browser session"
+              title="Hide browser session"
+              tone="muted"
+              onClick={(event) => event.stopPropagation()}
             >
-              <div className="flex min-w-0 items-center gap-3">
-                <span className="inline-flex h-10 w-10 flex-none items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200">
-                  <Safari className="h-4.5 w-4.5" aria-hidden="true" />
-                </span>
-                <div className="min-w-0">
-                  <Text as="p" variant="bodyStrong" tone="primary" className="flex items-center gap-1.5">
-                    <Spinner aria-hidden="true" tone="slate" size="xs" />
-                    <span>{viewState.sentence}</span>
-                  </Text>
-                </div>
-              </div>
-              <IconButton
-                variant="primary"
-                size="sm"
-                onPress={() => setFullscreen(true)}
-                aria-label="Open browser fullscreen"
-                title="Open browser fullscreen"
-                elevation="none"
-                onClick={(event) => event.stopPropagation()}
-              >
-                <Expand className="h-4 w-4" aria-hidden="true" />
-              </IconButton>
-            </div>
-          ) : (
-            <div
-              className={[
-                "flex items-center justify-between gap-3 px-3.5 py-2.5",
-                shouldUseDesktopDockedCard ? "cursor-pointer" : "",
-              ].join(" ")}
-              role={shouldUseDesktopDockedCard ? "button" : undefined}
-              tabIndex={shouldUseDesktopDockedCard ? 0 : undefined}
-              onClick={shouldUseDesktopDockedCard ? expandDockedViewer : undefined}
-              onKeyDown={
-                shouldUseDesktopDockedCard
-                  ? (event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        expandDockedViewer();
-                      }
-                    }
-                  : undefined
-              }
-            >
-              <div className="flex min-w-0 items-center gap-3">
-                <span className="inline-flex h-10 w-10 flex-none items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200">
-                  <Safari className="h-4.5 w-4.5" aria-hidden="true" />
-                </span>
-                <div className="min-w-0">
-                  <Text as="p" variant="bodyStrong" tone="primary" className="truncate">
-                    Browser
-                  </Text>
-                  <span className="inline-flex items-center gap-1.5 text-xxs font-medium text-emerald-600 dark:text-emerald-400">
-                    <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500 dark:bg-emerald-400" />
-                    <span>Connected</span>
-                  </span>
-                </div>
-              </div>
-              <div className="flex flex-none items-center gap-1.5">
-                <IconButton
-                  variant="ghost"
-                  size="sm"
-                  onPress={closeBrowserSession}
-                  aria-label="Hide browser session"
-                  title="Hide browser session"
-                  tone="muted"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <Xmark className="h-4 w-4" aria-hidden="true" />
-                </IconButton>
-                <IconButton
-                  variant="primary"
-                  size="sm"
-                  onPress={() => setFullscreen(true)}
-                  aria-label="Open browser fullscreen"
-                  title="Open browser fullscreen"
-                  elevation="none"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <Expand className="h-4 w-4" aria-hidden="true" />
-                </IconButton>
-              </div>
-            </div>
-          )}
-    </div>
+              <Xmark className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+          ) : null}
+          <IconButton
+            variant="ghost"
+            size="sm"
+            onPress={() => setFullscreen(true)}
+            aria-label="Open browser fullscreen"
+            title="Open browser fullscreen"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <Expand className="h-4 w-4" aria-hidden="true" />
+          </IconButton>
+        </div>
+      </div>
+    </Surface>
   ) : null;
 
   const renderSessionControls = (actions?: ReactNode) => !shouldCollapseDocked && projectId ? (
@@ -3561,9 +3522,7 @@ export function BrowserSessionModal({
                 : "relative h-full w-full overflow-hidden rounded-lg"
               : isInlineDocked
               ? shouldCollapseDocked
-                ? compactRecovery
-                  ? "relative min-w-0 w-full"
-                  : "relative w-full overflow-hidden rounded-[1.15rem] border border-slate-200/70 bg-slate-950/92 shadow-modal dark:border-slate-800 dark:bg-slate-950/96"
+                ? "relative min-w-0 w-full"
                 : "relative w-full overflow-hidden rounded-none border-0 bg-transparent shadow-none"
               : "relative h-full w-full"
           }
