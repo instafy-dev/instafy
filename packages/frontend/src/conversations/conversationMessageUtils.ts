@@ -123,7 +123,13 @@ function compareMessageDisplayOrder(a: ChatMessage, b: ChatMessage): number {
   return a.timestamp - b.timestamp;
 }
 
-function stripBrowserSessionDispatchPrelude(content: string): string | null {
+/**
+ * The person's own words in a prompt an older Studio sent with a browser
+ * prelude in front ("Use the existing … page …", or the new-page lines), or
+ * null when it has none. Studio no longer adds the page prelude; prompts from
+ * before still carry it.
+ */
+export function stripBrowserSessionDispatchPrelude(content: string): string | null {
   const trimmed = content.trim();
   if (!trimmed) {
     return null;

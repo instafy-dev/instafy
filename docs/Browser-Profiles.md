@@ -47,8 +47,10 @@ starts a card by itself only:
   Instafy's browser on the conversation's own machine, when the controller covers the
   space and reports that the machine starts the browser on demand, the machine is
   running, and nobody else has that browser open, controls it, runs an agent in it or is
-  starting it (see [Shared Browser](Shared-Browser.md)). Studio opens only that exact
-  machine's browser and never starts the machine for it. It never opens a separate
+  starting it (see [Shared Browser](Shared-Browser.md)). That browser need not be
+  running yet: the open starts it, as a press would. Studio opens only that exact
+  machine's browser and never starts the machine for it, and it leaves the person in
+  Chat: only a press switches to the Browser view. It never opens a separate
   browser session by itself: the controller does not record who started one, so Studio
   cannot tell the person's own session from a teammate's. Nor does it open a new one,
   which would start a machine or switch the space's own machine to the browser and stop
@@ -84,12 +86,12 @@ Once the browser is ready and before the task goes out, Studio checks again: if 
 wrote after the card, another run started, a draft appeared, or someone else holds the
 browser, the task is not sent and the card keeps its button. For Instafy's browser on the
 space's machine, Studio also waits, within the same two minutes, until the browser shows
-that machine, its roster has connected and a fresh reading after the open says it is
-ready; it refuses only when someone else is known to have it open or in control, or
-another person's run works in it. If the roster cannot connect at all, the card keeps
-its button with "Studio could not check who else is in Instafy's browser." Instafy's
-browser that failed, or that needs the space's machine to restart, also leaves the button,
-with the reason. While someone else has it, the card says "Instafy's browser is in use. It
+that machine and a fresh reading after the open says it is ready (and, while the Browser
+view is on screen, its roster has connected); it refuses only when someone else is known
+to have it open or in control, or another person's run works in it. If the roster cannot
+connect at all, the card keeps its button with "Studio could not check who else is in
+Instafy's browser." Instafy's browser that needs the space's machine to restart also
+leaves the button, with the reason. While someone else has it, the card says "Instafy's browser is in use. It
 opens here by itself once it is free.", and Studio reads it again every ten seconds while
 the tab is visible and opens it once it is free, for as long as the card is recent enough
 to open by itself. Where Studio does not start a card, it keeps its button, with the

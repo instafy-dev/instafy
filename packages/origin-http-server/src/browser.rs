@@ -120,6 +120,20 @@ struct BrowserControlsResponse {
     history: bool,
     reload: bool,
     focus_page: bool,
+    /// `POST /browser/pages/new` opens a blank tab (a chat's own tab).
+    new_page: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserNewPageResponse {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserCdpVersion {
+    #[serde(rename = "webSocketDebuggerUrl")]
+    websocket_debugger_url: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -218,6 +232,10 @@ const BROWSER_ACTION_PAGE_ID_MAX_BYTES: usize = 256;
 const BROWSER_CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const BROWSER_CDP_LIST_BODY_MAX_BYTES: usize = 1024 * 1024;
 const BROWSER_CDP_ACTIVATE_BODY_MAX_BYTES: usize = 64 * 1024;
+const BROWSER_CDP_VERSION_BODY_MAX_BYTES: usize = 64 * 1024;
+/// A new blank tab is refused once the browser has this many: a tab per chat,
+/// and Octo's own few, stay well below it.
+const BROWSER_NEW_PAGE_MAX_PAGES: usize = 24;
 const BROWSER_CDP_ERROR_PREVIEW_MAX_BYTES: usize = 2048;
 const BROWSER_CDP_TARGET_MAX_COUNT: usize = 128;
 const BROWSER_CDP_TARGET_TITLE_MAX_BYTES: usize = 1024;
@@ -290,6 +308,8 @@ pub fn control_routes() -> Router<AppState> {
             "/browser/input",
             get(crate::browser_screencast::handle_browser_input_ws),
         )
+        // A chat's own tab: one blank tab, opened behind the one on screen.
+        .route("/browser/pages/new", post(handle_open_browser_page))
         .route(
             "/browser/pages/:page_id/focus",
             post(handle_focus_browser_page),
@@ -640,6 +660,7 @@ fn browser_capabilities(
             history: true,
             reload: true,
             focus_page: true,
+            new_page: true,
         },
     }
 }
@@ -1203,6 +1224,98 @@ async fn handle_focus_browser_page(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /browser/pages/new`: one blank tab, for a chat whose browser turn has
+/// no tab of its own yet. Instafy's browser is shared by the space's chats, so
+/// Studio gives each chat a tab, and a turn never starts on a page another
+/// chat left there. The tab opens behind the one on screen: whoever watches or
+/// drives keeps their page, and Studio brings the new tab forward itself when
+/// the person's view shows that chat. A blank page shows and sends nothing, so
+/// opening one asks for `browser.control` and no approval.
+async fn handle_open_browser_page(
+    _ready: BrowserHostReady,
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<BrowserNewPageResponse>), OriginError> {
+    let pages = filter_browser_page_targets(fetch_browser_cdp_targets(&state).await?, true);
+    if pages.len() >= BROWSER_NEW_PAGE_MAX_PAGES {
+        return Err(OriginError::conflict(
+            "Instafy's browser has too many tabs open to add another",
+        ));
+    }
+    let id = open_background_blank_tab(&state.http_client, &resolve_browser_cdp_base_url()).await?;
+    Ok((StatusCode::CREATED, Json(BrowserNewPageResponse { id })))
+}
+
+/// The browser's own CDP endpoint, as `/json/version` names it, when it is a
+/// plain loopback websocket on the CDP port Instafy's browser listens on.
+fn browser_cdp_websocket_url(raw: &str, cdp_base_url: &str) -> Result<String, OriginError> {
+    let refused = || OriginError::unavailable("browser cdp endpoint is not the local browser");
+    let parsed = reqwest::Url::parse(raw.trim()).map_err(|_| refused())?;
+    let base = reqwest::Url::parse(cdp_base_url).map_err(|_| refused())?;
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    if parsed.scheme() != "ws"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "::1")
+        || parsed.port_or_known_default() != base.port_or_known_default()
+        || !parsed.path().starts_with("/devtools/browser/")
+    {
+        return Err(refused());
+    }
+    Ok(parsed.to_string())
+}
+
+/// Opens `about:blank` in a new tab of the browser at `cdp_base_url`, behind
+/// the tab on screen, and returns its target id.
+async fn open_background_blank_tab(
+    client: &reqwest::Client,
+    cdp_base_url: &str,
+) -> Result<String, OriginError> {
+    let version_url = format!("{cdp_base_url}/json/version");
+    let browser_websocket = timeout(BROWSER_CDP_COMMAND_TIMEOUT, async {
+        let response = client.get(version_url).send().await.map_err(|error| {
+            OriginError::unavailable(format!("browser cdp unavailable: {error}"))
+        })?;
+        let status = response.status();
+        let body = read_bounded_http_body(
+            response,
+            BROWSER_CDP_VERSION_BODY_MAX_BYTES,
+            "browser cdp version",
+        )
+        .await?;
+        if !status.is_success() {
+            return Err(OriginError::unavailable(format!(
+                "browser cdp version unavailable ({status}): {}",
+                bounded_error_preview(&body)
+            )));
+        }
+        serde_json::from_slice::<BrowserCdpVersion>(&body)
+            .map(|version| version.websocket_debugger_url)
+            .map_err(|error| {
+                OriginError::unavailable(format!("invalid browser cdp version: {error}"))
+            })
+    })
+    .await
+    .map_err(|_| OriginError::unavailable("browser cdp version timed out"))??;
+    let browser_websocket = browser_cdp_websocket_url(&browser_websocket, cdp_base_url)?;
+    let created = send_browser_cdp_command(
+        &browser_websocket,
+        "Target.createTarget",
+        serde_json::json!({ "url": "about:blank", "background": true }),
+    )
+    .await?;
+    let id = created
+        .get("targetId")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !valid_browser_action_page_id(id) {
+        return Err(OriginError::unavailable(
+            "browser cdp opened a tab without a usable id",
+        ));
+    }
+    Ok(id.to_string())
+}
+
 fn browser_history_destination(
     history: &BrowserNavigationHistory,
     action: BrowserPageCommandAction,
@@ -1508,6 +1621,101 @@ mod tests {
             .send()
             .await
             .expect("request local HTTP server")
+    }
+
+    /// A browser's CDP port, as much of it as opening a tab uses: its
+    /// `/json/version` names its own websocket, which answers
+    /// `Target.createTarget`. Each command it receives is sent on `commands`.
+    async fn fake_cdp_browser(
+        target_id: &'static str,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<JsonValue>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake CDP");
+        let port = listener.local_addr().expect("fake CDP address").port();
+        let (commands, received) = tokio::sync::mpsc::unbounded_channel::<JsonValue>();
+        let router = Router::new()
+            .route(
+                "/json/version",
+                get(move || async move {
+                    Json(serde_json::json!({
+                        "Browser": "Chrome/140.0.0.0",
+                        "webSocketDebuggerUrl": format!("ws://127.0.0.1:{port}/devtools/browser/fake"),
+                    }))
+                }),
+            )
+            .route(
+                "/devtools/browser/fake",
+                get(move |ws: WebSocketUpgrade| async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        while let Some(Ok(WsMessage::Text(text))) = socket.next().await {
+                            let command: JsonValue =
+                                serde_json::from_str(&text).expect("CDP command JSON");
+                            let id = command["id"].clone();
+                            let _ = commands.send(command);
+                            let reply = serde_json::json!({ "id": id, "result": { "targetId": target_id } });
+                            if socket.send(WsMessage::Text(reply.to_string())).await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (format!("http://127.0.0.1:{port}"), received)
+    }
+
+    /// Local drive, Oct 29: a new chat's browser turn started on the page
+    /// another chat had left on screen. A chat's first browser turn now gets a
+    /// blank tab of its own, opened behind the one on screen.
+    #[tokio::test]
+    async fn a_new_tab_opens_blank_behind_the_tab_on_screen() {
+        let (cdp_base_url, mut commands) = fake_cdp_browser("NEW-TAB-1").await;
+        let id = open_background_blank_tab(&reqwest::Client::new(), &cdp_base_url)
+            .await
+            .expect("open a blank tab");
+        assert_eq!(id, "NEW-TAB-1");
+        let command = commands.recv().await.expect("one CDP command");
+        assert_eq!(command["method"], "Target.createTarget");
+        assert_eq!(
+            command["params"],
+            serde_json::json!({ "url": "about:blank", "background": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_tab_without_a_usable_id_is_an_error() {
+        let (cdp_base_url, _commands) = fake_cdp_browser("../NOT AN ID").await;
+        assert!(
+            open_background_blank_tab(&reqwest::Client::new(), &cdp_base_url)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn only_the_local_browser_endpoint_opens_tabs() {
+        let base = "http://127.0.0.1:9223";
+        assert_eq!(
+            browser_cdp_websocket_url("ws://127.0.0.1:9223/devtools/browser/ABC", base)
+                .expect("the browser's own endpoint"),
+            "ws://127.0.0.1:9223/devtools/browser/ABC"
+        );
+        for refused in [
+            "ws://attacker.test:9223/devtools/browser/ABC",
+            "ws://127.0.0.1:9999/devtools/browser/ABC",
+            "wss://127.0.0.1:9223/devtools/browser/ABC",
+            "ws://user:pass@127.0.0.1:9223/devtools/browser/ABC",
+            "ws://127.0.0.1:9223/devtools/page/ABC",
+            "not a url",
+        ] {
+            assert!(
+                browser_cdp_websocket_url(refused, base).is_err(),
+                "{refused}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1887,7 +2095,8 @@ mod tests {
                     "navigate": true,
                     "history": true,
                     "reload": true,
-                    "focusPage": true
+                    "focusPage": true,
+                    "newPage": true
                 }
             })
         );

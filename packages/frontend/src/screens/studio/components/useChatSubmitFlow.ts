@@ -218,6 +218,7 @@ export function useChatSubmitFlow({
   sharedBrowserActive: sharedBrowserShown,
   sharedBrowserBindingPage,
   resolveSharedBrowserFollowUp,
+  resolveSharedBrowserTab,
   sharedBrowserRuntimeId,
   showCredentialsGate,
   showStatus,
@@ -347,6 +348,13 @@ export function useChatSubmitFlow({
    * with a card. Read at send time.
    */
   resolveSharedBrowserFollowUp?: () => { runId: string; page: BrowserSessionPage } | null;
+  /**
+   * The tab a browser turn from the browser's own composer is sent for: the
+   * chat's own tab, or a blank one opened for it (chatBrowserTab.ts), so the
+   * turn never starts on a page another chat left. Null when there is none
+   * and the browser cannot open one; the page on screen is used then.
+   */
+  resolveSharedBrowserTab?: () => Promise<BrowserSessionPageTarget | null>;
   sharedBrowserRuntimeId: string | null;
   showCredentialsGate: () => void;
   showStatus: ShowStatus;
@@ -544,9 +552,22 @@ export function useChatSubmitFlow({
       queuedRuntimeOverride ??
       personalBrowserRouting.runtimeOverride ??
       sharedBrowserRouting.runtimeOverride;
+    // A follow-up stays in the tab of the turn it continues. Any other browser
+    // turn runs in this chat's own tab, never on a page another chat left on
+    // screen; only a browser that cannot open one keeps the page on screen.
+    let chatBrowserTab: BrowserSessionPageTarget | null = null;
+    if (useSharedBrowserRuntime && !sharedBrowserFollowUp && browserLaunchMode !== "new_page") {
+      try {
+        chatBrowserTab = await resolveSharedBrowserTab?.() ?? null;
+      } catch (error) {
+        showStatus(error instanceof Error ? error.message : String(error), "error", 5000);
+        return false;
+      }
+    }
     const sharedBrowserPageTarget = sharedBrowserFollowUp
       ? toBrowserSessionPageTarget(sharedBrowserFollowUp.page)
-      : browserPageTarget ??
+      : chatBrowserTab ??
+        browserPageTarget ??
         (sharedBrowserBindingPage ? toBrowserSessionPageTarget(sharedBrowserBindingPage) : null);
     if (useSharedBrowserRuntime && !sharedBrowserPageTarget) {
       showStatus(
@@ -950,6 +971,7 @@ export function useChatSubmitFlow({
     resolveGroupParticipationBeforeSubmit,
     resolvePromptAgentTargets,
     resolveSharedBrowserFollowUp,
+    resolveSharedBrowserTab,
     runtimeControllerEnabled,
     runtimeReady,
     scrollToBottom,

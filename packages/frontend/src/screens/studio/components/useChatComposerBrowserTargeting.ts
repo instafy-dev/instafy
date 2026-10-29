@@ -79,6 +79,7 @@ export function useChatComposerBrowserTargeting({
     goForward: goForwardInSharedBrowser,
     reloadPage: reloadSharedBrowserPage,
     focusPage: focusBrowserSessionPage,
+    openPage: openSharedBrowserPage,
     keepPage: keepSharedBrowserPage,
   } = useBrowserSessionPages({
     enabled:
@@ -251,6 +252,12 @@ export function useChatComposerBrowserTargeting({
     goForwardInSharedBrowser,
     reloadSharedBrowserPage,
     keepSharedBrowserPage,
+    /** Opens a blank tab behind the one on screen (a chat's own tab); null when it cannot. */
+    openSharedBrowserPage,
+    /** Whether this browser opens such a tab (an older one does not). */
+    sharedBrowserCanOpenPage: sharedBrowserCapabilities?.controls.newPage === true,
+    /** Brings a tab to the front without a word when it cannot: Studio's own focus, not the person's pick. */
+    focusSharedBrowserPageQuietly: focusBrowserSessionPage,
     setPendingBrowserLaunchMode: updatePendingBrowserLaunchMode,
   };
 }

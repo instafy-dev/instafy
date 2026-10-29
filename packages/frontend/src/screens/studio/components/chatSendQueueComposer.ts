@@ -3,8 +3,8 @@ import { AssistantMentionNode } from "./chat-input/AssistantMentionNode";
 import { AgentMentionNode } from "./chat-input/AgentMentionNode";
 import { UserMentionNode } from "./chat-input/UserMentionNode";
 import { $applyChatInputText } from "./chat-input/chatInputState";
+import { stripBrowserSessionDispatchPrelude } from "../../../conversations/conversationMessageUtils";
 import {
-  buildBrowserSessionTargetedMessage,
   buildNewBrowserSessionMessage,
   type BrowserSessionPageTarget,
 } from "./browserSessionPages";
@@ -52,14 +52,11 @@ export function queuedComposerEditorStateMatches(
 /** Reuse the exact wrappers that were applied when this queue item was created. */
 export function queuedComposerDispatchMessage(composer: {
   message: string;
-  browserPageTarget: BrowserSessionPageTarget | null;
   browserLaunchMode: "new_page" | null;
 }): string {
   return composer.browserLaunchMode === "new_page"
     ? buildNewBrowserSessionMessage(composer.message)
-    : composer.browserPageTarget
-      ? buildBrowserSessionTargetedMessage(composer.message, composer.browserPageTarget)
-      : composer.message.trim();
+    : composer.message.trim();
 }
 
 function validComposer(value: unknown, dispatchMessage: string): QueuedComposer | null {
@@ -75,7 +72,10 @@ function validComposer(value: unknown, dispatchMessage: string): QueuedComposer 
   }
   const serialized = JSON.stringify(candidate);
   if (serialized.length > MAX_QUEUED_COMPOSER_BYTES || new TextEncoder().encode(serialized).length > MAX_QUEUED_COMPOSER_BYTES) return null;
-  if (queuedComposerDispatchMessage(candidate) !== dispatchMessage) return null;
+  const expected = queuedComposerDispatchMessage(candidate);
+  // An item an older Studio queued for a page carries that page's prelude.
+  if (expected !== dispatchMessage &&
+      !(candidate.browserPageTarget && stripBrowserSessionDispatchPrelude(dispatchMessage) === expected)) return null;
   try {
     // Use the composer's registered node types and text semantics. A sidecar
     // must never replace an authoritative queued prompt with unrelated text.

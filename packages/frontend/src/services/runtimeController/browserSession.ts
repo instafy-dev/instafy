@@ -74,6 +74,11 @@ export type RuntimeBrowserSessionCapabilities = {
     history: boolean;
     reload: boolean;
     focusPage: boolean;
+    /**
+     * `POST /browser/pages/new` opens a blank tab, a chat's own tab. Absent on
+     * an older browser, which binds a chat's turn to the tab on screen.
+     */
+    newPage?: boolean;
   };
 };
 
@@ -448,6 +453,7 @@ export function mapRuntimeBrowserSessionCapabilitiesPayload(
       history: rawControls.history === true,
       reload: rawControls.reload === true,
       focusPage: rawControls.focusPage === true,
+      ...(rawControls.newPage === true ? { newPage: true } : {}),
     },
   };
 }
@@ -1030,6 +1036,67 @@ export async function focusRuntimeBrowserSessionPage(params: {
   }
 
   return true;
+}
+
+const BROWSER_SESSION_PAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
+
+/** Instafy's browser has as many tabs as it opens: one must close first. */
+export class BrowserTabLimitError extends Error {
+  constructor() {
+    super("Instafy's browser has too many tabs open. Close one, then try again.");
+    this.name = "BrowserTabLimitError";
+  }
+}
+
+/**
+ * Opens one blank tab in Instafy's browser, behind the tab on screen, and
+ * returns its id: a chat's own tab, for a chat whose browser turn has none
+ * yet. Null when the browser cannot open one now (it is not running, or an
+ * older browser has no such route).
+ */
+export async function openRuntimeBrowserSessionPage(params: {
+  projectId: string;
+  browserSessionId: string;
+  preferRuntimeId?: string | null;
+  accessToken?: string | null;
+}): Promise<string | null> {
+  const token = await requestOriginAccessToken({
+    projectId: params.projectId,
+    protocol: "http",
+    scopes: ["browser.control"],
+    preferRuntime: params.preferRuntimeId ?? null,
+    accessToken: params.accessToken ?? null,
+    browserSessionId: params.browserSessionId,
+  });
+
+  if (!token) {
+    return null;
+  }
+
+  const response = await fetch(buildOriginEndpointUrl(token.endpoint, "/browser/pages/new"), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token.token}`,
+      accept: "application/json",
+    },
+  });
+
+  if (browserSessionStatusIndicatesUnavailable(response.status) || response.status === 405) {
+    return null;
+  }
+
+  if (response.status === 409) {
+    throw new BrowserTabLimitError();
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Opening a browser tab failed (${response.status}): ${text}`);
+  }
+
+  const payload = (await response.json().catch(() => null)) as { id?: unknown } | null;
+  const id = typeof payload?.id === "string" ? payload.id.trim() : "";
+  return BROWSER_SESSION_PAGE_ID_PATTERN.test(id) ? id : null;
 }
 
 /**

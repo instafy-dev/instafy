@@ -5426,6 +5426,17 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+        // A chat's new tab changes the browser too, so it needs control.
+        assert_eq!(
+            client
+                .post(format!("{base}/browser/pages/new"))
+                .bearer_auth(&view)
+                .send()
+                .await
+                .expect("view-only new tab request")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
 
         let control = token(&["browser.control"]);
         assert_eq!(

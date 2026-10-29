@@ -159,7 +159,12 @@ export function useChatBrowserSessionState({
     setBrowserSessionExpandRequestToken((current) => current + 1);
   }, [browserSessionStateStorageKey]);
 
-  const resumeBrowserSession = useCallback((runtimeId: string) => {
+  /**
+   * Opens the browser on exactly this machine. It comes on screen too, unless
+   * `show` is false: Studio opening it by itself for a card leaves the person
+   * in Chat, where the reading line and the Browser tab's dot show it working.
+   */
+  const resumeBrowserSession = useCallback((runtimeId: string, options: { show?: boolean } = {}) => {
     if (!browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) return;
     const normalized = sanitizeRuntimeId(runtimeId);
     if (!normalized) return;
@@ -168,7 +173,7 @@ export function useChatBrowserSessionState({
     setExactBrowserRuntimeId(normalized);
     setBrowserSessionOpen(true);
     setOpenedInPageKey(browserSessionStateStorageKey);
-    setBrowserSessionExpandRequestToken((current) => current + 1);
+    if (options.show !== false) setBrowserSessionExpandRequestToken((current) => current + 1);
   }, [browserSessionStateStorageKey]);
 
   const handleBrowserSessionOpenChange = useCallback((open: boolean) => {

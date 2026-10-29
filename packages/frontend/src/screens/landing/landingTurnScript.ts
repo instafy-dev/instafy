@@ -268,9 +268,9 @@ export interface SessionScenario {
   reply: string;
 }
 
-/** The message browserRequestContinuation (browserRequest.ts) sends as Ada when she presses the card. */
+/** The message browserRequestContinuation (browserRequest.ts) sends as Ada when she presses the card: its task alone. */
 export function browserContinuation(task: string): string {
-  return `Continue this browser task using the browser attached to this turn. Inspect its current state first, preserve existing session state, and avoid repeating work that is already complete.\n\n${task}`;
+  return task;
 }
 
 const BANK_EXPORT: PaneFile = {

@@ -400,8 +400,9 @@ describe("useChatSubmitFlow sends made for the person", () => {
     expect(options.clearPendingBrowserLaunchMode).toHaveBeenCalledTimes(consumed ? 1 : 0);
   });
 
-  it("aims a typed send at the open browser page", async () => {
-    // The control case for the next test: this message does target the page.
+  // Local drive, Oct 29: a chat turn was sent with "Use the existing … page
+  // in the current shared browser session", naming another chat's page.
+  it("sends a typed message in the person's own words, with nothing naming the open browser page", async () => {
     const options = createOptions({
       isAssistantTyping: false,
       browserSessionOpen: true,
@@ -414,8 +415,9 @@ describe("useChatSubmitFlow sends made for the person", () => {
     });
 
     const payload = vi.mocked(options.performSubmit).mock.calls[0]?.[0];
-    expect(payload?.message).not.toBe(RETRY_PROMPT);
-    expect(payload?.message).toContain('"Pricing" page');
+    expect(payload?.message).toBe(RETRY_PROMPT);
+    expect(payload?.message).not.toContain("Pricing");
+    expect(payload?.metadata ?? {}).not.toHaveProperty("browserPageId");
     expect(payload?.automatic).toBe(false);
   });
 

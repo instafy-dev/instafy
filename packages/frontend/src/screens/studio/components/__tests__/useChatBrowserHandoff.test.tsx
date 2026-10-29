@@ -201,6 +201,28 @@ describe("useChatBrowserHandoff", () => {
     expect(cancelAgentJob).not.toHaveBeenCalled();
   });
 
+  // Local drive, Oct 29: a card's turn was bound to whatever tab was on
+  // screen, another chat's Visit Lisboa page. It now runs in the chat's own
+  // tab, whatever the browser shows meanwhile.
+  it("runs a card's turn in the chat's own tab, not the page on screen", async () => {
+    const value = options();
+    await render(value);
+    const tab = { id: "chat-tab-1", url: "about:blank", host: "", label: "New tab" };
+    await expect(resultRef.current!.continueShared("Find the opening hours.", {
+      display: "Opened Instafy's browser",
+      metadata: { browserRequestOf: "job:job-1" },
+    }, tab)).resolves.toBe(true);
+    const sent = vi.mocked(value.onSubmit).mock.calls[0]![2]!;
+    expect(sent.metadata).toMatchObject({ browserPageId: "chat-tab-1", browserPageUrl: "about:blank" });
+    // Studio brings the chat's tab to the front while the turn is sent: the
+    // page on screen changing does not stop it.
+    await render({ ...value, page: { ...value.page!, id: "chat-tab-1", url: "about:blank" } });
+    expect(() => sent.assertDispatchCurrent!()).not.toThrow();
+    // Another chat or browser does.
+    await render({ ...value, conversationId: "conversation-2" });
+    expect(() => sent.assertDispatchCurrent!()).toThrow();
+  });
+
   it("records a card's continuation as a notice and sends its task, with the card it continues", async () => {
     // Octo's request, not the person's words: the chat shows the notice, the
     // turn gets the task, and the prompt's metadata names the card.

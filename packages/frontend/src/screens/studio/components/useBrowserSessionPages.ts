@@ -9,6 +9,7 @@ import type { BrowserSessionPage } from "./browserSessionPages";
 import { SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS } from "./sharedBrowserHostAttach";
 import { BOOT_BROWSER_RESTARTING_CODE } from "./bootBrowserWait";
 import { useAdaptivePoll } from "../../../runtime/pollingGate";
+import { BrowserTabLimitError } from "../../../services/runtimeController/browserSession";
 
 const BROWSER_SESSION_POLL_INTERVAL_MS = 2500;
 /**
@@ -615,6 +616,35 @@ export function useBrowserSessionPages(params: {
     [browserSessionId, enabled, preferRuntimeId, projectId, refreshAfterMutation, scopeIsCurrent, scopeKey],
   );
 
+  // A chat's own tab: one blank tab, behind the one on screen. Resolves to
+  // its id once the list has been read again, or null when the browser cannot
+  // open one now; a full browser rejects with its plain reason. It shows
+  // nothing itself: the caller decides what to do.
+  const openPage = useCallback(async (): Promise<string | null> => {
+    if (!enabled || !projectId) {
+      return null;
+    }
+    const requestScope = scopeKey;
+    let opened: string | null = null;
+    try {
+      opened = await controllerClient.browserSessions.openPage({
+        projectId,
+        browserSessionId,
+        preferRuntimeId,
+      });
+    } catch (error) {
+      if (error instanceof BrowserTabLimitError) throw error;
+      opened = null;
+    }
+    if (!scopeIsCurrent(requestScope)) {
+      return null;
+    }
+    if (opened) {
+      await refreshAfterMutation().catch(() => false);
+    }
+    return opened;
+  }, [browserSessionId, enabled, preferRuntimeId, projectId, refreshAfterMutation, scopeIsCurrent, scopeKey]);
+
   useEffect(() => {
     preferredActivePageIdRef.current = { scopeKey, pageId: null };
     unavailableSuspendedRef.current = { scopeKey, suspended: false };
@@ -738,6 +768,7 @@ export function useBrowserSessionPages(params: {
     refresh,
     refreshCapabilities,
     focusPage,
+    openPage,
     keepPage,
     clearCommandError,
     navigatePage,

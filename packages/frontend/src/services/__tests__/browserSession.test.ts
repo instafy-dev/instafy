@@ -20,6 +20,7 @@ import {
   focusRuntimeBrowserSessionPage,
   isBrowserSessionUnavailableError,
   keepRuntimeBrowserSessionPage,
+  openRuntimeBrowserSessionPage,
   isSharedBrowserHostRefusedError,
   mapSharedBrowserHostPayload,
   readBrowserErrorCode,
@@ -234,6 +235,15 @@ describe("runtime browser session capabilities", () => {
       }),
     ).toBeNull();
     expect(mapRuntimeBrowserSessionCapabilitiesPayload({ version: 1 })).toBeNull();
+  });
+
+  it("reads that the browser opens a blank tab only from an exact true", () => {
+    expect(mapRuntimeBrowserSessionCapabilitiesPayload({
+      ...capabilitiesPayload, controls: { ...capabilitiesPayload.controls, newPage: true },
+    })?.controls.newPage).toBe(true);
+    expect(mapRuntimeBrowserSessionCapabilitiesPayload({
+      ...capabilitiesPayload, controls: { ...capabilitiesPayload.controls, newPage: "true" },
+    })?.controls).not.toHaveProperty("newPage");
   });
 
   it("reads the view-only RFB lane only from an exact true", () => {
@@ -465,6 +475,41 @@ describe("runtime browser session page controls", () => {
     await expect(
       keepRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1", pageId: " " }),
     ).resolves.toBe(false);
+  });
+
+  // A chat's own tab: a new chat's browser turn never starts on a page
+  // another chat left on screen.
+  it("opens a blank tab with browser control and returns its id, or null where it cannot", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "NEW-TAB-1" }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      openRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1" }),
+    ).resolves.toBe("NEW-TAB-1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://origin.example.test/browser/pages/new",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(requestOriginAccessTokenMock).toHaveBeenCalledWith(
+      expect.objectContaining({ scopes: ["browser.control"], browserSessionId: "browser-surface-1" }),
+    );
+    // An older browser has no such route; a browser that is not running
+    // answers unavailable; an id that is not one is no tab.
+    for (const response of [
+      new Response("not found", { status: 404 }),
+      new Response("method not allowed", { status: 405 }),
+      new Response("unavailable", { status: 503 }),
+      new Response(JSON.stringify({ id: "../not an id" }), { status: 201 }),
+    ]) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+      await expect(
+        openRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1" }),
+      ).resolves.toBeNull();
+    }
+    // A full browser says so in plain words.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 409 })));
+    await expect(
+      openRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1" }),
+    ).rejects.toThrow("Instafy's browser has too many tabs open. Close one, then try again.");
   });
 
   it("uses browser view to read the browser action stream", async () => {

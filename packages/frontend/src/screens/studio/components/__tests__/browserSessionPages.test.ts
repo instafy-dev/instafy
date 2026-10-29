@@ -3,11 +3,9 @@ import type { ChatMessage } from "../../types";
 import {
   browserSessionPageIsPlaceholder,
   buildNewBrowserSessionMessage,
-  buildBrowserSessionTargetedMessage,
   resolveBrowserSessionPages,
   resolvePreferredBrowserSessionPage,
   shouldAutoTargetBrowserSessionMessage,
-  toBrowserSessionPageTarget,
 } from "../browserSessionPages";
 
 function assistantMessage(content: string, timestamp: number): ChatMessage {
@@ -67,24 +65,6 @@ describe("browserSessionPages", () => {
     ]);
 
     expect(pages).toEqual([]);
-  });
-
-  it("builds a one-shot browser-targeted message", () => {
-    const [page] = resolveBrowserSessionPages([
-      assistantMessage("Opened https://example.com in the shared browser session.", 10),
-    ]);
-
-    expect(page).toBeTruthy();
-    const target = toBrowserSessionPageTarget(page!);
-    expect(
-      buildBrowserSessionTargetedMessage("Summarize the current page.", target),
-    ).toContain('Use the existing "example.com" page in the current shared browser session');
-    expect(
-      buildBrowserSessionTargetedMessage("Summarize the current page.", target),
-    ).toContain("https://example.com/");
-    expect(
-      buildBrowserSessionTargetedMessage("Summarize the current page.", target),
-    ).toContain("not as a new isolated session or a new runtime-backed browser session");
   });
 
   it("builds a one-shot new browser session message", () => {

@@ -222,12 +222,28 @@ describe("browserAutoStartPlan for Instafy's browser on the conversation's own m
     expect(hostPlan({ host: null })).toEqual({ kind: "button", reason: null });
   });
 
-  it.each([
-    ["poisoned", BROWSER_AUTO_START_COPY.hostPoisoned],
-    ["failed", BROWSER_AUTO_START_COPY.hostFailed],
-    ["unknown", null],
-  ] as const)("leaves a %s browser a button, with the reason (row 6)", (state, reason) => {
-    expect(hostPlan({ host: readyHost({ state }) })).toEqual({ kind: "button", reason });
+  it("leaves a poisoned browser a button, with the reason (row 6)", () => {
+    // Only the machine's restart brings it back, and Studio never restarts one.
+    expect(hostPlan({ host: readyHost({ state: "poisoned" }) }))
+      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.hostPoisoned });
+  });
+
+  // Local drive, Oct 29: one card waited for a press, the next opened by
+  // itself, the third waited again. On the space's own machine a card now
+  // opens by itself whether its browser runs or not, and the open starts it.
+  it.each(["failed", "unknown"] as const)("opens a %s browser by itself, as a press would, starting it (row 8)", (state) => {
+    expect(hostPlan({ host: readyHost({ state }) })).toEqual({ kind: "attach", runtimeId: MACHINE_ID });
+  });
+
+  it("counts the conversation's machine as the browser's host whatever its last heartbeat said", () => {
+    // A heartbeat later than the machine's idle time made the card a button
+    // that never opened; a reading of the browser says whether it answers.
+    const late = lazyHost({ lastSeenAt: new Date(Date.now() - 20 * 60_000).toISOString(), idleTtlSeconds: 300, health: "idle" });
+    expect(hostPlan({ runtimes: [late], host: null, hostReadAtMs: null })).toEqual({ kind: "pending" });
+    expect(hostPlan({ runtimes: [late] })).toEqual({ kind: "attach", runtimeId: MACHINE_ID });
+    // A machine that is starting, or has stopped, still waits for a press.
+    expect(hostPlan({ runtimes: [lazyHost({ status: "requested" })] })).not.toMatchObject({ kind: "attach" });
+    expect(hostPlan({ runtimes: [lazyHost({ status: "stopped" })] })).not.toMatchObject({ kind: "attach" });
   });
 
   it.each([

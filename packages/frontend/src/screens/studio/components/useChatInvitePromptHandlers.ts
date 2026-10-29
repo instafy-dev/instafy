@@ -3,10 +3,7 @@ import { replaceUserMentionsWithPlainText, type UserMentionToken } from "../../.
 import type { ControllerConversationParticipant } from "../../../services/runtimeController/conversations";
 import type { StatusIntent } from "../../../status/useStatus";
 import type { BrowserSessionPageTarget } from "./browserSessionPages";
-import {
-  buildBrowserSessionTargetedMessage,
-  buildNewBrowserSessionMessage,
-} from "./browserSessionPages";
+import { buildNewBrowserSessionMessage } from "./browserSessionPages";
 import type { ChatSubmitDispatchPayload } from "./useChatSubmitDispatch";
 
 export type PendingConversationInvitePrompt = {
@@ -35,13 +32,7 @@ type UseChatInvitePromptHandlersOptions = {
 };
 
 function resolveInvitePromptDispatchMessage(prompt: PendingConversationInvitePrompt, message: string) {
-  if (prompt.browserLaunchMode === "new_page") {
-    return buildNewBrowserSessionMessage(message);
-  }
-  if (prompt.browserPageTarget) {
-    return buildBrowserSessionTargetedMessage(message, prompt.browserPageTarget);
-  }
-  return message;
+  return prompt.browserLaunchMode === "new_page" ? buildNewBrowserSessionMessage(message) : message;
 }
 
 export function useChatInvitePromptHandlers({

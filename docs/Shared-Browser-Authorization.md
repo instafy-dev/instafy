@@ -22,6 +22,10 @@ input changes an ephemeral Chromium session, not the canonical workspace.
 - `/browser/pages/:pageId/focus`, `/browser/pages/:pageId/command`, and the
   input-only websocket require `browser.control` and the exact live driver
   lease. Ownership is rechecked immediately before every mutation.
+- `POST /browser/pages/new` requires `browser.control`, but no driver lease: it
+  opens one `about:blank` tab behind the tab on screen (a chat's own tab),
+  sends no input to any page and changes no tab anyone is watching or driving.
+  It answers 409 once the browser has 24 tabs.
 - CDP screencast and a WebRTC offer require `browser.view`; both are pixel-only
   and close at the signed grant deadline. Their separate input websocket still
   requires `browser.control` and the live driver lease.
