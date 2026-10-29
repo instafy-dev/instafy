@@ -1,5 +1,5 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
-import { withoutBrowserUiJobBudget } from "./lib/browserUiBudgetTestBaseline.mjs";
+import { BROWSER_UI_PARTS, browserUiAggregateJob, browserUiPartJob, withoutBrowserUiJobBudget, withoutBrowserUiParts } from "./lib/browserUiBudgetTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -10,10 +10,15 @@ import { REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-br
 const root = path.resolve(import.meta.dirname, "..");
 const read = (relative) => withoutManualCiRouting(path.basename(relative), fs.readFileSync(path.join(root, relative), "utf8"));
 
+const browserTools = ["bash", "git", "curl", "tar", "unzip", "sudo", "apt-get", "xvfb-run", "Xvfb", "xauth"];
+// Browser UI rendering is the required check; it aggregates the lane's parts.
 const routedJobs = [
-  { key: "personal", label: "public-browser-personal", name: "Personal Browser E2E", minutes: 30 },
-  { key: "browser-ui", label: "public-browser-ui", name: "Browser UI rendering", minutes: 40 },
+  { key: "personal", label: "public-browser-personal", name: "Personal Browser E2E", minutes: 30, tools: browserTools, conditions: 3 },
+  { key: "browser-ui", label: "public-browser-ui", name: "Browser UI rendering", minutes: 5, tools: ["bash", "git"], conditions: 1 },
+  ...Array.from({ length: BROWSER_UI_PARTS }, (_, index) => ({ key: `browser-ui-${index + 1}`, label: `public-browser-ui-${index + 1}`,
+    name: `Browser UI rendering (${index + 1} of ${BROWSER_UI_PARTS})`, minutes: 40, tools: browserTools, conditions: 2 })),
 ];
+const partKeys = routedJobs.filter(job => /^browser-ui-\d+$/u.test(job.key)).map(job => job.key);
 const jobSource = key => read(".github/workflows/browser-e2e.yml").split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
 function callerContext(event = "pull_request") {
   const ref = event === "pull_request" ? "refs/pull/11/merge" : "refs/heads/main";
@@ -38,7 +43,7 @@ function selectBrowser(job, github, toggle = "true") {
   }, { timeout: 1000 })));
 }
 
-test("browser routing is independently default-off and preserves the exact two job names and budgets", () => {
+test("browser routing is independently default-off and preserves the exact job names and budgets", () => {
   for (const job of routedJobs) for (const event of ["pull_request", "push"]) {
     for (const flag of ["", "false", "0", "unknown"]) assert.equal(selectBrowser(job, callerContext(event), flag), "ubuntu-24.04");
     assert.ok(jobSource(job.key).includes(`    name: ${job.name}\n`));
@@ -48,7 +53,7 @@ test("browser routing is independently default-off and preserves the exact two j
   assert.match(shared, /vars\.CI_SHARED_BROWSER_SELF_HOSTED/u);
   assert.match(shared, /^    timeout-minutes: 5$/mu);
   assert.doesNotMatch(shared, /vars\.CI_BROWSER_SELF_HOSTED/u);
-  assert.equal((read(".github/workflows/browser-e2e.yml").match(/vars\.CI_BROWSER_SELF_HOSTED/g) ?? []).length, 2);
+  assert.equal((read(".github/workflows/browser-e2e.yml").match(/vars\.CI_BROWSER_SELF_HOSTED/g) ?? []).length, routedJobs.length);
 });
 
 test("browser labels bind each literal job, repository, run, attempt and caller trust", () => {
@@ -112,14 +117,14 @@ function qualifyBrowser(job, mutate = () => {}, missingTool) {
 test("browser qualification fails before checkout for wrong isolation, platform, Node or missing baseline tools", () => {
   for (const job of routedJobs) {
     const tools = qualifyBrowser(job);
-    assert.deepEqual(tools, ["bash", "git", "curl", "tar", "unzip", "sudo", "apt-get", "xvfb-run", "Xvfb", "xauth"]);
+    assert.deepEqual(tools, job.tools);
     for (const tool of tools) assert.throws(() => qualifyBrowser(job, () => {}, tool));
     for (const mutate of [s => { s.platform = "darwin"; }, s => { s.arch = "x64"; }, s => { s.getuid = () => 0; },
       s => { s.versions.node = "20.20.2"; }, s => { s.env.RUNNER_OS = "macOS"; }, s => { s.env.RUNNER_ARCH = "X64"; },
       s => { delete s.env.INSTAFY_CI_JOB_ISOLATION; }, s => { s.env.INSTAFY_ENV_DIR = "/inert-private-env"; }]) {
       assert.throws(() => qualifyBrowser(job, mutate));
     }
-    assert.equal((jobSource(job.key).match(/^        if: /gmu) ?? []).length, job.key === "personal" ? 3 : 2,
+    assert.equal((jobSource(job.key).match(/^        if: /gmu) ?? []).length, job.conditions,
       "only qualification, Personal native dependency setup and always-upload may be conditional");
   }
 });
@@ -130,7 +135,7 @@ test("only the self-hosted Personal job installs its documented GTK3 dependency 
   assert.ok(personal.includes(step));
   assert.ok(personal.indexOf(step) > personal.indexOf("playwright install --with-deps chromium"));
   assert.ok(personal.indexOf(step) < personal.indexOf("pnpm --filter @instafy/desktop-runtime-agent build"));
-  for (const key of ["browser-ui", "shared-profile"]) assert.doesNotMatch(jobSource(key), /libgtk-3-0t64|Install Linux Electron runtime dependency/u);
+  for (const key of ["browser-ui", ...partKeys, "shared-profile"]) assert.doesNotMatch(jobSource(key), /libgtk-3-0t64|Install Linux Electron runtime dependency/u);
   assert.match(personal, /xvfb-run -a pnpm test:browser:ci personal/u);
   assert.doesNotMatch(personal, /--no-sandbox|--allow-unauthenticated|--ignore-scripts|NODE_TLS_REJECT_UNAUTHORIZED/u);
 });
@@ -159,9 +164,9 @@ test("required browser lanes execute without secret or production authority", ()
   const workflow = read(".github/workflows/browser-e2e.yml");
   assert.match(workflow, /\n  workflow_call:/);
   assert.doesNotMatch(workflow, /secrets:|secrets\.|continue-on-error:|pull_request_target:|environment:/);
-  assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 4);
+  assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 4 + BROWSER_UI_PARTS);
   assert.equal((workflow.match(/runs-on: ubuntu-24\.04/g) ?? []).length, 0);
-  assert.equal((workflow.match(/\|\| 'ubuntu-24\.04' }}/g) ?? []).length, 5);
+  assert.equal((workflow.match(/\|\| 'ubuntu-24\.04' }}/g) ?? []).length, 5 + BROWSER_UI_PARTS);
   assert.match(workflow, /xvfb-run -a pnpm test:browser:ci personal/);
   assert.match(workflow, /run: pnpm test:browser:ci browser-ui/);
   assert.match(workflow, /xvfb-run -a node scripts\/browser-profile-e2e\.mjs/);
@@ -169,7 +174,7 @@ test("required browser lanes execute without secret or production authority", ()
   assert.match(workflow, /install --yes --no-install-recommends x11-utils sqlite3 postgresql-client/);
   assert.doesNotMatch(workflow, /SUPABASE_DATABASE_ONLY:/);
   assert.match(workflow, /TEST_DATABASE_URL: postgresql:\/\/postgres:postgres@127\.0\.0\.1:54322\/postgres/);
-  assert.equal((workflow.match(/if-no-files-found: error/g) ?? []).length, 4);
+  assert.equal((workflow.match(/if-no-files-found: error/g) ?? []).length, 3 + BROWSER_UI_PARTS);
   assert.match(workflow, /browser-ci\/shared-profile\/result\.json/);
   assert.match(workflow, /browser-ci\/shared-studio\/required-browser-result\.json/);
   assert.doesNotMatch(workflow, /--pass-with-no-tests|--retries=[1-9]|--grep/);
@@ -223,24 +228,29 @@ test("UI config basenames avoid pinned Brotli name detection without changing co
   }
 });
 
-test("the required browser UI job includes the real co-browsing protocol fixture", () => {
-  const workflow = read(".github/workflows/browser-e2e.yml");
-  const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
-  assert.match(job, /name: Browser UI rendering/);
+test("the first Browser UI part includes the real co-browsing protocol fixture", () => {
+  const job = jobSource("browser-ui-1");
+  assert.match(job, /name: Browser UI rendering \(1 of 2\)/);
   const install = job.indexOf("playwright install --with-deps chromium");
   const guards = job.indexOf("node --test scripts/shared-browser-cobrowsing-e2e.test.mjs");
   const fixture = job.indexOf("run: node scripts/shared-browser-cobrowsing-e2e.mjs");
-  const components = job.indexOf("run: pnpm test:browser:ci browser-ui");
+  const components = job.indexOf("run: pnpm test:browser:ci browser-ui --shard=1/2\n");
   assert.ok(install >= 0 && guards > install && fixture > guards && components > fixture);
   assert.match(job, /packages\/frontend\/test-results\/browser-ci\/shared-cobrowsing/);
   const beforeChecks = job.slice(0, components).replace("        if: runner.environment == 'self-hosted'\n", "");
   assert.doesNotMatch(beforeChecks, /if:|continue-on-error:|secrets:|secrets\./);
+  // The fixture runs once per run: no other job runs it or keeps its results.
+  const workflow = read(".github/workflows/browser-e2e.yml");
+  for (const text of ["scripts/shared-browser-cobrowsing-e2e.test.mjs", "run: node scripts/shared-browser-cobrowsing-e2e.mjs", "browser-ci/shared-cobrowsing"]) {
+    assert.equal(workflow.split(text).length - 1, 1, text);
+  }
   assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.mjs")));
   assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.test.mjs")));
 });
 
 test("the expanded browser UI inventory has a bounded suite budget without relaxing test gates", () => {
   const config = read("packages/frontend/playwright.ci-ui.config.ts");
+  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].parts, BROWSER_UI_PARTS);
   assert.match(config, /^\s+globalTimeout: 1_800_000,$/m);
   assert.match(config, /^\s+timeout: 30_000,$/m);
   assert.match(config, /^\s+workers: 1,$/m);
@@ -250,24 +260,106 @@ test("the expanded browser UI inventory has a bounded suite budget without relax
   assert.match(config, /^\s+testMatch: REQUIRED_BROWSER_UI_SPECS,$/m);
   assert.match(config, /required-browser-reporter\.mjs", \{ lane: "browser-ui" \}/);
   assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 53);
-  const workflow = read(".github/workflows/browser-e2e.yml");
-  const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
-  assert.match(job, /\|\| 'ubuntu-24\.04' }}/);
-  assert.match(job, /^\s+timeout-minutes: 40$/m);
+  // Each part keeps the lane's former 40-minute job budget; the aggregate has five.
+  for (const key of partKeys) {
+    assert.match(jobSource(key), /\|\| 'ubuntu-24\.04' }}/);
+    assert.deepEqual(jobSource(key).match(/^\s+timeout-minutes: .*$/gmu), ["    timeout-minutes: 40"]);
+  }
+  assert.deepEqual(jobSource("browser-ui").match(/^\s+timeout-minutes: .*$/gmu), ["    timeout-minutes: 5"]);
 });
 
-test("historical workflow proofs reverse only the reviewed Browser UI job budget", () => {
-  const source = read(".github/workflows/browser-e2e.yml");
-  const job = jobSource("browser-ui");
-  const previous = source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 30"));
+test("historical workflow proofs reverse only the reviewed Browser UI split and job budget", () => {
+  const source = fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8");
+  const unsplit = withoutBrowserUiParts("browser-e2e.yml", source);
+  const job = unsplit.split("\n  browser-ui:\n")[1].split(/\n  [\w-]+:\n/u)[0];
+  // The split is exactly the reviewed aggregate and parts built from that one job.
+  assert.equal(source.replace(`\n  browser-ui:\n${browserUiAggregateJob(job)}\n  browser-ui-1:\n${browserUiPartJob(job, 1)}`
+    + `\n  browser-ui-2:\n${browserUiPartJob(job, 2)}`, () => `\n  browser-ui:\n${job}`), unsplit);
+  assert.equal(withoutManualCiRouting("browser-e2e.yml", unsplit),
+    withoutBrowserUiParts("browser-e2e.yml", withoutManualCiRouting("browser-e2e.yml", source)));
+  const previous = unsplit.replace(job, () => job.replace("    timeout-minutes: 40", "    timeout-minutes: 30"));
   assert.equal(withoutBrowserUiJobBudget("browser-e2e.yml", source), previous);
   assert.equal(withoutBrowserUiJobBudget("build.yml", source), source);
+  assert.equal(withoutBrowserUiParts("build.yml", source), source);
+  const part = key => source.split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
+  const [aggregate, first, second] = ["browser-ui", "browser-ui-1", "browser-ui-2"].map(part);
+  const inFirst = (from, to) => source.replace(first, () => first.replace(from, () => to));
+  const inSecond = (from, to) => source.replace(second, () => second.replace(from, () => to));
+  const inAggregate = (from, to) => source.replace(aggregate, () => aggregate.replace(from, () => to));
+  const bothParts = (from, to) => inFirst(from, to).replace(second, () => second.replace(from, () => to));
   for (const changed of [
-    source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 30")),
-    source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 41")),
-    source.replace(job, job.replace("    timeout-minutes: 40\n", "")),
-    source.replace(job, job.replace("    timeout-minutes: 40", "    timeout-minutes: 40\n    timeout-minutes: 40")),
+    inFirst("    timeout-minutes: 40", "    timeout-minutes: 30"),
+    inFirst("    timeout-minutes: 40", "    timeout-minutes: 41"),
+    inFirst("    timeout-minutes: 40\n", ""),
+    inFirst("    timeout-minutes: 40", "    timeout-minutes: 40\n    timeout-minutes: 40"),
+    bothParts("    timeout-minutes: 40", "    timeout-minutes: 30"),
+    inSecond("--shard=2/2", "--shard=1/2"),
+    inSecond("--shard=2/2", "--shard=2/3"),
+    inSecond("--shard=2/2\n", "--shard=2/2 --grep cobrowsing\n"),
+    inSecond("      - name: Run browser component rendering proofs\n",
+      "      - name: Exercise routine approval and human-input handoff in real Chromium\n        run: node scripts/shared-browser-cobrowsing-e2e.mjs\n      - name: Run browser component rendering proofs\n"),
+    inSecond("browser-ui-rendering-2", "browser-ui-rendering-1"),
+    inSecond("-public-browser-ui-2\",", "-public-browser-ui-1\","),
+    inSecond("    name: Browser UI rendering (2 of 2)", "    name: Browser UI rendering"),
+    inAggregate("      - browser-ui-2\n", ""),
+    inAggregate("results[key].result, 'success'", "results[key].result === 'skipped' ? 'success' : results[key].result, 'success'"),
+    inAggregate("    if: ${{ always() && ", "    if: ${{ "),
+    inAggregate("    timeout-minutes: 5", "    timeout-minutes: 40"),
+    inAggregate("          pattern: browser-ui-rendering-*\n", "          pattern: browser-ui-rendering-1\n"),
+    inAggregate("required-browser-parts.mjs browser-ui", "required-browser-parts.mjs personal"),
+    inAggregate("          persist-credentials: false\n", ""),
+    source.replace(`\n  browser-ui-1:\n${first}`, "").replace(`\n  browser-ui-2:\n${second}`, () => `\n  browser-ui-2:\n${second}\n  browser-ui-1:\n${first}`),
+    source.replace(`\n  browser-ui:\n${aggregate}`, ""),
     source.replace("\n  browser-ui:\n", "\n  another-job:\n"),
-    source + "\n  browser-ui:\n" + job,
-  ]) assert.throws(() => withoutBrowserUiJobBudget("browser-e2e.yml", changed));
+    source + "\n  browser-ui-2:\n" + second,
+  ]) {
+    assert.notEqual(changed, source);
+    assert.throws(() => withoutBrowserUiJobBudget("browser-e2e.yml", changed));
+  }
+});
+
+test("the required Browser UI check runs after both parts and passes only when both succeeded", () => {
+  const aggregate = jobSource("browser-ui");
+  assert.deepEqual(aggregate.match(/^    needs:\n((?:      - .+\n)+)/mu)?.[1].trim().split("\n").map(line => line.trim().slice(2)), partKeys);
+  assert.ok(aggregate.includes("    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}\n"));
+  const program = aggregate.match(/      - name: Require both Browser UI parts to succeed\n        env:\n          BROWSER_UI_RESULTS: \$\{\{ toJSON\(needs\) \}\}\n        shell: bash\n        run: \|\n          node <<'NODE'\n([\s\S]*?)          NODE\n/u)?.[1];
+  assert.ok(program);
+  const check = results => vm.runInNewContext(program.replace(/^          /gmu, ""), {
+    require: name => { assert.equal(name, "node:assert/strict"); return assert; },
+    process: { env: { BROWSER_UI_RESULTS: JSON.stringify(results) } },
+  }, { timeout: 1000 });
+  const success = Object.fromEntries(partKeys.map(key => [key, { result: "success", outputs: {} }]));
+  assert.doesNotThrow(() => check(success));
+  for (const key of partKeys) {
+    // A skipped or cancelled part never counts as passing.
+    for (const result of ["failure", "cancelled", "skipped", "timed_out", "neutral", "", "Success", null]) {
+      assert.throws(() => check({ ...success, [key]: { result } }), `${key}/${result}`);
+    }
+    const missing = { ...success }; delete missing[key]; assert.throws(() => check(missing));
+  }
+  for (const malformed of [{}, [], null, { ...success, unexpected: { result: "success" } }]) assert.throws(() => check(malformed));
+});
+
+test("the required Browser UI check proves the lane's whole contract on both parts' own results", () => {
+  const aggregate = jobSource("browser-ui");
+  const steps = aggregate.split("      - name: ").slice(1).map(step => step.split("\n")[0]);
+  assert.deepEqual(steps, ["Qualify isolated browser CI runner", "Require both Browser UI parts to succeed", "Checkout the tested revision",
+    "Download both parts' results", "Require every required case across both parts"]);
+  assert.ok(aggregate.includes("        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n"
+    + "        with:\n          pattern: browser-ui-rendering-*\n          path: ${{ runner.temp }}/browser-ui-parts\n"));
+  assert.ok(aggregate.endsWith("        run: node packages/frontend/scripts/required-browser-parts.mjs browser-ui \"$RUNNER_TEMP/browser-ui-parts\"\n"));
+  assert.doesNotMatch(aggregate, /merge-multiple|run-id|github-token|continue-on-error|secrets\.|pnpm/u);
+  // Each part runs its literal share of the lane and keeps its own results under
+  // a name the download pattern matches; no other artifact of this workflow does.
+  const workflow = read(".github/workflows/browser-e2e.yml");
+  const artifacts = [...workflow.matchAll(/^          name: (.+)$/gmu)].map(match => match[1]);
+  assert.deepEqual(artifacts.filter(name => name.startsWith("browser-ui-rendering-")), partKeys.map((_, index) => `browser-ui-rendering-${index + 1}`));
+  assert.ok(artifacts.every(name => !name.startsWith("browser-ui-rendering") || /^browser-ui-rendering-\d+$/u.test(name)));
+  for (const [index, key] of partKeys.entries()) {
+    const job = jobSource(key);
+    assert.equal((job.match(/pnpm test:browser:ci/gu) ?? []).length, 1, key);
+    assert.ok(job.includes(`      - name: Run browser component rendering proofs\n        run: pnpm test:browser:ci browser-ui --shard=${index + 1}/${BROWSER_UI_PARTS}\n`), key);
+    assert.ok(job.includes(`          name: browser-ui-rendering-${index + 1}\n          path: |\n            packages/frontend/test-results/browser-ci/browser-ui\n`), key);
+  }
+  assert.ok(fs.statSync(path.join(root, "packages/frontend/scripts/required-browser-parts.mjs")).isFile());
 });

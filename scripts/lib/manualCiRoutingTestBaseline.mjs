@@ -24,6 +24,8 @@ export const MANUAL_CI_JOBS = [
   {"file":"build.yml","key":"rust-test-broker","toggle":"CI_RUST_SELF_HOSTED","label":"public-rust-test-broker","hosted":"ubuntu-latest"},
   {"file":"browser-e2e.yml","key":"personal","toggle":"CI_BROWSER_SELF_HOSTED","label":"public-browser-personal","hosted":"ubuntu-24.04"},
   {"file":"browser-e2e.yml","key":"browser-ui","toggle":"CI_BROWSER_SELF_HOSTED","label":"public-browser-ui","hosted":"ubuntu-24.04"},
+  {"file":"browser-e2e.yml","key":"browser-ui-1","toggle":"CI_BROWSER_SELF_HOSTED","label":"public-browser-ui-1","hosted":"ubuntu-24.04"},
+  {"file":"browser-e2e.yml","key":"browser-ui-2","toggle":"CI_BROWSER_SELF_HOSTED","label":"public-browser-ui-2","hosted":"ubuntu-24.04"},
   {"file":"browser-e2e.yml","key":"shared-profile","toggle":"CI_SHARED_BROWSER_SELF_HOSTED","label":"public-shared-browser-aggregate","hosted":"ubuntu-24.04"},
   {"file":"browser-e2e.yml","key":"shared-profile-lifecycle","toggle":"CI_SHARED_BROWSER_SELF_HOSTED","label":"public-shared-browser-profile","hosted":"ubuntu-24.04"},
   {"file":"browser-e2e.yml","key":"shared-studio","toggle":"CI_SHARED_BROWSER_SELF_HOSTED","label":"public-shared-browser-studio","hosted":"ubuntu-24.04"},

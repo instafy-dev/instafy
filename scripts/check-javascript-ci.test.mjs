@@ -74,8 +74,10 @@ const cancellationWorkflows = [
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
     previousHash: 'ece087f0bea707d44c0447b7ef5b27ca2b67af7f33414eab6c10b3ccd3243283' },
+  // The Browser UI rendering aggregate came with the lane's split into parts;
+  // reversing that split exactly (inside withoutBrowserUiJobBudget) removes it.
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
-    keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
+    keys: ['shared-profile', 'browser-ui'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];
 const cancellationAggregates = cancellationWorkflows.flatMap(workflow => workflow.keys.map(key => {
   const text = workflow.text.split('\n  ' + key + ':\n')[1]?.split(/\n  [\w-]+:\n/u)[0];
@@ -133,7 +135,7 @@ function aggregateResult(text, github, isCancelled, results) {
   }
 }
 
-test('only four job if lines differ from the complete reviewed workflows plus the runtime retry, read-reference and compaction test selectors and main-only caches', () => {
+test('only the aggregates\' job if lines differ from the complete reviewed workflows plus the runtime retry, read-reference and compaction test selectors and main-only caches', () => {
   for (const workflow of cancellationWorkflows) {
     assert.equal(workflow.text.split(aggregateIf).length - 1, workflow.keys.length, workflow.file);
     for (const key of workflow.keys) {
@@ -148,7 +150,7 @@ test('only four job if lines differ from the complete reviewed workflows plus th
   }
 });
 
-test('only a cancelled canonical protected-main push can skip any of the four aggregates', () => {
+test('only a cancelled canonical protected-main push can skip any of the aggregates', () => {
   for (const aggregate of cancellationAggregates)
     for (const repository of ['instafy-dev/instafy', 'someone/instafy'])
       for (const event_name of ['push', 'pull_request', 'workflow_dispatch', 'workflow_call', 'merge_group', 'pull_request_target', 'schedule'])

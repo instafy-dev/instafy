@@ -55,7 +55,8 @@ It also calls the secret-free `Browser verification` workflow on every pull
 request, `main` push, and manual Public Build run. That workflow has three
 required checks: `Personal Browser E2E`, `Browser UI rendering`, and
 `Shared Browser profile E2E`. The Shared check aggregates two complete,
-independent fixture jobs. A failure in any of them fails Public Build,
+independent fixture jobs, and the Browser UI check aggregates the two parts
+its component cases run in. A failure in any of them fails Public Build,
 including its downstream release-workflow result. Repository administrators
 must also require the emitted browser job checks in branch protection; adding
 workflow YAML does not change repository protection settings.
@@ -1180,7 +1181,7 @@ The privacy check verifies owner isolation, operator boundaries, and account mis
 ## Secret-free browser CI lanes
 
 The independent, default-off `CI_BROWSER_SELF_HOSTED=true` switch covers only
-`Browser verification / Browser UI rendering` and
+`Browser verification / Browser UI rendering` with its two parts and
 `Browser verification / Personal Browser E2E`, called by Public
 Build. It requires private visibility, a same-repository PR to `main` or a
 protected-main push, and the exact `build.yml` caller. The manual route above
@@ -1193,8 +1194,9 @@ not a measured completion claim. The worker lifecycle remains bounded to
 35 minutes with its existing cleanup reserve; browser test-level timeouts,
 commands, permissions, locked installations and required reports are unchanged.
 
-The two label suffixes are `public-browser-ui` and `public-browser-personal`,
-using the same trust-specific groups and per-run/attempt labels described
+The label suffixes are `public-browser-ui` (the required check),
+`public-browser-ui-1` and `public-browser-ui-2` (its parts) and
+`public-browser-personal`, using the same trust-specific groups and per-run/attempt labels described
 above. Provisioning must authenticate both caller and callee bytes at the same
 tested commit and protected main, including the exact attempt's reusable-workflow
 metadata. A caller-supplied input or matching label is not source authority.
@@ -1386,12 +1388,19 @@ attempt per test: skips, expected failures, retries, filtered subsets, and zero
 tests fail the lane. Failure traces and a machine-readable result are retained
 under `packages/frontend/test-results/browser-ci/<lane>`.
 
-The serial `browser-ui` lane has a twenty-minute total budget for hosted
-runners. Hosted timings project roughly fifteen minutes for its 157 cases,
-so the total budget leaves room for startup and teardown. Each test still has
-a 30-second limit, with no retries or skips allowed. The containing workflow
-job has a 40-minute limit: dependency installation and the co-browsing fixture
-took another fourteen minutes in the measured hosted run.
+CI runs the serial `browser-ui` lane in two parts, one job each:
+`pnpm test:browser:ci browser-ui --shard=1/2` and `--shard=2/2`, which
+Playwright splits by test count. A part's reporter checks only its own cases
+(each passes on its single attempt; skips, expected failures and retries still
+fail) and records which part it is. The required `Browser UI rendering` check
+runs after both parts, fails unless both succeeded (a skipped or cancelled part
+fails it), and then checks the lane's whole inventory on both parts' receipts
+together, so a case that no part ran fails the lane. Locally,
+`pnpm test:browser:ci browser-ui` still runs the whole lane in one run with the
+same inventory check. Each part keeps the lane's 30-minute suite budget and
+its job's 40-minute limit; on hosted runners a part's cases take about five
+minutes. Each test still has a 30-second limit, with no retries or skips
+allowed.
 
 The settings component cases mount production Notifications and segmented controls.
 They cover phone and desktop switch alignment, disclosure, single-channel preference
@@ -1514,8 +1523,8 @@ deltas, and device pixel ratios with the runtime's actual JSON parser features.
 They retain strict field/type checks and the existing finite-value and viewport
 bounds; successful integer-coordinate clicks alone are insufficient coverage.
 
-The required **Browser UI rendering** job also runs the real co-browsing tool
-fixture before the UI lane. Run it locally with:
+The first part of the required **Browser UI rendering** check also runs the
+real co-browsing tool fixture before its share of the UI lane. Run it locally with:
 
 ```bash
 node --test scripts/shared-browser-cobrowsing-e2e.test.mjs

@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import RequiredBrowserReporter, { REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-browser-reporter.mjs";
+import RequiredBrowserReporter, { combineRequiredBrowserParts, REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-browser-reporter.mjs";
+import { checkRequiredBrowserParts, readPartReceipts } from "../packages/frontend/scripts/required-browser-parts.mjs";
 
 function setup(t, lane = "personal") {
   const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-browser-reporter-"));
@@ -281,4 +282,133 @@ test("browser UI cannot omit a thread-spine surface theme or viewport", async (t
     run.begin(selected); run.pass(selected);
     assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, target);
   }
+});
+
+// A lane CI runs in parts: each part proves its own tests, and the required
+// check proves the lane's contract on every part's receipt together.
+async function runPart(t, lane, selected, part) {
+  const run = setup(t, lane);
+  run.reporter.onBegin({ projects: [{ outputDir: run.outputDir }], shard: part }, { allTests: () => selected });
+  run.pass(selected);
+  const result = await run.reporter.onEnd({ status: "passed" });
+  return { result, receipt: JSON.parse(fs.readFileSync(path.join(run.outputDir, "required-browser-result.json"), "utf8")) };
+}
+
+async function browserUiParts(t, mutate = (tests) => tests) {
+  const run = setup(t, "browser-ui");
+  const tests = mutate(browserUiInventory(run));
+  const half = Math.ceil(tests.length / 2);
+  return [await runPart(t, "browser-ui", tests.slice(0, half), { current: 1, total: 2 }),
+    await runPart(t, "browser-ui", tests.slice(half), { current: 2, total: 2 })];
+}
+
+test("a part of the browser UI lane passes on its own tests and records which part it is", async (t) => {
+  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].parts, 2);
+  const [first, second] = await browserUiParts(t);
+  for (const [index, part] of [first, second].entries()) {
+    assert.deepEqual(part.result, { status: "passed" });
+    assert.deepEqual(part.receipt.part, { current: index + 1, total: 2 });
+    assert.ok(part.receipt.tests.every((item) => typeof item.id === "string"));
+  }
+  // Neither half alone meets the lane's contract; only both together do.
+  const run = setup(t, "browser-ui"); const half = browserUiInventory(run).slice(0, 27);
+  run.begin(half); run.pass(half);
+  assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
+});
+
+test("an empty part, a part of an unsplit lane, a wrong part count or a retried case fails the part", async (t) => {
+  assert.deepEqual((await runPart(t, "browser-ui", [], { current: 2, total: 2 })).result, { status: "failed" });
+  const personal = setup(t).tests;
+  assert.deepEqual((await runPart(t, "personal", personal, { current: 1, total: 2 })).result, { status: "failed" });
+  const inventory = browserUiInventory(setup(t, "browser-ui"));
+  assert.deepEqual((await runPart(t, "browser-ui", inventory, { current: 1, total: 1 })).result, { status: "failed" });
+  assert.deepEqual((await runPart(t, "browser-ui", inventory.slice(0, 5), { current: 1, total: 3 })).result, { status: "failed" });
+  const run = setup(t, "browser-ui"); const selected = inventory.slice(0, 5);
+  run.reporter.onBegin({ projects: [{ outputDir: run.outputDir }], shard: { current: 1, total: 2 } }, { allTests: () => selected });
+  run.pass(selected.slice(1));
+  run.reporter.onTestEnd(selected[0], { status: "failed", retry: 0 });
+  run.reporter.onTestEnd(selected[0], { status: "passed", retry: 1 });
+  assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
+});
+
+test("both passing parts together meet the browser UI contract", async (t) => {
+  const receipts = (await browserUiParts(t)).map((part) => part.receipt);
+  const combined = combineRequiredBrowserParts("browser-ui", receipts);
+  assert.deepEqual(combined, { lane: "browser-ui", status: "passed", parts: 2, selected: REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, failures: [] });
+  assert.equal(combineRequiredBrowserParts("browser-ui", [...receipts].reverse()).status, "passed");
+});
+
+test("a missing, repeated, failed or foreign part, or a case run twice, never makes the lane pass", async (t) => {
+  const [first, second] = (await browserUiParts(t)).map((part) => part.receipt);
+  const failed = (receipts) => combineRequiredBrowserParts("browser-ui", receipts);
+  const without = (receipt, key) => { const copy = structuredClone(receipt); delete copy[key]; return copy; };
+  const changed = (receipt, change) => { const copy = structuredClone(receipt); change(copy); return copy; };
+  for (const receipts of [
+    [], [first], [second], [first, first], [first, second, second],
+    [first, changed(second, (copy) => { copy.part.current = 1; })],
+    [first, changed(second, (copy) => { copy.part.total = 3; })],
+    [first, changed(second, (copy) => { copy.part.current = 3; copy.part.total = 3; })],
+    [first, without(second, "part")],
+    [first, changed(second, (copy) => { copy.status = "failed"; })],
+    [first, changed(second, (copy) => { copy.failures = ["Runner status: timedout"]; })],
+    [first, changed(second, (copy) => { copy.tests[0].passed = false; })],
+    [first, changed(second, (copy) => { copy.tests = []; })],
+    [first, changed(second, (copy) => { copy.tests[0].id = first.tests[0].id; })],
+    [first, changed(second, (copy) => { copy.lane = "personal"; })],
+    [first, changed(second, (copy) => { copy.schemaVersion = 2; })],
+    [first, null], [first, []], [first, "passed"], [first, changed(second, (copy) => { copy.tests = [null]; })],
+  ]) assert.equal(failed(receipts).status, "failed", JSON.stringify(receipts.map((receipt) => receipt?.part ?? receipt)));
+  for (const lane of ["personal", "shared-studio", "unknown", "constructor", "__proto__"]) {
+    assert.equal(combineRequiredBrowserParts(lane, [first, second]).status, "failed", lane);
+  }
+  assert.equal(combineRequiredBrowserParts("browser-ui", null).status, "failed");
+});
+
+test("a required case or spec missing from every part fails the lane even when both parts passed", async (t) => {
+  const requiredTitle = "Escape returns from the mobile workspace drill-in before dismissing navigation";
+  const renamed = (await browserUiParts(t, (tests) => tests.map((item) => item.title === requiredTitle
+    ? { ...item, title: "unrelated passing dismissal test" } : item))).map((part) => part.receipt);
+  assert.ok(renamed.every((receipt) => receipt.status === "passed"));
+  const combined = combineRequiredBrowserParts("browser-ui", renamed);
+  assert.equal(combined.status, "failed");
+  assert.ok(combined.failures.includes(`Required case missing: ${requiredTitle}`));
+  const requiredFile = "mobile-sidebar-safe-area.spec.ts";
+  const moved = (await browserUiParts(t, (tests) => tests.map((item) => item.location.file.endsWith(requiredFile)
+    ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item))).map((part) => part.receipt);
+  assert.ok(combineRequiredBrowserParts("browser-ui", moved).failures.includes(`Required spec missing: ${requiredFile}`));
+  const short = (await browserUiParts(t, (tests) => tests.slice(0, -1).map((item) => item))).map((part) => part.receipt);
+  assert.ok(REQUIRED_BROWSER_LANES["browser-ui"].titles.length < REQUIRED_BROWSER_LANES["browser-ui"].minimumTests - 1);
+  assert.ok(combineRequiredBrowserParts("browser-ui", short).failures.includes("Required tests are missing"));
+});
+
+test("the required check reads every part's receipt from the downloaded artifacts and fails closed", async (t) => {
+  const receipts = (await browserUiParts(t)).map((part) => part.receipt);
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-browser-parts-"));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  // Download layout: one folder per artifact; the first part also keeps the
+  // co-browsing fixture's results beside its own.
+  const write = (relative, receipt) => {
+    fs.mkdirSync(path.dirname(path.join(folder, relative)), { recursive: true });
+    fs.writeFileSync(path.join(folder, relative), `${JSON.stringify(receipt)}\n`);
+  };
+  write("browser-ui-rendering-1/browser-ui/required-browser-result.json", receipts[0]);
+  write("browser-ui-rendering-1/shared-cobrowsing/result.json", { status: "passed" });
+  assert.equal(readPartReceipts(folder).length, 1);
+  const output = [];
+  const stream = { write: (text) => output.push(text) };
+  const quiet = (args) => checkRequiredBrowserParts(args, { stdout: stream, stderr: stream });
+  assert.equal(quiet(["browser-ui", folder]), 1);
+  assert.ok(output.includes("[required-browser] Part 2 of 2 is missing\n"));
+  write("browser-ui-rendering-2/required-browser-result.json", receipts[1]);
+  assert.equal(quiet(["browser-ui", folder]), 0);
+  assert.equal(output.at(-1), `[required-browser] browser-ui: ${REQUIRED_BROWSER_LANES["browser-ui"].minimumTests} tests passed in 2 parts; passed\n`);
+  // A linked folder is not followed, so a receipt cannot be counted twice.
+  fs.symlinkSync(path.join(folder, "browser-ui-rendering-2"), path.join(folder, "linked"));
+  assert.equal(readPartReceipts(folder).length, 2);
+  assert.equal(quiet(["browser-ui", folder]), 0);
+  write("browser-ui-rendering-3/required-browser-result.json", receipts[1]);
+  assert.equal(quiet(["browser-ui", folder]), 1);
+  fs.writeFileSync(path.join(folder, "browser-ui-rendering-3/required-browser-result.json"), "not json");
+  assert.throws(() => quiet(["browser-ui", folder]));
+  for (const args of [[], ["browser-ui"], ["browser-ui", folder, "extra"]]) assert.throws(() => quiet(args), /Usage:/u);
 });

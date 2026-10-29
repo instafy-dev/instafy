@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { browserCiEnvironment } from "../packages/frontend/scripts/browser-ci.mjs";
-import { REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-browser-reporter.mjs";
+import { combineRequiredBrowserParts, REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-browser-reporter.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repoRoot, "packages/frontend/package.json"));
@@ -119,4 +119,60 @@ test("required browser reporter rejects a failed first attempt followed by a pas
     { status: "failed", retry: 0 },
     { status: "passed", retry: 1 },
   ]);
+});
+
+// The browser UI lane runs on CI as Playwright shards. Run a fixture with the
+// lane's whole required inventory through real Playwright as two parts: each
+// part's receipt says which part it is, and only both together meet the lane.
+function runBrowserUiParts(t, { renamed } = {}) {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-required-browser-parts-"));
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+  const titles = [...contract.titles.map((title) => title === renamed ? "an unrelated passing case" : title)];
+  while (titles.length < contract.minimumTests) titles.push(`another browser UI case ${titles.length}`);
+  const cases = new Map(contract.files.map((file) => [file, []]));
+  titles.forEach((title, index) => cases.get(contract.files[index % contract.files.length]).push(title));
+  for (const [file, list] of cases) {
+    fs.writeFileSync(path.join(fixtureRoot, file), `const { test, expect } = require(${JSON.stringify(playwrightTest)});\n`
+      + list.map((title) => `test(${JSON.stringify(title)}, async () => { expect(true).toBe(true); });`).join("\n") + "\n");
+  }
+  return [1, contract.parts].map((current) => {
+    const outputDir = path.join(fixtureRoot, `results-${current}`);
+    const configPath = path.join(fixtureRoot, `playwright-${current}.config.mjs`);
+    fs.writeFileSync(configPath, `export default ${JSON.stringify({
+      testDir: fixtureRoot, testMatch: "*.spec.ts", forbidOnly: true, fullyParallel: false, workers: 1, retries: 0,
+      timeout: 5_000, globalTimeout: 15_000, outputDir, reporter: [[reporterPath, { lane: "browser-ui" }]],
+    }, null, 2)};\n`);
+    const result = spawnSync(process.execPath, [playwrightCli, "test", "--config", configPath, `--shard=${current}/${contract.parts}`], {
+      cwd: fixtureRoot, env: browserCiEnvironment(), encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024,
+    });
+    assert.ifError(result.error);
+    const diagnostic = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.status, 0, diagnostic);
+    return JSON.parse(fs.readFileSync(path.join(outputDir, "required-browser-result.json"), "utf8"));
+  });
+}
+
+test("each real Playwright shard of the browser UI lane records its part, and both together meet the lane", (t) => {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  const receipts = runBrowserUiParts(t);
+  assert.equal(contract.parts, 2);
+  receipts.forEach((receipt, index) => {
+    assert.equal(receipt.status, "passed");
+    assert.deepEqual(receipt.part, { current: index + 1, total: 2 });
+    assert.ok(receipt.selected > 0 && receipt.selected < contract.minimumTests);
+  });
+  assert.equal(receipts[0].selected + receipts[1].selected, contract.minimumTests);
+  assert.equal(combineRequiredBrowserParts("browser-ui", receipts).status, "passed");
+  for (const receipt of receipts) assert.equal(combineRequiredBrowserParts("browser-ui", [receipt]).status, "failed");
+  assert.equal(combineRequiredBrowserParts("browser-ui", [receipts[0], receipts[0]]).status, "failed");
+});
+
+test("a required case missing from both real shards fails the browser UI lane though each shard passed", (t) => {
+  const renamed = "keeps Unicode remote input out of a previously focused local editor";
+  const receipts = runBrowserUiParts(t, { renamed });
+  assert.ok(receipts.every((receipt) => receipt.status === "passed"));
+  const combined = combineRequiredBrowserParts("browser-ui", receipts);
+  assert.equal(combined.status, "failed");
+  assert.deepEqual(combined.failures, [`Required case missing: ${renamed}`]);
 });

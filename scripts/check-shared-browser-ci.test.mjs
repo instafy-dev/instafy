@@ -1,7 +1,7 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import { assertMainOnlySave, assertNoPullRequestCacheSave, cacheStepRuns, CACHE_REFS, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
 import { HOSTED_CHROMIUM_STEP, PATH_RESOLVED_CMAKE, withoutSharedPrerequisiteTimeout } from "./lib/sharedBrowserPrerequisitesTestBaseline.mjs";
-import { withoutBrowserUiJobBudget } from "./lib/browserUiBudgetTestBaseline.mjs";
+import { withoutBrowserUiJobBudget, withoutBrowserUiParts } from "./lib/browserUiBudgetTestBaseline.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -13,6 +13,9 @@ import vm from "node:vm";
 
 const root = path.resolve(import.meta.dirname, "..");
 const workflow = withoutManualCiRouting("browser-e2e.yml", fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8"));
+// The Shared prerequisite inverses predate the Browser UI lane's split into
+// parts, so their proofs start from the workflow with that split reversed exactly.
+const unsplit = withoutBrowserUiParts("browser-e2e.yml", workflow);
 const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
 // Only historical byte-reconstruction proofs use the former aggregate guard.
 // They start from the bytes before main-only saves, the shared compiler key and
@@ -196,31 +199,33 @@ test("only both Shared prerequisite steps allow ten minutes while network limits
   }
   assert.match(section("shared-profile"), /^    timeout-minutes: 5$/mu);
   assert.doesNotMatch(section("shared-profile"), /Install fixture display, database and compiler prerequisites/u);
-  const previous = withoutSharedPrerequisiteTimeout("browser-e2e.yml", workflow);
+  const previous = withoutSharedPrerequisiteTimeout("browser-e2e.yml", unsplit);
   assert.equal(previous.split(`${marker}        timeout-minutes: 5\n`).length - 1, 2);
   // Composite round trip: re-applying the budget, the PATH-resolved CMake and
   // the hosted Chromium split in turn restores every current byte.
   assert.equal(previous.replaceAll(`${marker}        timeout-minutes: 5\n`, `${marker}        timeout-minutes: 10\n`)
     .replaceAll(PATH_RESOLVED_CMAKE[1], PATH_RESOLVED_CMAKE[0])
     .replaceAll(`${chromiumStep}${withDeps}${bindStep}`, `${chromiumStep}${selfHostedIf}${withDeps}${HOSTED_CHROMIUM_STEP}${bindStep}`)
-    .replaceAll(`${fixtureGuards}\n`, `${fixtureGuards} ${hostedGuard}\n`), workflow);
+    .replaceAll(`${fixtureGuards}\n`, `${fixtureGuards} ${hostedGuard}\n`), unsplit);
   const install = "            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends cmake\n";
   for (const changed of [
-    workflow.replace(`${marker}        timeout-minutes: 10\n`, `${marker}        timeout-minutes: 11\n`),
-    workflow.replace(marker, ""),
-    workflow + `${marker}        timeout-minutes: 10\n`,
-    workflow.replace("pkg-config libssl-dev clang lld libcap-dev", "pkg-config libssl-dev clang lld cmake libcap-dev"),
-    workflow.replace("cmake_minor >= 28", "cmake_minor >= 0"),
-    workflow.replace(install, ""),
-    workflow.replace(install, install.replace(" install --yes", " install --no-upgrade --yes")),
-    workflow.replace("          ld.lld --version\n", ""),
-    workflow + PATH_RESOLVED_CMAKE[0],
+    unsplit.replace(`${marker}        timeout-minutes: 10\n`, `${marker}        timeout-minutes: 11\n`),
+    unsplit.replace(marker, ""),
+    unsplit + `${marker}        timeout-minutes: 10\n`,
+    unsplit.replace("pkg-config libssl-dev clang lld libcap-dev", "pkg-config libssl-dev clang lld cmake libcap-dev"),
+    unsplit.replace("cmake_minor >= 28", "cmake_minor >= 0"),
+    unsplit.replace(install, ""),
+    unsplit.replace(install, install.replace(" install --yes", " install --no-upgrade --yes")),
+    unsplit.replace("          ld.lld --version\n", ""),
+    unsplit + PATH_RESOLVED_CMAKE[0],
   ]) assert.throws(() => withoutSharedPrerequisiteTimeout("browser-e2e.yml", changed));
 });
 test("hosted Shared children install the locked Chromium without Playwright's apt pass; self-hosted guests keep --with-deps", () => {
   const names = ["Install locked Chromium and operating-system dependencies", "Install locked Chromium on the provisioned hosted image",
     "Bind the launcher to the locked test Chromium", "Install fixture display, database and compiler prerequisites"];
-  const browserUi = cacheStep("browser-ui", names[0]);
+  // Both Browser UI parts keep the unconditional step the single job had.
+  const browserUi = cacheStep("browser-ui-1", names[0]);
+  assert.equal(cacheStep("browser-ui-2", names[0]), browserUi);
   for (const job of jobs.filter(job => job.script)) {
     const source = section(job.key), at = names.map(name => source.indexOf(`      - name: ${name}\n`));
     for (const name of names) assert.equal(source.split(`      - name: ${name}\n`).length - 1, 1, `${job.key}: ${name}`);
@@ -240,24 +245,24 @@ test("hosted Shared children install the locked Chromium without Playwright's ap
     assert.match(bind, /\n          test -x "\$chromium_path"\n/u);
     assert.ok(source.includes(`run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs ${fixtureGuards} ${hostedGuard}\n`), job.key);
   }
-  for (const key of ["personal", "browser-ui"]) assert.doesNotMatch(section(key), /ensure-hosted-chromium-host|provisioned hosted image/u, key);
-  assert.equal(workflow.split("--with-deps").length - 1, 4);
-  assert.equal(workflow.split(`${withDeps.trimEnd().split("run: ")[1]}\n`).length - 1, 4);
+  for (const key of ["personal", "browser-ui", "browser-ui-1", "browser-ui-2"]) assert.doesNotMatch(section(key), /ensure-hosted-chromium-host|provisioned hosted image/u, key);
+  assert.equal(workflow.split("--with-deps").length - 1, 5);
+  assert.equal(workflow.split(`${withDeps.trimEnd().split("run: ")[1]}\n`).length - 1, 5);
   assert.equal(workflow.split("          pnpm --filter @instafy/frontend exec playwright install chromium\n").length - 1, 2);
   assert.ok(fs.statSync(path.join(root, "scripts/ensure-hosted-chromium-host.mjs")).isFile());
   assert.ok(fs.statSync(path.join(root, "scripts/ensure-hosted-chromium-host.test.mjs")).isFile());
   const pair = `${chromiumStep}${selfHostedIf}${withDeps}${HOSTED_CHROMIUM_STEP}`;
   for (const changed of [
-    workflow.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace("playwright install chromium", "playwright install --with-deps chromium")),
-    workflow.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace("        timeout-minutes: 10\n", "")),
-    workflow.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace(" install\n", " verify\n")),
-    workflow.replace(`${chromiumStep}${selfHostedIf}`, chromiumStep),
-    workflow.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace("        if: runner.environment == 'github-hosted'\n", "")),
-    workflow.replace(HOSTED_CHROMIUM_STEP, ""),
-    workflow.replace(pair, `${pair}${HOSTED_CHROMIUM_STEP}`),
-    workflow + HOSTED_CHROMIUM_STEP,
-    workflow.replace(`${fixtureGuards} ${hostedGuard}\n`, `${fixtureGuards}\n`),
-    workflow.replace(`${chromiumStep}${withDeps}`, `${chromiumStep}${selfHostedIf}${withDeps}`),
+    unsplit.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace("playwright install chromium", "playwright install --with-deps chromium")),
+    unsplit.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace("        timeout-minutes: 10\n", "")),
+    unsplit.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace(" install\n", " verify\n")),
+    unsplit.replace(`${chromiumStep}${selfHostedIf}`, chromiumStep),
+    unsplit.replace(HOSTED_CHROMIUM_STEP, HOSTED_CHROMIUM_STEP.replace("        if: runner.environment == 'github-hosted'\n", "")),
+    unsplit.replace(HOSTED_CHROMIUM_STEP, ""),
+    unsplit.replace(pair, `${pair}${HOSTED_CHROMIUM_STEP}`),
+    unsplit + HOSTED_CHROMIUM_STEP,
+    unsplit.replace(`${fixtureGuards} ${hostedGuard}\n`, `${fixtureGuards}\n`),
+    unsplit.replace(`${chromiumStep}${withDeps}`, `${chromiumStep}${selfHostedIf}${withDeps}`),
   ]) assert.throws(() => withoutSharedPrerequisiteTimeout("browser-e2e.yml", changed));
 });
 // Actions' `shell: bash` resolves bash from PATH. The step relies on errexit
