@@ -17,7 +17,7 @@ export const useStatus = () => ({ showStatus: reportAction });
 export const useProjects = () => ({ activeProjectId: "review-space", activeProject: projects[0], projectList: projects });
 const controls = {
   showChatActions: true,
-  onStartNewConversation: () => reportAction("Public chat selected in local review."),
+  onStartNewConversation: () => reportAction("New chat selected in local review."),
   onStartPrivateConversation: ({ displayName }: { displayName: string }) => reportAction(`Private chat selected: ${displayName}.`),
   onOpenProjectSettings: () => reportAction("Space settings selected in local review."),
 };

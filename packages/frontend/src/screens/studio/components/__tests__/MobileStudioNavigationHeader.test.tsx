@@ -179,14 +179,14 @@ describe("MobileStudioNavigationHeader", () => {
   });
 
   it("keeps secondary chat, parent and settings actions reachable and closes after each", async () => {
-    const actions = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    const actions = [vi.fn(), vi.fn(), vi.fn()];
     Object.assign(props, {
-      onNewChat: actions[0], onNewPrivateChat: actions[1],
-      parentConversation: { title: "Parent", onOpen: actions[2] },
-      onOpenSettings: actions[3],
+      onNewChat: actions[0],
+      parentConversation: { title: "Parent", onOpen: actions[1] },
+      onOpenSettings: actions[2],
     });
     await render();
-    for (const [index, title] of ["Public chat", "Private chat", "Open parent conversationParent", "Space settings"].entries()) {
+    for (const [index, title] of ["New chat", "Open parent conversationParent", "Space settings"].entries()) {
       await click("mobile-header-more");
       expect(query("mobile-header-actions")).not.toBeNull();
       // Observe the real shared Dialog/React Aria fallback, not just the

@@ -2523,27 +2523,20 @@ async function ensureWorkspaceConversationTab(page: Page): Promise<void> {
     }
   }
 
-  const openConversationMenu = async (): Promise<boolean> => {
+  const startNewChat = async (): Promise<boolean> => {
     const newConversationButton = page.getByTestId("topbar-new-conversation").or(page.getByTestId("sidebar-new-chat")).filter({ visible: true }).first();
     const visible = await newConversationButton.isVisible().catch(() => false);
     if (!visible) {
       return false;
     }
-    await newConversationButton.click().catch(() => {});
-    const popover = page.getByTestId("chat-new-chat-menu-popover");
-    const popoverVisible = await popover.isVisible().catch(() => false);
-    if (popoverVisible) {
-      await page.getByRole("button", { name: "Public chat" }).click().catch(() => {});
-      return true;
-    }
-    return false;
+    return newConversationButton.click().then(() => true, () => false);
   };
 
-  if (!(await openConversationMenu())) {
+  if (!(await startNewChat())) {
     await returnToConversation(page).catch(() => {});
     await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
     if (!(await hasConversationWorkspace())) {
-      await openConversationMenu();
+      await startNewChat();
     }
   }
 

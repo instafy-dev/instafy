@@ -618,13 +618,13 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
   const renderRow = (event: HomeFeedEvent, options: { divider: boolean }) => {
     const when = formatRelativeTimestamp(event.at);
     const where = [showTeamOnRows ? event.team.name : null, showTeamOnRows || spansSpaces ? event.project.name : null].filter(Boolean).join(" · ") || null;
-    // A folded thread says how much is behind its newest state.
-    const updates =
-      event.group && event.group.count > 1
-        ? event.group.newCount > 0
-          ? `${event.group.newCount} new of ${event.group.count} updates`
-          : `${event.group.count} updates`
-        : null;
+    // A folded thread says how much is behind its newest state. It never says
+    // "new": Unread alone lists what is unread, and a chat read since the last
+    // visit to Home is not news. A row standing for several look-alike chats
+    // counts the chats, since opening it shows only the newest one.
+    const updates = event.group?.chats && event.group.chats > 1
+      ? `${event.group.chats} chats`
+      : event.group && event.group.count > 1 ? `${event.group.count} updates` : null;
     // A scheduled conversation says so once, ahead of its state.
     const scheduled =
       event.source.type === "activity" &&

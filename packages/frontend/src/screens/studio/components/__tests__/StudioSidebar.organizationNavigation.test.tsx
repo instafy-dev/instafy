@@ -471,10 +471,10 @@ describe("StudioSidebar organization navigation", () => {
     const newChat = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-new-chat"]')!;
     expect(newChat.getAttribute("aria-label")).toBe("New chat");
     expect(newChat.closest('[data-testid="sidebar-team-header"]')).toBe(collapsed ? null : header);
+    // One press makes the chat, as the tab bar's + does: no Public or Private menu.
     await click("sidebar-new-chat");
-    expect(fixture.onStartNewConversation).not.toHaveBeenCalled();
-    await click("chat-new-chat-public");
     expect(fixture.onStartNewConversation).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain("Private chat");
   });
 
   it.each([
@@ -499,8 +499,6 @@ describe("StudioSidebar organization navigation", () => {
       expect(newChat.closest('[data-testid="sidebar-context-scroll"]')).toBeNull();
     }
     await click("sidebar-new-chat");
-    expect(fixture.onStartNewConversation).not.toHaveBeenCalled();
-    await click("chat-new-chat-public");
     expect(fixture.onStartNewConversation).toHaveBeenCalledTimes(1);
     expect(fixture.onToggleSidebar).not.toHaveBeenCalled();
     expect(onSelect).not.toHaveBeenCalled();
@@ -529,7 +527,7 @@ describe("StudioSidebar organization navigation", () => {
     { collapsed: false, mobile: false },
     { collapsed: true, mobile: false },
     { collapsed: false, mobile: true },
-  ])("retains private chat creation from Settings through the shared picker (collapsed=$collapsed, mobile=$mobile)", async ({ collapsed, mobile }) => {
+  ])("makes a chat from Settings through the sidebar's own action, with no private choice (collapsed=$collapsed, mobile=$mobile)", async ({ collapsed, mobile }) => {
     fixture.desktop = !mobile;
     fixture.navigationPage = "account";
     fixture.privateChatAvailable = true;
@@ -539,20 +537,17 @@ describe("StudioSidebar organization navigation", () => {
       hideContext: usesGlobalNavigationContext(fixture.navigationPage, fixture.activeProjectId),
     });
     await click("sidebar-new-chat");
-    expect(document.querySelector('[data-testid="chat-new-chat-private"]')).not.toBeNull();
-    await click("chat-new-chat-private");
-    expect(document.querySelector('[data-testid="chat-private-chat-modal"]')).not.toBeNull();
-    await click("chat-private-chat-target-teammate-id");
+    expect(document.body.textContent).not.toContain("Private chat");
     expect(runSidebarAction).toHaveBeenCalledOnce();
-    expect(fixture.onStartPrivateConversation).not.toHaveBeenCalled();
+    expect(fixture.onStartNewConversation).not.toHaveBeenCalled();
     expect(onRequestClose).not.toHaveBeenCalled();
     await act(async () => {
       if (mobile) onRequestClose();
       pendingAction!();
     });
-    if (mobile) expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(fixture.onStartPrivateConversation.mock.invocationCallOrder[0]);
-    expect(fixture.onStartPrivateConversation).toHaveBeenCalledExactlyOnceWith({ userId: "teammate-id", displayName: "Teammate" });
-    expect(fixture.onStartNewConversation).not.toHaveBeenCalled();
+    if (mobile) expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(fixture.onStartNewConversation.mock.invocationCallOrder[0]);
+    expect(fixture.onStartNewConversation).toHaveBeenCalledOnce();
+    expect(fixture.onStartPrivateConversation).not.toHaveBeenCalled();
   });
 
   it("opens an external mobile space directory scoped to its team and permits an explicit team switch", async () => {
@@ -601,8 +596,6 @@ describe("StudioSidebar organization navigation", () => {
     expect(header.classList.contains("flex-row-reverse")).toBe(true);
     expect(newChat.nextElementSibling?.getAttribute("data-testid")).toBe("sidebar-drawer-toggle");
     await click("sidebar-new-chat");
-    expect(runSidebarAction).not.toHaveBeenCalled();
-    await click("chat-new-chat-public");
     expect(runSidebarAction).toHaveBeenCalledTimes(1);
     expect(fixture.onStartNewConversation).not.toHaveBeenCalled();
     expect(onRequestClose).not.toHaveBeenCalled();
@@ -1056,7 +1049,6 @@ describe("StudioSidebar organization navigation", () => {
     await click("sheet-tab-other");
     expect(selectChat).toHaveBeenCalledExactlyOnceWith("other");
     await click("sidebar-new-chat");
-    await click("chat-new-chat-public");
     expect(fixture.onStartNewConversation).toHaveBeenCalledOnce();
     expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(fixture.onStartNewConversation.mock.invocationCallOrder[0]);
     await click("sidebar-team-menu-trigger");
