@@ -1,9 +1,11 @@
-import { createContext, Fragment, useContext, useEffect, useMemo, useState } from "react";
-import { CheckCircle, GitBranch, MoreHoriz, WarningTriangle, Xmark } from "iconoir-react";
+import { createContext, Fragment, useCallback, useContext, useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
+import { ChatBubbleQuestion, Check, Clock, GitBranch, MoreHoriz, Prohibition, ShieldQuestion, WarningTriangle } from "iconoir-react";
+import { WarningTriangle as WarningTriangleSolid } from "iconoir-react/solid";
 import { MenuTrigger } from "react-aria-components";
 import { AiFace } from "../../../components/AiFace";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
+import { Spinner } from "../../../components/Spinner";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
@@ -559,12 +561,14 @@ function collectTeamActivity({
   conversationMessages,
   runs,
   declaredGroupId,
+  leadHandle,
   snapshot,
 }: {
   planMessage?: ChatMessage | null;
   conversationMessages?: ChatMessage[] | null;
   runs: Readonly<Record<string, RunRecord>>;
   declaredGroupId: string;
+  leadHandle: string;
   snapshot: ControllerPlanGroupStatus | null;
 }) {
   const planJobId = planMessage ? extractAgentJobId(planMessage) : null;
@@ -584,6 +588,16 @@ function collectTeamActivity({
     const stamped = aiFaceIdentityFromMetadata(source.metadata);
     if (stamped) stampedFaceByHandle.set(handle, stamped);
   };
+  // The lead's face, the one its own rows wear: the agent stamped on its
+  // newest loaded continuation run, else on its newest loaded message, else on
+  // the plan message when the lead wrote it. A stamp under another handle is
+  // another AI's.
+  const leadKey = normalizeHandleKey(leadHandle);
+  const leadStamp = (source: Pick<ChatMessage, "metadata">) => {
+    const stamped = aiFaceIdentityFromMetadata(source.metadata);
+    return stamped && leadKey && normalizeHandleKey(stamped.handle) === leadKey ? stamped : null;
+  };
+  let leadFace = planMessage ? leadStamp(planMessage) : null;
   const planRuns = Object.values(runs).filter(run => {
     const planMeta = extractMultiAgentPlanMeta(run);
     return declaredGroupId ? stringField(planMeta?.groupId) === declaredGroupId
@@ -677,6 +691,7 @@ function collectTeamActivity({
       leadMessages.push(message);
     }
   }
+  for (const message of leadMessages) leadFace = leadStamp(message) ?? leadFace;
 
   const buildActivity = (key: string, messages: ChatMessage[]): TeamActivity | null => {
     if (messages.length === 0) {
@@ -775,6 +790,7 @@ function collectTeamActivity({
     if (!key || (role !== "worker" && role !== "lead_continuation")) continue;
     const jobId = stringField(run.metadata?.jobId ?? run.metadata?.job_id);
     if (role === "worker") noteStampedFace(key, run);
+    else leadFace = leadStamp(run) ?? leadFace;
     if (role === "worker" && supersededLane(key, jobId)) continue;
     const evidence = role === "worker" ? workerActivityByHandle.get(key) : leadActivity;
     const inputRequest = isRecord(run.metadata?.userInputRequest) ? run.metadata.userInputRequest : null;
@@ -816,6 +832,7 @@ function collectTeamActivity({
     rerunByHandle,
     workerFaceByHandle,
     leadActivity,
+    leadFace,
     groupId: [...groupIds][0] ?? null,
   };
 }
@@ -840,41 +857,93 @@ function statusLabel(status: TeamActivityStatus): string {
   }
 }
 
+// A plan's face chips (its helpers and its lead) are the Machines agent chip
+// around a 20px face (docs/Brand.md, "One rule for faces"): 2px of chip all
+// round, so the corners are the tile's 6px + 2 = 8px, and no ring, so the
+// tile's own hairline and shadow are the only edge inside the chip. The status
+// slot at the far end mirrors the face's square.
+const PLAN_CHIP_CLASS = "inline-flex min-w-0 max-w-full items-center gap-1 rounded-lg p-0.5 font-medium";
+
+// Workstreams' and Cancel group's touch target. Button gives every control a
+// 44px box on a coarse pointer; here the box stays the chips' 24px, so a press,
+// an open menu or a focus ring looks as it does with a mouse, and an invisible
+// ::after takes the 44px instead: 10px above and below, 2px short of the 12px
+// the row leaves on touch, so it never reaches a chip, a details panel, a rerun
+// notice or the message text, on any line.
+const PLAN_ROW_TOUCH_TARGET_CLASS = "relative pointer-coarse:!min-h-0 pointer-coarse:after:absolute pointer-coarse:after:inset-x-0 pointer-coarse:after:-inset-y-2.5";
+
+// One calm grey for every status; finished lanes recede. Status colour lives
+// on the glyph alone (statusGlyphClassName). Hover is the shell's group-hover,
+// so the chip stays lit while the pointer is on its "…". outline-hidden keeps
+// a focus outline in forced colours, where the ring (a box-shadow) is dropped.
 function statusChipClassName(status: TeamActivityStatus, interactive: boolean): string {
   const interactionClassName = interactive
-    ? "cursor-pointer hover:bg-white hover:ring-slate-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:hover:bg-slate-900/80 dark:hover:ring-slate-500"
+    ? "cursor-pointer transition-colors group-hover/agent-chip:bg-slate-200 group-hover/agent-chip:text-slate-900 active:bg-slate-200 aria-expanded:bg-slate-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:group-hover/agent-chip:bg-white/10 dark:group-hover/agent-chip:text-slate-50 dark:active:bg-white/10 dark:aria-expanded:bg-white/10 dark:focus-visible:ring-offset-[var(--color-studio-dark-panel)]"
     : "cursor-default";
   switch (status) {
-    case "working":
-      return `bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-500/10 dark:text-sky-200 dark:ring-sky-400/25 ${interactionClassName}`;
     case "done":
-      return `bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-200 dark:ring-emerald-400/25 ${interactionClassName}`;
-    case "failed":
-      return `bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-500/10 dark:text-rose-200 dark:ring-rose-400/25 ${interactionClassName}`;
-    case "waiting":
-    case "waiting_input":
-      return `bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-400/25 ${interactionClassName}`;
-    case "queued":
+    case "canceled":
+      return `bg-slate-50 text-slate-600 dark:bg-white/[0.05] dark:text-slate-400 ${interactionClassName}`;
     default:
-      return `bg-slate-50 text-slate-500 ring-slate-200 dark:bg-slate-900/60 dark:text-slate-300 dark:ring-slate-700 ${interactionClassName}`;
+      return `bg-slate-100 text-slate-700 dark:bg-white/[0.07] dark:text-slate-200 ${interactionClassName}`;
   }
 }
 
+// Grey, one step under the name, unless the person must act (amber) or
+// something failed (rose). Those glyphs are darker than the grey ones in light
+// and brighter in dark, and drawn heavier, so they stand out without hue too.
+// Failed is the one solid glyph: to many colour-blind eyes this rose and amber
+// are one olive, so weight, not hue, tells failed from waiting.
+function statusGlyphClassName(status: TeamActivityStatus): string {
+  switch (status) {
+    case "failed":
+      return "text-rose-700 dark:text-rose-300";
+    case "waiting":
+    case "waiting_input":
+      return "text-amber-700 dark:text-amber-400";
+    default:
+      return "text-slate-600 dark:text-slate-500";
+  }
+}
+
+// One shape per status, so the row reads in greyscale. Drawn after the name,
+// never beside the face (a dot there read as the hatchling's own node).
 function StatusGlyph({ status }: { status: TeamActivityStatus }) {
-  if (status === "canceled") {
-    return <Xmark aria-hidden="true" className="h-3.5 w-3.5" />;
+  switch (status) {
+    case "working":
+      return <Spinner size="xs" tone="current" aria-hidden="true" />;
+    case "done":
+      return <Check aria-hidden="true" className="h-3.5 w-3.5" />;
+    case "failed":
+      return <WarningTriangleSolid aria-hidden="true" className="h-3.5 w-3.5" />;
+    case "waiting":
+      return <ShieldQuestion aria-hidden="true" strokeWidth={2} className="h-3.5 w-3.5" />;
+    case "waiting_input":
+      return <ChatBubbleQuestion aria-hidden="true" strokeWidth={2} className="h-3.5 w-3.5" />;
+    case "canceled":
+      return <Prohibition aria-hidden="true" className="h-3.5 w-3.5" />;
+    case "queued":
+    default:
+      return <Clock aria-hidden="true" className="h-3.5 w-3.5" />;
   }
-  if (status === "done") {
-    return <CheckCircle aria-hidden="true" className="h-3.5 w-3.5" />;
-  }
-  if (status === "failed") {
-    return <WarningTriangle aria-hidden="true" className="h-3.5 w-3.5" />;
-  }
+}
+
+// The glyph's 20px slot. On a lane (reveal) the "…" takes it while the chip is
+// hovered, while the "…" has keyboard focus and while its menu is open; keyboard
+// focus on the chip itself keeps the glyph, so the focused helper's status stays
+// readable.
+function StatusSlot({ status, reveal = false }: { status: TeamActivityStatus; reveal?: boolean }) {
   return (
     <span
-      aria-hidden="true"
-      className={`h-2 w-2 rounded-full ${status === "working" ? "animate-pulse bg-current" : "bg-current opacity-50"}`}
-    />
+      data-chip-status={status}
+      className={`flex h-5 w-5 shrink-0 items-center justify-center ${statusGlyphClassName(status)}${
+        reveal
+          ? " transition-opacity group-hover/agent-chip:opacity-0 group-has-[[data-chip-menu]:focus-visible]/agent-chip:opacity-0 group-has-[[data-chip-menu][aria-expanded=true]]/agent-chip:opacity-0"
+          : ""
+      }`}
+    >
+      <StatusGlyph status={status} />
+    </span>
   );
 }
 
@@ -940,6 +1009,97 @@ function formatTeamStatusSummary({
   return `${plan.agents.length} lane${plan.agents.length === 1 ? "" : "s"} queued`;
 }
 
+// A touch or pen long-press on a lane opens that lane's "…" menu (touch has no
+// hover, so the "…" never shows there). It is the gesture the chat already uses
+// for a message's actions, so it stops the bubble's own long-press (and
+// Android's long-press contextmenu) from also opening the message's menu, and
+// swallows the click that ends it so the run trace does not open too. Mouse
+// and keyboard are untouched: they have the "…".
+function useLaneLongPress(openMenu: (handleKey: string) => void) {
+  const timer = useRef<number | null>(null);
+  const origin = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const fired = useRef(false);
+  const clear = useCallback(() => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+    origin.current = null;
+  }, []);
+  useEffect(() => clear, [clear]);
+  // Once the lane's menu closes, the click that ends its long-press has come
+  // or never will (Android sends none), so an activation with no press before
+  // it, such as a screen reader's, goes through as well.
+  const menuClosed = useCallback(() => {
+    fired.current = false;
+  }, []);
+  const chipProps = useCallback((handleKey: string) => {
+    const fire = (chip: HTMLButtonElement) => {
+      clear();
+      // A lane that left the plan mid-press opens nothing.
+      if (!chip.isConnected) return;
+      fired.current = true;
+      // When the menu closes it hands focus back to whatever had it before
+      // the press. A field (the composer, on a phone) gives it up now, as a
+      // tap on the chip would make it, so its keyboard does not come back
+      // then. Focusing the chip instead would ring it after a touch.
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && (active.isContentEditable || active.matches("input, textarea, select"))) {
+        active.blur();
+      }
+      openMenu(handleKey);
+    };
+    // Only the pointer that started the press ends it, as only its moves
+    // cancel it: a second finger lifting does not.
+    const release = (event: PointerEvent<HTMLButtonElement>) => {
+      if (event.pointerId === origin.current?.pointerId) clear();
+    };
+    return {
+      onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
+        // Every new press starts clean: when the click that ends a long-press
+        // never reaches the chip (the menu has taken focus, or Android sends
+        // none), the next mouse, pen or touch activation must still go through.
+        fired.current = false;
+        if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+        event.stopPropagation();
+        clear();
+        const chip = event.currentTarget;
+        origin.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+        timer.current = window.setTimeout(() => fire(chip), 420);
+      },
+      onPointerMove: (event: PointerEvent<HTMLButtonElement>) => {
+        const start = origin.current;
+        if (!start || event.pointerId !== start.pointerId) return;
+        const dx = event.clientX - start.x;
+        const dy = event.clientY - start.y;
+        if (dx * dx + dy * dy > 64) clear();
+      },
+      onPointerUp: release,
+      onPointerCancel: release,
+      // Enter or Space after a long-press: the same.
+      onKeyDown: () => {
+        fired.current = false;
+      },
+      onContextMenu: (event: MouseEvent<HTMLButtonElement>) => {
+        if (!origin.current && !fired.current) return; // a mouse right-click keeps the message menu
+        event.preventDefault();
+        event.stopPropagation();
+        if (!fired.current) fire(event.currentTarget);
+      },
+      onClickCapture: (event: MouseEvent<HTMLButtonElement>) => {
+        if (!fired.current) return;
+        fired.current = false;
+        event.preventDefault();
+        event.stopPropagation();
+      },
+    };
+  }, [clear, openMenu]);
+  return { chipProps, menuClosed };
+}
+
+function stopContextMenu(event: MouseEvent<HTMLElement>) {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
 export function MultiAgentPlanEntry({
   details,
   planMessage,
@@ -966,18 +1126,21 @@ export function MultiAgentPlanEntry({
   const [expandedFullEvidenceRows, setExpandedFullEvidenceRows] = useState<Set<string>>(() => new Set());
   const [cancelGroupPending, setCancelGroupPending] = useState(false);
   const [groupSnapshot, setGroupSnapshot] = useState<{ key: string; value: ControllerPlanGroupStatus } | null>(null);
+  const [openMenuHandle, setOpenMenuHandle] = useState<string | null>(null);
+  const laneLongPress = useLaneLongPress(setOpenMenuHandle);
   const planMetadata = planMessage ? extractMultiAgentPlanMeta(planMessage) : null;
   const planRefused = stringField(planMetadata?.status) === "refused";
   const declaredGroupId = stringField(planMetadata?.groupId ?? planDetails?.groupId);
+  const leadHandle = plan?.leadHandle ?? "";
   const liveActivity = useMemo(
-    () => collectTeamActivity({ planMessage, conversationMessages, runs, declaredGroupId, snapshot: null }),
-    [conversationMessages, planMessage, runs, declaredGroupId],
+    () => collectTeamActivity({ planMessage, conversationMessages, runs, declaredGroupId, leadHandle, snapshot: null }),
+    [conversationMessages, planMessage, runs, declaredGroupId, leadHandle],
   );
   const groupId = liveActivity.groupId;
   const scopedSnapshot = groupSnapshot?.key === `${scopeKey}:${groupId}` ? groupSnapshot.value : null;
   const teamActivity = useMemo(() => scopedSnapshot
-    ? collectTeamActivity({ planMessage, conversationMessages, runs, declaredGroupId, snapshot: scopedSnapshot })
-    : liveActivity, [planMessage, conversationMessages, runs, declaredGroupId, scopedSnapshot, liveActivity]);
+    ? collectTeamActivity({ planMessage, conversationMessages, runs, declaredGroupId, leadHandle, snapshot: scopedSnapshot })
+    : liveActivity, [planMessage, conversationMessages, runs, declaredGroupId, leadHandle, scopedSnapshot, liveActivity]);
   const missingRuns = !planRefused && (plan?.agents.some(agent => !teamActivity.workerRunHandles.has(normalizeHandleKey(agent.handle || agent.label))) ?? false);
   useEffect(() => {
     if (!scopeKey || !groupId || !missingRuns) return;
@@ -1001,6 +1164,9 @@ export function MultiAgentPlanEntry({
   }
 
   const leadLabel = plan.leadHandle;
+  // The lead wears the face its own rows do, its current profile if it is one
+  // of the viewer's saved agents, as a lane does.
+  const leadFace = withSavedAgentFace(teamActivity.leadFace ?? { handle: leadLabel }, savedAgents);
   const leadStatus = teamActivity.leadActivity?.status ?? "queued";
   const hasActiveWorkers = plan.agents.some((agent) => {
     const handleKey = normalizeHandleKey(agent.handle || agent.label);
@@ -1071,7 +1237,7 @@ export function MultiAgentPlanEntry({
     <div
       data-testid="multi-agent-inline-status"
       data-plan-mode={plan.mode}
-      className="mt-2 flex max-w-full flex-wrap items-center gap-1.5 text-xs"
+      className="mt-2 flex max-w-full flex-wrap items-center gap-1.5 text-xs pointer-coarse:mt-3 pointer-coarse:gap-y-3"
       aria-label={[teamStatusSummary, teamRuntimeSummary?.label].filter(Boolean).join("; ")}
     >
       {teamRuntimeSummary ? (
@@ -1079,17 +1245,17 @@ export function MultiAgentPlanEntry({
           <Button
             type="button"
             variant="ghost"
+            tone="muted"
             size="xs"
-            radius="full"
-            className="inline-flex min-w-0 items-center gap-1 rounded-full bg-slate-50 px-2 py-1 font-medium text-slate-500 ring-1 ring-inset ring-slate-200 transition hover:bg-white hover:ring-slate-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:bg-slate-900/60 dark:text-slate-300 dark:ring-slate-700 dark:hover:bg-slate-900/80 dark:hover:ring-slate-500"
+            radius="lg"
+            // While its menu is open React Aria keeps it pressed, so it shows
+            // Button's pressed fill then, as every menu button does.
+            className={`min-w-0 !gap-1.5 pl-0.5 pr-1.5 text-slate-600 focus-visible:!outline-hidden focus-visible:!ring-primary-500 dark:focus-visible:!ring-offset-[var(--color-studio-dark-panel)] ${PLAN_ROW_TOUCH_TARGET_CLASS}`}
             title={teamRuntimeSummary.title}
             aria-label={`Workstreams; ${teamStatusSummary}; ${teamRuntimeSummary.label}`}
             data-testid="multi-agent-team-chip"
           >
-            <GitBranch
-              aria-hidden="true"
-              className="h-3.5 w-3.5 flex-none -scale-x-100 text-primary-600 dark:text-primary-300"
-            />
+            <GitBranch aria-hidden="true" className="h-3.5 w-3.5 flex-none -scale-x-100" />
             <span>Workstreams</span>
           </Button>
           <StudioPopover placement="bottom start" offset={6} className="w-72 p-1.5">
@@ -1120,14 +1286,11 @@ export function MultiAgentPlanEntry({
         </MenuTrigger>
       ) : (
         <span
-          className="inline-flex min-w-0 items-center gap-1 rounded-full bg-slate-50 px-2 py-1 font-medium text-slate-500 ring-1 ring-inset ring-slate-200 dark:bg-slate-900/60 dark:text-slate-300 dark:ring-slate-700"
+          className="inline-flex min-w-0 items-center gap-1.5 py-1 pl-0.5 pr-1.5 font-medium text-slate-600 dark:text-slate-400"
           title={teamStatusSummary}
           data-testid="multi-agent-team-chip"
         >
-          <GitBranch
-            aria-hidden="true"
-            className="h-3.5 w-3.5 flex-none -scale-x-100 text-primary-600 dark:text-primary-300"
-          />
+          <GitBranch aria-hidden="true" className="h-3.5 w-3.5 flex-none -scale-x-100" />
           <span>Workstreams</span>
         </span>
       )}
@@ -1172,10 +1335,17 @@ export function MultiAgentPlanEntry({
               className="group/agent-chip relative inline-flex min-w-0 max-w-full items-center"
               data-agent-write-mode={agent.writeMode}
               data-testid="multi-agent-chip-shell"
+              // While the lane's menu is open, a contextmenu on it (a
+              // right-click, or Android's long-press one where it outlasts the
+              // 420ms that opened the menu and the finger is over the menu)
+              // bubbles from that portal through here, and here it stops: it
+              // must not reach the bubble and open the message's menu over the
+              // lane's.
+              onContextMenu={openMenuHandle === handleKey ? stopContextMenu : undefined}
             >
               <button
                 type="button"
-                className={`inline-flex min-w-0 max-w-full items-center gap-1 rounded-full px-2 py-0.5 font-medium ring-1 ring-inset transition ${statusChipClassName(status, isInteractive)}`}
+                className={`${PLAN_CHIP_CLASS} ${statusChipClassName(status, isInteractive)}`}
                 onClick={() => {
                   if (canOpenRunTrace && activity?.jobId) {
                     onOpenWorkerRunTrace?.({
@@ -1188,30 +1358,41 @@ export function MultiAgentPlanEntry({
                     toggleEvidence(handleKey);
                   }
                 }}
+                {...laneLongPress.chipProps(handleKey)}
                 disabled={!isInteractive}
                 aria-expanded={canOpenRunTrace || !canShowEvidence ? undefined : isExpanded}
                 aria-label={actionLabel}
-                title={[taskIdentity, agent.scopeSummary, leaseMetricsLabel?.title].filter(Boolean).join("\n")}
+                title={[`${taskIdentity} · ${statusLabel(status)}`, agent.scopeSummary, leaseMetricsLabel?.title].filter(Boolean).join("\n")}
                 data-testid="multi-agent-evidence-row"
                 data-agent-handle={agent.handle}
               >
-                <StatusGlyph status={status} />
                 {/* The legend: the lane's face, the one its rows wear where no
                     name is printed (the typing row, branch rows). 20px, so the
-                    chip keeps its height. */}
-                <AiFace identity={face} className="h-5 w-5" testId="multi-agent-chip-face" />
+                    chip keeps its height; the status follows the name, never
+                    beside the face. */}
+                <AiFace identity={face} className="mr-0.5 h-5 w-5" testId="multi-agent-chip-face" />
                 <span className="min-w-0 truncate">{label}</span>
-                {status === "canceled" ? <span>canceled</span> : null}
+                <StatusSlot status={status} reveal />
               </button>
-              <span className="pointer-events-none absolute -right-2 -top-2 z-10 opacity-0 transition group-focus-within/agent-chip:opacity-100 group-hover/agent-chip:opacity-100">
-                <MenuTrigger>
+              <span className="pointer-events-none absolute inset-y-0.5 right-0.5 z-10 flex opacity-0 transition-opacity group-hover/agent-chip:opacity-100 has-[:focus-visible]:opacity-100 has-[[aria-expanded=true]]:opacity-100">
+                <MenuTrigger
+                  isOpen={openMenuHandle === handleKey}
+                  onOpenChange={(open) => {
+                    setOpenMenuHandle(open ? handleKey : null);
+                    if (!open) laneLongPress.menuClosed();
+                  }}
+                >
                   <IconButton
                     variant="ghost"
-                    radius="full"
+                    tone="neutral"
+                    radius="md"
                     size="xs"
                     aria-label={`More actions for ${label}`}
                     title={`More actions for ${label}`}
-                    className="pointer-events-auto h-5 w-5 flex-none bg-white/95 text-slate-400 shadow-sm ring-1 ring-slate-200 hover:text-slate-700 dark:bg-slate-950/95 dark:text-slate-500 dark:ring-slate-700 dark:hover:text-slate-200"
+                    // While its menu is open React Aria keeps the "…" pressed,
+                    // so it shows its pressed fill then, as every menu button does.
+                    className="pointer-events-none relative !h-5 !w-5 flex-none pointer-coarse:!min-h-0 pointer-coarse:!min-w-0 after:absolute after:-inset-0.5 group-hover/agent-chip:pointer-events-auto hover:!bg-slate-300/60 data-[hovered]:!bg-slate-300/60 data-[pressed]:!bg-slate-300 dark:hover:!bg-white/10 dark:data-[hovered]:!bg-white/10 dark:data-[pressed]:!bg-white/15 focus-visible:!outline-hidden focus-visible:!ring-primary-500 focus-visible:!ring-offset-0"
+                    data-chip-menu=""
                     data-testid="multi-agent-chip-menu-button"
                   >
                     <MoreHoriz aria-hidden="true" className="h-3.5 w-3.5" />
@@ -1291,7 +1472,7 @@ export function MultiAgentPlanEntry({
                     {hasMoreEvidence ? (
                       <button
                         type="button"
-                        className="ml-1 inline-flex items-center text-xxs font-medium text-primary-700 hover:text-primary-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:text-primary-200 dark:hover:text-primary-100"
+                        className="ml-1 inline-flex items-center text-xxs font-medium text-primary-700 hover:text-primary-900 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-primary-200 dark:hover:text-primary-100"
                         onClick={() => {
                           setExpandedFullEvidenceRows((current) => {
                             const next = new Set(current);
@@ -1319,21 +1500,24 @@ export function MultiAgentPlanEntry({
       })}
       {leadLabel ? (
         <span
-          className={`inline-flex min-w-0 max-w-full cursor-default items-center gap-1 rounded-full px-2 py-1 font-medium ring-1 ring-inset ${statusChipClassName(leadStatus, false)}`}
+          role="group"
+          className={`${PLAN_CHIP_CLASS} ${statusChipClassName(leadStatus, false)}`}
           aria-label={`Lead ${leadLabel}; status ${statusLabel(leadStatus)}`}
           data-testid="multi-agent-lead-status"
         >
-          <StatusGlyph status={leadStatus} />
+          <AiFace identity={leadFace} className="mr-0.5 h-5 w-5" testId="multi-agent-lead-face" />
           <span className="min-w-0 truncate">{leadLabel}</span>
+          <StatusSlot status={leadStatus} />
         </span>
       ) : null}
       {showCancelGroup ? (
         <Button
           type="button"
           variant="ghost"
+          tone="muted"
           size="xs"
-          radius="full"
-          className="inline-flex min-w-0 items-center gap-1 rounded-full bg-slate-50 px-2 py-1 font-medium text-slate-500 ring-1 ring-inset ring-slate-200 transition hover:bg-white hover:text-rose-600 hover:ring-rose-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:bg-slate-900/60 dark:text-slate-300 dark:ring-slate-700 dark:hover:bg-slate-900/80 dark:hover:text-rose-300 dark:hover:ring-rose-400/40"
+          radius="lg"
+          className={`min-w-0 pl-1 pr-1.5 text-slate-600 data-[hovered]:!text-rose-700 dark:data-[hovered]:!text-rose-300 focus-visible:!outline-hidden focus-visible:!ring-primary-500 dark:focus-visible:!ring-offset-[var(--color-studio-dark-panel)] ${PLAN_ROW_TOUCH_TARGET_CLASS}`}
           onPress={handleCancelGroup}
           isDisabled={cancelGroupPending}
           title="Cancel remaining workstream jobs in this group"

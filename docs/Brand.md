@@ -209,11 +209,27 @@ is printed: the 20px thread stack, the conversation roster, a phone's header.
 - **What hugs a face follows it:** an AI's speaker pill and a Machines agent
   chip round their corners to the tile's, the tile's corner plus the gap
   beside it (12px beside the speaker pill's 28 and 32px faces, 9.2px around
-  the chip's 24px face), instead of a person's stadium. A button that wraps an
-  AI face alone, the transcript gutter's and a bot's picture button included,
-  takes the tile's own corners (`Button` `radius="aiTile"`,
-  `IdentityPhotoButton` `shape="aiTile"`), so its hover fill and focus ring
-  never show past them; it is never a person's circle.
+  the chip's 24px face, 8px around a plan chip's 20px face), instead of a
+  person's stadium. A button that wraps an AI face alone, the transcript
+  gutter's and a bot's picture button included, takes the tile's own corners
+  (`Button` `radius="aiTile"`, `IdentityPhotoButton` `shape="aiTile"`), so its
+  hover fill and focus ring never show past them; it is never a person's
+  circle.
+- **A plan's helper chips** (the row under a plan, `MultiAgentPlanEntry`) are
+  the Machines agent chip at the 20px face: one grey fill (`bg-slate-100`,
+  `bg-white/[0.07]` in dark; a finished helper's lighter, `bg-slate-50` and
+  `bg-white/[0.05]`) with no ring or border, 2px of chip around the tile, so
+  its corners are the tile's 6px plus the 2px gap (`rounded-lg`). The tile's
+  own hairline and shadow stay the only edge inside the chip. Status is one
+  glyph after the name, never beside the face and never a tint on the chip:
+  grey unless the person must act (amber) or something failed (rose). Failed
+  is the one solid glyph: to many colour-blind eyes that rose and amber are
+  one olive, so weight, not hue, tells them apart. The lead wears its own
+  face too: Octo's tile when Octo leads, the boldest face in the row. The
+  row's controls that hold no face (Workstreams, Cancel group) are quiet ghost
+  buttons with the same 8px corners, and they keep that 24px look on touch:
+  their 44px touch targets reach into the row's gaps, which open to 12px
+  there, never over another chip.
 - **Stacks:** where faces overlap, the 1px separator is a ring on each face,
   so it follows each face's own shape (see
   [Every face's edge](#every-faces-edge)).

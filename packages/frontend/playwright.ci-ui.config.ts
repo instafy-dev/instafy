@@ -48,6 +48,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "notification-preferences.spec.ts",
   "octo-hatchling.spec.ts",
   "organization-rail-reorder.spec.ts",
+  "plan-chips.spec.ts",
   "preview-card-responsive.spec.ts",
   "run-failure-block.spec.ts",
   "run-stop-control.spec.ts",
