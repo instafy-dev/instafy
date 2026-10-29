@@ -592,8 +592,14 @@ export function AgentJobThreadPreviewLayout({
       return <ActionRequestOrPreviewEntry message={card} details={cardDetails} projectId={projectId ?? null} />;
     }
     const content = card.content.trim();
+    // Give the card's clip 4px of room for an outside focus ring (the plan
+    // chips'): -ml-1 and -my-1 cancel p-1 on the left, top and bottom, and the
+    // max-width grows by the 4px taken on the left. Not on the right, where
+    // the bubble clips x flush with its edge: there the card ends 4px inside
+    // it. On touch the clip reaches 10px under the last line (the card grows
+    // by 6px), so Workstreams' and Cancel group's 44px targets stay whole.
     return (
-      <div className="min-w-0 max-w-full overflow-hidden">
+      <div className="-ml-1 -my-1 min-w-0 max-w-[calc(100%+0.25rem)] overflow-hidden p-1 pointer-coarse:pb-2.5">
         {content ? <MessageContent content={content} projectId={projectId ?? null} /> : null}
         <MultiAgentPlanEntry details={cardDetails} planMessage={card} />
       </div>

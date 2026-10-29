@@ -2038,6 +2038,139 @@ describe("ConversationMessageRows", () => {
     );
   });
 
+  describe("a touch long-press in a plan message", () => {
+    // A one-lane plan in the real message bubble, whose own touch long-press
+    // opens the message's actions.
+    const onRequestActionsAtPoint = vi.fn();
+    const onMessageContextMenu = vi.fn();
+    const lane = () => container.querySelector<HTMLButtonElement>('[data-testid="multi-agent-evidence-row"]')!;
+    const text = () => findTextNode(container, "I'm splitting this into workstreams.").parentElement!;
+    const pointer = (target: Element, type: string, pointerType = "touch", pointerId = 3) => {
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: 30, clientY: 20 });
+      Object.defineProperties(event, { pointerType: { value: pointerType }, pointerId: { value: pointerId } });
+      return target.dispatchEvent(event);
+    };
+    const hold = async (target: Element) => {
+      await act(async () => {
+        pointer(target, "pointerdown");
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(600);
+      });
+    };
+    const tap = (target: HTMLElement, pointerType = "touch") =>
+      act(async () => {
+        pointer(target, "pointerdown", pointerType, 5);
+        pointer(target, "pointerup", pointerType, 5);
+        target.click();
+      });
+
+    beforeEach(async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      onRequestActionsAtPoint.mockReset();
+      onMessageContextMenu.mockReset();
+      const planMessage = createMessage({
+        id: "plan-message",
+        content: "I'm splitting this into workstreams.",
+        messageType: "multi_agent_plan",
+        metadata: {
+          messageType: "multi_agent_plan",
+          jobId: "plan-job-1",
+          details: {
+            mode: "read_only",
+            agents: [{ handle: "runtime", label: "Runtime/tool boundaries", writeScope: { mode: "read_only" } }],
+            lead: { leadHandle: "octo", expectedReportFormat: "Final report." },
+          },
+        },
+      });
+      const workerMessage = createMessage({
+        id: "worker-message",
+        content: "Worker evidence.",
+        metadata: {
+          jobId: "worker-job-1",
+          agent: { handle: "runtime" },
+          outcome: "succeeded",
+          multiAgentPlan: { role: "worker", parentJobId: "plan-job-1", groupId: "group-1" },
+        },
+      });
+      await act(async () => {
+        root.render(
+          <ConversationMessageRows
+            messages={[planMessage]}
+            allConversationMessages={[planMessage, workerMessage]}
+            currentUserId={null}
+            chatClientSessionId="session-1"
+            projectId="project-1"
+            runtimeId={null}
+            conversationLocalId="conversation-local"
+            conversationControllerId="conversation-controller"
+            firstPlanMessageId={null}
+            humanLabelByUserId={new Map()}
+            runAgentIdentityByRunId={new Map()}
+            runAgentHandleByRunId={new Map()}
+            renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+            assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+            onRequestActions={vi.fn()}
+            onRequestActionsAtPoint={onRequestActionsAtPoint}
+            onCancelTerminalCommand={null}
+            onMessageContextMenu={onMessageContextMenu}
+          />,
+        );
+      });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("opens a plan lane's menu on a touch long-press without the message's own actions or the lane's run trace", async () => {
+      // Touch has no hover, so a lane's "…" never shows there; the long-press
+      // that opens a message's actions opens the lane's menu instead.
+      await hold(lane());
+      const menu = document.body.querySelector('[data-testid="multi-agent-chip-menu"]');
+      expect(menu?.textContent).toContain("Copy reference");
+      expect(onRequestActionsAtPoint).not.toHaveBeenCalled();
+      // Nor does Android's long-press contextmenu open the message's menu,
+      // whether it lands on the chip or, once the menu is open, on the menu
+      // (as a right-click there does too).
+      for (const target of [lane(), menu!.querySelector('[role="menuitem"]')!, menu!]) {
+        expect(target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))).toBe(false);
+      }
+      expect(onMessageContextMenu).not.toHaveBeenCalled();
+      // Nor the click that ends the gesture the run trace.
+      await act(async () => {
+        pointer(lane(), "pointerup");
+        lane().click();
+      });
+      expect(workspaceTabsMocks.openJobThreadTab).not.toHaveBeenCalled();
+
+      // Anywhere else in the message, the long-press still opens its actions.
+      await hold(text());
+      expect(onRequestActionsAtPoint).toHaveBeenCalledExactlyOnceWith("plan-message", 30, 20);
+    });
+
+    it("lets the next tap or click on a lane through after a long-press on the message", async () => {
+      // The message's menu takes the click that ends its long-press (it lands
+      // on the menu's backdrop, outside the bubble), and Android sends none.
+      // The lane stops its own touch presses, yet the bubble's latch must not
+      // swallow the next one.
+      const opened = { jobId: "worker-job-1", conversationId: "conversation-local", title: "Runtime/tool boundaries run" };
+      await hold(text());
+      await act(async () => {
+        pointer(text(), "pointerup");
+      });
+      expect(onRequestActionsAtPoint).toHaveBeenCalledTimes(1);
+      await tap(lane());
+      expect(workspaceTabsMocks.openJobThreadTab).toHaveBeenCalledExactlyOnceWith(opened);
+
+      await hold(text());
+      await act(async () => {
+        pointer(text(), "pointerup");
+      });
+      await tap(lane(), "mouse");
+      expect(workspaceTabsMocks.openJobThreadTab).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it("summarizes runtime spread on the workstreams chip without adding visible metric badges", async () => {
     const planMessage = createMessage({
       id: "plan-message",

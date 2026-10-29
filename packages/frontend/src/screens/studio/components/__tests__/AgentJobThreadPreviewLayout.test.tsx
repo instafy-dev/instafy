@@ -1975,6 +1975,41 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(bubble?.querySelector('[data-testid="mock-file-change-list"]')).not.toBeNull();
   });
 
+  it("gives a plan card's clip room for its chips' outside focus ring and their touch targets", async () => {
+    // The chips' ring is 2px with a 2px offset, outside the chip. A clip
+    // flush with the row cut it on the row's left edge and last line, so the
+    // card's wrapper pads its clip by 4px and takes the 4px back on the left,
+    // top and bottom (-ml-1, -my-1). Not on the right: the bubble clips x
+    // flush with its right edge (no padding there), so a chip as wide as the
+    // row, or one ending at its right end, lost its ring's right side when
+    // the wrapper reached out there too. On touch the clip also keeps 10px
+    // under the last line for Workstreams' and Cancel group's 44px targets.
+    const card = createMessage({
+      id: "team-plan",
+      messageType: "multi_agent_plan",
+      content: "I'm splitting this into workstreams.",
+      metadata: {
+        messageType: "multi_agent_plan",
+        details: {
+          mode: "read_only",
+          agents: [{ handle: "front", label: "Frontend", writeScope: { mode: "read_only" } }],
+          lead: { leadHandle: "octo", continuationPrompt: "Review sibling outputs." },
+        },
+      },
+    });
+    await act(async () => {
+      root.render(<AgentJobThreadPreviewLayout {...createProps({ cards: [card] })} />);
+    });
+
+    const wrapper = container.querySelector('[data-testid="multi-agent-inline-status"]')?.parentElement;
+    expect(classTokens(wrapper)).toEqual(
+      expect.arrayContaining(["overflow-hidden", "p-1", "-ml-1", "-my-1", "max-w-[calc(100%+0.25rem)]", "pointer-coarse:pb-2.5"]),
+    );
+    for (const outward of ["max-w-full", "-m-1", "-mx-1", "-mr-1"]) {
+      expect(classTokens(wrapper)).not.toContain(outward);
+    }
+  });
+
   it("hides stale or completed reasoning-only run chrome with no useful summary", async () => {
     await act(async () => {
       root.render(
