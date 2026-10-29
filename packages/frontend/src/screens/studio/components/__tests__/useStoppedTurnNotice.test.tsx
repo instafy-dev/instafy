@@ -44,7 +44,8 @@ const STOPPED_COPY = "Octo was stopped before finishing. It picks up again when 
 const KEPT_IN_HISTORY = "Any unsaved changes are kept under History, in Unsaved work.";
 /** The stop's flush pushed everything it kept, so History lists it. */
 const SAVED_FLUSH = { status: "flushed", unpushedRefs: 0, error: null };
-const THINKING_LABEL = "Running sleep 120";
+/** What the typing status says before the turn's first step. */
+const THINKING_LABEL = "Starting…";
 /** What the typing status says while a send waits on the team's one machine. */
 const LIMIT_COPY =
   'Your cloud runtime is busy in "Space B". Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.';
@@ -289,9 +290,9 @@ function Harness({
         hasMultipleTypingAgents={false}
         typingAgentHandle="octo"
         typingAgentAvatarSeed="octo"
-        typingIndicatorState={limitWait ? { phase: "waiting", label: null } : { phase: "thinking", label: THINKING_LABEL }}
-        typingStatusLabel={limitWait?.label ?? "Thinking…"}
-        typingStatusAriaLabel={limitWait?.ariaLabel ?? "Octo is thinking"}
+        typingIndicatorState={limitWait ? { phase: "waiting", label: null } : { phase: "thinking", label: null }}
+        typingStatusLabel={limitWait?.label ?? THINKING_LABEL}
+        typingStatusAriaLabel={limitWait?.ariaLabel ?? "Octo is starting"}
         // As ChatPanel passes it: the runtime-busy notice is the label that wraps.
         typingStatusWraps={limitWait?.isRuntimeBusyNotice === true}
         suppressAssistantStatus={stoppedTurnNotice !== null}

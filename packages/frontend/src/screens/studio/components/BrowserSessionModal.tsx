@@ -59,7 +59,8 @@ import { collaborationSelfOwnsControl } from "./sharedBrowserCollaboration";
 import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
 import { useSustainedFlag } from "./useSustainedFlag";
 import { BrowserIdentityBadge } from "./BrowserIdentityBadge";
-import { BrowserSessionRecovery, BrowserSessionReconnecting } from "./BrowserSessionRecovery";
+import { BrowserSessionArrival, BrowserSessionRecovery, BrowserSessionReconnecting } from "./BrowserSessionRecovery";
+import { browserArrivalNote, type BrowserTurnArrival } from "./browserTurnArrival";
 import {
   BROWSER_LIVE_STAGE_CLASS,
   shouldForceDockedBrowserFullscreen,
@@ -486,6 +487,7 @@ export function BrowserSessionModal({
   spaceBusy = false,
   runApproval = null,
   conversationId = null,
+  agentArrival = null,
 }: {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
@@ -581,6 +583,11 @@ export function BrowserSessionModal({
    * never shows in another.
    */
   conversationId?: string | null;
+  /**
+   * A browser turn of this chat on its way, with the site its card named:
+   * over a blank tab the stage says where Octo is going until its first page.
+   */
+  agentArrival?: BrowserTurnArrival | null;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -3219,7 +3226,11 @@ export function BrowserSessionModal({
   const agentPage = effectiveAgentControlOwner
     ? agentReadingPages.find((page) => page.id === sharedBrowserPageId) ?? agentReadingPages[0] ?? null
     : null;
-  const agentWhereabouts = effectiveAgentControlOwner && viewLive && !agentPictureShown
+  // Over a blank tab a turn of this chat is on its way to: where Octo is going.
+  const agentArrivalNote = viewLive
+    ? browserArrivalNote(agentArrival, sharedBrowserActivePage, effectiveAgentControlOwner?.displayName ?? "Octo")
+    : null;
+  const agentWhereabouts = effectiveAgentControlOwner && viewLive && !agentPictureShown && !agentArrivalNote
     ? agentPage
       ? `${effectiveAgentControlOwner.displayName} is on ${browserReadingHost(agentPage)}`
       : `${effectiveAgentControlOwner.displayName} is using the browser`
@@ -3579,6 +3590,7 @@ export function BrowserSessionModal({
           data-shared-browser-viewer={activeSharedBrowserViewerKind ?? "unsupported"}
           data-human-input-enabled={humanInputEnabled ? "true" : "false"}
         >
+          {!shouldCollapseDocked && agentArrivalNote ? <BrowserSessionArrival note={agentArrivalNote} /> : null}
           {!shouldCollapseDocked && agentWhereabouts ? (
             <div
               className="absolute inset-0 flex items-center justify-center p-4 text-center"

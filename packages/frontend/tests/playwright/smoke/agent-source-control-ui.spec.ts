@@ -160,14 +160,15 @@ test.describe("Agent + Source Control UI (opt-in)", () => {
 
     const card = page.getByTestId("chat-file-change-summary").last();
     const revert = card.getByTestId("chat-file-change-revert");
-    // A stack that is not stateless shows no Revert, so this fails rather than skips.
+    // A stack that is not stateless shows no saved-version Undo, so this fails rather than skips.
     await expect(revert).toBeVisible({ timeout: 60_000 });
-    await expect(revert).toHaveText("Revert this change");
-    await expect(card.getByTestId("chat-file-change-undo")).toBeVisible();
+    await expect(revert).toHaveText("Undo");
+    // One Undo: no second one that asks the agent beside it.
+    await expect(card.getByTestId("chat-file-change-undo")).toHaveCount(0);
 
     await revert.click();
     const dialog = page.getByTestId("chat-file-change-revert-dialog");
-    await expect(dialog).toContainText("Revert this change?");
+    await expect(dialog).toContainText("Undo this change?");
     // The dialog checks which files the saved version holds before it
     // offers Revert; the agent's version holds only this file.
     await expect(dialog).toHaveAttribute("data-state", "ready", { timeout: 30_000 });

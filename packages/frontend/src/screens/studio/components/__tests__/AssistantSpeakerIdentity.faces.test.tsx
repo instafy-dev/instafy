@@ -8,21 +8,14 @@ import {
   classTokens,
   expectAiTile,
   expectCanonicalOctoCoin,
-  expectPersonCircle,
 } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import { AssistantAvatarPopover } from "../AssistantAvatarPopover";
-import {
-  AssistantSpeakerIdentityLabel,
-  AssistantSpeakerIdentityPill,
-} from "../AssistantSpeakerIdentityPill";
-import { HumanSpeakerIdentityPill } from "../chatHumanIdentity";
+import { AssistantSpeakerIdentityLabel } from "../AssistantSpeakerIdentityPill";
 
 // One rule for faces (docs/Brand.md): the speaker identity draws an AI as its
-// rounded-square tile, so everything that hugs the face (the sticky pill's
-// corners, the profile button's focus ring) follows the tile, and the face's
-// accessible name says it is an AI. A person's pill stays a stadium around a
-// round face.
+// rounded-square tile, so everything that hugs the face (the profile button's
+// focus ring) follows the tile, and the face's accessible name says it is an AI.
 describe("assistant speaker identity faces", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -70,26 +63,5 @@ describe("assistant speaker identity faces", () => {
     const face = button?.querySelector('[data-testid="chat-avatar-assistant"]');
     expectAiTile(face);
     expect(face?.querySelector("img")?.getAttribute("src")).toBe("https://images.example/pia.png");
-  });
-
-  it("rounds an AI's sticky pill to the tile and keeps a person's pill a stadium", async () => {
-    await act(async () => root.render(
-      <>
-        <AssistantSpeakerIdentityPill handle="reviewer" />
-        <HumanSpeakerIdentityPill avatarSeed="person-id" label="Alex Person" />
-      </>,
-    ));
-    const aiPill = container.querySelector('[data-agent-handle="reviewer"]');
-    expect(classTokens(aiPill)).toContain("rounded-xl");
-    expect(classTokens(aiPill)).not.toContain("rounded-full");
-    expectAiTile(aiPill?.querySelector('[data-testid="chat-avatar-assistant"]'));
-
-    const personPill = container.querySelector('[data-testid="chat-human-speaker-pill"]');
-    expect(classTokens(personPill)).toContain("rounded-full");
-    expect(classTokens(personPill)).not.toContain("rounded-xl");
-    expectPersonCircle(personPill?.querySelector('[data-testid="chat-avatar-human"]'));
-    // Both pills keep the same shared geometry (border, padding, the 3px pull).
-    const shared = (pill: Element | null) => classTokens(pill).filter((token) => !token.startsWith("rounded-") && !token.startsWith("dark:"));
-    expect(shared(aiPill)).toEqual(shared(personPill));
   });
 });

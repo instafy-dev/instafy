@@ -774,6 +774,10 @@ impl<'a> Matcher<'a> {
                 return;
             }
         }
+        // A command asked for its own help only prints how to use it: plumbing, as `cat` is.
+        if words.iter().any(|word| word.exact() == Some("--help")) {
+            return;
+        }
         let label = self
             .pack_label(words)
             .or_else(|| Self::instafy_label(words))
@@ -1334,6 +1338,31 @@ mod tests {
         ] {
             assert_eq!(label(&[], script), None, "{script}");
         }
+    }
+
+    // A local test: Details read "Read a source" for `uw cite --help` and
+    // "Tried working on the map" for `uw research --help`.
+    #[test]
+    fn a_help_run_is_plumbing() {
+        let root = tempfile::tempdir().expect("tmp");
+        let packs = map_packs(root.path());
+        for script in [
+            "uw cite --help",
+            "uw research --help",
+            "uw --help",
+            "instafy preview open --help",
+            "pnpm install --help",
+        ] {
+            assert_eq!(label(&packs, script), None, "{script}");
+        }
+        // Only that command: the next one in the chain is labelled as usual.
+        let chain = label(
+            &packs,
+            "uw cite --help && uw cite https://a.example/ --grep hours",
+        )
+        .unwrap();
+        assert_eq!(chain["key"], json!("pack/interactive-map/uw/cite"));
+        assert_eq!(chain["count"], json!(1));
     }
 
     #[test]

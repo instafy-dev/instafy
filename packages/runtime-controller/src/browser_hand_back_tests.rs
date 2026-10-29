@@ -357,6 +357,85 @@ async fn with_chain(
     Ok(())
 }
 
+/// A turn's reply carries the turn's steps, so Studio words its done line
+/// from all of them after a reload too (a page of history can start in the
+/// middle of a long turn): each step once, with its checked label, and never
+/// its command or output.
+#[tokio::test]
+async fn a_turns_reply_carries_its_steps_for_the_done_line() -> anyhow::Result<()> {
+    with_chain("turn-steps-with-reply", |chain| {
+        Box::pin(async move {
+            let turn = chain
+                .send(&chain.owner, "Plan a day on the coast.", json!({}))
+                .await
+                .map_err(|error| controller_error("turn", error))?;
+            let job = chain.job_of(&turn).await?;
+            let add_point = json!({
+                "v": 1, "key": "pack/interactive-map/uw/add-point", "role": "content",
+                "live": "Looking up places",
+                "done": { "one": "looked up a place", "other": "looked up {n} places", "some": "looked up places" },
+                "count": 1, "also": []
+            });
+            for (item, status) in [("1", "in_progress"), ("1", "completed"), ("2", "completed")] {
+                chain
+                    .post(
+                        &job,
+                        "uw add-point 'Belém Tower' # http://172.19.0.3:4173/",
+                        "command_execution",
+                        json!({ "itemId": item, "status": status, "exitCode": 0, "activity": add_point }),
+                    )
+                    .await?;
+            }
+            // A step a person recorded under the turn's job (the record route keeps
+            // its author) is no step of the turn's runtime: it stays out.
+            chain
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "insert into conversation_messages
+                         (id, conversation_id, project_id, role, content, metadata, created_by)
+                     values ($1, $2, $3, 'assistant', 'rm -rf /', $4::jsonb, $5)",
+                    &[
+                        &Uuid::new_v4(),
+                        &chain.conversation_id,
+                        &chain.project_id,
+                        &PgJson(json!({
+                            "source": "agent", "jobId": job.to_string(),
+                            "messageType": "command_execution",
+                            "details": { "itemId": "recorded", "status": "completed", "exitCode": 0 }
+                        })),
+                        &chain.owner,
+                    ],
+                )
+                .await?;
+            chain.finish(&job, Some("Here is your day."), "succeeded").await?;
+            let connection = chain.pool.get().await?;
+            let reply: PgJson<serde_json::Value> = connection
+                .query_one(
+                    "select metadata from conversation_messages
+                      where conversation_id = $1 and content = 'Here is your day.'",
+                    &[&chain.conversation_id],
+                )
+                .await?
+                .get(0);
+            let record = &reply.0[crate::chat_activity::TURN_STEPS_KEY];
+            assert_eq!(record["v"], json!(1), "{}", reply.0);
+            assert_eq!(record["activities"].as_array().map(Vec::len), Some(1));
+            assert_eq!(
+                record["steps"],
+                json!([
+                    { "type": "command_execution", "status": "completed", "exitCode": 0, "activity": 0 },
+                    { "type": "command_execution", "status": "completed", "exitCode": 0, "activity": 0 },
+                ])
+            );
+            assert!(!record.to_string().contains("172.19"));
+            Ok(())
+        })
+    })
+    .await
+}
+
 /// Card, browser turn, building turn: the hand-back carries the browser
 /// turn's reply as a checked record with labelled findings, once, and only
 /// for the person whose browser turn it was.

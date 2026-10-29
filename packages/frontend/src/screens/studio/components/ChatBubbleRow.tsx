@@ -181,20 +181,12 @@ export function ChatBubbleRow({
             />
           ) : null}
           {speakerIdentity ? (
-            <div
-              className="mb-1.5 flex w-fit max-w-full data-[chat-speaker-covered=true]:invisible"
-              data-chat-speaker-inline="true"
-              data-testid="chat-speaker-inline"
-            >
+            <div className="mb-1.5 flex w-fit max-w-full" data-testid="chat-speaker-inline">
               {speakerIdentity}
             </div>
           ) : null}
           {narrowSpeakerIdentity ? (
-            <div
-              className="mb-1.5 flex w-fit max-w-full sm:hidden data-[chat-speaker-covered=true]:invisible"
-              data-chat-speaker-inline="true"
-              data-testid="chat-speaker-inline"
-            >
+            <div className="mb-1.5 flex w-fit max-w-full sm:hidden" data-testid="chat-speaker-inline">
               {narrowSpeakerIdentity}
             </div>
           ) : null}

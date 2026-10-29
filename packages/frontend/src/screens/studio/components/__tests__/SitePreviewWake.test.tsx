@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControllerApiError } from "../../../../services/runtimeController/core";
 import type { ControllerSitePreview } from "../../../../services/runtimeController/previews";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../../workspace/ConversationPreviewContext";
-import { SitePreviewCard } from "../SitePreviewCard";
+import { SITE_PREVIEW_PAGE_WAIT_MS, SitePreviewCard, shareSitePreviewPageShown } from "../SitePreviewCard";
 import { SitePreviewPane } from "../SitePreviewPane";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
@@ -106,8 +106,26 @@ describe("the card wakes a stopped site on Open", () => {
     expect(opener.openPreview).not.toHaveBeenCalled();
     await advance(2_000); // answers
     expect(opener.openPreview).toHaveBeenCalledExactlyOnceWith({ previewId: PREVIEW_ID, title: "Site preview" });
+    // A local test: the restarted site's pane stayed blank for 16 to 26 s
+    // while its card already read as live. Until the pane shows the page, the
+    // card still says it is starting.
+    expect(text("[data-testid=preview-ready-status]")).toBe("Starting…");
+    await advance(10_000);
+    expect(text("[data-testid=preview-ready-status]")).toBe("Starting…");
+    await act(async () => shareSitePreviewPageShown(PREVIEW_ID));
     // Live is the normal state: nothing is said.
     expect(container.querySelector<HTMLElement>("[data-testid=preview-ready-status]")!.dataset.state).toBe("live");
+    expect(text("[data-testid=preview-ready-status]")).toBe("");
+  });
+
+  it("stops saying Starting once the wait for the page runs out, even with no pane", async () => {
+    mocks.getSitePreview.mockResolvedValueOnce(stopped()).mockResolvedValue(record());
+    mocks.wakeSitePreview.mockResolvedValue({ state: "live" });
+    await render();
+    await press("[data-testid=preview-ready-open]");
+    expect(opener.openPreview).toHaveBeenCalledOnce();
+    expect(text("[data-testid=preview-ready-status]")).toBe("Starting…");
+    await advance(SITE_PREVIEW_PAGE_WAIT_MS);
     expect(text("[data-testid=preview-ready-status]")).toBe("");
   });
 
@@ -233,6 +251,9 @@ describe("the card wakes a stopped site on Open", () => {
     expect(opener.openPreview).not.toHaveBeenCalled();
     await advance(2_000);
     expect(opener.openPreview).toHaveBeenCalledExactlyOnceWith({ previewId: PREVIEW_ID, title: "Site preview" });
+    // Starting until the pane it opened shows the page.
+    expect(text("[data-testid=preview-ready-status]")).toBe("Starting…");
+    await act(async () => shareSitePreviewPageShown(PREVIEW_ID));
     expect(text("[data-testid=preview-ready-status]")).toBe("");
   });
 });

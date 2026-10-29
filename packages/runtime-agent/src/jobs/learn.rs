@@ -98,6 +98,8 @@ const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
 const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before it said how replies speak (no ports, process ids, paths, tool names or error codes).
     include_str!("legacy/agents-doc-v1.md"),
+    // From before it said to tell what was done, not what the tools saw ("The browser was blank, so…").
+    include_str!("legacy/agents-doc-v2.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2047,6 +2049,29 @@ mod tests {
         fs::write(&path, theirs).unwrap();
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
+    }
+
+    /// A reply says what Octo did, not what its tools saw (29 Oct drive: "The browser was blank,
+    /// so I opened…", "The page check returned no output, so I can't confirm its visual
+    /// rendering"). The copy from before says neither and is upgraded.
+    #[test]
+    fn agents_doc_says_what_was_done_not_what_the_tools_saw() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        for needle in [
+            "Say what you did, not what your tools saw:",
+            "\"I opened the museum's own site\", not \"The browser was blank, so I opened…\"",
+            "\"I couldn't check how the page looks yet\", not \"The page check returned no output…\"",
+        ] {
+            assert!(doc.contains(needle), "{needle}");
+        }
+        let previous = include_str!("legacy/agents-doc-v2.md");
+        assert!(!previous.contains("The browser was blank"));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// A page of options cites each value's page and day, and a stated limit lists a row whose value is unknown

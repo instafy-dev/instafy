@@ -4,6 +4,8 @@ import { isUUID } from "../../../utils/uuid";
 import type { ChatMessage } from "../types";
 
 const LIVE_BOTTOM_THRESHOLD_PX = 24;
+/** How many frames the pill waits on the chat finding its place before it waits on the next render. */
+const PLACE_LOOK_MAX_FRAMES = 300;
 
 interface NewMessagesOptions {
   visitKey: string | null;
@@ -81,26 +83,71 @@ export function useChatNewMessages(options: NewMessagesOptions) {
 
   // The visible live reader at the newest message has seen every arrival. It
   // gets there by scrolling, or without a scroll: the chat came back from its
-  // Browser view (hidden, it noted a reply) already at the bottom, or the
-  // transcript resized under it. Only a scroll used to clear it, so the pill
-  // stayed over the newest turn of a chat that was at the bottom.
+  // Browser view (hidden, it noted a reply) already at the bottom, the
+  // transcript resized under it, or its content grew (a reply, a row that
+  // finished rendering). A chat that fits on screen never scrolls, and a reply
+  // grows the content, not the scroller, so only a scroll or a resize of the
+  // scroller left the pill over the newest turn of a chat at the bottom.
+  const pending = Boolean(scope && pendingScope === scope);
+  const settle = useCallback(() => {
+    const node = scrollContainerRef.current;
+    const current = latest.current;
+    if (!node || !scope || !current.enabled) return;
+    if (current.visitKey !== visitKey || current.currentUserId !== currentUserId) return;
+    if (readerAtNewest(node, current)) setPendingScope(null);
+  }, [currentUserId, scope, scrollContainerRef, visitKey]);
   useLayoutEffect(() => {
     const node = scrollContainerRef.current;
-    if (!node || !scope || !enabled) return;
-    const settle = () => {
-      const current = latest.current;
-      if (current.visitKey !== visitKey || current.currentUserId !== currentUserId) return;
-      if (readerAtNewest(node, current)) setPendingScope(null);
-    };
+    if (!node || !scope || !enabled || !pending) return;
     settle();
     node.addEventListener("scroll", settle, { passive: true });
     const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => settle());
     resize?.observe(node);
+    for (const child of Array.from(node.children)) resize?.observe(child);
+    // A streaming reply changes the transcript many times a second: one look per frame.
+    let frame: number | null = null;
+    const settleOnce = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        settle();
+      });
+    };
+    const grown = typeof MutationObserver === "undefined" ? null : new MutationObserver(settleOnce);
+    grown?.observe(node, { childList: true, subtree: true, characterData: true });
     return () => {
       node.removeEventListener("scroll", settle);
       resize?.disconnect();
+      grown?.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
     };
-  }, [currentUserId, enabled, scope, scrollContainerRef, visitKey]);
+  }, [enabled, pending, scope, scrollContainerRef, settle]);
+  // The chat restores its place after it shows again (a frame or two later,
+  // with no scroll when it lands where it was): each render asks again while
+  // the pill is up, so it goes the moment the place is the newest message.
+  useLayoutEffect(() => {
+    if (pending) settle();
+  });
+  // Whether the chat had found its place when it last rendered. It finds it
+  // with no render of its own, so while the pill waits on it the hook looks
+  // each frame (for a few seconds at most) and renders once it has: the pill
+  // then shows, or the render's own look above clears it.
+  const placeFound = options.messageTargetActive || options.isReadingReady();
+  const [, setPlaceLooks] = useState(0);
+  useLayoutEffect(() => {
+    if (!pending || !enabled || placeFound || typeof window.requestAnimationFrame !== "function") return;
+    let frames = 0;
+    let frame = window.requestAnimationFrame(function look() {
+      const current = latest.current;
+      if (current.messageTargetActive || current.isReadingReady()) {
+        setPlaceLooks((looks) => looks + 1);
+        return;
+      }
+      frames += 1;
+      if (frames < PLACE_LOOK_MAX_FRAMES) frame = window.requestAnimationFrame(look);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [enabled, pending, placeFound]);
 
   const jumpToLatest = useCallback(() => {
     const current = latest.current;
@@ -113,7 +160,9 @@ export function useChatNewMessages(options: NewMessagesOptions) {
   }, [currentUserId, visitKey]);
 
   return {
-    hasNewMessages: Boolean(scope && pendingScope === scope && enabled && hasResolvedHistory),
+    // Never while the chat is still finding its place: whether the arrival is
+    // out of view is known only once it has.
+    hasNewMessages: pending && enabled && hasResolvedHistory && placeFound,
     jumpToLatest,
   };
 }

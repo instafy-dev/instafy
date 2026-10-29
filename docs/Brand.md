@@ -205,10 +205,9 @@ is printed: the 20px thread stack, the conversation roster, a phone's header.
   "Pia, AI", and an AI face or control that has an accessible name of its
   own adds ", AI" to it (`formatAiAccessibleName`: "View profile for
   @pia, AI").
-- **What hugs a face follows it:** an AI's speaker pill and a Machines agent
-  chip round their corners to the tile's, the tile's corner plus the gap
-  beside it (12px beside the speaker pill's 28 and 32px faces, 9.2px around
-  the chip's 24px face), instead of a person's stadium. A button that wraps an
+- **What hugs a face follows it:** a Machines agent chip rounds its corners
+  to the tile's, the tile's corner plus the gap beside it (9.2px around the
+  chip's 24px face), instead of a person's stadium. A button that wraps an
   AI face alone, the transcript gutter's and a bot's picture button included,
   takes the tile's own corners (`Button` `radius="aiTile"`,
   `IdentityPhotoButton` `shape="aiTile"`), so its hover fill and focus ring
@@ -220,7 +219,7 @@ is printed: the 20px thread stack, the conversation roster, a phone's header.
 ### Octo's tile
 
 The tile is Octo's face wherever Octo appears as a participant in themed UI:
-chat and transcript avatars, the thinking and typing rows, speaker pills, the
+chat and transcript avatars, the thinking and typing rows, the
 conversation roster, agent chips, the participants drawer, the mention picker,
 thread participant stacks, the AI settings rows, and the landing's roster and
 transcript. Every one of them renders the same component,
