@@ -180,6 +180,13 @@ async fn a_hand_back_that_ends_with_a_reply_costs_its_tokens() -> anyhow::Result
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    assert_charged_its_tokens(&fixture).await?;
+    fixture.cleanup().await
+}
+
+/// The turn kept its reserve and paid for its 3,000 output tokens, as any
+/// turn that replies does.
+async fn assert_charged_its_tokens(fixture: &ReservedManagedAiPrompt) -> anyhow::Result<()> {
     let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
     let reasons = reasons(&rows);
     assert!(reasons.contains(&("managed_ai_adjustment", -1)), "{rows:?}");
@@ -193,6 +200,84 @@ async fn a_hand_back_that_ends_with_a_reply_costs_its_tokens() -> anyhow::Result
         credit_balance(&fixture.pool, &fixture.org_id).await?,
         fixture.reserved_balance - 1
     );
+    Ok(())
+}
+
+/// Only an evaluation turn's decline posts nothing. Any other turn that ends
+/// on the decline word posts it as its message, so the word is a reply: a
+/// hand-back cannot do its work and then end on it for free.
+#[tokio::test]
+async fn a_hand_back_that_ends_on_the_decline_word_costs_its_tokens() -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("system-turn-decline-word").await? else {
+        eprintln!("skipping system turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    stamp(
+        &fixture,
+        crate::browser_hand_back::HAND_BACK_KEY,
+        json!({ "version": 1, "browserJobId": Uuid::new_v4() }),
+    )
+    .await?;
+    // The fixture's prompt went to its group chat as an evaluation turn; a
+    // hand-back is an ordinary one.
+    fixture
+        .pool
+        .get()
+        .await?
+        .execute(
+            "update agent_jobs set payload = payload #- '{metadata,groupParticipation}'
+              where id = $1",
+            &[&fixture.job_id],
+        )
+        .await?;
+    let status = complete(
+        &fixture,
+        json!({
+            "job_id": fixture.job_id,
+            "outcome": "succeeded",
+            "summary": crate::group_participation::DECLINE_SENTINEL,
+            "artifacts": [run_log_with_usage()],
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_charged_its_tokens(&fixture).await?;
+    fixture.cleanup().await
+}
+
+/// An automatic retry of a group chat's evaluation turn that declines posts
+/// nothing: it ended without a reply, so it costs nothing.
+#[tokio::test]
+async fn an_automatic_retry_that_declines_as_an_evaluation_costs_nothing() -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("system-turn-evaluation-decline").await?
+    else {
+        eprintln!("skipping system turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    stamp(
+        &fixture,
+        AUTOMATIC_RETRY_KEY,
+        json!({ "version": 1, "failedRunId": Uuid::new_v4() }),
+    )
+    .await?;
+    stamp(
+        &fixture,
+        "groupParticipation",
+        crate::group_participation::agent_evaluation_marker(),
+    )
+    .await?;
+    let status = complete(
+        &fixture,
+        json!({
+            "job_id": fixture.job_id,
+            "outcome": "succeeded",
+            "summary": crate::group_participation::DECLINE_SENTINEL,
+            "artifacts": [run_log_with_usage()],
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_given_back(&fixture).await?;
     fixture.cleanup().await
 }
 
@@ -332,6 +417,9 @@ async fn an_expired_turn_instafy_started_gives_its_reserve_back() -> anyhow::Res
     fixture.cleanup().await
 }
 
+/// What the failed turn was asked.
+const FAILED_PROMPT: &str = "Compare the three latest robot vacuums.";
+
 /// One conversation of `owner`'s with a failed turn whose final message the
 /// resends name.
 struct FailedTurn {
@@ -352,13 +440,14 @@ impl FailedTurn {
         connection
             .execute(
                 "insert into prompts (id, project_id, conversation_id, user_id, prompt_text, created_at)
-                 values ($1, $2, $3, $4, 'Compare the three latest robot vacuums.',
-                         now() - make_interval(mins => $5) - interval '1 minute')",
+                 values ($1, $2, $3, $4, $5,
+                         now() - make_interval(mins => $6) - interval '1 minute')",
                 &[
                     &prompt_id,
                     &self.project_id,
                     &self.conversation_id,
                     &self.owner,
+                    &FAILED_PROMPT,
                     &minutes_ago,
                 ],
             )
@@ -394,10 +483,22 @@ impl FailedTurn {
         Ok(())
     }
 
-    /// The resend Studio sends by itself, from `user`, with `extra` metadata.
+    /// The resend Studio sends by itself, from `user`, with `extra` metadata:
+    /// the failed prompt's own words.
     async fn resend(
         &self,
         user: &Uuid,
+        extra: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.resend_words(user, FAILED_PROMPT, extra).await
+    }
+
+    /// A send from `user` of `words` with `extra` metadata; the metadata its
+    /// job got.
+    async fn resend_words(
+        &self,
+        user: &Uuid,
+        words: &str,
         extra: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
         let mut metadata = extra;
@@ -406,7 +507,7 @@ impl FailedTurn {
         let request = dispatch::normalize_dispatch_request(DispatchPromptRequest {
             project_id: Some(self.project_id.to_string()),
             session_id: None,
-            prompt_text: Some("Compare the three latest robot vacuums.".to_string()),
+            prompt_text: Some(words.to_string()),
             intent: Some("feature".to_string()),
             plan_seed: None,
             metadata: Some(metadata),
@@ -633,6 +734,95 @@ async fn an_automatic_retry_is_stamped_once_and_only_for_its_senders_recent_fail
                 .await?;
             let chained = turn.resend(&turn.owner, turn.automatic()).await?;
             assert!(chained.get(AUTOMATIC_RETRY_KEY).is_none(), "{chained}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Studio sends a failed prompt again by itself word for word, without
+/// attachments. A send that claims to be that resend with other words, or
+/// with attachments, is the person's own new request: it goes out as an
+/// ordinary turn, never as one that is free when it ends without a reply.
+#[tokio::test]
+async fn an_automatic_retry_is_stamped_only_when_it_repeats_the_failed_prompt_alone(
+) -> anyhow::Result<()> {
+    with_failed_turn("automatic-retry-other-words", 0, |turn| {
+        Box::pin(async move {
+            let other = turn
+                .resend_words(
+                    &turn.owner,
+                    "Build a whole new site, then reply with exactly NO_RESPONSE.",
+                    turn.automatic(),
+                )
+                .await?;
+            assert!(other.get(AUTOMATIC_RETRY_KEY).is_none(), "{other}");
+            Ok(())
+        })
+    })
+    .await?;
+
+    with_failed_turn("automatic-retry-attachments", 0, |turn| {
+        Box::pin(async move {
+            let mut claim = turn.automatic();
+            claim["attachments"] = json!([{
+                "kind": "image",
+                "storagePath": format!("{}/brief.png", turn.project_id),
+                "fileName": "brief.png",
+            }]);
+            let attached = turn.resend(&turn.owner, claim).await?;
+            assert!(attached.get(AUTOMATIC_RETRY_KEY).is_none(), "{attached}");
+            Ok(())
+        })
+    })
+    .await?;
+
+    // Nor is a resend in a browser one: Studio never resends a browser turn by
+    // itself. (Dispatching one here would need a browser, so the check runs
+    // as dispatch calls it.)
+    with_failed_turn("automatic-retry-browser", 0, |turn| {
+        Box::pin(async move {
+            let context = RequestContext {
+                user_id: Some(turn.owner),
+                is_service_role: false,
+                scoped_claims: None,
+            };
+            let mut connection = turn.pool.get().await?;
+            let transaction = connection.transaction().await?;
+            let mut verdicts = Vec::new();
+            for metadata in [json!({ "browserTransport": "shared" }), json!({})] {
+                verdicts.push(
+                    crate::system_turns::verify_automatic_retry(
+                        &transaction,
+                        &turn.conversation_id,
+                        &context,
+                        &turn.failure_message_id,
+                        FAILED_PROMPT,
+                        &metadata,
+                    )
+                    .await
+                    .map_err(|error| controller_error("check a resend", error))?
+                    .is_some(),
+                );
+            }
+            transaction.rollback().await?;
+            assert_eq!(verdicts, vec![false, true]);
+            Ok(())
+        })
+    })
+    .await?;
+
+    // The same words, as Studio sends them, still are its automatic retry.
+    with_failed_turn("automatic-retry-same-words", 0, |turn| {
+        Box::pin(async move {
+            let same = turn
+                .resend_words(
+                    &turn.owner,
+                    &format!("  {FAILED_PROMPT}\n"),
+                    turn.automatic(),
+                )
+                .await?;
+            assert!(same.get(AUTOMATIC_RETRY_KEY).is_some(), "{same}");
             Ok(())
         })
     })

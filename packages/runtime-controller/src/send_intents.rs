@@ -926,6 +926,11 @@ pub(crate) async fn apply_steer_send_intent(
         )
         .await
         .map_err(|error| internal_error(format!("failed to enqueue active-turn input: {error}")))?;
+    // A turn Instafy started by itself costs nothing unless it ends with a
+    // reply; once someone writes into it, it is a turn they sent.
+    if crate::system_turns::system_turn_of(&target.payload).is_some() {
+        crate::system_turns::mark_steered(&transaction, &target.id).await?;
+    }
     let command = stored_job_input(&command_row);
     let persisted_message = map_conversation_message_row(&message_row);
 

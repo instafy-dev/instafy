@@ -23,11 +23,16 @@
 //! Anyone who can send a message can write the marks above, so billing reads
 //! only the controller's own stamps on the job: the hand-back record dispatch
 //! puts on a hand-back it checked, and [`AUTOMATIC_RETRY_KEY`], which dispatch
-//! puts on a resend only when [`verify_automatic_retry`] finds that it retries
-//! the failed run of a prompt its sender sent in this conversation, at most
-//! [`AUTOMATIC_RETRY_WINDOW_MINUTES`] ago, that was not itself a turn Instafy
-//! started, with no prompt sent since and no earlier automatic retry of it. A
-//! resend that fails a check still goes out, as an ordinary turn.
+//! puts on a resend only when [`verify_automatic_retry`] finds that it repeats,
+//! word for word and with no attachments or browser, the failed prompt its
+//! sender sent in this conversation at most [`AUTOMATIC_RETRY_WINDOW_MINUTES`]
+//! ago, that the failed run was not itself a turn Instafy started, and that no
+//! prompt was sent since and no earlier automatic retry of it. A resend that
+//! fails a check still goes out, as an ordinary turn. Nor does a hand-back
+//! carry anything of the sender's: dispatch gives it Studio's words
+//! ([`crate::browser_hand_back::HAND_BACK_PROMPT`]) and refuses attachments.
+//! Words someone sends into either kind while it runs (a steer) make it a
+//! turn they sent ([`mark_steered`]).
 
 use axum::{http::StatusCode, Json};
 use chrono::{DateTime, Utc};
@@ -61,10 +66,19 @@ pub(crate) enum SystemTurn {
     AutomaticRetry,
 }
 
+/// Put on such a turn when someone sends words into it while it runs (a
+/// steer, crate::send_intents): their request rides on it from then on, so it
+/// is charged as a turn they sent. Its stamp stays, for the checks that read
+/// which turns Instafy started.
+const STEERED_KEY: &str = "steeredByPerson";
+
 /// Which turn Instafy started by itself a job is, from the controller's own
-/// stamps on its payload; None for a turn someone sent.
+/// stamps on its payload; None for a turn someone sent or steered.
 pub(crate) fn system_turn_of(job_payload: &JsonValue) -> Option<SystemTurn> {
     let metadata = job_payload.get("metadata")?;
+    if metadata.get(STEERED_KEY).is_some() {
+        return None;
+    }
     if metadata
         .get(crate::browser_hand_back::HAND_BACK_KEY)
         .is_some_and(JsonValue::is_object)
@@ -80,14 +94,30 @@ pub(crate) fn system_turn_of(job_payload: &JsonValue) -> Option<SystemTurn> {
     None
 }
 
+/// Marks the steered job `job_id`, a turn Instafy started, as the sender's
+/// own. Its row is locked by the steer.
+pub(crate) async fn mark_steered(
+    transaction: &Transaction<'_>,
+    job_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    transaction
+        .execute(
+            "update agent_jobs
+                set payload = jsonb_set(payload, array['metadata', $2::text], 'true'::jsonb, true)
+              where id = $1",
+            &[job_id, &STEERED_KEY],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to mark a steered turn: {error}")))?;
+    Ok(())
+}
+
 /// Whether a turn's completion is Octo's reply: it succeeded and says
-/// something, not the decline sentinel that posts nothing.
-pub(crate) fn completion_is_a_reply(outcome: &str, summary: Option<&str>) -> bool {
-    outcome == "succeeded"
-        && summary.is_some_and(|text| {
-            !text.trim().is_empty()
-                && !crate::group_participation::is_group_participation_decline_sentinel(text)
-        })
+/// something, and is not a decline the controller swallows (`swallowed`: an
+/// evaluation turn's `NO_RESPONSE`, which posts nothing). Any other turn
+/// posts that word as its message, so for it the word is a reply.
+pub(crate) fn completion_is_a_reply(outcome: &str, summary: Option<&str>, swallowed: bool) -> bool {
+    outcome == "succeeded" && !swallowed && summary.is_some_and(|text| !text.trim().is_empty())
 }
 
 /// Removes every client copy of the controller's automatic-retry stamp, top
@@ -106,6 +136,20 @@ pub(crate) fn strip_automatic_retry_stamps(metadata: &mut JsonValue) {
             }
         }
     }
+}
+
+/// Whether a send carries attachments where the runtime reads them: the
+/// message's `attachments`, or its prompt metadata's (crate::chat_attachments).
+pub(crate) fn carries_attachments(metadata: &JsonValue) -> bool {
+    ["attachments", "prompt_metadata", "promptMetadata"]
+        .iter()
+        .filter_map(|key| metadata.get(*key))
+        .filter_map(|source| match source {
+            JsonValue::Array(entries) => Some(entries),
+            JsonValue::Object(map) => map.get("attachments").and_then(JsonValue::as_array),
+            _ => None,
+        })
+        .any(|entries| !entries.is_empty())
 }
 
 /// The failed message a resend says Instafy sent again by itself:
@@ -150,22 +194,33 @@ const AUTOMATIC_RETRY_CHECKS_SQL: &str = "select
      ) as already_retried";
 
 /// Checks an automatic retry's claim and returns the stamp to put on its job,
-/// or None for a resend that goes out as an ordinary turn. Runs inside the
-/// dispatch transaction, after the conversation's dispatch fence, so two
-/// resends of one failure cannot both pass the once-only check.
+/// or None for a resend that goes out as an ordinary turn. `prompt_text` and
+/// `metadata` are the resend's: Studio sends the failed prompt again word for
+/// word, never with attachments or a browser
+/// (`isRunFailurePromptAutoResendable`), so a send with other words or with
+/// either is the person's own new request. Runs inside the dispatch
+/// transaction, after the conversation's dispatch fence, so two resends of
+/// one failure cannot both pass the once-only check.
 pub(crate) async fn verify_automatic_retry(
     transaction: &Transaction<'_>,
     conversation_id: &Uuid,
     context: &RequestContext,
     failure_message_id: &Uuid,
+    prompt_text: &str,
+    metadata: &JsonValue,
 ) -> Result<Option<JsonValue>, (StatusCode, Json<ApiError>)> {
     let Ok(user_id) = require_user_session(context) else {
         return Ok(None);
     };
+    if carries_attachments(metadata)
+        || crate::browser_hand_back::browser_transport_of(metadata).is_some()
+    {
+        return Ok(None);
+    }
     let failure = transaction
         .query_opt(
             "select message.run_id, message.created_at, run.status as run_status,
-                    prompt.user_id as sender
+                    prompt.user_id as sender, prompt.prompt_text as failed_prompt
                from conversation_messages message
                join runs run on run.id = message.run_id
                left join prompts prompt on prompt.id = run.prompt_id
@@ -184,6 +239,11 @@ pub(crate) async fn verify_automatic_retry(
     let failed_at: DateTime<Utc> = failure.get("created_at");
     if failure.get::<_, String>("run_status") != "failed"
         || failure.get::<_, Option<Uuid>>("sender") != Some(user_id)
+        || failure
+            .get::<_, Option<String>>("failed_prompt")
+            .as_deref()
+            .map(str::trim)
+            != Some(prompt_text.trim())
         || Utc::now() - failed_at > chrono::Duration::minutes(AUTOMATIC_RETRY_WINDOW_MINUTES)
     {
         return Ok(None);
@@ -356,6 +416,14 @@ mod tests {
             system_turn_of(&json!({"metadata": {"automaticRetry": {"version": 1}}})),
             Some(SystemTurn::AutomaticRetry)
         );
+        // Someone wrote into it while it ran: it is their turn now.
+        assert_eq!(
+            system_turn_of(&json!({"metadata": {
+                "automaticRetry": {"version": 1},
+                "steeredByPerson": true,
+            }})),
+            None
+        );
         // A client's marks are claims, not stamps.
         for metadata in [
             json!({"retryAutomatic": true, "retryOfMessageId": Uuid::new_v4().to_string()}),
@@ -439,13 +507,28 @@ mod tests {
     fn only_a_successful_turn_that_says_something_is_a_reply() {
         assert!(completion_is_a_reply(
             "succeeded",
-            Some("Built the comparison page.")
+            Some("Built the comparison page."),
+            false
         ));
-        assert!(!completion_is_a_reply("succeeded", Some("  ")));
-        assert!(!completion_is_a_reply("succeeded", None));
-        assert!(!completion_is_a_reply("succeeded", Some("NO_RESPONSE")));
+        assert!(!completion_is_a_reply("succeeded", Some("  "), false));
+        assert!(!completion_is_a_reply("succeeded", None, false));
+        // The decline word is a reply unless the controller swallows it.
+        assert!(completion_is_a_reply(
+            "succeeded",
+            Some("NO_RESPONSE"),
+            false
+        ));
+        assert!(!completion_is_a_reply(
+            "succeeded",
+            Some("NO_RESPONSE"),
+            true
+        ));
         for outcome in ["failed", "canceled", "expired"] {
-            assert!(!completion_is_a_reply(outcome, Some("Partial answer")));
+            assert!(!completion_is_a_reply(
+                outcome,
+                Some("Partial answer"),
+                false
+            ));
         }
     }
 }

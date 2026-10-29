@@ -1391,6 +1391,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .await?;
         ensure_object(&mut request.metadata)
             .insert(crate::browser_hand_back::HAND_BACK_KEY.to_string(), record);
+        // It asks only what Studio asks: it costs nothing unless it ends with
+        // a reply (crate::system_turns), so no request of the sender's rides
+        // on it.
+        request.prompt_text = crate::browser_hand_back::HAND_BACK_PROMPT.to_string();
     }
     // An automatic retry costs nothing unless it ends with a reply: stamped
     // only after its failure checks out, and otherwise an ordinary turn.
@@ -1400,6 +1404,8 @@ pub(crate) async fn process_dispatch_prompt_timed(
             &conversation.id,
             context,
             failure_message_id,
+            &request.prompt_text,
+            &request.metadata,
         )
         .await?
         {

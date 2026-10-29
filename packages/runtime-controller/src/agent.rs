@@ -3559,9 +3559,15 @@ pub(crate) async fn agent_complete(
 
     // A turn Instafy started by itself (a hand-back, an automatic retry) is
     // charged only when it ends with Octo's reply (crate::system_turns): one
-    // that does not gets its reserve back, and its tokens are not billed.
-    let system_turn_without_reply = crate::system_turns::system_turn_of(&job_payload).is_some()
-        && !crate::system_turns::completion_is_a_reply(&outcome_lower, summary.as_deref());
+    // that does not gets its reserve back, and its tokens are not billed. A
+    // decline is no reply only where it posts nothing, as it does below.
+    let system_turn_without_reply = if crate::system_turns::system_turn_of(&job_payload).is_some() {
+        let swallowed = silent_completion
+            && !run_has_visible_assistant_message(&transaction, &project_id, run_id).await?;
+        !crate::system_turns::completion_is_a_reply(&outcome_lower, summary.as_deref(), swallowed)
+    } else {
+        false
+    };
     if system_turn_without_reply {
         if let Some(org_id) = crate::system_turns::give_back_reserve_without_reply(
             &transaction,

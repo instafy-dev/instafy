@@ -329,7 +329,9 @@ A browser turn that Studio opens by itself for Octo's card is not one of them: i
 person's own request, as their press would, and is charged as their turn.
 
 Either kind reserves its credit at dispatch like any other. When it ends with a reply (it
-succeeded, and its reply is not empty or a decline), its usage is reconciled like any turn's. A
+succeeded and posted something that is not empty), its usage is reconciled like any turn's.
+`NO_RESPONSE` is no reply only where the controller swallows it and posts nothing, as for an
+evaluation turn in a group chat; any other turn posts it as its message, so it is a reply. A
 team plan it writes is its reply once the plan goes out. When it fails, is stopped, expires, ends
 without a reply or has its plan refused, its reserve and its daily prompt slot are given back
 (refund reason `system_turn_without_reply`) and its tokens are not charged, even when a runtime
@@ -341,10 +343,15 @@ Billing reads only the controller's own marks on the job (`system_turns.rs`): th
 `browserHandBack` record that dispatch stamps on a hand-back it checked, and
 `metadata.automaticRetry`, which dispatch stamps on a resend marked `retryAutomatic: true` only
 when the message its `retryOfMessageId` names is this conversation's and belongs to a failed run
-of a prompt the sender sent, at most 10 minutes ago; that run was not itself a turn Instafy
-started; nobody has sent a prompt in the conversation since; and no other automatic retry of it
-was dispatched. A resend that fails a check still goes out, as an ordinary turn. A client's own
-copy of either mark is dropped at dispatch and on recorded messages.
+of a prompt the sender sent, at most 10 minutes ago; the resend repeats that prompt's words, with
+no attachments and no browser, as Studio's own resend does; that run was not itself a turn
+Instafy started; nobody has sent a prompt in the conversation since; and no other automatic
+retry of it was dispatched. A resend that fails a check still goes out, as an ordinary turn. A
+client's own copy of either mark is dropped at dispatch and on recorded messages. Nothing of the
+person's rides on a hand-back either: whatever words it was sent with, it asks only Studio's
+"Continue building with what the browser turn found.", and one that carries attachments is
+refused. Words someone sends into either kind while it runs (a steer) make it theirs: the steer
+marks the job `steeredByPerson`, and from then on it is charged as a turn they sent.
 
 ### Measuring root-call usage
 

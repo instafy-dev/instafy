@@ -327,3 +327,50 @@ async fn teammates_can_still_steer_an_ordinary_turn() -> anyhow::Result<()> {
     })
     .await
 }
+
+/// A turn Instafy started by itself costs nothing unless it ends with a reply
+/// (crate::system_turns). Words someone sends into it while it runs make it
+/// theirs, so from then on it is charged as a turn they sent: a steer cannot
+/// get work done for free in a turn that is then stopped.
+#[tokio::test]
+async fn steering_a_turn_instafy_started_makes_it_the_senders() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.run(async {
+        let stamp = json!({ "version": 1, "failedRunId": Uuid::new_v4() });
+        let job = f
+            .active_job(
+                Some(f.owner),
+                json!({ crate::system_turns::AUTOMATIC_RETRY_KEY: stamp }),
+            )
+            .await?;
+        let payload = || async {
+            anyhow::Ok(
+                f.state
+                    .pool
+                    .get()
+                    .await?
+                    .query_one("select payload from agent_jobs where id = $1", &[&job])
+                    .await?
+                    .get::<_, PgJson<JsonValue>>(0)
+                    .0,
+            )
+        };
+        assert!(crate::system_turns::system_turn_of(&payload().await?).is_some());
+
+        let (status, body) = f.steer(&f.owner_token, job).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let steered = payload().await?;
+        assert_eq!(
+            crate::system_turns::system_turn_of(&steered),
+            None,
+            "{steered}"
+        );
+        // The stamp itself stays: it still says which failure was retried.
+        assert_eq!(
+            steered["metadata"][crate::system_turns::AUTOMATIC_RETRY_KEY],
+            stamp
+        );
+        Ok(())
+    })
+    .await
+}
