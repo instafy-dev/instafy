@@ -1895,25 +1895,68 @@ fn format_project_memory_snapshot(
     format_project_memory_snapshot_with_preferences(workspace_dir, prompt_text, &preferences, None)
 }
 
-/// The browser skill's folder: the skill a browser turn always carries.
-const BROWSER_SKILL_ID: &str = "instafy-browser-automation";
+/// A skill a turn carries whatever its words, and the section of it a turn on a
+/// restored thread is given again.
+struct PinnedSkill {
+    /// The skill's folder under `.agents/skills`.
+    id: &'static str,
+    relative_path: &'static str,
+    /// The heading of the section a restored thread is given.
+    section: &'static str,
+}
 
-/// The skill a turn carries whatever its words: a Personal or Shared Browser
-/// turn carries the browser skill, which says how to find a page. The router
-/// weighs words, and a browser turn's request often has none of the skill's
-/// ("Now find how to get there by tram", or a task that names an address).
-fn pinned_skill_for_turn(job: &LeaseJob) -> Option<&'static str> {
+/// The browser skill, which says how to find a page.
+const BROWSER_TURN_SKILL: PinnedSkill = PinnedSkill {
+    id: "instafy-browser-automation",
+    relative_path: learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+    section: "## Finding a page",
+};
+
+/// A Personal or Shared Browser turn carries the browser skill whatever its
+/// words. The router weighs words, and a browser turn's request often has none
+/// of the skill's ("Now find how to get there by tram", or a task that names an
+/// address).
+fn pinned_skill_for_turn(job: &LeaseJob) -> Option<&'static PinnedSkill> {
     (crate::personal_browser::payload_requests_personal_browser(&job.payload)
         || crate::shared_browser::payload_requests_shared_browser(&job.payload))
-    .then_some(BROWSER_SKILL_ID)
+    .then_some(&BROWSER_TURN_SKILL)
+}
+
+/// The pinned skill's section, from the space's own copy of the skill, for a
+/// turn on a restored thread. That turn loads no snapshot, the thread may have
+/// begun on a turn that never loaded the skill (a browser turn resumes its
+/// chat's thread), and a browser turn has no tool to read the file. None when
+/// the space's copy has no such section.
+fn pinned_skill_section(workspace_dir: &Path, pinned: &PinnedSkill) -> Option<String> {
+    let (text, _) = read_text_file_lossy_truncated(
+        &workspace_dir.join(pinned.relative_path),
+        PROJECT_MEMORY_MAX_FILE_BYTES,
+    )?;
+    let start = text
+        .match_indices(pinned.section)
+        .map(|(at, _)| at)
+        .find(|&at| {
+            (at == 0 || text[..at].ends_with('\n'))
+                && text[at + pinned.section.len()..].starts_with('\n')
+        })?;
+    let body = &text[start + pinned.section.len()..];
+    let end = body.find("\n## ").unwrap_or(body.len());
+    Some(format!(
+        "\nFrom `{}` (`{}`; this thread may predate it):\n{}{}\n",
+        pinned.id,
+        pinned.relative_path,
+        pinned.section,
+        body[..end].trim_end()
+    ))
 }
 
 fn format_project_memory_snapshot_with_preferences(
     workspace_dir: &Path,
     prompt_text: &str,
     preferences: &ProjectPreferencesSnapshot,
-    pinned_skill: Option<&str>,
+    pinned_skill: Option<&PinnedSkill>,
 ) -> Option<ProjectMemorySnapshot> {
+    let pinned_skill = pinned_skill.map(|pinned| pinned.id);
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
     if remaining == 0 {
         return None;
@@ -9393,6 +9436,17 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     &hints.text,
                 );
                 skill_hints = Some(("restoredSkillHints", hints.skills));
+            }
+            if include_workspace_memory
+                && let Some(section) = pinned_skill_for_turn(job)
+                    .and_then(|pinned| pinned_skill_section(workspace_dir, pinned))
+            {
+                append_prompt_section(
+                    &mut prompt,
+                    &mut prompt_section_metrics,
+                    "pinnedSkillSection",
+                    &section,
+                );
             }
         } else {
             append_prompt_section(

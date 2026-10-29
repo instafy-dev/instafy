@@ -620,9 +620,13 @@ say nothing.
 Every Personal or Shared Browser turn carries the `instafy-browser-automation`
 skill, whatever its words: the router loads a skill by the words of a request,
 and a browser turn's often has none of the skill's ("Now find how to get there
-by tram", or a task that names an address). The skill loads first of the turn's
-skills, so the snapshot's budget never runs out before it. Its "Finding a page"
-section, which the `instafy-web-research` skill points to, says how every reader
+by tram", or a task that names an address). On a fresh thread the skill loads
+first of the turn's skills, so the snapshot's budget never runs out before it.
+Most browser turns resume their chat's thread instead (a card's turn follows the
+turn that posted the card), which loads no snapshot, and a browser turn cannot
+read a skill file, so such a turn is given the skill's "Finding a page" section
+again, from the space's own copy. That section, which the
+`instafy-web-research` skill points to, says how every reader
 finds a page: an address the person or a skill gave, a link on a page read, or
 the official site's home page, never a search engine or a guessed path; a
 missing page's own site search; another source after two failed pages on one

@@ -1005,3 +1005,69 @@ fn a_browser_turn_carries_the_browser_skill_whatever_its_words() {
         }
     }
 }
+
+/// A fresh browser turn's prompt is rare: a card's browser turn resumes the thread of the chat whose turn posted the
+/// card. A turn on a restored thread loads no snapshot, and a browser turn gets no skill hints since it cannot read a
+/// file, so it is given the browser skill's "Finding a page" again, from the space's own copy, and only that section.
+/// An ordinary restored turn is not, and a space's copy without the section gives nothing.
+#[test]
+fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
+    let tmp = scaffolded_space();
+    let restored = |metadata: JsonValue| {
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+        job.project_id = Some(project_id);
+        let state = json!({"defaultThreadId": "existing-thread", "threadId": "existing-thread", "historyReplayRequired": false});
+        let request = "Now find how to get there by tram from Praça do Comércio.";
+        let (prompt, _, metrics) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                request,
+                true,
+                Some(&state),
+                &[],
+                None,
+                None,
+            )
+            .expect("prompt should build");
+        assert_eq!(metrics["promptMode"], "stateful_compact");
+        assert!(prompt.contains("Workspace memory snapshot omitted"));
+        prompt
+    };
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    let section = BROWSER_SKILL[start..end].trim_end();
+    for transport in ["shared", "desktop-personal"] {
+        let prompt = restored(json!({ "browserTransport": transport }));
+        assert!(prompt.contains(section), "{transport}");
+        assert!(prompt.contains("From `instafy-browser-automation` (`.agents/skills/instafy-browser-automation/SKILL.md`; this thread may predate it):"), "{transport}");
+        assert!(
+            !prompt.contains("## Shared Browser command"),
+            "{transport}: only the section"
+        );
+    }
+    assert!(!restored(json!({})).contains("## Finding a page"));
+
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    let edited = BROWSER_SKILL.replace(
+        "accepting is the person's choice.\n",
+        "accepting is the person's choice.\n- Start from the city's open-data portal.\n",
+    );
+    assert_ne!(edited, BROWSER_SKILL);
+    fs::write(&skill, &edited).unwrap();
+    assert!(
+        restored(json!({ "browserTransport": "shared" }))
+            .contains("- Start from the city's open-data portal.")
+    );
+    fs::write(
+        &skill,
+        edited.replace("## Finding a page", "## How to find pages"),
+    )
+    .unwrap();
+    assert!(
+        !restored(json!({ "browserTransport": "shared" })).contains("this thread may predate it")
+    );
+}
