@@ -421,11 +421,12 @@ export const BROWSER_OPTIONS = "inline-flex h-8 w-8 shrink-0 items-center justif
 // stage under it slides rather than jumps when the turn ends.
 export const BROWSER_ROUTINE_COLLAPSE = "grid shrink-0 transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none";
 export const BROWSER_ROUTINE_ROW = `border-b border-slate-200 px-3 py-1 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`;
-// BrowserSessionModal.tsx:2335 the viewport: black under a live page, slate
-// while the session starts (dark cool-slate 950 replaced by the canvas tier).
+// BrowserSessionModal.tsx the viewport: slate under a live page, black only in
+// dark mode (BROWSER_LIVE_STAGE_CLASS), and slate while the session starts
+// (dark cool-slate 950 replaced by the canvas tier).
 export const BROWSER_VIEWPORT = "relative min-h-0 flex-1 overflow-hidden";
 export const BROWSER_VIEWPORT_STARTING = `bg-slate-100 ${DARK_CANVAS_CLASS}`;
-export const BROWSER_VIEWPORT_LIVE = "bg-black";
+export const BROWSER_VIEWPORT_LIVE = "bg-slate-100 dark:bg-black";
 // :2855-2941 the starting card.
 export const BROWSER_STATE_WRAP = "pointer-events-none absolute inset-0 flex items-center justify-center p-6";
 export const BROWSER_STATE_CARD = `w-full max-w-md rounded-2xl border border-slate-200 bg-white p-4 text-left text-sm text-slate-700 shadow-xl ${DARK_PANEL_SURFACE_CLASS} dark:text-slate-200`;

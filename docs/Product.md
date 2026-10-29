@@ -165,10 +165,10 @@ than six spaces adds a name filter, and long lists scroll within the popover.
 directory's New space. The rail's **+** is **New team**.
 Expanded inline sidebar shortcuts retain their bounded recent-space list.
 
-Desktop conversation shortcuts have a **+** after the last tab to start a chat
-in the current space. Its tooltip names that space, including when open chats span
-several spaces in the team. The action stays reachable at the edge when tabs overflow;
-mobile keeps its existing New chat controls.
+Desktop conversation shortcuts list the open space's chats only; another space's
+chats come back with that space. A **+** after the last tab starts a chat in the
+current space, and its tooltip names that space. The action stays reachable at the
+edge when tabs overflow; mobile keeps its existing New chat controls.
 
 Desktop drawer headings such as Chats, Files and Changes use the shared 14px
 medium navigation typography, matching the sidebar labels and workspace tabs.
@@ -521,9 +521,9 @@ Hover and keyboard focus follow the compact icon-and-label group while the full 
 tappable. Keyboard focus uses a clear outline, separate from the filled selection indicator.
 
 In compact conversations, the composer's leading hamburger opens navigation as a bottom sheet
-on both touch devices and narrow browser windows. The sheet lists the current team's open chats,
+on both touch devices and narrow browser windows. The sheet lists the current space's open chats,
 using the same references and order as desktop tabs and the header title picker. The current chat
-is marked; space names appear when the list includes another space. Selecting the current chat
+is marked. Selecting the current chat
 only dismisses the sheet, while another chat restores its remembered workspace. One fixed toolbar
 places Home before the team/space breadcrumb, followed by Browse all chats, Search and New chat (+).
 Only conversation entries occupy the independently scrolling list below it.

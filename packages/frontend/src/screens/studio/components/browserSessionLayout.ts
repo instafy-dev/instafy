@@ -100,3 +100,11 @@ export function shouldPinChatMessagesToBottom(options: {
   void options;
   return true;
 }
+
+/**
+ * The stage around a live page: the chat's light surface in light mode, black
+ * only in dark mode, so the Browser view follows the theme like its chrome and
+ * the composer. On a phone the page leaves bands above and below it, and
+ * black ones there read as dark chrome in light mode.
+ */
+export const BROWSER_LIVE_STAGE_CLASS = "bg-slate-100 dark:bg-black";

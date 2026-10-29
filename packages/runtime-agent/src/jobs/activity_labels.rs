@@ -87,18 +87,27 @@ const WEB_SEARCH_COMMAND: BuiltinLabel = BuiltinLabel {
         "searched the web",
     ),
 };
-// The preview card already says the preview opened.
+// Quiet: the preview card already says the preview opened. Studio names it as the turn's result
+// only when nothing else the turn made is (docs/Chat-Activity.md). Its `done` is the step's
+// past tense in Details.
 const PREVIEW_OPEN: BuiltinLabel = BuiltinLabel {
     key: "instafy/preview-open",
     role: ActivityRole::Quiet,
     live: "Opening the preview",
-    done: None,
+    done: single("opened a preview"),
 };
 const PREVIEW_CHECK: BuiltinLabel = BuiltinLabel {
     key: "instafy/preview-check",
     role: ActivityRole::Quiet,
     live: "Checking the page",
-    done: None,
+    done: single("checked the page"),
+};
+// Stopping a site is what the turn did: "Stopped the preview".
+const PREVIEW_CLOSE: BuiltinLabel = BuiltinLabel {
+    key: "instafy/preview-close",
+    role: ActivityRole::Outcome,
+    live: "Stopping the preview",
+    done: single("stopped the preview"),
 };
 const BIND: BuiltinLabel = BuiltinLabel {
     key: "instafy/bind",
@@ -122,7 +131,7 @@ const SAVED_SETTINGS: BuiltinLabel = BuiltinLabel {
     key: "instafy/settings",
     role: ActivityRole::Quiet,
     live: "Checking saved settings",
-    done: None,
+    done: single("checked saved settings"),
 };
 const INSTALL: BuiltinLabel = BuiltinLabel {
     key: "builtin/install",
@@ -209,7 +218,7 @@ const BROWSER_BROWSE: BuiltinLabel = BuiltinLabel {
     key: "browser/browse",
     role: ActivityRole::Quiet,
     live: "Browsing {host}",
-    done: None,
+    done: single("browsed {host}"),
 };
 const TOOL: BuiltinLabel = BuiltinLabel {
     key: "tool/use",
@@ -595,13 +604,17 @@ impl<'a> Matcher<'a> {
             ("web", Some("search")) => &WEB_SEARCH_COMMAND,
             ("preview", Some("open")) => &PREVIEW_OPEN,
             ("preview", Some("check")) => &PREVIEW_CHECK,
+            ("preview", Some("close")) => &PREVIEW_CLOSE,
             ("bind", Some("init" | "serve")) => &BIND,
             ("tunnel", Some("start")) => &TUNNEL,
             ("conversation", Some("search" | "grep" | "show")) => &CONVERSATION_SEARCH,
             ("secrets", _) | ("agents", Some("context")) => &SAVED_SETTINGS,
             _ => return None,
         };
-        Some(Found::builtin(label, Some(1)))
+        let mut found = Found::builtin(label, Some(1));
+        // What a command made counts only once it exited 0.
+        found.success_only = label.role == ActivityRole::Outcome;
+        Some(found)
     }
 
     fn generic_label(words: &[Word]) -> Option<Found> {
@@ -1237,9 +1250,43 @@ mod tests {
         assert_eq!(activity["key"], json!("instafy/preview-open"));
         assert_eq!(activity["role"], json!("quiet"));
         assert_eq!(activity["live"], json!("Opening the preview"));
-        assert!(activity.get("done").is_none());
         let check = label(&[], "instafy preview check --port 4173").unwrap();
         assert_eq!(check["role"], json!("quiet"));
+    }
+
+    // A finished row in Details reads in the past tense, quiet steps too.
+    #[test]
+    fn quiet_instafy_steps_have_a_past_tense_for_details() {
+        for (script, done) in [
+            ("instafy preview open --port 4173", "opened a preview"),
+            ("instafy preview check --port 4173", "checked the page"),
+            ("instafy secrets list", "checked saved settings"),
+        ] {
+            let activity = label(&[], script).expect("label");
+            assert_eq!(activity["role"], json!("quiet"), "{script}");
+            assert_eq!(activity["done"], json!(done), "{script}");
+        }
+        let click =
+            browser_step_activity(&json!({"step": "click", "host": "visitlisboa.com"})).unwrap();
+        assert_eq!(click["done"], json!("browsed {host}"));
+    }
+
+    // "stop the preview server" read "Ran 3 commands": closing a preview is what the turn did.
+    #[test]
+    fn preview_close_is_the_outcome_once_it_succeeds() {
+        let activity = label(
+            &[],
+            "instafy preview close 9b5fcdfb-7b26-446e-8162-f0370b8b9fda",
+        )
+        .expect("label");
+        assert_eq!(activity["key"], json!("instafy/preview-close"));
+        assert_eq!(activity["role"], json!("outcome"));
+        assert_eq!(activity["live"], json!("Stopping the preview"));
+        assert_eq!(activity["done"], json!("stopped the preview"));
+        assert_eq!(activity["when"], json!("success"));
+        // Other Instafy steps never wait for success.
+        let open = label(&[], "instafy preview open --port 4173").unwrap();
+        assert!(open.get("when").is_none());
     }
 
     #[test]

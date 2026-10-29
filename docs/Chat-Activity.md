@@ -3,11 +3,11 @@
 A turn in chat shows Octo's reply and one plain-language line that says what the turn did:
 
 ```
-Looked up 14 places, read 6 pages, built the map   Details ›
+Built the map, looked up 14 places, read 6 pages   Details ›
 ```
 
 While the turn runs, the line names the current step ("Looking up places…", "Reading pages…") and
-says "Thinking…" between steps. Details holds everything else: each command and its output, tool
+says "Thinking…" when the model works a while with no step. Details holds everything else: each command and its output, tool
 calls, Octo's notes, reasoning titles and plan updates. This page describes where the words come from and why they
 can be trusted.
 
@@ -18,19 +18,25 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 
 | Turn | Line |
 |---|---|
-| Queued or starting, before the model has begun | `Starting…`; `Trying again…` for a turn Instafy resent by itself |
-| Running a labelled step | its running label, for example `Looking up places…` (the newest running step wins) |
+| Queued or starting, before the model has begun | `Starting…`, whether the workspace starts, the turn waits behind another or nothing is known yet; `Trying again…` for a turn Instafy resent by itself |
+| Running a labelled step | its running label, for example `Looking up places…` (the newest running step wins; in a chain, its first command that is not quiet) |
 | Running an unlabelled command or tool | `Working…`; a file edit says `Editing files…` |
 | A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives |
-| The model is working, before or between steps | `Thinking…` (never its reasoning titles or notes) |
+| The model is working with no step running | `Thinking…` (never its reasoning titles or notes), once there has been no step for 3 seconds; until then the line keeps the step before it, or `Starting…` |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
-| Done | up to two "what it did" groups, biggest first and in the order they happened, then the latest "what it made": `Looked up 14 places, read 6 pages, built the map`; then, after ` · `, what the person answered to the turn's browser prompts |
+| Done | what it made leads (the latest outcome), then up to two "what it did" groups, the biggest, in the order they happened: `Built the map, looked up 14 places, read 6 pages`; then, after ` · `, what the person answered to the turn's browser prompts. A turn that made nothing labelled but opened or stopped a preview leads with the later of the two: `Opened a preview, edited a file`, `Stopped the preview`, and a site stopped and opened again reads `Opened a preview`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web` |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files` |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
 | Done, nothing of its own after an automatic retry | `Took two tries`, so Details opens on the first try |
 | Stopped by the person | `Stopped · looked up 9 places`, or `Stopped` |
 | No news for 45 seconds while not in flight | `Status unavailable` |
 
+- While the turn runs, the line changes only to a label that has lasted: each one it shows stays at
+  least 1.2 seconds, and a label replaced before its turn came is never shown, so a step that ends
+  at once never flashes past (`useSteadyActivityLabel.ts`). `Waiting for you` shows at once, and goes at once when the person answered. The
+  typing row before the turn's own line uses the same rule, so a turn opens with one `Starting…`,
+  and a screen reader hears the label it shows, never one it holds back. Its runtime-busy notice,
+  which asks the person to act, shows and goes at once.
 - Once the turn has a step, the whole line is one button that opens Details (`aria-expanded`,
   `aria-controls`); it reads "Details ›", then "Hide details", and opens and closes as often as it
   is pressed. Opening Details never moves the line or changes the turn's chrome.
@@ -69,16 +75,20 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 - Details (`TurnActivityDetails.tsx`) lists the turn in order: each command with its label, the
   command without its shell wrapper (the full line is its title), its state and its output behind
   a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes,
-  reasoning titles, plan updates and statuses. A failed step reads as what it was doing ("Checking
-  the map"), never as what it would have done. It shows the newest 60 rows, with "Show earlier
-  steps" above them; pressing that moves focus to the first row it reveals.
+  reasoning titles, plan updates and statuses. A row's label comes from its first command that is
+  not quiet, so `uw geocode Baixa; uw stay …` reads "Found places to stay". A finished row reads
+  in the past tense ("Opened a preview"), a running one as it runs, and a failed one as what it
+  tried ("Tried checking the map"), never as what it would have done. A row with no label reads
+  "Ran a command" ("Running a command" while it runs; "Used a tool" for a tool), never a guess at what it did: the command
+  itself is only its second line. It shows the newest 60 rows, with "Show earlier steps" above
+  them; pressing that moves focus to the first row it reveals.
 - Cards (secrets, connections, action and preview cards, team plans) stay in the turn's default
   view, and the file changes stay under the reply. Run traces keep their full view.
-- A command on its own in the conversation is one row: its label (or "Ran a command"), its state
-  and a chevron that shows the command and its output.
-- The typing row that shows under a newer message while a turn runs (a person wrote in the
-  meantime) says the run's phase ("Thinking…", "Trying again…"), never Octo's notes or reasoning
-  titles, for the same reason as the line.
+- A command on its own in the conversation is one row: its label (or "Ran a command"), its
+  state and a chevron that shows the command and its output.
+- The typing row that shows before the turn's own line, or under a newer message while a turn
+  runs (a person wrote in the meantime), says the run's phase ("Starting…", "Thinking…", "Trying
+  again…"), never Octo's notes or reasoning titles, for the same reason as the line.
 - The running line is the turn's one polite live region; it announces a new label at most every
   5 seconds. Reduced motion turns the sweep off. On coarse pointers the line and the rows are at
   least 44 px tall.
@@ -98,9 +108,12 @@ from trusted data only, in this order:
 2. **Instafy's own CLI**, from a table in `runtime-agent` (`jobs/activity_labels.rs`):
    `instafy web read <url>…` is "Reading pages" and counts its URL arguments; `instafy web search`
    is "Searching the web" (the step itself keeps only the query and the number of results);
-   `instafy preview open` and `instafy preview check` are quiet (the preview card already says it);
-   `instafy bind init|serve`, `instafy tunnel start` and `instafy conversation search|grep|show`
-   have their own words; `instafy secrets …` and `instafy agents context …` are quiet.
+   `instafy preview open` and `instafy preview check` are quiet (the preview card already says it),
+   with a past form for Details ("opened a preview", "checked the page"); `instafy preview close`
+   is "stopped the preview" once it exits 0 (Studio names a preview opened or stopped only when
+   the turn made nothing else, and then the later of the two); `instafy bind init|serve`,
+   `instafy tunnel start` and `instafy conversation search|grep|show` have their own words;
+   `instafy secrets …` and `instafy agents context …` are quiet.
 3. **A few common tools**: package installs (`pnpm`/`npm`/`yarn` `install|i|add`), test runners
    (`pnpm test`, `npm run test`, `cargo test`, `pytest`, `vitest`), builds (`pnpm build`,
    `npm run build`, `cargo build`) and `git clone`. Web searches, file edits, browser tool calls
@@ -133,7 +146,7 @@ checks use. A script over 16 KiB, or one that does not parse cleanly, gets no la
 - Command and process substitutions, words built from variables, here-document bodies, function
   bodies that are never called and `case` bodies are never looked inside.
 - The step's `activity` is its first labelled command. Up to 3 further distinct labels go in
-  `also`. `count` is how many simple commands matched; a match inside a loop counts as an unknown
+  `also`; Studio names the step by the first of them that is not quiet. `count` is how many simple commands matched; a match inside a loop counts as an unknown
   number (`null`), and the line then says "looked up places".
 
 Exit status reaches Studio through the step's own `status` and `exitCode`; a label with
@@ -149,7 +162,8 @@ Exit status reaches Studio through the step's own `status` and `exitCode`; a lab
 ```
 
 - `role` is `content` (what the turn did; the two biggest are named), `outcome` (what it made;
-  the latest is named last) or `quiet` (shown only while it runs and in Details).
+  the latest leads the line) or `quiet` (shown only while it runs and in Details; a quiet label's
+  `done` is its row's past tense in Details).
 - `done` is one form for any count, or `one`, `other` (with `{n}`) and `some` (count unknown).
 - `when: "success"` counts the step only when it exits 0.
 - Browser steps may also carry `host`, `pageKey` (16 hex characters, never the URL), `step` and
@@ -191,18 +205,21 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   | `navigate`, `open_tab` | Opening {host} | opened {host} / opened {n} pages on {host} / opened pages on {host} | content |
   | `snapshot` | Reading {host} | read a page on {host} / read {n} pages on {host} / read pages on {host} | content |
   | `search` (typing with submit, or Enter, in a search field) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
-  | `submit`, `click`, `type`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | – | quiet |
+  | `submit`, `click`, `type`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
   | no host known yet | Using the browser | used the browser | content |
 
   Opening, reading and searching carry `when: "success"`: a step the person said no to, left
   unanswered, or that failed (a link-only site, an error) opened, read and searched nothing, so
-  the done line never counts it. "Opened google.com · you said no to opening google.com" cannot
+  the done line never counts it (Studio counts no failed step at all). "Opened google.com · you said no to opening google.com" cannot
   happen; a turn whose only step was refused reads "Used a tool · you said no to opening
   google.com".
 
 - **Studio** groups browser steps by key and host. Pages opened and read count by distinct
   `pageKey`, so reading a page twice is "read a page"; searches count each time. After a group on
   the same site, a group's trailing " on {host}" goes: "Searched visitlisboa.com, read 2 pages".
+  "Used the browser" (a step taken before any site was known, such as listing the tabs) leaves the
+  line once a browser step names its site: "Opened 2 pages on visitlisboa.com, read a page", not
+  "Used the browser, opened 2 pages on visitlisboa.com". Its row in Details keeps it.
   A host in punycode shows in Unicode when all its letters are of one script (or one of the CJK
   sets written with Latin, Unicode's "highly restrictive" profile), so "münchen.de" reads as
   itself and a name that mixes scripts stays in punycode (`activityHost.ts`).

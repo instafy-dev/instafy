@@ -688,7 +688,7 @@ function AgentJobThreadPreviewEntry({
 
 // Live runtime activity, provided by ChatPanel, so persisted runtime alerts
 // can tell when a newer workspace start supersedes them: a 45-minute-old
-// "startup failed" card above a live "starting its workspace…" row reads as a
+// "startup failed" card above a live "Starting…" row reads as a
 // contradiction, not as history. `workspaceStartingSince` is when the live
 // start began; an alert persisted for that same start is not history yet.
 export const ChatRuntimeActivityContext = createContext<{
