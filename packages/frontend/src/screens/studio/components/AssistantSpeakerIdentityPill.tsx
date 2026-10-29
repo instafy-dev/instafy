@@ -1,4 +1,6 @@
 import { WarningTriangle } from "iconoir-react";
+import { formatAiAccessibleName } from "../../../components/AiTag";
+import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { requestAgentProfile } from "./agentProfileOpen";
 import type {
@@ -34,7 +36,7 @@ export function AssistantSpeakerIdentityPill({
 
   return (
     <div
-      className={`${SPEAKER_PILL_CLASS_NAME} dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200`}
+      className={`${AI_SPEAKER_PILL_CLASS_NAME} dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200`}
       data-agent-handle={normalizedHandle}
     >
       <ChatMessageAvatar
@@ -60,9 +62,17 @@ export function AssistantSpeakerIdentityPill({
  * The 3px pull is a relative offset, not a negative margin. The sticky
  * overlay shrink-wraps the pill, and a -3px margin made its max-content 3px
  * narrower than the pill, so `max-w-full` clipped the name to "o…".
+ *
+ * The pill's corners follow its face (docs/Brand.md, "One rule for faces"):
+ * a person's pill is a stadium around the round face, and an AI's pill rounds
+ * its corners to the tile's, 30% of the face plus the 3px of border and
+ * padding beside it (12px for the 28px and 32px faces), so the tile's corners
+ * never cut into the pill's edge.
  */
-export const SPEAKER_PILL_CLASS_NAME =
-  "relative -left-[3px] inline-flex max-w-full items-center gap-2 rounded-full border border-slate-200/70 bg-white/95 py-0 pl-0.5 pr-2 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur";
+const SPEAKER_PILL_BASE_CLASS_NAME =
+  "relative -left-[3px] inline-flex max-w-full items-center gap-2 border border-slate-200/70 bg-white/95 py-0 pl-0.5 pr-2 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur";
+export const SPEAKER_PILL_CLASS_NAME = `${SPEAKER_PILL_BASE_CLASS_NAME} rounded-full`;
+const AI_SPEAKER_PILL_CLASS_NAME = `${SPEAKER_PILL_BASE_CLASS_NAME} rounded-xl`;
 
 export type SpeakerStatusMarker = {
   label: string;
@@ -124,9 +134,9 @@ export function AssistantSpeakerIdentityLabel({
         type="button"
         onClick={() => requestAgentProfile(normalizedHandle,
           resolveObservedAgentIdentity(agentIdentity, extractAgentIdentityFromMetadata(metadata)))}
-        aria-label={`View profile for ${normalizedHandle}`}
+        aria-label={formatAiAccessibleName(`View profile for ${normalizedHandle}`)}
         data-testid="chat-speaker-agent-profile"
-        className={`flex-none rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 ${
+        className={`flex-none ${AI_TILE_SHAPE_CLASS} outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 ${
           avatarVisibility === "narrow" ? "sm:hidden" : ""
         }`.trim()}
       >

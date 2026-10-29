@@ -10,6 +10,7 @@ import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { formatRuntimeResourcesSummary } from "./chatRuntimeResources";
 import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
 import { SettingsShell } from "./SettingsShell";
+import { formatAiAccessibleName } from "../../../components/AiTag";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import {
@@ -268,9 +269,13 @@ export function MachinesPanel() {
               const pinnedHere =
                 (agent.runtimeId?.trim() || null) === machineId;
               return (
+                // The chip and its profile button round their corners to the
+                // 24px face's AI tile (7.2px), the chip's 2px further out, so
+                // the tile's corners keep the same 2px of chip all round
+                // (docs/Brand.md, "One rule for faces").
                 <span
                   key={agent.id}
-                  className="inline-flex items-center gap-1 rounded-full bg-slate-100 py-0.5 pl-0.5 pr-2 text-slate-600 dark:bg-white/[0.07] dark:text-slate-300"
+                  className="inline-flex items-center gap-1 rounded-[9.2px] bg-slate-100 py-0.5 pl-0.5 pr-2 text-slate-600 dark:bg-white/[0.07] dark:text-slate-300"
                   data-testid={`machines-agent-chip-${agent.handle}`}
                   title={
                     pinnedHere
@@ -282,9 +287,9 @@ export function MachinesPanel() {
                       control stays a sibling so no buttons nest. */}
                   <DialogTrigger>
                     <AriaButton
-                      aria-label={`View profile for @${agent.handle}`}
+                      aria-label={formatAiAccessibleName(`View profile for @${agent.handle}`)}
                       data-testid={`machines-agent-profile-${agent.handle}`}
-                      className="inline-flex min-w-0 items-center gap-1 rounded-full outline-none hover:opacity-80 focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                      className="inline-flex min-w-0 items-center gap-1 rounded-[7.2px] outline-none hover:opacity-80 focus-visible:ring-2 focus-visible:ring-primary-500/40"
                     >
                       <ChatMessageAvatar
                         kind="assistant"

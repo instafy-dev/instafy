@@ -368,11 +368,22 @@ export function reachArmOf(c: Cub): number {
 /** The coin's top rises by this fraction of its height at full pop. */
 export const popLift = (c: Cub): number => (c.o.timeline.coinPop ? c.o.timeline.coinPop.scale / 2 : 0);
 
-/** Octo's coin as the host draws it right now: centre and radius, popped by pop (0..1) and pressed by pressed (0..1). */
+/**
+ * Octo's face is the AI tile (docs/Brand.md, "One rule for faces"): a square
+ * whose corners round off at 30% of its size (AI_TILE_SHAPE_CLASS), so this
+ * share of its half-size.
+ */
+export const COIN_CORNER = 0.6;
+
+/**
+ * Octo's coin as the host draws it right now: centre, half-size r and corner
+ * radius rc, popped by pop (0..1) and pressed by pressed (0..1).
+ */
 export interface DrawnCoin {
   cx: number;
   cy: number;
   r: number;
+  rc: number;
 }
 
 export function coinDrawn(c: Cub, pop: number, pressed: number): DrawnCoin {
@@ -381,16 +392,21 @@ export function coinDrawn(c: Cub, pop: number, pressed: number): DrawnCoin {
   const p = clamp(0, pressed, 1);
   const grow = cp ? lerp(cp.scale, cp.press ? cp.press.scale : cp.scale, p) * pop : 0;
   const dy = cp && cp.press ? cp.press.dy * p * pop : 0;
-  return { cx: co.x + co.w / 2, cy: co.y + co.h / 2 + dy, r: (Math.min(co.w, co.h) / 2) * (1 + grow) };
+  const r = (Math.min(co.w, co.h) / 2) * (1 + grow);
+  return { cx: co.x + co.w / 2, cy: co.y + co.h / 2 + dy, r, rc: COIN_CORNER * r };
 }
 
 /**
  * Where a tip of radius rt centred at x rests on the drawn coin with `gap` px
- * of air under it (negative: it presses into the ring): the coin is round, so
- * a tip off its centre sits lower.
+ * of air under it (negative: it presses into the edge): level on the tile's
+ * flat top, lower round a corner (a tip there touches the corner's arc).
  */
-export const tipYOn = (k: DrawnCoin, x: number, rt: number, gap: number): number =>
-  k.cy - Math.sqrt(Math.max(0, (k.r + rt + gap) ** 2 - (x - k.cx) ** 2));
+export function tipYOn(k: DrawnCoin, x: number, rt: number, gap: number): number {
+  const flat = k.r - k.rc;
+  const R = k.rc + rt + gap;
+  const dx = Math.max(0, Math.abs(x - k.cx) - flat);
+  return k.cy - flat - Math.sqrt(Math.max(0, R * R - dx * dx));
+}
 
 /**
  * Ends the lent arm's tip on (tx, ty) by weight w: whatever the morph's ledge

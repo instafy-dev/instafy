@@ -9,6 +9,8 @@ import {
 } from "react-aria-components";
 import { AgentProfilePopoverCard } from "./AssistantAvatarPopover";
 import { AgentAvatar } from "../../../components/AgentAvatar";
+import { AiTag, QUIET_TAG_CLASS, formatAiAccessibleName } from "../../../components/AiTag";
+import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
 import { Button, IconButton } from "../../../components/Button";
 import { DrawerHeader } from "../../../components/DrawerHeader";
 import { Text } from "../../../components/Text";
@@ -427,7 +429,7 @@ function RuntimeGroupHeader({
           >
             {runtime.label}
           </Text>
-          <span className="shrink-0 rounded bg-slate-200/70 px-1.5 py-px text-3xs font-medium text-slate-600 dark:bg-white/10 dark:text-slate-300">
+          <span className={QUIET_TAG_CLASS}>
             {runtimeKindLabel(runtime.kind)}
             {runtime.kind === "shared" && agentCount > 1
               ? ` · ${agentCount}`
@@ -728,14 +730,17 @@ export function ParticipantsDrawer({
         ) : null}
 
         {agents.length > 0 ? (
-          <section aria-label="Agents">
+          // People and AI share this list, so the AI section is headed AI and
+          // each AI's name carries the word (docs/Brand.md, "One rule for
+          // faces").
+          <section aria-label="AI">
             <Text
               as="div"
               variant="caption"
               tone="subtle"
               className="border-t border-slate-200/70 pb-1 pt-2.5 text-xxs max-[899px]:text-xs pointer-coarse:text-xs font-medium dark:border-[color:var(--color-studio-dark-divider)]"
             >
-              {showGroupHeaders ? "Runtimes & agents" : "Agents"}
+              {showGroupHeaders ? "Runtimes & AI" : "AI"}
             </Text>
             {runtimeGroups.map((group) => (
               <div key={group.key}>
@@ -804,12 +809,12 @@ export function ParticipantsDrawer({
                         {/* The avatar is the agent's profile: activity + machine. */}
                         <DialogTrigger>
                           <AriaButton
-                            aria-label={`View profile for @${agent.handle}`}
+                            aria-label={formatAiAccessibleName(`View profile for @${agent.handle}`)}
                             data-testid={`participants-agent-profile-${agent.handle}`}
-                            className="flex shrink-0 items-center justify-center rounded-full max-[899px]:h-11 max-[899px]:w-11 pointer-coarse:h-11 pointer-coarse:w-11 outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                            className={`flex shrink-0 items-center justify-center ${AI_TILE_SHAPE_CLASS} max-[899px]:h-11 max-[899px]:w-11 pointer-coarse:h-11 pointer-coarse:w-11 outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40`}
                           >
                             {/* The shared agent face, so built-in Octo keeps its
-                                coin and a custom avatar image shows here too. */}
+                                tile and a custom avatar image shows here too. */}
                             <AgentAvatar
                               agent={{
                                 id: agent.agentId ?? undefined,
@@ -852,6 +857,7 @@ export function ParticipantsDrawer({
                             >
                               @{agent.handle}
                             </Text>
+                            <AiTag />
                             {isEditable && editing ? (
                               <AgentInlineControls
                                 agent={agent}

@@ -4,7 +4,8 @@
 import { describe, expect, it } from "vitest";
 import { ARM_R0, K, SS, TAP_LAND } from "../cubConfig";
 import { build } from "../cubBuild";
-import { coinDrawn, reachArmOf } from "../cubReach";
+import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
+import { COIN_CORNER, coinDrawn, reachArmOf, tipYOn, type DrawnCoin } from "../cubReach";
 import { armTaper } from "../cubRig";
 import type { ArmBuf, Cub } from "../cubState";
 import { popW, pressW, tapAt, tapTimes } from "../cubTimeline";
@@ -100,7 +101,50 @@ function armsCross(a: ArmBuf, b: ArmBuf): boolean {
   return false;
 }
 
-describe("Octo's coin under the lent arm", () => {
+/**
+ * Signed distance from (x, y) to the drawn tile's edge, negative inside: the
+ * rounded square of half-size r whose corners round off at rc.
+ */
+function tileDist(k: DrawnCoin, x: number, y: number): number {
+  const qx = Math.abs(x - k.cx) - (k.r - k.rc);
+  const qy = Math.abs(y - k.cy) - (k.r - k.rc);
+  return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - k.rc;
+}
+
+describe("Octo's tile under the lent arm", () => {
+  it("is the AI tile: corners round off at 30% of its size", () => {
+    expect(AI_TILE_SHAPE_CLASS).toBe(`rounded-[${Math.round(COIN_CORNER * 50)}%]`);
+    const c = cubAt(Object.keys(LAYOUTS)[0]);
+    const k = coinDrawn(c, 0, 0);
+    const co = c.L!.octoCoin;
+    expect(k.r).toBeCloseTo(Math.min(co.w, co.h) / 2, 6);
+    expect(k.rc).toBeCloseTo(0.3 * 2 * k.r, 6);
+  });
+
+  // The tile's top is flat across its middle: a tip anywhere on it rests at
+  // one height, where on the old round coin it sat lower off centre. Round a
+  // corner it touches the corner's arc, and at no x does it float or sink.
+  it("rests a tip level on the flat top and on the arc round each corner", () => {
+    const k: DrawnCoin = { cx: 100, cy: 60, r: 14, rc: 0.6 * 14 };
+    const rt = 2.5;
+    for (const gap of [1.5, 0, -1]) {
+      const level = k.cy - k.r - rt - gap;
+      const flat = k.r - k.rc;
+      for (let x = k.cx - flat; x <= k.cx + flat + 1e-9; x += 0.25) expect(tipYOn(k, x, rt, gap)).toBeCloseTo(level, 9);
+      // Off the flat it drops, symmetric about the centre, and still touches.
+      const off = k.cx + flat + 3;
+      const y = tipYOn(k, off, rt, gap);
+      expect(y).toBeGreaterThan(level);
+      expect(tipYOn(k, 2 * k.cx - off, rt, gap)).toBeCloseTo(y, 9);
+      expect(Math.hypot(off - (k.cx + flat), y - (k.cy - flat))).toBeCloseTo(k.rc + rt + gap, 9);
+      for (let x = k.cx - k.r; x <= k.cx + k.r + 1e-9; x += 0.5) expect(tileDist(k, x, tipYOn(k, x, rt, gap)) - rt).toBeCloseTo(gap, 6);
+    }
+    // A circle is the tile with no flat (rc = r): the round coin's contact.
+    const round: DrawnCoin = { ...k, rc: k.r };
+    for (const x of [k.cx, k.cx + 4, k.cx - 9])
+      expect(tipYOn(round, x, rt, 1)).toBeCloseTo(k.cy - Math.sqrt((k.r + rt + 1) ** 2 - (x - k.cx) ** 2), 9);
+  });
+
   for (const size of Object.keys(LAYOUTS)) {
     it(`lands each tap on the coin as drawn (popped and pressed) at ${size}`, () => {
       const c = cubAt(size);
@@ -117,9 +161,9 @@ describe("Octo's coin under the lent arm", () => {
           const { arms } = armsAt(c, 30 + td, td);
           const arm = arms[reachArmOf(c)];
           const k = coinDrawn(c, popW(TL, td), pressW(TL, td));
-          // The tip's edge to the coin's ring: touching, at most TAP_LAND into it.
-          const gap = Math.hypot(arm.X[K - 1] - k.cx, arm.Y[K - 1] - k.cy) - k.r - rt;
-          if (gap > 0.75 || gap < -TAP_LAND - 0.75) report.push(`td ${td.toFixed(2)}: the tip is ${gap.toFixed(2)} px off the coin`);
+          // The tip's edge to the tile's edge: touching, at most TAP_LAND into it.
+          const gap = tileDist(k, arm.X[K - 1], arm.Y[K - 1]) - rt;
+          if (gap > 0.75 || gap < -TAP_LAND - 0.75) report.push(`td ${td.toFixed(2)}: the tip is ${gap.toFixed(2)} px off the tile`);
         }
       expect(report).toEqual([]);
       // Every tap and the first pat are checked.
