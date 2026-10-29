@@ -362,8 +362,13 @@ local drive of a browser turn on that path sees prompts users never see.
 To drive the browser as users get it, start the stack with:
 
 ```bash
-STACK_BROWSER_HOST=1 pnpm stack:up
+STACK_BROWSER_HOST=1 pnpm stack:refresh
 ```
+
+On a stack that is stopped, `STACK_BROWSER_HOST=1 pnpm stack:up` does the
+same. `stack:up` reuses a controller and a provider that are already running,
+and they keep the settings they started with, so on a running stack it says so
+and changes nothing: use `stack:refresh` there, or `pnpm stack:down` first.
 
 The first run builds the base runtime image with the on-demand browser host
 (`runtime-agent:host-local`, target `runtime`; add `STACK_FORCE_RUNTIME_BUILD=1`

@@ -39,6 +39,7 @@ import {
   STACK_BROWSER_HOST_BUILD_TARGET,
   STACK_BROWSER_HOST_IMAGE,
   stackBrowserHostEnabled,
+  stackBrowserHostReuseWarning,
   withStackBrowserHostControllerEnv,
   withStackBrowserHostProviderEnv,
 } from "./lib/stackBrowserHost.mjs";
@@ -2773,6 +2774,8 @@ async function waitForProvider(port) {
  */
 function reuseRunningProvider(pid) {
   console.log(`[runtime-dev] Provider already running (pid=${pid}).`);
+  const browserHostWarning = stackBrowserHostReuseWarning("provider");
+  if (browserHostWarning) console.warn(browserHostWarning);
   separateRuntimeCheckoutsFromGateway(
     resolveRuntimeCheckoutRoot({ env: process.env, repoRoot, sandboxDir }),
     {
@@ -3054,6 +3057,8 @@ async function startControllerIfNeeded(
       }
     } else {
       console.log(`[runtime-dev] Detected controller on ${controllerBaseUrl}; reusing existing instance.`);
+      const browserHostWarning = stackBrowserHostReuseWarning("controller");
+      if (browserHostWarning) console.warn(browserHostWarning);
       try {
         run("node", ["scripts/runtime-projects.mjs", "ensure", `--base-url=${controllerBaseUrl}`, "--quiet"]);
       } catch (error) {

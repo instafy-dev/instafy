@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   STACK_BROWSER_HOST_IMAGE,
   stackBrowserHostEnabled,
+  stackBrowserHostReuseWarning,
   withStackBrowserHostControllerEnv,
   withStackBrowserHostProviderEnv,
 } from "./stackBrowserHost.mjs";
@@ -36,4 +37,16 @@ test("an operator's own image and policy are kept", () => {
   };
   assert.equal(withStackBrowserHostProviderEnv(env).RUNTIME_AGENT_IMAGE, "runtime-agent:mine");
   assert.equal(withStackBrowserHostControllerEnv(env).HOSTED_BROWSER_HOST, "projects");
+});
+
+// `stack:up` reuses a controller and a provider that are already running, and
+// their settings were fixed when they started: switching on a running stack
+// changed nothing, and the drive saw the old prompts.
+test("a controller or provider that is already running is named as keeping its old settings", () => {
+  for (const service of ["controller", "provider"]) {
+    const warning = stackBrowserHostReuseWarning(service, { STACK_BROWSER_HOST: "1" });
+    assert.match(warning, new RegExp(`the ${service} that is already running`));
+    assert.match(warning, /STACK_BROWSER_HOST=1 pnpm stack:refresh/);
+    assert.equal(stackBrowserHostReuseWarning(service, {}), null);
+  }
 });

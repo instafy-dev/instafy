@@ -38,3 +38,18 @@ export function withStackBrowserHostControllerEnv(env, source = env) {
   if (!stackBrowserHostEnabled(source)) return env;
   return unset(env.HOSTED_BROWSER_HOST) ? { ...env, HOSTED_BROWSER_HOST: "all" } : env;
 }
+
+/**
+ * What `stack:up` says when STACK_BROWSER_HOST=1 finds the controller or the
+ * provider already running: it reuses them, and their settings were fixed
+ * when they started, so the switch reaches them only after a restart. Null
+ * without the switch.
+ */
+export function stackBrowserHostReuseWarning(service, env = process.env) {
+  if (!stackBrowserHostEnabled(env)) return null;
+  return (
+    `[runtime-dev] STACK_BROWSER_HOST=1 does not reach the ${service} that is already running: ` +
+    "it keeps the settings it started with. Run STACK_BROWSER_HOST=1 pnpm stack:refresh, " +
+    "or pnpm stack:down and then STACK_BROWSER_HOST=1 pnpm stack:up."
+  );
+}
