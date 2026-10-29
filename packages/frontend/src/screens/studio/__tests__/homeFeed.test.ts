@@ -577,7 +577,7 @@ describe("buildHomeFeed with ledger rows", () => {
     expect(model.teams.map((team) => team.key)).toEqual(["personal", "org-acme"]);
   });
 
-  it("counts the updates behind a folded thread against the server cut", () => {
+  it("counts the updates behind a folded thread, new when any is past the server cut", () => {
     const model = buildHomeFeed({
       attentionEntries: [],
       recentConversations: [],
@@ -596,9 +596,9 @@ describe("buildHomeFeed with ledger rows", () => {
       now: NOW,
     });
     const flat = model.activity.flatMap((day) => day.events);
-    expect(flat.map((event) => [event.title, event.group?.count, event.group?.newCount, event.isNew])).toEqual([
-      ["Split checkout", 3, 2, true],
-      ["Old", 1, 0, false],
+    expect(flat.map((event) => [event.title, event.group?.count, event.isNew])).toEqual([
+      ["Split checkout", 3, true],
+      ["Old", 1, false],
     ]);
     expect(model.sinceCutIndex).toBe(1);
   });

@@ -3,23 +3,39 @@ import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { StudioDialogSectionLabel } from "../../../components/aria/StudioDialogLayout";
 import type { ControllerProjectMember } from "../../../sdk/instafy";
+import type { PrivateChatTarget } from "../workspaceControls";
 
 type ComposerInvitePrivateChatSectionProps = {
-  conversationReady: boolean;
-  loading: boolean;
   members: ControllerProjectMember[];
-  participantIdSet: Set<string>;
-  busyUserId: string | null;
-  onInvite: (member: ControllerProjectMember) => void;
-};
+} & (
+  | {
+    /** In a private chat, each teammate is added to this chat. */
+    conversationReady: boolean;
+    loading: boolean;
+    participantIdSet: Set<string>;
+    busyUserId: string | null;
+    onInvite: (member: ControllerProjectMember) => void;
+    onStart?: never;
+  }
+  | {
+    /** In any other chat, each teammate starts a new private chat with them. */
+    onStart: (target: PrivateChatTarget) => void;
+    conversationReady?: never;
+    loading?: never;
+    participantIdSet?: never;
+    busyUserId?: never;
+    onInvite?: never;
+  }
+);
 
 export function ComposerInvitePrivateChatSection({
-  conversationReady,
-  loading,
+  conversationReady = true,
+  loading = false,
   members,
   participantIdSet,
-  busyUserId,
+  busyUserId = null,
   onInvite,
+  onStart,
 }: ComposerInvitePrivateChatSectionProps) {
   return (
     <section className="space-y-2.5">
@@ -49,7 +65,7 @@ export function ComposerInvitePrivateChatSection({
             const email = typeof member.email === "string" ? member.email.trim() : "";
             const label = fullName || email || "Teammate";
             const subtitle = fullName && email ? email : null;
-            const invited = participantIdSet.has(member.userId);
+            const invited = participantIdSet?.has(member.userId) === true;
             const isBusy = busyUserId === member.userId;
             return (
               <div
@@ -71,11 +87,12 @@ export function ComposerInvitePrivateChatSection({
                   variant={invited ? "outline" : "primary"}
                   preset="inline"
                   isDisabled={invited || busyUserId !== null}
-                  onPress={() => onInvite(member)}
+                  aria-label={onStart ? `Start a private chat with ${label}` : undefined}
+                  onPress={() => onStart ? onStart({ userId: member.userId, displayName: label }) : onInvite?.(member)}
                   className="shrink-0"
                 >
                   {isBusy ? <Spinner aria-hidden="true" tone="primary" size="xs" /> : null}
-                  {invited ? "In chat" : "Add"}
+                  {onStart ? "Start" : invited ? "In chat" : "Add"}
                 </Button>
               </div>
             );

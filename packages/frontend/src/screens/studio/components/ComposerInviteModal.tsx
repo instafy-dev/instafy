@@ -18,6 +18,7 @@ import { ComposerInviteProjectAccessSection } from "./ComposerInviteProjectAcces
 import { ComposerInviteQrModal } from "./ComposerInviteQrModal";
 import { useComposerAccessInvites } from "./useComposerAccessInvites";
 import { useComposerDeviceHandoff } from "./useComposerDeviceHandoff";
+import { useWorkspaceControls } from "../workspaceControls";
 
 export { buildAuthenticatedDeviceHandoffUrl } from "./useComposerDeviceHandoff";
 
@@ -100,6 +101,7 @@ export function ComposerInviteModal({
     sharingPermissionsLoading,
   });
   const canInviteIntoChat = activeConversationVisibility === "private";
+  const { onStartPrivateConversation } = useWorkspaceControls();
 
   useEffect(() => {
     closeQr();
@@ -135,6 +137,19 @@ export function ComposerInviteModal({
                 participantIdSet={inviteParticipantIdSet}
                 busyUserId={inviteParticipantBusyUserId}
                 onInvite={(member) => void onInviteTeammate(member)}
+              />
+            </>
+          ) : canWriteProject && onStartPrivateConversation && mentionableUsers.length > 0 ? (
+            // A private chat starts here, with the teammate it is for: New chat
+            // only ever makes an ordinary chat.
+            <>
+              <StudioDialogDivider />
+              <ComposerInvitePrivateChatSection
+                members={mentionableUsers}
+                onStart={(target) => {
+                  onOpenChange(false);
+                  onStartPrivateConversation(target);
+                }}
               />
             </>
           ) : null}

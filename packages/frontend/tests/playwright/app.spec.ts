@@ -357,36 +357,6 @@ test.afterEach(async ({ page }) => {
     await expect(page.getByTestId("workspace-tabs")).toHaveCount(0);
   });
 
-  loadsStudioTest("new chat menu anchors from the plus button start edge", async ({ page }) => {
-    test.setTimeout(60_000);
-    await page.goto("/studio");
-
-    await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
-    const trigger = page.getByTestId("sidebar-new-chat");
-    await trigger.click();
-
-    const popover = page.getByTestId("chat-new-chat-menu-popover");
-    await expect(popover).toBeVisible();
-
-    const triggerBox = await trigger.boundingBox();
-    const popoverBox = await popover.boundingBox();
-    expect(triggerBox).not.toBeNull();
-    expect(popoverBox).not.toBeNull();
-    expect(Math.abs((popoverBox?.x ?? 0) - (triggerBox?.x ?? 0))).toBeLessThanOrEqual(2);
-    expect((popoverBox?.y ?? 0)).toBeGreaterThan((triggerBox?.y ?? 0) + (triggerBox?.height ?? 0) - 1);
-
-    await page.mouse.click(20, 20);
-    await expect(popover).toHaveCount(0);
-    await expect
-      .poll(() =>
-        page.evaluate(() => {
-          const button = document.querySelector('[data-testid="sidebar-new-chat"]');
-          return button ? button.matches(":focus-visible") : false;
-        }),
-      )
-      .toBe(false);
-  });
-
   loadsStudioTest("switches chats through the explorer without creating global tabs", async ({ page }) => {
     test.setTimeout(60_000);
     await page.goto("/studio");

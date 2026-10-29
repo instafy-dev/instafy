@@ -69,8 +69,7 @@ function Navigation() {
         <div className="max-w-md"><MobileStudioNavigationHeader title="Project planning" spaceName="Product" teamName="Workshop"
           history={{ canGoBack: true, canGoForward: false, goBack: () => reportAction("Back selected in local review."), goForward: noAction }} historyInMenu
           onOpenPicker={() => reportAction("Space navigation selected in local review.")}
-          onNewChat={() => reportAction("Public chat selected in local review.")}
-          onNewPrivateChat={() => reportAction("Private chat selected in local review.")}
+          onNewChat={() => reportAction("New chat selected in local review.")}
           onOpenSettings={() => reportAction("Space settings selected in local review.")} /></div>
       </section>
     </div>
@@ -106,6 +105,7 @@ function Review() {
       <Button onPress={() => setDialog("history")} data-testid="open-history">Remove history entry</Button>
       <Button onPress={() => setDialog("agent")} data-testid="open-agent">Edit agent</Button>
       <Button onPress={() => setDialog("invite")} data-testid="open-invite">Invite to chat</Button>
+      <Button onPress={() => setDialog("invite-public")} data-testid="open-invite-public">Invite from an ordinary chat</Button>
     </div></SettingsShell>}
     <Text role="status" variant="caption" className="px-4" data-testid="review-status">{status}</Text>
     <HistoryConfirmDialog isOpen={dialog === "history"} title="Remove history entry?" detail="Documentation review · version 24" body="This removes the saved history entry. Files in the current workspace are not changed." cancelLabel="Cancel" confirmLabel="Remove" destructive onCancel={() => setDialog(null)} onConfirm={() => { setDialog(null); setStatus("History removal selected in local review."); }} testId="review-history-confirm" />
@@ -117,10 +117,10 @@ function Review() {
       credentialId={credential} credentials={[{ id: "credential-1", kind: "openai_api_key", label: "Review connection", isDefault: true, revokedAt: null, lastUsedAt: null, createdAt: "", updatedAt: "", metadata: { provider: "openai" } }]} onCredentialChange={setCredential} onConnectCredential={() => reportAction("Connect selected in local review.")}
       modelId={model} modelOptions={[{ id: "review-model", label: "Review model" }, { id: "review-fast", label: "Review fast model" }]} onModelChange={setModel}
       onClose={() => setDialog(null)} onSave={save} />
-    <ComposerInviteModal isOpen={dialog === "invite"} onOpenChange={open => { if (!open) setDialog(null); }}
-      mentionableUsers={members.slice(1, 3)} inviteParticipantIdSet={new Set(["review-researcher"])} inviteParticipantBusyUserId={inviteBusyUser} inviteParticipantsLoading={false}
+    <ComposerInviteModal isOpen={dialog === "invite" || dialog === "invite-public"} onOpenChange={open => { if (!open) setDialog(null); }}
+      mentionableUsers={dialog === "invite-public" ? members.slice(1) : members.slice(1, 3)} inviteParticipantIdSet={new Set(["review-researcher"])} inviteParticipantBusyUserId={inviteBusyUser} inviteParticipantsLoading={false}
       onInviteTeammate={async member => { setInviteBusyUser(member.userId); reportAction(`Add ${member.fullName} selected in local review.`); }}
-      activeConversationVisibility="private" activeConversationControllerId="review-conversation" activeOrgId="review-org" activeProjectId="review-space"
+      activeConversationVisibility={dialog === "invite-public" ? "public" : "private"} activeConversationControllerId="review-conversation" activeOrgId="review-org" activeProjectId="review-space"
       canShareProject canWriteProject sharingPermissionsLoading={false} onOpenProjectSettings={() => reportAction("Space settings selected in local review.")} />
   </main>;
 }

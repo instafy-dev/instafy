@@ -4,6 +4,7 @@ import { act, useState, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComposerInviteModal } from "../ComposerInviteModal";
+import { WorkspaceControlsProvider } from "../../workspaceControls";
 
 const mocks = vi.hoisted(() => ({
   cancelInvitation: vi.fn(),
@@ -805,6 +806,30 @@ describe("ComposerInviteModal", () => {
     });
 
     expect(mocks.cancelInvitation).toHaveBeenCalledWith("invitation-1");
+  });
+
+  it("starts a private chat with a teammate from an ordinary chat, where New chat no longer asks", async () => {
+    const onStartPrivateConversation = vi.fn();
+    const onOpenChange = vi.fn();
+    const render = (props: Partial<ComponentProps<typeof ComposerInviteModal>>) => root.render(
+      <WorkspaceControlsProvider value={{ userEmail: null, activeProjectName: null, hasLogs: false, onStartPrivateConversation }}>
+        <ComposerInviteModal {...createProps({ activeConversationVisibility: "public", onOpenChange, ...props })} />
+      </WorkspaceControlsProvider>,
+    );
+    await act(async () => render({}));
+
+    expect(document.body.textContent).toContain("Private chat");
+    const start = document.querySelector<HTMLButtonElement>('[aria-label="Start a private chat with Team Mate"]');
+    expect(start?.textContent).toBe("Start");
+    await act(async () => start!.click());
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onStartPrivateConversation).toHaveBeenCalledExactlyOnceWith({ userId: "user-2", displayName: "Team Mate" });
+
+    // Alone in a space, or without write access, there is nobody to start one with.
+    await act(async () => render({ mentionableUsers: [] }));
+    expect(document.body.textContent).not.toContain("Private chat");
+    await act(async () => render({ canWriteProject: false }));
+    expect(document.querySelector('[aria-label="Start a private chat with Team Mate"]')).toBeNull();
   });
 
   it("does not load or enable scoped sharing before a private chat is synced", async () => {

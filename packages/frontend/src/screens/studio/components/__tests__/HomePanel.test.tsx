@@ -541,6 +541,41 @@ describe("HomePanel activity states", () => {
     expect(query("home-create")).toBeNull();
   });
 
+  it("never calls a chat's updates new: one already read is no longer unread", async () => {
+    // A chat read in the chat itself since the last visit to Home: its three
+    // updates are past the visit's cut, and the chat is not under Unread.
+    const chat = { id: "conversation-hi", title: "Say hi in three words", visibility: "public", threadKind: null };
+    mocks.activity.activityItems = [
+      activityItem({ id: "23", kind: "run.finished", conversation: chat, title: chat.title, preview: null }),
+      activityItem({ id: "22", at: "2026-09-06T11:59:00Z", conversation: chat, title: chat.title, preview: "Hi there, friend!" }),
+      activityItem({ id: "21", at: "2026-09-06T11:58:00Z", kind: "conversation.created", conversation: chat, title: chat.title, preview: null,
+        actor: { kind: "user", userId: "viewer", displayName: "Viewer", handle: null, avatarSeed: null } }),
+    ];
+    mocks.activity.serverLastSeenEventId = "15";
+    await render();
+    expect(query("home-attention-section")).toBeNull();
+    const row = query("home-recent-item-23")!;
+    expect(row.textContent).toContain("3 updates");
+    expect(row.textContent).not.toMatch(/new/i);
+    expect(container.textContent).not.toMatch(/\bnew of\b/);
+  });
+
+  it("lists chats that would read exactly the same once", async () => {
+    // Untitled chats in one space, each with the same last update, from an
+    // earlier day: one row, not a column of identical ones.
+    mocks.activity.activityItems = [1, 2, 3, 4, 5].map((n) => activityItem({
+      id: String(10 + n), at: `2026-08-21T12:0${n}:00Z`, title: null, preview: "Follow site is ready to preview.",
+      conversation: { id: `conversation-follow-${n}`, title: null, visibility: "public", threadKind: null },
+    }));
+    await render();
+    const rows = Array.from(query("home-recent-section")!.querySelectorAll('[data-testid^="home-recent-item-"]'));
+    // The newest stands for all five.
+    expect(rows.map((row) => row.getAttribute("data-testid"))).toEqual(["home-recent-item-15"]);
+    expect(rows[0].textContent).toContain("New chat");
+    expect(rows[0].textContent).toContain("5 updates");
+    expect(container.textContent?.match(/Follow site is ready to preview\./g)).toHaveLength(1);
+  });
+
   it("preserves the direct first-chat action without adding another create menu", async () => {
     await render();
     expect(query("home-empty")?.textContent).toContain("Nothing here yet");
