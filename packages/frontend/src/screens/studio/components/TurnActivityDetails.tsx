@@ -8,7 +8,7 @@ import { parseCommandExecutionOutput } from "./chatContentHelpers";
 import { extractMessageDetails } from "./chatMessageMetadata";
 import { CommandOutputBlock } from "./CommandOutputBlock";
 import { renderThreadCompactEventIcon, stripShellWrapperFromCommand } from "./threadPreviewHelpers";
-import { turnStepFromMessage, type DetailItem, type StepState, type TurnStep } from "./turnActivity";
+import { isBrowserToolStep, turnStepFromMessage, type DetailItem, type StepState, type TurnStep } from "./turnActivity";
 
 /** Details lists at most this many rows before "Show earlier steps". */
 export const TURN_ACTIVITY_DETAILS_ROW_CAP = 60;
@@ -143,8 +143,16 @@ function stepDescription(step: TurnStep): { detail: string | null; mono: boolean
     case "tool": {
       const server = text("server");
       const tool = text("tool");
+      const activity = step.activity;
+      if (isBrowserToolStep(step)) {
+        // A browser step shows the site it was on, or nothing: never the
+        // tool's name. A look at the tabs names no page, and a label that
+        // names the site already says it.
+        const host = activity?.host && activity.step !== "tabs" ? displayActivityHost(activity.host) : null;
+        return { detail: host && !step.label.includes(host) ? host : null, mono: false };
+      }
       const descriptor = server && tool ? `${server}/${tool}` : server || tool;
-      const host = step.activity?.host ? displayActivityHost(step.activity.host) : null;
+      const host = activity?.host ? displayActivityHost(activity.host) : null;
       return { detail: host ?? (descriptor || null), mono: !host };
     }
     case "search":

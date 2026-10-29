@@ -1,6 +1,6 @@
 import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Eye, NavArrowRight, OpenNewWindow, Undo, UndoCircle, WarningTriangle } from "iconoir-react";
+import { Eye, NavArrowRight, OpenNewWindow, Undo, WarningTriangle } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { useStatus } from "../../../status/useStatus";
@@ -38,6 +38,7 @@ import {
   unsavedWorkPlacementFor,
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
+import { useChatHasSite } from "./chatSiteContext";
 
 const {
   fetchDiff: fetchWorkspaceGitDiffFromController,
@@ -274,10 +275,17 @@ function formatFileCount(count: number): string {
   return `${count} file${count === 1 ? "" : "s"}`;
 }
 
-/** Every file is one the turn created for the site it opened. */
-function createdOnlySite(madeSite: boolean, files: ChatMessageFileChange[]): boolean {
+/**
+ * What the row says for a site's files: "Created the site" when the turn
+ * created every one of them, "Changed the site" otherwise, never a file count
+ * or the lines in them. Null when the files are no site's.
+ */
+function siteChangeLabel(site: boolean, files: ChatMessageFileChange[]): string | null {
   const entries = resolveUniqueChatFileChanges(files);
-  return madeSite && entries.length > 0 && entries.every((entry) => entry.file.changeType === "created");
+  if (!site || entries.length === 0) {
+    return null;
+  }
+  return entries.every((entry) => entry.file.changeType === "created") ? "Created the site" : "Changed the site";
 }
 
 function resolveChangeSetVerb(entries: ResolvedChatFileChange[]): string {
@@ -357,11 +365,14 @@ export function ChatFileChangeList({
   // versions the old way, and to "Revert this change" alone elsewhere.
   messageId?: string | null;
   messageTimestamp?: number | null;
-  // The turn opened a site in a preview. When every file is one it created,
-  // the row reads "Created the site": what the person asked for, not a file
-  // count and the lines in them. The files stay one press away.
+  // The turn opened a site in a preview. Its files, like those of any turn in
+  // a chat that has a site, read "Created the site" or "Changed the site":
+  // what the person asked for, not a file count and the lines in them. The
+  // files stay one press away.
   madeSite?: boolean;
 }) {
+  const chatHasSite = useChatHasSite();
+  const site = madeSite || chatHasSite;
   const { openPanelTab, requestUrlPush, openGitDiffTab } = useWorkspaceTabs();
   const { showStatus } = useStatus();
   const { effectiveRuntimeId, runtimeReady } = useRuntime();
@@ -388,7 +399,7 @@ export function ChatFileChangeList({
   const [diffRefreshNonce, setDiffRefreshNonce] = useState(0);
   const [undoStatusByPath, setUndoStatusByPath] = useState<Record<string, ChatFileUndoStatus>>({});
   const [railExpanded, setRailExpanded] = useState(
-    () => !createdOnlySite(madeSite, files) && resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
+    () => !siteChangeLabel(site, files) && resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
   );
   const [unsavedNoteOpen, setUnsavedNoteOpen] = useState(false);
   const [openNotSavedNotes, setOpenNotSavedNotes] = useState<Record<string, boolean>>({});
@@ -472,7 +483,8 @@ export function ChatFileChangeList({
   // Files the turn's save left out; reverted ones have nothing left to save.
   const notSavedCount = pendingEntries.filter((entry) => entry.file.notSaved).length;
 
-  const siteSummary = revertedCount === 0 && createdOnlySite(madeSite, files);
+  const siteLabel = revertedCount === 0 ? siteChangeLabel(site, files) : null;
+  const siteSummary = siteLabel !== null;
   const compactSummaryLabel = (() => {
     if (totalCount === 0) {
       return "No file changes";
@@ -481,8 +493,8 @@ export function ChatFileChangeList({
       return `Reverted ${formatFileCount(totalCount)}`;
     }
     const notSavedSuffix = notSavedCount > 0 ? ` · ${notSavedCount} not saved` : "";
-    if (siteSummary) {
-      return `Created the site${notSavedSuffix}`;
+    if (siteLabel) {
+      return `${siteLabel}${notSavedSuffix}`;
     }
     if (revertedCount > 0) {
       return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(totalCount)} · ${revertedCount} reverted${notSavedSuffix}`;
@@ -1396,26 +1408,28 @@ export function ChatFileChangeList({
               <span>Review changes</span>
             </button>
             {projectWriteEnabled && savesAreVersions ? (
-              <>
-                {conversationalUndoChip}
-                {canRevertChange ? (
-                  <button
-                    ref={revertChipRef}
-                    type="button"
-                    // Not `disabled` while a revert runs: focus can rest here
-                    // after the dialog is closed, and a press opens nothing.
-                    className={revertingChange ? `${actionChipClass} opacity-45` : actionChipClass}
-                    onClick={openRevertDialog}
-                    aria-disabled={revertingChange || undefined}
-                    aria-busy={revertingChange || undefined}
-                    title="Save a new version that undoes this change"
-                    data-testid="chat-file-change-revert"
-                  >
-                    <UndoCircle className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
-                    <span>{revertingChange ? "Reverting…" : "Revert this change"}</span>
-                  </button>
-                ) : null}
-              </>
+              // One Undo. Where the change's saved version can be undone, it
+              // saves a new version that does, with no turn of Octo's;
+              // otherwise it asks Octo to undo the change.
+              canRevertChange ? (
+                <button
+                  ref={revertChipRef}
+                  type="button"
+                  // Not `disabled` while a revert runs: focus can rest here
+                  // after the dialog is closed, and a press opens nothing.
+                  className={revertingChange ? `${actionUndoChipClass} opacity-45` : actionUndoChipClass}
+                  onClick={openRevertDialog}
+                  aria-disabled={revertingChange || undefined}
+                  aria-busy={revertingChange || undefined}
+                  title="Save a new version that undoes this change"
+                  data-testid="chat-file-change-revert"
+                >
+                  <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+                  <span>{revertingChange ? "Undoing…" : "Undo"}</span>
+                </button>
+              ) : (
+                conversationalUndoChip
+              )
             ) : projectWriteEnabled ? (
               messageId ? (
                 conversationalUndoChip
@@ -1684,7 +1698,7 @@ export function ChatFileChangeList({
         >
           <div data-testid="chat-file-change-revert-dialog" data-state={revertScope?.status ?? "checking"}>
             <h2 id={`${cardIdBase}-revert-title`} className="text-lg font-semibold">
-              Revert this change?
+              Undo this change?
             </h2>
             <p
               role="status"
@@ -1722,7 +1736,7 @@ export function ChatFileChangeList({
                   onPress={() => void handleRevertChange()}
                   data-testid="chat-file-change-revert-confirm"
                 >
-                  Revert
+                  Undo
                 </Button>
               )}
             </div>

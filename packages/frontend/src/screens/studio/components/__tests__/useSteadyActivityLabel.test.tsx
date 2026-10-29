@@ -14,8 +14,8 @@ describe("useSteadyActivityLabel", () => {
   let shownLog: Array<{ at: number; text: string }>;
   let start: number;
 
-  function Harness({ text, live, opensTurn = false }: { text: string; live: boolean; opensTurn?: boolean }) {
-    const shown = useSteadyActivityLabel(text, live, opensTurn);
+  function Harness({ text, live }: { text: string; live: boolean }) {
+    const shown = useSteadyActivityLabel(text, live);
     useEffect(() => {
       shownLog.push({ at: Date.now() - start, text: shown });
     }, [shown]);
@@ -23,9 +23,9 @@ describe("useSteadyActivityLabel", () => {
   }
 
   const line = () => container.querySelector('[data-testid="line"]')?.textContent;
-  const render = (text: string, live = true, opensTurn = false) =>
+  const render = (text: string, live = true) =>
     act(async () => {
-      root.render(<Harness text={text} live={live} opensTurn={opensTurn} />);
+      root.render(<Harness text={text} live={live} />);
     });
   // In steps, so each change is logged at the time it happened.
   const STEP_MS = 20;
@@ -137,14 +137,35 @@ describe("useSteadyActivityLabel", () => {
     expect(line()).toBe("Thinking…");
   });
 
-  it("opens a turn that has no step yet with Starting…", async () => {
-    await render("Thinking…", true, true);
-    expect(line()).toBe("Starting…");
-    await wait(1_000);
-    await render("Looking up places…", true, true);
-    await wait(ACTIVITY_LABEL_HOLD_MS - 1_000);
-    expect(line()).toBe("Looking up places…");
-    expect(shownLog.map((entry) => entry.text)).toEqual(["Starting…", "Looking up places…"]);
+  // A local test: "Saving your changes…" showed for 0.8 s and "Thinking…" for
+  // 0.75 s before the turn's done line took their place.
+  it("holds the last running label before the done line takes its place", async () => {
+    await render("Looking up places…");
+    await wait(ACTIVITY_LABEL_HOLD_MS);
+    await render("Saving your changes…");
+    expect(line()).toBe("Saving your changes…");
+    await wait(800);
+    await render("Built the map, looked up 4 places", false);
+    expect(line()).toBe("Saving your changes…");
+    await wait(ACTIVITY_LABEL_HOLD_MS - 800 - STEP_MS);
+    expect(line()).toBe("Saving your changes…");
+    await wait(STEP_MS);
+    expect(line()).toBe("Built the map, looked up 4 places");
+    // A label that has held long enough gives way at once.
+    await render("Looking up places…");
+    await render("Reading pages…");
+    await wait(ACTIVITY_LABEL_HOLD_MS);
+    expect(line()).toBe("Reading pages…");
+    await wait(ACTIVITY_LABEL_HOLD_MS);
+    await render("Read 6 pages", false);
+    expect(line()).toBe("Read 6 pages");
+  });
+
+  it("shows a done line that never ran as it is, and its changes at once", async () => {
+    await render("Built the map, planned the days", false);
+    expect(line()).toBe("Built the map, planned the days");
+    await render("Built the map, looked up 4 places", false);
+    expect(line()).toBe("Built the map, looked up 4 places");
   });
 
   it("shows Waiting for you and a done line at once", async () => {

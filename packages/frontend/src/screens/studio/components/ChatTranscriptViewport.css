@@ -1,9 +1,9 @@
 .chat-transcript-scroll-with-header {
   /* No background or blur layer: the message ink recedes into the actual
      conversation surface, including when its theme changes. Nothing of it
-     shows behind the presence row (the sticky speaker pill and the roster,
-     8px from the top and at most 34px tall): a line that scrolls up fades out
-     below the row, so the pill never sits over a line someone is reading. */
+     shows behind the presence row (the roster, 8px from the top and at most
+     34px tall): a line that scrolls up fades out below the row, so the roster
+     never sits over a line someone is reading. */
   mask-image: linear-gradient(to bottom, transparent 42px, #000 48px);
 }
 

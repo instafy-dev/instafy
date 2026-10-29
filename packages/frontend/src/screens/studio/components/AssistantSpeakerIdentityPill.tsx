@@ -8,7 +8,6 @@ import type {
 import { extractAgentIdentityFromMetadata, resolveObservedAgentIdentity } from "./chatAssistantIdentity";
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
-import { useBreakpoint } from "../../../hooks/useBreakpoint";
 
 function resolveAvatarSeed(
   normalizedHandle: string,
@@ -16,53 +15,6 @@ function resolveAvatarSeed(
 ): string {
   return agentIdentity?.avatarSeed ?? normalizedHandle;
 }
-
-export function AssistantSpeakerIdentityPill({
-  handle,
-  metadata = null,
-  agentIdentity = null,
-  motion = "idle",
-}: {
-  handle: string | null | undefined;
-  metadata?: Record<string, unknown> | null;
-  agentIdentity?: AssistantAgentIdentity | null;
-  motion?: AssistantAvatarMotion;
-}) {
-  const normalizedHandle = normalizeAssistantHandleLabel(handle);
-  const avatarSeed = resolveAvatarSeed(normalizedHandle, agentIdentity);
-  const wideLayout = useBreakpoint("sm");
-
-  return (
-    <div
-      className={`${SPEAKER_PILL_CLASS_NAME} dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200`}
-      data-agent-handle={normalizedHandle}
-    >
-      <ChatMessageAvatar
-        kind="assistant"
-        metadata={metadata ?? null}
-        agent={{ handle: normalizedHandle, avatarSeed }}
-        motion={motion}
-        scrollReactive={motion === "thinking"}
-        size={wideLayout ? "sm" : "xs"}
-      />
-      <span className="min-w-0 truncate">{normalizedHandle}</span>
-    </div>
-  );
-}
-
-/**
- * The pill stands in for the inline identity on the same pixel row, so its
- * face and name have to land on the same x as the identity's did: the face on
- * the column's left edge (the pill's border and 2px of padding are pulled
- * back by the same 3px), the same 8px gap, and the face at the row's own
- * size, 32px beside the avatar gutter at sm+ and 28px inline below it.
- *
- * The 3px pull is a relative offset, not a negative margin. The sticky
- * overlay shrink-wraps the pill, and a -3px margin made its max-content 3px
- * narrower than the pill, so `max-w-full` clipped the name to "o…".
- */
-export const SPEAKER_PILL_CLASS_NAME =
-  "relative -left-[3px] inline-flex max-w-full items-center gap-2 rounded-full border border-slate-200/70 bg-white/95 py-0 pl-0.5 pr-2 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur";
 
 export type SpeakerStatusMarker = {
   label: string;

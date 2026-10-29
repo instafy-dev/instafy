@@ -1134,18 +1134,17 @@ describe("ChatFileChangeList", () => {
       });
     }
 
-    it("offers Undo first and Revert this change second, and no path discard", async () => {
+    // A local test: Undo and "Revert this change" sat side by side under a reply.
+    it("offers one Undo, the one that saves a new version, and no path discard", async () => {
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange, messageId: "msg-7" });
 
       const actions = Array.from(container.querySelectorAll("[data-testid]"))
         .map((node) => node.getAttribute("data-testid"))
         .filter((id) => id === "chat-file-change-undo" || id === "chat-file-change-revert");
-      expect(actions).toEqual(["chat-file-change-undo", "chat-file-change-revert"]);
-      expect(container.querySelector('[data-testid="chat-file-change-undo"]')?.getAttribute("title")).toBe(
-        "Ask the agent to undo this change",
-      );
-      expect(revertChip()?.textContent).toBe("Revert this change");
+      expect(actions).toEqual(["chat-file-change-revert"]);
+      expect(revertChip()?.textContent).toBe("Undo");
       expect(revertChip()?.title).toBe("Save a new version that undoes this change");
+      expect(container.textContent).not.toContain("Revert");
 
       // The detail card has no per-file discard in this mode.
       await act(async () => {
@@ -1155,7 +1154,7 @@ describe("ChatFileChangeList", () => {
       expect(revertWorkspaceGitPaths).not.toHaveBeenCalled();
     });
 
-    it("makes Revert this change the only action without a message identity", async () => {
+    it("offers the same one Undo without a message identity", async () => {
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
 
       expect(container.querySelector('[data-testid="chat-file-change-undo"]')).toBeNull();
@@ -1215,7 +1214,7 @@ describe("ChatFileChangeList", () => {
         await act(async () => {
           revertChip()?.click();
         });
-        expect(dialog()?.textContent).toContain("Revert this change?");
+        expect(dialog()?.textContent).toContain("Undo this change?");
         // Revert waits until the version's files are known.
         expect(dialog()?.getAttribute("data-state")).toBe("checking");
         expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe("Checking what this change includes\u2026");
@@ -1957,7 +1956,7 @@ describe("ChatFileChangeList", () => {
         expect(document.activeElement?.getAttribute("data-testid")).toBe("chat-file-change-file-chip");
       });
 
-      it("returns focus to Revert this change when the revert fails", async () => {
+      it("returns focus to Undo when the revert fails", async () => {
         revertWorkspaceGitCommit.mockResolvedValue({
           ok: false,
           conflict: true,
@@ -1991,7 +1990,7 @@ describe("ChatFileChangeList", () => {
 
         // The dialog says what closing it does, and Cancel becomes Close.
         expect(document.querySelector('[data-testid="chat-file-change-revert-scope"]')?.textContent).toBe(
-          "Reverting… Closing this doesn't stop it. You'll see the result when it's done.",
+          "Undoing… Closing this doesn't stop it. You'll see the result when it's done.",
         );
         expect(dialogButton("Cancel")).toBeUndefined();
         const close = dialogButton("Close");
@@ -2003,7 +2002,7 @@ describe("ChatFileChangeList", () => {
         expect(document.querySelector('[data-testid="chat-file-change-revert-dialog"]')).toBeNull();
         // The chip carries the running revert and keeps focus; pressing it
         // opens nothing and sends nothing.
-        expect(revertChip()?.textContent).toBe("Reverting…");
+        expect(revertChip()?.textContent).toBe("Undoing…");
         expect(revertChip()?.getAttribute("aria-disabled")).toBe("true");
         expect(document.activeElement).toBe(revertChip());
         await act(async () => {
@@ -2040,7 +2039,7 @@ describe("ChatFileChangeList", () => {
           document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
         });
         expect(document.querySelector('[data-testid="chat-file-change-revert-dialog"]')).toBeNull();
-        expect(revertChip()?.textContent).toBe("Reverting…");
+        expect(revertChip()?.textContent).toBe("Undoing…");
         expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
 
         await act(async () => {
@@ -2058,7 +2057,7 @@ describe("ChatFileChangeList", () => {
           6500,
           undefined,
         );
-        expect(revertChip()?.textContent).toBe("Revert this change");
+        expect(revertChip()?.textContent).toBe("Undo");
         expect(revertChip()?.hasAttribute("aria-disabled")).toBe(false);
       });
 
@@ -2098,11 +2097,11 @@ describe("ChatFileChangeList", () => {
           expect(dialog()).toBeNull();
           expect(showStatus).toHaveBeenCalledTimes(1);
           expect(showStatus).toHaveBeenCalledWith(
-            "The revert is taking longer than expected. It may still finish, and you'll see the result when it does.",
+            "Undoing it is taking longer than expected. It may still finish, and you'll see the result when it does.",
             "warning",
             9000,
           );
-          expect(revertChip()?.textContent).toBe("Revert this change");
+          expect(revertChip()?.textContent).toBe("Undo");
           expect(document.activeElement).toBe(revertChip());
 
           // The answer arrives later and is still shown.
@@ -2158,7 +2157,7 @@ describe("ChatFileChangeList", () => {
         });
         expect(dialog()).toBeNull();
         expect(showStatus).toHaveBeenCalledTimes(1);
-        expect(revertChip()?.textContent).toBe("Revert this change");
+        expect(revertChip()?.textContent).toBe("Undo");
       }
 
       function scopeText() {
@@ -2185,11 +2184,11 @@ describe("ChatFileChangeList", () => {
           });
           expect(dialog()).not.toBeNull();
           expect(scopeText()).toBe(
-            "Your earlier revert of this change is still running. Closing this doesn't stop it. You'll see the result when it's done.",
+            "Your earlier undo of this change is still running. Closing this doesn't stop it. You'll see the result when it's done.",
           );
           expect(dialogButton("Close")?.disabled).toBe(false);
           expect(confirmButton()?.getAttribute("aria-disabled")).toBe("true");
-          expect(revertChip()?.textContent).toBe("Reverting…");
+          expect(revertChip()?.textContent).toBe("Undoing…");
           await act(async () => {
             confirmButton()?.click();
           });
@@ -2240,7 +2239,7 @@ describe("ChatFileChangeList", () => {
             dialogButton("Close")?.click();
           });
           expect(dialog()).toBeNull();
-          expect(revertChip()?.textContent).toBe("Reverting…");
+          expect(revertChip()?.textContent).toBe("Undoing…");
           expect(revertChip()?.getAttribute("aria-disabled")).toBe("true");
 
           // The card stops waiting a second time and frees the chip again.
@@ -2249,11 +2248,11 @@ describe("ChatFileChangeList", () => {
           });
           expect(showStatus).toHaveBeenCalledTimes(2);
           expect(showStatus).toHaveBeenLastCalledWith(
-            "The revert is taking longer than expected. It may still finish, and you'll see the result when it does.",
+            "Undoing it is taking longer than expected. It may still finish, and you'll see the result when it does.",
             "warning",
             9000,
           );
-          expect(revertChip()?.textContent).toBe("Revert this change");
+          expect(revertChip()?.textContent).toBe("Undo");
           expect(revertChip()?.hasAttribute("aria-disabled")).toBe(false);
           expect(document.activeElement).toBe(revertChip());
 

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControllerApiError } from "../../../../services/runtimeController/core";
 import { NO_MOUNTED_SITE_PREVIEWS, SITE_PREVIEW_HEALTH_POLL_MS, SITE_PREVIEW_HEARTBEAT_MS, SitePreviewPane, nextMountedSitePreviews } from "../SitePreviewPane";
 import { withHostQuery } from "../previewHost/hostMessages";
+import { waitForSitePreviewPage } from "../SitePreviewCard";
 import { resetFollowStoreForTests, setFollowPresence } from "../previewHost/followStore";
 
 const PREVIEW_ID = "11111111-1111-4111-8111-111111111111";
@@ -163,6 +164,26 @@ describe("SitePreviewPane", () => {
     expect(pill.classList.contains("sr-only")).toBe(true);
     expect(pill.getAttribute("role")).toBe("status");
     expect(pill.textContent).toBe("Starting…");
+  });
+
+  // A local test: a restarted site's pane was blank for 16 to 26 s, and the
+  // map's for 5 to 18 s, with nothing said.
+  it("says Loading… over a frame whose page has not loaded, and tells the cards once it has", async () => {
+    const shown = vi.fn();
+    const stop = waitForSitePreviewPage(PREVIEW_ID, shown);
+    await render();
+    expect(pane().dataset.state).toBe("live");
+    expect(frame()).not.toBeNull();
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Loading…");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+    expect(shown).toHaveBeenCalledOnce();
+    // Reload loads a new frame: blank again until its page loads.
+    await click("[data-testid=site-preview-reload]");
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Loading…");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+    stop();
   });
 
   it("reads only the broker's status message, only from its own frame and origin", async () => {

@@ -836,7 +836,6 @@ export function AgentJobThreadPreviewLayout({
               text={activityText}
               live={activity.live !== null}
               animate={shouldAnimateThreadLiveState}
-              noStepsYet={activity.stepCount === 0}
               interactive={activityLineOpensDetails}
               detailsOpen={showDetailsPanel}
               detailsId={detailsId}

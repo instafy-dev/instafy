@@ -220,7 +220,7 @@ export const AVATAR_HUMAN = "font-semibold";
 // Octo's coin is not copied here: the landing renders the studio's own
 // OctoCoin (src/components/OctoCoin.tsx), sized by AVATAR_ROSTER / AVATAR_SM.
 
-// AssistantSpeakerIdentityPill.tsx:100-138 and chatHumanIdentity.tsx:52-75.
+// AssistantSpeakerIdentityLabel (AssistantSpeakerIdentityPill.tsx) and HumanSpeakerIdentityLabel (chatHumanIdentity.tsx).
 export const SPEAKER_LABEL = "inline-flex max-w-full items-center gap-2 text-xs text-slate-500 dark:text-slate-400";
 export const SPEAKER_NAME = "min-w-0 truncate font-semibold text-slate-600 dark:text-slate-300";
 export const SPEAKER_TIME = "flex-none text-xxs font-medium text-slate-400 dark:text-slate-500";

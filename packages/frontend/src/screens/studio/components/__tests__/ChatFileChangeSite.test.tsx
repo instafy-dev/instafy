@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessageFileChange } from "../../types";
 import { ChatFileChangeList } from "../ChatFileChangeList";
+import { ChatHasSiteContext } from "../chatSiteContext";
 
 // Every file reads as 100 added lines. Nothing here may hit the network.
 const fetchDiff = vi.hoisted(() =>
@@ -97,10 +98,33 @@ describe("the files a site turn created", () => {
     expect(container.textContent).not.toContain("index.html");
   });
 
-  it("keeps the file count where the turn made no site, or changed files that were there", async () => {
+  it("keeps the file count where the chat has no site", async () => {
     await show(["a.md", "b.md", "c.md", "d.md", "e.md"].map(created), false);
     expect(toggle()?.textContent).toContain("Created 5 files");
+  });
+
+  // A local test: the map's hand-back read "sights.geojson +5 −2 ·
+  // map.config.json +22 −4" under its reply.
+  it("reads Changed the site for a site's files that were there, with no names or line counts", async () => {
     await show([created("site/index.html"), changed("README.md")], true);
-    expect(toggle()?.textContent).toContain("Edited 2 files");
+    expect(toggle()?.textContent).toBe("Changed the site");
+    await show([changed("lisbon/sights.geojson"), changed("lisbon/map.config.json")], true);
+    expect(toggle()?.textContent).toBe("Changed the site");
+    expect(container.textContent).not.toMatch(/sights|map\.config|[+−-]\d/u);
+    expect(chips()).toHaveLength(0);
+  });
+
+  // A local test: the map turn opened no card of its own (a later turn did),
+  // and read "lisbon-3-days +2724" under its reply.
+  it("reads as the site in a chat that has a site, whichever turn opened its card", async () => {
+    await act(async () => {
+      root.render(
+        <ChatHasSiteContext.Provider value>
+          <ChatFileChangeList files={[created("lisbon-3-days")]} projectId="project-1" />
+        </ChatHasSiteContext.Provider>,
+      );
+    });
+    expect(toggle()?.textContent).toBe("Created the site");
+    expect(container.textContent).not.toMatch(/lisbon|\+\d/u);
   });
 });

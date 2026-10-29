@@ -122,8 +122,10 @@ so a checkpoint does not bypass authorization.
 When another participant adds a message while you are reading above the live
 bottom, **New messages ↓** appears above the composer without moving the
 transcript. It returns to live messages and clears once you catch up, including
-when the chat comes back from its Browser view already at the bottom, and it never
-shows for a message you already see there. Historical
+when the chat comes back from its Browser view already at the bottom, or the
+newest message arrives in a chat that fits on screen and never scrolls; it waits
+until the chat has found its place before it shows, and it never shows for a
+message you already see there. Historical
 search views use the same action and retain **Results**; the duplicate **Latest**
 action is hidden while it is shown. Loading existing history or sending your own
 message does not count as a new incoming message for this indicator.

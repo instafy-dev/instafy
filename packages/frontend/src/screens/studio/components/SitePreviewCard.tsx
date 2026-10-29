@@ -46,6 +46,11 @@ const MAX_UNSEEN_FOLLOWS = 8;
 const RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
 /** A card says "Checking the site…" only once a check has taken this long; most answer before. */
 export const SITE_PREVIEW_CHECKING_QUIET_MS = 3_000;
+/**
+ * How long a card that started its site says "Starting…" after the site
+ * answered, while the pane it opened has not shown the page.
+ */
+export const SITE_PREVIEW_PAGE_WAIT_MS = 60_000;
 const ENDED_GRANT_STATUSES: ReadonlySet<string> = new Set(["revoked", "expired", "closed", "failed"]);
 const ENDED_RUNTIME_STATUSES: ReadonlySet<string> = new Set(["stopped", "stopping", "terminated", "released", "failed"]);
 /** A turn in one of these has ended: whatever it did to a site is done. */
@@ -148,6 +153,29 @@ function shareAnswer(previewId: string, from: CardMember, answer: SharedAnswer) 
  */
 export function shareSitePreviewRecord(previewId: string, preview: ControllerSitePreview) {
   for (const member of cardsByPreview.get(previewId)?.members ?? []) member.read({ preview });
+}
+
+/** The cards that started a site and wait for its page to show in the pane, per preview. */
+const pageWaiters = new Map<string, Set<() => void>>();
+
+/**
+ * The pane showed the site's page (its frame loaded): a card that started
+ * the site says "Starting…" until then, since a site that answers its first
+ * check can take many seconds more to show its page.
+ */
+export function shareSitePreviewPageShown(previewId: string) {
+  for (const shown of [...(pageWaiters.get(previewId) ?? [])]) shown();
+}
+
+/** Calls `shown` when a pane shows this preview's page. Returns the unregister. */
+export function waitForSitePreviewPage(previewId: string, shown: () => void): () => void {
+  const waiters = pageWaiters.get(previewId) ?? new Set<() => void>();
+  pageWaiters.set(previewId, waiters);
+  waiters.add(shown);
+  return () => {
+    waiters.delete(shown);
+    if (!waiters.size) pageWaiters.delete(previewId);
+  };
 }
 
 /** The pane on screen for each preview, as its own "check the site now". */
@@ -347,6 +375,9 @@ export function SitePreviewCard({
   // this site, so Open on a stopped one starts it again without an Octo turn,
   // then opens it. Nothing here knows what the site is.
   const [waking, setWaking] = useState(false);
+  // The site answered and its pane opened: the card keeps "Starting…" until
+  // the pane shows the page, or for at most SITE_PREVIEW_PAGE_WAIT_MS.
+  const [awaitingPage, setAwaitingPage] = useState(false);
   const [wakeError, setWakeError] = useState<string | null>(null);
   const wakeRequest = useRef<AbortController | null>(null);
   useEffect(() => () => wakeRequest.current?.abort(), []);
@@ -370,6 +401,7 @@ export function SitePreviewCard({
       } else renew();
       // A pane already showing the stopped site opens it again now, not at its next check.
       paneChecks.get(preview.previewId)?.();
+      setAwaitingPage(true);
       then();
     } catch (cause) {
       if (controller.signal.aborted) return;
@@ -382,6 +414,18 @@ export function SitePreviewCard({
       }
     }
   }, [member, preview.previewId, projectId, renew]);
+
+  // Until the pane it opened shows the page (or the wait runs out).
+  useEffect(() => {
+    if (!awaitingPage) return;
+    const done = () => setAwaitingPage(false);
+    const stopWaiting = waitForSitePreviewPage(preview.previewId, done);
+    const timer = window.setTimeout(done, SITE_PREVIEW_PAGE_WAIT_MS);
+    return () => {
+      stopWaiting();
+      window.clearTimeout(timer);
+    };
+  }, [awaitingPage, preview.previewId]);
 
   // A failed check is no answer: ask again a few times, more slowly each
   // time and only while the page is visible, then stop.
@@ -436,7 +480,7 @@ export function SitePreviewCard({
   const startBlocked = wakeable && down && server?.canStart === false;
   // Someone else (another member, another tab) is waking it: follow along.
   const wakingElsewhere = !waking && !replaced && server?.wake?.state === "waking";
-  const starting = waking || wakingElsewhere;
+  const starting = waking || wakingElsewhere || awaitingPage;
   // The site came back some other way (Octo restarted it, someone else woke it): the failure is old news.
   useEffect(() => { if (state === "live" && wakeError && !waking) setWakeError(null); }, [state, wakeError, waking]);
 

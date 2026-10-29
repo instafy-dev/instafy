@@ -9,6 +9,7 @@ import {
   isDoneForm,
   isLiveLabel,
   readStepActivity,
+  readTurnStepsRecord,
   summarizeTurnActivity,
   type TurnActivityPhase,
 } from "../turnActivity";
@@ -478,12 +479,27 @@ describe("summarizeTurnActivity", () => {
     expect(summarize([finished], "stale").live).toBe("Status unavailable");
   });
 
-  it("starts a turn Instafy is trying again by itself with Trying again", () => {
-    expect(summarizeTurnActivity([], { jobId: JOB, phase: "starting", retry: true }).live).toBe("Trying again…");
-    // Once it runs, it reads like any turn.
-    expect(summarizeTurnActivity([command(ADD_POINT)], { jobId: JOB, phase: "running", retry: true }).live).toBe(
-      "Thinking…",
-    );
+  // A local test: 37 s passed between a send and its turn's first step, with
+  // nothing under the message but "Trying again…" for 0.8 s.
+  it("says Starting until the turn's first step, however long, and a retry keeps it", () => {
+    expect(summarize([], "starting").live).toBe("Starting…");
+    // The model reasoning before its first step is the turn still starting.
+    expect(summarize([note("**Planning the Lisbon weekend**", "reasoning")], "running").live).toBe("Starting…");
+    // So is the runtime retrying its request, with its label attached.
+    const retrying = note("Retrying: stream disconnected", "status", {
+      v: 1,
+      key: "runtime/retry",
+      role: "quiet",
+      live: "Trying again",
+      count: 1,
+      also: [],
+    });
+    expect(summarize([note("**Reading**", "reasoning"), retrying], "running").live).toBe("Starting…");
+    // A person's answer is still asked for at once.
+    expect(summarize([], "running", true).live).toBe("Waiting for you");
+    // From the first step on, the line follows the steps.
+    expect(summarize([command(ADD_POINT)], "running").live).toBe("Thinking…");
+    expect(summarize([command(ADD_POINT), retrying], "running").live).toBe("Trying again…");
   });
 
   it("shows a runtime status the runtime labelled while it is the newest thing", () => {
@@ -515,7 +531,7 @@ describe("summarizeTurnActivity", () => {
     expect(summarize([command(ADD_POINT), retrying, note("**Picking the hotels**", "reasoning")], "running").live).toBe(
       "Thinking…",
     );
-    expect(summarize([retrying, note("Workspace changes saved.")], "running").live).toBe("Thinking…");
+    expect(summarize([command(ADD_POINT), retrying, note("Workspace changes saved.")], "running").live).toBe("Thinking…");
   });
 
   it("says Waiting for you only to the person who can answer", () => {
@@ -617,9 +633,9 @@ describe("browser steps", () => {
       browserStep(BROWSER_OPEN, { host: "visitlisboa.com", pageKey: PAGE_B, step: "navigate" }),
     ];
     expect(summarize(messages).summary).toBe("Opened 2 pages on visitlisboa.com, read a page");
-    // Its row in Details keeps it.
+    // Its row in Details says what it did in words.
     const first = summarize(messages).details[0];
-    expect(first.kind === "step" && first.step.label).toBe("Used the browser");
+    expect(first.kind === "step" && first.step.label).toBe("Looked at the tabs");
     // With no site named, it is what the line can say.
     expect(summarize([tabs]).summary).toBe("Used the browser");
   });
@@ -654,6 +670,184 @@ describe("browser steps", () => {
     expect(summarize(munich).summary).toBe("Opened münchen.de");
     const lookalike = [browserStep(BROWSER_OPEN, { host: "xn--pple-43d.com", pageKey: PAGE_A, step: "navigate" })];
     expect(summarize(lookalike).summary).toBe("Opened xn--pple-43d.com");
+  });
+});
+
+const BROWSER_USE = { key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" };
+
+describe("the page a browser turn starts on", () => {
+  // A local test: the tram follow-up read "Read a page on visitlisboa.com,
+  // opened metrolisboa.pt", led by the page an earlier turn had left open.
+  it("never leads the line once the turn went somewhere", () => {
+    const messages = [
+      browserStep(BROWSER_USE, { step: "tabs" }),
+      browserStep(BROWSER_OPEN, { host: "google.com", step: "navigate" }, "failed"),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+      browserStep(BROWSER_OPEN, { host: "metrolisboa.pt", pageKey: PAGE_B, step: "navigate" }),
+    ];
+    expect(summarize(messages).summary).toBe("Opened metrolisboa.pt");
+    // Details keeps every step.
+    expect(summarize(messages).details.map((item) => item.kind === "step" && item.step.label)).toEqual([
+      "Looked at the tabs",
+      "Tried opening google.com",
+      "Read a page on visitlisboa.com",
+      "Opened metrolisboa.pt",
+    ]);
+  });
+
+  it("counts a page read after the turn moved, on any site", () => {
+    const messages = [
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+      browserStep(BROWSER_BROWSE, { host: "visitlisboa.com", step: "click" }),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(summarize(messages).summary).toBe("Read a page on visitlisboa.com");
+  });
+
+  it("is what a turn that only looked at it did", () => {
+    const messages = [
+      browserStep(BROWSER_USE, { step: "tabs" }),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+    ];
+    expect(summarize(messages).summary).toBe("Read a page on visitlisboa.com");
+    // A failed step there says what was tried, not the page it started on.
+    const failed = [
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+      browserStep(BROWSER_OPEN, { host: "roborock.com", step: "navigate" }, "failed"),
+    ];
+    expect(summarize(failed).summary).toBe("Tried opening roborock.com");
+  });
+});
+
+describe("browser rows in Details", () => {
+  it("say what a look at the tabs did, in words", () => {
+    const label = (status: string) => {
+      const item = summarize([browserStep(BROWSER_USE, { step: "tabs" }, status)], "running").details[0];
+      return item.kind === "step" ? item.step.label : null;
+    };
+    expect(label("in_progress")).toBe("Looking at the tabs");
+    expect(label("completed")).toBe("Looked at the tabs");
+    expect(label("failed")).toBe("Tried looking at the tabs");
+  });
+});
+
+describe("Details notes", () => {
+  const RETRY_ACTIVITY = { v: 1, key: "runtime/retry", role: "quiet", live: "Trying again", count: 1, also: [] };
+  const SAVE_ACTIVITY = { v: 1, key: "runtime/save", role: "quiet", live: "Saving your changes", count: 1, also: [] };
+
+  function listed(notes: ChatMessage[]) {
+    const activity = summarizeTurnActivity([command(ADD_POINT), ...notes], {
+      jobId: JOB,
+      phase: "completed",
+      updates: notes,
+    });
+    return activity.details.flatMap((item) => (item.kind === "update" ? [item.message.content] : []));
+  }
+
+  it("keep Octo's own notes, reasoning titles and plan updates", () => {
+    expect(
+      listed([
+        note("Checking the Belém listings first."),
+        note("**Planning the days**", "reasoning"),
+        note("Plan update: 1/3 steps complete", "todo_list"),
+      ]),
+    ).toEqual(["Checking the Belém listings first.", "**Planning the days**", "Plan update: 1/3 steps complete"]);
+  });
+
+  // A local test: Details showed a "Trying again…" row between the steps.
+  it("leave out the statuses the runtime writes itself", () => {
+    expect(
+      listed([
+        note("Retrying: stream disconnected", "status", RETRY_ACTIVITY),
+        note("Syncing workspace changes…", "status", SAVE_ACTIVITY),
+        note("Retrying: unexpected status 502"),
+      ]),
+    ).toEqual([]);
+  });
+
+  // A local test: Details showed the browser card's request and the browser
+  // turn's findings as raw JSON rows.
+  it("leave out a note that is only data", () => {
+    const request = note('{"task":"Find and read authoritative public pages","browserLocation":"auto","continueBuilding":true}>xpath');
+    const findings = note(
+      '{"url":"https://www.visitlisboa.com/en/places","title":"What are you looking for? Visit Lisboa","facts":["Belém"]}\n' +
+        '{"url":"https://www.visitlisboa.com/en/places/b","title":"B","facts":[]}',
+      "status",
+    );
+    const listedFindings = { ...findings, metadata: { ...findings.metadata, details: { kind: "agent_message", browserFindings: { pages: 2, pagesRead: 2 } } } };
+    const list = note('[{"url":"https://a.example/","stopped":"login"}]');
+    expect(listed([request, listedFindings, list])).toEqual([]);
+    // Words that mention braces are still words.
+    expect(listed([note("Kept the {n} placeholder out of the title.")])).toEqual(["Kept the {n} placeholder out of the title."]);
+  });
+});
+
+describe("a finished turn's stored steps", () => {
+  const STAY = {
+    v: 1,
+    key: "pack/interactive-map/uw/stay",
+    role: "content",
+    live: "Finding places to stay",
+    done: "found places to stay",
+    count: 1,
+    also: [],
+  };
+  const PLAN = { v: 1, key: "pack/interactive-map/uw/plan", role: "content", live: "Planning the days", done: "planned the days", count: 1, also: [] };
+  // The steps as the controller stores them with the reply.
+  const record = {
+    v: 1,
+    activities: [ADD_POINT, STAY, PLAN, VALIDATE].map((activity) => ({ ...activity })),
+    steps: [
+      { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+      { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+      { type: "command_execution", status: "failed", exitCode: 1 },
+      { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+      { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+      { type: "command_execution", status: "completed", exitCode: 0, activity: 1 },
+      { type: "file_change", status: "completed", paths: ["map/data.json", "map/index.html"] },
+      { type: "command_execution", status: "completed", exitCode: 0, activity: 2 },
+      { type: "command_execution", status: "completed", exitCode: 0, activity: 3 },
+    ],
+  };
+  const reply = (metadata: Record<string, unknown>): ChatMessage => ({
+    id: "reply",
+    role: "assistant",
+    content: "Here is your Lisbon map.",
+    timestamp: 99,
+    metadata: { source: "agent", jobId: JOB, outcome: "succeeded", turnSteps: record, ...metadata },
+  });
+
+  // A local test: a map turn read "Built the map, looked up 4 places, found
+  // places to stay" when it ended, and "Built the map, planned the days" after
+  // a reload whose page of history began in the middle of the turn.
+  it("word the line from the whole turn, whatever part of it loaded", () => {
+    const tail = [command(PLAN), command(VALIDATE)];
+    expect(summarize(tail).summary).toBe("Built the map, planned the days");
+    const steps = readTurnStepsRecord(reply({}), JOB);
+    expect(steps).toHaveLength(9);
+    expect(summarize(steps!).summary).toBe("Built the map, looked up 4 places, found places to stay");
+    // The same words as the turn's own messages give.
+    const live = [
+      ...Array.from({ length: 2 }, () => command(ADD_POINT)),
+      command(null, { status: "failed", exitCode: 1 }),
+      ...Array.from({ length: 2 }, () => command(ADD_POINT)),
+      command(STAY),
+      step("file_change", null, { paths: ["map/data.json", "map/index.html"] }),
+      command(PLAN),
+      command(VALIDATE),
+    ];
+    expect(summarize(live).summary).toBe(summarize(steps!).summary);
+  });
+
+  it("are read only from the agent's reply for this turn, and only as checked labels", () => {
+    expect(readTurnStepsRecord(reply({ source: "user" }), JOB)).toBeNull();
+    expect(readTurnStepsRecord(reply({}), "another-job")).toBeNull();
+    expect(readTurnStepsRecord({ ...reply({}), role: "user" }, JOB)).toBeNull();
+    expect(readTurnStepsRecord(reply({ turnSteps: { v: 2, activities: [], steps: [] } }), JOB)).toBeNull();
+    expect(readTurnStepsRecord(reply({ turnSteps: { ...record, steps: [{ type: "shell" }] } }), JOB)).toBeNull();
+    // A label that breaks the rules counts as an unlabelled step.
+    const forged = { ...record, activities: [{ ...ADD_POINT, done: "visit https://evil.example" }], steps: [record.steps[0]] };
+    expect(summarize(readTurnStepsRecord(reply({ turnSteps: forged }), JOB)!).summary).toBe("Ran a command");
   });
 });
 

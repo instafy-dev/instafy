@@ -27,7 +27,7 @@ import { FollowRing, FollowRipples, FollowToast, SitePreviewFollowControls } fro
 import { AskConfirmStrip } from "./previewHost/AskConfirmStrip";
 import type { SiteAskHost } from "./previewHost/useSiteAsks";
 import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
-import { registerSitePreviewPaneCheck, shareSitePreviewRecord } from "./SitePreviewCard";
+import { registerSitePreviewPaneCheck, shareSitePreviewPageShown, shareSitePreviewRecord } from "./SitePreviewCard";
 
 export const SITE_PREVIEW_HEALTH_POLL_MS = 15_000;
 /** While the frame is on screen: keeps a quiet site's session alive. */
@@ -143,6 +143,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   /** The record's title, port and path: what keys this site for location. */
   const [record, setRecord] = useState<SiteRecord | null>(null);
   const [frameKey, setFrameKey] = useState(0);
+  /** The frame the site's page last loaded in (its key and address); until then the pane says "Loading…". */
+  const [loadedFrame, setLoadedFrame] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [openingTab, setOpeningTab] = useState(false);
   /** The record says how to start the site again (`instafy preview open` recorded it); null until a record says. */
@@ -438,6 +440,15 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
     })();
   }, [openingTab, previewId, projectId, revoke]);
 
+  // A frame whose page has not loaded is blank (a site that just started can
+  // take many seconds): the pane says so instead of showing nothing.
+  const frameIdentity = viewerUrl ? `${frameKey}:${viewerUrl}` : null;
+  const frameLoading = frameShown && frameIdentity !== null && loadedFrame !== frameIdentity;
+  const onFrameLoad = () => {
+    setLoadedFrame(frameIdentity);
+    shareSitePreviewPageShown(previewId);
+    host.onFrameLoad();
+  };
   const problem = problemText(shown);
   // In place of the site, the pane's message is the one signal: no pill beside it saying the same.
   const problemShown = down || problem !== null;
@@ -496,7 +507,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
             referrerPolicy="no-referrer"
             className="h-full w-full border-0"
             data-testid="site-preview-frame"
-            onLoad={host.onFrameLoad}
+            onLoad={onFrameLoad}
           />
         ) : null}
         {frameShown && follow.state.role === "following" ? <FollowRing /> : null}
@@ -508,9 +519,10 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
             onStop={() => { if (host.location.site) setLocationStopped(host.location.site, true); host.location.dismissToast(); }} />
         ) : followNote ? <FollowToast text={followNote} />
           : follow.locationLeftOut && follow.state.role === "presenting" ? <FollowToast text="📍 Your location is left out" testId="follow-location-toast" /> : null}
-        {shown === "opening" || shown === "starting" ? (
-          <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400" data-testid="site-preview-progress">
-            <Spinner aria-hidden="true" tone="slate" size="sm" /> {shown === "starting" ? "Starting" : "Opening"} {title}…
+        {shown === "opening" || shown === "starting" || frameLoading ? (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400" data-testid="site-preview-progress">
+            <Spinner aria-hidden="true" tone="slate" size="sm" />{" "}
+            {shown === "starting" ? `Starting ${title}…` : shown === "opening" ? `Opening ${title}…` : "Loading…"}
           </div>
         ) : null}
         {problemShown ? (

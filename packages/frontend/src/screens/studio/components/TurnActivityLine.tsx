@@ -49,8 +49,6 @@ export type TurnActivityLineProps = {
   /** The turn is running: the line sweeps, holds each label and announces its changes. */
   live: boolean;
   animate: boolean;
-  /** The turn has no step yet: the line opens with "Starting…" until the model has worked a moment. */
-  noStepsYet?: boolean;
   /** The line opens Details. False on a failed turn, whose failure block has the one Details. */
   interactive: boolean;
   detailsOpen: boolean;
@@ -66,15 +64,15 @@ export function TurnActivityLine({
   text: latestText,
   live,
   animate,
-  noStepsYet = false,
   interactive,
   detailsOpen,
   detailsId,
   onToggleDetails,
 }: TurnActivityLineProps) {
   // While the turn runs, a label holds until the next one has lasted: a step
-  // that ends at once, or a short pause between steps, never flashes past.
-  const text = useSteadyActivityLabel(latestText, live, noStepsYet);
+  // that ends at once, a short pause between steps, or the last step before
+  // the done line, never flashes past.
+  const text = useSteadyActivityLabel(latestText, live);
   const sweep = live && animate ? "instafy-status-sweep" : "";
   const label = (
     <span className={`${sweep} min-w-0 truncate`} data-sweep-text={text}>

@@ -11,6 +11,7 @@
 // without a valid label counts as an unlabelled one ("Ran 3 commands"), so
 // older runtimes and history read the same way.
 
+import { resolveRetryingStatusPresentation } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
 import { displayActivityHost } from "./activityHost";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
@@ -471,6 +472,22 @@ type Group = {
 const PAGE_COUNTED_KEYS = new Set(["browser/read", "browser/open"]);
 // A browser step taken before any site was known ("used the browser").
 const BROWSER_WITHOUT_SITE = "browser/use";
+const BROWSER_READ = "browser/read";
+// Browser steps that can take the tab to another page. A look at the page
+// before the first of them that worked is a look at the page the turn started
+// on, which another turn (or another chat) left there.
+const PAGE_MOVING_STEPS = new Set(["navigate", "open_tab", "click", "search", "submit", "press"]);
+
+function movesThePage(step: TurnStep): boolean {
+  const entry = step.activity;
+  return (
+    step.state === "done" &&
+    entry !== null &&
+    entry.key.startsWith("browser/") &&
+    entry.step !== undefined &&
+    PAGE_MOVING_STEPS.has(entry.step)
+  );
+}
 
 function groupCount(group: Group): number | null {
   if (group.unknown) {
@@ -512,10 +529,14 @@ function groupWords(group: Group, previousHost: string | null): string {
  * What the turn made leads ("Built the map, looked up 14 places, read 6
  * pages"), then the two biggest things it did. A step that failed counts for
  * nothing it would have done: when nothing else is left to say, the line says
- * what was tried ("Tried searching the web").
+ * what was tried ("Tried searching the web"). A look at the page the turn
+ * started on never leads: it is named only when the turn did nothing else.
  */
 function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: string | null } {
   const groups = new Map<string, Group>();
+  // Looks at the page the browser was on when the turn began.
+  const startPage = new Map<string, Group>();
+  const firstMove = steps.findIndex(movesThePage);
   // Assigned in the loop below; the assertions keep them from narrowing to null.
   let tried = null as ActivityEntry | null;
   let result = null as string | null;
@@ -523,6 +544,7 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
     if (!step.activity) {
       return;
     }
+    const lookAtStartPage = firstMove === -1 || index < firstMove;
     // A step the person said no to, or left, is named by its answer instead.
     const declined = step.activity.approval === "denied" || step.activity.approval === "expired";
     for (const entry of [step.activity, ...step.activity.also]) {
@@ -551,12 +573,13 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
         continue;
       }
       const groupKey = entry.host ? `${entry.key}@${entry.host}` : entry.key;
-      let group = groups.get(groupKey);
+      const into = entry.key === BROWSER_READ && lookAtStartPage ? startPage : groups;
+      let group = into.get(groupKey);
       if (!group) {
         group = {
           entry, known: 0, unknown: false, members: 0, first: index, last: index, paths: null, pageKeys: null, unkeyed: 0,
         };
-        groups.set(groupKey, group);
+        into.set(groupKey, group);
       }
       group.members += 1;
       group.last = index;
@@ -587,7 +610,9 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
   // "Used the browser" is a browser step before any site was known. Once a
   // step names its site it says nothing more: "Opened 2 pages on
   // visitlisboa.com", not "Used the browser, opened 2 pages on visitlisboa.com".
-  const namesASite = all.some((group) => group.entry.key.startsWith("browser/") && group.entry.host);
+  const namesASite = [...all, ...startPage.values()].some(
+    (group) => group.entry.key.startsWith("browser/") && group.entry.host,
+  );
   const content = all
     .filter((group) => group.entry.role === "content" && !(namesASite && group.entry.key === BROWSER_WITHOUT_SITE))
     .sort((a, b) => weight(b) - weight(a) || a.first - b.first)
@@ -606,6 +631,14 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
   }
   if (phrases.length === 0 && tried?.live) {
     return { text: triedWords(tried.live, tried.host), firstHost: tried.host ?? null };
+  }
+  if (phrases.length === 0 && startPage.size > 0) {
+    // The turn only looked at the page it started on: that is what it did.
+    const looks = [...startPage.values()].sort((a, b) => a.first - b.first);
+    return {
+      text: looks.map((group) => groupWords(group, null)).join(", "),
+      firstHost: looks[0].entry.host ?? null,
+    };
   }
   return {
     text: phrases.length > 0 ? phrases.join(", ") : null,
@@ -733,9 +766,47 @@ function neutralDone(kind: StepKind, message: ChatMessage): string {
   return NEUTRAL_LABELS[kind].done;
 }
 
+// A browser step that only listed or switched the browser's tabs names no
+// page. Its row says so in words, never with the tool's name.
+const BROWSER_TABS_LABEL = { live: "Looking at the tabs", done: "looked at the tabs" };
+// A step of Instafy's own browsers that no runtime labelled (an older one).
+const BROWSER_NEUTRAL_LABEL = { live: "Using the browser", done: "used the browser" };
+
+/** Instafy's own browsers: Details names their steps by site, never by tool. */
+export const BROWSER_TOOL_SERVERS: ReadonlySet<string> = new Set([
+  "instafy_shared_browser",
+  "instafy_personal_browser",
+  "instafy_local_browser",
+]);
+
+/** A tool call made in one of Instafy's own browsers. */
+export function isBrowserToolStep(step: Pick<TurnStep, "kind" | "message" | "activity">): boolean {
+  if (step.kind !== "tool") {
+    return false;
+  }
+  if (step.activity?.key.startsWith("browser/")) {
+    return true;
+  }
+  const details = extractMessageDetails(isRecord(step.message.metadata) ? step.message.metadata : null);
+  const server = typeof details?.server === "string" ? details.server.trim() : "";
+  return BROWSER_TOOL_SERVERS.has(server);
+}
+
+function isBrowserTabsStep(entry: ActivityEntry | null): boolean {
+  return Boolean(entry?.key.startsWith("browser/") && entry.step === "tabs");
+}
+
 function stepLabel(kind: StepKind, message: ChatMessage, activity: StepActivity | null, state: StepState): string {
   const entry = activity ? primaryEntry(activity) : null;
-  const live = entry?.live ? fillHost(entry.live, entry.host) : NEUTRAL_LABELS[kind].live;
+  const tabs = isBrowserTabsStep(entry);
+  const unlabelledBrowserStep = !entry && isBrowserToolStep({ kind, message, activity });
+  const live = tabs
+    ? BROWSER_TABS_LABEL.live
+    : entry?.live
+      ? fillHost(entry.live, entry.host)
+      : unlabelledBrowserStep
+        ? BROWSER_NEUTRAL_LABEL.live
+        : NEUTRAL_LABELS[kind].live;
   if (state === "running") {
     return live;
   }
@@ -744,8 +815,14 @@ function stepLabel(kind: StepKind, message: ChatMessage, activity: StepActivity 
   if (state === "failed") {
     return capitalize(triedWords(live));
   }
+  if (tabs) {
+    return capitalize(BROWSER_TABS_LABEL.done);
+  }
   if (entry?.done) {
     return capitalize(doneWords(entry.done, entry.count, entry.host));
+  }
+  if (unlabelledBrowserStep) {
+    return capitalize(BROWSER_NEUTRAL_LABEL.done);
   }
   // A quiet step its runtime gave no past form keeps its own words.
   return entry ? live : capitalize(neutralDone(kind, message));
@@ -764,6 +841,32 @@ export function turnStepFromMessage(message: ChatMessage, jobId: string | null):
 
 function isRuntimeStatus(message: ChatMessage): boolean {
   return (getMessageType(message) ?? "").trim().toLowerCase() === "status";
+}
+
+// A note that starts as a JSON object (or a list of them) is data, not words:
+// `{"task": …}`, `{"url": …, "facts": […]}`.
+const JSON_NOTE = /^\s*(?:\[\s*)?\{\s*"[^"\n]+"\s*:/u;
+
+/**
+ * Whether Details lists this note: Octo's notes, reasoning titles and plan
+ * updates. A status the runtime writes itself ("Trying again…", "Saving your
+ * changes") is neither a step nor a note, and a note that is only data (a
+ * browser card's request, the findings a browser turn hands back) repeats what
+ * the card or the reply already says; the findings stay in the hand-back.
+ */
+export function isDetailsNote(message: ChatMessage): boolean {
+  const metadata = isRecord(message.metadata) ? message.metadata : null;
+  if (isRuntimeStatus(message) && readStepActivity(message, null) !== null) {
+    return false;
+  }
+  if (resolveRetryingStatusPresentation({ metadata, content: message.content })) {
+    return false;
+  }
+  const details = extractMessageDetails(metadata);
+  if (isRecord(metadata?.browserFindings) || isRecord(details?.browserFindings)) {
+    return false;
+  }
+  return !JSON_NOTE.test(message.content);
 }
 
 /**
@@ -793,6 +896,63 @@ export function detailsOnlySummary(items: readonly DetailItem[], threads = 0): s
   return parts.length > 0 ? capitalize(parts.join(", ")) : null;
 }
 
+/** A finished turn stores at most this many steps with its reply. */
+const MAX_RECORDED_STEPS = 400;
+
+/**
+ * The steps of a finished turn as the controller stored them with its reply
+ * (`turnSteps`: each step's type, status, exit code, files and checked
+ * activity), as step messages the line counts. A page of history can start in
+ * the middle of a long turn, so after a reload the loaded steps may be only its
+ * last ones; these are all of them, and the line reads as it did when the turn
+ * ended. Null when the reply carries none (an older controller, a turn with no
+ * steps), or is not the agent's reply for this turn.
+ */
+export function readTurnStepsRecord(message: ChatMessage, jobId: string | null): ChatMessage[] | null {
+  if (message.role !== "assistant" || !isRecord(message.metadata)) {
+    return null;
+  }
+  const metadata = message.metadata;
+  if (metadata.source !== "agent" || !jobId || (typeof metadata.jobId === "string" ? metadata.jobId.trim() : "") !== jobId) {
+    return null;
+  }
+  const record = metadata.turnSteps;
+  if (!isRecord(record) || record.v !== 1 || !Array.isArray(record.steps) || !Array.isArray(record.activities)) {
+    return null;
+  }
+  const { activities, steps } = record as { activities: unknown[]; steps: unknown[] };
+  if (steps.length === 0 || steps.length > MAX_RECORDED_STEPS) {
+    return null;
+  }
+  const messages: ChatMessage[] = [];
+  for (const [index, value] of steps.entries()) {
+    if (!isRecord(value) || typeof value.type !== "string" || !STEP_TYPES[value.type]) {
+      return null;
+    }
+    const details: Record<string, unknown> = { itemId: `recorded-${index}` };
+    if (typeof value.status === "string") details.status = value.status;
+    if (typeof value.exitCode === "number" && Number.isInteger(value.exitCode)) details.exitCode = value.exitCode;
+    if (Array.isArray(value.paths)) details.paths = value.paths.filter((path) => typeof path === "string");
+    const activity =
+      typeof value.activity === "number" && Number.isInteger(value.activity) ? activities[value.activity] : undefined;
+    messages.push({
+      id: `turn-step:${jobId}:${index}`,
+      role: "assistant",
+      content: "",
+      timestamp: index,
+      messageType: value.type,
+      metadata: {
+        source: "agent",
+        jobId,
+        messageType: value.type,
+        details,
+        ...(activity !== undefined ? { activity } : {}),
+      },
+    });
+  }
+  return messages;
+}
+
 export type SummarizeTurnActivityOptions = {
   jobId: string | null;
   phase: TurnActivityPhase;
@@ -806,8 +966,6 @@ export type SummarizeTurnActivityOptions = {
   approvals?: readonly SessionBrowserApproval[];
   /** Non-step messages Details lists between the steps (notes, plan updates). */
   updates?: readonly ChatMessage[];
-  /** The turn is Instafy trying a failed one again by itself: it starts with "Trying again…". */
-  retry?: boolean;
 };
 
 /**
@@ -858,7 +1016,7 @@ export function summarizeTurnActivity(
     } else {
       newestOtherIndex = index;
     }
-    if (updateIds.has(message.id)) {
+    if (updateIds.has(message.id) && isDetailsNote(message)) {
       order.push({ kind: "update", message });
     }
   });
@@ -895,7 +1053,9 @@ export function summarizeTurnActivity(
   let live: string | null = null;
   let summary: string | null = null;
   if (phase === "starting") {
-    live = options.retry ? "Trying again…" : STARTING_LINE;
+    // A turn Instafy tries again by itself starts as any turn does: one
+    // "Starting…", never a "Trying again…" of its own.
+    live = STARTING_LINE;
   } else if (phase === "stale") {
     live = "Status unavailable";
   } else if (phase === "running") {
@@ -904,6 +1064,11 @@ export function summarizeTurnActivity(
     const runningEntry = runningStep?.activity ? primaryEntry(runningStep.activity) : null;
     if (options.viewerCanAnswer) {
       live = WAITING_FOR_YOU_LINE;
+    } else if (stepCount === 0) {
+      // From the send until the turn's first step the line says one thing,
+      // however long that takes: the model reasoning, or the runtime retrying
+      // its request, is still the turn starting.
+      live = STARTING_LINE;
     } else if (status && status.index > newestOtherIndex && status.activity.live) {
       live = `${fillHost(status.activity.live, status.activity.host)}…`;
     } else if (runningStep) {

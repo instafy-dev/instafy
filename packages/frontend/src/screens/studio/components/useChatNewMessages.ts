@@ -81,26 +81,41 @@ export function useChatNewMessages(options: NewMessagesOptions) {
 
   // The visible live reader at the newest message has seen every arrival. It
   // gets there by scrolling, or without a scroll: the chat came back from its
-  // Browser view (hidden, it noted a reply) already at the bottom, or the
-  // transcript resized under it. Only a scroll used to clear it, so the pill
-  // stayed over the newest turn of a chat that was at the bottom.
+  // Browser view (hidden, it noted a reply) already at the bottom, the
+  // transcript resized under it, or its content grew (a reply, a row that
+  // finished rendering). A chat that fits on screen never scrolls, and a reply
+  // grows the content, not the scroller, so only a scroll or a resize of the
+  // scroller left the pill over the newest turn of a chat at the bottom.
+  const pending = Boolean(scope && pendingScope === scope);
+  const settle = useCallback(() => {
+    const node = scrollContainerRef.current;
+    const current = latest.current;
+    if (!node || !scope || !current.enabled) return;
+    if (current.visitKey !== visitKey || current.currentUserId !== currentUserId) return;
+    if (readerAtNewest(node, current)) setPendingScope(null);
+  }, [currentUserId, scope, scrollContainerRef, visitKey]);
   useLayoutEffect(() => {
     const node = scrollContainerRef.current;
-    if (!node || !scope || !enabled) return;
-    const settle = () => {
-      const current = latest.current;
-      if (current.visitKey !== visitKey || current.currentUserId !== currentUserId) return;
-      if (readerAtNewest(node, current)) setPendingScope(null);
-    };
+    if (!node || !scope || !enabled || !pending) return;
     settle();
     node.addEventListener("scroll", settle, { passive: true });
     const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => settle());
     resize?.observe(node);
+    for (const child of Array.from(node.children)) resize?.observe(child);
+    const grown = typeof MutationObserver === "undefined" ? null : new MutationObserver(() => settle());
+    grown?.observe(node, { childList: true, subtree: true, characterData: true });
     return () => {
       node.removeEventListener("scroll", settle);
       resize?.disconnect();
+      grown?.disconnect();
     };
-  }, [currentUserId, enabled, scope, scrollContainerRef, visitKey]);
+  }, [enabled, pending, scope, scrollContainerRef, settle]);
+  // The chat restores its place after it shows again (a frame or two later,
+  // with no scroll when it lands where it was): each render asks again while
+  // the pill is up, so it goes the moment the place is the newest message.
+  useLayoutEffect(() => {
+    if (pending) settle();
+  });
 
   const jumpToLatest = useCallback(() => {
     const current = latest.current;
@@ -113,7 +128,9 @@ export function useChatNewMessages(options: NewMessagesOptions) {
   }, [currentUserId, visitKey]);
 
   return {
-    hasNewMessages: Boolean(scope && pendingScope === scope && enabled && hasResolvedHistory),
+    // Never while the chat is still finding its place: whether the arrival is
+    // out of view is known only once it has.
+    hasNewMessages: pending && enabled && hasResolvedHistory && (options.messageTargetActive || options.isReadingReady()),
     jumpToLatest,
   };
 }

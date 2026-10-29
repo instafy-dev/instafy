@@ -15,6 +15,7 @@ import {
 } from "../BrowserApprovalRow";
 import { ChatBubbleRow } from "../ChatBubbleRow";
 import type { SessionBrowserApproval } from "../turnActivity";
+import { ACTIVITY_LABEL_HOLD_MS } from "../useSteadyActivityLabel";
 import {
   BROWSER_APPROVAL_UNCLAIMED_FALLBACK_MS,
   fallbackRowContinuesTail,
@@ -450,6 +451,8 @@ describe("a browser prompt inside Octo's turn", () => {
       reply("The Belém Tower opens at 10:00.", NOW + 3_000),
     ];
     await act(async () => { root.render(<Chat state={approval()} showTurn threadMessages={done} />); });
+    // The last running label holds its moment before the done line.
+    await advance(ACTIVITY_LABEL_HOLD_MS);
     expect(byTestId("turn-activity-line")?.textContent).toContain(
       "Opened carris.pt, searched visitlisboa.com · you allowed a search on visitlisboa.com",
     );
@@ -485,6 +488,7 @@ describe("a browser prompt inside Octo's turn", () => {
     live.inFlight = false;
     const done = [OPENED_CARRIS, step("item-search", NOW + 2_000, "failed", null), reply("You declined, so I stopped.", NOW + 3_000)];
     await act(async () => { root.render(<Chat state={approval()} showTurn threadMessages={done} />); });
+    await advance(ACTIVITY_LABEL_HOLD_MS);
     expect(byTestId("turn-activity-line")?.textContent).toContain(
       "Opened carris.pt · you said no to a form on visitlisboa.com",
     );
