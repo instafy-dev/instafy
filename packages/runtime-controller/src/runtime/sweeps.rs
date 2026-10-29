@@ -3681,8 +3681,10 @@ mod tests {
     }
 
     /// A runtime stop requeues leased jobs as well as queued ones. A job that
-    /// was leased may already have spent a model turn before the stop, so its
-    /// expiry must not refund the reserve.
+    /// was leased may already have done something for the person before the
+    /// stop: one with a step that worked keeps its reserve when it expires.
+    /// (One that left nothing gets it back: system_turns_tests,
+    /// `an_expired_turn_that_left_nothing_gives_its_reserve_back`.)
     #[tokio::test]
     async fn expired_requeued_job_keeps_managed_ai_charge_after_a_lease() -> anyhow::Result<()> {
         use crate::tests_managed_ai_refund::{
@@ -3697,10 +3699,34 @@ mod tests {
         };
 
         // A runtime leased the job (the lease path bumps lease_attempts), ran
-        // for a while, then its stop requeued the job; nothing came back and
-        // no live runtime remains for the project.
+        // a command that worked, then its stop requeued the job; nothing else
+        // came back and no live runtime remains for the project.
         {
             let connection = fixture.pool.get().await?;
+            connection
+                .execute(
+                    "insert into conversation_messages
+                         (id, conversation_id, project_id, run_id, role, content, metadata)
+                     select $2, job.conversation_id, job.project_id, job.run_id, 'assistant',
+                            'git status --short', $3
+                       from agent_jobs job
+                      where job.id = $1",
+                    &[
+                        &fixture.job_id,
+                        &uuid::Uuid::new_v4(),
+                        &tokio_postgres::types::Json(json!({
+                            "jobId": fixture.job_id.to_string(),
+                            "messageType": "command_execution",
+                            "details": {
+                                "kind": "codex_command_execution",
+                                "itemId": "item-1",
+                                "status": "completed",
+                                "exitCode": 0,
+                            },
+                        })),
+                    ],
+                )
+                .await?;
             connection
                 .execute(
                     "update runtimes set status = 'stopped' where project_id = $1",
@@ -3755,7 +3781,7 @@ mod tests {
         assert!(
             rows.iter()
                 .all(|(reason, _, _)| reason != "managed_ai_refund"),
-            "a job that was leased is not refunded on expiry, got {rows:?}"
+            "a job that did something is not refunded on expiry, got {rows:?}"
         );
         assert_eq!(
             credit_balance(&fixture.pool, &fixture.org_id).await?,
