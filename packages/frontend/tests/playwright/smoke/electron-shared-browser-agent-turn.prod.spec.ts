@@ -335,24 +335,19 @@ async function approveExpectedSharedBrowserRequest(
 ): Promise<string> {
   const prompt = sharedBrowser.getByTestId("shared-browser-approval-prompt");
   await expect(prompt).toBeVisible({ timeout: 60_000 });
+  // The sheet asks in Octo's words: "Octo wants to use iana.org." for a
+  // site, "Octo wants to click …" for a step.
   await expect(prompt.getByRole("heading")).toHaveText(
-    expected.kind === "origin"
-      ? "Allow the AI agent to use this site?"
-      : "Allow this browser action?",
+    expected.kind === "origin" ? /^\S+ wants to (?:use|open) / : /^\S+ wants to (?!use |open )/,
     { timeout: 60_000 },
   );
   const destination = prompt.getByTestId("shared-browser-approval-destination");
   await expect(destination).toHaveText(expected.destination, { timeout: 60_000 });
   const approvedDestination = (await destination.textContent())?.trim() ?? "";
   expect(approvedDestination).not.toBe("");
-  if (expected.kind === "action") {
-    await expect(prompt).toContainText("This approval is used once.");
-  } else {
-    await expect(prompt).toContainText("Allow applies to this site for the current AI turn.");
-  }
   await expect(prompt.getByTestId("shared-browser-approval-deny")).toBeFocused();
   const allow = prompt.getByTestId("shared-browser-approval-allow");
-  await expect(allow).toHaveText(expected.kind === "origin" ? "Allow site" : "Allow once");
+  await expect(allow).toHaveText(expected.kind === "origin" ? "Allow site" : "Allow");
   await allow.click();
   return approvedDestination;
 }
@@ -411,14 +406,11 @@ async function approveIanaRedirectOriginsUntilAgentYields(
             return false;
           }
           const heading = (await prompt.getByRole("heading").textContent())?.trim() ?? "";
-          if (heading === "Allow this browser action?") {
+          if (!/ wants to (?:use|open) /.test(heading)) {
             // The just-approved action card can remain mounted for one render
             // while its decision is applied. Keep polling; a genuinely stuck
             // card still fails at the bounded timeout.
             return false;
-          }
-          if (heading !== "Allow the AI agent to use this site?") {
-            throw new Error(`Unexpected Shared Browser approval after click: ${heading}`);
           }
           const rawDestination =
             (await prompt

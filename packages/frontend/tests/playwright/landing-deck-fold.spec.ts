@@ -25,8 +25,7 @@ function browserTurnClock(page: Page) {
   return async (beat: TurnBeatId) => {
     const targetIndex = BROWSER_TURN_BEATS.findIndex((entry) => entry.id === beat);
     expect(targetIndex, `the browser script includes ${beat}`).toBeGreaterThanOrEqual(nextIndex);
-    // Render every scheduled beat, including the routine-choice scroll before
-    // Allow. A busy runner must not miss the 250ms tap/allowPress states while
+    // Render every scheduled beat. A busy runner must not miss the 250ms tap/allowPress states while
     // inspecting the previous frame. The real application still owns its
     // timers and state; only elapsed time is controlled by the test.
     while (nextIndex <= targetIndex) {
@@ -46,14 +45,6 @@ async function expectAboveFold(page: Page, testId: string, label: string) {
   expect(seen, `${label}: ${testId} is drawn`).not.toBeNull();
   expect(seen!.top, `${label}: ${testId} starts on screen`).toBeGreaterThanOrEqual(0);
   expect(seen!.bottom, `${label}: ${testId} ends above the fold`).toBeLessThanOrEqual(height);
-}
-
-async function routineChoiceInsidePrompt(page: Page) {
-  return page.evaluate(() => {
-    const check = document.querySelector('[data-testid="landing-browser-routine-check"]')!.getBoundingClientRect();
-    const content = document.querySelector('[data-testid="landing-browser-approval-content"]')!.getBoundingClientRect();
-    return check.top >= content.top - 0.5 && check.bottom <= content.bottom + 0.5;
-  });
 }
 
 // Display sizes, and the shorter first views real browsers leave once their
@@ -109,18 +100,10 @@ for (const [width, height] of [
 
       await untilBeat("approve");
       await expectAboveFold(page, "landing-browser-allow", "approve");
-      // Ada's ticked choice is in view beside the Allow she presses: the
-      // prompt's content is scrolled so its checkbox shows, above the fold.
-      await untilBeat("routine");
-      // The browser's CSS transition uses rendering time, not the mocked JS
-      // clock. Finish the routine-choice scroll before advancing to her press.
-      await expect.poll(() => routineChoiceInsidePrompt(page), {
-        message: "routine: the checkbox scrolls inside the prompt before Allow is pressed",
-      }).toBe(true);
+      // Octo's one-sentence question is in view beside the Allow site she presses.
       await untilBeat("allowPress");
-      await expectAboveFold(page, "landing-browser-routine-check", "allowPress");
-      const checkShown = await routineChoiceInsidePrompt(page);
-      expect(checkShown, "allowPress: the ticked checkbox is inside the prompt's visible content").toBe(true);
+      await expectAboveFold(page, "landing-browser-approval-content", "allowPress");
+      await expectAboveFold(page, "landing-browser-allow", "allowPress");
       await untilBeat("navigate");
       await expectAboveFold(page, "landing-browser-ticker", "navigate");
       await untilBeat("click");

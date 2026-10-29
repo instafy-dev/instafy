@@ -120,9 +120,12 @@ earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
 earlier tab" in the tab picker. Take over
 is the same action as the toolbar's take-over, without a confirmation: it
 cancels the run, and ending its runtime-wide agent marker returns every tab to
-people. On a tab the agent opened itself, take-over finds the runtime's one
-browser run; a person's own tab never falls back to a runtime-wide run. Once
-control is gone, no tab carries the agent's name.
+people. Taken on one of the agent's own tabs, it first keeps that tab (the
+keep route below, waited on for at most 1.5 s), so the page the person took
+stays open when the run's other tabs close. On a tab the agent opened itself,
+take-over finds the runtime's one browser run; a person's own tab never falls
+back to a runtime-wide run. Once control is gone, no tab carries the agent's
+name.
 
 Personal and Shared Browser use one `BrowserAddressField` and the common Instafy
 `Input`, `Button`, `IconButton` and `Checkbox` primitives for their address, actions
@@ -207,15 +210,39 @@ former driver's socket after a bounded rejected-input burst. WebRTC separately
 caps active peers and offer attempts. These bounds keep presence, rejected
 input, or renderer reconnects from becoming an unbounded runtime fan-out.
 
-RFB cannot safely separate pixels from arbitrary raw input without parsing the
-RFB client protocol. It therefore remains driver-exclusive: non-drivers use
-WebRTC or CDP, and the origin rechecks the exact owner before forwarding every
-client packet (with a one-second idle poll to close a quiet revoked bridge). It
-is not presented as a view-only collaboration lane. On a runtime whose only
-viewer is RFB, a person who may control the browser while Octo or someone else
-drives it keeps a live view without a picture: the last frame, and who has
-control with **Take over** (or the request controls). When nobody holds control
-the view says to request it.
+RFB carries pixels and raw input on one stream, so its pass-through lane
+(`/browser/vnc`) remains driver-exclusive: the origin rechecks the exact owner
+before forwarding every client packet (with a one-second idle poll to close a
+quiet revoked bridge). Everyone else watches RFB on its view-only lane,
+`/browser/vnc/view` (`browser.view`, the same pixel-stream caps as the other
+viewers, closed when the grant expires). That lane parses the client's half of
+the protocol instead of passing it through: RFB 3.8 with no security, a shared
+session whatever the client asked, and then only the messages that ask for
+pixels (pixel format, encodings, update requests, continuous updates and
+fences). Key and pointer events, clipboard text, desktop resizes and power
+requests are dropped, and any message the lane does not know closes it. The
+server's half is passed through, so the display sends no clipboard: RFB would
+send every viewer the text copied or selected in the browser, and the runtime
+starts Xtigervnc with `-SendCutText=0` (no Instafy viewer reads that text).
+Capabilities advertise it as `rfb.viewOnly: true`. Studio uses it while Octo or
+another person drives: noVNC connects with `viewOnly` and scales the picture
+instead of resizing the shared screen, and moves to the driver's lane when
+control comes back. Like the driver's lane, it is open only while the Browser
+view is shown. Octo brings the tab it works in to the front, so the view
+follows Octo across its own tabs. WebRTC or CDP, when the runtime offers them,
+still come first for a viewer.
+
+On a runtime without the view-only lane, a person who may control the browser
+while Octo drives keeps a still of the page Octo is on, and who has control
+with one **Take over** (the reading row's, when it shows). The still is kept
+only for the chat, page and address it was taken on: once any of them changes
+the stage says in one line where Octo is ("Octo is on example.com") instead of
+showing another page. A viewer that stays connected while its tab moves to
+another address (a screencast) can still be captured for the new address.
+When nobody holds control the view says to request it. The caption of Octo's
+latest step shows only while Octo holds the browser, and only for steps of that
+hold: steps already in the log when the hold began, or when the view first read
+the log during the hold, are never captioned.
 
 The collaboration roster belongs to the browser, not to a tab: its socket stays
 connected while Studio's tab list is empty or reloading, and the participant's
@@ -362,13 +389,43 @@ the page origin has been approved because it changes no remote state. Typing
 authentication, payment, or identity secrets remains blocked outright and is
 not made possible by approval.
 
-In Ask, the first site prompt also offers **Always allow routine browsing for this turn**
-when the runtime advertises `approvalModes: ["ask", "routine"]`. This is an
-explicit grant across HTTP(S) sites for the exact current run, initiating user,
-runtime generation and selected page—not permanent site trust, a project-wide
-default, or permission inherited by the next turn (only a run that continues it
-with **Let AI continue** keeps it, see "Manual input handoff"). A run on the space's own
-machine starts with the same grant, scoped the same way. Under routine browsing,
+Two steps never ask, in Ask too:
+
+- **A pressed card's site.** A browser card names the site its task opens ("For
+  www.example.com"), and the person's press on it is their OK for that site.
+  Studio names the sites of every card the person pressed in the chat
+  (`browserCardSites` in the turn's metadata: plain host names, at most eight,
+  never a card Studio opened by itself, and never a teammate's press in a
+  shared chat, which is that teammate's OK), and the runtime starts each later
+  Shared Browser run of that chat with those sites' `https` origins approved on
+  the person's page, as an answered site prompt leaves them. The controller
+  keeps the key only on the person's own signed-in message (never a service,
+  runtime or agent token), and the runtime takes only plain public host names
+  (no address, IP literal, port or local name). It approves the site only:
+  every step on it still asks as before, Octo's own tabs approve sites for
+  themselves, and link-only sites, private addresses and risky addresses are
+  refused or ask exactly as before.
+- **A cookie banner's refusal.** A click on a button with a refusal's words
+  ("Reject all", "Only necessary", "Alle ablehnen", "Rejeitar todos", …) inside
+  a cookie or consent banner (the page describer's `consentContext`: a
+  container named for it, a dialog titled for it, or a small container close
+  by that speaks of cookies) shares nothing, so it runs without a prompt. It
+  must not be a link or send a form, and its step lets no form post leave the
+  tab, not even to the page's own site. "Accept all", and the same words
+  outside a banner (a document editor's "Reject all"), still ask.
+
+The browser view's prompt asks in the chat row's words: "Octo wants to use
+example.com." with **Deny** and **Allow site** (or "Octo wants to click “Search”
+on example.com." with **Allow**), and the exact site or page it is about. It
+offers no routine-browsing choice: a run on the space's own machine starts in
+routine browsing, which is what users' spaces get.
+
+Routine browsing is a grant across HTTP(S) sites for the exact current run,
+initiating user, runtime generation and selected page—not permanent site
+trust, a project-wide default, or permission inherited by the next turn (only a
+run that continues it with **Let AI continue** keeps it, see "Manual input
+handoff"). A run on the space's own machine starts with it; the runtime still
+honours a decision of `allow_routine` on a site prompt from an older client. Under routine browsing,
 ordinary navigation, clicks, non-sensitive field filling and non-activation keys
 proceed without another site/action prompt, including an address typed for a
 site the run has not used yet. Steps in a named risk category (below), risky
@@ -620,9 +677,12 @@ Browser has tabs of its own (see Personal-Browser.md).
   leaves the run; the next step in it reports that and does nothing.
 - **Closed at the end, unless kept.** When the run's tool processes are
   confirmed gone, runtime-agent closes Octo's tabs through the loopback
-  DevTools endpoint (`GET /json/close/<id>`), apart from the ones a person kept
-  with **Keep tab** in the browser toolbar (`POST /browser/pages/:id/keep`,
-  `browser.control`, recorded in the run's `kept-tabs.json`). A kept tab stays
+  DevTools endpoint (`GET /json/close/<id>`), apart from the ones kept through
+  `POST /browser/pages/:id/keep` (`browser.control`, recorded in the run's
+  `kept-tabs.json`). Studio keeps the tab on screen when the person takes over
+  on one of Octo's tabs; it shows no separate **Keep tab** button, which was
+  unexplained to a first-time user, since the person now watches Octo's tab
+  live while Octo works in it. A kept tab stays
   an ordinary tab no later run can use, and both records are cleared with the
   run's approval directory.
 - **No orphan tabs.** A tab of Octo's that is still open when its run's
@@ -634,8 +694,8 @@ Browser has tabs of its own (see Personal-Browser.md).
   the next run numbers its own tabs from 1 again: Studio calls each one
   "Octo's earlier tab", and the Reading row and the count of the tabs Octo
   holds leave them out. runtime-agent closes them at the next confirmed
-  shutdown, runtime start or browser start, and **Keep tab** on one makes it
-  an ordinary tab at once. Both rewrite the record under a lock on the
+  shutdown, runtime start or browser start, and the keep route on one makes
+  it an ordinary tab at once. Both rewrite the record under a lock on the
   approval directory (`flock` on the directory itself), and runtime-agent
   applies only what its own closing pass changed, so a tab a person keeps
   while the tabs close is never put back, and a tab still open is never

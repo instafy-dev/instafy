@@ -91,7 +91,6 @@ describe("landing studio window turn column", () => {
       "handoff",
       "browse",
       "approve",
-      "routine",
       "allowPress",
       "allowed",
       "navigate",
@@ -113,10 +112,8 @@ describe("landing studio window turn column", () => {
     expect(atMs("press") - atMs("tap")).toBeGreaterThanOrEqual(250);
     expect(atMs("handoff") - atMs("press")).toBeGreaterThanOrEqual(800);
     expect(atMs("allowed") - atMs("approve")).toBeGreaterThanOrEqual(1600);
-    // The prompt's top is up long enough to read before Ada scrolls to the
-    // routine box, and her ticked choice before she presses Allow.
-    expect(atMs("routine") - atMs("approve")).toBeGreaterThanOrEqual(900);
-    expect(atMs("allowPress") - atMs("routine")).toBeGreaterThanOrEqual(800);
+    // The prompt is up long enough to read before Ada presses Allow site.
+    expect(atMs("allowPress") - atMs("approve")).toBeGreaterThanOrEqual(1500);
     // Each ticker caption Octo's browser work shows is up long enough to read.
     expect(atMs("loaded") - atMs("navigate")).toBeGreaterThanOrEqual(1100);
     expect(atMs("scroll") - atMs("loaded")).toBeGreaterThanOrEqual(1100);

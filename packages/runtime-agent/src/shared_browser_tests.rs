@@ -83,6 +83,12 @@ const special = {
   "invite-button": { description: control("Invite member") },
   "generate-key": { description: control("Generate API key") },
   "plain-button": { description: control("Show details") },
+  // A cookie banner's refusal, and the same words where no banner is.
+  "cookie-reject": { description: control("Reject all"), policy: { consentContext: true, areas: "dialog" } },
+  "cookie-reject-pt": { description: control("Rejeitar todos"), policy: { consentContext: true, areas: "dialog" } },
+  "cookie-reject-posts": { description: control("Reject all"), policy: { consentContext: true, areas: "dialog" } },
+  "cookie-accept": { description: control("Accept all"), policy: { consentContext: true, areas: "dialog" } },
+  "reject-outside-banner": { description: control("Reject all") },
   // Script-driven save buttons: no form owner, only the commit word.
   "save-button": { description: control("Speichern") },
   "save-button-en": { description: control("Save changes") },
@@ -569,7 +575,7 @@ const makePage = (targetId, opened = null) => {
       if (mode === "posts-elsewhere-after-click") {
         pauseDocument("main", "https://other.example/collect", { method: "POST" });
       }
-      if (mode === "posts-to-own-site-after-click") {
+      if (mode === "posts-to-own-site-after-click" || mode === "cookie-reject-posts") {
         pauseDocument("main", "https://example.test/collect", { method: "POST" });
       }
       if (mode === "redirect-posts-elsewhere-after-click") {
@@ -4830,6 +4836,7 @@ async fn a_jobs_guard_starts_its_run_as_the_runtime_decides() {
             "page-target",
             "Octo",
             None,
+            &[],
             cancel_signal.clone(),
         )
         .expect("acquire a job's guard");
@@ -6260,6 +6267,7 @@ async fn a_run_keeps_the_last_runs_approvals_only_when_it_continues_that_run_for
             page,
             "Octo",
             continues,
+            &[],
             cancel_signal.clone(),
             Duration::from_secs(60),
         )
@@ -6365,6 +6373,7 @@ async fn let_ai_continue_keeps_the_site_the_person_approved_and_a_fresh_turn_ask
             "page-target",
             "Octo",
             continues,
+            &[],
             cancel_signal.clone(),
             Duration::from_secs(60),
         )
@@ -8431,4 +8440,162 @@ fn a_stopped_or_refused_page_load_does_not_say_the_site_was_unreachable() {
             .expect("a network code");
         assert_eq!(failure.reason, SITE_UNREACHABLE_REASON, "{code}");
     }
+}
+
+#[test]
+fn card_sites_count_only_as_plain_public_host_names() {
+    let payload = |sites: JsonValue| json!({ "metadata": { "browserCardSites": sites } });
+    assert_eq!(
+        card_site_origins_from_payload(&payload(json!([
+            "www.visitlisboa.com",
+            "carris.pt",
+            "www.visitlisboa.com"
+        ]))),
+        vec![
+            "https://www.visitlisboa.com".to_string(),
+            "https://carris.pt".to_string()
+        ]
+    );
+    // Addresses, IP literals, local names, ports, capitals and odd shapes
+    // are left out, one by one.
+    for refused in [
+        "https://example.com",
+        "example.com/path",
+        "example.com:8443",
+        "127.0.0.1",
+        "10.0.0.7",
+        "localhost",
+        "printer.local",
+        "router.home.arpa",
+        "intranet",
+        "Example.com",
+        "-bad.example.com",
+        "exa_mple.com",
+        "",
+    ] {
+        assert!(
+            card_site_origins_from_payload(&payload(json!([refused]))).is_empty(),
+            "{refused}"
+        );
+    }
+    assert!(card_site_origins_from_payload(&payload(json!([1, null, {}]))).is_empty());
+    // A list longer than a chat's cards could name counts for nothing.
+    let many: Vec<String> = (0..9).map(|n| format!("site{n}.example.com")).collect();
+    assert!(card_site_origins_from_payload(&payload(json!(many))).is_empty());
+    assert!(card_site_origins_from_payload(&json!({ "metadata": {} })).is_empty());
+}
+
+#[tokio::test]
+async fn a_run_starts_with_the_sites_of_the_cards_the_person_pressed_on_their_page() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let path = directory.path().join("agent-control.json");
+    let approval_dir = directory.path().join("approvals");
+    let cancel_signal = JobCancelSignal::new();
+    let card_sites = vec!["https://www.visitlisboa.com".to_string()];
+    let guard = SharedBrowserAgentControlGuard::acquire_continuing(
+        path.clone(),
+        approval_dir.clone(),
+        ApprovalStart::Ask,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        None,
+        &card_sites,
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire run");
+    let marker: JsonValue =
+        serde_json::from_slice(&std::fs::read(&path).expect("marker")).expect("marker JSON");
+    let state: JsonValue = serde_json::from_slice(
+        &std::fs::read(approval_dir.join("state.json")).expect("starting state"),
+    )
+    .expect("state JSON");
+    // The card's site is approved on the person's page, as an answered site
+    // prompt leaves it; nothing else changes: routine browsing stays off, so
+    // every step still asks as before.
+    assert_eq!(
+        state["approvedOrigins"],
+        json!(["https://www.visitlisboa.com"])
+    );
+    assert_eq!(state["routineBrowsingAllowed"], false);
+    for key in ["ownerId", "runId", "initiatorUserId", "browserPageId"] {
+        assert_eq!(state[key], marker[key], "{key}");
+    }
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+}
+
+/// Drive, Oct 28: "Allow this browser action? The AI agent is waiting to
+/// click 'Reject all'." A cookie banner's refusal shares nothing, so it
+/// never asks, in Ask too; the same words outside a banner, and a banner's
+/// "Accept all", still do.
+#[test]
+fn a_cookie_banners_refusal_never_asks_while_the_same_words_elsewhere_still_do() {
+    for mode in ["cookie-reject", "cookie-reject-pt"] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+            &["https://example.test"],
+            &[],
+        );
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(requests.is_empty(), "{mode} asked: {requests:?}");
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+    for mode in ["reject-outside-banner", "cookie-accept"] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+            &["https://example.test"],
+            &[],
+        );
+        assert_eq!(requests.len(), 1, "{mode} did not ask");
+        assert_eq!(requests[0]["operation"], "click", "{mode}");
+        assert!(!output.status.success(), "{mode} ran although denied");
+    }
+}
+
+/// The refusal that never asks may not send a form anywhere, not even to
+/// the page's own site.
+#[test]
+fn a_cookie_banners_refusal_lets_no_form_post_leave_the_tab() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("cookie-reject-posts");
+    let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+    let (output, requests) = fixture.run_with_decisions(
+        "cookie-reject-posts",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body),
+        &["https://example.test"],
+        &[],
+    );
+    assert!(requests.is_empty(), "{requests:?}");
+    let refused = failure_of(&output);
+    assert!(
+        refused.contains("the page sent a form to https://example.test/, which the step was not approved to send to"),
+        "{refused}"
+    );
 }

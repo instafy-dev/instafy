@@ -1037,6 +1037,30 @@ function describeInPage(rule, forms, names, element, sources) {
     }
     const rowText = row ? textOf(row, 500) : "";
 
+    // A cookie or consent banner around the control: a container whose id,
+    // class, label or test id names it, a dialog whose title does, or a
+    // small container close by whose text speaks of cookies. Only a
+    // refusal's words count with it (the classifier's consent rejection).
+    const consentPattern = /cookie|consent|gdpr|rgpd|dsgvo|privacy|datenschutz|privacidade|confidentialit/i;
+    let consentContext = consentPattern.test(dialogLabel);
+    for (
+      let node = element.parentElement, depth = 0;
+      node && depth < 16 && !consentContext;
+      node = node.parentElement, depth += 1
+    ) {
+      const named = bounded(
+        [attribute(node, "id"), attribute(node, "class"), attribute(node, "aria-label"),
+          idText(node, "aria-labelledby"), attribute(node, "data-testid")].filter(Boolean).join(" "),
+        400,
+      );
+      if (consentPattern.test(named)) {
+        consentContext = true;
+      } else if (depth < 6) {
+        const raw = typeof node.textContent === "string" ? node.textContent : "";
+        consentContext = raw.length <= 1_500 && /\bcookies?\b/i.test(raw);
+      }
+    }
+
     // Masked text counts only in the element's row or a small container
     // around it, never a whole card or page.
     const smallMasked = (node) => {
@@ -1124,6 +1148,7 @@ function describeInPage(rule, forms, names, element, sources) {
       areas: areas.join(" "),
       menuOpener: expanded !== null || (popup !== null && popup !== "false") || controlsRegion || pageToggle,
       credentialContext: credentialPattern.test([dialogLabel, heading, header, rowText].join(" ")),
+      consentContext,
       row: Boolean(row),
       nearMaskedText,
       iconHint,
@@ -1483,6 +1508,7 @@ function policyFactsOf(raw) {
     areas: text(raw.areas, 200),
     menuOpener: raw.menuOpener === true,
     credentialContext: raw.credentialContext === true,
+    consentContext: raw.consentContext === true,
     row: raw.row === true,
     nearMaskedText: raw.nearMaskedText === true,
     iconHint: text(raw.iconHint, 160),
@@ -1534,6 +1560,7 @@ function policyTarget(description) {
     areas: facts.areas || "",
     menuOpener: facts.menuOpener === true,
     credentialContext: facts.credentialContext === true,
+    consentContext: facts.consentContext === true,
     row: facts.row === true,
     nearMaskedText: facts.nearMaskedText === true,
     iconHint: facts.iconHint || "",
@@ -3277,12 +3304,17 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const rawDestination = resolvedTargetDestination(target.description, page.url());
     const destination = approvalProtocol.destinationBinding(rawDestination);
-    const readingStep = routineCovers(step, target.description) &&
-      !isFormSubmissionControl(target.description);
+    const clickSubmission = stepFormSubmission(target.description, "click");
+    // A cookie banner's refusal shares nothing, so it never asks, in any
+    // mode: only a button in a consent banner, with a refusal's words, that
+    // is no link and sends no form. Its step lets no form post leave the tab.
+    const consentRejection = step.verdict === "allow" && step.consentRejection === true &&
+      !rawDestination && !clickSubmission && !isFormSubmissionControl(target.description);
+    const readingStep = consentRejection || (routineCovers(step, target.description) &&
+      !isFormSubmissionControl(target.description));
     if (rawDestination) {
       assertMayOpen(rawDestination);
     }
-    const clickSubmission = stepFormSubmission(target.description, "click");
     refuseNewWindowOrNestedSubmission(clickSubmission);
     refuseUnlessReadingStep(readingStep);
     if (
@@ -3295,16 +3327,18 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
         { destinationUrl: rawDestination },
       );
     }
-    await allowStepOnce({
-      operation: "click",
-      label: controlLabel(target.description) || "Activate this control",
-      categoryTitle: approvalCategoryTitle(step),
-      sourceOrigin,
-      ...destination,
-      snapshotId: body.snapshotId,
-      targetFingerprint: approvedTargetFingerprint,
-      payloadFingerprint: approvalProtocol.sha256("click"),
-    }, { routine: readingStep });
+    if (!consentRejection) {
+      await allowStepOnce({
+        operation: "click",
+        label: controlLabel(target.description) || "Activate this control",
+        categoryTitle: approvalCategoryTitle(step),
+        sourceOrigin,
+        ...destination,
+        snapshotId: body.snapshotId,
+        targetFingerprint: approvedTargetFingerprint,
+        payloadFingerprint: approvalProtocol.sha256("click"),
+      }, { routine: readingStep });
+    }
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await targetLocator(page, body, true);
@@ -3315,7 +3349,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       destination,
     );
     const withholding = await withholdBeforeStep(page, step);
-    documents?.limitFormPosts(stepPostOrigins(readingStep, sourceOrigin, clickSubmission, destination));
+    documents?.limitFormPosts(consentRejection
+      ? []
+      : stepPostOrigins(readingStep, sourceOrigin, clickSubmission, destination));
     const box = target.description.box;
     const size = await viewport(page);
     emitAction({

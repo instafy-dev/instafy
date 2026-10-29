@@ -12,6 +12,11 @@
  *            change (Save, Speichern, Buchen), so a host that lets ordinary
  *            clicks run can still ask for it; never on menu items, tabs,
  *            tree items, disclosure or menu openers or navigation-area items
+ *   consentRejection
+ *            true on a cookie or consent banner's button that refuses
+ *            consent ("Reject all", "Only necessary"): it shares nothing, so
+ *            a host may take it without a prompt in every approval mode,
+ *            while it still keeps its own guards (no link, no form)
  *
  * A free ("allow") verdict only ever comes from structure: tag, role, link
  * shape, form method, page area. Label words and icon names only add risk.
@@ -158,6 +163,11 @@
     "iu",
   );
   const SEARCH_LABEL = words(["search", "suche", "suchen", "filter", "find", "finden", "durchsuchen"]);
+  // A consent banner's button that refuses consent, in the languages the
+  // other word lists cover and the main ones a banner uses. Never an
+  // "allow" or "accept" phrase, even "Allow necessary only": those words
+  // add risk wherever they appear.
+  const CONSENT_REJECT_EXACT = /^(?:reject(?:\s+all)?(?:\s+cookies)?|decline(?:\s+all)?(?:\s+cookies)?|refuse(?:\s+all)?|deny(?:\s+all)?|only\s+(?:necessary|essential|required)(?:\s+cookies)?|(?:necessary|essential|required)(?:\s+cookies)?\s+only|use\s+(?:only\s+)?(?:necessary|essential)(?:\s+cookies)?(?:\s+only)?|continue\s+without\s+accepting|alle\s+ablehnen|ablehnen|nur\s+(?:notwendige|erforderliche|essenzielle|technisch\s+notwendige)(?:\s+cookies)?|tout\s+refuser|refuser(?:\s+tout)?|continuer\s+sans\s+accepter|rechazar(?:\s+todo|\s+todas)?|rifiuta(?:\s+tutto|\s+tutti)?|rejeitar(?:\s+tudo|\s+todos|\s+todas)?|recusar(?:\s+tudo|\s+todos|\s+todas)?|apenas\s+(?:necess[aá]rios|essenciais)|alles\s+weigeren|weigeren)$/iu;
   const DISMISS_EXACT = /^(?:reject\s+all|decline\s+all|only\s+necessary|necessary\s+only|use\s+necessary\s+only|essential\s+only|only\s+essential|close|dismiss|alle\s+ablehnen|nur\s+notwendige|nur\s+notwendige\s+cookies|nur\s+erforderliche|nur\s+essenzielle|schließen|×|✕)$/iu;
   const PAGE_LABEL = /^(?:\d{1,4}|next|next\s+page|previous|previous\s+page|prev|first|last|older|newer|weiter|zurück|vor|nächste|nächste\s+seite|vorherige|vorherige\s+seite|erste|letzte|seite\s+\d{1,4}|page\s+\d{1,4}|[‹›«»<>…]|\.\.\.)$/iu;
   // Whole names of controls that only open or close part of the page: a side
@@ -886,6 +896,13 @@
       const navigationItem = ["menuitem", "treeitem", "tab"].includes(role) || areas.some((area) => NAVIGATION_AREAS.includes(area));
       if (navigationItem && label && !riskyLabel(label) && !inDialog && target.credentialContext !== true) {
         return allow("navigation", "menu, tree, tab or navigation item");
+      }
+      // A cookie or consent banner's refusal, judged by where it sits (the
+      // page describer's consent context) as well as its words: "Reject all"
+      // in an editor's suggestions panel is no banner, and asks below.
+      if (!cleanText(target.formOwnerIdentity) && target.consentContext === true && !lower(target.href) &&
+          CONSENT_REJECT_EXACT.test(label)) {
+        return { ...allow("dismiss", "cookie banner refusal"), consentRejection: true };
       }
       if (!cleanText(target.formOwnerIdentity) && DISMISS_EXACT.test(label)) {
         return allow("dismiss", "privacy-preserving dismissal");

@@ -88,6 +88,21 @@ describe("Chat browser request handoff", () => {
     expect(lastState?.cardStates.get("message:request-1")).toEqual({ kind: "opened" });
   });
 
+  it("counts the person's press on a card that names its site as their OK for that site", async () => {
+    // Drive, Oct 28: the press on a card "For www.visitlisboa.com" was
+    // followed by "Allow the AI agent to use this site? www.visitlisboa.com".
+    value.messages = [{ id: "request-1", role: "assistant", content: "Continue in browser", timestamp: 1,
+      metadata: { messageType: "action_request", details: { browserRequest: { task: TASK, location: "auto" } } } }];
+    value.transport = "shared"; await render();
+    const attempt = await begin();
+    value.open = true; value.sharedReady = true; await render(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringContaining(TASK), expect.objectContaining({
+      metadata: { browserRequestOf: "message:request-1", browserCardSites: ["app.example.test"] },
+      knownHosts: ["app.example.test"],
+    }));
+  });
+
   // Local drive, Oct 28: a question's browser turn was followed by a turn
   // nobody asked for. Only a card Octo builds from asks for a hand-back.
   it("marks the continuation of a card Octo builds from, and only that one", async () => {
@@ -234,7 +249,8 @@ describe("Chat browser request handoff", () => {
     expect(await sent).toBe(true);
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", expect.stringMatching(/\n\nOpen https:\/\/app\.example\.test\/settings and stop on API keys\.$/), {
       display: "Opened Instafy's browser for app.example.test",
-      metadata: { retryOfMessageId: "failure-1", browserRequestOf: "job:old" },
+      // Try again is the person's own press, so it is their OK for the site again.
+      metadata: { retryOfMessageId: "failure-1", browserRequestOf: "job:old", browserCardSites: ["app.example.test"] },
       knownHosts: ["app.example.test"],
     });
   });

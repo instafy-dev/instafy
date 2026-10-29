@@ -350,6 +350,35 @@ Vite dev server on http://localhost:5173
 
 Hot reload enabled
 
+### Instafy's browser the way users get it
+
+Users' spaces run Instafy's browser on their own machine, on demand, and its
+turns start in routine browsing ("Browser on the space's own machine" in
+`docs/Shared-Browser.md`). The local stack's default takes an older path: every
+space machine runs the webdev image, and the first browser press restarts the
+machine as a browser of its own, whose turns ask for every site and step. A
+local drive of a browser turn on that path sees prompts users never see.
+
+To drive the browser as users get it, start the stack with:
+
+```bash
+STACK_BROWSER_HOST=1 pnpm stack:refresh
+```
+
+On a stack that is stopped, `STACK_BROWSER_HOST=1 pnpm stack:up` does the
+same. `stack:up` reuses a controller and a provider that are already running,
+and they keep the settings they started with, so on a running stack it says so
+and changes nothing: use `stack:refresh` there, or `pnpm stack:down` first.
+
+The first run builds the base runtime image with the on-demand browser host
+(`runtime-agent:host-local`, target `runtime`; add `STACK_FORCE_RUNTIME_BUILD=1`
+to rebuild it), the provider launches space machines from it, and the
+controller covers every space (`HOSTED_BROWSER_HOST=all`). Webdev launches keep
+`runtime-agent:webdev`. A machine started before the switch keeps its launch
+settings until it is stopped, so stop the space's machine (or start a new
+space) after switching. An explicit `RUNTIME_AGENT_IMAGE` or
+`HOSTED_BROWSER_HOST` is kept.
+
 ## 7. Browser Editing with WebContainers (optional but recommended)
 
 1. Install the API dependency (already checked in, but rerun if you reset `node_modules`):

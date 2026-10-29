@@ -44,7 +44,7 @@ function Approval() {
   };
   return <div className="relative min-h-0 flex-1" data-testid="review-approval-host">
     <div className="p-5"><Text as="p" variant="body">Research notes and browser preview</Text></div>
-    {visible ? <SharedBrowserApprovalPrompt request={request} routineApprovalAvailable submitting={pending}
+    {visible ? <SharedBrowserApprovalPrompt request={request} submitting={pending}
       error={query.has("error") ? LONG_ERROR : null} onDecision={decide} /> : null}
     <output hidden data-testid="review-decision">{decision}</output>
   </div>;

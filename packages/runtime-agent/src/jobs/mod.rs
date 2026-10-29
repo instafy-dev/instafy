@@ -6464,6 +6464,7 @@ impl JobProcessor {
                         .expect("Shared Browser execution must have a selected page"),
                     display_name,
                     crate::shared_browser::continued_run_id_from_payload(&job.payload),
+                    &crate::shared_browser::card_site_origins_from_payload(&job.payload),
                     cancel_signal
                         .as_ref()
                         .expect("Shared Browser execution must have a cancellation signal")
