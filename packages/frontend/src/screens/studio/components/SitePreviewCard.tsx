@@ -157,18 +157,40 @@ export function shareSitePreviewRecord(previewId: string, preview: ControllerSit
 
 /** The cards that started a site and wait for its page to show in the pane, per preview. */
 const pageWaiters = new Map<string, Set<() => void>>();
+/** How many panes hold each preview's loaded page now. */
+const pagesShown = new Map<string, number>();
 
 /**
- * The pane showed the site's page (its frame loaded): a card that started
- * the site says "Starting…" until then, since a site that answers its first
- * check can take many seconds more to show its page.
+ * The pane showed the site's page (its frame loaded), or closed before it
+ * did: a card that started the site says "Starting…" until then, since a
+ * site that answers its first check can take many seconds more to show its
+ * page, and no page shows in a pane that closed.
  */
 export function shareSitePreviewPageShown(previewId: string) {
   for (const shown of [...(pageWaiters.get(previewId) ?? [])]) shown();
 }
 
-/** Calls `shown` when a pane shows this preview's page. Returns the unregister. */
+/**
+ * A pane holds this preview's loaded page until the returned call: a card
+ * that starts waiting meanwhile has nothing to wait for (the pane showed the
+ * page before the card started the site, and keeps it).
+ */
+export function holdSitePreviewPage(previewId: string): () => void {
+  pagesShown.set(previewId, (pagesShown.get(previewId) ?? 0) + 1);
+  shareSitePreviewPageShown(previewId);
+  return () => {
+    const left = (pagesShown.get(previewId) ?? 1) - 1;
+    if (left > 0) pagesShown.set(previewId, left);
+    else pagesShown.delete(previewId);
+  };
+}
+
+/** Calls `shown` when a pane shows this preview's page, at once when one does already. Returns the unregister. */
 export function waitForSitePreviewPage(previewId: string, shown: () => void): () => void {
+  if (pagesShown.has(previewId)) {
+    shown();
+    return () => undefined;
+  }
   const waiters = pageWaiters.get(previewId) ?? new Set<() => void>();
   pageWaiters.set(previewId, waiters);
   waiters.add(shown);

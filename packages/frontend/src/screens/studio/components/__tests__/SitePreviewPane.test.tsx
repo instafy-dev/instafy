@@ -186,6 +186,43 @@ describe("SitePreviewPane", () => {
     stop();
   });
 
+  // The frame of a site that stopped answering goes, and a new one loads when
+  // it answers again: at the same address, so the page that loaded in the
+  // frame before is no sign this one has.
+  it("says Loading… over the new frame of a site that answers again, until its page loads", async () => {
+    await render();
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+    mocks.getSitePreview.mockResolvedValue(record({ health: { listening: false, status: null } }));
+    await advance(SITE_PREVIEW_HEALTH_POLL_MS);
+    expect(frame()).toBeNull();
+    mocks.getSitePreview.mockResolvedValue(record());
+    await advance(SITE_PREVIEW_HEALTH_POLL_MS);
+    expect(frame()?.getAttribute("src")).toBe(withHostQuery(FIRST));
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Loading…");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+  });
+
+  // A card that started the site waits for its page in a pane: a pane that
+  // shows it already, or closes before it loads, ends that wait.
+  it("tells the cards when it already shows the page, and when it closes before the page loads", async () => {
+    await render();
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    const shownAlready = vi.fn();
+    const stopShownAlready = waitForSitePreviewPage(PREVIEW_ID, shownAlready);
+    expect(shownAlready).toHaveBeenCalledOnce();
+    stopShownAlready();
+    await click("[data-testid=site-preview-reload]");
+    const closed = vi.fn();
+    const stopClosed = waitForSitePreviewPage(PREVIEW_ID, closed);
+    expect(closed).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+    expect(closed).toHaveBeenCalledOnce();
+    stopClosed();
+    root = createRoot(container);
+  });
+
   it("reads only the broker's status message, only from its own frame and origin", async () => {
     await render();
     const target = frame()!.contentWindow!;

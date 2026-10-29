@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { OpenNewWindow, Refresh } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
@@ -27,7 +27,7 @@ import { FollowRing, FollowRipples, FollowToast, SitePreviewFollowControls } fro
 import { AskConfirmStrip } from "./previewHost/AskConfirmStrip";
 import type { SiteAskHost } from "./previewHost/useSiteAsks";
 import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
-import { registerSitePreviewPaneCheck, shareSitePreviewPageShown, shareSitePreviewRecord } from "./SitePreviewCard";
+import { holdSitePreviewPage, registerSitePreviewPaneCheck, shareSitePreviewPageShown, shareSitePreviewRecord } from "./SitePreviewCard";
 
 export const SITE_PREVIEW_HEALTH_POLL_MS = 15_000;
 /** While the frame is on screen: keeps a quiet site's session alive. */
@@ -441,14 +441,21 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   }, [openingTab, previewId, projectId, revoke]);
 
   // A frame whose page has not loaded is blank (a site that just started can
-  // take many seconds): the pane says so instead of showing nothing.
+  // take many seconds): the pane says so instead of showing nothing. A frame
+  // that goes (the site stopped answering) loads anew when it comes back, at
+  // the same address, so the page it loaded before counts for nothing.
   const frameIdentity = viewerUrl ? `${frameKey}:${viewerUrl}` : null;
+  if (!frameShown && loadedFrame !== null) setLoadedFrame(null);
   const frameLoading = frameShown && frameIdentity !== null && loadedFrame !== frameIdentity;
   const onFrameLoad = () => {
     setLoadedFrame(frameIdentity);
-    shareSitePreviewPageShown(previewId);
     host.onFrameLoad();
   };
+  // A card that started the site says "Starting…" until a pane shows its
+  // page: this one while it holds the page, or none once it closes.
+  const pageShown = frameShown && !frameLoading;
+  useLayoutEffect(() => (pageShown ? holdSitePreviewPage(previewId) : undefined), [pageShown, previewId]);
+  useEffect(() => () => shareSitePreviewPageShown(previewId), [previewId]);
   const problem = problemText(shown);
   // In place of the site, the pane's message is the one signal: no pill beside it saying the same.
   const problemShown = down || problem !== null;
