@@ -1,0 +1,4 @@
+---
+---
+
+A browser turn whose task names no address now opens a page instead of failing. A research or comparison card carries no address, and a browser that has just started (the first press after the space's machine became the browser) shows a blank tab; the browser policy, the blank page's own observation and the one retry all told Octo to open "the address the task names", so Octo stopped on the blank tab twice and the turn failed. They now say to open the official site of what the task is about when the task names no address, and never to end on a blank page. A browser turn that still ends without opening a page reads "Octo couldn't open a page in the browser, so this turn stopped." (and "Octo couldn't use the browser on this device…" for the browser on the person's device) instead of a sentence naming the AI vendor and its tools; its retry note in Details is plain too. No package changes.

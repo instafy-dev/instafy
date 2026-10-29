@@ -1087,6 +1087,19 @@ describe("resolveRunFailurePresentation", () => {
     }
   });
 
+  it("shows a browser turn that opened no page in Octo's own plain words", () => {
+    // The runtime's reason for a browser turn that ended, after its retry,
+    // without opening a page. Older runtimes named the AI vendor and the
+    // tools ("Codex did not execute the dedicated Shared Browser tools after
+    // retry."), which stays behind Details above.
+    const reason = "Octo couldn't open a page in the browser, so this turn stopped.";
+    const presentation = resolveRunFailurePresentation({
+      metadata: { source: "agent", outcome: "failed", jobId: "job-1" },
+      content: reason,
+    });
+    expect(presentation).toEqual({ kind: "generic", friendlyText: reason, rawText: reason });
+  });
+
   it("shows the controller's runtime-limit give-up reason in full, with a manual retry only", () => {
     // Recorded by runtime/limit_waits.rs when a message waited out the
     // 30-minute window behind the team's hosted runtime limit.
