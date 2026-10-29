@@ -75,6 +75,17 @@ async fn final_checkpoint_waits_for_early_lead_and_recovers_every_terminal_hando
             first_payload["session_id"] = json!(session);
             first_payload["metadata"]["runtimePreference"] = json!({"runtimeId":space.hosted_runtime_id,"source":"multi_agent_plan_parent"});
             let connection = pool.get().await?;
+            // Checkpoints inherit the real planning job's research budget, so the
+            // fixture must retain that job and the workers' stored parent links.
+            connection.execute(
+                "insert into agent_jobs(id,project_id,conversation_id,status,outcome,completed_at,payload)
+                 values($1,$2,$3,'completed','succeeded',now(),'{}'::jsonb)",
+                &[&parent_job,&space.project_id,&conversation],
+            ).await?;
+            connection.execute(
+                "update agent_jobs set parent_job_id=$2 where id=any($1::uuid[])",
+                &[&vec![first,second],&parent_job],
+            ).await?;
             connection.execute("update agent_jobs set payload=$2,session_id=$3 where id=$1", &[&first,&PgJson(first_payload.clone()),&session]).await?;
             connection.execute("update conversations set session_id=$2 where id=$1", &[&conversation,&session]).await?;
             connection.execute("update agent_jobs set status='failed', outcome='failed', error_message='Missing input' where id=$1", &[&first]).await?;

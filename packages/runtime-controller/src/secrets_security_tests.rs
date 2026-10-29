@@ -184,7 +184,7 @@ async fn agent_secrets_only_releases_to_current_runtime_owning_live_job() -> any
             let (status, body) = request_secrets(&app, &token, json!({ "job_id": job_id, "touch": false })).await?;
             anyhow::ensure!(status == StatusCode::OK, "strict={strict_mode}: {status}: {body}");
             anyhow::ensure!(body["env"]["SECURITY_TEST_SECRET"] == "private-secret-marker");
-            assert_eq!(body["runtimeSettings"], json!({"maxNativeSubagents": 3,"researchBudget":{"maxPageLoads":12,"maxPageLoadsPerSite":4}}));
+            assert_eq!(body["runtimeSettings"], json!({"maxNativeSubagents": 3,"researchBudget":{"maxPageLoads":100,"maxPageLoadsPerSite":25}}));
 
             // Every parent path receives current controller policy, independently of
             // agent identity, client-supplied metadata, and requested settings.
@@ -210,7 +210,7 @@ async fn agent_secrets_only_releases_to_current_runtime_owning_live_job() -> any
                 })).await?;
                 // The response carries secret values, so it never goes into a failure message.
                 assert!(status == StatusCode::OK, "strict={strict_mode}: secrets request was not accepted");
-                assert_eq!(body["runtimeSettings"], json!({"maxNativeSubagents": 10,"researchBudget":{"maxPageLoads":12,"maxPageLoadsPerSite":4}}));
+                assert_eq!(body["runtimeSettings"], json!({"maxNativeSubagents": 10,"researchBudget":{"maxPageLoads":100,"maxPageLoadsPerSite":25}}));
             }
             {
                 let connection = pool.get().await?;
