@@ -1009,6 +1009,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // "This continues a browser turn" is the controller's to say too: the
     // claim is checked below, under the conversation's dispatch fence.
     let hand_back_claim = crate::browser_hand_back::take_hand_back_claim(&mut request.metadata);
+    // So is "Instafy sent this again by itself", which decides what the turn
+    // costs (crate::system_turns): only the check below stamps it.
+    crate::system_turns::strip_automatic_retry_stamps(&mut request.metadata);
+    let automatic_retry_claim = crate::system_turns::automatic_retry_claim(&request.metadata);
     conversations::normalize_human_mention_metadata(&mut request.metadata)?;
     // Parity with the record path: untrusted callers must not persist a forged
     // controller participation marker through gate-bypassing dispatches (e.g.
@@ -1390,6 +1394,27 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .await?;
         ensure_object(&mut request.metadata)
             .insert(crate::browser_hand_back::HAND_BACK_KEY.to_string(), record);
+        // It asks only what Studio asks: it costs nothing unless it ends with
+        // a reply (crate::system_turns), so no request of the sender's rides
+        // on it.
+        request.prompt_text = crate::browser_hand_back::HAND_BACK_PROMPT.to_string();
+    }
+    // An automatic retry costs nothing unless it ends with a reply: stamped
+    // only after its failure checks out, and otherwise an ordinary turn.
+    if let Some(failure_message_id) = automatic_retry_claim.as_ref() {
+        if let Some(record) = crate::system_turns::verify_automatic_retry(
+            &transaction,
+            &conversation.id,
+            context,
+            failure_message_id,
+            &request.prompt_text,
+            &request.metadata,
+        )
+        .await?
+        {
+            ensure_object(&mut request.metadata)
+                .insert(crate::system_turns::AUTOMATIC_RETRY_KEY.to_string(), record);
+        }
     }
 
     // An ambient multi-human turn dispatches to the default agent stamped with
@@ -1459,20 +1484,23 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 coverage => coverage,
             };
             let mut canceled_arithmetic_coverage = None;
+            let mut covered_refund_org_id = None;
             let mut canceled_job_input_state_updates = Vec::new();
             let mut participation = match arithmetic_coverage {
                 Some(coverage)
                     if coverage.action
                         == crate::group_participation::ArithmeticCoverageAction::CancelActiveOcto =>
                 {
-                    if crate::group_participation::cancel_covered_default_octo_job(
-                        &transaction,
-                        &project.id,
-                        &conversation.id,
-                        coverage,
-                    )
-                    .await?
+                    if let Some(canceled) =
+                        crate::group_participation::cancel_covered_default_octo_job(
+                            &transaction,
+                            &project.id,
+                            &conversation.id,
+                            coverage,
+                        )
+                        .await?
                     {
+                        covered_refund_org_id = canceled.refunded_org_id;
                         canceled_job_input_state_updates.extend(
                             crate::send_intents::reject_unacknowledged_inputs_for_job(
                                 &transaction,
@@ -1596,6 +1624,13 @@ pub(crate) async fn process_dispatch_prompt_timed(
                     )
                     .await;
                     crate::send_queue::spawn_send_queue_drain(state.clone(), conversation.id);
+                }
+                if let Some(org_id) = covered_refund_org_id {
+                    crate::credits::spawn_credits_updated(
+                        state,
+                        org_id,
+                        crate::credits::CREDITS_UPDATED_LEDGER,
+                    );
                 }
                 return Ok(recorded_dispatch_response(conversation.id));
             }

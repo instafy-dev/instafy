@@ -259,6 +259,8 @@ controller's lease or the proxy's static credentials, with their kind and pinned
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 
+That usage is the `turn.completed` event at the end of the turn's Codex run log, so every turn is settled from its own tokens, short or long. The runtime cuts a long run log down to its first and last events within the completion payload's limit of 80 entries per list, which keeps that last event. (A runtime older than this keeps only the first 80 events of a long log, so a turn of more than 80 events reaches the controller without its usage and costs only its reserve.)
+
 Reconciliation never holds a turn's reply back. The completion first commits and publishes the reply and the run's end, and then lets the conversation's next queued send dispatch, which reserves its own credits; after a plan worker's turn that drain waits until the lead's continuation is queued. The completion then writes Home's rows, reconciles in a transaction of its own, and only after that queues a plan lead's continuation and announces `credits.updated`; its response waits for all of it. An attempt fails when the reconciliation returns an error (the org lookup, a ledger write) or when any statement in it failed, even one that was only logged (a ledger reference, the run's credit trace): Postgres turns `COMMIT` on such an aborted transaction into a rollback without an error, so the controller checks the transaction before it commits. A failed attempt is logged as an error, rolled back whole and tried once more, right away; the adjustment row is idempotent per prompt, so a retry never charges twice. A reconciliation whose second attempt fails too no longer fails the completion: the run keeps its reply, the reserve stands as the charge, the controller logs the failure as an error, and nothing retries it later.
 
 A multi-agent planning turn becomes terminal when the controller dispatches or refuses its plan,
@@ -313,6 +315,44 @@ Starter guidance with the current defaults:
 - tunnels and hosted runtimes burn from the same pool, so heavy infra usage reduces how much managed AI remains that day
 - once per UTC day the balance tops back up to the daily limit (a balance at or above it gets
   nothing), so what is left of one day's credits never adds to the next day's
+
+### Turns Instafy starts by itself
+
+A turn Instafy starts by itself, not the person, costs nothing unless it ends with Octo's
+reply. There are two:
+
+- a browser hand-back, which takes what a browser turn read back to the turn that is building a
+  page or a map ("Hand-back" in [Shared Browser](Shared-Browser.md));
+- an automatic retry, which Studio sends once when a turn fails for a passing reason, a dropped
+  reply or a short rate limit ([Chat activity](Chat-Activity.md)).
+
+A browser turn that Studio opens by itself for Octo's card is not one of them: it carries on the
+person's own request, as their press would, and is charged as their turn.
+
+Either kind reserves its credit at dispatch like any other. When it ends with a reply (it
+succeeded and posted something that is not empty), its usage is reconciled like any turn's.
+`NO_RESPONSE` is no reply only where the controller swallows it and posts nothing, as for an
+evaluation turn in a group chat; any other turn posts it as its message, so it is a reply. A
+team plan it writes is its reply once the plan goes out. When it fails, is stopped, expires, ends
+without a reply or has its plan refused, its reserve and its daily prompt slot are given back
+(refund reason `system_turn_without_reply`) and its tokens are not charged, even when a runtime
+already ran it; the runtime's later receipt for a refused plan bills nothing either. The turn it
+continues or retries follows the rules for a turn the person sent: a failed turn keeps its
+charge unless it never reached a model (above).
+
+Billing reads only the controller's own marks on the job (`system_turns.rs`): the
+`browserHandBack` record that dispatch stamps on a hand-back it checked, and
+`metadata.automaticRetry`, which dispatch stamps on a resend marked `retryAutomatic: true` only
+when the message its `retryOfMessageId` names is this conversation's and belongs to a failed run
+of a prompt the sender sent, at most 10 minutes ago; the resend repeats that prompt's words, with
+no attachments and no browser, as Studio's own resend does; that run was not itself a turn
+Instafy started; nobody has sent a prompt in the conversation since; and no other automatic
+retry of it was dispatched. A resend that fails a check still goes out, as an ordinary turn. A
+client's own copy of either mark is dropped at dispatch and on recorded messages. Nothing of the
+person's rides on a hand-back either: whatever words it was sent with, it asks only Studio's
+"Continue building with what the browser turn found.", and one that carries attachments is
+refused. Words someone sends into either kind while it runs (a steer) make it theirs: the steer
+marks the job `steeredByPerson`, and from then on it is charged as a turn they sent.
 
 ### Measuring root-call usage
 

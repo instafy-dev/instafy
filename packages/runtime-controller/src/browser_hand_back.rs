@@ -46,6 +46,9 @@ use crate::{bad_request, forbidden, internal_error, ApiError};
 pub(crate) const HAND_BACK_KEY: &str = "browserHandBack";
 const HAND_BACK_ALIASES: [&str; 2] = [HAND_BACK_KEY, "browser_hand_back"];
 pub(crate) const HAND_BACK_CLAIM_KEY: &str = "continuesFromBrowserJob";
+/// What a hand-back asks the building turn, whatever words the send carried:
+/// Studio's own (`BROWSER_HAND_BACK_PROMPT`); the findings come as data.
+pub(crate) const HAND_BACK_PROMPT: &str = "Continue building with what the browser turn found.";
 const HAND_BACK_CLAIM_ALIASES: [&str; 2] = [HAND_BACK_CLAIM_KEY, "continues_from_browser_job"];
 /// Nested copies of the message metadata a client could also fill in.
 const NESTED_METADATA_KEYS: [&str; 3] = ["prompt_metadata", "promptMetadata", "details"];
@@ -447,7 +450,7 @@ fn card_job_of(metadata: &JsonValue) -> Option<Uuid> {
     Uuid::parse_str(raw.trim().strip_prefix("job:")?.trim()).ok()
 }
 
-fn browser_transport_of(metadata: &JsonValue) -> Option<&str> {
+pub(crate) fn browser_transport_of(metadata: &JsonValue) -> Option<&str> {
     metadata
         .get("browserTransport")
         .or_else(|| metadata.get("browser_transport"))
@@ -488,6 +491,14 @@ pub(crate) async fn require_hand_back(
     if browser_transport_of(request_metadata).is_some() {
         return Err(bad_request(
             "A hand-back continues the building turn, so it cannot also ask for a browser.",
+        ));
+    }
+    // Nor does it bring anything of the person's: what it asks is the
+    // controller's (HAND_BACK_PROMPT), and it costs nothing unless it ends
+    // with a reply (crate::system_turns).
+    if crate::system_turns::carries_attachments(request_metadata) {
+        return Err(bad_request(
+            "A hand-back continues the building turn with what the browser found, so it cannot carry attachments.",
         ));
     }
     let user_id = match context.user_id {
@@ -831,6 +842,12 @@ mod tests {
 
     fn fixtures() -> JsonValue {
         serde_json::from_str(include_str!("browser_hand_back_fixtures.json")).expect("fixtures")
+    }
+
+    // Studio's test pins its prompt to the same fixture.
+    #[test]
+    fn a_hand_back_asks_what_studio_sends() {
+        assert_eq!(json!(HAND_BACK_PROMPT), fixtures()["handBackPrompt"]);
     }
 
     #[test]

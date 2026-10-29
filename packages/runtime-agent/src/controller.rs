@@ -32,7 +32,10 @@ const REQUIRED_AGENT_SCOPES: &[&str] = &[
 const MAX_AGENT_MESSAGE_CONTENT_CHARS: usize = 32_000;
 const MAX_AGENT_SUMMARY_CHARS: usize = 32_000;
 const MAX_AGENT_METADATA_STRING_CHARS: usize = 8_000;
-const MAX_AGENT_METADATA_ARRAY_ITEMS: usize = 80;
+/// Every list in a payload sent to the controller keeps at most this many
+/// entries, its first ones. A run log keeps its end within it (see
+/// `jobs::CODEX_RUN_LOG_TAIL_EVENTS`), since its last event carries the turn's usage.
+pub(crate) const MAX_AGENT_METADATA_ARRAY_ITEMS: usize = 80;
 const MAX_AGENT_METADATA_DEPTH: usize = 8;
 
 pub struct ControllerClient {
@@ -1110,10 +1113,7 @@ impl ControllerClient {
         proxy_metadata: Option<JsonValue>,
     ) -> Result<()> {
         let url = self.base_url.join("/agent/complete")?;
-        let compact_artifacts = artifacts
-            .iter()
-            .map(|artifact| compact_agent_payload_json(artifact, 0))
-            .collect::<Vec<_>>();
+        let compact_artifacts = compact_completion_artifacts(artifacts);
         let mut payload = json!({
             "job_id": job_id,
             "outcome": "succeeded",
@@ -1149,10 +1149,7 @@ impl ControllerClient {
         proxy_metadata: Option<JsonValue>,
     ) -> Result<()> {
         let url = self.base_url.join("/agent/complete")?;
-        let compact_artifacts = artifacts
-            .iter()
-            .map(|artifact| compact_agent_payload_json(artifact, 0))
-            .collect::<Vec<_>>();
+        let compact_artifacts = compact_completion_artifacts(artifacts);
         let mut payload = json!({
             "job_id": job_id,
             "outcome": "failed",
@@ -1561,6 +1558,15 @@ impl ControllerClient {
 
         Ok(())
     }
+}
+
+/// A completion's artifacts as they are sent: every list cut to its first
+/// [`MAX_AGENT_METADATA_ARRAY_ITEMS`] entries and every string bounded.
+pub(crate) fn compact_completion_artifacts(artifacts: &[JsonValue]) -> Vec<JsonValue> {
+    artifacts
+        .iter()
+        .map(|artifact| compact_agent_payload_json(artifact, 0))
+        .collect()
 }
 
 fn compact_agent_payload_json(value: &JsonValue, depth: usize) -> JsonValue {

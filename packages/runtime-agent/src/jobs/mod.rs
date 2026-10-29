@@ -120,8 +120,17 @@ const CODEX_RUN_LOG_STRING_MAX_CHARS: usize = 8_000;
 const CODEX_RUN_LOG_COMPACT_STRING_MAX_CHARS: usize = 2_000;
 const CODEX_RUN_LOG_ARTIFACT_MAX_BYTES: usize = 750_000;
 const CODEX_RUN_LOG_HEAD_EVENTS: usize = 24;
-const CODEX_RUN_LOG_TAIL_EVENTS: usize = 96;
+/// A long run log keeps its first and its last events. Head, the compaction
+/// marker and tail fit the completion payload, which keeps only the first
+/// entries of a list, so the log's end reaches the controller whole: its last
+/// event, `turn.completed`, carries the usage the turn is charged for.
+const CODEX_RUN_LOG_TAIL_EVENTS: usize =
+    crate::controller::MAX_AGENT_METADATA_ARRAY_ITEMS - CODEX_RUN_LOG_HEAD_EVENTS - 1;
 const CODEX_RUN_LOG_COMPACT_TAIL_EVENTS: usize = 48;
+const _: () = assert!(
+    CODEX_RUN_LOG_HEAD_EVENTS + 1 + CODEX_RUN_LOG_COMPACT_TAIL_EVENTS
+        <= crate::controller::MAX_AGENT_METADATA_ARRAY_ITEMS
+);
 const MISSING_FINAL_RECOVERY_SNAPSHOT_MAX_BYTES: usize = 12_000;
 const MISSING_FINAL_RECOVERY_SNIPPET_MAX_CHARS: usize = 1_600;
 const AGENT_CONTEXT_CARD_LIMIT: usize = 4;
@@ -29517,6 +29526,58 @@ mod tests {
                 .unwrap_or(180)
                 < 180
         );
+    }
+
+    /// Local drive, Oct 28: 11 of 14 turns reached the controller with their
+    /// run log cut to its first 80 events, so `turn.completed` and its usage
+    /// were gone and the turn cost only its reserve. A 194-event map cost 1
+    /// credit, a 46-event "stop the preview server" its 4.
+    #[test]
+    fn a_long_turn_keeps_its_usage_in_the_completion_it_sends() {
+        for event_count in [81, 100, 121, 194] {
+            let mut events = (1..event_count)
+                .map(|index| {
+                    json!({
+                        "type": "item.completed",
+                        "item": {
+                            "id": format!("cmd_{index}"),
+                            "type": "command_execution",
+                            "command": "uw doctor",
+                            "aggregated_output": "ok",
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            events.push(json!({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 395_824,
+                    "cached_input_tokens": 354_432,
+                    "output_tokens": 1_305,
+                },
+                "usageScope": "turn",
+            }));
+            let run_log = build_codex_run_log_artifact(&events, Some(json!({ "attempt": 1 })));
+
+            let sent = crate::controller::compact_completion_artifacts(&[run_log]);
+
+            let sent_events = sent[0]["events"].as_array().expect("events");
+            assert!(
+                sent_events.len() <= crate::controller::MAX_AGENT_METADATA_ARRAY_ITEMS,
+                "{event_count} events"
+            );
+            assert!(
+                sent_events
+                    .iter()
+                    .all(|event| event["kind"] != "runtime/payload-array-truncated"),
+                "{event_count} events: the payload cut the log"
+            );
+            let last = sent_events.last().expect("last event");
+            assert_eq!(last["type"], "turn.completed", "{event_count} events");
+            assert_eq!(last["usage"]["input_tokens"], 395_824);
+            assert_eq!(last["usage"]["cached_input_tokens"], 354_432);
+            assert_eq!(last["usage"]["output_tokens"], 1_305);
+        }
     }
 
     #[test]

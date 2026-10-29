@@ -429,6 +429,13 @@ function hasReplyContext(record: Record<string, unknown>): boolean {
   return isRecord(record["replyContext"]) || isRecord(record["reply_context"]);
 }
 
+// A hand-back names the browser turn whose findings it carries: the claim
+// Studio sends (`continuesFromBrowserJob`) or the controller's record
+// (`browserHandBack`).
+function hasBrowserHandBack(record: Record<string, unknown>): boolean {
+  return record["continuesFromBrowserJob"] != null || record["browserHandBack"] != null;
+}
+
 // A prompt that acts on another message, such as an undo request
 // (`undoTargetMessageId`), names it in a `...TargetMessageId` field.
 function hasMessageTarget(record: Record<string, unknown>): boolean {
@@ -450,6 +457,8 @@ function hasMessageTarget(record: Record<string, unknown>): boolean {
  *   `...TargetMessageId` fields), which the resend would drop, and which can
  *   be destructive, such as an undo;
  * - a prompt routed to a browser page ({@link isBrowserRoutedPromptMetadata});
+ * - a hand-back (`continuesFromBrowserJob`), whose words alone would go out
+ *   as a turn of their own, without what the browser found, and be charged;
  * - a prompt dispatched with other text than it shows (`dispatchContent`),
  *   which is how a targeted or fresh browser page and a goal command wrap the
  *   typed text.
@@ -461,6 +470,7 @@ export function isRunFailurePromptAutoResendable(
   if (records.some(
       (record) =>
         hasBrowserRouting(record) ||
+        hasBrowserHandBack(record) ||
         hasAttachments(record) ||
         hasReplyContext(record) ||
         hasMessageTarget(record),

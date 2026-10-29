@@ -67,6 +67,9 @@ mod browser_profile_e2e_fixture;
 #[path = "support_workflow_tests.rs"]
 mod support_workflow_tests;
 
+#[path = "system_turns_tests.rs"]
+mod system_turns_tests;
+
 #[path = "notification_platform_http_tests.rs"]
 mod notification_platform_http_tests;
 
@@ -22840,7 +22843,7 @@ async fn group_participation_job_lock_fences_human_octo_answer_races() -> anyhow
         )
         .await
         .map_err(|error| controller_error("cancel human-covered Octo answer", error))?;
-        assert!(canceled);
+        assert!(canceled.is_some());
         transaction.commit().await?;
     }
     {
@@ -22937,7 +22940,7 @@ async fn group_participation_job_lock_fences_human_octo_answer_races() -> anyhow
 
     let canceled = timeout(std::time::Duration::from_secs(2), cancel_task).await???;
     assert!(
-        !canceled,
+        canceled.is_none(),
         "a delivered correct Octo answer must defeat stale cancellation"
     );
     {

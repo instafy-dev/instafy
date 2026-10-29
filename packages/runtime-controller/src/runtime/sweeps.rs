@@ -438,6 +438,8 @@ fn api_error_to_anyhow(context: &str, error: (StatusCode, Json<crate::ApiError>)
 /// was leased may already have spent a model turn, so the refund is gated on
 /// the same evidence `agent_complete` uses: never leased, no visible
 /// assistant message, no tool updates, and no usage adjustment on the ledger.
+/// A turn Instafy started by itself is refunded without those gates: it ends
+/// here without a reply (crate::system_turns).
 /// Idempotent through the ledger key; runs in a savepoint so a ledger failure
 /// is logged and the caller's transaction still completes. Returns the org id
 /// when this call wrote the refund, for a `credits.updated` once the caller
@@ -451,6 +453,22 @@ pub(crate) async fn refund_managed_ai_reserve_for_expired_job(
     payload: &serde_json::Value,
     refund_reason: &str,
 ) -> AnyResult<Option<Uuid>> {
+    // A turn Instafy started by itself that ends here never ended with a
+    // reply, so it costs nothing, even after a runtime held it
+    // (crate::system_turns).
+    if crate::system_turns::system_turn_of(payload).is_some() {
+        return crate::system_turns::give_back_reserve_without_reply(
+            transaction,
+            project_id,
+            job_id,
+            run_id,
+            None,
+            None,
+            payload,
+        )
+        .await
+        .map_err(|error| api_error_to_anyhow("refund a turn Instafy started by itself", error));
+    }
     let managed_ai_used = payload
         .pointer("/metadata/managedAiUsed")
         .and_then(serde_json::Value::as_bool)

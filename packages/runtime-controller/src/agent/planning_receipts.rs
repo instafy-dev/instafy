@@ -38,7 +38,7 @@ pub(super) async fn store(
     let Some(row) = transaction
         .query_opt(
             "select run_id, prompt_id, payload, leased_by_runtime_id, lease_attempts,
-                summary, error_message, planning_receipt_state
+                summary, error_message, planning_receipt_state, status
          from agent_jobs
          where id = $1 and project_id = $2 and status in ('completed', 'failed')
            and planning_receipt_state is not null
@@ -94,7 +94,24 @@ pub(super) async fn store(
             .and_then(JsonValue::as_str)
             .and_then(|id| Uuid::parse_str(id).ok())
     });
-    let credit_org_id = if let Some(usage) = extract_turn_usage_from_artifacts(artifacts) {
+    // A turn Instafy started by itself whose plan was refused ended without
+    // a reply: it costs nothing, so its tokens are not billed and its reserve
+    // goes back, if the refusal could not give it back (crate::system_turns).
+    // A plan that went out was its reply, billed below as any turn's.
+    let system_turn_without_reply = crate::system_turns::system_turn_of(&payload).is_some()
+        && row.get::<_, String>("status") == "failed";
+    let credit_org_id = if system_turn_without_reply {
+        crate::system_turns::give_back_reserve_without_reply(
+            transaction,
+            &claims.project_id,
+            &job_id,
+            run_id,
+            prompt_id,
+            runtime_id,
+            &payload,
+        )
+        .await?
+    } else if let Some(usage) = extract_turn_usage_from_artifacts(artifacts) {
         reconcile_completion_usage(
             state,
             transaction,

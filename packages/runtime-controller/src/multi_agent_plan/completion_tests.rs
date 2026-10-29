@@ -1,6 +1,7 @@
 use super::*;
 use crate::tests_managed_ai_refund::{
-    ledger_rows, seed_reserved_managed_ai_prompt, ReservedManagedAiPrompt,
+    credit_balance, daily_prompts_used, ledger_rows, run_row, seed_reserved_managed_ai_prompt,
+    ReservedManagedAiPrompt,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -159,6 +160,133 @@ async fn planning_receipts_persist_once_after_dispatch_or_refusal_with_lease_fen
             assert_eq!(connection.query_one("select count(*) from agent_jobs where project_id=$1", &[&fixture.project_id]).await?.get::<_,i64>(0),jobs_before);
             Ok(())
         }.await;
+        let cleanup = fixture.cleanup().await;
+        result?;
+        cleanup?;
+    }
+    Ok(())
+}
+
+/// A hand-back is a turn Instafy starts by itself (crate::system_turns). A
+/// team plan it writes that is refused ends it without a reply, so its
+/// reserve and daily prompt slot come back at the refusal, and the runtime's
+/// late receipt for it bills no tokens. A plan that goes out is its reply:
+/// that receipt is billed as any turn's is.
+#[tokio::test]
+async fn a_hand_back_whose_team_plan_is_refused_costs_nothing() -> anyhow::Result<()> {
+    for refused in [true, false] {
+        let Some(fixture) = seed_reserved_managed_ai_prompt("system-turn-plan").await? else {
+            eprintln!("skipping system turn plan integration: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let result: anyhow::Result<()> = async {
+            let (runtime, lease, generation, token) = add_runtime(&fixture).await?;
+            let connection = fixture.pool.get().await?;
+            let conversation: Uuid = connection
+                .query_one(
+                    "update agent_jobs
+                        set status = 'leased', leased_by_runtime_id = $2, lease_attempts = 1,
+                            leased_at = now(), lease_expires_at = now() + interval '1 minute',
+                            payload = jsonb_set(payload, '{metadata,browserHandBack}', $3::jsonb, true)
+                      where id = $1
+                  returning conversation_id",
+                    &[
+                        &fixture.job_id,
+                        &runtime,
+                        &PgJson(json!({ "version": 1, "browserJobId": Uuid::new_v4() })),
+                    ],
+                )
+                .await?
+                .get(0);
+            drop(connection);
+            let outcome = if refused {
+                ParentPlanOutcome::Refused {
+                    group_id: Uuid::new_v4(),
+                    reason: "No eligible worker runtime",
+                    code: "test_plan_refused",
+                }
+            } else {
+                ParentPlanOutcome::Dispatched
+            };
+            finish_parent_plan_job(
+                &fixture.state,
+                fixture.project_id,
+                conversation,
+                None,
+                fixture.job_id,
+                Some(fixture.run_id),
+                "Two scouts will read the pages the browser found.",
+                outcome,
+                None,
+                Some(PlanningReceiptFence {
+                    claims: crate::agent::TokenContext {
+                        project_id: fixture.project_id,
+                        runtime_id: Some(runtime),
+                        lease_id: Some(lease),
+                        runtime_generation: Some(generation),
+                    },
+                    lease_attempt: 1,
+                }),
+            )
+            .await
+            .map_err(api_error)?;
+
+            let refunds = |rows: &[(String, i32, Option<String>)]| {
+                rows.iter()
+                    .filter(|(reason, _, _)| reason == "managed_ai_refund")
+                    .map(|(_, delta, _)| *delta)
+                    .collect::<Vec<_>>()
+            };
+            let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+            if refused {
+                assert_eq!(refunds(&rows), vec![fixture.burn_amount], "{rows:?}");
+                assert_eq!(
+                    daily_prompts_used(&fixture.pool, &fixture.owner_user_id).await?,
+                    0
+                );
+                let (_, run_metadata) = run_row(&fixture.pool, &fixture.run_id).await?;
+                assert_eq!(
+                    run_metadata["managedAiCredit"]["refund"]["refundReason"],
+                    json!(crate::system_turns::SYSTEM_TURN_WITHOUT_REPLY_REFUND_REASON)
+                );
+            } else {
+                assert!(refunds(&rows).is_empty(), "{rows:?}");
+            }
+
+            // The runtime's own completion of the planning turn arrives
+            // later, with what the model used: 3,000 output tokens, two
+            // credits against the one-credit reserve.
+            let body = json!({
+                "job_id": fixture.job_id,
+                "outcome": "succeeded",
+                "summary": "Runtime must not replace controller result",
+                "artifacts": [{"kind": "codex/run-log", "events": [{"type": "turn.completed",
+                    "usageScope": "turn",
+                    "usage": {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 3000}}]}],
+                "proxy_metadata": {"provider": "codex-embedded"},
+            });
+            let app = crate::agent::router().with_state(fixture.state.clone());
+            assert_eq!(
+                post(app, "/agent/complete", &token, body).await?.0,
+                StatusCode::OK
+            );
+            let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+            let adjustments = rows
+                .iter()
+                .filter(|(reason, _, _)| reason == "managed_ai_adjustment")
+                .map(|(_, delta, _)| *delta)
+                .collect::<Vec<_>>();
+            let balance = credit_balance(&fixture.pool, &fixture.org_id).await?;
+            if refused {
+                assert!(adjustments.is_empty(), "no token is billed: {rows:?}");
+                assert_eq!(balance, fixture.reserved_balance + fixture.burn_amount);
+            } else {
+                assert_eq!(adjustments, vec![-1], "{rows:?}");
+                assert_eq!(balance, fixture.reserved_balance - 1);
+            }
+            Ok(())
+        }
+        .await;
         let cleanup = fixture.cleanup().await;
         result?;
         cleanup?;
