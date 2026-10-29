@@ -35,7 +35,7 @@ function StepStateGlyph({ state }: { state: StepState }) {
 // A label may be 48 characters: it truncates (whole in its title) and leaves
 // room for the command, so the row's state and output chevron stay on screen
 // at phone width.
-function StepLabel({ text }: { text: string | null }) {
+function StepLabel({ text }: { text: string }) {
   return text ? (
     <span
       className="min-w-0 max-w-[60%] truncate font-medium text-slate-700 dark:text-slate-100"
@@ -61,9 +61,7 @@ function CommandStepRow({ step, standalone = false }: { step: TurnStep; standalo
   const rawCommand = (parsed.command ?? step.message.content).trim();
   const command = stripShellWrapperFromCommand(rawCommand);
   const output = parsed.output?.trim() ? parsed.output : null;
-  const label = standalone
-    ? (step.label ?? (step.state === "running" ? "Working" : "Ran a command"))
-    : step.label;
+  const label = step.label;
   const canOpen = standalone ? Boolean(command || output) : Boolean(output);
   const toggleLabel = standalone
     ? open
@@ -137,7 +135,8 @@ export function TurnCommandRow({ message }: { message: ChatMessage }) {
   return step ? <CommandStepRow step={step} standalone /> : null;
 }
 
-function stepDescription(step: TurnStep): { fallback: string; detail: string | null; mono: boolean } {
+// The row's second line: the site, the tool, the query or the files.
+function stepDescription(step: TurnStep): { detail: string | null; mono: boolean } {
   const details = extractMessageDetails(isRecord(step.message.metadata) ? step.message.metadata : null);
   const text = (key: string) => (typeof details?.[key] === "string" ? (details[key] as string).trim() : "");
   switch (step.kind) {
@@ -146,23 +145,23 @@ function stepDescription(step: TurnStep): { fallback: string; detail: string | n
       const tool = text("tool");
       const descriptor = server && tool ? `${server}/${tool}` : server || tool;
       const host = step.activity?.host ? displayActivityHost(step.activity.host) : null;
-      return { fallback: "Tool call", detail: host ?? (descriptor || null), mono: !host };
+      return { detail: host ?? (descriptor || null), mono: !host };
     }
     case "search":
-      return { fallback: "Web search", detail: text("query") || null, mono: false };
+      return { detail: text("query") || null, mono: false };
     case "edit": {
       const paths = Array.isArray(details?.paths)
         ? (details.paths as unknown[]).filter((path): path is string => typeof path === "string")
         : [];
-      return { fallback: "File change", detail: paths.length > 0 ? paths.join(", ") : null, mono: true };
+      return { detail: paths.length > 0 ? paths.join(", ") : null, mono: true };
     }
     default:
-      return { fallback: "Step", detail: null, mono: false };
+      return { detail: null, mono: false };
   }
 }
 
 function OtherStepRow({ step }: { step: TurnStep }) {
-  const { fallback, detail, mono } = stepDescription(step);
+  const { detail, mono } = stepDescription(step);
   const icon =
     step.kind === "edit" ? (
       <EditPencil aria-hidden="true" className={ICON_CLASS} />
@@ -172,7 +171,7 @@ function OtherStepRow({ step }: { step: TurnStep }) {
   return (
     <div className={ROW_CLASS} data-testid={`turn-activity-${step.kind}`}>
       {icon}
-      <StepLabel text={step.label ?? fallback} />
+      <StepLabel text={step.label} />
       {detail ? (
         <span
           className={`min-w-0 flex-1 truncate text-slate-500 dark:text-slate-400 ${mono ? "font-mono text-xxs" : ""}`}

@@ -3355,7 +3355,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [workspaceStarting, workspaceStartingSince],
   );
   // A hosted launch that has not come up in five minutes turns the
-  // "starting its workspace…" status into a notice with Try again.
+  // "Starting…" status into a notice with Try again.
   const workspaceStartStall = useStalledWorkspaceStart({
     runtimeStatuses,
     runtimeReady,

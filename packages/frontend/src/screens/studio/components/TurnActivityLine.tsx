@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { NavArrowDown, NavArrowRight } from "iconoir-react";
 import { Text } from "../../../components/Text";
+import { useSteadyActivityLabel } from "./useSteadyActivityLabel";
 
 // The chat's focus ring, as on the file chips and the run rail before them.
 const LINE_FOCUS_CLASS =
@@ -45,9 +46,11 @@ function LiveAnnouncement({ text }: { text: string }) {
 export type TurnActivityLineProps = {
   /** "Looking up places…" while the turn runs, "Looked up 14 places" once done. */
   text: string;
-  /** The turn is running: the line sweeps and its label changes are announced. */
+  /** The turn is running: the line sweeps, holds each label and announces its changes. */
   live: boolean;
   animate: boolean;
+  /** The turn has no step yet: the line opens with "Starting…" until the model has worked a moment. */
+  noStepsYet?: boolean;
   /** The line opens Details. False on a failed turn, whose failure block has the one Details. */
   interactive: boolean;
   detailsOpen: boolean;
@@ -60,14 +63,18 @@ export type TurnActivityLineProps = {
  * exists the whole line is one button that opens Details.
  */
 export function TurnActivityLine({
-  text,
+  text: latestText,
   live,
   animate,
+  noStepsYet = false,
   interactive,
   detailsOpen,
   detailsId,
   onToggleDetails,
 }: TurnActivityLineProps) {
+  // While the turn runs, a label holds until the next one has lasted: a step
+  // that ends at once, or a short pause between steps, never flashes past.
+  const text = useSteadyActivityLabel(latestText, live, noStepsYet);
   const sweep = live && animate ? "instafy-status-sweep" : "";
   const label = (
     <span className={`${sweep} min-w-0 truncate`} data-sweep-text={text}>

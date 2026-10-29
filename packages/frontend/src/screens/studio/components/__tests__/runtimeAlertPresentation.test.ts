@@ -94,40 +94,23 @@ describe("isRuntimeAlertSupersededByStart", () => {
 });
 
 describe("resolveAgentWaitingActivityCopy", () => {
-  it("reserves workspace-starting copy for a real cold-start state", () => {
+  // A local test: "Octo is starting its workspace…", "Octo is waiting for its
+  // turn…" and "Thinking…" inside 1.1 s. A turn opens with one label.
+  it("says Starting… whether the workspace starts, the turn waits or no run state has arrived", () => {
+    for (const state of [
+      { workspaceStarting: true, queued: true },
+      { workspaceStarting: true, queued: false },
+      { workspaceStarting: false, queued: true },
+      { workspaceStarting: false, queued: false },
+    ]) {
+      expect(resolveAgentWaitingActivityCopy({ displayNames: ["Octo"], ...state }), JSON.stringify(state)).toEqual({
+        label: "Starting…",
+        ariaLabel: "Octo is starting",
+      });
+    }
     expect(
-      resolveAgentWaitingActivityCopy({
-        displayNames: ["Octo"],
-        workspaceStarting: true,
-        queued: true,
-      }),
-    ).toEqual({
-      label: "Octo is starting its workspace…",
-      ariaLabel: "Octo is starting its workspace",
-    });
-  });
-
-  it("describes a ready-runtime queue as waiting for a turn", () => {
-    expect(
-      resolveAgentWaitingActivityCopy({
-        displayNames: ["Octo"],
-        workspaceStarting: false,
-        queued: true,
-      }),
-    ).toEqual({
-      label: "Octo is waiting for its turn…",
-      ariaLabel: "Octo is waiting for its turn",
-    });
-  });
-
-  it("uses neutral copy while no run state has arrived", () => {
-    expect(
-      resolveAgentWaitingActivityCopy({
-        displayNames: ["Octo"],
-        workspaceStarting: false,
-        queued: false,
-      }).label,
-    ).toBe("Octo is getting ready…");
+      resolveAgentWaitingActivityCopy({ displayNames: ["Octo", "Reviewer"], workspaceStarting: true, queued: false }),
+    ).toEqual({ label: "Starting…", ariaLabel: "Octo, Reviewer are starting" });
   });
 });
 
@@ -145,7 +128,7 @@ describe("resolveAgentWaitingActivityCopy runtime slot wall", () => {
     });
     expect(copy.label).toContain('"My other app"');
     expect(copy.label).toContain("Stop it there");
-    expect(copy.label).not.toContain("starting its workspace");
+    expect(copy.label).not.toContain("Starting");
   });
 
   it("promises the send with the controller's give-up bound", () => {
@@ -185,6 +168,6 @@ describe("resolveAgentWaitingActivityCopy runtime slot wall", () => {
       queued: false,
       runtimeLimit: null,
     });
-    expect(copy.label).toContain("starting its workspace");
+    expect(copy.label).toBe("Starting…");
   });
 });

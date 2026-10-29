@@ -24,6 +24,7 @@ import {
 import { RunFailureRetryProvider } from "../RunFailureNotice";
 import type { TurnActivity } from "../turnActivity";
 import { useAgentJobThreadPreviewState } from "../useAgentJobThreadPreviewState";
+import { THINKING_LABEL_DELAY_MS } from "../useSteadyActivityLabel";
 
 const JOB_ID = "0d4c9c1e-49af-4b1d-9a63-5b8f6f4f2f10";
 
@@ -390,7 +391,13 @@ describe("AgentJobThreadPreviewLayout", () => {
     }
   });
 
-  it("says Thinking once the model has started, before its first step", async () => {
+  // A local test: every turn opened with three labels inside 1.1 s. The line says
+  // Starting… until the model has worked a moment with no step.
+  it("opens with Starting…, then says Thinking once the model has worked a moment before its first step", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     const message = threadMessage([
       {
         id: "octo-reasoning",
@@ -410,6 +417,14 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     const line = container.querySelector('[data-testid="turn-activity-line"]');
     expect(line?.tagName).toBe("DIV");
+    expect(line?.textContent).toBe("Starting…");
+    await act(async () => {
+      vi.advanceTimersByTime(THINKING_LABEL_DELAY_MS - 100);
+    });
+    expect(line?.textContent).toBe("Starting…");
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+    });
     expect(line?.textContent).toBe("Thinking…");
     expect(container.textContent).not.toContain("Planning the Lisbon weekend");
   });

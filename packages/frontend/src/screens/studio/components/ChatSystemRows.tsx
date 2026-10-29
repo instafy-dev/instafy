@@ -133,7 +133,7 @@ function workspaceStartStalledDescription({
 }
 
 /**
- * Stands in for the "starting its workspace…" status once a hosted launch has
+ * Stands in for the "Starting…" status once a hosted launch has
  * gone five minutes without coming up. Try again asks the controller to
  * replace the launch; a new one's fresh start time clears this row.
  */
