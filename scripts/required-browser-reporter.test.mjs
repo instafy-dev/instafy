@@ -376,9 +376,15 @@ test("a required case or spec missing from every part fails the lane even when b
   const moved = (await browserUiParts(t, (tests) => tests.map((item) => item.location.file.endsWith(requiredFile)
     ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item))).map((part) => part.receipt);
   assert.ok(combineRequiredBrowserParts("browser-ui", moved).failures.includes(`Required spec missing: ${requiredFile}`));
-  const short = (await browserUiParts(t, (tests) => tests.slice(0, -1).map((item) => item))).map((part) => part.receipt);
-  assert.ok(REQUIRED_BROWSER_LANES["browser-ui"].titles.length < REQUIRED_BROWSER_LANES["browser-ui"].minimumTests - 1);
-  assert.ok(combineRequiredBrowserParts("browser-ui", short).failures.includes("Required tests are missing"));
+  const short = (await browserUiParts(t, (tests) => tests.slice(0, -1))).map((part) => part.receipt);
+  assert.equal(short.length, 2);
+  assert.ok(short.every((receipt) => receipt.status === "passed"));
+  const shortCount = short.reduce((count, receipt) => count + receipt.tests.length, 0);
+  assert.equal(shortCount, REQUIRED_BROWSER_LANES["browser-ui"].minimumTests - 1);
+  const incomplete = combineRequiredBrowserParts("browser-ui", short);
+  assert.equal(incomplete.selected, shortCount);
+  assert.equal(incomplete.status, "failed");
+  assert.ok(incomplete.failures.includes("Required tests are missing"));
 });
 
 test("the required check reads every part's receipt from the downloaded artifacts and fails closed", async (t) => {
