@@ -5,6 +5,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use runtime_contracts::agent_face;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio_postgres::error::SqlState;
@@ -12,7 +13,9 @@ use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::Transaction;
 use uuid::Uuid;
 
-use crate::active_job_auth::{authorize_active_job_if_scoped, ActiveJobProjectAccess};
+use crate::active_job_auth::{
+    authorize_active_job_if_scoped, ActiveJobAuthorization, ActiveJobProjectAccess,
+};
 use crate::auth::authenticate_request;
 use crate::conversations::load_conversation_record;
 use crate::projects::{ensure_project_access, ensure_project_write_access, load_project_record};
@@ -327,6 +330,7 @@ async fn upsert_agent_context(
     let agent_id = resolve_required_agent(
         &transaction,
         &user_id,
+        active_job.as_ref(),
         body.agent_id.as_deref(),
         body.agent.as_deref(),
     )
@@ -534,6 +538,7 @@ async fn resolve_optional_agent_filter(
 async fn resolve_required_agent(
     transaction: &Transaction<'_>,
     user_id: &Uuid,
+    active_job: Option<&ActiveJobAuthorization>,
     agent_id_raw: Option<&str>,
     agent_raw: Option<&str>,
 ) -> Result<Uuid, (StatusCode, Json<ApiError>)> {
@@ -570,7 +575,46 @@ async fn resolve_required_agent(
         return Ok(agent_id);
     }
 
-    create_context_agent_profile(transaction, user_id, &handle).await
+    match active_job {
+        Some(job) => lead_of_job(transaction, user_id, job).await,
+        None => create_context_agent_profile(transaction, user_id, &handle).await,
+    }
+}
+
+/// Where a job's card for an AI without a profile goes, a plan helper's own
+/// handle included: a job never creates a saved agent (docs/Brand.md, "Octo's
+/// hatchlings"), which would wear a helper's face in every chat. The card is
+/// its plan's lead's (outside a plan, its own AI's) when that is a saved agent
+/// of the job's person, else Octo's.
+async fn lead_of_job(
+    transaction: &Transaction<'_>,
+    user_id: &Uuid,
+    job: &ActiveJobAuthorization,
+) -> Result<Uuid, (StatusCode, Json<ApiError>)> {
+    let row = transaction
+        .query_opt(
+            "select coalesce(
+                        payload #>> '{metadata,multiAgentPlan,lead,leadHandle}',
+                        payload #>> '{metadata,multi_agent_plan,lead,leadHandle}',
+                        payload #>> '{metadata,agent,handle}'
+                    ) as lead
+             from agent_jobs where id = $1 and project_id = $2",
+            &[&job.job_id, &job.project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load the job's lead: {error}")))?;
+    let lead = row
+        .and_then(|row| row.get::<_, Option<String>>("lead"))
+        .as_deref()
+        .and_then(normalize_agent_handle)
+        .filter(|lead| !agent_face::is_octo_handle(lead));
+    if let Some(lead) = lead {
+        if let Some(agent_id) = find_agent_by_handle(transaction, user_id, &lead).await? {
+            return Ok(agent_id);
+        }
+    }
+    let octo = ai_agents::load_or_create_octo_agent_profile(transaction, user_id).await?;
+    Ok(octo.id)
 }
 
 async fn resolve_agent_id(

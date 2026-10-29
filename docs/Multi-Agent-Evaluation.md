@@ -159,6 +159,35 @@ ephemeral worker when a request names a saved profile. Verify the controller-sta
 before attributing a run to that profile, then inspect the effective worker settings. Correct
 settings on an explicitly selected worker do not establish reliable autonomous profile selection.
 
+### Worker faces
+
+Every AI without a profile, plan lanes included, wears one of Octo's eight hatchlings in its
+chat (see [Brand](Brand.md)). Dispatch stamps it once, as `metadata.agent.avatarSeed =
+"hatchling:<n>"`, so the AI's runs, jobs, messages, questions, Home rows and its entry in the
+plan-group status (`workers[].avatarSeed`) carry the same face. A face belongs to a handle in
+the root conversation, and threads share the root's faces. A turn continuation, rate-limit retry
+or answered question copies its predecessor's seed, and a returning handle gets its last face
+back unless another AI at work holds it. An AI at work is a queued or leased job, a question that
+is pending or answered, or a plan's lead: while its helpers work and for two minutes after one
+ends, until its continuation is queued. Fresh lanes take faces that no AI at work and no
+picture-less saved agent among the chat's 200 most recently used jobs wears (a saved agent as its
+profile shows it now), least recently used first. More than eight at work repeat faces. A plan's
+runtime alerts speak as its lead, and question rows and alerts keep a saved agent's id.
+
+Saved agents keep their own seed: a picture, the `hatchling:<n>` their owner picked or, for
+older agents, their id. `/me/agents` accepts only a picture or `hatchling:1` to `hatchling:8`
+(no hatchling for Octo), the agent's own id (sent when a picture is removed) and the seed the
+agent already has. Octo stays Octo: the runtime's lane uniquifier renames a lane
+named `octo` or `ai` before the plan is posted, and a lane an older runtime named `ai` keeps its
+name and Octo's tile. A job never creates a saved agent: a context card it saves for an AI
+without a profile, its own helper handle included, goes to its plan's lead (outside a plan, its
+own agent) when that has a profile, else to Octo. Only
+the controller stamps `metadata.agent`: a member's dispatch that carries its own has it dropped.
+Allocating dispatches lock the root conversation's row, then take `conversation-faces:<root>`,
+and read the chat's faces in one statement; other dispatches take neither lock. These reads run
+in a savepoint: if one fails, the dispatch goes on and its AIs wear their handles' faces. Rows
+from before the stamp keep their handle seeds. There is no migration.
+
 ## Shared Team Capacity
 
 A space defaults to 64 agents per plan and eight concurrently leased team workers across

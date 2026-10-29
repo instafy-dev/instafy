@@ -5,6 +5,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use runtime_contracts::agent_face;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio_postgres::error::SqlState;
@@ -219,6 +220,31 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|entry| entry.trim().to_string())
         .filter(|entry| !entry.is_empty())
+}
+
+/// A saved agent's face (docs/Brand.md, "Octo's hatchlings") is a picture or the
+/// hatchling its owner picked, exactly `hatchling:1` to `hatchling:8`; Octo keeps
+/// its own tile and takes no hatchling. An older Studio that removes a picture
+/// sends the agent's own id (`agent_id`, once there is an agent), which saves as
+/// before. Any other seed is refused, a value that only looks like a stamp
+/// included.
+fn validate_avatar_seed(
+    seed: &str,
+    agent_id: Option<&Uuid>,
+    octo: bool,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if agent_face::is_picture_seed(seed) || agent_id.is_some_and(|id| seed == id.to_string()) {
+        return Ok(());
+    }
+    if octo {
+        return Err(bad_request("Octo's avatarSeed must be a picture"));
+    }
+    if agent_face::parse_hatchling_seed(seed).is_none() {
+        return Err(bad_request(
+            "avatarSeed must be a picture or hatchling:1 to hatchling:8",
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_optional_description(
@@ -725,8 +751,11 @@ async fn create_my_agent(
             return Err(bad_request("handle is already in use"));
         }
         let agent_id = Uuid::new_v4();
-        let avatar_seed =
-            normalize_optional_text(body.avatar_seed).unwrap_or_else(|| agent_id.to_string());
+        let avatar_seed = normalize_optional_text(body.avatar_seed);
+        if let Some(seed) = avatar_seed.as_deref() {
+            validate_avatar_seed(seed, None, false)?;
+        }
+        let avatar_seed = avatar_seed.unwrap_or_else(|| agent_id.to_string());
         transaction
             .execute(
                 "insert into user_agents (
@@ -921,10 +950,18 @@ async fn update_my_agent(
 
     let next_avatar_seed = match body.avatar_seed {
         None => existing_avatar_seed,
-        Some(value) => {
-            let candidate = normalize_optional_text(value);
-            candidate.unwrap_or_else(|| existing_avatar_seed.clone())
-        }
+        Some(value) => match normalize_optional_text(value) {
+            // A seed the agent already has saves unchecked, as before.
+            Some(candidate) if candidate != existing_avatar_seed => {
+                validate_avatar_seed(
+                    &candidate,
+                    Some(&agent_id),
+                    agent_face::is_octo_handle(&existing_handle),
+                )?;
+                candidate
+            }
+            _ => existing_avatar_seed,
+        },
     };
 
     let next_credential_id = match body.credential_id {
@@ -1234,9 +1271,56 @@ async fn delete_my_agent(
 #[cfg(test)]
 mod tests {
     use super::UpdateAgentBody;
-    use super::{agent_runtime_is_selectable, normalize_optional_bio, CreateAgentBody};
+    use super::{
+        agent_runtime_is_selectable, normalize_optional_bio, validate_avatar_seed, CreateAgentBody,
+    };
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn saved_agents_wear_a_picture_or_one_of_the_eight_hatchlings() {
+        for seed in [
+            "hatchling:1",
+            "hatchling:8",
+            "https://cdn.example.com/pia.png",
+            "/identity-images/agents/pia.png",
+            "data:image/png;base64,AAAA",
+        ] {
+            assert!(validate_avatar_seed(seed, None, false).is_ok(), "{seed}");
+        }
+        // An older Studio removing a picture sends the agent's own id, which still saves.
+        let id = Uuid::parse_str("3f6c1f0e-8a1b-4c55-9d1e-2b7a6c9e4f10").unwrap();
+        assert!(validate_avatar_seed(&id.to_string(), Some(&id), false).is_ok());
+        for seed in [
+            "hatchling",
+            "hatchling:",
+            "hatchling:0",
+            "hatchling:9",
+            "hatchling:03",
+            "hatchling: 3",
+            "Hatchling:3",
+            "HATCHLING:2",
+            "hatchlings",
+            // JavaScript's trim drops a byte-order mark, so a client could read this as face 3.
+            "\u{feff}hatchling:3",
+            "reviewer",
+            "octo",
+            "data:text/plain,hatchling:3",
+            "3f6c1f0e-8a1b-4c55-9d1e-2b7a6c9e4f10",
+        ] {
+            assert!(validate_avatar_seed(seed, None, false).is_err(), "{seed}");
+        }
+        assert!(validate_avatar_seed(&Uuid::new_v4().to_string(), Some(&id), false).is_err());
+        // Octo keeps its own tile, but may still take a picture, or its id from an older Studio.
+        for seed in ["hatchling:3", "\u{feff}hatchling:3", "reviewer"] {
+            assert!(
+                validate_avatar_seed(seed, Some(&id), true).is_err(),
+                "{seed}"
+            );
+        }
+        assert!(validate_avatar_seed("https://cdn.example.com/octo.png", Some(&id), true).is_ok());
+        assert!(validate_avatar_seed(&id.to_string(), Some(&id), true).is_ok());
+    }
 
     #[test]
     fn agent_bio_normalizes_blank_and_counts_unicode_code_points() {
