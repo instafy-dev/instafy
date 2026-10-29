@@ -65,7 +65,7 @@ pub(crate) use stop::{
     RuntimeStopResponse,
 };
 pub(crate) use sweeps::{
-    conversation_owes_final_lead, prune_expired_runtime_events,
+    conversation_owes_final_lead, credential_removed_at_exists, prune_expired_runtime_events,
     refund_managed_ai_reserve_for_expired_job, reset_hosted_runtime_credit_sweep_pool_pressure,
     should_report_hosted_runtime_credit_sweep_error, sweep_hosted_runtime_credit_usage,
     sweep_idle_activity, REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS,
@@ -90,7 +90,8 @@ pub(crate) use stop::{
 pub(crate) use sweeps::{
     conversations_owing_a_lost_final_lead, expire_stale_requeued_jobs,
     recover_deferred_plan_checkpoints, recover_lost_final_plan_checkpoints,
-    recover_lost_final_plan_checkpoints_within, settle_plan_agents_out_of_team_time,
+    recover_lost_final_plan_checkpoints_within, settle_jobs_whose_credential_was_removed,
+    settle_plan_agents_out_of_team_time, CREDENTIAL_REMOVED_CODE, CREDENTIAL_REMOVED_MESSAGE,
     REQUEUED_JOB_EXPIRED_MESSAGE, STRANDED_PLATFORM_JOB_GRACE_SECONDS,
     TEAM_TIME_BUDGET_NOT_STARTED_MESSAGE,
 };
