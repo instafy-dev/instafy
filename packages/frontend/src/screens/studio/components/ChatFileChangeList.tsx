@@ -485,6 +485,12 @@ export function ChatFileChangeList({
 
   const siteLabel = revertedCount === 0 ? siteChangeLabel(site, files) : null;
   const siteSummary = siteLabel !== null;
+  // The chat's site can show up after these files did (a later turn opened its
+  // card): its files then fold behind the site's line, unless the person opened them.
+  const railToggledByPerson = useRef(false);
+  useEffect(() => {
+    if (siteSummary && !railToggledByPerson.current) setRailExpanded(false);
+  }, [siteSummary]);
   const compactSummaryLabel = (() => {
     if (totalCount === 0) {
       return "No file changes";
@@ -1269,7 +1275,10 @@ export function ChatFileChangeList({
               ref={summaryToggleRef}
               type="button"
               className={summaryToggleClass}
-              onClick={() => setRailExpanded((value) => !value)}
+              onClick={() => {
+                railToggledByPerson.current = true;
+                setRailExpanded((value) => !value);
+              }}
               aria-expanded={railExpanded}
               aria-controls={`${cardIdBase}-files`}
               title={railExpanded ? "Hide files" : "Show files"}

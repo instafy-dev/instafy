@@ -127,4 +127,22 @@ describe("the files a site turn created", () => {
     expect(toggle()?.textContent).toBe("Created the site");
     expect(container.textContent).not.toMatch(/lisbon|\+\d/u);
   });
+
+  it("folds files shown before the chat had a site behind the site's line once it has one", async () => {
+    const files = ["map/index.html", "map/data.json"].map(created);
+    const render = async (hasSite: boolean) => {
+      await act(async () => {
+        root.render(
+          <ChatHasSiteContext.Provider value={hasSite}>
+            <ChatFileChangeList files={files} projectId="project-1" />
+          </ChatHasSiteContext.Provider>,
+        );
+      });
+    };
+    await render(false);
+    expect(chips()).toHaveLength(2);
+    await render(true);
+    expect(toggle()?.textContent).toBe("Created the site");
+    expect(chips()).toHaveLength(0);
+  });
 });
