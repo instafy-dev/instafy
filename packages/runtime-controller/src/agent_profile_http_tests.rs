@@ -110,7 +110,7 @@ impl AgentProfileCase {
                 "/me/agents",
                 Some(json!({
                     "handle": "build-bot", "displayName": "Build bot", "bio": bio,
-                    "description": "Private runtime style guidance", "avatarSeed": "robot"
+                    "description": "Private runtime style guidance", "avatarSeed": "hatchling:7"
                 })),
             )
             .await?;
@@ -232,7 +232,7 @@ async fn agent_profile_public_read_requires_both_current_project_grants_and_excl
         assert_eq!(status, StatusCode::OK, "{public}");
         assert_eq!(
             public,
-            json!({"id": id, "handle": "build-bot", "displayName": "Build bot", "avatarSeed": "robot", "bio": "I help this team with builds."})
+            json!({"id": id, "handle": "build-bot", "displayName": "Build bot", "avatarSeed": "hatchling:7", "bio": "I help this team with builds."})
         );
     }
     let (status, _) = case.request(None, "GET", &path, None).await?;
@@ -281,5 +281,121 @@ async fn agent_profile_public_read_requires_both_current_project_grants_and_excl
         .await?;
     let (status, _) = case.request(Some(case.manager), "GET", &path, None).await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    case.cleanup().await
+}
+
+#[tokio::test]
+async fn agent_profile_faces_are_a_picture_or_one_of_the_eight_hatchlings() -> anyhow::Result<()> {
+    let case = AgentProfileCase::create().await?;
+    for (index, (seed, saved)) in [
+        ("hatchling:1", true),
+        ("hatchling:8", true),
+        ("https://cdn.example.com/face.png", true),
+        ("hatchling:9", false),
+        ("Hatchling:3", false),
+        ("\u{feff}hatchling:3", false),
+        ("robot", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, agent) = case
+            .request(
+                Some(case.owner),
+                "POST",
+                "/me/agents",
+                Some(json!({"handle": format!("face-{index}"), "avatarSeed": seed})),
+            )
+            .await?;
+        let expected = if saved {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        assert_eq!(status, expected, "{seed}: {agent}");
+        if saved {
+            assert_eq!(agent["avatarSeed"], seed);
+        }
+    }
+
+    // An older Studio removing a picture sends the agent's id, and a seed saved
+    // before faces were checked still saves when a client sends it back.
+    let agent = case.create_agent("I help this team with builds.").await?;
+    let id = agent["id"].as_str().unwrap();
+    let path = format!("/me/agents/{id}");
+    let patch = |seed: &str| {
+        case.request(
+            Some(case.owner),
+            "PATCH",
+            &path,
+            Some(json!({"avatarSeed": seed})),
+        )
+    };
+    let (status, updated) = patch(id).await?;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["avatarSeed"], id);
+    case.pool
+        .get()
+        .await?
+        .execute(
+            "update user_agents set avatar_seed='Hatchling:3' where id=$1",
+            &[&Uuid::parse_str(id)?],
+        )
+        .await?;
+    let (status, updated) = patch("Hatchling:3").await?;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["avatarSeed"], "Hatchling:3");
+    for refused in ["hatchling:0", "reviewer", &Uuid::new_v4().to_string()] {
+        assert_eq!(
+            patch(refused).await?.0,
+            StatusCode::BAD_REQUEST,
+            "{refused}"
+        );
+    }
+    let (status, updated) = patch("hatchling:4").await?;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["avatarSeed"], "hatchling:4");
+
+    // Octo keeps its own tile: it may take a picture, never a hatchling.
+    let (status, agents) = case
+        .request(Some(case.owner), "GET", "/me/agents", None)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{agents}");
+    let octo = agents
+        .as_array()
+        .and_then(|agents| agents.iter().find(|agent| agent["handle"] == "octo"))
+        .and_then(|agent| agent["id"].as_str())
+        .expect("Octo's profile")
+        .to_string();
+    let octo_path = format!("/me/agents/{octo}");
+    let (status, _) = case
+        .request(
+            Some(case.owner),
+            "PATCH",
+            &octo_path,
+            Some(json!({"avatarSeed": "hatchling:3"})),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, updated) = case
+        .request(
+            Some(case.owner),
+            "PATCH",
+            &octo_path,
+            Some(json!({"avatarSeed": "https://cdn.example.com/octo.png"})),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    // Removing that picture in an older Studio sends Octo's id.
+    let (status, updated) = case
+        .request(
+            Some(case.owner),
+            "PATCH",
+            &octo_path,
+            Some(json!({"avatarSeed": octo})),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["avatarSeed"], json!(octo));
     case.cleanup().await
 }

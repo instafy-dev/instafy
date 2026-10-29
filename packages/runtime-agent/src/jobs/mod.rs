@@ -11516,6 +11516,15 @@ fn expand_source_root_path(source_root: Option<&str>, path: &str) -> String {
     format!("{root}/{}", path.trim_start_matches('/'))
 }
 
+/// Whether a lane may not take `handle`: the lead's, an earlier lane's, or
+/// Octo's (`octo` or its alias `ai`), which every client draws as Octo's tile
+/// (docs/Brand.md, "Octo's hatchlings").
+fn codex_plan_agent_handle_taken(handle: &str, seen: &HashSet<String>, lead_handle: &str) -> bool {
+    handle == lead_handle
+        || seen.contains(handle)
+        || runtime_contracts::agent_face::is_octo_handle(handle)
+}
+
 fn unique_codex_plan_agent_handle(
     requested_handle: Option<&str>,
     agent: &serde_json::Map<String, JsonValue>,
@@ -11524,7 +11533,7 @@ fn unique_codex_plan_agent_handle(
     lead_handle: &str,
 ) -> String {
     let requested_is_usable = requested_handle
-        .map(|handle| handle != lead_handle && !seen.contains(handle))
+        .map(|handle| !codex_plan_agent_handle_taken(handle, seen, lead_handle))
         .unwrap_or(false);
     if requested_is_usable {
         return requested_handle.unwrap_or("lane").to_string();
@@ -11571,7 +11580,7 @@ fn unique_codex_agent_handle_from_base(
     lead_handle: &str,
 ) -> Option<String> {
     let normalized = normalize_codex_agent_handle(base)?;
-    if normalized != lead_handle && !seen.contains(&normalized) {
+    if !codex_plan_agent_handle_taken(&normalized, seen, lead_handle) {
         return Some(normalized);
     }
 
@@ -11595,8 +11604,7 @@ fn unique_codex_agent_handle_from_base(
         }
         let candidate = format!("{prefix}{suffix}");
         if normalize_codex_agent_handle(&candidate).is_some()
-            && candidate != lead_handle
-            && !seen.contains(&candidate)
+            && !codex_plan_agent_handle_taken(&candidate, seen, lead_handle)
         {
             return Some(candidate);
         }
@@ -19113,6 +19121,34 @@ mod tests {
                     && parsed.get("timeBudgetSeconds").is_none(),
                 "{parsed}"
             );
+        }
+    }
+
+    #[test]
+    fn no_lane_is_named_like_octo() {
+        // `octo` and its alias `ai` are Octo's tile in every client, so the plan card and the
+        // lanes the controller runs never name a helper so, whoever leads.
+        for lead in ["octo", "pia"] {
+            let action = json!({
+                "type": "multi_agent_plan",
+                "agents": [
+                    {"handle": "ai", "label": "AI news", "prompt": "Read the AI news."},
+                    {"handle": "@AI", "prompt": "Read the papers."},
+                    {"handle": "octo", "prompt": "Read the docs."},
+                    {"handle": "octopus", "prompt": "Read the reef notes."}
+                ],
+                "lead": {"leadHandle": lead, "continuationPrompt": "Summarize."}
+            });
+            let (plan, count, _) =
+                parse_codex_multi_agent_plan_action(action.as_object().unwrap()).expect("a plan");
+            assert_eq!(count, 4);
+            let handles: Vec<&str> = plan["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|agent| agent["handle"].as_str().unwrap())
+                .collect();
+            assert_eq!(handles, ["ai-news", "ai-2", "octo-3", "octopus"], "{lead}");
         }
     }
 

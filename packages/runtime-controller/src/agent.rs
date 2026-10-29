@@ -7964,6 +7964,48 @@ mod tests {
     }
 
     #[test]
+    fn every_message_of_a_lane_wears_its_face() {
+        let job_id = Uuid::new_v4();
+        let agent = json!({
+            "handle": "reading_list",
+            "avatarSeed": "hatchling:3",
+        });
+        let plan = json!({"groupId": "group-1", "role": "worker"});
+        let bare = json!({"metadata": {"agent": agent, "multiAgentPlan": plan}});
+        let pinned = json!({"metadata": {
+            "agent": agent,
+            "multiAgentPlan": plan,
+            "runtimePreference": {"runtimeId": Uuid::new_v4().to_string(), "source": "project"},
+        }});
+        for payload in [&bare, &pinned] {
+            let update = build_agent_update_metadata(
+                &job_id,
+                Some("command_execution"),
+                Some(json!({"command": "ls"})),
+            );
+            let usage = build_agent_update_metadata(
+                &job_id,
+                Some("token_usage"),
+                Some(json!({"kind": "codex_turn_usage"})),
+            );
+            let reply = build_agent_message_metadata(
+                "succeeded",
+                None,
+                None,
+                &json!([]),
+                None,
+                None,
+                &job_id,
+                &[],
+            );
+            for metadata in [update, usage, reply] {
+                let merged = merge_runtime_preference_from_job_payload(metadata, payload);
+                assert_eq!(merged["agent"], agent, "{merged}");
+            }
+        }
+    }
+
+    #[test]
     fn merge_runtime_preference_from_job_payload_preserves_workspace_mode_metadata() {
         let merged = merge_runtime_preference_from_job_payload(
             json!({

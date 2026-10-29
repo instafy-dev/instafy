@@ -35,6 +35,9 @@ use crate::{
     workspace, ApiError, AppConfig, AppState, ProjectRecord,
 };
 
+#[path = "dispatch_agent_faces.rs"]
+mod agent_faces;
+
 pub(crate) const DEFAULT_PROMPT_INTENT: &str = "feature";
 const DEFAULT_PROMPT_PRIORITY: i32 = 100;
 const EXECUTION_MODE_APPLY: &str = "apply";
@@ -635,6 +638,35 @@ async fn resolve_agent_targets(
     Ok(targets)
 }
 
+/// The seed every row of `target` carries (`metadata.agent.avatarSeed`): its
+/// own, else its saved agent's id, else its handle. Dispatch first stamps a face
+/// on each AI without a profile (`agent_faces`); one it gives none, Octo's alias
+/// `ai`, keeps its handle.
+fn effective_avatar_seed(target: &AgentTarget) -> String {
+    target
+        .avatar_seed
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| target.agent_id.map(|value| value.to_string()))
+        .unwrap_or_else(|| target.handle.clone())
+}
+
+/// `target` as a notice it speaks (a runtime alert) names it: with its saved
+/// agent's id, as its runs carry it, so a client draws the agent's profile.
+fn notice_agent_identity(target: &AgentTarget) -> JsonValue {
+    let mut identity = json!({
+        "handle": target.handle,
+        "displayName": target.display_name,
+        "avatarSeed": effective_avatar_seed(target),
+    });
+    if let Some(agent_id) = target.agent_id {
+        identity["id"] = json!(agent_id.to_string());
+    }
+    identity
+}
+
 fn inject_agent_target_metadata(metadata: &mut JsonValue, target: &AgentTarget) {
     let map = ensure_object(metadata);
     let mut agent_map = JsonMap::new();
@@ -657,15 +689,10 @@ fn inject_agent_target_metadata(metadata: &mut JsonValue, target: &AgentTarget) 
             JsonValue::String(description.clone()),
         );
     }
-    let avatar_seed = target
-        .avatar_seed
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-        .or_else(|| target.agent_id.map(|value| value.to_string()))
-        .unwrap_or_else(|| target.handle.clone());
-    agent_map.insert("avatarSeed".to_string(), JsonValue::String(avatar_seed));
+    agent_map.insert(
+        "avatarSeed".to_string(),
+        JsonValue::String(effective_avatar_seed(target)),
+    );
     map.insert("agent".to_string(), JsonValue::Object(agent_map));
 }
 
@@ -1020,6 +1047,12 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // turns further down.
     if !context.is_service_role {
         conversations::strip_client_group_participation_claims(&mut request.metadata);
+        // Who an AI is, and so the face it wears, is the controller's to stamp
+        // (`inject_agent_target_metadata`). A caller's own `agent` would only
+        // ride onto the person's message as an AI's identity.
+        if let Some(map) = request.metadata.as_object_mut() {
+            map.remove("agent");
+        }
     }
     // Browser control is bound to the runtime that owns the visible page.
     // Capture the caller's explicit runtime before project/conversation
@@ -1679,12 +1712,23 @@ pub(crate) async fn process_dispatch_prompt_timed(
             &agent_handles,
         ));
     }
-    let agent_targets = resolve_agent_targets(
+    let mut agent_targets = resolve_agent_targets(
         &transaction,
         &project.id,
         context.user_id,
         agent_handles,
         default_credential_id,
+    )
+    .await?;
+    // Before anything is stamped with them: each AI without a profile wears
+    // its face of this chat, a rerun the face its lane already wears.
+    agent_faces::stamp_faces(
+        &mut transaction,
+        context,
+        project.id,
+        &conversation,
+        &request.metadata,
+        &mut agent_targets,
     )
     .await?;
     // A plain one-agent turn that its person's own message started may hold
@@ -1760,13 +1804,20 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .first()
         .map(|(run_id, _)| *run_id)
         .unwrap_or_else(Uuid::new_v4);
-    let primary_agent_metadata = agent_runs.first().map(|(_, target)| {
-        json!({
-            "handle": target.handle,
-            "displayName": target.display_name,
-            "avatarSeed": target.avatar_seed,
-        })
-    });
+    // A plan's own notices speak as its lead, not as its first lane.
+    let primary_agent_metadata = match agent_faces::plan_lead_agent(
+        &mut transaction,
+        context,
+        project.id,
+        &request.metadata,
+    )
+    .await?
+    {
+        Some(lead) => Some(lead),
+        None => agent_runs
+            .first()
+            .map(|(_, target)| notice_agent_identity(target)),
+    };
 
     insert_prompt_record(&transaction, &project, context, &request, &prompt_id).await?;
 
@@ -6589,6 +6640,64 @@ mod tests {
             assert_eq!(metadata["source"], "controller");
             assert_eq!(metadata["kind"], "runtime_alert");
         }
+    }
+
+    #[test]
+    fn a_stamped_face_rides_on_the_ais_rows_and_notices() {
+        let helper = AgentTarget {
+            handle: "reading_list".to_string(),
+            agent_id: None,
+            credential_id: None,
+            runtime_id: None,
+            display_name: None,
+            description: None,
+            avatar_seed: Some("hatchling:3".to_string()),
+        };
+        // The controller's stamp replaces whatever `agent` the request carried.
+        let mut metadata =
+            json!({"agent": {"handle": "reading_list", "avatarSeed": "hatchling:8"}});
+        inject_agent_target_metadata(&mut metadata, &helper);
+        assert_eq!(
+            metadata["agent"],
+            json!({"handle": "reading_list", "avatarSeed": "hatchling:3"})
+        );
+        let alert = build_runtime_alert_conversation_metadata(
+            json!({"reason": "runtime_unavailable"}),
+            Some(notice_agent_identity(&helper)),
+        );
+        assert_eq!(
+            alert["agent"],
+            json!({"handle": "reading_list", "displayName": null, "avatarSeed": "hatchling:3"})
+        );
+
+        // Octo's alias gets no face and keeps its handle as its seed, on its rows and notices.
+        let alias = AgentTarget {
+            handle: "ai".to_string(),
+            avatar_seed: None,
+            ..helper.clone()
+        };
+        inject_agent_target_metadata(&mut metadata, &alias);
+        assert_eq!(metadata["agent"]["avatarSeed"], "ai");
+        assert_eq!(notice_agent_identity(&alias)["avatarSeed"], "ai");
+        // A saved agent's notices name it by id, and one with no seed of its own is seeded with
+        // its id.
+        let agent_id = Uuid::new_v4();
+        let saved = AgentTarget {
+            handle: "pia".to_string(),
+            agent_id: Some(agent_id),
+            display_name: Some("Pia".to_string()),
+            avatar_seed: Some("  ".to_string()),
+            ..helper
+        };
+        assert_eq!(
+            notice_agent_identity(&saved),
+            json!({
+                "handle": "pia",
+                "id": agent_id.to_string(),
+                "displayName": "Pia",
+                "avatarSeed": agent_id.to_string(),
+            })
+        );
     }
 
     #[test]

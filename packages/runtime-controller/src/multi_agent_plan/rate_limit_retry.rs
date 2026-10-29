@@ -374,6 +374,7 @@ mod tests {
             summary: None,
             error_message: error.map(str::to_string),
             handle: Some(handle.into()),
+            avatar_seed: None,
             scope_summary: None,
             lease_metrics: None,
             paths: Vec::new(),

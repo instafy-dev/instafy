@@ -745,8 +745,13 @@ Apply `20260915110000_agent_identity_images.sql` after the identity-image migrat
 uploads use `agents/<owner-user-id>/<random-uuid>.<extension>` in the public `identity-images`
 bucket, which also permits uploading before a new bot has an ID. Only that user can upload
 or delete objects in their directory; overwrite is not allowed. The existing controller
-checks bot ownership when saving `avatarSeed`. Existing saved image URLs remain readable,
-but the editor uses the native file picker rather than an image-URL field.
+checks bot ownership when saving `avatarSeed`. It accepts only a picture (an `http(s)` URL,
+a `/` path or a `data:image/` URI) or exactly `hatchling:1` to `hatchling:8`, which Octo
+never takes; an update may also send the bot's own id or its unchanged saved seed, and any
+other value is rejected with a 400. A missing or blank seed keeps the saved one (on create,
+the bot's id), and creating a bot from a connection without a handle ignores `avatarSeed`.
+Existing saved image URLs remain readable, but the editor uses the native file picker rather
+than an image-URL field.
 
 
 Docked side panels use `DrawerHeader frame="rail"`: a 48px row with 16px horizontal
