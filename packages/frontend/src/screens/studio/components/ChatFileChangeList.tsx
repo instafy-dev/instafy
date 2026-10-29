@@ -274,6 +274,12 @@ function formatFileCount(count: number): string {
   return `${count} file${count === 1 ? "" : "s"}`;
 }
 
+/** Every file is one the turn created for the site it opened. */
+function createdOnlySite(madeSite: boolean, files: ChatMessageFileChange[]): boolean {
+  const entries = resolveUniqueChatFileChanges(files);
+  return madeSite && entries.length > 0 && entries.every((entry) => entry.file.changeType === "created");
+}
+
 function resolveChangeSetVerb(entries: ResolvedChatFileChange[]): string {
   if (entries.length === 0) {
     return "Edited";
@@ -333,6 +339,7 @@ export function ChatFileChangeList({
   unsavedReason,
   messageId,
   messageTimestamp,
+  madeSite = false,
 }: {
   files: ChatMessageFileChange[];
   projectId?: string | null;
@@ -350,6 +357,10 @@ export function ChatFileChangeList({
   // versions the old way, and to "Revert this change" alone elsewhere.
   messageId?: string | null;
   messageTimestamp?: number | null;
+  // The turn opened a site in a preview. When every file is one it created,
+  // the row reads "Created the site": what the person asked for, not a file
+  // count and the lines in them. The files stay one press away.
+  madeSite?: boolean;
 }) {
   const { openPanelTab, requestUrlPush, openGitDiffTab } = useWorkspaceTabs();
   const { showStatus } = useStatus();
@@ -377,7 +388,7 @@ export function ChatFileChangeList({
   const [diffRefreshNonce, setDiffRefreshNonce] = useState(0);
   const [undoStatusByPath, setUndoStatusByPath] = useState<Record<string, ChatFileUndoStatus>>({});
   const [railExpanded, setRailExpanded] = useState(
-    () => resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
+    () => !createdOnlySite(madeSite, files) && resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
   );
   const [unsavedNoteOpen, setUnsavedNoteOpen] = useState(false);
   const [openNotSavedNotes, setOpenNotSavedNotes] = useState<Record<string, boolean>>({});
@@ -461,6 +472,7 @@ export function ChatFileChangeList({
   // Files the turn's save left out; reverted ones have nothing left to save.
   const notSavedCount = pendingEntries.filter((entry) => entry.file.notSaved).length;
 
+  const siteSummary = revertedCount === 0 && createdOnlySite(madeSite, files);
   const compactSummaryLabel = (() => {
     if (totalCount === 0) {
       return "No file changes";
@@ -469,6 +481,9 @@ export function ChatFileChangeList({
       return `Reverted ${formatFileCount(totalCount)}`;
     }
     const notSavedSuffix = notSavedCount > 0 ? ` · ${notSavedCount} not saved` : "";
+    if (siteSummary) {
+      return `Created the site${notSavedSuffix}`;
+    }
     if (revertedCount > 0) {
       return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(totalCount)} · ${revertedCount} reverted${notSavedSuffix}`;
     }
@@ -480,8 +495,9 @@ export function ChatFileChangeList({
     unsavedReason && pendingCount > 0 ? describeUnsavedChanges(unsavedReason, unsavedWorkPlacement) : null;
   const unsavedNoteId = `${cardIdBase}-unsaved`;
 
-  // A single file needs no summary/toggle chip: the file chip carries everything.
-  const showSummaryToggle = totalCount > 1;
+  // A single file needs no summary/toggle chip: the file chip carries
+  // everything. A site the turn made has one, whatever its size.
+  const showSummaryToggle = totalCount > 1 || siteSummary;
   const visibleChipEntries = railExpanded || !showSummaryToggle ? resolvedFiles : [];
   const chipLabels = resolveChipLabels(resolvedFiles);
   // Stats load only from a ready runtime. A space whose machine is not running
@@ -1248,7 +1264,7 @@ export function ChatFileChangeList({
               data-testid="chat-file-change-toggle-files"
             >
               <span className="truncate">{compactSummaryLabel}</span>
-              {totals && (pendingCount > 1 || !railExpanded) ? (
+              {siteSummary ? null : totals && (pendingCount > 1 || !railExpanded) ? (
                 <LineDelta added={totals.added} removed={totals.removed} />
               ) : !railExpanded && statsLoading ? (
                 <span

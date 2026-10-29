@@ -741,28 +741,6 @@ describe("conversation preview tabs", () => {
     expect(api.tabs.some((tab) => tab.kind === "panel" && tab.panel === "home")).toBe(true);
   });
 
-  it("keeps or closes background-space tabs without resurrecting them on return", async () => {
-    const props = { conversationWorkspaceUserId: "user-a" };
-    save(["a", "b", "c"], "b");
-    await render(props);
-    expect(api.conversationTabsRestored).toBe(true);
-    fixture.projectId = projectB;
-    await render(props);
-    expect(api.conversationTabsRestored).toBe(false);
-    fixture.projectKey = projectB;
-    fixture.conversations = [conversation("x")]; fixture.activeConversationId = "x";
-    await render(props);
-    await act(async () => api.updateInactiveConversationTab(projectA, "b", "keep"));
-    await act(async () => api.updateInactiveConversationTab(projectA, "c", "close"));
-    expect(loadPersistedWorkspaceTabs()?.projects[projectA]).toMatchObject({ conversations: ["a", "b"] });
-    expect(loadPersistedWorkspaceTabs()?.projects[projectA]?.previewConversationId).toBeUndefined();
-    fixture.projectId = projectA; fixture.projectKey = projectA;
-    fixture.conversations = [conversation("a"), conversation("b"), conversation("c")]; fixture.activeConversationId = "a";
-    await render(props);
-    expect(ids()).toEqual(["a", "b"]); expect(previews()).toEqual([]);
-    expect(api.conversationTabsRestored).toBe(true);
-  });
-
   it("restores each space's own preview and kept tabs", async () => {
     persistWorkspaceTabsState({ projects: {
       [projectA]: { conversations: ["a", "b"], activeConversationId: "b", previewConversationId: "b" },

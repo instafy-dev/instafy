@@ -24,7 +24,7 @@ fn jpeg_segment(marker: u8, data: &[u8]) -> Vec<u8> {
 const GPS_NOTE: &[u8] = b"GPS 59.3293N 18.0686E";
 const XMP_NOTE: &[u8] = b"<x:xmpmeta>creator: someone@example.com</x:xmpmeta>";
 
-fn jpeg(width: u16, height: u16) -> Vec<u8> {
+pub(super) fn jpeg(width: u16, height: u16) -> Vec<u8> {
     let mut out = vec![0xFF, 0xD8];
     out.extend(jpeg_segment(0xE0, b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0"));
     let mut exif = b"Exif\0\0".to_vec();
@@ -222,7 +222,7 @@ fn summary_is_validated_like_the_title() {
 // ---------------------------------------------------------------------------
 // The routes
 
-fn upload_body(bytes: &[u8], content_type: &str) -> Value {
+pub(super) fn upload_body(bytes: &[u8], content_type: &str) -> Value {
     json!({
         "image": STANDARD.encode(bytes),
         "contentType": content_type,
@@ -236,7 +236,7 @@ impl Fixture {
         self.path(&format!("/{preview_id}/thumbnail"))
     }
 
-    async fn upload(
+    pub(super) async fn upload(
         &self,
         token: &str,
         preview_id: &str,
@@ -247,7 +247,7 @@ impl Fixture {
     }
 
     /// The raw answer of `GET …/thumbnail`: status, headers and bytes.
-    async fn picture(
+    pub(super) async fn picture(
         &self,
         token: &str,
         preview_id: &str,
@@ -275,7 +275,7 @@ impl Fixture {
         Ok(preview_id)
     }
 
-    async fn thumbnail_rows(&self, preview_id: &str) -> anyhow::Result<i64> {
+    pub(super) async fn thumbnail_rows(&self, preview_id: &str) -> anyhow::Result<i64> {
         Ok(self
             .state
             .pool

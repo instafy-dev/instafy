@@ -61,6 +61,7 @@ import { useSustainedFlag } from "./useSustainedFlag";
 import { BrowserIdentityBadge } from "./BrowserIdentityBadge";
 import { BrowserSessionRecovery, BrowserSessionReconnecting } from "./BrowserSessionRecovery";
 import {
+  BROWSER_LIVE_STAGE_CLASS,
   shouldForceDockedBrowserFullscreen,
   shouldRenderBrowserSessionFullscreen,
 } from "./browserSessionLayout";
@@ -146,6 +147,7 @@ type DockedBrowserLayoutMetrics = {
 type BrowserSessionRfbLike = {
   _canvas?: HTMLCanvasElement;
   addEventListener?: (type: "connect" | "disconnect", listener: () => void) => void;
+  background?: string;
   clipViewport?: boolean;
   disconnect?: () => void;
   dragViewport?: boolean;
@@ -2680,6 +2682,10 @@ export function BrowserSessionModal({
         }
         const RFB = resolveBrowserSessionRfbConstructor(mod);
         rfb = new RFB(container, wsUrl, {});
+        // noVNC fills its screen with dark grey around the page; the stage
+        // under it follows the theme (BROWSER_LIVE_STAGE_CLASS), so the bands
+        // a page leaves above and below it on a phone are light in light mode.
+        rfb.background = "transparent";
         rfbRef.current = rfb;
         const markFrameConnected = () => {
           setHasConnectedOnce(true);
@@ -3129,9 +3135,12 @@ export function BrowserSessionModal({
     [fail, fallBackFromViewer],
   );
 
+  // Around a live page the stage follows the theme like the chrome above it
+  // and the composer below: black under a page in light mode read as dark
+  // chrome on a phone, where the page leaves bands above and below it.
   const viewportSurfaceClass =
     viewLive
-      ? "bg-black"
+      ? BROWSER_LIVE_STAGE_CLASS
       : "bg-slate-100 dark:bg-slate-950";
   const recoveryRuntimeLimit = error && limitReached ? {
     summary: runtimeSlotSummary,
@@ -3486,7 +3495,7 @@ export function BrowserSessionModal({
             <img
               alt=""
               aria-hidden="true"
-              className="absolute inset-0 h-full w-full bg-black object-contain"
+              className={`absolute inset-0 h-full w-full object-contain ${BROWSER_LIVE_STAGE_CLASS}`}
               data-testid="browser-session-frozen-frame"
               src={frozenFrameUrl}
             />
