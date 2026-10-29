@@ -59,9 +59,13 @@ describe("reading only visible persisted conversation messages", () => {
     });
     Object.defineProperty(document, "elementFromPoint", { configurable: true, value: vi.fn((_x: number, y: number) => {
       if (covered) return document.body;
-      return [...document.querySelectorAll("[data-chat-message-id]")].find((element) => {
-        const box = element.getBoundingClientRect(); return box.top <= y && box.bottom >= y;
-      }) ?? null;
+      // Harness rows occupy two pixels of each three-pixel slot. Resolve the
+      // current slot directly, including rows moved after observation, rather
+      // than rescanning and measuring every row for each production hit test.
+      const element = document.querySelector(`[data-chat-message-id][data-top="${Math.floor(y / 3) * 3}"]`);
+      if (!element) return null;
+      const box = element.getBoundingClientRect();
+      return box.top <= y && box.bottom >= y ? element : null;
     }) });
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
     setNotificationSession({ userId: ACCOUNT, accessToken: "token-a" });

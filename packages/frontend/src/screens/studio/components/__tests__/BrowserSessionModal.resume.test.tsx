@@ -213,6 +213,21 @@ describe("production Shared modal resume selection", () => {
     await act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="Resume Shared session ${firstId}"]`)!.click());
     expect(onResolved).toHaveBeenCalledWith(firstId); expect(mocks.ensure).not.toHaveBeenCalled();
   });
+  it("announces compact opening progress and lets the participant expand the browser", async () => {
+    vi.stubGlobal("innerHeight", 700);
+    mocks.fetchStatus.mockReturnValue(new Promise(() => {}));
+    await act(async () => root.render(<BrowserSessionModal isOpen onOpenChange={noop} projectId={projectId}
+      currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={null} presentation="docked" canControlBrowser
+      sharedBrowserCapabilitiesResolved={false} />));
+    const card = container.querySelector('[data-testid="browser-session-collapsed-card"]')!;
+    expect(card).not.toBeNull();
+    expect(card.querySelector('[role="status"]')?.textContent).toBeTruthy();
+    expect(card.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => card.querySelector<HTMLButtonElement>('[aria-label="Open browser fullscreen"]')!.click());
+    expect(document.querySelector('[role="dialog"][aria-label="Browser session"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="browser-session-collapsed-card"]')).toBeNull();
+    expect(mocks.ensure).not.toHaveBeenCalled();
+  });
   it.each([false, true])("lets compact recovery content determine the stage height (runtime limit: %s)", async limit => {
     // Inline recovery collapses below 760px; below 620px the whole viewer is fullscreen.
     vi.stubGlobal("innerHeight", 700);

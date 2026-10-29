@@ -412,3 +412,25 @@ test("the required check reads every part's receipt from the downloaded artifact
   assert.throws(() => quiet(["browser-ui", folder]));
   for (const args of [[], ["browser-ui"], ["browser-ui", folder, "extra"]]) assert.throws(() => quiet(args), /Usage:/u);
 });
+
+test("browser UI requires login and global-search keyboard regressions", async (t) => {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  const files = ["login-keyboard.spec.ts", "search-keyboard.spec.ts"];
+  const titles = [
+    "preserves email and focus, and leaves long errors reachable through document scrolling",
+    "keeps login actions clear of system bars and respects rotated side insets",
+    "keeps the first actual result visible with query and scope controls",
+    "keeps loading, error recovery and empty results reachable within native safe areas",
+  ];
+  for (const file of files) assert.ok(contract.files.includes(file), file);
+  for (const title of titles) assert.ok(contract.titles.includes(title), title);
+  for (const target of [...files, ...titles]) {
+    const run = setup(t, "browser-ui");
+    const selected = browserUiInventory(run).map(item => item.title === target
+      ? { ...item, title: "unrelated passing keyboard case" }
+      : files.includes(target) && item.location.file.endsWith(target)
+        ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item);
+    run.begin(selected); run.pass(selected);
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, target);
+  }
+});

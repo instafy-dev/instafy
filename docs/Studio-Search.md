@@ -22,6 +22,11 @@ their latest message time, falling back to the chat's update or creation time.
 Files, settings and actions keep their navigation order; there is no relevance
 ranking yet.
 
+Search keeps the query and scope controls above one scrolling results area. Index
+coverage and keyboard help follow the results inside that area, so explanatory
+copy does not reserve space above the mobile keyboard. Loading, errors and retry
+actions remain in the same scroll area.
+
 Selecting a chat in the **Chats** explorer opens or focuses its conversation
 workspace, including after the last tab was closed. Closing a tab keeps the chat
 and its draft available for reopening.
