@@ -954,6 +954,19 @@
     return ask("change", "field");
   }
 
+  // A field the person fills to sign in, which the agent never types into: a
+  // password or one-time code field, or the account identifier the typing
+  // rules above refuse (a form's field right before its password, an email
+  // field in a form with a password, an email-first username field). A host
+  // names these so the agent pauses on them for the person.
+  function isSignInField(target) {
+    const safeTarget = target && typeof target === "object" ? target : {};
+    if (lower(safeTarget.tag) !== "input" || !TEXT_INPUT_TYPES.has(lower(safeTarget.type))) return false;
+    if (lower(safeTarget.type) === "password") return true;
+    if (/(?:^|\s)(?:current-password|one-time-code)(?:\s|$)/.test(lower(safeTarget.autocomplete))) return true;
+    return classifyTyping(safeTarget, {}).code === REFUSALS.sign_in.code;
+  }
+
   function classifySubmit(target, ctx) {
     if (ctx && ctx.sensitive === true) return refuse("sensitive", "sensitive field");
     if (isSignInForm(target)) return refuse("sign_in", "sign-in form submit");
@@ -1031,6 +1044,7 @@
     isPlaceholderName,
     isEditable,
     isSearchField,
+    isSignInField,
     isFreeSiteSearch,
   });
 });

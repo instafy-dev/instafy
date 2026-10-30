@@ -1041,6 +1041,50 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
+/// A sign-in the person asked for, or one their task goes on past, is opened and paused on, so the task goes on after
+/// it (30 Oct drive 6: "star the repository" ended twice with "use its Sign in control … tell me when you're ready").
+/// The skill's list of pages that end a read no longer covers it, the turn that writes the card's task knows the
+/// browser turn pauses there, and the browser skill's sign-in rules stay inside the part a browser turn carries. The
+/// reply no longer says where the browser goes (the card says it), and still never says a page opened before a tool
+/// saw it. An unedited earlier copy of the skill is upgraded.
+#[test]
+fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    for needle in [
+        "\"Finding a page\" says what comes next. Never retry that page another way. A sign-in the person asked for isn't one of these: open its sign-in page and pause (Core rules).",
+        "Treat sign-in, one-time codes, consent and payment as the person's steps: pause on them with `request_human_input`, and continue when they choose Let Octo continue.",
+        "Never use a sign-in that belongs to someone else in this space",
+    ] {
+        assert!(carried.contains(needle), "{needle}");
+    }
+    assert!(!flat(BROWSER_SKILL).contains("where the browser goes"));
+    assert!(BROWSER_CHOICE_CONTRACT.contains(
+        "- The person does their own sign-ins, codes and consent screens; a browser turn opens the sign-in page and pauses on its fields for them. Never type or ask for a credential."
+    ));
+    assert!(BROWSER_CHOICE_CONTRACT.contains(
+        "- In `summary`, never say a page opened, or what it shows, before a browser tool saw it.\n"
+    ));
+    assert!(!BROWSER_CHOICE_CONTRACT.contains("where the browser goes"));
+
+    let tmp = scaffolded_space();
+    let request = "Open GitHub so I can sign in, then star the repository I named.";
+    assert!(fresh_prompt(tmp.path(), request, json!({})).contains(BROWSER_CHOICE_CONTRACT));
+    let browser_turn = flat(&fresh_prompt(
+        tmp.path(),
+        request,
+        json!({ "browserTransport": "shared" }),
+    ));
+    assert!(browser_turn.contains("A sign-in the person asked for isn't one of these: open its sign-in page and pause (Core rules)."));
+
+    let previous = include_str!("legacy/browser-automation-v14.md");
+    assert!(previous.contains("say where the browser goes and why"));
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
 /// A fresh turn's prompt for `request`, with the job's metadata.
 fn fresh_prompt(tmp: &std::path::Path, request: &str, metadata: JsonValue) -> String {
     let processor = test_job_processor(tmp);

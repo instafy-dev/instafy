@@ -1178,6 +1178,16 @@ that names another host is refused, and a blank page needs a full address. The
 text reads a closed select's chosen option as a word of its own. The control's
 box stays inside the controller for the visible cursor, and the MCP text result
 is compact JSON beside the same structured content.
+On the page the person chose, a page with sign-in fields (a password or
+one-time code field, or the account identifier that typing into is refused as a
+sign-in, as the shared policy's `isSignInField` tells them) names them in its
+result's `signIn.fields`, with what comes next: when the person asked to sign in,
+or their task goes on past it, the turn pauses there with `request_human_input`
+and ends, and they sign in on the page and choose **Let Octo continue**. That
+holds for `snapshot`, `navigate` and every step whose result reads the page.
+Octo's own tabs, which are for reading, never name them. The turn's reply then
+says "Sign in or fill in the highlighted fields on the page in Instafy's browser,
+then choose Let Octo continue. I don't ask for those details in chat."
 
 A browser that has just started, such as the on-demand browser on a space's own
 machine, shows exactly `about:blank`, and a tab opened in the viewer shows the

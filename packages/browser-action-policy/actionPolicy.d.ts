@@ -110,6 +110,12 @@ export declare function isPlaceholderName(value: unknown): boolean;
 export declare function isEditable(target: PersonalBrowserStepTarget): boolean;
 export declare function isSearchField(target: PersonalBrowserStepTarget): boolean;
 /**
+ * A field the person fills to sign in and the agent never types into: a
+ * password or one-time code field, or the account identifier typing into
+ * which is refused as a sign-in. Hosts name these so the agent pauses there.
+ */
+export declare function isSignInField(target: PersonalBrowserStepTarget): boolean;
+/**
  * Enter in a site's own search box (or typing into it with submit) that a
  * host may let go without a prompt under routine browsing: a known GET
  * submission of the page's own origin in the same tab, to a public address,

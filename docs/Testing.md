@@ -1628,6 +1628,16 @@ POST goes out without the prompts for that site. The Personal Browser lane runs
 the same table through the built page bridge in Electron, and a keydown handler
 that moves the form there too.
 
+Last, `scripts/shared-browser-sign-in-e2e.mjs` plays a task that goes on past a
+sign-in ("sign in, then star the repository") on a loopback code host. The
+repository page names no sign-in fields; the sign-in page's result names its
+username and password fields and says to pause there with `request_human_input`;
+typing into them is refused; the pause highlights exactly those fields and ends
+the turn with nothing sent. The person then signs in on the page, and a fresh run
+on the same page (what **Let Octo continue** starts) stars the repository, asking
+once before the form post. The person's values never reach a tool's output or
+the action feed.
+
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across
 Expand/Collapse, and sends an explicit Done continuation. Rust/native/hook tests

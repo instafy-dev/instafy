@@ -2010,6 +2010,13 @@ async function snapshot(page, { withhold = false } = {}) {
     const masked = redaction.redactUrl(href).text;
     return sameSitePath(pageOrigin, view.secretScreen ? strictlyMasked(masked) : masked);
   };
+  // A sign-in page names its fields, so a task that goes on past the sign-in
+  // pauses on them for the person instead of ending the turn. Octo's own
+  // tabs are for reading and never ask the person to fill fields.
+  const signInFields = inAgentTab() || view.secretScreen ? [] : interactive
+    .filter(({ description }) => actionPolicy.isSignInField(policyTarget(description)))
+    .map(({ description }) => description.index)
+    .slice(0, 8);
   return {
     snapshotId: snapshotFingerprint(rawUrl, interactive),
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
@@ -2034,6 +2041,12 @@ async function snapshot(page, { withhold = false } = {}) {
     // How many controls were left out because a person cannot see them yet,
     // so a cut list does not read as the whole page.
     ...(hiddenNames.length ? { omittedControls: hiddenNames.length } : {}),
+    ...(signInFields.length ? {
+      signIn: {
+        fields: signInFields,
+        next: "Signing in is the person's step. If they asked to sign in, or their task goes on past it, call request_human_input with this snapshotId and these fields' indices, then end the turn: they sign in on the page and choose Let Octo continue. Never type into these fields.",
+      },
+    } : {}),
   };
 }
 
