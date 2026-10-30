@@ -98,9 +98,12 @@ for (const width of [320, 390, 1280]) for (const theme of ["light", "dark"]) {
 
       await open(page, "action-approval", theme, "&error=1");
       await fits(page, prompt);
-      const destination = page.getByTestId("shared-browser-approval-destination");
-      await destination.scrollIntoViewIfNeeded();
-      expect(await destination.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      // The sentence names the long page itself, wrapped inside the sheet,
+      // and no box repeats it.
+      const title = page.locator("#shared-browser-approval-title");
+      await title.scrollIntoViewIfNeeded();
+      expect(await title.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      await expect(page.getByTestId("shared-browser-approval-destination")).toHaveCount(0);
       await readableError(page, page.getByTestId("shared-browser-approval-error"));
       await allow.click();
       await expect(page.getByTestId("review-decision")).toHaveText("allow_once");

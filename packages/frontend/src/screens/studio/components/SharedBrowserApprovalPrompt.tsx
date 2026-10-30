@@ -100,6 +100,7 @@ export function SharedBrowserApprovalPrompt({
         aria-labelledby="shared-browser-approval-title"
         aria-modal="true"
         className="flex max-h-full w-full max-w-md flex-col overflow-hidden"
+        data-approval-origin={request.display.destinationOrigin?.trim() || request.destinationOrigin?.trim() || undefined}
         data-testid="shared-browser-approval-prompt"
         role="alertdialog"
         tone="floating"
