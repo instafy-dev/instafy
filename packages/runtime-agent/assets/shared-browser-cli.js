@@ -3176,10 +3176,13 @@ async function within(ms, promise, fallback = null) {
 // snapshot within LATE_READ_MS, or its address alone when the page is too busy
 // to be read. It says that the step's time ran out, so Octo checks what the step
 // did before it acts again. Its activity says what it is: a read of the page,
-// or, for the address alone, the page it is on, as status names it. The step's
-// guards still hold while the page is read, then end as a step's guards end: a
-// window it opened is closed, and what they stopped fails the step as it would
-// have in its time.
+// or, for the address alone, the page it is on, as status names it. A tab still
+// on the blank page has a load that has not arrived: that is a busy page, not a
+// blank one to navigate again, and the step opened nothing, so it fails (its
+// line reads as a step tried) with the busy page's answer. The step's guards
+// still hold while the page is read, then end as a step's guards end: a window
+// it opened is closed, and what they stopped fails the step as it would have in
+// its time.
 async function pageAsItIs(browser) {
   const read = await within(LATE_READ_MS, (async () => snapshotForResult(await resolveExpectedPage(browser)))());
   const guards = [...openStepGuards];
@@ -3199,13 +3202,17 @@ async function pageAsItIs(browser) {
   await within(GUARD_RELEASE_MS, Promise.all(guards.map((guard) => guard.release())));
   if (stopped) throw stopped;
   const view = read ?? addressOnly(resolvedPage);
-  const readSomething = read && !isBusyPageResult(read);
-  emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
+  const loading = view.blank === true;
+  const readSomething = read && !loading && !isBusyPageResult(read);
   // Only a page that was read is "the page as it is now"; a busy one says so
   // in its own message.
   const note = `This step was still running after ${STEP_TIME_MS / 1000} seconds, so it stopped where it was. ${
     readSomething ? "This is the page as it is now: check" : "Check"
   } what the step did before you act again.`;
+  if (loading) {
+    throw new Error(`${BUSY_PAGE_MESSAGE} ${note}`);
+  }
+  emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
   return withActivity(
     { ...view, stepTimedOut: true, message: [view.message, note].filter(Boolean).join(" ") },
     stepActivity(resolvedPage, readSomething ? "snapshot" : "status", null),

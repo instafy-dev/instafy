@@ -369,7 +369,8 @@ swallows still costs nothing, as it does for an evaluation turn the person sent.
 
 A card's browser turn is charged when it did something in the browser beyond looking at the page
 it was given: it opened a page or a tab, clicked, typed, pressed a key or scrolled, or ran any
-other step that worked. Looking at the tabs, the browser's state or the page does not count, and
+other step that worked. A step whose time ran out before its page left the blank page opened
+nothing and fails, so it does not count. Looking at the tabs, the browser's state or the page does not count, and
 neither does its reply: a refusal is a reply too, as when the turn finds the browser on a page that
 has nothing to do with its task and stops.
 

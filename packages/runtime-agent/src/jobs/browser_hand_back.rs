@@ -8,7 +8,9 @@
 //! `metadata.browserHandsBack`) is told to end its reply with labelled
 //! findings, one line per page. Those lines are for Octo, not the person: the
 //! runtime takes them out of the posted reply and keeps them in a Details note
-//! ([`move_findings_into_details`]). When the turn ends, Studio sends one
+//! ([`move_findings_into_details`]). The person reads [`FINDINGS_ONLY_REPLY`]
+//! in place of the browser turn's own words, unless a page stopped it: the
+//! building turn says what it made with them a moment later. When the turn ends, Studio sends one
 //! hand-back turn, and the controller checks it (it read at least one page,
 //! and its card continues building) and stamps `metadata.browserHandBack` with
 //! the reply and the findings (runtime-controller `browser_hand_back.rs`).
@@ -55,21 +57,23 @@ fn is_browser_turn(metadata: &JsonValue) -> bool {
     })
 }
 
-/// The findings contract for a browser turn that continues a card which
-/// continues building, or None for any other turn: a question's browser turn
-/// answers in its own words, and nothing goes back.
+/// Whether a browser turn continues a card which continues building, so its
+/// findings go back to the building turn. A question's browser turn answers in
+/// its own words, and nothing goes back.
+fn hands_back(metadata: &JsonValue) -> bool {
+    is_browser_turn(metadata)
+        && metadata_string(metadata, &["browserRequestOf", "browser_request_of"]).is_some()
+        && ["browserHandsBack", "browser_hands_back"]
+            .iter()
+            .any(|key| metadata.get(*key) == Some(&JsonValue::Bool(true)))
+}
+
+/// The findings contract for a browser turn whose findings go back to the
+/// building turn ([`hands_back`]), or None for any other turn.
 pub(super) fn format_browser_findings_contract_section(
     metadata: Option<&JsonValue>,
 ) -> Option<String> {
-    let metadata = metadata?;
-    if !is_browser_turn(metadata) {
-        return None;
-    }
-    metadata_string(metadata, &["browserRequestOf", "browser_request_of"])?;
-    let hands_back = ["browserHandsBack", "browser_hands_back"]
-        .iter()
-        .any(|key| metadata.get(*key) == Some(&JsonValue::Bool(true)));
-    hands_back.then(|| FINDINGS_CONTRACT.to_string())
+    hands_back(metadata?).then(|| FINDINGS_CONTRACT.to_string())
 }
 
 /// A turn the controller stamped as a hand-back: it continues the building
@@ -170,13 +174,19 @@ fn split_findings(reply: &str) -> Option<(String, Vec<String>)> {
     Some((posted.trim().to_string(), findings))
 }
 
-/// What the person reads when a browser turn's reply was only its findings.
+/// What the person reads when a browser turn's reply was only its findings, or
+/// when its findings go back to the building turn and no page stopped it.
 const FINDINGS_ONLY_REPLY: &str = "Finished in the browser. What each page showed is in Details.";
 
 /// Moves the finding lines out of a browser turn's reply. The person reads
 /// the reply without them; they stay in the turn's Details as one note, where
 /// the controller reads them for the hand-back (runtime-controller
-/// `browser_hand_back.rs`). Any other turn is left as it is.
+/// `browser_hand_back.rs`). A browser turn whose findings go back to the
+/// building turn ([`hands_back`]) posts [`FINDINGS_ONLY_REPLY`] instead of its
+/// own words, unless a finding says a page stopped it: the building turn says
+/// what it made a moment later, and the browser turn's own account of what it
+/// could not build is no answer to the person. Any other turn is left as it
+/// is.
 pub(crate) fn move_findings_into_details(job: &LeaseJob, execution: &mut JobExecution) {
     let Some(metadata) = job.payload.get("metadata") else {
         return;
@@ -191,11 +201,12 @@ pub(crate) fn move_findings_into_details(job: &LeaseJob, execution: &mut JobExec
         .iter()
         .filter(|line| finding_line(line) == Some(true))
         .count();
-    execution.summary = if reply.is_empty() {
-        FINDINGS_ONLY_REPLY.to_string()
-    } else {
-        reply
-    };
+    execution.summary =
+        if reply.is_empty() || (hands_back(metadata) && pages_read == findings.len()) {
+            FINDINGS_ONLY_REPLY.to_string()
+        } else {
+            reply
+        };
     execution.final_messages.push(JobMessage {
         content: findings.join("\n"),
         message_type: Some("status".to_string()),
@@ -570,6 +581,54 @@ mod tests {
         move_findings_into_details(&job, &mut turn);
         assert_eq!(turn.summary, FINDINGS_ONLY_REPLY);
         assert_eq!(turn.final_messages.len(), 1);
+    }
+
+    /// A browser turn whose findings go back to the building turn posts no words of its own
+    /// beside them: the building turn says what it made a moment later. Its own words had said
+    /// "I could not create the comparison page because this turn is read-only" a second before
+    /// the page was built. A page that stopped it keeps its words, which say which and why, and a
+    /// question's browser turn answers in its own words.
+    #[test]
+    fn a_browser_turn_that_hands_back_posts_the_findings_line_unless_a_page_stopped_it() {
+        let hands_back = json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": true,
+        });
+        let read = [
+            r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#,
+            r#"{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["Battery: 50 Wh"]}"#,
+        ]
+        .join("\n");
+        let mut turn = execution(&format!(
+            "I read the maker's pages for two laptops. I could not create the comparison page because this turn is read-only.\n\n{read}"
+        ));
+        move_findings_into_details(&browser_job(hands_back.clone()), &mut turn);
+        assert_eq!(turn.summary, FINDINGS_ONLY_REPLY);
+        assert_eq!(turn.final_messages.len(), 1);
+        assert_eq!(turn.final_messages[0].content, read);
+        assert_eq!(
+            turn.final_messages[0].metadata.as_ref().unwrap()["browserFindings"],
+            json!({ "pages": 2, "pagesRead": 2 })
+        );
+
+        // A page that stopped it: its words say which.
+        let words = "The review page asked for a subscription, so I read only the maker's pages.";
+        let stopped = r#"{"url": "https://reviews.example/laptop-13", "stopped": "paywall"}"#;
+        let mut turn = execution(&format!("{words}\n\n{read}\n{stopped}"));
+        move_findings_into_details(&browser_job(hands_back), &mut turn);
+        assert_eq!(turn.summary, words);
+
+        // A question's browser turn: its reply is the answer.
+        let mut turn = execution(&format!("Laptop 13 has a 74 Wh battery.\n\n{read}"));
+        move_findings_into_details(
+            &browser_job(json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            })),
+            &mut turn,
+        );
+        assert_eq!(turn.summary, "Laptop 13 has a 74 Wh battery.");
     }
 
     #[test]

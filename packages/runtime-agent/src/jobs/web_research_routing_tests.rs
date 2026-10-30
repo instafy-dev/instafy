@@ -614,20 +614,38 @@ fn the_browser_skill_leaves_a_banner_without_a_reject_button_up() {
     }
 }
 
-/// A page that reads with no text and no controls answers that it is still busy (the browser's `snapshot`), and
-/// "Finding a page" says what comes next: one more snapshot, then the place's own site, never "no readable content".
-/// Reviews come from a search or from a reviewer's home page and its links, never from addresses guessed for
-/// publishers "you know review this kind of item". Unedited earlier copies of both skills are upgraded.
+/// A page that fails, whether busy, blank or an error page such as a 504, sends the turn to the place's own site
+/// at once, in the same turn, then to another official source. The earlier lines took one more snapshot of a busy
+/// page and waited for two failed pages on one site, and a turn that read a tourism site's 504 only offered the
+/// venue's own site, which the person then had to ask for. An unedited earlier copy is upgraded.
 #[test]
-fn a_busy_page_gets_one_more_read_and_reviews_are_never_guessed_addresses() {
+fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let start = BROWSER_SKILL.find("## Finding a page").expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
-    let busy = "- A page that reads as busy: take one more snapshot in a moment; still nothing, go to the place's own site.";
-    assert!(flat(&BROWSER_SKILL[start..end]).contains(busy));
+    let section = flat(&BROWSER_SKILL[start..end]);
+    let failed = "- A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.";
+    assert!(section.contains(failed), "{section}");
+    for earlier in ["take one more snapshot", "Two failed pages on one site"] {
+        assert!(!section.contains(earlier), "{earlier}");
+    }
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
-    assert!(carried.contains(busy));
+    assert!(carried.contains(failed));
 
+    let previous = include_str!("legacy/browser-automation-v17.md");
+    assert!(flat(previous).contains("Two failed pages on one site"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
+/// Reviews come from a search or from a reviewer's home page and its links, never from addresses guessed for
+/// publishers "you know review this kind of item". Unedited earlier copies of both skills are upgraded.
+#[test]
+fn reviews_are_never_guessed_addresses() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     assert!(!research.contains("reviews from publishers you know review"));
     assert!(research.contains(
@@ -903,10 +921,7 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
             &research,
             "Name: the exact model and generation its official page gives, else the page naming it.",
         ),
-        (
-            &browser,
-            "Two failed pages on one site: find another source with `instafy web search`",
-        ),
+        (&browser, "After that, another official source."),
         (&browser, "Comparing: list the models a page you read names"),
     ];
     let previous = include_str!("legacy/web-research-v7.md");
@@ -995,8 +1010,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "Open an address the person, a skill or a search result gave, a link on a page you read, or the home page of the official site the task is about.",
         "Never a search engine or a guessed path.",
         "A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu.",
-        "Two failed pages on one site: find another source with `instafy web search` (no key: `--chain reference-search`)",
-        "with only browser tools, open the home page of another official source (the operator, authority or maker).",
+        "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
         "A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page",
         "Anything not read on a page this turn (from memory or a search result) says \"not checked\" next to it.",
         "Comparing: list the models a page you read names, and mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
@@ -1081,7 +1095,7 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     for needle in [
         "a redirect to a link-only site ends that page, not the task: \"Finding a page\" says what comes next. Never retry that page another way.",
-        "Two failed pages on one site: find another source with `instafy web search` (no key: `--chain reference-search`), then read its best result;",
+        "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
     ] {
         assert!(carried.contains(needle), "{needle}");
     }

@@ -17,7 +17,9 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // is up, with the page as it is, instead of waiting for the page; a prompt the
 // person answers after more than the step's time is never cut short. A step
 // whose time runs out still ends as every step ends: a window it opened is
-// closed and said, and a hand-off it had not finished is never left behind. No model,
+// closed and said, and a hand-off it had not finished is never left behind. A
+// navigation from a blank tab to a site that does not answer in time fails as
+// a busy page, never as a blank one to navigate again. No model,
 // Studio, controller, account or external site is used, and Chromium resolves
 // no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -115,11 +117,17 @@ export async function runSharedBrowserStepTimeFixture() {
   const children = new Set();
   let server;
   let context;
+  // Answers of the site that does not answer in time, held until the case ends.
+  const unanswered = [];
   try {
     const requests = [];
     server = createServer((request, response) => {
       const url = new URL(request.url, "http://fixture.invalid");
       requests.push(`${request.method} ${url.pathname}${url.search}`);
+      if (url.pathname === "/slow") {
+        unanswered.push(response);
+        return;
+      }
       const body = {
         "/": [page("Places", SEARCH)], "/results": [page("Results", RESULTS, BUSY)], "/places/tower": [page("The tower", "<p>Open daily.</p>")],
         "/window": [page("Details", WINDOW, OPENS_WINDOW)], "/popup": [page("Popup", "<p>Another window.</p>")], "/form": [page("Your details", FORM, BUSY_ON_HIGHLIGHT)],
@@ -275,6 +283,35 @@ export async function runSharedBrowserStepTimeFixture() {
     }
     assert.deepEqual(hidden.payload.activity, { step: "status", url: `${origin}/hidden` });
 
+    // 1c. A navigation from a blank tab to a site that does not answer within
+    // the step's time: when the time is up the tab still shows the blank page,
+    // as a just-started browser does. The load has not arrived, so the page is
+    // busy, not blank: the step fails (its line reads as a step tried) with
+    // the busy page's answer, never the blank page's "Call navigate", which
+    // sent Octo to load the same site again.
+    await runPage.goto("about:blank");
+    requests.length = 0;
+    const loading = await runTool("POST", "/v1/navigate", { url: `${origin}/slow` });
+    assert.deepEqual(requests, ["GET /slow"], "The site was asked once");
+    assert.equal(loading.code, 1, `The step fails: ${loading.stdout}`);
+    assert.equal(loading.stdout, "", "A failed navigation answers with no page");
+    assert.ok(
+      loading.stderr.includes(`${BUSY_MESSAGE} This step was still running after 20 seconds, so it stopped where it was. Check what the step did before you act again.`),
+      loading.stderr,
+    );
+    assert.doesNotMatch(loading.stderr, /The page is blank|Call navigate/u);
+    // It answered when its time was up, and before the site did: the site
+    // answers only below. Its late read waits out LATE_READ_MS while the load
+    // is pending.
+    assert.ok(loading.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(loading.wallMs)} ms)`);
+    assert.equal(prompts.length, 1, "Nothing asked during the navigation");
+    // The site answers at last, as a slow site's gateway does, and the next
+    // case starts on a page that loaded.
+    for (const response of unanswered.splice(0)) {
+      response.writeHead(504, { "content-type": "text/html; charset=utf-8" }).end(page("Gateway Time-out", "<p>The site did not answer in time.</p>"));
+    }
+    await runPage.waitForURL(`${origin}/slow`);
+
     // 2. A click that opens another window and then keeps the page busy: the
     // step's time runs out, and it still ends as a step does. The window is
     // closed before it loads anything and the step says so, and once the page
@@ -341,16 +378,18 @@ export async function runSharedBrowserStepTimeFixture() {
       checks: [
         "a prompt answered after more than a step's time is waited for, and the step then reads the page as usual",
         "a loaded page that shows no text and no controls reads as still busy, not as an empty page, and its line says no page was read",
+        "a navigation from a blank tab to a site that does not answer in time fails once the step's time is up, as a busy page and never as a blank one to navigate again",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs) },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs) },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);
     return result;
   } finally {
+    for (const response of unanswered) response.destroy();
     for (const child of children) child.kill("SIGKILL");
     await context?.close().catch(() => {});
     if (server) await new Promise((resolve) => server.close(resolve));

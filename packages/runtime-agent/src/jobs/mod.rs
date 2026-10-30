@@ -3868,12 +3868,17 @@ fn is_explicit_team_planning_job(job: &LeaseJob) -> bool {
         })
 }
 
+/// Whether a turn gets the routing step before it runs. A team's planning, lead and worker
+/// turns have their route, and so does a hand-back (`browser_hand_back`): it continues the
+/// building work in this chat with what a browser turn found, and the findings it builds from are
+/// in its own prompt, which the routing step never sees.
 fn should_run_agent_routing_preflight(job: &LeaseJob, prompt_text: &str) -> bool {
     let prompt_text = prompt_text.trim();
     if prompt_text.is_empty()
         || is_explicit_team_planning_job(job)
         || is_multi_agent_lead_continuation_job(job)
         || is_multi_agent_worker_job(job)
+        || browser_hand_back::is_hand_back_job(job)
     {
         return false;
     }
@@ -9735,8 +9740,14 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     "\nResponse contract reminder:\n\
                 - Return one JSON object only: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }.\n\
                 - Put the natural-language answer in `summary`; do not wrap the JSON in Markdown.\n\
-                - Populate `files` only for real workspace changes.\n\
-                - Use `actions` for required secrets, integrations, location, opening Instafy's browser (`request_browser`), goal creation/status updates, or skill-authored multi-agent coordination.\n",
+                - Populate `files` only for real workspace changes.\n",
+                    // A turn that may not ask for the browser is not offered its card: a browser
+                    // turn that ended on one stopped where it could have taken the step itself.
+                    if browser_request_unsupported(job) {
+                        "- Use `actions` for required secrets, integrations, location, goal creation/status updates, or skill-authored multi-agent coordination.\n"
+                    } else {
+                        "- Use `actions` for required secrets, integrations, location, opening Instafy's browser (`request_browser`), goal creation/status updates, or skill-authored multi-agent coordination.\n"
+                    },
                     SECRET_REJECTION_CONTRACT,
                     "- A request to create/start a goal also starts goal execution. Do not only acknowledge goal creation or suggest starting later.\n\
                 - For a newly requested goal that can be fully satisfied in this turn, satisfy it in `summary` and emit one completed `goal_update`; do not leave simple finite goals active.\n\
@@ -10500,7 +10511,8 @@ fn suppress_multi_agent_plan_actions_for_worker(job: &LeaseJob, outcome: &mut Co
     }
 }
 
-/// Drops `request_browser` where Studio must never act on it. A Personal or
+/// Whether a turn may not ask for the browser: Studio never acts on its
+/// `request_browser`, so its response contract does not offer one. A Personal or
 /// Shared Browser turn already holds the browser, and Studio sends its
 /// continuation from the page that asked, so a card from that turn would open
 /// the browser again: after a pause or a denied action that is a loop. A
@@ -10509,13 +10521,18 @@ fn suppress_multi_agent_plan_actions_for_worker(job: &LeaseJob, outcome: &mut Co
 /// person is talking to.
 /// A hand-back turn continues from what a browser turn found: a card from it
 /// would be a turn nobody asked for.
-fn suppress_browser_requests_where_unsupported(job: &LeaseJob, outcome: &mut CodexOutcome) {
-    let unsupported = is_bounded_job(job)
+fn browser_request_unsupported(job: &LeaseJob) -> bool {
+    is_bounded_job(job)
         || is_multi_agent_worker_job(job)
         || is_multi_agent_lead_continuation_job(job)
         || is_explicit_team_planning_job(job)
-        || browser_hand_back::is_hand_back_job(job);
-    if !unsupported {
+        || browser_hand_back::is_hand_back_job(job)
+}
+
+/// Drops the `request_browser` actions of a turn that may not ask for the
+/// browser ([`browser_request_unsupported`]).
+fn suppress_browser_requests_where_unsupported(job: &LeaseJob, outcome: &mut CodexOutcome) {
+    if !browser_request_unsupported(job) {
         return;
     }
     let before = outcome.actions.len();
@@ -15562,6 +15579,7 @@ fn build_agent_routing_preflight_prompt(
         Set `requiresContextLookup = true` only when required prior conversation/context evidence is absent from the latest request and supplied current-conversation evidence and must be retrieved. Referring to prior work or supplying links alone neither requires nor satisfies retrieval; use the actual supplied evidence. This flag independently requires a read-only Instafy context/conversation lookup, regardless of `requiresCommandExecution`.\n\
         Set `requiresCommandExecution = true` when a correct final answer needs a separate fresh observation of current filesystem, Git, process, repo, runtime, server, or tool state. Prior-conversation retrieval belongs only in `requiresContextLookup`; the fact that its transport uses a CLI does not set this flag. Leave it false when supplied current evidence is enough. Both flags may be true when both kinds of evidence are needed.\n\
         Set `workspaceFileChangeRequirement` from the success condition, independently of write permission: `required` when success necessarily requires creating, editing, moving, deleting, committing, or syncing workspace files; `conditional` when inspection or validation decides whether changes are warranted, and a justified unchanged result can satisfy the request; `none` when no workspace mutation is requested. Conditional work still permits warranted edits under the existing write scope. Do not turn permission to improve or repair into a requirement to produce a patch. Preserve the requested observations and tests even when no change is warranted.\n\
+        A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`: its card hands back to a build.\n\
         Always include `observationCommands`; use an empty array when no current-state observation is needed. When `requiresCommandExecution` is true, propose up to 3 concrete safe commands for that observation. These are proposals, not permission grants: the host executes only its existing allowlist, and the main agent must obtain any remaining observation under its normal tool permissions. Do not place conversation/context retrieval commands here. Do not set `requiresCommandExecution = true` merely because the main task includes workspace writes, patches, commits, pushes, or syncs. Do not put file-writing, patching, commit, push, or sync commands in `observationCommands`; classify `workspaceFileChangeRequirement` instead and let the main run make the requested changes under its existing permissions. Explicit non-file Instafy CLI actions such as `instafy automations create` or `instafy automations update` are allowed only when the user asked for that exact action. Propose independent read-only commands, not shell pipelines or command lists whose final status can hide a failed read. If no supported proposal fits, leave `observationCommands` empty and keep the observation requirement for the main agent.\n\
         {plan_group_guidance}\
         {skill_snapshot}\n\
@@ -21835,6 +21853,48 @@ mod tests {
         assert!(!should_run_agent_routing_preflight(&routed, prompt));
     }
 
+    /// A hand-back continues the building work in this chat with what a
+    /// browser turn found: its route is decided, and the findings it builds
+    /// from are in its own prompt, which the routing step never sees. With a
+    /// routing step, a hand-back went to a lookup of earlier chats ("the
+    /// supplied conversation only summarizes those findings") and built a page
+    /// nobody could open. Only the controller's checked record makes one.
+    #[test]
+    fn a_hand_back_takes_no_routing_step() {
+        let prompt = "Continue building with what the browser turn found.";
+        let job = |record: JsonValue| {
+            test_lease_job(
+                Some("feature"),
+                json!({ "prompt_text": prompt, "metadata": { "browserHandBack": record } }),
+            )
+        };
+        let hand_back = job(json!({"verified": true, "reply": "Read the maker's pages."}));
+        assert!(!should_run_agent_routing_preflight(&hand_back, prompt));
+        assert!(!should_run_agent_routing_preflight_for_execution(
+            &hand_back, prompt
+        ));
+        let unchecked = job(json!({"reply": "Read the maker's pages."}));
+        assert!(should_run_agent_routing_preflight(&unchecked, prompt));
+    }
+
+    /// A request that needs Instafy's browser before a change gets the card,
+    /// and the card hands back to a build. Routed as a change that must write
+    /// files, it ran in the lane that cannot open the browser and answered "No
+    /// browser controls are available in this run".
+    #[test]
+    fn routing_sends_a_request_that_needs_the_browser_first_to_its_card() {
+        let tmp = tempdir().expect("temp dir");
+        let prompt = build_agent_routing_preflight_prompt(
+            tmp.path(),
+            "In your browser, find two independent reviews for each laptop and add them to the page.",
+            None,
+            None,
+        );
+        assert!(prompt.contains(
+            "A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`: its card hands back to a build."
+        ));
+    }
+
     #[test]
     fn browser_jobs_skip_project_preflight_and_reject_fast_command_lanes() {
         let workspace = tempdir().expect("temp dir");
@@ -24694,6 +24754,58 @@ mod tests {
             reminder.contains("opening Instafy's browser (`request_browser`)"),
             "{reminder}"
         );
+    }
+
+    /// A turn that may not ask for the browser is not offered its card. A
+    /// browser turn's reminder listed `request_browser`, and the turn ended on a
+    /// card ("use the official venue site instead") where it could have opened
+    /// that site itself; the runtime drops such a card, so the step never
+    /// happened. A hand-back turn may not ask for the browser either.
+    #[test]
+    fn a_turn_that_may_not_ask_for_the_browser_is_not_offered_its_card() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let provider_state =
+            json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
+        let reminder = |metadata: JsonValue| {
+            let job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+            let (prompt, _, _) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Please keep going and find the opening hours.",
+                    false,
+                    Some(&provider_state),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+            prompt
+                .split("\nResponse contract reminder:\n")
+                .nth(1)
+                .and_then(|rest| rest.split("\n\n").next())
+                .expect("restored reminder")
+                .to_string()
+        };
+        for metadata in [
+            json!({"browserTransport":"shared"}),
+            json!({"browserTransport":"desktop-personal"}),
+            json!({"browserHandBack":{"verified": true, "reply": "Read the timetable."}}),
+        ] {
+            let reminder = reminder(metadata.clone());
+            assert!(
+                !reminder.contains("request_browser"),
+                "{metadata}: {reminder}"
+            );
+            assert!(
+                reminder.contains("- Use `actions` for required secrets, integrations, location, goal creation/status updates, or skill-authored multi-agent coordination.\n"),
+                "{metadata}: {reminder}"
+            );
+        }
+        assert!(reminder(json!({})).contains("opening Instafy's browser (`request_browser`)"));
     }
 
     /// A browser turn's own card would open the browser again from the page
