@@ -135,6 +135,40 @@ pub(crate) fn db_error_summary(error: &tokio_postgres::Error) -> String {
         .unwrap_or_else(|| error.to_string())
 }
 
+/// The name Studio gives the space's own machine. A machine started without
+/// a name, as a send or an automation starts one in a space that has none, is
+/// that same machine: a lookup by this name finds it too, and names it.
+pub(crate) const SPACE_MACHINE_DISPLAY_NAME: &str = "Hosted Runtime";
+
+/// Advisory-lock key serializing the space's find-or-create of a runtime
+/// record when the caller names no runtime, across replicas.
+pub(crate) fn space_runtime_record_lock_key(project_id: &Uuid) -> String {
+    format!("space-runtime-record:{project_id}")
+}
+
+/// Hold the space's find-or-create until `transaction` ends, so a second
+/// ensure that names no runtime waits for the first one's record and finds
+/// it, instead of adding a second machine to the space. Studio's start and a
+/// send's dispatch arrive together on a new space's first message.
+async fn lock_space_runtime_record(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&space_runtime_record_lock_key(project_id)],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to serialize the space's runtime record: {}",
+                db_error_summary(&error)
+            ))
+        })?;
+    Ok(())
+}
+
 pub(crate) async fn ensure_runtime_record(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
@@ -223,13 +257,14 @@ pub(crate) async fn ensure_runtime_record(
         return Ok(runtime);
     }
 
+    lock_space_runtime_record(transaction, project_id).await?;
     if let Some(row) = transaction
         .query_opt(
             "select id, project_id, provider, status, idle_ttl_seconds, capabilities, display_name, active_lease_id, last_seen_at, endpoint_url
              from runtimes
              where project_id = $1
                and provider = $2
-               and ($3::text is null or display_name = $3)
+               and ($3::text is null or coalesce(display_name, $4) = $3)
              order by
                case
                  when status in ('ready', 'running') then 0
@@ -238,7 +273,12 @@ pub(crate) async fn ensure_runtime_record(
                end,
                updated_at desc
              limit 1",
-            &[project_id, &provider, &display_name],
+            &[
+                project_id,
+                &provider,
+                &display_name,
+                &SPACE_MACHINE_DISPLAY_NAME,
+            ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load runtime: {error}")))?

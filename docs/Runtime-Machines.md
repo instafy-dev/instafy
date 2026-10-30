@@ -143,6 +143,17 @@ on reload), and the browser then opens on that machine (see
 [Browser on the space's own machine](Shared-Browser.md#how-studio-opens-it)).
 Elsewhere it is a separate browser session runtime, as before.
 
+A space gets one machine however many of these ask at once. On a new space's
+first message the Studio's start and the send's dispatch both ask for the
+space's machine without naming one. Every ensure that names no runtime finds
+or records the space's runtime under a per-space advisory lock
+(`pg_advisory_xact_lock`, held until its transaction ends, across replicas),
+so the second one waits and finds the first one's record instead of adding
+its own. A runtime recorded without a name is the space's own machine, which
+the Studio calls "Hosted Runtime", so the Studio's ensure by that name finds
+it too and names it. Explicit runtime ids (a Desktop machine, a webdev switch,
+a team worker slot) are separate machines, as before.
+
 When Octo asks for Instafy's browser, Studio never opens the hosted browser
 by itself (see [Browser Profiles](Browser-Profiles.md)). It never starts a
 machine, never switches the space's own machine to the browser and never

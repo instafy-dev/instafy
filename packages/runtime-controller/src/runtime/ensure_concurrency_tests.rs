@@ -1333,3 +1333,262 @@ async fn slow_provider_ensure_pins_at_most_one_pool_connection() -> anyhow::Resu
     })
     .await
 }
+
+/// A new space's first message: Studio starts the space's machine while the
+/// send's dispatch records one, and neither names a runtime. The second
+/// ensure waits for the first one's record and finds it, so the space gets
+/// one machine, under Studio's name.
+#[tokio::test]
+async fn ensures_that_name_no_runtime_share_one_record_per_space() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("space runtime record lock test").await?;
+    let project_id = Uuid::new_v4();
+    let fixture = crate::tests::SharedDbFixture {
+        organizations: vec![],
+        projects: vec![project_id],
+    };
+
+    crate::tests::with_shared_db_fixture(fixture, async {
+        pool.get()
+            .await?
+            .execute(
+                "insert into projects (id, project_type, status) values ($1, 'customer', 'active')",
+                &[&project_id],
+            )
+            .await?;
+
+        // The dispatch's record, not yet committed.
+        let mut dispatch_connection = pool.get().await?;
+        let dispatch = dispatch_connection.transaction().await?;
+        let dispatched = ensure_runtime_record(
+            &dispatch,
+            &project_id,
+            None,
+            "instafy-cloud",
+            600,
+            None,
+            None,
+            true,
+        )
+        .await
+        .map_err(|(status, body)| {
+            anyhow::anyhow!("dispatch record ({status}): {}", body.0.message)
+        })?;
+
+        // Studio's ensure of the space's machine.
+        let studio_pool = pool.clone();
+        let studio = crate::tests::spawn_aborting(async move {
+            let mut connection = studio_pool.get().await?;
+            let transaction = connection.transaction().await?;
+            let runtime = ensure_runtime_record(
+                &transaction,
+                &project_id,
+                None,
+                "instafy-cloud",
+                600,
+                Some(super::super::db::SPACE_MACHINE_DISPLAY_NAME),
+                None,
+                true,
+            )
+            .await
+            .map_err(|(status, body)| {
+                anyhow::anyhow!("studio record ({status}): {}", body.0.message)
+            })?;
+            transaction.commit().await?;
+            anyhow::Ok(runtime.id)
+        });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !studio.is_finished(),
+            "a second ensure must wait for the space's first record instead of adding its own"
+        );
+        dispatch.commit().await?;
+        drop(dispatch_connection);
+
+        let studio_runtime_id = tokio::time::timeout(Duration::from_secs(10), studio).await???;
+        assert_eq!(studio_runtime_id, dispatched.id);
+        let rows = pool
+            .get()
+            .await?
+            .query(
+                "select id, display_name from runtimes where project_id = $1",
+                &[&project_id],
+            )
+            .await?;
+        assert_eq!(rows.len(), 1, "one space, one machine");
+        assert_eq!(
+            rows[0].get::<_, Option<String>>("display_name").as_deref(),
+            Some(super::super::db::SPACE_MACHINE_DISPLAY_NAME)
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// The same first message through the whole ensure: Studio's launch waits for
+/// the dispatch's record and launches that machine, and the dispatch's own
+/// ensure of it then finds Studio's launch. One machine, one launch.
+#[tokio::test]
+async fn studio_ensure_during_a_dispatch_launches_the_dispatch_machine() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("space machine single-flight test").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let fixture = crate::tests::SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![project_id],
+    };
+
+    crate::tests::with_shared_db_fixture(fixture, async {
+        let provider_launches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider_app = axum::Router::new().route(
+            "/runtime/ensure",
+            axum::routing::post({
+                let provider_launches = provider_launches.clone();
+                move || {
+                    let provider_launches = provider_launches.clone();
+                    async move {
+                        provider_launches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Json(json!({ "message": "runtime ensured" }))
+                    }
+                }
+            }),
+        );
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let provider_address = provider_listener.local_addr()?;
+        let _provider_server = crate::tests::spawn_aborting(async move {
+            axum::serve(provider_listener, provider_app)
+                .await
+                .expect("serve test provider");
+        });
+
+        let provider_id = "space_machine_single_flight_test";
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into organizations (id, slug, name) values ($1, $2, $3)",
+                    &[
+                        &org_id,
+                        &format!("space-machine-single-flight-{org_id}"),
+                        &"Space machine single-flight test",
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into projects (id, org_id, project_type, status)
+                     values ($1, $2, 'customer', 'active')",
+                    &[&project_id, &org_id],
+                )
+                .await?;
+        }
+
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "space-machine-single-flight",
+        );
+        config.runtime_providers = vec![crate::config::RuntimeProviderConfig {
+            id: provider_id.to_string(),
+            display_name: "Test provider".to_string(),
+            kind: "test".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: Some(format!("http://{provider_address}")),
+            auth_token: None,
+            metadata: None,
+        }];
+        let state = crate::tests::build_test_state(pool.clone(), config);
+
+        // The send's dispatch records the space's machine and has not
+        // committed yet.
+        let mut dispatch_connection = pool.get().await?;
+        let dispatch = dispatch_connection.transaction().await?;
+        let dispatched = ensure_runtime_record(
+            &dispatch,
+            &project_id,
+            None,
+            provider_id,
+            600,
+            None,
+            None,
+            true,
+        )
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("dispatch record ({status}): {}", body.0.message))?;
+
+        let studio_state = state.clone();
+        let studio = crate::tests::spawn_aborting(async move {
+            ensure_runtime_launch(
+                &studio_state,
+                project_id,
+                None,
+                provider_id.to_string(),
+                600,
+                Some(super::super::db::SPACE_MACHINE_DISPLAY_NAME.to_string()),
+                None,
+                RuntimeLeaseScope::Exclusive,
+                OriginEnsureOptions::new(Some("hosted".to_string()), None, None),
+                ReusedLeaseMetadata::Requested,
+                StalledLaunch::Reuse,
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !studio.is_finished(),
+            "Studio's ensure must wait for the dispatch's record instead of launching its own machine"
+        );
+        dispatch.commit().await?;
+        drop(dispatch_connection);
+
+        let launched = tokio::time::timeout(Duration::from_secs(10), studio)
+            .await??
+            .map_err(|(status, body)| anyhow::anyhow!("studio launch ({status}): {}", body.0.message))?;
+        assert_eq!(launched.runtime_id, dispatched.id.to_string());
+
+        // The dispatch then ensures its record, as it does for a machine
+        // that is not ready yet, and finds Studio's launch.
+        let reconnected = ensure_runtime_launch(
+            &state,
+            project_id,
+            Some(dispatched.id),
+            provider_id.to_string(),
+            600,
+            None,
+            None,
+            RuntimeLeaseScope::Exclusive,
+            OriginEnsureOptions::new(None, None, None),
+            ReusedLeaseMetadata::CarriedFrom(None),
+            StalledLaunch::Reuse,
+        )
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("dispatch ensure ({status}): {}", body.0.message))?;
+        assert_eq!(reconnected.runtime_id, launched.runtime_id);
+        assert_eq!(reconnected.lease_id, launched.lease_id);
+
+        let connection = pool.get().await?;
+        let runtimes: i64 = connection
+            .query_one(
+                "select count(*) from runtimes where project_id = $1",
+                &[&project_id],
+            )
+            .await?
+            .get(0);
+        let leases: i64 = connection
+            .query_one(
+                "select count(*) from runtime_leases where project_id = $1",
+                &[&project_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!((runtimes, leases), (1, 1), "one space, one machine, one launch");
+        assert_eq!(
+            provider_launches.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        Ok(())
+    })
+    .await
+}

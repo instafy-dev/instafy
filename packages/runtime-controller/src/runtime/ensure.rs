@@ -2203,7 +2203,7 @@ async fn cleanup_stale_runtime_generation_before_ensure(
                  left join runtime_leases lease on lease.id = r.active_lease_id
                  where r.project_id = $1
                    and r.provider = $2
-                   and ($3::text is null or r.display_name = $3)
+                   and ($3::text is null or coalesce(r.display_name, $4) = $3)
                  order by
                    case
                      when r.status in ('ready', 'running') then 0
@@ -2212,7 +2212,12 @@ async fn cleanup_stale_runtime_generation_before_ensure(
                    end,
                    r.updated_at desc
                  limit 1",
-                &[project_id, &provider, &display_name],
+                &[
+                    project_id,
+                    &provider,
+                    &display_name,
+                    &super::db::SPACE_MACHINE_DISPLAY_NAME,
+                ],
             )
             .await
     }
