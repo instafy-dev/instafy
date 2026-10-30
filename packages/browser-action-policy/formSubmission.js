@@ -40,7 +40,8 @@
  *     The names a person knows the fields by that the submission through
  *     `element` sends something from (typed text, a chosen item, a ticked
  *     box), for a prompt to say what a step sends: a label, a group's legend
- *     or the name attribute, never a value, and no hidden field. `typed`
+ *     or the name attribute, never a value, and no hidden field. Radios and
+ *     a list of boxes go by their group, never by the ones chosen. `typed`
  *     counts `element` as filled.
  *
  * The rules, from the HTML form submission and implicit submission
@@ -426,15 +427,18 @@
         return "";
       }
     };
-    // The name of the group a radio or a box belongs to: its fieldset's
-    // legend, or a radio group's own name.
-    const groupName = (element) => {
-      let group = null;
+    // The group a radio or a box belongs to: its fieldset, or a group the
+    // page marks as one.
+    const groupOf = (element) => {
       try {
-        group = element.closest("fieldset, [role=radiogroup], [role=group]");
+        return element.closest("fieldset, [role=radiogroup], [role=group]");
       } catch (_) {
-        group = null;
+        return null;
       }
+    };
+    // The name of that group: its fieldset's legend, or the group's own name.
+    const groupName = (element) => {
+      const group = groupOf(element);
       if (!group) return "";
       if (tag(group) === "fieldset") {
         for (let child = firstElementChildOf.call(group); child; child = nextElementSiblingOf.call(child)) {
@@ -444,15 +448,20 @@
       return ownName(group);
     };
     // A radio's own label, and that of a box that shares its name with
-    // others, name a choice, which is a value: those are named by their
-    // group, or their name attribute. A box of its own is named by its label.
-    const fieldName = (element, sharedBoxNames) => {
+    // others or its group with other boxes, name a choice, which is a value:
+    // the ticked boxes are the person's answers. Those are named by their
+    // group, or by a name attribute they share, else as ticked boxes. A box
+    // of its own is named by its label.
+    const fieldName = (element, boxes) => {
       const type = typeOf(element);
-      const choice = tag(element) === "input" &&
-        (type === "radio" || (type === "checkbox" && sharedBoxNames.has(attribute(element, "name"))));
-      if (choice) return groupName(element) || tidy(attribute(element, "name"));
+      if (tag(element) === "input" && type === "radio") return groupName(element) || tidy(attribute(element, "name"));
+      const name = attribute(element, "name");
+      if (tag(element) === "input" && type === "checkbox" &&
+        (boxes.sharedNames.has(name) || (boxes.perGroup.get(groupOf(element)) || 0) > 1)) {
+        return groupName(element) || (boxes.sharedNames.has(name) ? tidy(name) : "Ticked boxes");
+      }
       return ownName(element) || labelWords(element) || tidy(attribute(element, "placeholder")) ||
-        tidy(attribute(element, "title")) || tidy(attribute(element, "name"));
+        tidy(attribute(element, "title")) || tidy(name);
     };
     // Whether the submission sends something of the person's from a control:
     // typed text, a chosen item, a ticked box or a chosen file. A hidden
@@ -483,18 +492,20 @@
       if (!submission || !submission.form || submission.method === "dialog") return [];
       const controls = listedControlsOf(submission.form);
       const boxNames = new Set();
-      const sharedBoxNames = new Set();
+      const boxes = { sharedNames: new Set(), perGroup: new Map() };
       for (const control of controls) {
         if (tag(control) !== "input" || typeOf(control) !== "checkbox") continue;
         const name = attribute(control, "name");
-        if (boxNames.has(name)) sharedBoxNames.add(name);
+        if (boxNames.has(name)) boxes.sharedNames.add(name);
         boxNames.add(name);
+        const group = groupOf(control);
+        if (group) boxes.perGroup.set(group, (boxes.perGroup.get(group) || 0) + 1);
       }
       const names = [];
       const seen = new Set();
       for (const control of controls) {
         if (!sendsField(control, typed === true && control === element)) continue;
-        const name = fieldName(control, sharedBoxNames);
+        const name = fieldName(control, boxes);
         if (!name || seen.has(lower(name))) continue;
         seen.add(lower(name));
         names.push(name);

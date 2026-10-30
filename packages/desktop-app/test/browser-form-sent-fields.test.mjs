@@ -82,6 +82,32 @@ test("a submit names the fields it sends something from, never their values", ()
   }
 });
 
+test("boxes that answer one question are named by the question, never by the boxes ticked", () => {
+  // A list of boxes is a choice, like a radio group, whatever their name
+  // attributes: naming the ticked ones would say the person's answers.
+  const window = page(`
+    <form method="post" action="/intake">
+      <p><label>Name <input name="name" value="Alex Example"></label></p>
+      <fieldset>
+        <legend>Conditions you have</legend>
+        <label><input type="checkbox" name="cond_diabetes"> Diabetes</label>
+        <label><input type="checkbox" name="cond_hiv" checked> HIV</label>
+        <label><input type="checkbox" name="cond_pregnant" checked> Pregnant</label>
+      </fieldset>
+      <div role="group">
+        <label><input type="checkbox" name="smoker" checked> I smoke</label>
+        <label><input type="checkbox" name="drinker"> I drink</label>
+      </div>
+      <button id="send">Send</button>
+    </form>`);
+  const names = sentFieldNames(window, "send");
+  assert.deepEqual(names, ["Name", "Conditions you have", "Ticked boxes"]);
+  const said = names.join(" ");
+  for (const answer of ["Diabetes", "HIV", "Pregnant", "cond_", "smoke", "drink"]) {
+    assert.ok(!said.includes(answer), `${answer} in ${said}`);
+  }
+});
+
 test("a field a step types into before it submits counts as filled", () => {
   const window = page(`
     <form action="/search">
