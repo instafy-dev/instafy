@@ -2071,6 +2071,11 @@ async function snapshot(page, { withhold = false } = {}) {
     const masked = redaction.redactUrl(href).text;
     return sameSitePath(pageOrigin, view.secretScreen ? strictlyMasked(masked) : masked);
   };
+  // A sign-in page names its fields, so a sign-in the person needs pauses on
+  // them for the person instead of ending the turn; a page with none yet names
+  // the control that opens the sign-in page ("Sign in" in its header). Octo's
+  // own tabs are for reading and never ask the person to fill fields.
+  const signInHint = inAgentTab() || view.secretScreen ? null : signInHintOf(interactive);
   return {
     snapshotId: snapshotFingerprint(rawUrl, interactive),
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
@@ -2095,6 +2100,33 @@ async function snapshot(page, { withhold = false } = {}) {
     // How many controls were left out because a person cannot see them yet,
     // so a cut list does not read as the whole page.
     ...(hiddenNames.length ? { omittedControls: hiddenNames.length } : {}),
+    ...(signInHint ? { signIn: signInHint } : {}),
+  };
+}
+
+// The one rule for a sign-in, as the policies and the browser skill state it:
+// a sign-in the person asked for, or one a step they asked for needs, is
+// opened and paused on for them; otherwise Octo never signs in, and a page
+// that shows only a sign-in ends there, not the task. Neither hint says a page
+// ends: a readable page with a sign-in link or a login box stays readable.
+const SIGN_IN_WHEN = "If the person asked to sign in, or a step they asked for needs it,";
+
+function signInHintOf(interactive) {
+  const fields = interactive
+    .filter(({ description }) => actionPolicy.isSignInField(policyTarget(description)))
+    .map(({ description }) => description.index)
+    .slice(0, 8);
+  if (fields.length) {
+    return {
+      fields,
+      next: `Signing in is the person's step. ${SIGN_IN_WHEN} call request_human_input with this snapshotId and these fields' indices, then end the turn: they sign in on the page and choose Let Octo continue. Otherwise never sign in: use what the page shows without it and go on with the task. Never type into these fields.`,
+    };
+  }
+  const opener = interactive.find(({ description }) => actionPolicy.isSignInOpener(policyTarget(description)));
+  if (!opener) return null;
+  return {
+    open: opener.description.index,
+    next: `This opens the site's sign-in page. ${SIGN_IN_WHEN} click it, then pause on the sign-in page's fields with request_human_input. Otherwise leave it.`,
   };
 }
 

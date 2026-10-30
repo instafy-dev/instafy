@@ -442,6 +442,46 @@ const controlsFor = (targetId) => {
       { shown: false, name: "" },
     ];
   }
+  // A sign-in form as the page describer reports it: the account's email
+  // (the field right before the password), the password, "Keep me signed in"
+  // and the form's submit button.
+  if (mode === "sign-in-page") {
+    const field = (label, inputType, autocomplete, policy = {}) => ({
+      ...descriptionFor(targetId), idAttribute: label, ariaLabel: label, labels: label, placeholder: "",
+      nameAttribute: label, inputType, autocomplete, formAction: "https://example.test/session",
+      formMethod: "post", formActionText: "Sign in",
+      policy: { ...basePolicy, formName: "Sign in", formSubmitLabels: "Sign in", formHasPassword: true,
+        formPasswordCount: 1, formFieldCount: 2, ...policy },
+    });
+    return [
+      field("Email", "email", "username", { signInIdentifier: true }),
+      field("Password", "password", "current-password"),
+      field("Keep me signed in", "checkbox", "off"),
+      { ...field("Sign in", "submit", "off"), tag: "button", ariaLabel: "", labels: "", text: "Sign in" },
+    ];
+  }
+  // A signed-out page: a site's own links, a federated sign-in button, an
+  // email-first form's "Log in" submit (it sends the form) and the header's
+  // "Sign in" link to its sign-in page; no sign-in fields yet.
+  if (mode === "sign-in-link") {
+    const link = (text, href) => ({
+      ...descriptionFor(targetId), tag: "a", inputType: "", autocomplete: "", ariaLabel: "",
+      labels: "", placeholder: "", nameAttribute: "", idAttribute: "", text, href,
+      formAction: "", formMethod: "", formActionText: "",
+      policy: { ...basePolicy, href, linkSelf: true },
+    });
+    return [
+      link("Pricing", "https://example.test/pricing"),
+      { ...descriptionFor(targetId), tag: "button", inputType: "button", autocomplete: "", ariaLabel: "",
+        labels: "", placeholder: "", nameAttribute: "", idAttribute: "", text: "Sign in with Google",
+        formAction: "", formMethod: "", formActionText: "" },
+      { ...descriptionFor(targetId), tag: "button", inputType: "submit", autocomplete: "", ariaLabel: "",
+        labels: "", placeholder: "", nameAttribute: "", idAttribute: "", text: "Log in",
+        formAction: "https://example.test/session", formMethod: "post", formActionText: "Log in",
+        policy: { ...basePolicy, formName: "Log in", formSubmitLabels: "Log in", formFieldCount: 1 } },
+      link("Sign in", "https://example.test/login"),
+    ];
+  }
   if (mode === "page-links") {
     const link = (text, href) => ({
       ...descriptionFor(targetId), tag: "a", inputType: "", autocomplete: "", ariaLabel: "",
@@ -4303,6 +4343,122 @@ fn a_snapshot_lists_only_what_a_person_can_see_and_actions_index_the_same_list()
         std::fs::read_to_string(&fixture.click_log).expect("click log"),
         "1\n"
     );
+}
+
+/// A sign-in page names its fields and says to pause on them with
+/// `request_human_input` (a task that went on past a sign-in ended the turn
+/// with "sign in yourself, then tell me", twice). The pause on
+/// those fields ends the turn for the person; Octo still never types into
+/// them. A page without sign-in fields, and Octo's own tabs, which are for
+/// reading, say nothing of it. The hint states the one rule the policies and
+/// the browser skill state: a sign-in the person asked for, or one a step
+/// they asked for needs, is paused on; any other ends that page, not the task.
+#[test]
+fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = payload_of(&fixture.run("sign-in-page", "GET", "/v1/snapshot", None));
+    // The email and the password; never the checkbox or the button.
+    assert_eq!(snapshot["signIn"]["fields"], json!([0, 1]));
+    assert!(snapshot["signIn"].get("open").is_none(), "{snapshot}");
+    let next = snapshot["signIn"]["next"]
+        .as_str()
+        .expect("what to do next");
+    for words in [
+        "Signing in is the person's step.",
+        "If the person asked to sign in, or a step they asked for needs it, call request_human_input with this snapshotId and these fields' indices, then end the turn",
+        "choose Let Octo continue",
+        "Otherwise never sign in: use what the page shows without it and go on with the task.",
+        "Never type into these fields.",
+    ] {
+        assert!(next.contains(words), "{words}: {next}");
+    }
+    assert!(!next.contains("goes on past"), "{next}");
+    let snapshot_id = snapshot["snapshotId"].as_str().expect("snapshot id");
+
+    // Typing there is still refused, before any prompt.
+    let typed = fixture.run(
+        "sign-in-page",
+        "POST",
+        "/v1/type",
+        Some(
+            &json!({ "index": 0, "snapshotId": snapshot_id, "text": "someone@example.test" })
+                .to_string(),
+        ),
+    );
+    assert!(!typed.status.success());
+    assert!(
+        String::from_utf8_lossy(&typed.stderr).contains("step_refused_sign_in"),
+        "{}",
+        String::from_utf8_lossy(&typed.stderr)
+    );
+
+    // The pause on the named fields ends the turn and asks the person.
+    let paused = fixture.run(
+        "sign-in-page",
+        "POST",
+        "/v1/request-human-input",
+        Some(&json!({ "indices": [0, 1], "snapshotId": snapshot_id }).to_string()),
+    );
+    assert!(!paused.status.success());
+    assert!(
+        String::from_utf8_lossy(&paused.stderr).contains("[human_input_required_non_retryable]"),
+        "{}",
+        String::from_utf8_lossy(&paused.stderr)
+    );
+    let log = fixture.action_log();
+    let request = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<JsonValue>(line).ok())
+        .find(|action| action["type"] == "human_input")
+        .expect("the pause asks the person");
+    assert_eq!(
+        request["humanInputRequest"]["fields"],
+        json!([{ "label": "Highlighted field 1" }, { "label": "Highlighted field 2" }])
+    );
+    assert!(!log.contains("someone@example.test"));
+
+    // A page with no sign-in fields and nothing that opens a sign-in page
+    // says nothing of it.
+    let plain = payload_of(&fixture.run("safe", "GET", "/v1/snapshot", None));
+    assert!(plain.get("signIn").is_none(), "{plain}");
+
+    // Nor does Octo's own tab, where the person is never asked to fill fields.
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    fixture.open_tab("https://example.test/login");
+    let in_tab = payload_of(&fixture.call("sign-in-page", "GET", "/v1/snapshot", None));
+    assert!(in_tab["tabId"].is_string(), "{in_tab}");
+    assert!(in_tab.get("signIn").is_none(), "{in_tab}");
+    let in_tab = payload_of(&fixture.call("sign-in-link", "GET", "/v1/snapshot", None));
+    assert!(in_tab.get("signIn").is_none(), "{in_tab}");
+}
+
+/// The same task stopped on the site's home page, whose header has only a
+/// "Sign in" link, with "use its Sign in control … tell me when you're ready":
+/// a page without sign-in fields named nothing. Such a page names the control
+/// that opens the sign-in page (never a federated sign-in, nor a form's submit
+/// that would send it), so the turn reaches the fields and pauses there; the
+/// real-Chromium sign-in fixture clicks it without a prompt.
+#[test]
+fn a_page_with_a_sign_in_link_names_it_so_a_needed_sign_in_reaches_its_fields() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = payload_of(&fixture.run("sign-in-link", "GET", "/v1/snapshot", None));
+    assert_eq!(snapshot["interactiveElements"][2]["label"], "Log in");
+    assert_eq!(snapshot["interactiveElements"][3]["label"], "Sign in");
+    assert_eq!(snapshot["signIn"]["open"], json!(3), "{snapshot}");
+    assert!(snapshot["signIn"].get("fields").is_none(), "{snapshot}");
+    let next = snapshot["signIn"]["next"]
+        .as_str()
+        .expect("what to do next");
+    for words in [
+        "This opens the site's sign-in page.",
+        "If the person asked to sign in, or a step they asked for needs it, click it, then pause on the sign-in page's fields with request_human_input.",
+        "Otherwise leave it.",
+    ] {
+        assert!(next.contains(words), "{words}: {next}");
+    }
+    // A readable page with a sign-in link is still read: nothing says it ends.
+    assert!(!next.contains("ends"), "{next}");
 }
 
 #[test]

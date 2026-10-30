@@ -955,6 +955,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     // as the person takes (scripts/shared-browser-step-time-e2e.mjs).
     const { runSharedBrowserStepTimeFixture } = await import("./shared-browser-step-time-e2e.mjs");
     console.log(JSON.stringify(await runSharedBrowserStepTimeFixture(), null, 2));
+    // And that a sign-in a task goes on past pauses on its fields, and the
+    // next run goes on after it (scripts/shared-browser-sign-in-e2e.mjs).
+    const { runSharedBrowserSignInFixture } = await import("./shared-browser-sign-in-e2e.mjs");
+    console.log(JSON.stringify(await runSharedBrowserSignInFixture(), null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
     fs.writeFileSync(path.join(resultDirectory, "result.json"), `${JSON.stringify({ status: "failed", fixtureVersion: 1 })}\n`);
