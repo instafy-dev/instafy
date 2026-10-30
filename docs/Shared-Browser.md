@@ -1178,6 +1178,28 @@ that names another host is refused, and a blank page needs a full address. The
 text reads a closed select's chosen option as a word of its own. The control's
 box stays inside the controller for the visible cursor, and the MCP text result
 is compact JSON beside the same structured content.
+On the page the person chose, a page with sign-in fields (a password or
+one-time code field, or the account identifier that typing into is refused as a
+sign-in, as the shared policy's `isSignInField` tells them) names them in its
+result's `signIn.fields`, with what comes next: when the person asked to sign in,
+or a step they asked for needs it, the turn pauses there with
+`request_human_input` and ends, and they sign in on the page and choose **Let
+Octo continue**. A page with no sign-in fields yet names the link or button that
+opens the sign-in page instead (`signIn.open`: named exactly "Sign in", "Log in"
+or the like, outside any form with a password, as `isSignInOpener` tells), so a
+turn that starts on a site's home page reaches the fields. That holds for
+`snapshot`, `navigate` and every step whose result reads the page. Octo's own
+tabs, which are for reading, never name them.
+
+Otherwise Octo never signs in: it uses what the page shows without it, and a
+page that shows only a sign-in (one read for research) ends there, not the task.
+Neither hint says a page ends, so a readable page with a "Sign in" link stays
+readable. The Shared and Personal Browser policies, the browser skill and the
+turn that writes a card's task state the same rule. A run on a resumed provider
+thread keeps the policy that thread began with, so there the hint is what says
+it. The turn's reply after a pause says "Sign in or fill in the highlighted
+fields on the page in Instafy's browser, then choose Let Octo continue. I don't
+ask for those details in chat."
 
 A browser that has just started, such as the on-demand browser on a space's own
 machine, shows exactly `about:blank`, and a tab opened in the viewer shows the
