@@ -330,7 +330,8 @@ export function chatPageOnScreen<Page extends { id: string; isActive: boolean }>
  * view shows (`chatPageOnScreen`), else the chat's own tab. Never another
  * chat's page in front, nor the browser's first tab when it names none in
  * front: Let Octo continue goes on in the chat's own tab, and with none it
- * sends nothing. A view that is not a chat's own keeps the tab in front.
+ * sends nothing. Take over finds the chat's turn from either, so it stays
+ * there whatever tab is in front.
  */
 export function chatBrowserHandoffPage<Page extends { id: string; isActive: boolean }>(input: {
   pages: readonly Page[];
@@ -339,8 +340,7 @@ export function chatBrowserHandoffPage<Page extends { id: string; isActive: bool
   /** The chat's own tab (`chatBrowserTab`). */
   chatTab: Page | null;
 }): Page | null {
-  return chatPageOnScreen(input.pages, input.chatPageIds) ??
-    (input.chatPageIds === null ? null : input.chatTab);
+  return chatPageOnScreen(input.pages, input.chatPageIds) ?? input.chatTab;
 }
 
 /**

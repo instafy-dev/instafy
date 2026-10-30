@@ -515,8 +515,11 @@ describe("the page Take over and Let Octo continue act on", () => {
       .toBe(octoInFront);
     // A chat with no tab of its own sends nothing, never to the page in front.
     expect(chatBrowserHandoffPage({ pages: [otherChat], chatPageIds: [], chatTab: null })).toBeNull();
-    // An older browser: the tab in front, and none when none is named.
+    // An older browser: the tab in front, else the chat's own tab (where
+    // Take over finds the chat's turn), never the browser's first tab.
     expect(chatBrowserHandoffPage({ pages: [own, otherChat], chatPageIds: null, chatTab: own })).toBe(otherChat);
+    expect(chatBrowserHandoffPage({ pages: [{ ...otherChat, isActive: false }, own], chatPageIds: null, chatTab: own }))
+      .toBe(own);
     expect(chatBrowserHandoffPage({ pages: [{ ...otherChat, isActive: false }], chatPageIds: null, chatTab: null }))
       .toBeNull();
   });
