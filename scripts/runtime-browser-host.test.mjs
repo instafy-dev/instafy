@@ -355,8 +355,10 @@ test("a profile that a running Chromium on this machine holds is refused", withF
   const env = hostEnvironment(fixture, bin);
   fs.mkdirSync(env.INSTAFY_BROWSER_HOST_PROFILE_DIR, { recursive: true });
   // A process named like Chromium on this host holds the lock. The kernel
-  // names a process after the file it runs, so run sleep through a link.
-  const holder = spawn("bash", ["-c", 'ln -s "$(command -v sleep)" "$1/chromium" && exec "$1/chromium" 30', "holder", fixture], { stdio: "ignore" });
+  // names a process after the file it runs, so run sleep through a link. A
+  // multi-call coreutils (uutils, as on Ubuntu 26.04) picks its command from
+  // argv[0], so that stays "sleep".
+  const holder = spawn("bash", ["-c", 'ln -s "$(command -v sleep)" "$1/chromium" && exec -a sleep "$1/chromium" 30', "holder", fixture], { stdio: "ignore" });
   try {
     await waitUntil(() => {
       try {
