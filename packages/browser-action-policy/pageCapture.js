@@ -111,17 +111,81 @@
         elementTag(element) === "DIALOG" ||
         ["dialog", "alertdialog"].includes(elementAttribute(element, "role")) ||
         elementAttribute(element, "aria-modal") === "true";
+      // The value a read-only field shows, or null for any other field.
+      const readOnlyValue = (element) => {
+        const tag = elementTag(element);
+        if (tag !== "INPUT" && tag !== "TEXTAREA") return null;
+        const type = String(element.type || elementAttribute(element, "type") || "").toLowerCase();
+        const readOnly =
+          element.readOnly === true || elementAttribute(element, "readonly") !== null ||
+          element.disabled === true || elementAttribute(element, "disabled") !== null;
+        return readOnly && type !== "password" && type !== "hidden" ? element.value : null;
+      };
+      // A credential word in the page's title or a dialog's label names the
+      // whole page. In a heading (or a legend, table header, term or label)
+      // it names that heading's own section only, so it counts when the
+      // section shows a value that looks like a key: a product page's
+      // "Secret scanning" card does not turn every random-looking name
+      // elsewhere on the page into a key.
       const labelTags = new Set(["H1", "H2", "H3", "H4", "H5", "H6", "LEGEND", "TH", "LABEL", "DT", "CAPTION"]);
+      // A heading's section is what follows it up to the next heading of the
+      // same or a higher level, inside the nearest of these. A legend, table
+      // header, term or label is a heading of the lowest level.
+      const sectionTags = new Set(["ARTICLE", "ASIDE", "NAV", "SECTION", "DIALOG", "FIELDSET", "FORM", "TABLE", "DL"]);
+      const unreadTags = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
+      const headingLevel = (element) => {
+        if (elementAttribute(element, "role") === "heading") {
+          const level = Number(elementAttribute(element, "aria-level"));
+          return Number.isInteger(level) && level > 0 ? level : 2;
+        }
+        const tag = elementTag(element);
+        return /^H[1-6]$/.test(tag) ? Number(tag.slice(1)) : 0;
+      };
+      const knownKeyPatterns = sources.secretPatterns.map((source) => new RegExp(source, "g"));
+      const runPattern = /[A-Za-z0-9][A-Za-z0-9_\-+/=~]{18,}[A-Za-z0-9=]/g;
+      // A key in a run of text, counted as redaction.js counts one in a
+      // credential context: a known key format that is not a placeholder, or
+      // a long random-looking run.
+      const textShowsKey = (text) =>
+        knownKeyPatterns.some((pattern) =>
+          Array.from(text.matchAll(pattern), (match) => match[0]).some((match) => !placeholderPattern.test(match))) ||
+        (text.match(runPattern) || []).some((run) => looksLikeSecretValue(run, true));
+      // Sections share one reading budget. A section too long to read whole
+      // counts, as any heading did before.
+      let sectionBudget = 20_000;
+      const sectionShowsKey = (label) => {
+        const level = headingLevel(label) || 7;
+        let boundary = label.parentElement;
+        while (boundary && !sectionTags.has(elementTag(boundary)) && !isDialog(boundary)) boundary = boundary.parentElement;
+        let text = "";
+        for (let element = label; element; ) {
+          const elementLevel = element === label ? 0 : headingLevel(element);
+          if (elementLevel > 0 && elementLevel <= level) break;
+          sectionBudget -= 1;
+          if (sectionBudget < 0 || text.length > 200_000) return true;
+          const read = !unreadTags.has(elementTag(element));
+          if (read) {
+            for (const node of Array.from(element.childNodes || [])) {
+              if (node.nodeType === 3) text += node.nodeValue || "";
+            }
+            if (looksLikeSecretValue(readOnlyValue(element), true)) return true;
+          }
+          // The next element in document order, inside the boundary.
+          let next = read ? element.firstElementChild : null;
+          for (let current = element; !next && current && current !== boundary; current = current.parentElement) {
+            next = current.nextElementSibling;
+          }
+          element = next;
+        }
+        return textShowsKey(text);
+      };
       const credentialContext =
         credentialContextPattern.test(clean(document.title, 1_000)) ||
         scanElements((element) => {
-          const label =
-            labelTags.has(elementTag(element)) || elementAttribute(element, "role") === "heading"
-              ? elementText(element)
-              : isDialog(element)
-                ? clean(elementAttribute(element, "aria-label"))
-                : "";
-          return Boolean(label) && credentialContextPattern.test(label);
+          if (labelTags.has(elementTag(element)) || elementAttribute(element, "role") === "heading") {
+            return credentialContextPattern.test(elementText(element)) && sectionShowsKey(element);
+          }
+          return isDialog(element) && credentialContextPattern.test(clean(elementAttribute(element, "aria-label")));
         });
       const codeTags = new Set(["CODE", "PRE", "KBD", "SAMP", "OUTPUT"]);
       let secretField = false;
@@ -129,14 +193,8 @@
       let maskedNearReveal = false;
       scanElements((element) => {
         const tag = elementTag(element);
-        if (!secretField && (tag === "INPUT" || tag === "TEXTAREA")) {
-          const type = String(element.type || elementAttribute(element, "type") || "").toLowerCase();
-          const readOnly =
-            element.readOnly === true || elementAttribute(element, "readonly") !== null ||
-            element.disabled === true || elementAttribute(element, "disabled") !== null;
-          if (readOnly && type !== "password" && type !== "hidden" && looksLikeSecretValue(element.value, credentialContext)) {
-            secretField = true;
-          }
+        if (!secretField && looksLikeSecretValue(readOnlyValue(element), credentialContext)) {
+          secretField = true;
         }
         if (!secretCode && codeTags.has(tag) && looksLikeSecretValue(elementText(element), credentialContext)) {
           secretCode = true;

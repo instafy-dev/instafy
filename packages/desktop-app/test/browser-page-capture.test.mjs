@@ -65,6 +65,72 @@ test("a page that shows a credential sends no title or text", () => {
   assert.equal(withheld.text, "");
 });
 
+// Saved pages written by hand for the secret-screen rules (fixtures/secret-screen).
+const secretScreenFixture = (name) => fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "secret-screen", name),
+  "utf8",
+);
+const TOKEN = join("gh", "p_", "Zq8Xw2Lm5Rt7Vb1Nc4", "Kj6Hd9Fs3Gp0Ty2Ua8Ei");
+
+test("a heading that names a credential counts for its own section, not for the whole page", () => {
+  // A product's signed-out home page: a feature card about secret scanning,
+  // and a live feed elsewhere of project names that look random. It read as
+  // a secret screen, so a task that went on past its "Sign in" stopped there.
+  const home = capture(secretScreenFixture("product-home.html"), { url: "https://forge.example/" });
+  assert.equal(home.secretScreen, false);
+  assert.equal(home.title, "Forgeline · Build software together");
+  assert.match(home.text, /Catch leaked secrets before they ship/);
+  assert.match(home.text, /kestrel7\/orbit-notes-2026/);
+  assert.match(home.text, /Sign in/);
+
+  // The same rule in a few lines: a heading's section ends at the next
+  // heading of its level, so a value under the next one is not its key.
+  const nextSection = capture(`<title>Console</title><h2>API keys</h2><p>None yet.</p><h2>Activity</h2><p>${RANDOM_VALUE}</p>`);
+  assert.equal(nextSection.secretScreen, false);
+  assert.match(nextSection.text, /None yet\./);
+});
+
+test("a page that shows a token under a credential heading is still a secret screen", () => {
+  for (const value of [RANDOM_VALUE, TOKEN]) {
+    for (const holder of ["code", "span"]) {
+      const html = secretScreenFixture("access-tokens.html").replace("{{TOKEN}}", `<${holder}>${value}</${holder}>`);
+      const page = capture(html, { url: "https://forge.example/settings/tokens" });
+      assert.equal(page.secretScreen, true, `${holder}: ${value.slice(0, 3)}`);
+      assert.equal(page.text, "");
+      assert.equal(page.title, "");
+      assert.ok(!JSON.stringify(page).includes(value));
+    }
+  }
+  for (const html of [
+    // Further down the heading's section, past headings of a lower level.
+    `<title>Console</title><h2>API keys</h2><h3>Production</h3><p>Made today.</p><h3>Staging</h3><p>${RANDOM_VALUE}</p><h2>Billing</h2>`,
+    // A table header's column.
+    `<title>Apps</title><h1>Apps</h1><table><tr><th>App</th><th>Token</th></tr><tr><td>Deploy</td><td>${RANDOM_VALUE}</td></tr></table>`,
+    // A label's read-only field, even holding an id-shaped value.
+    `<title>Apps</title><h1>Apps</h1><label for="k">Client secret</label><input id="k" readonly value="3f2a9c1e-8b7d-4e6f-a5b4-c3d2e1f0a9b8">`,
+    // The title still names the whole page, and a dialog's label too.
+    `<title>API keys</title><h1>Console</h1><p>None yet.</p><h2>Activity</h2><p>${RANDOM_VALUE}</p>`,
+    `<title>Console</title><div role="dialog" aria-label="New API key"><p>Copy it now.</p></div><h2>Activity</h2><p>${RANDOM_VALUE}</p>`,
+  ]) {
+    const page = capture(html);
+    assert.equal(page.secretScreen, true, html);
+    assert.equal(page.text, "", html);
+  }
+  // The connected-apps screen the Personal Browser's step rules are pinned on.
+  const connected = new JSDOM(
+    fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "risky-steps", "ff", "verbundene-apps.html"), "utf8"),
+    { url: "https://books.example/apps/verbundene-apps.xhtml", runScripts: "outside-only" },
+  );
+  connected.window.document.getElementById("key-field").value = KEY;
+  connected.window.eval(`(function (module, require) {\n${redactionSource}\n})(undefined, undefined);`);
+  connected.window.eval(`(function (module, require) {\n${pageCaptureSource}\n})(undefined, undefined);`);
+  const view = JSON.parse(connected.window.eval(
+    "JSON.stringify(globalThis.__instafyBrowserPageCapture.captureSentPage(globalThis.__instafyBrowserRedaction, { withhold: false }))",
+  ));
+  assert.equal(view.secretScreen, true);
+  assert.ok(!JSON.stringify(view).includes(KEY));
+});
+
 test("a key cut at the reading window never reaches the sent text, however masking moved it", () => {
   const redaction = require("@instafy/browser-action-policy/redaction");
   const { maskSentPage, MAX_SENT_PAGE_TEXT_CHARS, SENT_PAGE_MASK_MARGIN_CHARS } =

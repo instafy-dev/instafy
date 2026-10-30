@@ -1,0 +1,52 @@
+<!doctype html>
+<!--
+  A hand-written settings page that has just made a personal access token and
+  shows it once. Nothing here was captured from a live site. The page's title
+  names no credential: only the section's heading does, and the token sits
+  in that section, below the heading's own row. The test puts the token in
+  the list's first row at run time, so no key is committed.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Developer settings · Forgeline</title>
+  </head>
+  <body>
+    <header>
+      <nav aria-label="Main">
+        <a href="/">Forgeline</a>
+        <a href="/settings/profile">Settings</a>
+      </nav>
+    </header>
+    <div class="layout">
+      <aside>
+        <nav aria-label="Settings">
+          <a href="/settings/profile">Public profile</a>
+          <a href="/settings/apps">Apps</a>
+          <a href="/settings/tokens" aria-current="page">Personal access tokens</a>
+        </nav>
+      </aside>
+      <main>
+        <h1>Developer settings</h1>
+        <div class="subhead">
+          <h2>Personal access tokens</h2>
+          <a href="/settings/tokens/new">Generate new token</a>
+        </div>
+        <p>Tokens you have made that can be used to reach the service from scripts.</p>
+        <div class="notice" role="status">Make sure to copy it now. You won't be able to see it again!</div>
+        <ul class="list">
+          <li>
+            {{TOKEN}}
+            <button type="button" aria-label="Copy">⧉</button>
+          </li>
+          <li>
+            <span>ci-deploy</span> <span>Last used within the last week</span>
+            <button type="button">Delete</button>
+          </li>
+        </ul>
+        <h2>Fine-grained tokens</h2>
+        <p>None yet.</p>
+      </main>
+    </div>
+  </body>
+</html>

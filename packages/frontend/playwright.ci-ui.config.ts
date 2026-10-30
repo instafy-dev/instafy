@@ -34,6 +34,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-cobrowsing-ui.spec.ts",
   "browser-cursor-overlay.spec.ts",
   "browser-live-proof.spec.ts",
+  "browser-pause-continue.spec.ts",
   "browser-transport-switch.spec.ts",
   "browser-recovery.spec.ts",
   "browser-keyboard-status.spec.ts",

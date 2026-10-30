@@ -1,4 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  CONTROL_ACTION_ANSWER_MS,
+  CONTROL_ACTION_NO_ANSWER,
+  CONTROL_ACTION_OFFLINE,
+} from "./SharedBrowserCollaborationControls";
 
 export type BrowserHumanInputRequest = {
   version: 1;
@@ -23,6 +28,13 @@ export type BrowserHumanInputOptions = {
   /** Live origin ownership / native revoked capability, never canceled-run status. */
   humanControlConfirmed: boolean;
   canContinue?: boolean;
+  /**
+   * Take control's call, while nobody holds the browser and this person may
+   * take it. Let Octo continue then takes control first and goes on once the
+   * browser confirms it (`humanControlConfirmed`). False means nothing was
+   * sent.
+   */
+  takeControl?: (() => boolean | void) | null;
   /** A click on a native surface requests the same confirmation as the DOM surface. */
   takeoverRequestId?: string;
   /** Callbacks must preserve the captured exact target across their own awaits. */
@@ -31,12 +43,17 @@ export type BrowserHumanInputOptions = {
 };
 
 export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
-  const { identityKey, request, canTakeOver, humanControlConfirmed, canContinue = true, onTakeOver, onContinue } = options;
+  const {
+    identityKey, request, canTakeOver, humanControlConfirmed, canContinue = true, takeControl = null, onTakeOver, onContinue,
+  } = options;
   const [startedIdentity, setStartedIdentity] = useState<string | null>(null);
   const [dismissedId, setDismissedId] = useState<string | null>(null);
   const [busy, setBusy] = useState<"takeover" | "continue" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [takeoverIdentity, setTakeoverIdentity] = useState<string | null>(null);
+  // Let Octo continue took control of a browser nobody held; it goes on once
+  // the browser confirms that control for this identity.
+  const [continueOnControl, setContinueOnControl] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now);
   const generation = useRef(0);
   const identityRef = useRef(identityKey);
@@ -54,6 +71,7 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
     setBusy(null);
     setError(null);
     setTakeoverIdentity(null);
+    setContinueOnControl(null);
   }, [identityKey]);
   useEffect(() => {
     const key = options.takeoverRequestId ? `${identityKey}:${options.takeoverRequestId}` : null;
@@ -94,8 +112,7 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
     }
   }, [canTakeOver, identityKey, onTakeOver]);
 
-  const continueTask = useCallback(async () => {
-    if (!active || !humanControlConfirmed || !canContinue || busyRef.current) return;
+  const sendContinuation = useCallback(async () => {
     const epoch = generation.current;
     busyRef.current = true;
     setBusy("continue");
@@ -111,7 +128,43 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
     } finally {
       if (generation.current === epoch) { busyRef.current = false; setBusy(null); }
     }
-  }, [active, canContinue, humanControlConfirmed, onContinue, request?.handoffId]);
+  }, [onContinue, request?.handoffId]);
+
+  const continueTask = useCallback(async () => {
+    if (!active || !canContinue || busyRef.current) return;
+    if (humanControlConfirmed) return sendContinuation();
+    if (!takeControl) return;
+    // Nobody holds the browser: take it, as Take control does, then go on.
+    busyRef.current = true;
+    setBusy("continue");
+    setError(null);
+    if (takeControl() === false) {
+      busyRef.current = false;
+      setBusy(null);
+      setError(CONTROL_ACTION_OFFLINE);
+      return;
+    }
+    setContinueOnControl(identityKey);
+  }, [active, canContinue, humanControlConfirmed, identityKey, sendContinuation, takeControl]);
+  const continueTaskRef = useRef(continueTask);
+  continueTaskRef.current = continueTask;
+  useEffect(() => {
+    if (continueOnControl === null || continueOnControl !== identityKey) return;
+    if (humanControlConfirmed) {
+      setContinueOnControl(null);
+      busyRef.current = false;
+      setBusy(null);
+      void continueTaskRef.current();
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setContinueOnControl(null);
+      busyRef.current = false;
+      setBusy(null);
+      setError(CONTROL_ACTION_NO_ANSWER);
+    }, CONTROL_ACTION_ANSWER_MS);
+    return () => window.clearTimeout(timer);
+  }, [continueOnControl, humanControlConfirmed, identityKey]);
 
   const requestTakeOver = () => { if (canTakeOver && !busyRef.current) setTakeoverIdentity(identityKey); };
   const dismissTakeOver = () => { if (!busyRef.current) setTakeoverIdentity(null); };

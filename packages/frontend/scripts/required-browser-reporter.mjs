@@ -33,6 +33,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "shared-browser-focused-editable.spec.ts",
       "shared-browser-sessions-responsive.spec.ts",
       "browser-live-proof.spec.ts",
+      "browser-pause-continue.spec.ts",
       "browser-recovery.spec.ts",
       "browser-keyboard-status.spec.ts",
       "conversation-surfaces.spec.ts",
@@ -110,6 +111,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "a browser prompt wraps under its sentence on a phone and keeps 44px buttons",
       "names the card, the lock and the status for screen readers",
       "opens on a press anywhere on the card and from the keyboard, rings the whole card on focus",
+      "the sign-in pause shows Let Octo continue and the press continues the turn at 1024×768",
     ],
   },
   "shared-studio": {

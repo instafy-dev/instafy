@@ -33,8 +33,8 @@ function participantById(
 
 /** How long a control action may wait for the browser's answer before it says so. */
 export const CONTROL_ACTION_ANSWER_MS = 5_000;
-const CONTROL_ACTION_NO_ANSWER = "The browser didn't answer. Try again.";
-const CONTROL_ACTION_OFFLINE = "Not connected to the browser. Try again in a moment.";
+export const CONTROL_ACTION_NO_ANSWER = "The browser didn't answer. Try again.";
+export const CONTROL_ACTION_OFFLINE = "Not connected to the browser. Try again in a moment.";
 
 export function SharedBrowserCollaborationControls({
   client,
