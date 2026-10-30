@@ -5067,7 +5067,14 @@ pub(crate) async fn lease_next_agent_job(
 
     let conversation_id: Option<Uuid> = row.get("conversation_id");
     let run_id: Option<Uuid> = row.get("run_id");
-    let credential_id: Option<Uuid> = row.try_get("credential_id").unwrap_or(None);
+    // A job without a credential runs on the platform key, so a credential
+    // that does not decode fails the lease, which leaves the job queued,
+    // rather than reading as none.
+    let credential_id: Option<Uuid> = row.try_get("credential_id").map_err(|error| {
+        internal_error(format!(
+            "failed to read the leased job's credential: {error}"
+        ))
+    })?;
     let mut payload: JsonValue = row.get("payload");
     // A granted turn's grants, and when its person asked (job_trigger.rs).
     let grant_ids: Vec<Uuid> = row

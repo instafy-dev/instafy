@@ -5,6 +5,11 @@
 //! lease records the sha256 of every job token it mints under its lease
 //! attempt, and `verify_proxy_job_token` accepts only a token recorded that
 //! way. Nothing here bills: every record is `record_only`.
+//!
+//! A job on a person's own AI never becomes a platform job: deleting its
+//! credential row, or its person, fails it, its plan wakes no lead that could
+//! run on the platform lane instead, and a credential the lease cannot read
+//! fails the lease instead of reading as none.
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -23,11 +28,16 @@ use crate::auth::{
     ProxyJobTokenMode, ProxyJobTokenRejection, RequestContext, VerifiedProxyJobToken,
     MANAGED_AI_SETTLE_MAX_AGE_SECONDS,
 };
+use crate::background_loops::TickConnection;
 use crate::config::{AppConfig, PgPool, RuntimeProviderConfig};
 use crate::dispatch::{self, DispatchPromptNormalized, DispatchPromptRequest};
+use crate::runtime::{
+    settle_jobs_whose_credential_was_removed, CREDENTIAL_REMOVED_CODE, CREDENTIAL_REMOVED_MESSAGE,
+};
 use crate::tests::{
     build_app_config, build_test_state, ensure_test_user, require_origin_test_pool,
-    test_origin_private_key, test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
+    test_origin_private_key, test_origin_public_key, with_empty_tables, with_shared_db_fixture,
+    SharedDbFixture,
 };
 use crate::{agent, AppState};
 
@@ -735,6 +745,20 @@ async fn post_as_runtime(
     path: &str,
     body: JsonValue,
 ) -> anyhow::Result<JsonValue> {
+    let (status, body) = post_as_runtime_with_status(state, team, runtime_id, path, body).await?;
+    anyhow::ensure!(status == StatusCode::OK, "{path} returned {status}: {body}");
+    Ok(body)
+}
+
+/// Posts `body` to an agent endpoint as the runtime and returns the
+/// response's status and body.
+async fn post_as_runtime_with_status(
+    state: &AppState,
+    team: &Team,
+    runtime_id: &Uuid,
+    path: &str,
+    body: JsonValue,
+) -> anyhow::Result<(StatusCode, JsonValue)> {
     let agent_token =
         crate::auth::issue_agent_token(&state.config, &team.project_id, runtime_id, None, None)
             .map_err(|error| controller_error("issue agent token", error))?
@@ -756,8 +780,7 @@ async fn post_as_runtime(
     let status = response.status();
     let body: JsonValue =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
-    anyhow::ensure!(status == StatusCode::OK, "{path} returned {status}: {body}");
-    Ok(body)
+    Ok((status, body))
 }
 
 /// Leases one job as the runtime and returns it with its proxy token.
@@ -1340,6 +1363,905 @@ async fn settle_mode_accepts_expired_token_within_max_age_for_its_own_attempt() 
             }
         }
         Ok(())
+    })
+    .await
+}
+
+/// What a runtime reports for a turn that stopped on a short provider rate
+/// limit, which completion puts back in the queue once
+/// (`turn_rate_limit_retry`).
+const SHORT_RATE_LIMIT: &str = "rate limit exceeded: The upstream provider rate limit was reached (upstream_rate_limit, 429). Please try again in 7.632s.";
+
+/// Fails unless `agent_jobs_fail_on_credential_removal` failed `job_id`, with
+/// the words the controller settles it with.
+async fn assert_failed_for_its_removed_credential(
+    pool: &PgPool,
+    job_id: &Uuid,
+    case: &str,
+) -> anyhow::Result<()> {
+    let row = pool
+        .get()
+        .await?
+        .query_one(
+            "select status, outcome, credential_id, error_message,
+                    credential_removed_at is not null as stamped,
+                    completed_at is not null as completed,
+                    lease_expires_at is null as lease_ended
+             from agent_jobs where id = $1",
+            &[job_id],
+        )
+        .await?;
+    assert_eq!(row.get::<_, String>("status"), "failed", "{case}");
+    assert_eq!(
+        row.get::<_, Option<String>>("outcome").as_deref(),
+        Some("failed"),
+        "{case}"
+    );
+    assert_eq!(row.get::<_, Option<Uuid>>("credential_id"), None, "{case}");
+    assert_eq!(
+        row.get::<_, Option<String>>("error_message").as_deref(),
+        Some(CREDENTIAL_REMOVED_MESSAGE),
+        "{case}: the trigger and the sweep say the same"
+    );
+    assert!(row.get::<_, bool>("stamped"), "{case}");
+    assert!(row.get::<_, bool>("completed"), "{case}");
+    assert!(row.get::<_, bool>("lease_ended"), "{case}");
+    Ok(())
+}
+
+/// The status and last message of `job_id`'s run.
+async fn run_of_job(pool: &PgPool, job_id: &Uuid) -> anyhow::Result<(String, Option<String>)> {
+    let row = pool
+        .get()
+        .await?
+        .query_one(
+            "select r.status, r.last_message
+             from agent_jobs j join runs r on r.id = j.run_id
+             where j.id = $1",
+            &[job_id],
+        )
+        .await?;
+    Ok((row.get(0), row.get(1)))
+}
+
+/// The reason and key of each of the project's managed-AI ledger rows (a
+/// prompt's reserve, its refund, its usage adjustment), oldest first.
+async fn managed_ai_ledger_rows(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> anyhow::Result<Vec<(String, String)>> {
+    Ok(pool
+        .get()
+        .await?
+        .query(
+            "select reason, idempotency_key from org_credit_ledger
+             where project_id = $1 and idempotency_key like 'managed-ai-%'
+             order by created_at, idempotency_key",
+            &[project_id],
+        )
+        .await?
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect())
+}
+
+/// Settles what deleted credentials failed, as one idle sweep tick does.
+async fn settle_removed_credentials(state: &AppState) -> anyhow::Result<()> {
+    settle_jobs_whose_credential_was_removed(state, &mut TickConnection::new(&state.pool)).await
+}
+
+/// Deleting the credential row a person's own AI ran on, or deleting the
+/// person, which deletes their credential rows, fails the AI jobs still
+/// queued or leased on it in that same statement
+/// (`agent_jobs_fail_on_credential_removal`). Neither job becomes a platform
+/// job: the lease takes neither again, so it mints no token without a
+/// credential for them, and the leased job's heartbeat and completion are
+/// refused, so its runtime stops it and no rate-limit retry puts it back in
+/// the queue. The idle sweep then fails each run and says why in its
+/// conversation, once however often it runs, and gives back no reserve.
+#[tokio::test]
+async fn deleting_a_credential_or_its_person_fails_the_jobs_queued_on_it() -> anyhow::Result<()> {
+    for deletes_the_person in [false, true] {
+        with_team("credential removal", |pool, team| async move {
+            let case = if deletes_the_person {
+                "deleting the person"
+            } else {
+                "deleting the credential"
+            };
+            let runtime_id = team.add_hosted_runtime(&pool).await?;
+            let state = build_test_state(pool.clone(), test_config("credential-removal"));
+            let credential_id = team.add_owner_default_credential(&pool).await?;
+            let leased_job = dispatch_to_runtime(&state, &team, &runtime_id, "feature").await?;
+            let queued_job = dispatch_to_runtime(&state, &team, &runtime_id, "feature").await?;
+            let (leased, token) = lease_one(&state, &team, &runtime_id).await?;
+            assert_eq!(leased, leased_job);
+            assert_eq!(
+                claims_of(&token)?["credential_id"],
+                json!(credential_id.to_string())
+            );
+
+            let deleted = if deletes_the_person {
+                pool.get()
+                    .await?
+                    .execute(
+                        "delete from auth.users where id = $1",
+                        &[&team.owner_user_id],
+                    )
+                    .await?
+            } else {
+                pool.get()
+                    .await?
+                    .execute(
+                        "delete from user_credentials where id = $1",
+                        &[&credential_id],
+                    )
+                    .await?
+            };
+            assert_eq!(deleted, 1, "{case}");
+            for job_id in [&leased_job, &queued_job] {
+                assert_failed_for_its_removed_credential(&pool, job_id, case).await?;
+            }
+            assert_eq!(
+                lease_state(&pool, &leased_job).await?,
+                ("failed".to_string(), 1, Some(runtime_id)),
+                "{case}"
+            );
+            assert_eq!(
+                lease_state(&pool, &queued_job).await?,
+                ("failed".to_string(), 0, None),
+                "{case}"
+            );
+
+            let lease = post_as_runtime(
+                &state,
+                &team,
+                &runtime_id,
+                "/agent/lease",
+                json!({ "max": 5, "lease_seconds": 120 }),
+            )
+            .await?;
+            assert_eq!(
+                lease["jobs"],
+                json!([]),
+                "{case}: the lease hands out neither"
+            );
+            assert_eq!(
+                lease_state(&pool, &leased_job).await?,
+                ("failed".to_string(), 1, Some(runtime_id)),
+                "{case}: the lease took neither again"
+            );
+            assert_eq!(
+                lease_state(&pool, &queued_job).await?,
+                ("failed".to_string(), 0, None),
+                "{case}: the lease took neither again"
+            );
+            let (status, body) = post_as_runtime_with_status(
+                &state,
+                &team,
+                &runtime_id,
+                "/agent/heartbeat",
+                json!({ "job_id": leased_job.to_string(), "extend_seconds": 60 }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::CONFLICT, "{case}: {body}");
+            let (status, body) = post_as_runtime_with_status(
+                &state,
+                &team,
+                &runtime_id,
+                "/agent/complete",
+                json!({
+                    "job_id": leased_job.to_string(),
+                    "outcome": "failed",
+                    "error_message": SHORT_RATE_LIMIT,
+                }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{case}: {body}");
+            assert_eq!(lease_state(&pool, &leased_job).await?.0, "failed", "{case}");
+
+            let mut events = state.events.subscribe();
+            for _ in 0..2 {
+                settle_removed_credentials(&state).await?;
+            }
+            let mut failures = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if event.kind == "run.completed" && event.project_id == Some(team.project_id) {
+                    failures.push(event);
+                }
+            }
+            assert_eq!(failures.len(), 2, "{case}: one failure per run");
+            for job_id in [&leased_job, &queued_job] {
+                assert_eq!(
+                    run_of_job(&pool, job_id).await?,
+                    (
+                        "failed".to_string(),
+                        Some(CREDENTIAL_REMOVED_MESSAGE.to_string())
+                    ),
+                    "{case}"
+                );
+                let failure = failures
+                    .iter()
+                    .find(|event| event.job_id == Some(*job_id))
+                    .ok_or_else(|| anyhow::anyhow!("{case}: no failure for {job_id}"))?;
+                assert_eq!(failure.data["outcome"], json!("failed"), "{case}");
+                assert_eq!(
+                    failure.data["failureCode"],
+                    json!(CREDENTIAL_REMOVED_CODE),
+                    "{case}"
+                );
+                assert_eq!(
+                    failure.data["errorMessage"],
+                    json!(CREDENTIAL_REMOVED_MESSAGE),
+                    "{case}"
+                );
+                assert_eq!(failure.data["run"]["status"], json!("failed"), "{case}");
+                let messages = pool
+                    .get()
+                    .await?
+                    .query(
+                        "select m.content, m.metadata
+                         from conversation_messages m
+                         join agent_jobs j on j.conversation_id = m.conversation_id
+                         where j.id = $1 and m.created_by is null
+                           and m.metadata ->> 'source' = 'controller'",
+                        &[job_id],
+                    )
+                    .await?;
+                assert_eq!(messages.len(), 1, "{case}: said once");
+                assert_eq!(
+                    messages[0].get::<_, String>("content"),
+                    CREDENTIAL_REMOVED_MESSAGE
+                );
+                let metadata = messages[0].get::<_, PgJson<JsonValue>>("metadata").0;
+                assert_eq!(metadata["kind"], json!(CREDENTIAL_REMOVED_CODE), "{case}");
+                assert_eq!(metadata["jobId"], json!(job_id), "{case}");
+            }
+            let refunds: i64 = pool
+                .get()
+                .await?
+                .query_one(
+                    "select count(*) from org_credit_ledger
+                     where project_id = $1 and reason = $2",
+                    &[&team.project_id, &crate::credits::MANAGED_AI_REFUND_REASON],
+                )
+                .await?
+                .get(0);
+            assert_eq!(refunds, 0, "{case}");
+            Ok(())
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// One dispatch to Octo on the platform lane and to an agent on its person's
+/// own AI shares a prompt, and the prompt's managed-AI reserve is the
+/// platform job's, though the agent's job carries the dispatch's
+/// `managedAiUsed` too. Deleting the agent's credential fails only the
+/// agent's job, and the sweep that settles it gives none of that reserve
+/// back. Octo's job keeps its platform record and still leases, with a token
+/// that names no credential.
+#[tokio::test]
+async fn deleting_a_credential_leaves_the_platform_job_of_its_dispatch_alone() -> anyhow::Result<()>
+{
+    with_team(
+        "credential removal mixed dispatch",
+        |pool, team| async move {
+            let credential_id = team.add_owner_byo_agent(&pool, "reviewer").await?;
+            let runtime_id = team.add_hosted_runtime(&pool).await?;
+            let proxy = managed_proxy().await;
+            let mut config = test_config("credential-removal-mixed-dispatch");
+            config.proxy_base_url = Some(proxy.base_url());
+            let state = build_test_state(pool.clone(), config);
+
+            let conversation_id = Uuid::new_v4();
+            let mut request = dispatch_request(
+                &team,
+                &conversation_id,
+                "@octo @reviewer compare the two designs.",
+                "feature",
+                &["octo", "reviewer"],
+                &["octo", "reviewer"],
+                "private",
+            )?;
+            request.runtime_id = Some(runtime_id);
+            dispatch_as(
+                &state,
+                &user_context(team.owner_user_id),
+                request,
+                "mixed dispatch",
+            )
+            .await?;
+            let jobs = dispatched_jobs(&pool, &conversation_id).await?;
+            let handles: Vec<&str> = jobs.iter().map(|job| job.handle.as_str()).collect();
+            assert_eq!(handles, ["octo", "reviewer"]);
+            let (octo, reviewer) = (&jobs[0], &jobs[1]);
+            assert_eq!(octo.credential_id, None);
+            assert_eq!(octo.record, Some(PlatformRecord::expected(&team, octo, 0)));
+            assert_eq!(reviewer.credential_id, Some(credential_id));
+            assert_eq!(reviewer.record, None);
+            let prompt_id = octo.prompt_id.expect("the dispatch has a prompt");
+            assert_eq!(reviewer.prompt_id, Some(prompt_id), "one prompt");
+            assert_eq!(
+                reviewer.payload["metadata"]["managedAiUsed"],
+                json!(true),
+                "the agent's job carries the dispatch's managed AI flag"
+            );
+            let reserve = vec![(
+                "managed_ai_prompt".to_string(),
+                format!("managed-ai-prompt:{prompt_id}"),
+            )];
+            assert_eq!(
+                managed_ai_ledger_rows(&pool, &team.project_id).await?,
+                reserve
+            );
+
+            pool.get()
+                .await?
+                .execute(
+                    "delete from user_credentials where id = $1",
+                    &[&credential_id],
+                )
+                .await?;
+            assert_failed_for_its_removed_credential(&pool, &reviewer.job_id, "the agent's job")
+                .await?;
+            assert_eq!(
+                lease_state(&pool, &octo.job_id).await?,
+                ("queued".to_string(), 0, None)
+            );
+
+            settle_removed_credentials(&state).await?;
+            assert_eq!(run_of_job(&pool, &reviewer.job_id).await?.0, "failed");
+            assert_eq!(run_of_job(&pool, &octo.job_id).await?.0, "queued");
+            assert_eq!(
+                managed_ai_ledger_rows(&pool, &team.project_id).await?,
+                reserve,
+                "the reserve stands and nothing is refunded"
+            );
+
+            let octo_now = dispatched_jobs(&pool, &conversation_id).await?.remove(0);
+            assert_eq!(octo_now.job_id, octo.job_id);
+            assert_eq!(
+                octo_now.record,
+                Some(PlatformRecord::expected(&team, octo, 0))
+            );
+            let (leased, token) = lease_one(&state, &team, &runtime_id).await?;
+            assert_eq!(leased, octo.job_id);
+            assert!(claims_of(&token)?.get("credential_id").is_none());
+            assert_eq!(
+                recorded_hashes(&pool, &octo.job_id).await?,
+                Some(json!({ "1": proxy_token_sha256(&token) }))
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A plan worker on its person's own AI whose credential is deleted fails
+/// with it, and settling it wakes no lead: a lead continuation dispatched
+/// now would resolve its person's credentials again and, with none left, run
+/// on the platform lane. The worker's run still fails.
+#[tokio::test]
+async fn a_plan_worker_whose_credential_was_removed_wakes_no_lead() -> anyhow::Result<()> {
+    with_team("credential removal plan worker", |pool, team| async move {
+        let runtime_id = team.add_hosted_runtime(&pool).await?;
+        let state = build_test_state(pool.clone(), test_config("credential-removal-plan"));
+        let credential_id = team.add_owner_default_credential(&pool).await?;
+        let conversation_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let worker_job_id = Uuid::new_v4();
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility)
+                 values ($1, $2, $3, '{}'::jsonb, 'private')",
+                &[&conversation_id, &team.project_id, &team.owner_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runs (id, project_id, conversation_id, run_type, status)
+                 values ($1, $2, $3, 'prompt', 'queued')",
+                &[&run_id, &team.project_id, &conversation_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into agent_jobs (
+                     id, project_id, run_id, conversation_id, status, intent,
+                     credential_id, target_runtime_id, payload
+                 ) values ($1, $2, $3, $4, 'queued', 'feature', $5, $6, $7)",
+                &[
+                    &worker_job_id,
+                    &team.project_id,
+                    &run_id,
+                    &conversation_id,
+                    &credential_id,
+                    &runtime_id,
+                    &PgJson(json!({
+                        "project_id": team.project_id,
+                        "conversation_id": conversation_id,
+                        "user_id": team.owner_user_id,
+                        "prompt_text": "Read the README.",
+                        "metadata": {
+                            "agent": { "handle": "scout" },
+                            "runtimePreference": { "runtimeId": runtime_id },
+                            "multiAgentPlan": {
+                                "groupId": Uuid::new_v4(),
+                                "role": "worker",
+                                "lead": { "leadHandle": "octo" }
+                            }
+                        }
+                    })),
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "delete from user_credentials where id = $1",
+                &[&credential_id],
+            )
+            .await?;
+        drop(connection);
+        assert_failed_for_its_removed_credential(&pool, &worker_job_id, "the worker").await?;
+
+        settle_removed_credentials(&state).await?;
+        assert_eq!(run_of_job(&pool, &worker_job_id).await?.0, "failed");
+        let jobs: i64 = pool
+            .get()
+            .await?
+            .query_one(
+                "select count(*) from agent_jobs where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(jobs, 1, "only the worker: no lead was dispatched");
+        Ok(())
+    })
+    .await
+}
+
+/// A plan of the team's owner, led by Octo, in a conversation of its own on
+/// one runtime. Its jobs are inserted one at a time.
+struct SeededPlan {
+    project_id: Uuid,
+    owner_user_id: Uuid,
+    conversation_id: Uuid,
+    group_id: Uuid,
+    runtime_id: Uuid,
+}
+
+impl SeededPlan {
+    async fn new(pool: &PgPool, team: &Team, runtime_id: Uuid) -> anyhow::Result<Self> {
+        let plan = Self {
+            project_id: team.project_id,
+            owner_user_id: team.owner_user_id,
+            conversation_id: Uuid::new_v4(),
+            group_id: Uuid::new_v4(),
+            runtime_id,
+        };
+        pool.get()
+            .await?
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility)
+                 values ($1, $2, $3, '{}'::jsonb, 'private')",
+                &[&plan.conversation_id, &plan.project_id, &plan.owner_user_id],
+            )
+            .await?;
+        Ok(plan)
+    }
+
+    /// Inserts `handle`'s job of the plan with a run of its own: a `worker`,
+    /// or the lead's early checkpoint when `role` is `lead_continuation`. A
+    /// leased job is leased by the plan's runtime, a finished one finished a
+    /// minute ago.
+    async fn add_job(
+        &self,
+        pool: &PgPool,
+        handle: &str,
+        role: &str,
+        status: &str,
+        credential_id: Option<Uuid>,
+    ) -> anyhow::Result<Uuid> {
+        let mut plan = json!({
+            "groupId": self.group_id,
+            "role": role,
+            "lead": { "leadHandle": "octo" }
+        });
+        let intent = if role == "lead_continuation" {
+            plan["checkpointKind"] = json!("early_failure");
+            "multi_agent_lead_continuation"
+        } else {
+            "feature"
+        };
+        let (run_status, outcome) = match status {
+            "queued" => ("queued", None),
+            "leased" => ("in_progress", None),
+            "completed" => ("success", Some("succeeded")),
+            _ => ("failed", Some(status)),
+        };
+        let run_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into runs (id, project_id, conversation_id, run_type, status)
+                 values ($1, $2, $3, 'prompt', $4)",
+                &[
+                    &run_id,
+                    &self.project_id,
+                    &self.conversation_id,
+                    &run_status,
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into agent_jobs (
+                     id, project_id, run_id, conversation_id, status, outcome, intent,
+                     credential_id, target_runtime_id, payload,
+                     leased_by_runtime_id, leased_at, lease_expires_at, lease_attempts,
+                     completed_at
+                 ) values (
+                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                     case when $5 = 'leased' then $9::uuid end,
+                     case when $5 = 'leased' then now() end,
+                     case when $5 = 'leased' then now() + interval '5 minutes' end,
+                     case when $5 = 'queued' then 0 else 1 end,
+                     case when $5 not in ('queued', 'leased')
+                         then now() - interval '1 minute' end
+                 )",
+                &[
+                    &job_id,
+                    &self.project_id,
+                    &run_id,
+                    &self.conversation_id,
+                    &status,
+                    &outcome,
+                    &intent,
+                    &credential_id,
+                    &self.runtime_id,
+                    &PgJson(json!({
+                        "project_id": self.project_id,
+                        "conversation_id": self.conversation_id,
+                        "user_id": self.owner_user_id,
+                        "prompt_text": "Read the README.",
+                        "metadata": {
+                            "agent": { "handle": handle },
+                            "runtimePreference": { "runtimeId": self.runtime_id },
+                            "multiAgentPlan": plan
+                        }
+                    })),
+                ],
+            )
+            .await?;
+        Ok(job_id)
+    }
+
+    /// The lead continuations in the plan's conversation, its early
+    /// checkpoints included.
+    async fn lead_continuations(&self, pool: &PgPool) -> anyhow::Result<i64> {
+        Ok(pool
+            .get()
+            .await?
+            .query_one(
+                "select count(*) from agent_jobs
+                 where conversation_id = $1
+                   and coalesce(agent_role, payload #>> '{metadata,multiAgentPlan,role}')
+                       = 'lead_continuation'",
+                &[&self.conversation_id],
+            )
+            .await?
+            .get(0))
+    }
+}
+
+/// A plan's agents run on two AI connections of its person: the scout on
+/// their default one, the reviewer and the critic on the reviewer agent's
+/// own. Deleting the default one's row fails the scout, and its plan then
+/// wakes no lead as its other agents end: not early, when the reviewer fails
+/// while the critic still runs, nor once the critic ends too. Each lead
+/// continuation would be dispatched as the service role and resolve the
+/// person's credentials again, and with the default connection gone, Octo
+/// would run on the platform lane.
+#[tokio::test]
+async fn a_plan_that_lost_an_agent_to_a_removed_credential_wakes_no_lead_as_the_others_end(
+) -> anyhow::Result<()> {
+    with_team(
+        "credential removal plan siblings",
+        |pool, team| async move {
+            let runtime_id = team.add_hosted_runtime(&pool).await?;
+            let state = build_test_state(
+                pool.clone(),
+                test_config("credential-removal-plan-siblings"),
+            );
+            let default_credential = team.add_owner_default_credential(&pool).await?;
+            let reviewer_credential = team.add_owner_byo_agent(&pool, "reviewer").await?;
+            let plan = SeededPlan::new(&pool, &team, runtime_id).await?;
+            let scout = plan
+                .add_job(&pool, "scout", "worker", "queued", Some(default_credential))
+                .await?;
+            let reviewer = plan
+                .add_job(
+                    &pool,
+                    "reviewer",
+                    "worker",
+                    "leased",
+                    Some(reviewer_credential),
+                )
+                .await?;
+            let critic = plan
+                .add_job(
+                    &pool,
+                    "critic",
+                    "worker",
+                    "queued",
+                    Some(reviewer_credential),
+                )
+                .await?;
+            pool.get()
+                .await?
+                .execute(
+                    "delete from user_credentials where id = $1",
+                    &[&default_credential],
+                )
+                .await?;
+            assert_failed_for_its_removed_credential(&pool, &scout, "the scout").await?;
+
+            post_as_runtime(
+                &state,
+                &team,
+                &runtime_id,
+                "/agent/complete",
+                json!({
+                    "job_id": reviewer.to_string(),
+                    "outcome": "failed",
+                    "error_message": "The design files were not in the workspace.",
+                }),
+            )
+            .await?;
+            assert_eq!(lease_state(&pool, &reviewer).await?.0, "failed");
+            assert_eq!(
+                plan.lead_continuations(&pool).await?,
+                0,
+                "the reviewer's failure woke no lead early"
+            );
+
+            pool.get()
+                .await?
+                .execute(
+                    "update agent_jobs
+                     set status = 'canceled', outcome = 'canceled', completed_at = now()
+                     where id = $1",
+                    &[&critic],
+                )
+                .await?;
+            crate::multi_agent_plan::checkpoint_plan_groups_for_jobs(&state, &[critic])
+                .await
+                .map_err(|error| controller_error("checkpoint the critic's plan", error))?;
+            assert_eq!(
+                plan.lead_continuations(&pool).await?,
+                0,
+                "the plan's last agent ending woke no lead"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A plan's lead woke early when one agent failed, and its last live agent
+/// runs on its person's own AI. Deleting that credential row, while the
+/// person stays, fails the agent, and the idle sweep wakes the lead no more:
+/// neither its recovery of an early checkpoint that ended, which runs before
+/// the step that settles the agent, nor that step, over two ticks. The early
+/// lead had either finished, or was still queued on the same credential and
+/// failed with it.
+#[tokio::test]
+async fn a_plan_that_lost_an_agent_to_a_removed_credential_wakes_no_lead_after_its_early_one(
+) -> anyhow::Result<()> {
+    for early_lead_was_queued in [false, true] {
+        with_team(
+            "credential removal early checkpoint",
+            |pool, team| async move {
+                let case = if early_lead_was_queued {
+                    "a queued early lead"
+                } else {
+                    "a finished early lead"
+                };
+                let runtime_id = team.add_hosted_runtime(&pool).await?;
+                let state = build_test_state(
+                    pool.clone(),
+                    test_config("credential-removal-early-checkpoint"),
+                );
+                let credential_id = team.add_owner_default_credential(&pool).await?;
+                let plan = SeededPlan::new(&pool, &team, runtime_id).await?;
+                plan.add_job(&pool, "critic", "worker", "failed", Some(credential_id))
+                    .await?;
+                let early_status = if early_lead_was_queued {
+                    "queued"
+                } else {
+                    "completed"
+                };
+                plan.add_job(
+                    &pool,
+                    "octo",
+                    "lead_continuation",
+                    early_status,
+                    Some(credential_id),
+                )
+                .await?;
+                let scout = plan
+                    .add_job(&pool, "scout", "worker", "queued", Some(credential_id))
+                    .await?;
+                pool.get()
+                    .await?
+                    .execute(
+                        "delete from user_credentials where id = $1",
+                        &[&credential_id],
+                    )
+                    .await?;
+                assert_failed_for_its_removed_credential(&pool, &scout, case).await?;
+
+                for _ in 0..2 {
+                    crate::runtime::recover_deferred_plan_checkpoints(
+                        &state,
+                        &mut TickConnection::new(&state.pool),
+                    )
+                    .await?;
+                    settle_removed_credentials(&state).await?;
+                }
+                assert_eq!(run_of_job(&pool, &scout).await?.0, "failed", "{case}");
+                assert_eq!(
+                    plan.lead_continuations(&pool).await?,
+                    1,
+                    "{case}: only the early lead"
+                );
+                Ok(())
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The early checkpoints the idle sweep recovers, oldest first, come a batch
+/// at a time. Plans that lost an agent to a removed credential wake no lead,
+/// so the recovery passes their early checkpoints over rather than taking
+/// them up on every tick: forty such plans, older than any other, still
+/// leave room for a plan whose final lead is due.
+#[tokio::test]
+async fn plans_that_lost_an_agent_to_a_removed_credential_hold_up_no_due_lead() -> anyhow::Result<()>
+{
+    with_team(
+        "credential removal recovery batch",
+        |pool, team| async move {
+            let runtime_id = team.add_hosted_runtime(&pool).await?;
+            let state = build_test_state(
+                pool.clone(),
+                test_config("credential-removal-recovery-batch"),
+            );
+            let credential_id = team.add_owner_default_credential(&pool).await?;
+            let due = SeededPlan::new(&pool, &team, runtime_id).await?;
+            due.add_job(&pool, "scout", "worker", "failed", Some(credential_id))
+                .await?;
+            due.add_job(
+                &pool,
+                "octo",
+                "lead_continuation",
+                "completed",
+                Some(credential_id),
+            )
+            .await?;
+            let lost = SeededPlan::new(&pool, &team, runtime_id).await?;
+            pool.get()
+                .await?
+                .execute(
+                    "insert into agent_jobs (
+                         project_id, conversation_id, status, intent, payload, completed_at,
+                         credential_removed_at
+                     )
+                     select $1::uuid, $2::uuid, job.status, job.intent,
+                            jsonb_strip_nulls(jsonb_build_object(
+                                'project_id', $1::uuid,
+                                'conversation_id', $2::uuid,
+                                'user_id', $3::uuid,
+                                'metadata', jsonb_build_object(
+                                    'multiAgentPlan', jsonb_build_object(
+                                        'groupId', lost.group_id,
+                                        'role', job.role,
+                                        'checkpointKind', job.checkpoint_kind,
+                                        'lead', jsonb_build_object('leadHandle', 'octo'))))),
+                            now() - interval '1 day',
+                            case when job.role = 'worker' then now() - interval '1 day' end
+                     from (select gen_random_uuid()::text as group_id
+                           from generate_series(1, 40)) lost
+                     cross join (values
+                         ('failed', 'feature', 'worker', null),
+                         ('completed', 'multi_agent_lead_continuation', 'lead_continuation',
+                          'early_failure')
+                     ) as job(status, intent, role, checkpoint_kind)",
+                    &[&team.project_id, &lost.conversation_id, &team.owner_user_id],
+                )
+                .await?;
+
+            crate::runtime::recover_deferred_plan_checkpoints(
+                &state,
+                &mut TickConnection::new(&state.pool),
+            )
+            .await?;
+            assert_eq!(
+                due.lead_continuations(&pool).await?,
+                2,
+                "the due plan's final lead was queued after its early one"
+            );
+            assert_eq!(
+                lost.lead_continuations(&pool).await?,
+                40,
+                "the plans that lost an agent woke no lead"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// The lease takes a job without a credential as a platform job, so a
+/// credential it cannot read fails the lease rather than reading as none.
+/// Here the job's credential column holds text, as a schema change could
+/// leave it: the lease answers 500 and the job stays queued, never leased
+/// with a token for the platform key.
+#[tokio::test]
+async fn a_credential_the_lease_cannot_read_fails_the_lease() -> anyhow::Result<()> {
+    with_empty_tables(&["agent_jobs"], |pool| async move {
+        let team = Team::new();
+        let fixture = team.fixture();
+        let users = vec![team.owner_user_id, team.builder_user_id];
+        let body_pool = pool.clone();
+        let result = with_shared_db_fixture(fixture, async move {
+            team.seed(&body_pool, "unreadable credential").await?;
+            let runtime_id = team.add_hosted_runtime(&body_pool).await?;
+            let job_id = Uuid::new_v4();
+            let connection = body_pool.get().await?;
+            connection
+                .batch_execute(
+                    "alter table agent_jobs
+                     alter column credential_id type text using credential_id::text",
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into agent_jobs (id, project_id, intent, status, credential_id)
+                     values ($1, $2, 'feature', 'queued', $3)",
+                    &[&job_id, &team.project_id, &Uuid::new_v4().to_string()],
+                )
+                .await?;
+            drop(connection);
+            let state = build_test_state(body_pool.clone(), test_config("unreadable-credential"));
+            let (status, body) = post_as_runtime_with_status(
+                &state,
+                &team,
+                &runtime_id,
+                "/agent/lease",
+                json!({ "max": 1, "lease_seconds": 120 }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+            assert_eq!(
+                lease_state(&body_pool, &job_id).await?,
+                ("queued".to_string(), 0, None)
+            );
+            Ok(())
+        })
+        .await;
+        let user_cleanup = pool
+            .get()
+            .await?
+            .execute("delete from auth.users where id = any($1)", &[&users])
+            .await;
+        result.and(user_cleanup.map(|_| ()).map_err(anyhow::Error::from))
     })
     .await
 }

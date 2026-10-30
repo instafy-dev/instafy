@@ -204,7 +204,6 @@ pub(crate) struct DispatchPromptNormalized {
     pub(crate) priority: i32,
     pub(crate) runtime_type: Option<String>,
     pub(crate) idle_ttl_seconds: Option<u32>,
-    pub(crate) project_type_hint: Option<String>,
     pub(crate) execution_mode: String,
     pub(crate) workspace_mode: String,
     pub(crate) runtime_id: Option<Uuid>,
@@ -3199,12 +3198,6 @@ pub(crate) fn normalize_dispatch_request(
 
     let (metadata, execution_mode, workspace_mode) =
         normalize_metadata(payload.metadata, session_raw.as_ref());
-    let project_type_hint = metadata
-        .as_object()
-        .and_then(|map| map.get("project_type"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_lowercase())
-        .filter(|value| !value.is_empty());
 
     let tool_limits = normalize_tool_limits(payload.tool_limits);
     let repo = normalize_repo(payload.repo);
@@ -3263,7 +3256,6 @@ pub(crate) fn normalize_dispatch_request(
         priority,
         runtime_type,
         idle_ttl_seconds: payload.idle_ttl_seconds,
-        project_type_hint,
         execution_mode,
         workspace_mode,
         runtime_id,
@@ -5492,6 +5484,23 @@ fn normalize_repo(repo: Option<DispatchPromptRepo>) -> Option<DispatchPromptRepo
     Some(normalized)
 }
 
+/// The type of a project dispatch bootstraps. Only the service role gets that
+/// far (`ensure_project_record_for_dispatch`), so only it may name one in
+/// `metadata.project_type`, and only a type the row can store; otherwise a
+/// user's project is a customer space and a userless one a sandbox.
+fn bootstrap_project_type(metadata: &JsonValue, context: &RequestContext) -> &'static str {
+    let named = metadata
+        .get("project_type")
+        .and_then(JsonValue::as_str)
+        .map(|value| value.trim().to_ascii_lowercase());
+    match named.as_deref() {
+        Some("sandbox") => "sandbox",
+        Some("customer") => "customer",
+        _ if context.user_id.is_some() => "customer",
+        _ => "sandbox",
+    }
+}
+
 async fn ensure_project_record_for_dispatch(
     transaction: &Transaction<'_>,
     config: &AppConfig,
@@ -5511,8 +5520,7 @@ async fn ensure_project_record_for_dispatch(
         // Authorize before initializing organizations, billing, or credits.
         ensure_project_prompt_access(transaction, &project, context, request.session_id).await?;
         let project = ensure_project_org(transaction, &project).await?;
-        credits::ensure_sandbox_credit_seed(transaction, config, &project, request, context)
-            .await?;
+        credits::ensure_sandbox_credit_seed(transaction, config, &project).await?;
         return Ok(project);
     }
 
@@ -5525,13 +5533,7 @@ async fn ensure_project_record_for_dispatch(
         ));
     }
 
-    let inferred_type = request.project_type_hint.clone().unwrap_or_else(|| {
-        if context.user_id.is_some() {
-            "customer".to_string()
-        } else {
-            "sandbox".to_string()
-        }
-    });
+    let inferred_type = bootstrap_project_type(&request.metadata, context);
 
     let inserted = transaction
         .query_opt(
@@ -5566,7 +5568,7 @@ async fn ensure_project_record_for_dispatch(
     let project = map_project_row(&project_row);
     ensure_project_prompt_access(transaction, &project, context, request.session_id).await?;
     let project = ensure_project_org(transaction, &project).await?;
-    credits::ensure_sandbox_credit_seed(transaction, config, &project, request, context).await?;
+    credits::ensure_sandbox_credit_seed(transaction, config, &project).await?;
     Ok(project)
 }
 
@@ -7315,6 +7317,38 @@ mod tests {
 
         let error = normalize_dispatch_request(request).unwrap_err();
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn bootstrap_project_type_names_only_a_storable_type() {
+        let with_user = RequestContext {
+            user_id: Some(Uuid::new_v4()),
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        let userless = RequestContext {
+            user_id: None,
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        assert_eq!(bootstrap_project_type(&json!({}), &with_user), "customer");
+        assert_eq!(bootstrap_project_type(&json!({}), &userless), "sandbox");
+        assert_eq!(
+            bootstrap_project_type(&json!({"project_type": " Customer "}), &userless),
+            "customer"
+        );
+        assert_eq!(
+            bootstrap_project_type(&json!({"project_type": "sandbox"}), &with_user),
+            "sandbox"
+        );
+        assert_eq!(
+            bootstrap_project_type(&json!({"project_type": "demo"}), &userless),
+            "sandbox"
+        );
+        assert_eq!(
+            bootstrap_project_type(&json!({"project_type": "demo"}), &with_user),
+            "customer"
+        );
     }
 
     #[test]

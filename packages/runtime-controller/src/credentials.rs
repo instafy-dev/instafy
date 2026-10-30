@@ -1131,22 +1131,19 @@ async fn test_my_credential(
                 None
             }
         });
-    let upstream_endpoint = meta
-        .and_then(|map| map.get("upstream_endpoint"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| match kind.trim() {
-            CREDENTIAL_KIND_OPENAI_API_KEY => Some(
-                provider
-                    .as_deref()
-                    .map(default_endpoint_for_provider)
-                    .unwrap_or(DEFAULT_OPENAI_ENDPOINT)
-                    .to_string(),
-            ),
-            CREDENTIAL_KIND_CODEX_AUTH_JSON => Some(DEFAULT_CHATGPT_ENDPOINT.to_string()),
-            _ => None,
-        });
+    // The endpoint the lease sends this credential to, which is never one
+    // stored in the row (see `materialize_internal_credential`).
+    let upstream_endpoint = match kind.trim() {
+        CREDENTIAL_KIND_OPENAI_API_KEY => Some(
+            provider
+                .as_deref()
+                .map(default_endpoint_for_provider)
+                .unwrap_or(DEFAULT_OPENAI_ENDPOINT)
+                .to_string(),
+        ),
+        CREDENTIAL_KIND_CODEX_AUTH_JSON => Some(DEFAULT_CHATGPT_ENDPOINT.to_string()),
+        _ => None,
+    };
     // The model a job on this credential runs without an agent model: the
     // stored default (raised to the own-AI floor for OpenAI), else the own-AI default for
     // its kind and provider, never the credits-funded managed tier's.
@@ -2861,11 +2858,6 @@ fn materialize_internal_credential(
         .and_then(JsonValue::as_str)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let upstream_endpoint = metadata_map
-        .and_then(|map| map.get("upstream_endpoint"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
     // The lease's default is what a job on this credential runs without a
     // model of its own, the same rule as its job secrets and completions.
     let default_model = Some(credential_default_model(kind, metadata));
@@ -2887,8 +2879,11 @@ fn materialize_internal_credential(
             .unwrap_or(PROVIDER_OPENAI)
             .trim()
             .to_ascii_lowercase();
-        let upstream_endpoint = upstream_endpoint
-            .or_else(|| Some(default_endpoint_for_provider(&provider_key).to_string()));
+        // Always the provider's own endpoint. Saving a credential stores
+        // exactly this value, so a different `upstream_endpoint` in the row
+        // did not come from the controller, and the proxy must never be
+        // pointed at it.
+        let upstream_endpoint = Some(default_endpoint_for_provider(&provider_key).to_string());
 
         let key = auth
             .get("OPENAI_API_KEY")
@@ -2939,7 +2934,8 @@ fn materialize_internal_credential(
         account_id,
         openai_api_key: None,
         provider,
-        upstream_endpoint,
+        // A ChatGPT login always goes to the proxy's own ChatGPT endpoint.
+        upstream_endpoint: None,
         default_model,
         pinned_model: None,
         auth_mode,
@@ -3679,6 +3675,49 @@ mod credential_lease_contract_tests {
             wire.get("renewalAuthority").and_then(Value::as_str),
             Some("controller")
         );
+    }
+
+    #[test]
+    fn a_lease_never_names_an_endpoint_stored_in_the_row() {
+        // Only the controller writes credential rows, but a row changed some
+        // other way must still not point the proxy anywhere else.
+        for (provider, expected) in [
+            ("openai", "https://api.openai.com/v1/responses"),
+            ("deepseek", "https://api.deepseek.com/v1/chat/completions"),
+            (
+                "zai",
+                "https://api.z.ai/api/coding/paas/v4/chat/completions",
+            ),
+            (
+                "gemini",
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            ),
+        ] {
+            let response = materialize_internal_credential(
+                Uuid::new_v4(),
+                CREDENTIAL_KIND_OPENAI_API_KEY,
+                &json!({ "OPENAI_API_KEY": "test-api-key" }),
+                &json!({
+                    "provider": provider,
+                    "upstream_endpoint": "http://169.254.169.254/latest/meta-data/"
+                }),
+            )
+            .expect("credential should materialize");
+            assert_eq!(
+                response.upstream_endpoint.as_deref(),
+                Some(expected),
+                "{provider}"
+            );
+        }
+
+        let response = materialize_internal_credential(
+            Uuid::new_v4(),
+            CREDENTIAL_KIND_CODEX_AUTH_JSON,
+            &json!({ "tokens": { "access_token": "test-access-token" } }),
+            &json!({ "provider": "openai", "upstream_endpoint": "https://elsewhere.example/" }),
+        )
+        .expect("credential should materialize");
+        assert_eq!(response.upstream_endpoint, None);
     }
 }
 

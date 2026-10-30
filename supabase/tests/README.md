@@ -48,11 +48,10 @@ transaction (`tests_ai_metering_schema`).
 
 The run also executes `reserved_managed_credential_id.sql`. It checks that
 `user_credentials_id_not_reserved` exists and, as migrated, is not validated: it ships
-`NOT VALID`, and validating it is left to a later migration. As the signed-in role,
-through the `user_credentials` row-level security policy, it checks that the owner
-still inserts and updates ordinary credential rows and that the managed credential id
-is refused by the check on insert, upsert and renumbering; the table owner is refused
-too. For reference when the check is validated, it also shows, for a row stored under
+`NOT VALID`, and validating it is left to a later migration. As the table owner, the
+way the controller writes credentials, it checks that ordinary credential rows still
+insert and update and that the managed credential id is refused by the check on
+insert, upsert and renumbering. For reference when the check is validated, it also shows, for a row stored under
 that id before the check existed, that revoking it or clearing its default flag is
 refused and VALIDATE fails, and that deleting the row (which clears agent references
 to it) lets the check validate. The fixture runs in one transaction and rolls back.
@@ -62,6 +61,27 @@ owner, it checks that `user_agents_credential_owner` refuses an agent pinned to 
 credential its owner does not hold, on insert, on update and when the agent moves to
 another user, while owners still pin, switch and clear their own credentials and
 deleting a credential still clears pins to it. It also rolls back.
+
+`user_credential_client_writes.sql` checks that only the controller writes credential
+rows; the controller suite runs it too (`tests_user_credential_policies`). As the
+signed-in owner, it reads a credential but cannot insert one, change one (its endpoint
+metadata or its revocation) or delete one: first with the privileges as migrated, then
+with the writes granted back, where the select-only `user credentials self` policy
+refuses them on its own. It rolls back.
+
+`agent_job_credential_removal.sql` checks that a job on a person's own AI never becomes a
+platform job when its credential row is deleted; the controller suite runs it too
+(`tests_agent_job_credential_removal`). As the table owner, it deletes a credential row
+directly, deletes a person with theirs, and clears a job's credential by hand, and checks
+that `agent_jobs_fail_on_credential_removal` fails each AI job still queued or leased on it
+(`credential_removed_at` set, the lease ended, its unacknowledged input rejected), so the
+only live AI job left without a credential is a real platform job. A finished job only
+loses the credential, a terminal command stays queued, jobs on other credentials and
+platform jobs are untouched, an update that ends the job itself keeps its own outcome, and
+the browser roles cannot execute the trigger function. The trigger folds an intent's case
+as the controller does, ASCII only: in a UTF-8 database, under `pg_c_utf8`, which lowers
+`İ` to `i` as libc collations do, `TERMİNAL_COMMAND` still fails and `Terminal_Command`
+stays queued. It rolls back.
 
 `deleted_space_access.sql` checks that a deleted space (`projects.status = 'deleted'`) is hidden
 from direct Supabase reads. As the signed-in role, through the row-level security policies, the

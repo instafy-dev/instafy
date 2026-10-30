@@ -251,11 +251,16 @@ runtimes as managed, and that chat turn drops to `medium` even when the lane is 
 proxy key. Set `MANAGED_AI_CHAT_REASONING_EFFORT` empty or `off` there to keep `high`.
 
 BYOC users connect an API key or sanitized `auth.json` through the credential flow. Neither
-credential path belongs in a Vite environment or browser bundle. `MANAGED_AI_STARTUP_CHECK=true`
-makes the controller fail closed when its own proxy can serve neither path; it does not probe
-per-runtime sidecars. When the check passes, the controller logs how that proxy serves managed
-turns, from the `platformLane` object on the proxy's `/healthz` (see the proxy README): the
-controller's lease or the proxy's static credentials, with their kind and pinned model.
+credential path belongs in a Vite environment or browser bundle. Only the controller writes
+credential rows: a signed-in person reads their own but cannot change or delete one directly, and
+a lease always sends an API key to its provider's own endpoint, never to one stored in the row.
+Deleting a credential row, or the person who owns it, fails the AI jobs still queued or running
+on it, with a reason in their conversation; they never move to the managed lane.
+`MANAGED_AI_STARTUP_CHECK=true` makes the controller fail closed when its own proxy can serve
+neither path; it does not probe per-runtime sidecars. When the check passes, the controller logs
+how that proxy serves managed turns, from the `platformLane` object on the proxy's `/healthz` (see
+the proxy README): the controller's lease or the proxy's static credentials, with their kind and
+pinned model.
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 

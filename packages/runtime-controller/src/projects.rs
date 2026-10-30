@@ -369,6 +369,19 @@ pub(crate) async fn ensure_project_not_deleted(
     }
 }
 
+/// A sandbox the controller provisioned: stored as `sandbox`, with no owner.
+/// Only the service role creates sandbox projects, and a space a person
+/// creates always has an owner, so this is read from the row, never from a
+/// request. Its session id is the way in (`resolve_effective_project_access`)
+/// and its team gets the one-time seed (`credits::ensure_sandbox_credit_seed`).
+/// Two kinds of row match as well without having been provisioned: a sandbox
+/// an anonymous caller bootstrapped through dispatch before only the service
+/// role could, and a sandbox whose owner was deleted, since deleting a user
+/// clears `owner_user_id`.
+pub(crate) fn is_provisioned_sandbox(project: &ProjectRecord) -> bool {
+    project.owner_user_id.is_none() && project.project_type.as_deref() == Some("sandbox")
+}
+
 pub(crate) async fn resolve_effective_project_access(
     transaction: &tokio_postgres::Transaction<'_>,
     project: &ProjectRecord,
@@ -399,14 +412,15 @@ pub(crate) async fn resolve_effective_project_access(
         ));
     }
 
-    if let Some(project_type) = project.project_type.as_deref() {
-        if project_type == "sandbox" {
-            if let (Some(project_session), Some(request_session)) =
-                (project.sandbox_session_id, session_id)
-            {
-                if project_session == request_session {
-                    return Ok(ProjectAccess::builder());
-                }
+    // A sandbox the controller provisions has no owner, and its session id is
+    // the way in. A space with an owner was made by a person, so its session
+    // id grants nothing and access follows the owner and members below.
+    if is_provisioned_sandbox(project) {
+        if let (Some(project_session), Some(request_session)) =
+            (project.sandbox_session_id, session_id)
+        {
+            if project_session == request_session {
+                return Ok(ProjectAccess::builder());
             }
         }
     }
@@ -6316,6 +6330,23 @@ async fn create_org_project(
         ));
     }
 
+    // A sandbox's session id lets its holder in without signing in
+    // (`resolve_effective_project_access`), so only the service role
+    // provisions one.
+    let requests_sandbox = body
+        .project_type
+        .as_deref()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("sandbox"))
+        || body
+            .sandbox_session_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    if requests_sandbox && !context.is_service_role {
+        return Err(forbidden(
+            "Only service-role requests can create sandbox projects",
+        ));
+    }
+
     let mut connection = state
         .pool
         .get()
@@ -6491,11 +6522,12 @@ pub(crate) async fn upsert_org(
 mod project_access_tests {
     use super::ProjectUpdateRequest;
     use super::{
-        invitation_accept_urls, load_project_memory_template_content, OrgInvitationResponse,
-        OrgInvitationSummary, ProjectAccess, ProjectRole, CLAUDE_DOC_TEMPLATE,
-        DIAGNOSTICS_OPENAI_TEMPLATE, DIAGNOSTICS_TEMPLATE, GROUP_PARTICIPATION_TEMPLATE,
-        INTERACTIVE_ARTIFACTS_TEMPLATE, PROJECT_MEMORY_TEMPLATE_FILES,
-        RESEARCH_TEAM_RESEARCHER_TEMPLATE, RESEARCH_TEAM_TEMPLATE, SPACE_REVIEW_TEMPLATE,
+        invitation_accept_urls, is_provisioned_sandbox, load_project_memory_template_content,
+        OrgInvitationResponse, OrgInvitationSummary, ProjectAccess, ProjectRecord, ProjectRole,
+        CLAUDE_DOC_TEMPLATE, DIAGNOSTICS_OPENAI_TEMPLATE, DIAGNOSTICS_TEMPLATE,
+        GROUP_PARTICIPATION_TEMPLATE, INTERACTIVE_ARTIFACTS_TEMPLATE,
+        PROJECT_MEMORY_TEMPLATE_FILES, RESEARCH_TEAM_RESEARCHER_TEMPLATE, RESEARCH_TEAM_TEMPLATE,
+        SPACE_REVIEW_TEMPLATE,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -6640,6 +6672,33 @@ mod project_access_tests {
         assert_eq!(merged.role, ProjectRole::Admin);
         assert!(merged.can_share);
         assert!(merged.can_manage);
+    }
+
+    #[test]
+    fn only_an_ownerless_stored_sandbox_is_provisioned() {
+        let project = |project_type: &str, owner_user_id: Option<Uuid>, session: Option<Uuid>| {
+            ProjectRecord {
+                id: Uuid::new_v4(),
+                org_id: None,
+                name: None,
+                sandbox_session_id: session,
+                project_type: Some(project_type.to_string()),
+                owner_user_id,
+                _status: Some("active".to_string()),
+            }
+        };
+        let person = Some(Uuid::new_v4());
+        let session = Some(Uuid::new_v4());
+        assert!(is_provisioned_sandbox(&project("sandbox", None, session)));
+        assert!(is_provisioned_sandbox(&project("sandbox", None, None)));
+        assert!(!is_provisioned_sandbox(&project(
+            "sandbox", person, session
+        )));
+        assert!(!is_provisioned_sandbox(&project("customer", None, session)));
+        assert!(!is_provisioned_sandbox(&project(
+            "customer", person, session
+        )));
+        assert!(!is_provisioned_sandbox(&project("demo", None, session)));
     }
 
     #[test]

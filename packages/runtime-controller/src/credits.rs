@@ -19,10 +19,9 @@ use tokio_postgres::Transaction;
 use tracing::{field, info, instrument};
 use uuid::Uuid;
 
-use crate::auth::{authenticate_request, RequestContext};
-use crate::dispatch::DispatchPromptNormalized;
+use crate::auth::authenticate_request;
 use crate::model_defaults::DEFAULT_MANAGED_AI_PROVIDER_ID;
-use crate::projects::{ensure_project_org, load_org_project_ids};
+use crate::projects::{ensure_project_org, is_provisioned_sandbox, load_org_project_ids};
 use crate::state::{publish_project_signal, EventHub, SignalAdmission};
 use crate::{
     bad_request, ensure_project_access, internal_error, load_project_record,
@@ -1144,18 +1143,20 @@ pub(crate) fn extract_provider_conversation_state(
         .cloned()
 }
 
+/// Grants the team of a sandbox the controller provisioned its one-time seed,
+/// once per team and only at a balance of zero or less. Whether the space is
+/// one is read from its row (`is_provisioned_sandbox`): a request's
+/// `metadata.project_type`, a session id or the caller grants nothing.
 pub(crate) async fn ensure_sandbox_credit_seed(
     transaction: &Transaction<'_>,
     config: &AppConfig,
     project: &ProjectRecord,
-    request: &DispatchPromptNormalized,
-    context: &RequestContext,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     if config.sandbox_credit_seed_amount <= 0 {
         return Ok(());
     }
 
-    if !should_seed_project(project, request.project_type_hint.as_deref(), context) {
+    if !is_provisioned_sandbox(project) {
         return Ok(());
     }
 
@@ -1169,6 +1170,25 @@ pub(crate) async fn ensure_sandbox_credit_seed(
         .org_id
         .ok_or_else(|| internal_error("project missing organization"))?;
 
+    // Lock the team's balance row before looking for a seed, as every ledger
+    // insert does. Concurrent dispatches would otherwise each find no seed
+    // and an empty balance, and each grant one; a second one now waits here
+    // and then finds the first one's seed.
+    transaction
+        .execute(
+            "insert into org_credit_balances (org_id) values ($1) on conflict (org_id) do nothing",
+            &[&org_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to ensure credit balance row: {error}")))?;
+    let balance_row = transaction
+        .query_one(
+            "select balance, credit_limit from org_credit_balances where org_id = $1 for update",
+            &[&org_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to lock credit balance row: {error}")))?;
+
     let existing_seed = transaction
         .query_opt(
             "select id from org_credit_ledger where org_id = $1 and reason = 'sandbox_seed' limit 1",
@@ -1181,29 +1201,16 @@ pub(crate) async fn ensure_sandbox_credit_seed(
         return Ok(());
     }
 
-    let balance_row = transaction
-        .query_opt(
-            "select balance, credit_limit from org_credit_balances where org_id = $1",
-            &[&org_id],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!("failed to query project credit balance: {error}"))
-        })?;
-
-    let (current_balance, current_limit) = match balance_row {
-        Some(row) => {
-            let balance: Option<i32> = row.get("balance");
-            let limit: Option<i32> = row.get("credit_limit");
-            (balance.unwrap_or(0), limit.unwrap_or(0))
-        }
-        None => (0, 0),
-    };
+    let current_balance: i32 = balance_row.get("balance");
+    let current_limit: i32 = balance_row.get("credit_limit");
 
     if current_balance > 0 {
         return Ok(());
     }
 
+    // The space's session id is not recorded: it is the way into a provisioned
+    // sandbox, and every reader of the team's ledger sees this row. The row's
+    // project_id already names the space.
     let mut metadata_map = JsonMap::new();
     metadata_map.insert(
         "source".to_string(),
@@ -1213,12 +1220,6 @@ pub(crate) async fn ensure_sandbox_credit_seed(
         metadata_map.insert(
             "project_type".to_string(),
             JsonValue::String(project_type.clone()),
-        );
-    }
-    if let Some(session_id) = project_with_org.sandbox_session_id {
-        metadata_map.insert(
-            "sandbox_session_id".to_string(),
-            JsonValue::String(session_id.to_string()),
         );
     }
     let metadata_json = JsonValue::Object(metadata_map);
@@ -1251,27 +1252,6 @@ pub(crate) async fn ensure_sandbox_credit_seed(
     }
 
     Ok(())
-}
-
-fn should_seed_project(
-    project: &ProjectRecord,
-    project_type_hint: Option<&str>,
-    context: &RequestContext,
-) -> bool {
-    let mut type_hints: Vec<&str> = Vec::new();
-    if let Some(hint) = project_type_hint {
-        type_hints.push(hint);
-    }
-    if let Some(existing) = project.project_type.as_deref() {
-        type_hints.push(existing);
-    }
-    let is_sandbox_type = type_hints
-        .iter()
-        .map(|value| value.trim().to_lowercase())
-        .any(|value| value == "sandbox" || value == "demo");
-    let has_sandbox_session = project.sandbox_session_id.is_some();
-    let is_anonymous = context.user_id.is_none() && project.owner_user_id.is_none();
-    is_sandbox_type || has_sandbox_session || is_anonymous
 }
 
 fn augment_metadata(
