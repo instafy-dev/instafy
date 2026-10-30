@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RunRecord } from "../../../types";
 import {
   browserSessionPageIsPlaceholder,
@@ -55,6 +55,30 @@ function remember(tab: RememberedTab): void {
     if (oldest === undefined) break;
     rememberedTabs.delete(oldest);
   }
+}
+
+/**
+ * The id a chat's tab is kept under while the chat has none of its own yet
+ * (nothing sent): its Browser view still shows a tab of its own, never the
+ * tab another chat left in front. Once its first message gives it an id, that
+ * tab stays its tab (`useChatBrowserTab`'s `newChatId`).
+ */
+export function newChatBrowserTabId(localConversationId: string): string {
+  return `new-chat:${localConversationId}`;
+}
+
+/** Keeps the tabs remembered for a new chat (`newChatId`) under the id it has now. */
+function keepNewChatTabs(scope: ChatBrowserTabScope, newChatId: string): boolean {
+  const browser = browserKey(scope);
+  if (!browser || !scope.conversationId) return false;
+  let kept = false;
+  for (const [entry, tab] of [...rememberedTabs.entries()]) {
+    if (tab.browser !== browser || tab.conversationId !== newChatId) continue;
+    rememberedTabs.delete(entry);
+    remember({ ...tab, conversationId: scope.conversationId });
+    kept = true;
+  }
+  return kept;
 }
 
 /** Empties what this page remembers, as a reload would. Tests only. */
@@ -385,6 +409,12 @@ export function useChatBrowserTab(input: {
   canOpenPage: boolean | null;
   /** Opens a blank tab behind the one on screen; null when it cannot. */
   openPage: () => Promise<string | null>;
+  /**
+   * The id this chat's tab was kept under before the chat had one
+   * (`newChatBrowserTabId`): once `scope` names the chat's own id, that tab
+   * stays its tab.
+   */
+  newChatId?: string | null;
 }) {
   const latest = useRef(input);
   latest.current = input;
@@ -392,6 +422,12 @@ export function useChatBrowserTab(input: {
   const key = scopeKey(scope);
   // Bumped when a tab is chosen for a chat, so `tab` is read again.
   const [chosenVersion, setChosenVersion] = useState(0);
+  const newChatId = input.newChatId ?? null;
+  useEffect(() => {
+    const current = latest.current.scope;
+    if (!newChatId || !current.conversationId || current.conversationId === newChatId) return;
+    if (keepNewChatTabs(current, newChatId)) setChosenVersion((version) => version + 1);
+  }, [key, newChatId]);
   const tab = useMemo(
     () => chatBrowserTab({ scope, runs, pages }),
     // `scope` is read through its key; `chosenVersion` stands for the memory.

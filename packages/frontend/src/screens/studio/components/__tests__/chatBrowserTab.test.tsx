@@ -13,6 +13,7 @@ import {
   forgetChatBrowserTabsForTests,
   lastChatBrowserTab,
   browserTurnUnderWay,
+  newChatBrowserTabId,
   nextChatBrowserViewStep,
   unusedBlankBrowserTab,
   useChatBrowserTab,
@@ -152,6 +153,26 @@ describe("useChatBrowserTab", () => {
     await act(async () => { target = await latest!.resolveForTurn(); });
     expect(props.openPage).toHaveBeenCalledOnce();
     expect(target).toMatchObject({ id: "PAGE-NEW", url: "about:blank" });
+  });
+
+  // A chat with nothing sent yet: its Browser view shows a tab of its own,
+  // kept under its local id, never the page another chat left in front. Its
+  // first message gives it an id, and the page the person reached there stays
+  // the chat's tab.
+  it("keeps a new chat's own tab once its first message gives it an id", async () => {
+    const newChat = newChatBrowserTabId("local-chat-1");
+    const props = await render({ scope: { ...scope(VACUUM_CHAT), conversationId: newChat }, newChatId: newChat });
+    expect(latest!.tab).toBeNull();
+    await act(async () => { await latest!.resolveForTurn(); });
+    expect(props.openPage).toHaveBeenCalledOnce();
+    const browsed = page("PAGE-NEW", "https://www.roborock.com/");
+    await render({ ...props, pages: [LISBON, browsed] });
+    expect(latest!.tab?.id).toBe("PAGE-NEW");
+    await render({ ...props, scope: scope(VACUUM_CHAT), pages: [LISBON, browsed] });
+    expect(latest!.tab?.id).toBe("PAGE-NEW");
+    // It is no other chat's.
+    await render({ ...props, scope: scope(MAP_CHAT), newChatId: null, pages: [LISBON, browsed] });
+    expect(latest!.tab?.id).toBe(LISBON.id);
   });
 
   it("keeps a chat's later turns in the tab its last turn used", async () => {

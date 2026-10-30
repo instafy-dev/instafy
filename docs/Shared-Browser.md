@@ -618,7 +618,9 @@ read, so that page would go into this chat's reply and Details):
   chat's tab comes forward again; the chat's own turn leaves the browser where
   it ends (its page, or a tab the person took over, which is the chat's tab
   from then on). A chat with no tab yet gets its own blank one (as for its
-  first browser turn), once while the view is on screen. While a turn of the
+  first browser turn), once while the view is on screen; a chat with nothing
+  sent yet too, and that tab stays its tab once its first message gives it an
+  id. While a turn of the
   chat is on its way and its page is blank or not in front yet, the stage says
   "Octo is starting…" (or where Octo is going). On "Reconnecting…" the stage
   keeps only a still of the chat's page in front, never the last picture the

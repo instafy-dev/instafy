@@ -206,6 +206,7 @@ import {
   CHAT_BROWSER_VIEW_START,
   browserTurnUnderWay,
   chatBrowserTarget,
+  newChatBrowserTabId,
   nextChatBrowserViewStep,
   useChatBrowserTab,
   type ChatBrowserViewState,
@@ -1871,17 +1872,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // This chat's own tab in Instafy's browser (chatBrowserTab.ts): its browser
   // turns go there, never to a page another chat left on screen.
   const projectRuns = runRecords;
+  // A chat with nothing sent yet has no id: its tab is kept under its local
+  // one until then, so its Browser view shows a tab of its own too.
+  const newChatBrowserId = activeConversationId ? newChatBrowserTabId(activeConversationId) : null;
+  const chatBrowserScopeId = activeConversationControllerId ?? newChatBrowserId;
   const chatBrowserTab = useChatBrowserTab({
     scope: {
       userId: currentUserId,
       projectId: activeProjectId ?? null,
-      conversationId: activeConversationControllerId,
+      conversationId: chatBrowserScopeId,
       runtimeId: resolvedBrowserRuntimeId,
     },
     runs: projectRuns,
     pages: sharedBrowserChromePages,
     canOpenPage: sharedBrowserCanOpenPage,
     openPage: openSharedBrowserPage,
+    newChatId: newChatBrowserId,
   });
   const chooseChatBrowserTab = chatBrowserTab.choose;
   const resolveChatBrowserTab = chatBrowserTab.resolveForTurn;
@@ -1930,7 +1936,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     const { state, step } = nextChatBrowserViewStep({
       onScreen: browserVisible && browserTransport === "shared",
       free: sharedBrowserPresenceKnown && !sharedBrowserRemoteController,
-      chatId: activeConversationControllerId,
+      chatId: chatBrowserScopeId,
       tab: chatBrowserTabId ? { id: chatBrowserTabId, isActive: chatBrowserTabActive } : null,
       canOpenTab: canWriteProject && sharedBrowserChromeResolved && sharedBrowserCanOpenPage !== null,
       chatTurnUnderWay: chatBrowserTurnUnderWay,
@@ -1941,11 +1947,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (step === "open-blank-tab") void resolveChatBrowserTab().catch(() => null);
     else if (step === "focus" && chatBrowserTabId) void focusSharedBrowserPageQuietly(chatBrowserTabId).catch(() => false);
   }, [
-    activeConversationControllerId,
     anyBrowserTurnUnderWay,
     browserTransport,
     browserVisible,
     canWriteProject,
+    chatBrowserScopeId,
     chatBrowserTabActive,
     chatBrowserTurnUnderWay,
     chatBrowserTabId,
