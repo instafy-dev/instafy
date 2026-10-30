@@ -4280,8 +4280,8 @@ fn a_snapshot_lists_only_what_a_person_can_see_and_actions_index_the_same_list()
 }
 
 /// A sign-in page names its fields and says to pause on them with
-/// `request_human_input` (30 Oct drive 6: a task that went on past a sign-in
-/// ended the turn with "sign in yourself, then tell me", twice). The pause on
+/// `request_human_input` (a task that went on past a sign-in ended the turn
+/// with "sign in yourself, then tell me", twice). The pause on
 /// those fields ends the turn for the person; Octo still never types into
 /// them. A page without sign-in fields, and Octo's own tabs, which are for
 /// reading, say nothing of it.

@@ -1042,7 +1042,7 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
 }
 
 /// A sign-in the person asked for, or one their task goes on past, is opened and paused on, so the task goes on after
-/// it (30 Oct drive 6: "star the repository" ended twice with "use its Sign in control … tell me when you're ready").
+/// it (a task to star a repository ended twice with "use its Sign in control … tell me when you're ready").
 /// The skill's list of pages that end a read no longer covers it, the turn that writes the card's task knows the
 /// browser turn pauses there, and the browser skill's sign-in rules stay inside the part a browser turn carries. The
 /// reply no longer says where the browser goes (the card says it), and still never says a page opened before a tool
