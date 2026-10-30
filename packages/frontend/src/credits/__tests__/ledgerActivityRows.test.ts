@@ -22,6 +22,21 @@ describe("ledgerActivityRows", () => {
     ]);
   });
 
+  // The ledger is the team's: two spaces' chats can share a name ("Plan 3
+  // days in Lisbon"), so a turn from another space names that space.
+  it("names the space of a turn from a space other than the open one", () => {
+    const rows = ledgerActivityRows([
+      { ...entry("managed_ai_prompt", -1, "2026-10-29T10:00:00Z", "p1", "Plan 3 days in Lisbon"), spaceName: "Last week's space" },
+      { ...entry("managed_ai_prompt", -2, "2026-10-29T09:00:00Z", "p2", "Plan 3 days in Lisbon"), spaceName: "" },
+      entry("managed_ai_prompt", -3, "2026-10-29T08:00:00Z", "p3", "Plan 3 days in Lisbon"),
+    ], label);
+    expect(rows.map(({ label, space }) => [label, space])).toEqual([
+      ["Plan 3 days in Lisbon", "Last week's space"],
+      ["Plan 3 days in Lisbon", "Untitled space"],
+      ["Plan 3 days in Lisbon", null],
+    ]);
+  });
+
   it("leaves out a turn that cost nothing in the end, and names a turn without a chat plainly", () => {
     const rows = ledgerActivityRows([
       entry("managed_ai_refund", 1, "2026-10-29T10:08:17Z", "p2", "Compare vacuums"),

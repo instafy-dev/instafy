@@ -509,7 +509,7 @@ describe("ChatComposerSurface", () => {
     expect(container.textContent).not.toContain("Results for Belém Tower");
   });
 
-  it("names a pending new tab as one removable token in the context row", async () => {
+  it("names a pending new tab as one removable token in the composer's own row", async () => {
     const onCancel = vi.fn();
     const onSubmit = vi.fn((event) => event.preventDefault());
     const props = createProps({ onSubmit, replyContext: <div data-testid="reply-context" /> });
@@ -517,7 +517,8 @@ describe("ChatComposerSurface", () => {
     const token = container.querySelector<HTMLElement>('[data-testid="composer-new-tab-token"]')!;
     expect(token).not.toBeNull();
     expect(token.textContent).toBe("New tab for the next message");
-    // It sits with the reply recipient, above the input, inside the form.
+    // It sits in the composer's own row, after the reply recipient and above the input.
+    expect(container.querySelector('[data-testid="chat-composer-joined-toolbar"]')!.contains(token)).toBe(true);
     const form = container.querySelector("form")!;
     expect(form.contains(token)).toBe(true);
     expect(container.querySelector('[data-testid="reply-context"]')!.compareDocumentPosition(token))
@@ -546,7 +547,10 @@ describe("ChatComposerSurface", () => {
     const token = container.querySelector<HTMLElement>('[data-testid="composer-browser-follow-up-token"]')!;
     expect(token).not.toBeNull();
     expect(token.textContent).toBe("Goes to Instafy's browser");
-    expect(container.querySelector("form")!.contains(token)).toBe(true);
+    // A local test: above the composer it floated over the newest turn's header
+    // until the person scrolled. It is part of the composer itself now.
+    expect(container.querySelector('[data-testid="chat-composer-surface"]')!.contains(token)).toBe(true);
+    expect(container.querySelector('[data-testid="chat-composer-joined-toolbar"]')!.contains(token)).toBe(true);
     expect(token.compareDocumentPosition(container.querySelector('[data-testid="chat-input"]')!))
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     const keep = token.querySelector<HTMLButtonElement>('button[aria-label="Don\'t send it to the browser"]')!;

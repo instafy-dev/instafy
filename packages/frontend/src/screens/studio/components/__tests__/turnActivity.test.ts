@@ -225,7 +225,8 @@ describe("summarizeTurnActivity", () => {
       command(PREVIEW_OPEN, { command: "bash -lc 'instafy preview open --port 4173'" }),
     ];
     const activity = summarize(messages);
-    expect(activity.summary).toBe("Built the map, looked up 14 places, read 6 pages");
+    // What it made, then the step that answered (the pages it read last), then the biggest other.
+    expect(activity.summary).toBe("Built the map, read 6 pages, looked up 14 places");
     expect(activity.live).toBeNull();
     expect(activity.stepCount).toBe(17);
   });
@@ -282,7 +283,7 @@ describe("summarizeTurnActivity", () => {
   it("uses the some form for a loop", () => {
     const validateEntry = Object.fromEntries(Object.entries(VALIDATE).filter(([key]) => key !== "v" && key !== "also"));
     const loop = command({ ...ADD_POINT, count: null, also: [validateEntry] });
-    expect(summarize([loop, command(WEB_READ)]).summary).toBe("Built the map, looked up places, read 6 pages");
+    expect(summarize([loop, command(WEB_READ)]).summary).toBe("Built the map, read 6 pages, looked up places");
   });
 
   it("counts an outcome only when its command succeeded", () => {
@@ -395,8 +396,8 @@ describe("summarizeTurnActivity", () => {
       command(PREVIEW_OPEN),
     ];
     // No `uw validate` ran, so nothing says the map was built: the preview it
-    // opened leads, then the two biggest things it did.
-    expect(summarize(messages).summary).toBe("Opened a preview, looked up transit, found places to stay");
+    // opened leads, then the last thing it did and the biggest other.
+    expect(summarize(messages).summary).toBe("Opened a preview, looked up a place, found places to stay");
   });
 
   // A local test: "uw geocode Baixa; uw stay …" read "Working on the map".
@@ -406,7 +407,8 @@ describe("summarizeTurnActivity", () => {
     const running = summarize([command(chain, { status: "in_progress" })], "running");
     expect(running.live).toBe("Finding places to stay…");
     const label = (activity: unknown, status = "completed", exitCode: number | null = 0) => {
-      const item = summarize([command(activity, { status, exitCode })]).details[0];
+      const phase = status === "in_progress" ? "running" : "completed";
+      const item = summarize([command(activity, { status, exitCode })], phase).details[0];
       return item.kind === "step" ? item.step.label : null;
     };
     expect(label(chain)).toBe("Found places to stay");
@@ -419,13 +421,13 @@ describe("summarizeTurnActivity", () => {
   });
 
   it("reads a finished row in the past tense, and an unlabelled one in plain words", () => {
-    const label = (message: ChatMessage) => {
-      const item = summarize([message]).details[0];
+    const label = (message: ChatMessage, phase: TurnActivityPhase = "completed") => {
+      const item = summarize([message], phase).details[0];
       return item.kind === "step" ? item.step.label : null;
     };
     expect(label(command(PREVIEW_OPEN))).toBe("Opened a preview");
     expect(label(command(null))).toBe("Ran a command");
-    expect(label(command(null, { status: "in_progress", exitCode: null }))).toBe("Running a command");
+    expect(label(command(null, { status: "in_progress", exitCode: null }), "running")).toBe("Running a command");
     expect(label(command(null, { status: "failed", exitCode: 1 }))).toBe("Tried running a command");
     expect(label(step("mcp_tool_call", null, { server: "files", tool: "list" }))).toBe("Used a tool");
     expect(label(step("mcp_tool_call", { v: 1, key: "browser/use", role: "content", live: "Using the browser", done: "used the browser", count: 1, also: [] }, { status: "failed" }))).toBe(
@@ -444,7 +446,7 @@ describe("summarizeTurnActivity", () => {
     }
   });
 
-  it("names the two biggest content groups in the order they happened", () => {
+  it("leads with the step that answered, then the biggest other thing the turn did", () => {
     const search = {
       v: 1,
       key: "builtin/web-search",
@@ -459,7 +461,7 @@ describe("summarizeTurnActivity", () => {
       command(WEB_READ),
       ...Array.from({ length: 3 }, () => command(ADD_POINT)),
     ];
-    expect(summarize(messages).summary).toBe("Read 6 pages, looked up 3 places");
+    expect(summarize(messages).summary).toBe("Looked up 3 places, read 6 pages");
   });
 
   it("follows the running step, then says Thinking between steps", () => {
@@ -568,6 +570,108 @@ describe("summarizeTurnActivity", () => {
   });
 });
 
+// The map turn of a local test ended while `uw stay` still ran: its line read
+// "Looked up transit, found places to stay" with no stay found, its rows kept
+// spinning "Finding places to stay" after the turn, and the line went back to
+// "Finding places to stay…" for a moment after "Saving your changes…".
+describe("a step its turn ended before", () => {
+  const STAY = {
+    v: 1,
+    key: "pack/interactive-map/uw/stay",
+    role: "content",
+    live: "Finding places to stay",
+    done: "found places to stay",
+    count: 1,
+    also: [],
+  };
+  const SAVING = {
+    v: 1,
+    key: "runtime/save",
+    role: "quiet",
+    live: "Saving your changes",
+    count: 1,
+    also: [],
+  };
+
+  it("never counts, whatever its label's when says", () => {
+    const messages = [command(ADD_POINT), command(STAY, { status: "in_progress", exitCode: null })];
+    expect(summarize(messages).summary).toBe("Looked up a place");
+    expect(summarize([command(STAY, { status: "in_progress", exitCode: null })]).summary).toBe("Ran a command");
+    expect(summarize(messages, "cancelled").summary).toBe("Stopped · looked up a place");
+  });
+
+  it("says in Details what it did not finish, once the turn has ended", () => {
+    const running = command(STAY, { status: "in_progress", exitCode: null });
+    for (const phase of ["completed", "failed", "cancelled"] as const) {
+      const item = summarize([running], phase).details[0];
+      expect(item.kind === "step" && [item.step.state, item.step.label], phase).toEqual([
+        "unfinished",
+        "Didn't finish finding places to stay",
+      ]);
+    }
+    const unlabelled = summarize([command(null, { status: "in_progress", exitCode: null })]).details[0];
+    expect(unlabelled.kind === "step" && unlabelled.step.label).toBe("Didn't finish running a command");
+    // While the turn runs it is running.
+    const live = summarize([running], "running").details[0];
+    expect(live.kind === "step" && [live.step.state, live.step.label]).toEqual(["running", "Finding places to stay"]);
+  });
+
+  it("never names the line again once the turn's save came after it", () => {
+    const stay = command(STAY, { status: "in_progress", exitCode: null });
+    const saving = note("Syncing workspace changes…", "status", SAVING);
+    const applying = note("Applying changes to workspace…", "status");
+    expect(summarize([command(ADD_POINT), stay], "running").live).toBe("Finding places to stay…");
+    expect(summarize([command(ADD_POINT), stay, saving], "running").live).toBe("Saving your changes…");
+    expect(summarize([command(ADD_POINT), stay, saving, applying], "running").live).toBe("Thinking…");
+    // A step started after the save names the line as usual.
+    const later = command(WEB_READ, { status: "in_progress", exitCode: null });
+    expect(summarize([stay, saving, applying, later], "running").live).toBe("Reading pages…");
+  });
+
+  // A retry in the middle of a turn is not its end: a lookup still running
+  // while the model is asked again names the line once the retry is over.
+  it("names the line again after Instafy tried the model again mid-turn", () => {
+    const stay = command(STAY, { status: "in_progress", exitCode: null });
+    const retrying = note("Retrying: unexpected status 502", "status", {
+      v: 1,
+      key: "runtime/retry",
+      role: "quiet",
+      live: "Trying again",
+      count: 1,
+      also: [],
+    });
+    expect(summarize([command(ADD_POINT), stay, retrying], "running").live).toBe("Trying again…");
+    expect(
+      summarize([command(ADD_POINT), stay, retrying, note("**Picking the hotels**", "reasoning")], "running").live,
+    ).toBe("Finding places to stay…");
+  });
+});
+
+// A turn whose only commands looked around the workspace (`pwd`, `rg --files`),
+// as the runtime marks them. A local test: two turns that only posted a browser
+// card read "Ran a command".
+describe("a look around the workspace", () => {
+  const LOOK = { v: 1, key: "builtin/plumbing", role: "quiet", live: "Running a command", done: "ran a command", count: 1, also: [] };
+
+  it("leaves no line on a turn that did nothing else", () => {
+    const pwd = command(LOOK, { command: "bash -lc pwd" });
+    expect(summarize([pwd]).summary).toBeNull();
+    expect(summarize([pwd, command(LOOK, { command: "bash -lc 'rg --files'" })]).summary).toBeNull();
+    // Anything else it ran is counted as before.
+    expect(summarize([pwd, command(null, { command: "bash -lc 'kill 4321'" })]).summary).toBe("Ran a command");
+    expect(summarize([pwd, command(ADD_POINT)]).summary).toBe("Looked up a place");
+  });
+
+  it("reads in Details and while it runs as any unlabelled command", () => {
+    const item = summarize([command(LOOK)]).details[0];
+    expect(item.kind === "step" && item.step.label).toBe("Ran a command");
+    expect(summarize([command(LOOK, { status: "in_progress", exitCode: null })], "running").live).toBe("Working…");
+    // Only alone: a step that also did something is named by what it did.
+    const chained = command({ ...LOOK, also: [entryOf(ADD_POINT)] });
+    expect(summarize([chained]).summary).toBe("Looked up a place");
+  });
+});
+
 // Browser steps, from the runtime's browser table (activity_labels.rs).
 // Opening, reading and searching count only for a step that succeeded.
 const BROWSER_OPEN = {
@@ -605,6 +709,7 @@ function browserStep(
   );
 }
 
+const BROWSER_USE_TABS = { key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" };
 const PAGE_A = "aaaaaaaaaaaaaaaa";
 const PAGE_B = "bbbbbbbbbbbbbbbb";
 
@@ -653,7 +758,30 @@ describe("browser steps", () => {
       browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" }),
       browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_B, step: "snapshot" }),
     ];
-    expect(summarize(twoSites).summary).toBe("Opened carris.pt, read a page on visitlisboa.com");
+    // The page that answered leads.
+    expect(summarize(twoSites).summary).toBe("Read a page on visitlisboa.com, opened carris.pt");
+  });
+
+  // A local test: the tram turn read "Opened metrolisboa.pt, opened carris.pt",
+  // led by the page that did not help; Carris's trip planner answered.
+  it("lead with the step that answered, not the first page opened", () => {
+    const messages = [
+      browserStep(BROWSER_USE_TABS, { step: "tabs" }),
+      browserStep(BROWSER_OPEN, { host: "metrolisboa.pt", pageKey: PAGE_A, step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_B, step: "open_tab" }),
+      browserStep(BROWSER_BROWSE, { host: "carris.pt", step: "type" }),
+      browserStep(BROWSER_BROWSE, { host: "carris.pt", step: "click" }),
+      browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot" }),
+      browserStep(BROWSER_BROWSE, { host: "carris.pt", step: "click" }),
+    ];
+    expect(summarize(messages).summary).toBe("Opened carris.pt, read a page");
+    // On another site than the rest, the page that answered leads.
+    const elsewhere = [
+      browserStep(BROWSER_OPEN, { host: "metrolisboa.pt", pageKey: PAGE_A, step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "metrolisboa.pt", pageKey: PAGE_B, step: "navigate" }),
+      browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(summarize(elsewhere).summary).toBe("Read a page on carris.pt, opened 2 pages on metrolisboa.pt");
   });
 
   it("name the site while a step runs, and the browser before any site is known", () => {
@@ -825,7 +953,7 @@ describe("a finished turn's stored steps", () => {
     expect(summarize(tail).summary).toBe("Built the map, planned the days");
     const steps = readTurnStepsRecord(reply({}), JOB);
     expect(steps).toHaveLength(9);
-    expect(summarize(steps!).summary).toBe("Built the map, looked up 4 places, found places to stay");
+    expect(summarize(steps!).summary).toBe("Built the map, planned the days, looked up 4 places");
     // The same words as the turn's own messages give.
     const live = [
       ...Array.from({ length: 2 }, () => command(ADD_POINT)),
@@ -866,7 +994,8 @@ describe("answered browser prompts", () => {
 
   it("name the site when the line names another one first", () => {
     const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
-    expect(summarize([opened, searched("once")]).summary).toBe(
+    const reopened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
+    expect(summarize([opened, searched("once"), reopened]).summary).toBe(
       "Opened carris.pt, searched visitlisboa.com · you allowed a search on visitlisboa.com",
     );
     const denied = browserStep(BROWSER_BROWSE, { host: "visitlisboa.com", step: "submit", approval: "denied" }, "failed");
@@ -932,7 +1061,8 @@ describe("answered browser prompts", () => {
       kind: "approval", id: "approval:approval-1", text: "You allowed a form on visitlisboa.com",
     });
     // The steps' own word wins once they carry it: no answer is counted twice.
-    const withStep = summarizeTurnActivity([opened, searched("once")], {
+    const reopened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
+    const withStep = summarizeTurnActivity([opened, searched("once"), reopened], {
       jobId: JOB,
       phase: "completed",
       approvals: [{

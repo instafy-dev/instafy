@@ -58,6 +58,7 @@ import { sitePreviewFromMessage } from "./sitePreviewRequest";
 import { isTransientThreadUpdate } from "./threadPreviewProxyError";
 import { TurnActivityDetails } from "./TurnActivityDetails";
 import { TurnActivityLine } from "./TurnActivityLine";
+import { useSteadyActivityLabel } from "./useSteadyActivityLabel";
 import { detailsOnlySummary, type DetailItem, type TurnActivity } from "./turnActivity";
 import { TurnBrowserApprovalRow, type TurnBrowserApproval } from "./turnBrowserApproval";
 
@@ -466,9 +467,18 @@ export function AgentJobThreadPreviewLayout({
     (activityLineOpensDetails ? detailsOnlySummary(detailItems, branchThreads.length) : null) ??
     (activityLineOpensDetails && earlierAttempts.length > 0 ? RETRIED_TURN_LINE : null) ??
     "";
+  // While the turn runs, a label holds until the next one has lasted: a step
+  // that ends at once, a short pause between steps, or the last step before
+  // the done line (or the failure block), never flashes past.
+  const lineLive = activity.live !== null;
+  const lineText = useSteadyActivityLabel(activityText, lineLive);
+  // The turn ended and its last running label is still having its moment.
+  const holdingLastLabel = !lineLive && lineText !== activityText;
   // A failed turn's one line is its failure block: a summary of its steps
-  // above it would read like a turn that went fine.
-  const showActivityLine = activityText.length > 0 && runFailurePresentation === null;
+  // above it would read like a turn that went fine. The block takes the
+  // line's place once the last running label has held.
+  const showFailureBlock = runFailurePresentation !== null && !holdingLastLabel;
+  const showActivityLine = lineText.length > 0 && (runFailurePresentation === null || holdingLastLabel);
   const showDetailsPanel = detailsOpen && activityLineOpensDetails;
   // The turn's preview card: the files it created are that site.
   const madeSite = cards.some((card) => sitePreviewFromMessage(card) !== null);
@@ -838,8 +848,8 @@ export function AgentJobThreadPreviewLayout({
           <div className="relative py-1">
             {renderThreadPreviewNotch()}
             <TurnActivityLine
-              text={activityText}
-              live={activity.live !== null}
+              text={lineText}
+              live={lineLive}
               animate={shouldAnimateThreadLiveState}
               interactive={activityLineOpensDetails}
               detailsOpen={showDetailsPanel}
@@ -866,7 +876,7 @@ export function AgentJobThreadPreviewLayout({
           </div>
         ))}
 
-        {showSummaryBody ? (
+        {showSummaryBody && (runFailurePresentation === null || showFailureBlock) ? (
           <div
             className={`relative ${showActivityLine || cards.length > 0 ? "pt-1" : "pt-2"} pb-0`}
             data-workflow-spine-notch-anchor={hideThreadSpine ? "true" : undefined}

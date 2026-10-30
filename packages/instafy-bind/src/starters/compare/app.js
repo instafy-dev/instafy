@@ -14,10 +14,13 @@
  *                          unknown?: "Price unknown"}. Only a value the page shows counts: a row whose value is
  *                          unknown is never listed as under $160; it is listed apart, under "Price unknown".
  *   items: [{ref: "option:a", name, why (one short line), badge?: "Previous model", note?, facts: {key: fact},
- *            store: {name, url, readable}, more?: [{label, fact}], sources?: [{name, url}]}]
+ *            store: {name, url, readable}, more?: [{label, fact}], sources?: [{name, url}], found?: "example.com"}]
  *                          every candidate a page you read named, also one nothing could be read for: its cells say
  *                          "Unknown" (a table of unknowns). Empty only when no page named any: it reads "No options yet".
- *   unchecked: ["what was not checked", …]     listed once in the footer
+ *                          A row cites a page you read that names it (a value's or a "sources" page). When only a
+ *                          search result names it, "found" is that result's site instead, and the row says "Not
+ *                          checked". `instafy bind check` fails a row with neither: a guess or a placeholder.
+ *   unchecked: ["what was not checked", …]     listed once in the footer, on an empty page too
  *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
  *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read that
  *   does not give the value is the fact without "v" ({"src", "url", "date"}): "Not listed · checked 17 Oct on
@@ -126,7 +129,9 @@
     }
     return site.trust(valueOf(item, col), { shared: isShared(src.cols, item, col) || ownRow(src.rows, item, col), label: label, unknown: "Unknown" });
   }
-  function hasMore(item) { return !!(item.note || (item.more && item.more.length) || (item.sources && item.sources.length)); }
+  function hasMore(item) { return !!(item.note || found(item) || (item.more && item.more.length) || (item.sources && item.sources.length)); }
+  /** The site of the search result that alone names this row ("found"), or "". */
+  function found(item) { return typeof item.found === "string" ? item.found.trim().slice(0, 100) : ""; }
 
   /** The "Sort by" select shows (and rows are sorted) only with 5 or more options and more than one way to sort. */
   function sortShown(data) { return (data.sort || []).length > 1 && (data.items || []).length >= 5; }
@@ -235,8 +240,8 @@
     sources = sources.filter(function (s) {
       return !named.some(function (f) { return f.src === s.name || (site.host(f.url) && site.host(f.url) === site.host(s.url)); });
     });
-    // the footer belongs to a list: an empty page has nothing to confirm
-    site.notes(items.length ? data.unchecked : [], items.length ? sources : []);
+    // what was not checked is said on an empty page too: it is why the page is empty
+    site.notes(data.unchecked, sources);
   }
 
   /** "2 without a price are listed last." when the sort key is missing for some rows. */
@@ -275,7 +280,8 @@
 
   function nameBlock(item) {
     return [
-      h("div", { "class": "name-line" }, h("span", { "class": "name", text: item.name }), item.badge ? h("span", { "class": "badge", text: item.badge }) : null),
+      h("div", { "class": "name-line" }, h("span", { "class": "name", text: item.name }), item.badge ? h("span", { "class": "badge", text: item.badge }) : null,
+        found(item) ? h("span", { "class": "badge", text: "Not checked" }) : null),
       item.why ? h("p", { "class": "cap", text: item.why }) : null
     ];
   }
@@ -296,6 +302,7 @@
     var sources = (item.sources || []).filter(function (s) { return s && !linked[s.url]; });
     return h("div", { "class": "more" },
       item.note ? h("p", { text: item.note }) : null,
+      found(item) ? h("p", { "class": "cap", text: "Named in a search result on " + found(item) + "." }) : null,
       facts.length ? h("dl", { "class": "facts" }, facts.map(function (f) {
         return h("div", null, h("dt", { text: f.label }), h("dd", null, site.trust(f.fact)));
       })) : null,

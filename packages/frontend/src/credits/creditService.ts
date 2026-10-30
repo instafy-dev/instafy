@@ -35,6 +35,11 @@ export interface CreditLedgerEntry {
    * viewer may open that chat; absent otherwise.
    */
   chatName?: string | null;
+  /**
+   * With `chatName`, the name of that chat's space when it is not the space
+   * the ledger was asked from ("" for a space with no name); absent otherwise.
+   */
+  spaceName?: string | null;
 }
 
 export interface CreditLedgerResult {
@@ -265,6 +270,7 @@ export async function fetchCreditLedger(
         createdAt?: string;
         created_at?: string;
         chatName?: unknown;
+        spaceName?: unknown;
       }>;
     };
 
@@ -272,12 +278,14 @@ export async function fetchCreditLedger(
       ? payload.entries
           .map((entry) => {
             const chatName = typeof entry.chatName === "string" ? entry.chatName.trim() : "";
+            const spaceName = typeof entry.spaceName === "string" ? entry.spaceName.trim() : null;
             return {
               delta: typeof entry.delta === "number" ? entry.delta : 0,
               reason: entry.reason ?? "activity",
               metadata: entry.metadata ?? null,
               createdAt: entry.createdAt ?? entry.created_at ?? "",
               ...(chatName ? { chatName } : {}),
+              ...(chatName && spaceName !== null ? { spaceName } : {}),
             };
           })
           .filter((entry) => entry.createdAt.length > 0)

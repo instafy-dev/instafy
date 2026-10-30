@@ -123,6 +123,48 @@ describe("RunFailureMessageBody", () => {
     expect(details?.className.split(/\s+/)).toContain("bg-transparent");
   });
 
+  // A local test: a browser turn's failure block read "Octo couldn't open a page
+  // in the browser, so this turn stopped.", and its Details opened that same
+  // sentence again above the steps.
+  it("never repeats its own sentence in Details", async () => {
+    const SENTENCE = "Octo couldn't open a page in the browser, so this turn stopped.";
+    const plain = createMessage({ ...FAILURE, id: "plain", content: SENTENCE });
+    expect(presentationFor(plain).friendlyText).toBe(SENTENCE);
+    const steps = <div data-testid="turn-steps">Tried opening roborock.com</div>;
+    await act(async () => {
+      root.render(
+        <RunFailureRetryProvider value={contextValue()}>
+          <RunFailureMessageBody message={plain} presentation={presentationFor(plain)} steps={steps} />
+        </RunFailureRetryProvider>,
+      );
+    });
+    await act(async () => {
+      query("run-failure-details-toggle")?.click();
+    });
+    expect(query("run-failure-details")).toBeNull();
+    expect(container.querySelector('[data-testid="turn-steps"]')).not.toBeNull();
+    expect(container.textContent?.split(SENTENCE)).toHaveLength(2);
+
+    const remount = async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      root = createRoot(container);
+    };
+    // With nothing else to show, there is no Details to open.
+    await remount();
+    await render(contextValue(), plain);
+    expect(query("run-failure-details-toggle")).toBeNull();
+
+    // A raw text that says more than the sentence is still there.
+    await remount();
+    await render(contextValue());
+    await act(async () => {
+      query("run-failure-details-toggle")?.click();
+    });
+    expect(query("run-failure-details")?.textContent).toBe(PROVIDER_RATE_LIMITED);
+  });
+
   it("gives Connect AI the same hit area on a missing credential", async () => {
     const onConnectAi = vi.fn();
     const needsAi = createMessage({ ...FAILURE, content: "credential not found" });
@@ -281,6 +323,29 @@ describe("RunFailureMessageBody", () => {
     // The card can sit above the fold; moving focus must not scroll to it.
     expect(focus).toHaveBeenCalledWith({ preventScroll: true });
     focus.mockRestore();
+  });
+
+  // A failure whose Details would only repeat its sentence has none: focus
+  // goes to "Retried" itself, never to the page.
+  it("moves focus from a pressed Try again to Retried when there is no Details", async () => {
+    const plain = createMessage({
+      ...FAILURE,
+      id: "plain",
+      content: "Octo couldn't open a page in the browser, so this turn stopped.",
+    });
+    const requestRetry = vi.fn();
+    await render(contextValue({ requestRetry }), plain);
+    expect(query("run-failure-details-toggle")).toBeNull();
+    const retry = query("run-failure-retry");
+    retry?.focus();
+    await act(async () => {
+      retry?.click();
+    });
+    await render(contextValue({ requestRetry, pendingRetryKey: "plain" }), plain);
+    await render(contextValue({ requestRetry, isRetrySuperseded: () => true }), plain);
+    expect(query("run-failure-retry")).toBeNull();
+    expect(query("run-failure-retried")?.getAttribute("tabindex")).toBe("-1");
+    expect(document.activeElement).toBe(query("run-failure-retried"));
   });
 
   it("never moves focus later when the press left Try again in place", async () => {
@@ -446,6 +511,22 @@ describe("RunFailureMessageBody", () => {
       expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
       focusSpy.mockRestore();
       expect(cancelAutoRetry).not.toHaveBeenCalled();
+    });
+
+    it("moves focus from Cancel to Try again when the countdown is dropped and there is no Details", async () => {
+      const plain = createMessage({
+        ...FAILURE,
+        id: "plain",
+        content: "Octo couldn't open a page in the browser, so this turn stopped.",
+      });
+      await render(
+        contextValue({ scheduledAutoRetry: { key: "plain", dueAt: Date.now() + 20_000 }, cancelAutoRetry: vi.fn() }),
+        plain,
+      );
+      query("run-failure-auto-retry-cancel")?.focus();
+      await render(contextValue({ scheduledAutoRetry: null }), plain);
+      expect(query("run-failure-details-toggle")).toBeNull();
+      expect(document.activeElement).toBe(query("run-failure-retry"));
     });
 
     it("leaves focus alone when the countdown ends while Cancel does not hold it", async () => {

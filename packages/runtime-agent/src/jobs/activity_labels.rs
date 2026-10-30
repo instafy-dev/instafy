@@ -10,7 +10,9 @@
 //!    (`skill_packs::activity`);
 //! 2. Instafy's own CLI (`instafy web read`, `instafy preview open`, ...);
 //! 3. a few common tools (installs, tests, builds, `git clone`);
-//! 4. anything else gets no label, and Studio counts it ("Ran 3 commands").
+//! 4. a command made only of looks around the workspace (`pwd`, `ls`, `cat`, `rg --files`, a
+//!    `--help`) is marked as such, and Studio leaves it off the line;
+//! 5. anything else gets no label, and Studio counts it ("Ran 3 commands").
 //!
 //! Only a command's argv is read: never its output, its exit text or the workspace. A script is
 //! parsed with tree-sitter-bash (the parser Codex's own command checks use); a script that does
@@ -239,6 +241,26 @@ const RETRYING: BuiltinLabel = BuiltinLabel {
     live: "Trying again",
     done: None,
 };
+// A command made only of looks around the workspace: where it is, what is there, what a file
+// says, how a command is used. Studio never counts it on the line, so a turn that only looked
+// and answered (or posted a card) has no line. Its words are an unlabelled command's, so its
+// row in Details reads as before.
+const PLUMBING: BuiltinLabel = BuiltinLabel {
+    key: "builtin/plumbing",
+    role: ActivityRole::Quiet,
+    live: "Running a command",
+    done: single("ran a command"),
+};
+/// Programs that only print what is there and change nothing. Anything written to a file
+/// (`echo hi > a.html`) is not a look; see [`Matcher::visit`].
+const LOOK_PROGRAMS: &[&str] = &[
+    "pwd", "ls", "cat", "head", "tail", "wc", "rg", "grep", "find", "cd", "echo", "printf", "true",
+    "test", "[", "sleep", "which", "stat", "realpath", "dirname", "basename",
+];
+/// `find` options that act on what it finds: deleting, running a command, writing a file.
+const FIND_ACTIONS: &[&str] = &[
+    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls",
+];
 
 /// A label found for a step, from a pack or from the runtime's tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,6 +319,31 @@ impl Found {
             entry.insert("when".into(), JsonValue::from("success"));
         }
         entry
+    }
+}
+
+/// What a command's simple commands were, as the matcher read them.
+#[derive(Default)]
+struct Scan {
+    /// The labelled ones, in the order they run.
+    found: Vec<Found>,
+    /// The ones that only looked around the workspace.
+    looks: Vec<Found>,
+    /// Something else ran: an unknown command, a file written, a substitution, or a script or
+    /// construct this never reads.
+    other: bool,
+}
+
+impl Scan {
+    /// The step's `activity`: its labels; else, when it only looked around, that it did.
+    fn activity(self) -> Option<JsonValue> {
+        if !self.found.is_empty() {
+            return activity_json(self.found);
+        }
+        if self.other {
+            return None;
+        }
+        activity_json(self.looks)
     }
 }
 
@@ -753,7 +800,7 @@ impl<'a> Matcher<'a> {
     }
 
     /// The label of one simple command, in precedence order.
-    fn label_words(&self, words: &[Word], in_loop: bool, depth: usize, found: &mut Vec<Found>) {
+    fn label_words(&self, words: &[Word], in_loop: bool, depth: usize, scan: &mut Scan) {
         let words = Self::strip_prefixes(words);
         let Some(program) = words.first() else {
             return;
@@ -766,16 +813,38 @@ impl<'a> Matcher<'a> {
                     .and_then(Word::exact)
                     .is_some_and(|flag| SHELL_SCRIPT_FLAGS.contains(&flag))
             {
-                if let Some(script) = words.get(2).and_then(Word::exact) {
-                    if depth < MAX_NESTED_SHELLS {
-                        self.label_script(script, in_loop, depth + 1, found);
+                match words.get(2).and_then(Word::exact) {
+                    Some(script) if depth < MAX_NESTED_SHELLS => {
+                        self.label_script(script, in_loop, depth + 1, scan);
                     }
+                    _ => scan.other = true,
                 }
                 return;
             }
         }
-        // A command asked for its own help only prints how to use it: plumbing, as `cat` is.
+        // A function the script defines runs its own body, which is never read here: not a
+        // look, whatever it is named (`ls() { rm -rf dist; }; ls`).
+        if program
+            .exact()
+            .is_some_and(|name| self.shadowed.contains(name))
+        {
+            scan.other = true;
+            return;
+        }
+        let look = || {
+            let mut look = Found::builtin(&PLUMBING, Some(1));
+            if in_loop {
+                look.count = None;
+            }
+            look
+        };
+        // A command asked for its own help only prints how to use it: a look, as `cat` is.
         if words.iter().any(|word| word.exact() == Some("--help")) {
+            if words.iter().any(|word| word.opaque) {
+                scan.other = true;
+            } else {
+                scan.looks.push(look());
+            }
             return;
         }
         let label = self
@@ -786,19 +855,26 @@ impl<'a> Matcher<'a> {
             if in_loop {
                 label.count = None;
             }
-            found.push(label);
+            scan.found.push(label);
+        } else if is_look(words) {
+            scan.looks.push(look());
+        } else {
+            scan.other = true;
         }
     }
 
-    fn label_script(&self, script: &str, in_loop: bool, depth: usize, found: &mut Vec<Found>) {
+    fn label_script(&self, script: &str, in_loop: bool, depth: usize, scan: &mut Scan) {
         if script.len() > MAX_SCRIPT_BYTES {
+            scan.other = true;
             return;
         }
         let Some(tree) = codex_shell_command::bash::try_parse_shell(script) else {
+            scan.other = true;
             return;
         };
         let root = tree.root_node();
         if root.has_error() {
+            scan.other = true;
             return;
         }
         // Function definitions first, so a call before its definition in the text still
@@ -809,7 +885,7 @@ impl<'a> Matcher<'a> {
             shadowed: self.shadowed.clone(),
         };
         nested.collect_aliases(root, script);
-        nested.visit(root, script, in_loop, depth, found);
+        nested.visit(root, script, in_loop, depth, scan);
     }
 
     fn collect_aliases(&mut self, node: Node<'_>, src: &str) {
@@ -865,28 +941,44 @@ impl<'a> Matcher<'a> {
         (forwards_arguments && is_shell_name(&name)).then_some((name, (pack, bin)))
     }
 
-    fn visit(
-        &self,
-        node: Node<'_>,
-        src: &str,
-        in_loop: bool,
-        depth: usize,
-        found: &mut Vec<Found>,
-    ) {
+    fn visit(&self, node: Node<'_>, src: &str, in_loop: bool, depth: usize, scan: &mut Scan) {
         match node.kind() {
             "command" => {
-                if let Some(words) = command_words(node, src) {
-                    self.label_words(&words, in_loop, depth, found);
+                // A command or process substitution runs a command of its own, never read here.
+                if has_substitution(node) {
+                    scan.other = true;
+                }
+                match command_words(node, src) {
+                    Some(words) => self.label_words(&words, in_loop, depth, scan),
+                    None => scan.other = true,
                 }
             }
             "redirected_statement" => {
-                if let Some(body) = node.child_by_field_name("body") {
-                    self.visit(body, src, in_loop, depth, found);
+                // Output sent to a file writes it, and a here-document can run a substitution:
+                // neither is a look.
+                let body = node.child_by_field_name("body");
+                let mut cursor = node.walk();
+                let redirects: Vec<Node<'_>> = node
+                    .named_children(&mut cursor)
+                    .filter(|child| Some(*child) != body)
+                    .collect();
+                if redirects
+                    .iter()
+                    .any(|redirect| writes_a_file(*redirect, src) || has_substitution(*redirect))
+                {
+                    scan.other = true;
+                }
+                if let Some(body) = body {
+                    self.visit(body, src, in_loop, depth, scan);
                 }
             }
             "for_statement" | "c_style_for_statement" => {
+                // What it loops over can run a command too: `for f in $(…)`.
+                if has_substitution(node) {
+                    scan.other = true;
+                }
                 if let Some(body) = node.child_by_field_name("body") {
-                    self.visit(body, src, true, depth, found);
+                    self.visit(body, src, true, depth, scan);
                 }
             }
             "while_statement" => {
@@ -895,7 +987,7 @@ impl<'a> Matcher<'a> {
                     let parts: Vec<Node<'_>> =
                         node.children_by_field_name(field, &mut cursor).collect();
                     for part in parts {
-                        self.visit(part, src, true, depth, found);
+                        self.visit(part, src, true, depth, scan);
                     }
                 }
             }
@@ -904,13 +996,88 @@ impl<'a> Matcher<'a> {
                 let mut cursor = node.walk();
                 let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
                 for child in children {
-                    self.visit(child, src, in_loop, depth, found);
+                    self.visit(child, src, in_loop, depth, scan);
                 }
             }
-            // A function body runs only when called; `case` bodies, tests, declarations and
-            // anything else are not followed.
-            _ => {}
+            // A function body runs only when called, and a call is a command of its own.
+            "function_definition" | "comment" => {}
+            // An assignment, a declaration or a test runs nothing, unless a substitution in it
+            // does.
+            "variable_assignment"
+            | "variable_assignments"
+            | "declaration_command"
+            | "test_command"
+            | "unset_command" => {
+                if has_substitution(node) {
+                    scan.other = true;
+                }
+            }
+            // `case` bodies and anything else are not followed: whatever they run is unknown.
+            _ => scan.other = true,
         }
+    }
+}
+
+/// Whether a command or process substitution (`$(…)`, `` `…` ``, `<(…)`) is anywhere inside.
+fn has_substitution(node: Node<'_>) -> bool {
+    if matches!(node.kind(), "command_substitution" | "process_substitution") {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+    children.into_iter().any(has_substitution)
+}
+
+/// Whether a redirection writes a file: output sent anywhere but `/dev/null` or another
+/// descriptor (`2>&1`). Input (`<`, a here-document) writes nothing.
+fn writes_a_file(redirect: Node<'_>, src: &str) -> bool {
+    if redirect.kind() != "file_redirect" {
+        return false;
+    }
+    let mut cursor = redirect.walk();
+    let children: Vec<Node<'_>> = redirect.children(&mut cursor).collect();
+    let writes = children
+        .iter()
+        .any(|child| !child.is_named() && node_text(*child, src).contains('>'));
+    if !writes {
+        return false;
+    }
+    let destination = redirect
+        .child_by_field_name("destination")
+        .or_else(|| {
+            children
+                .iter()
+                .rev()
+                .find(|child| child.is_named())
+                .copied()
+        })
+        .map(|destination| node_text(destination, src).trim())
+        .unwrap_or_default();
+    let descriptor =
+        !destination.is_empty() && destination.bytes().all(|byte| byte.is_ascii_digit());
+    !(destination == "/dev/null" || destination == "-" || descriptor)
+}
+
+/// A simple command that only looks around the workspace: a [`LOOK_PROGRAMS`] program with
+/// arguments that run nothing of their own.
+fn is_look(words: &[Word]) -> bool {
+    let Some(program) = words.first().and_then(Word::exact).map(basename) else {
+        return false;
+    };
+    if !LOOK_PROGRAMS.contains(&program) || words.iter().any(|word| word.opaque) {
+        return false;
+    }
+    match program {
+        // An argument only known when the shell runs could be an action (`-delete`, `--pre`).
+        "find" => words
+            .iter()
+            .all(|word| word.exact().is_some_and(|arg| !FIND_ACTIONS.contains(&arg))),
+        // `--pre` runs a command on every file it searches.
+        "rg" => words.iter().all(|word| {
+            word.exact()
+                .is_some_and(|arg| arg != "--pre" && !arg.starts_with("--pre="))
+        }),
+        _ => true,
     }
 }
 
@@ -962,18 +1129,18 @@ fn label_command_with(
     command: &str,
 ) -> Option<JsonValue> {
     let matcher = Matcher::new(packs);
-    let mut found = Vec::new();
+    let mut scan = Scan::default();
     let argv: Option<Vec<&str>> = argv
         .and_then(JsonValue::as_array)
         .and_then(|items| items.iter().map(JsonValue::as_str).collect());
     match argv {
         Some(argv) if !argv.is_empty() => {
             let words: Vec<Word> = argv.iter().map(|word| Word::literal(word)).collect();
-            matcher.label_words(&words, false, 0, &mut found);
+            matcher.label_words(&words, false, 0, &mut scan);
         }
-        _ => matcher.label_script(command, false, 0, &mut found),
+        _ => matcher.label_script(command, false, 0, &mut scan),
     }
-    activity_json(found)
+    scan.activity()
 }
 
 /// The `activity` of a command, from its argv (`command_argv`), else its command line.
@@ -1326,18 +1493,92 @@ mod tests {
                 "{script}"
             );
         }
-        // Plumbing and other git or instafy subcommands are silent.
+        // A look around the workspace says it is one; other git or instafy subcommands are
+        // silent.
+        for script in ["ls -la", "cat map.config.json | head -20", "rg -n uw ."] {
+            assert_eq!(
+                label(&[], script).map(|activity| activity["key"].clone()),
+                Some(json!("builtin/plumbing")),
+                "{script}"
+            );
+        }
         for script in [
-            "ls -la",
-            "cat map.config.json | head -20",
             "git status && git diff",
             "instafy whoami",
             "npm build",
             "pnpm run lint",
-            "rg -n uw .",
         ] {
             assert_eq!(label(&[], script), None, "{script}");
         }
+    }
+
+    // A local test: a turn that only posted a card read "Ran a command" for its `pwd`, and
+    // another for its `rg --files …`.
+    #[test]
+    fn a_look_around_the_workspace_says_so_and_nothing_else_does() {
+        let root = tempfile::tempdir().expect("tmp");
+        let packs = map_packs(root.path());
+        for script in [
+            "pwd",
+            "rg --files",
+            "cd /workspace && rg --files | head -50",
+            "cat .agents/skills/instafy-browser-automation/SKILL.md",
+            "ls -la && pwd",
+            "find . -name '*.json' -maxdepth 2",
+            "rg -n hours src 2>/dev/null",
+            "cat map.json 2>&1 | head -20",
+            "echo done",
+            "cat <<'EOF'\nuw add-point x\nEOF",
+            "f() { uw add-point x; }; pwd",
+        ] {
+            let activity = label(&packs, script).unwrap_or_else(|| panic!("{script}"));
+            assert_eq!(activity["key"], json!("builtin/plumbing"), "{script}");
+            assert_eq!(activity["role"], json!("quiet"), "{script}");
+            assert_eq!(activity["done"], json!("ran a command"), "{script}");
+        }
+        // As argv, without a shell, too.
+        assert_eq!(
+            label_command_with(&packs, Some(&json!(["pwd"])), "").unwrap()["key"],
+            json!("builtin/plumbing")
+        );
+        // Anything that writes, deletes, runs something of its own or is not read stays
+        // unlabelled, so Studio still counts it.
+        for script in [
+            "echo hi > index.html",
+            "printf x >> notes.txt",
+            "cat > index.html <<'EOF'\nhi\nEOF",
+            "find . -name '*.tmp' -delete",
+            "find . -name x -exec rm {} +",
+            "rg --pre ./decode.sh hours",
+            "rg --pre=./decode.sh hours",
+            "find $DIR -name x",
+            "cat $(ls)",
+            "X=$(rm -rf dist) pwd",
+            "for f in $(ls); do cat \"$f\"; done",
+            "pwd && rm -rf dist",
+            "case x in a) pwd ;; esac",
+            "sed -i s/a/b/ index.html",
+            "python3 -c 'print(1)'",
+            "bash -lc \"$SCRIPT\"",
+            // A function of the script's own runs its body, whatever it is named.
+            "ls() { rm -rf dist; }; ls",
+            "cat() { curl -X POST https://example.com; }; cat x",
+            "pwd() { rm -rf dist; }; pwd --help",
+        ] {
+            assert_eq!(label(&packs, script), None, "{script}");
+        }
+        // A labelled step is named by its label, whatever looks come before it.
+        let mixed = label(&packs, "pwd && cat a.json && uw add-point x").unwrap();
+        assert_eq!(
+            keys(&mixed),
+            vec![("pack/interactive-map/uw/add-point".to_string(), json!(1))]
+        );
+        // A look in a loop counts as one, of unknown count.
+        let looped = label(&packs, "for f in a b; do cat \"$f\"; done").unwrap();
+        assert_eq!(
+            keys(&looped),
+            vec![("builtin/plumbing".to_string(), JsonValue::Null)]
+        );
     }
 
     // A local test: Details read "Read a source" for `uw cite --help` and
@@ -1353,8 +1594,14 @@ mod tests {
             "instafy preview open --help",
             "pnpm install --help",
         ] {
-            assert_eq!(label(&packs, script), None, "{script}");
+            assert_eq!(
+                label(&packs, script).map(|activity| activity["key"].clone()),
+                Some(json!("builtin/plumbing")),
+                "{script}"
+            );
         }
+        // A substitution in it runs a command of its own.
+        assert_eq!(label(&packs, "uw $(rm -rf dist) --help"), None);
         // Only that command: the next one in the chain is labelled as usual.
         let chain = label(
             &packs,
@@ -1411,7 +1658,6 @@ mod tests {
             "\"$TOOL\" add-point x",
             "eval 'uw add-point x'",
             "echo \"$(uw add-point x)\"",
-            "cat <<'EOF'\nuw add-point x\nEOF",
             "case \"$1\" in a) uw add-point x ;; esac",
             "uw() { node x.mjs \"$@\"; }; uw add-point",
             "f() { uw add-point x; }",
@@ -1419,6 +1665,11 @@ mod tests {
         ] {
             assert_eq!(label(&packs, script), None, "{script}");
         }
+        // A here-document's lines are printed, not run: `cat` only looks.
+        assert_eq!(
+            label(&packs, "cat <<'EOF'\nuw add-point x\nEOF").unwrap()["key"],
+            json!("builtin/plumbing")
+        );
         // A dynamic subcommand still names the pack, through its `*` label.
         let star = label(&packs, "uw \"$cmd\" x").unwrap();
         assert_eq!(star["key"], json!("pack/interactive-map/uw/*"));

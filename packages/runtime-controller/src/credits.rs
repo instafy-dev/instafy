@@ -309,6 +309,18 @@ pub(crate) struct CreditLedgerEntry {
     /// viewer may open that chat ([`load_turn_chat_names`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) chat_name: Option<String>,
+    /// With `chat_name`, the name of that chat's space when it is not the
+    /// space the ledger was asked from ("" for a space with no name): the
+    /// ledger is the team's, and chats in two spaces can share a name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) space_name: Option<String>,
+}
+
+/// The chat an Instafy AI turn was sent in, as the ledger names it.
+struct TurnChat {
+    name: String,
+    space_id: Uuid,
+    space_name: String,
 }
 
 /// The reasons of the ledger rows one Instafy AI turn writes, each carrying
@@ -330,28 +342,29 @@ fn ledger_turn_prompt_id(reason: &str, metadata: Option<&JsonValue>) -> Option<U
         .and_then(|raw| Uuid::parse_str(raw.trim()).ok())
 }
 
-/// The names of the chats `prompt_ids` were sent in, for the chats `viewer`
-/// may open: Home's rule (crate::activity::ACCESS_CTE), a space of theirs and
-/// a chat that is not private or is theirs. The ledger is the team's, and a
-/// teammate's private chat, or a chat in a space the viewer is not in, stays
-/// unnamed. A chat without a title is left out too.
+/// The chats `prompt_ids` were sent in, with their spaces, for the chats
+/// `viewer` may open: Home's rule (crate::activity::ACCESS_CTE), a space of
+/// theirs and a chat that is not private or is theirs. The ledger is the
+/// team's, and a teammate's private chat, or a chat in a space the viewer is
+/// not in, stays unnamed. A chat without a title is left out too.
 async fn load_turn_chat_names(
     client: &impl GenericClient,
     viewer: &Uuid,
     prompt_ids: &[Uuid],
-) -> Result<std::collections::HashMap<Uuid, String>, (StatusCode, Json<ApiError>)> {
+) -> Result<std::collections::HashMap<Uuid, TurnChat>, (StatusCode, Json<ApiError>)> {
     if prompt_ids.is_empty() {
         return Ok(Default::default());
     }
     let sql = format!(
         "{access}
-         select prompt.id, btrim(chat.metadata ->> 'title') as chat_name
+         select prompt.id, btrim(chat.metadata ->> 'title') as chat_name,
+                chat.project_id as space_id, coalesce(btrim(space.name), '') as space_name
            from prompts prompt
            join conversations chat on chat.id = prompt.conversation_id
+           join accessible space on space.id = chat.project_id
            left join conversation_participants participant
              on participant.conversation_id = chat.id and participant.user_id = $1
           where prompt.id = any($2)
-            and chat.project_id in (select id from accessible)
             and (chat.visibility <> 'private'
                  or chat.created_by = $1
                  or participant.user_id is not null)
@@ -364,7 +377,16 @@ async fn load_turn_chat_names(
         .map_err(|error| internal_error(format!("failed to name the turns' chats: {error}")))?;
     Ok(rows
         .into_iter()
-        .map(|row| (row.get::<_, Uuid>("id"), row.get::<_, String>("chat_name")))
+        .map(|row| {
+            (
+                row.get::<_, Uuid>("id"),
+                TurnChat {
+                    name: row.get("chat_name"),
+                    space_id: row.get("space_id"),
+                    space_name: row.get("space_name"),
+                },
+            )
+        })
         .collect())
 }
 
@@ -929,14 +951,17 @@ pub(crate) async fn credit_ledger(
         entries: entries
             .into_iter()
             .map(|entry| {
-                let chat_name = ledger_turn_prompt_id(&entry.reason, entry.metadata.as_ref())
-                    .and_then(|prompt_id| chat_names.get(&prompt_id).cloned());
+                let chat = ledger_turn_prompt_id(&entry.reason, entry.metadata.as_ref())
+                    .and_then(|prompt_id| chat_names.get(&prompt_id));
                 CreditLedgerEntry {
                     delta: entry.delta,
                     reason: entry.reason,
                     metadata: entry.metadata,
                     created_at: entry.created_at.to_rfc3339(),
-                    chat_name,
+                    chat_name: chat.map(|chat| chat.name.clone()),
+                    space_name: chat
+                        .filter(|chat| chat.space_id != project_id)
+                        .map(|chat| chat.space_name.clone()),
                 }
             })
             .collect(),

@@ -576,6 +576,49 @@ describe("conversation routing during controller attachment", () => {
     expect(dispatch.mock.calls.map(([action]) => action.type)).not.toContain("CLOSE");
   });
 
+  // In a team space every member sees the others' chats, empty ones too: New
+  // chat must never take one over (isReusableBlankConversation).
+  it("marks a chat someone else started, from the chat list and created live", async () => {
+    const teammateId = "77777777-6666-4555-8444-333333333333";
+    const listed = vi.fn<(action: ConversationsAction) => void>();
+    await act(async () => {
+      root.render(<ControllerSyncHarness state={buildState()} dispatch={listed}
+        fetchProjectConversations={vi.fn().mockResolvedValue([buildRemoteConversation({ title: "New chat" }, teammateId)])} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(listed).toHaveBeenCalledWith({ type: "CREATE", select: false,
+      conversation: expect.objectContaining({ controllerId: CONTROLLER_ID, startedByOther: true }) });
+
+    const live = vi.fn<(action: ConversationsAction) => void>();
+    await act(async () => {
+      root.render(<PendingCreationHarness state={buildState()} dispatch={live}
+        creation={buildConversationCreated({ title: "New chat" }, teammateId)} />);
+    });
+    expect(live).toHaveBeenCalledWith({ type: "CREATE", select: false,
+      conversation: expect.objectContaining({ controllerId: CONTROLLER_ID, startedByOther: true }) });
+  });
+
+  it("marks a loaded chat once the chat list says who started it, and never the person's own", async () => {
+    const teammateId = "77777777-6666-4555-8444-333333333333";
+    const rebuilt = buildState();
+    rebuilt.conversations[0] = { ...rebuilt.conversations[0], controllerId: CONTROLLER_ID, remoteSummaryPending: true };
+    const dispatch = vi.fn<(action: ConversationsAction) => void>();
+    await act(async () => {
+      root.render(<ControllerSyncHarness state={rebuilt} dispatch={dispatch}
+        fetchProjectConversations={vi.fn().mockResolvedValue([buildRemoteConversation({ localId: LOCAL_ID }, teammateId)])} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_STARTED_BY_OTHER", id: LOCAL_ID, startedByOther: true });
+
+    const own = vi.fn<(action: ConversationsAction) => void>();
+    await act(async () => {
+      root.render(<ControllerSyncHarness state={rebuilt} dispatch={own} syncEpoch={1}
+        fetchProjectConversations={vi.fn().mockResolvedValue([buildRemoteConversation({ localId: LOCAL_ID })])} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(own.mock.calls.some(([action]) => action.type === "SET_STARTED_BY_OTHER")).toBe(false);
+  });
+
   it("selects remote history during the first successful non-empty hydration", async () => {
     const dispatch = vi.fn<(action: ConversationsAction) => void>();
     const teammateId = "77777777-6666-4555-8444-333333333333";

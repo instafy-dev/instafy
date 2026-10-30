@@ -100,6 +100,45 @@ describe("TurnActivityDetails", () => {
 
   // A local test: Details read "Used the browser  instafy_shared_browser/list_tabs"
   // and "Tried using the browser  instafy_shared_browser/snapshot".
+  // A local test: three "Finding places to stay" rows kept spinning after
+  // their turn had ended.
+  it("shows a step its turn ended before without a spinner, in the past tense", async () => {
+    const message: ChatMessage = {
+      id: "stay",
+      role: "assistant",
+      authorId: null,
+      content: "uw stay --near stations:lisbon",
+      timestamp: 1,
+      files: null,
+      messageType: "command_execution",
+      metadata: {
+        source: "agent",
+        messageType: "command_execution",
+        details: { kind: "codex_command_execution", itemId: "stay", command: "uw stay --near stations:lisbon", status: "in_progress" },
+      },
+    };
+    const item = (state: "running" | "unfinished", label: string): DetailItem => ({
+      kind: "step",
+      id: "command:stay",
+      step: { kind: "command", message, activity: null, state, label },
+    });
+    await act(async () => {
+      root.render(<TurnActivityDetails id="details" items={[item("running", "Finding places to stay")]} renderUpdate={() => null} />);
+    });
+    expect(container.querySelector('[aria-label="Running"]')).not.toBeNull();
+
+    await act(async () => {
+      root.render(
+        <TurnActivityDetails id="details" items={[item("unfinished", "Didn't finish finding places to stay")]} renderUpdate={() => null} />,
+      );
+    });
+    expect(container.querySelector('[aria-label="Running"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Done"]')).toBeNull();
+    expect(container.querySelector('[data-testid="turn-activity-step-label"]')?.textContent).toBe(
+      "Didn't finish finding places to stay",
+    );
+  });
+
   it("shows a browser step's site, or only its words, never the tool's name", async () => {
     const items = [
       toolItem(1, "instafy_shared_browser", "list_tabs", {

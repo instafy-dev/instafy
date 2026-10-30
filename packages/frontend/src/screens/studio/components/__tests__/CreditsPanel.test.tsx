@@ -7,6 +7,7 @@ import { CreditsPanel } from "../CreditsPanel";
 
 type LedgerRow = {
   delta: number; reason: string; metadata: Record<string, unknown> | null; createdAt: string; chatName?: string;
+  spaceName?: string;
 };
 const mocks = vi.hoisted(() => ({ checkout: vi.fn(), portal: vi.fn(), planChange: vi.fn(), showStatus: vi.fn(),
   billing: { creditBalance: 1000, creditLimit: 2000, subscription: null }, ledger: [] as LedgerRow[] }));
@@ -144,6 +145,24 @@ describe("Credits display choices", () => {
     // Sent at 09:49:47: the turn sits where it was sent, under the top-up.
     expect(rows[2]?.textContent).toContain(new Date("2026-10-29T09:49:47Z").toLocaleString());
     expect(container.textContent).not.toMatch(/AI usage|AI adjustment|AI refund|GPT|OpenAI|tokens|Instafy AI|1 credits/);
+  });
+
+  // The ledger is the team's: a chat of the same name in another space read
+  // the same as this space's.
+  it("names the space of a turn from another space beside its time", async () => {
+    mocks.ledger = [
+      { delta: -2, reason: "managed_ai_prompt", metadata: { promptId: "turn-other" },
+        createdAt: "2026-10-29T10:00:00Z", chatName: "Plan 3 days in Lisbon", spaceName: "Last week's space" },
+      { delta: -1, reason: "managed_ai_prompt", metadata: { promptId: "turn-here" },
+        createdAt: "2026-10-29T09:00:00Z", chatName: "Plan 3 days in Lisbon" },
+    ];
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    const captions = [...container.querySelectorAll('[data-testid="credit-ledger-entry"]')]
+      .map((row) => row.querySelectorAll("p")[1]?.textContent);
+    expect(captions).toEqual([
+      `Last week's space · ${new Date("2026-10-29T10:00:00Z").toLocaleString()}`,
+      new Date("2026-10-29T09:00:00Z").toLocaleString(),
+    ]);
   });
 
   // Local drive 3: Activity showed only the newest 8 rows, with no way to see more.

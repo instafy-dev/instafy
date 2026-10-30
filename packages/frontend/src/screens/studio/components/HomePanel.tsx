@@ -617,7 +617,10 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
 
   const renderRow = (event: HomeFeedEvent, options: { divider: boolean }) => {
     const when = formatRelativeTimestamp(event.at);
-    const where = [showTeamOnRows ? event.team.name : null, showTeamOnRows || spansSpaces ? event.project.name : null].filter(Boolean).join(" · ") || null;
+    // A row from a space other than the open one names it: chats from two
+    // spaces can share a name ("Plan 3 days in Lisbon…").
+    const otherSpace = Boolean(event.project.id) && event.project.id !== activeProjectId;
+    const where = [showTeamOnRows ? event.team.name : null, showTeamOnRows || spansSpaces || otherSpace ? event.project.name : null].filter(Boolean).join(" · ") || null;
     // A folded thread says how much is behind its newest state. It never says
     // "new": Unread alone lists what is unread, and a chat read since the last
     // visit to Home is not news. A row standing for several look-alike chats

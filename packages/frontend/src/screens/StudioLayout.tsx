@@ -121,10 +121,10 @@ import { usePromptBootstrap } from "./studio/hooks/usePromptBootstrap";
 import { useProjectMemoryBootstrap } from "./useProjectMemoryBootstrap";
 import { useSpacesPanelForMissingProject } from "./useSpacesPanelForMissingProject";
 import { useHomeAttentionInbox } from "./useHomeAttentionInbox";
+import { useStartNewChat } from "./studio/useStartNewChat";
 import { NO_SPACE_OPEN_NAME } from "../projects/spaceName";
 import { useCreatePrivateConversation } from "./studio/hooks/useCreatePrivateConversation";
 import { useConversations } from "../conversations/ConversationsProvider";
-import { NEW_CHAT_TITLE } from "../conversations/conversationState";
 import { isUUID } from "../utils/uuid";
 import { writeClipboardText } from "../runtime/runtimeMenuShared";
 import { INSTAFY_CLI_URL } from "../config/externalLinks";
@@ -1137,53 +1137,17 @@ function StudioLayoutInner() {
   usePromptBootstrap(handlePromptBootstrapResult);
   useSpaceAutoName();
 
-  const createFreshConversation = useCallback(() => {
+  const prepareNewChat = useCallback(() => {
     requestHistoryPush();
     if (!isLargeScreen) {
       setLeftDrawer(null);
     }
-    const projectId = activeProjectId && isUUID(activeProjectId) ? activeProjectId : null;
-    const conversation = createConversation({
-      title: NEW_CHAT_TITLE,
-      messages: [
-        {
-          id: `assistant-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-          role: "assistant",
-          content: "How can I help with your space?",
-          timestamp: Date.now(),
-          files: null,
-          messageType: "status",
-          metadata: null
-        }
-      ],
-      select: true
-    });
-    selectConversation(conversation.localId);
-    markConversationRead(conversation.localId);
-    setPendingConversationTabOpenId(conversation.localId);
-    if (!projectId) {
-      return;
-    }
-    void (async () => {
-      const response = await controllerClient.conversations.createBlank({
-        projectId,
-        metadata: { title: NEW_CHAT_TITLE, localId: conversation.localId }
-      });
-      if (!response?.conversationId) {
-        return;
-      }
-      setConversationControllerId(conversation.localId, response.conversationId);
-    })();
-  }, [
+  }, [isLargeScreen, requestHistoryPush, setLeftDrawer]);
+  const createFreshConversation = useStartNewChat({
     activeProjectId,
-    createConversation,
-    isLargeScreen,
-    markConversationRead,
-    requestHistoryPush,
-    selectConversation,
-    setConversationControllerId,
-    setLeftDrawer,
-  ]);
+    beforeOpen: prepareNewChat,
+    openTab: setPendingConversationTabOpenId,
+  });
 
   const handlePrivateConversationCreated = useCallback((conversation: { localId: string }) => {
     requestHistoryPush();

@@ -453,8 +453,9 @@ describe("a browser prompt inside Octo's turn", () => {
     await act(async () => { root.render(<Chat state={approval()} showTurn threadMessages={done} />); });
     // The last running label holds its moment before the done line.
     await advance(ACTIVITY_LABEL_HOLD_MS);
+    // The search answered, so it leads, and the clause leaves out the site it names.
     expect(byTestId("turn-activity-line")?.textContent).toContain(
-      "Opened carris.pt, searched visitlisboa.com · you allowed a search on visitlisboa.com",
+      "Searched visitlisboa.com, opened carris.pt · you allowed a search",
     );
     await act(async () => { byTestId("turn-activity-line")!.click(); });
     expect(byTestId("turn-activity-approval")?.textContent).toBe("You allowed a search on visitlisboa.com");

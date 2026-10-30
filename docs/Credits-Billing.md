@@ -564,7 +564,8 @@ records which jobs run on the platform key and which tokens they hold:
   turn's `metadata.promptId`) also carry `chatName`, the title of the chat the turn was sent in,
   when the viewer may open that chat by Home's rule (a space of theirs, and a chat that is not
   private or that they created or take part in). Other rows, and a turn in a chat they may not
-  open, carry none.
+  open, carry none. With `chatName`, a turn in a space other than the one asked about
+  (`projectId`) also carries `spaceName`, that space's name (`""` when it has none).
 - `GET /credits/policy` — refill policy, plan catalog, and configured usage rates for metered services (including managed AI prompt costs).
 - `POST /credits` — burn/refill ledger events.
 - `POST /billing/checkout` — checkout or portal sessions.
@@ -589,7 +590,8 @@ Required envs (GitHub secrets/vars or local env):
   starting balance or a refund.
 - The log shows one row per Instafy AI turn: its reserve, adjustment and refund added up, at the
   time it was sent, named by its chat (`chatName`), or "A chat" when the viewer may not open that
-  chat. A turn that cost nothing in the end, refunded in full, has no row. Every other ledger row
+  chat. A turn from another space names that space beside its time (`spaceName`), since chats in
+  two spaces can share a name. A turn that cost nothing in the end, refunded in full, has no row. Every other ledger row
   is a row of its own ("Daily top-up", "Starting balance", "Hosted runtime"). A row shows its name,
   its time and its amount ("1 credit", "14 credits"), never the model, the AI vendor, a token count
   or an id: the ledger keeps those in each row's metadata, and the Usage section shows the rates.

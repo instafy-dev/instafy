@@ -286,7 +286,7 @@ function ComposerContextToken({ label, cancelLabel, onCancel, testId }: {
   testId: string;
 }) {
   return (
-    <div className="flex min-w-0 px-2 pt-1" data-testid={`${testId}-token`}>
+    <div className="flex min-w-0 max-w-full" data-testid={`${testId}-token`}>
       <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full bg-slate-100 py-0.5 pl-2.5 pr-0.5 text-slate-600 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-300">
         <Globe className="h-3.5 w-3.5 flex-none" aria-hidden="true" />
         <Text as="span" variant="caption" tone="inherit" className="truncate">{label}</Text>
@@ -1153,6 +1153,25 @@ export function ChatComposerSurface({
         </IconButton>
     ) : null;
 
+  // Where the next message goes, when that is not this chat as usual: in the
+  // composer's own row, beside the view switch, so it never floats above the
+  // composer over the newest message.
+  const contextToken = pendingNewTab ? (
+    <ComposerContextToken
+      label="New tab for the next message"
+      cancelLabel="Cancel new tab"
+      onCancel={pendingNewTab.onCancel}
+      testId="composer-new-tab"
+    />
+  ) : browserFollowUp ? (
+    <ComposerContextToken
+      label="Goes to Instafy's browser"
+      cancelLabel="Don't send it to the browser"
+      onCancel={browserFollowUp.onCancel}
+      testId="composer-browser-follow-up"
+    />
+  ) : null;
+
   return (
     <>
       <div
@@ -1200,21 +1219,6 @@ export function ChatComposerSurface({
         >
           <div className={draftExpanded ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}>
             {replyContext}
-            {pendingNewTab ? (
-              <ComposerContextToken
-                label="New tab for the next message"
-                cancelLabel="Cancel new tab"
-                onCancel={pendingNewTab.onCancel}
-                testId="composer-new-tab"
-              />
-            ) : browserFollowUp ? (
-              <ComposerContextToken
-                label="Goes to Instafy's browser"
-                cancelLabel="Don't send it to the browser"
-                onCancel={browserFollowUp.onCancel}
-                testId="composer-browser-follow-up"
-              />
-            ) : null}
             {showActiveGoal && !draftExpanded ? (
               <div
                 className={`@container/goal pointer-events-auto flex min-w-0 flex-col gap-2 rounded-2xl border border-slate-200/70 bg-white/95 px-3 py-2 text-sm shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-strong)] ${
@@ -1415,12 +1419,13 @@ export function ChatComposerSurface({
               style={{ "--chat-composer-viewport-height": `${visibleViewport.height}px` } as CSSProperties}
               data-testid="chat-composer-surface"
             >
-              {viewNavigation || stashTrayProps?.stashes.length || queuedMessageCount > 0 || queueEditingItem ? (
+              {contextToken || viewNavigation || stashTrayProps?.stashes.length || queuedMessageCount > 0 || queueEditingItem ? (
                 <div
                   ref={joinedToolbarRef}
                   className="flex min-w-0 flex-wrap items-center gap-2 px-1 pb-1"
                   data-testid="chat-composer-joined-toolbar"
                 >
+                  {contextToken}
                   {/* Wrap the saved controls before squeezing the view labels into
                       an overflowing strip (font metrics vary across platforms). */}
                   {viewNavigation ? <div className="min-w-0 max-w-full flex-auto">{viewNavigation}</div> : null}
