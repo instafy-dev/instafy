@@ -607,11 +607,20 @@ fn a_busy_page_gets_one_more_read_and_reviews_are_never_guessed_addresses() {
     ));
 
     assert!(!include_str!("legacy/browser-automation-v14.md").contains("reads as busy"));
+    // The copy from before, with the sign-in pause already in it.
+    let previous = include_str!("legacy/browser-automation-v15.md");
+    assert!(!previous.contains("reads as busy"));
+    assert!(previous.contains("open its sign-in page and\npause (Core rules)"));
     assert!(include_str!("legacy/web-research-v10.md").contains("publishers you know review"));
     for (relative, previous, current) in [
         (
             learn::BROWSER_AUTOMATION_RELATIVE_PATH,
             include_str!("legacy/browser-automation-v14.md"),
+            BROWSER_SKILL,
+        ),
+        (
+            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+            previous,
             BROWSER_SKILL,
         ),
         (
@@ -1076,6 +1085,51 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
 
     let previous = include_str!("legacy/browser-automation-v12.md");
     assert!(flat(previous).contains("ends that page; never retry it another way"));
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
+/// A sign-in the person asked for, or one a step they asked for needs, is opened and paused on, so the task goes on
+/// after it (a task to star a repository ended twice with "use its Sign in control … tell me when you're ready").
+/// The skill's list of pages that end a read no longer covers it, the turn that writes the card's task knows the
+/// browser turn pauses there, and the browser skill's sign-in rules stay inside the part a browser turn carries, up to
+/// the last word of the last one (a cut inside that rule left its start in place, so a check of its start passed). The
+/// reply no longer says where the browser goes (the card says it), and still never says a page opened before a tool
+/// saw it. An unedited earlier copy of the skill is upgraded.
+#[test]
+fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    for needle in [
+        "\"Finding a page\" says what comes next. Never retry that page another way. A sign-in the person asked for isn't one of these: open its sign-in page and pause (Core rules).",
+        "Treat sign-in, one-time codes, consent and payment as the person's steps: pause on them with `request_human_input`, and continue when they choose Let Octo continue.",
+        "Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.",
+    ] {
+        assert!(carried.contains(needle), "{needle}");
+    }
+    assert!(!flat(BROWSER_SKILL).contains("where the browser goes"));
+    assert!(BROWSER_CHOICE_CONTRACT.contains(
+        "- The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential."
+    ));
+    assert!(BROWSER_CHOICE_CONTRACT.contains(
+        "- In `summary`, never say a page opened, or what it shows, before a browser tool saw it.\n"
+    ));
+    assert!(!BROWSER_CHOICE_CONTRACT.contains("where the browser goes"));
+
+    let tmp = scaffolded_space();
+    let request = "Open GitHub so I can sign in, then star the repository I named.";
+    assert!(fresh_prompt(tmp.path(), request, json!({})).contains(BROWSER_CHOICE_CONTRACT));
+    let browser_turn = flat(&fresh_prompt(
+        tmp.path(),
+        request,
+        json!({ "browserTransport": "shared" }),
+    ));
+    assert!(browser_turn.contains("A sign-in the person asked for isn't one of these: open its sign-in page and pause (Core rules)."));
+
+    let previous = include_str!("legacy/browser-automation-v14.md");
+    assert!(previous.contains("say where the browser goes and why"));
     let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
     fs::write(&skill, previous).unwrap();
     learn::ensure_project_memory_scaffold(tmp.path());

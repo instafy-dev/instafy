@@ -954,6 +954,34 @@
     return ask("change", "field");
   }
 
+  // A field the person fills to sign in, which the agent never types into: a
+  // password or one-time code field, or the account identifier the typing
+  // rules above refuse (a form's field right before its password, an email
+  // field in a form with a password, an email-first username field). A host
+  // names these so the agent pauses on them for the person.
+  function isSignInField(target) {
+    const safeTarget = target && typeof target === "object" ? target : {};
+    if (lower(safeTarget.tag) !== "input" || !TEXT_INPUT_TYPES.has(lower(safeTarget.type))) return false;
+    if (lower(safeTarget.type) === "password") return true;
+    if (/(?:^|\s)(?:current-password|one-time-code)(?:\s|$)/.test(lower(safeTarget.autocomplete))) return true;
+    return classifyTyping(safeTarget, {}).code === REFUSALS.sign_in.code;
+  }
+
+  // A link or button that only opens a site's sign-in page: named exactly
+  // "Sign in" ("Log in", "Anmelden", …), outside any form with a password
+  // field and never a form's submit button (an email-first form's "Sign in"
+  // sends it), the header control the activation rules above leave free so
+  // the agent can reach the page and hand it over. A host names it on a page
+  // with no sign-in fields yet, so a sign-in the person needs gets to them.
+  function isSignInOpener(target) {
+    const safeTarget = target && typeof target === "object" ? target : {};
+    if (safeTarget.formHasPassword === true || isEditable(safeTarget) || isSubmitControl(safeTarget)) return false;
+    const linkLike = lower(safeTarget.tag) === "a" || lower(safeTarget.role) === "link";
+    if (!linkLike && !isButtonLike(safeTarget)) return false;
+    return [safeTarget.ariaLabel, safeTarget.text, safeTarget.title]
+      .some((name) => SIGN_IN_EXACT.test(cleanText(name)));
+  }
+
   function classifySubmit(target, ctx) {
     if (ctx && ctx.sensitive === true) return refuse("sensitive", "sensitive field");
     if (isSignInForm(target)) return refuse("sign_in", "sign-in form submit");
@@ -1031,6 +1059,8 @@
     isPlaceholderName,
     isEditable,
     isSearchField,
+    isSignInField,
+    isSignInOpener,
     isFreeSiteSearch,
   });
 });

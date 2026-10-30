@@ -360,8 +360,11 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before a card's reads went one by one on the chat's own page, and the button that
     // continues after a sign-in was "Let AI continue".
     include_str!("legacy/browser-automation-v13.md"),
-    // From before a page that reads as busy got one more snapshot, then the place's own site.
+    // From before a sign-in the person asked for was opened and paused on, and the reply said
+    // where the browser goes.
     include_str!("legacy/browser-automation-v14.md"),
+    // From before a page that reads as busy got one more snapshot, then the place's own site.
+    include_str!("legacy/browser-automation-v15.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
