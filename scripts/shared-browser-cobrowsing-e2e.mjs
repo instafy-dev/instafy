@@ -193,7 +193,15 @@ ${body}<script>${script}</script></html>`;
   if (name === "consent") {
     return page("Opening hours", "", `<h1>Opening hours</h1><p>Open daily.</p>
 <div id="cookie-banner" class="cookie-consent"><p>This site uses cookies.</p>
-<a href="/rules/accepted">aceitar e continuar</a> <a href="/rules/visible">Pol\u00edtica de cookies</a></div>`, "");
+<a href="/rules/accepted">aceitar e continuar</a> <a href="/rules/visible">Pol\u00edtica de cookies</a>
+<button type="button">Consent</button></div>`, "");
+  }
+  // A page whose root and body a consent plugin names after cookies, with
+  // no banner on it.
+  if (name === "marked") {
+    return page("Invitation", "", `<h1>Team invitation</h1><p>You were invited to join the team.</p>
+<button type="button">Accept invitation</button>`,
+    `document.documentElement.classList.add("cookie-consent-pending"); document.body.classList.add("cookies-not-set");`);
   }
   if (name === "order") {
     return page("Order", "", `<h1>Order</h1><form id="order" method="post" action="/rules/ordered">
@@ -868,6 +876,17 @@ export async function runSharedBrowserCobrowsingFixture() {
     assert.match(accepted.stderr, /\[step_refused_consent\]/, accepted.stderr);
     assert.equal(observedApprovals.length, 2 + expectedSubmissions + 2, "The banner's accept asked");
     assert.equal(new URL(page.url()).pathname, "/rules/consent", "The banner's accept link navigated");
+    // So is its "Consent" button, which says neither "accept" nor "agree".
+    const consented = await runTool("POST", "/v1/click", target(rules, "Consent"));
+    assert.notEqual(consented.code, 0, "The banner's Consent button was pressed");
+    assert.match(consented.stderr, /\[step_refused_consent\]/, consented.stderr);
+    assert.equal(observedApprovals.length, 2 + expectedSubmissions + 2, "The banner's Consent asked");
+    // A page a consent plugin names after cookies from its root down is no
+    // banner: an accept on it asks once, as anywhere, and is not refused.
+    rules = (await successfulTool("POST", "/v1/navigate", { url: "/rules/marked" })).payload;
+    const invited = await runTool("POST", "/v1/click", target(rules, "Accept invitation"), "allow_once");
+    assert.equal(invited.code, 0, `The invitation's accept failed: ${invited.stderr}`);
+    assert.equal(observedApprovals.length, 2 + expectedSubmissions + 3, "The invitation's accept did not ask once");
     freshTurn();
     // A form's submit says which fields it sends, by the page's names for
     // them, and never their values.

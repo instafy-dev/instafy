@@ -1119,12 +1119,15 @@ function describeInPage(rule, forms, names, element, sources) {
     // class, label or test id names it, a dialog whose title does, or a
     // small container close by whose text speaks of cookies. With it, a
     // refusal's words go without a prompt and accepting words are refused
-    // (the classifier's consent rejection and `step_refused_consent`).
+    // (the classifier's consent rejection and `step_refused_consent`). The
+    // page's body and root are no banner, though a consent plugin may name
+    // them after cookies ("cookies-not-set") while it waits for an answer.
     const consentPattern = /cookie|consent|gdpr|rgpd|dsgvo|privacy|datenschutz|privacidade|confidentialit/i;
     let consentContext = consentPattern.test(dialogLabel);
+    const pageRoots = [element.ownerDocument?.body, element.ownerDocument?.documentElement];
     for (
       let node = element.parentElement, depth = 0;
-      node && depth < 16 && !consentContext;
+      node && !pageRoots.includes(node) && depth < 16 && !consentContext;
       node = node.parentElement, depth += 1
     ) {
       const named = bounded(
