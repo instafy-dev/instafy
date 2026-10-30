@@ -418,14 +418,29 @@ Two steps never ask, in Ask too:
   container named for it, a dialog titled for it, or a small container close
   by that speaks of cookies) shares nothing, so it runs without a prompt. It
   must not be a link or send a form, and its step lets no form post leave the
-  tab, not even to the page's own site. "Accept all", and the same words
-  outside a banner (a document editor's "Reject all"), still ask.
+  tab, not even to the page's own site. The same words outside a banner (a
+  document editor's "Reject all") still ask.
+- **A cookie banner's accept is refused.** In the same banner, a control or a
+  link whose words accept or agree ("Accept all", "I agree", "Agree and
+  close", "Alle akzeptieren", "aceitar e continuar", …, in the refusal's
+  languages) is refused in every mode before any prompt
+  (`step_refused_consent`): accepting is the person's step, and Octo reads on
+  under the banner. A link is refused too, which plain-link navigation would
+  otherwise take. Only accept words count: a banner's "Disagree" toggles, its
+  cookie policy link and its settings stay ordinary steps, and an accept word
+  after "not" or "without" ("Continuer sans accepter") is a refusal.
 
 The browser view's prompt asks in the chat row's words: "Octo wants to use
 example.com." with **Deny** and **Allow site** (or "Octo wants to click “Search”
-on example.com." with **Allow**), and the exact site or page it is about. It
-offers no routine-browsing choice: a run on the space's own machine starts in
-routine browsing, which is what users' spaces get.
+on example.com." with **Allow**), which name the exact site or page it is
+about. A control whose name says more than the text it shows is named by that
+text first ("Agree and close" (also called "Agree and close: Agree to our data
+processing and close")), each name cut on its own. A step that sends a form
+lists the fields it sends, by the names the page gives them and never their
+values ("Sends: Customer name, Telephone, E-mail address"). Under the sentence,
+"Goes to httpbin.org" names where a step on the page goes when the sentence
+does not. It offers no routine-browsing choice: a run on the space's own
+machine starts in routine browsing, which is what users' spaces get.
 
 Routine browsing is a grant across HTTP(S) sites for the exact current run,
 initiating user, runtime generation and selected page—not permanent site
@@ -917,8 +932,9 @@ hostile submit button.
 
 **Refused in every mode, before any prompt.** Revealing or copying a credential
 (`step_refused_secret`), sign-in submits, identity-provider sign-in buttons and
-typing a sign-in form's account identifier (`step_refused_sign_in`), and file
-inputs (`step_refused_upload`). Before a key change or "may show a secret" step
+typing a sign-in form's account identifier (`step_refused_sign_in`), file
+inputs (`step_refused_upload`), and a cookie banner's accept
+(`step_refused_consent`). Before a key change or "may show a secret" step
 runs, the page is marked withheld, and so is the page it leads to: the step
 records the document it ran on (the main frame's CDP loader id, which page
 scripts cannot set) in the run's approval directory as `withhold-next.json`, and
@@ -1041,8 +1057,9 @@ they want to try again. This keeps “Deny” from becoming a sequence of repeat
 consent prompts, and an unanswered prompt from becoming a chain of prompts
 while the person is away. What the person reads tells the two apart, with no code: an unanswered
 prompt reads "I'm waiting for your OK to continue in Instafy's browser. I
-haven't done that step yet.", a denial reads "You declined, so I stopped before
-that step.", and every other terminal code reads one plain message. Each speaks
+haven't done that step yet.", a denial reads "You said no, so that step didn't
+happen, and nothing from it was sent.", and every other terminal code reads one
+plain message. Each speaks
 only about the step that asked, because earlier steps of the same turn may
 already have opened pages or changed something. The code stays in the run's
 `browser/terminal-consent` artifact. The tool result tells

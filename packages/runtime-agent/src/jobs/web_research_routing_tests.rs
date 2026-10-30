@@ -586,6 +586,27 @@ fn the_browser_skill_reads_a_cards_pages_on_the_chats_own_page() {
     }
 }
 
+/// Accepting a cookie banner is the person's step: a banner with no reject button of its own is left up and read
+/// under (going into its settings is how an accept was reached before), its settings refuse only when the person
+/// asks, and no learning example clicks "I agree". Within the carried part; an unedited earlier copy is upgraded.
+#[test]
+fn the_browser_skill_leaves_a_banner_without_a_reject_button_up() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(
+        "With no reject button on the banner itself, leave it up and read on. Refuse through its settings only when the person asks; saving those settings asks once."
+    ));
+    assert!(!BROWSER_SKILL.contains("I agree"));
+
+    let previous = include_str!("legacy/browser-automation-v14.md");
+    assert!(previous.contains("If a consent button labeled `I agree` is visible, click it once"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
 /// A snapshot carries the browser skill's first `PROJECT_MEMORY_MAX_FILE_BYTES` bytes, and a browser turn
 /// cannot read the rest: the sign-in and secret rules end inside them, counted in bytes, so none is cut off
 /// mid-sentence.
@@ -1148,8 +1169,8 @@ fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
 
     let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
     let edited = BROWSER_SKILL.replace(
-        "accepting is the person's choice.\n",
-        "accepting is the person's choice.\n- Start from the city's open-data portal.\n",
+        "saving those settings asks once.\n",
+        "saving those settings asks once.\n- Start from the city's open-data portal.\n",
     );
     assert_ne!(edited, BROWSER_SKILL);
     fs::write(&skill, &edited).unwrap();

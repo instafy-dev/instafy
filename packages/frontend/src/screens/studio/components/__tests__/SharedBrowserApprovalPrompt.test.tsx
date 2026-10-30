@@ -94,9 +94,9 @@ describe("SharedBrowserApprovalPrompt", () => {
     });
     expect(container.querySelector("#shared-browser-approval-title")?.textContent)
       .toBe("Octo wants to open example.test/en/places/belem-tower?lang=en.");
-    // The exact page the answer is about stays in view.
-    expect(container.querySelector('[data-testid="shared-browser-approval-destination"]')?.textContent)
-      .toBe("example.test/en/places/belem-tower?lang=en");
+    // The sentence names the exact page, so no box repeats it.
+    expect(container.querySelector('[data-testid="shared-browser-approval-destination"]')).toBeNull();
+    expect(container.textContent).not.toContain("https://");
     for (const words of ["the AI agent", "Shared Browser", "routine browsing", "AI turn", "This approval is used once"]) {
       expect(container.textContent).not.toContain(words);
     }
@@ -204,6 +204,79 @@ describe("SharedBrowserApprovalPrompt", () => {
     });
 
     expect(container.querySelector("#shared-browser-approval-title")?.textContent).toBe(expected);
+  });
+
+  it("says what a step does in the page's words: the shown text first, the fields a form sends, and where it goes", async () => {
+    // A form's submit asked as "Octo wants to click “Submit order” on
+    // httpbin.org." over a "Destination https://httpbin.org" box, and a
+    // banner's button as "Agree and close: Agree to our data proc…", which
+    // cut the pair as one and lost the text the button shows.
+    const action = (operation: string, label: string, destinationOrigin: string | null) => ({
+      ...originRequest,
+      approvalId: "33333333-3333-4333-8333-333333333333",
+      kind: "action" as const,
+      operation,
+      sourceOrigin: "https://httpbin.org",
+      destinationOrigin,
+      display: { label, destinationOrigin },
+    });
+    const title = () => container.querySelector("#shared-browser-approval-title")?.textContent;
+    const goesTo = () => container.querySelector('[data-testid="shared-browser-approval-destination"]')?.textContent ?? null;
+
+    await act(async () => root.render(
+      <SharedBrowserApprovalPrompt
+        onDecision={vi.fn()}
+        request={action(
+          "click",
+          "Change something: Submit order \u00b7 Sends: Customer name, Telephone, E-mail address, Pizza Size, Delivery instructions",
+          "https://httpbin.org",
+        )}
+        submitting={false}
+      />,
+    ));
+    expect(title()).toBe(
+      "Octo wants to click “Submit order” on httpbin.org. Sends: Customer name, Telephone, E-mail address, Pizza Size, Delivery instructions.",
+    );
+    expect(goesTo()).toBe("Goes to httpbin.org");
+    expect(container.textContent).not.toContain("https://");
+    expect(container.textContent).not.toContain("Destination");
+
+    await act(async () => root.render(
+      <SharedBrowserApprovalPrompt
+        onDecision={vi.fn()}
+        request={action(
+          "click",
+          "Change something: Agree and close (also called \"Agree and close: Agree to our data processing and close\")",
+          null,
+        )}
+        submitting={false}
+      />,
+    ));
+    expect(title()).toBe(
+      "Octo wants to click “Agree and close” (also called “Agree and close: Agree to our data proc…”) on httpbin.org.",
+    );
+    expect(goesTo()).toBeNull();
+
+    // An older runtime led with the other name: the shown text still leads.
+    await act(async () => root.render(
+      <SharedBrowserApprovalPrompt
+        onDecision={vi.fn()}
+        request={action("click", "Learn More: Configure your consents (shown as \"Learn More \u2192\")", null)}
+        submitting={false}
+      />,
+    ));
+    expect(title()).toBe("Octo wants to click “Learn More →” (also called “Learn More: Configure your consents”) on httpbin.org.");
+
+    // A form sent to another site already says where it goes.
+    await act(async () => root.render(
+      <SharedBrowserApprovalPrompt
+        onDecision={vi.fn()}
+        request={action("form-submit", "Search \u00b7 Sends: Search", "https://search.example.org")}
+        submitting={false}
+      />,
+    ));
+    expect(title()).toBe("Octo wants to send the form “Search” on httpbin.org. It goes to search.example.org. Sends: Search.");
+    expect(goesTo()).toBeNull();
   });
 
   it("keeps both decisions disabled while a decision is being written", async () => {

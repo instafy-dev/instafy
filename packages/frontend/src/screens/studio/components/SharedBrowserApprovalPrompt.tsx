@@ -6,7 +6,11 @@ import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import { StudioDialogBody, StudioDialogFooter } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogGutterContext } from "../../../components/aria/StudioDialogSpacing";
-import { browserApprovalSentence, sharedBrowserApprovalTargetAddress } from "./browserApprovalWords";
+import {
+  browserApprovalGoesTo,
+  browserApprovalSentence,
+  sharedBrowserApprovalTargetAddress,
+} from "./browserApprovalWords";
 
 export type SharedBrowserApprovalKind = "origin" | "action";
 export type SharedBrowserApprovalDecision = "allow_origin" | "allow_once" | "allow_routine" | "deny";
@@ -34,9 +38,10 @@ export { sharedBrowserApprovalTargetAddress };
 
 /**
  * The browser view's sheet for a pending prompt, in the chat row's own words
- * ("Octo wants to use visitlisboa.com." [Deny] [Allow site]), with the exact
- * site or page it is about. It shares the row's approval state, so one answer
- * settles both.
+ * ("Octo wants to use visitlisboa.com." [Deny] [Allow site]), which name the
+ * exact site or page it is about, and where a step on the page goes ("Goes to
+ * httpbin.org") when the sentence does not say. It shares the row's approval
+ * state, so one answer settles both.
  */
 export function SharedBrowserApprovalPrompt({
   active = true,
@@ -57,9 +62,7 @@ export function SharedBrowserApprovalPrompt({
   const denyButtonRef = useRef<HTMLButtonElement | null>(null);
   const isOriginApproval = request.kind === "origin";
   const sentence = browserApprovalSentence(agentName.trim() || "Octo", request);
-  const targetAddress = sharedBrowserApprovalTargetAddress(request);
-  const destination =
-    targetAddress || request.display.destinationOrigin?.trim() || request.destinationOrigin?.trim() || null;
+  const goesTo = browserApprovalGoesTo(request);
 
   useEffect(() => {
     if (active) {
@@ -117,20 +120,10 @@ export function SharedBrowserApprovalPrompt({
               </Text>
             </div>
 
-            {destination ? (
-              <Surface tone="raised" radius="xl" shadow="none" className="px-3 py-2.5">
-                <Text as="p" variant="caption" tone="muted">
-                  {targetAddress ? "Page" : isOriginApproval ? "Site" : "Destination"}
-                </Text>
-                <Text
-                  variant="mono"
-                  tone="primary"
-                  className="mt-0.5 break-all"
-                  data-testid="shared-browser-approval-destination"
-                >
-                  {destination}
-                </Text>
-              </Surface>
+            {goesTo ? (
+              <Text as="p" tone="muted" className="break-words" data-testid="shared-browser-approval-destination">
+                Goes to {goesTo}
+              </Text>
             ) : null}
 
             {error ? (

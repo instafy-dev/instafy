@@ -106,8 +106,9 @@ For every reader, browser or not:
   result names "not checked". Never names from memory, never placeholders such
   as "candidate 1".
 - A cookie banner with a reject button ("Reject all", "Only necessary"): press
-  it so it does not cover the page the person watches. Refusing shares nothing;
-  accepting is the person's choice.
+  it so it does not cover the page the person watches. With no reject button on
+  the banner itself, leave it up and read on. Refuse through its settings only
+  when the person asks; saving those settings asks once.
 
 ## Shared Browser command (only when Shared Browser is exposed)
 
@@ -129,7 +130,7 @@ the request, or end the turn and ask.
 
 - Prefer concrete action over narration. If the target and first cue are already known, keep pre-action commentary to one short line at most.
 - Use the browser capability actually exposed for this turn. Personal and Shared Browser are visible interactive transports; the owner-local browser is a separate read-only headless observer. Never fall through from an unavailable transport to a different one.
-- For Personal or Shared Browser, default to one browser-capable runtime per conversation. Owner-local observation instead opens one fresh process per tool call and accepts one URL per call.
+- For Personal or Shared Browser, default to one browser-capable runtime per conversation.
 - Start with the exposed browser tool itself, not install checks (`node -v`, `npx playwright --version`, `npm i`), env or repo searches (`env | rg PLAYWRIGHT`, `command -v playwright`) or runtime introspection (`instafy runtime status`, `instafy --help`); report the tool's concrete error if provisioning failed.
 - For requests like “open this page”, “read the title”, “click this button”, or “continue the current browser session”, the first executable step must target the page directly.
 - Do not reopen `INSTAFY.md`, `AGENTS.md`, or `.agents/skills/**` via shell before the first page action. Project memory and loaded learned blocks are already in context for this run.
@@ -326,7 +327,6 @@ not the task ("Finding a page" says what comes next).
 Good:
 - “Start from `/search`, fill the input labeled `Search`, submit with the visible search button, then read `ARTICLE_TOKEN` from the article labels.”
 - “Start from `/search`, fill the input labeled `Search`, submit with the visible search button, then read the page label `Article token:` and map it into the final `ARTICLE_TOKEN` reply line.”
-- “If a consent button labeled `I agree` is visible, click it once before continuing.”
 - Command JSON evidence that includes:
   - `workedCues.route = "/directory"`
   - `workedCues.field = "Team"`

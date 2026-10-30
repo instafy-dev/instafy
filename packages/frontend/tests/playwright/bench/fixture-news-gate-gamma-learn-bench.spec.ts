@@ -102,7 +102,7 @@ test.describe("Bench: /learn improves deterministic fixture-site navigation (opt
         "",
         "Open a live browser session (visible inline).",
         `Navigate to ${fixtureBaseUrl}/`,
-        'If a cookie dialog appears, click "I agree".',
+        'If a cookie dialog appears, click "No thanks".',
         `Open the secret story via the Gate page (click "Secret story" or navigate to ${fixtureBaseUrl}/gate).`,
         "Find the access code on the gate page, enter it in the form, and unlock the story.",
         "Wait for the article page to load (it should be /article/gamma), then read the article heading, the current URL, and the article token from the browser.",

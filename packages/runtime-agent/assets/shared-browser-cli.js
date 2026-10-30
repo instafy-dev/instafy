@@ -1117,8 +1117,9 @@ function describeInPage(rule, forms, names, element, sources) {
 
     // A cookie or consent banner around the control: a container whose id,
     // class, label or test id names it, a dialog whose title does, or a
-    // small container close by whose text speaks of cookies. Only a
-    // refusal's words count with it (the classifier's consent rejection).
+    // small container close by whose text speaks of cookies. With it, a
+    // refusal's words go without a prompt and accepting words are refused
+    // (the classifier's consent rejection and `step_refused_consent`).
     const consentPattern = /cookie|consent|gdpr|rgpd|dsgvo|privacy|datenschutz|privacidade|confidentialit/i;
     let consentContext = consentPattern.test(dialogLabel);
     for (
@@ -1653,8 +1654,9 @@ function classifyStep(op, description, context) {
   }
 }
 
-// Revealing or copying a credential, signing in and choosing files are the
-// user's steps in every mode. Refused before any prompt is shown.
+// Revealing or copying a credential, signing in, choosing files and
+// accepting a cookie banner are the user's steps in every mode. Refused
+// before any prompt is shown.
 function refuseUserStep(classification) {
   if (classification.verdict !== "refuse") {
     return;
@@ -1686,15 +1688,71 @@ function approvalCategoryTitle(classification) {
   return actionPolicy.categoryTitle(classification.category) || "";
 }
 
-// The masked control name for prompts and the action log. Both labels are
-// shown when the accessible name and visible text differ.
-function controlLabel(description) {
+// A control's masked names: the text it shows, then its other name when the
+// two differ ("Agree and close", also called "Agree and close: Agree to our
+// data processing and close"). The text it shows leads: it is what the
+// person finds on the page, and the other name can say more than it shows.
+function controlNames(description) {
   const labels = actionPolicy.stepLabels(policyTarget(description));
-  const bounded = (value) => Array.from(String(value || "")).slice(0, MAX_LABEL_CHARS).join("");
-  const label = labels.differ
-    ? `${bounded(labels.accessible)} (shown as "${bounded(labels.visible)}")`
-    : description.label;
-  return maskedDisplayText(label);
+  return labels.differ
+    ? { shown: maskedDisplayText(labels.visible), other: maskedDisplayText(labels.accessible) }
+    : { shown: maskedDisplayText(description.label), other: "" };
+}
+
+// The control's name, quoted, for the action log and the ticker:
+// `"Agree and close" (also called "Agree and close: Agree to our data processing and close")`.
+function quotedControlLabel(description) {
+  const { shown, other } = controlNames(description);
+  const bounded = (value) => Array.from(value).slice(0, MAX_LABEL_CHARS).join("");
+  return other ? `"${bounded(shown)}" (also called "${bounded(other)}")` : `"${bounded(shown)}"`;
+}
+
+// A prompt's label, with its category and tab, fits the approval's 240
+// bytes, so each name and the list of sent fields are cut on their own.
+const PROMPT_NAME_BYTES = 44;
+const PROMPT_FIELDS_BYTES = 80;
+
+// `value` cut to `maxBytes` of UTF-8 between characters, ending in "…" when cut.
+function boundedBytes(value, maxBytes) {
+  const text = String(value || "");
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let kept = "";
+  let bytes = Buffer.byteLength("\u2026");
+  for (const character of text) {
+    const size = Buffer.byteLength(character);
+    if (bytes + size > maxBytes) break;
+    kept += character;
+    bytes += size;
+  }
+  return `${kept.trimEnd()}\u2026`;
+}
+
+// The sent fields as a prompt lists them: as many whole names as fit, then
+// "and 2 more".
+function sentFieldsText(names) {
+  const listed = [];
+  for (const [index, name] of names.entries()) {
+    const rest = names.length - index - 1;
+    const text = [...listed, name].join(", ") + (rest > 0 ? ` and ${rest} more` : "");
+    if (Buffer.byteLength(text) > PROMPT_FIELDS_BYTES) break;
+    listed.push(name);
+  }
+  const more = names.length - listed.length;
+  if (listed.length === 0) return names.length === 1 ? "1 field" : `${names.length} fields`;
+  return more > 0 ? `${listed.join(", ")} and ${more} more` : listed.join(", ");
+}
+
+// The control's name in a prompt, the text it shows first and each name cut
+// on its own, and for a step that sends a form the fields it sends, never
+// their values: `Submit order · Sends: Customer name, Telephone`.
+function promptLabel(description, fallback, sentFields = []) {
+  const { shown, other } = controlNames(description);
+  const name = !shown
+    ? fallback
+    : other
+      ? `${boundedBytes(shown, PROMPT_NAME_BYTES)} (also called "${boundedBytes(other, PROMPT_NAME_BYTES)}")`
+      : boundedBytes(shown, 2 * PROMPT_NAME_BYTES);
+  return sentFields.length > 0 ? `${name} \u00b7 Sends: ${sentFieldsText(sentFields)}` : name;
 }
 
 // The controls a person can see, in document order. Snapshots and actions
@@ -2353,6 +2411,29 @@ const FORM_ENTRIES_IN_PAGE = new Function(
   "...args",
   `return (${formEntriesInPage})((${formSubmission.formSubmissionRulesInPage})(), ...args);`,
 );
+
+// The fields a form step sends something from, named the way the page
+// labels them, never their values (formSubmission's sentFieldNames).
+const SENT_FIELDS_IN_PAGE = new Function(
+  "element",
+  "request",
+  `return (${formSubmission.formSubmissionRulesInPage})().sentFieldNames(element, Boolean(request && request.typed));`,
+);
+
+// What a prompt says a form step sends: the fields' masked names, or none
+// when the step sends no form, sends nothing (a dialog form) or the page did
+// not say. `typed` is the text a type step puts in the field first.
+async function sentFieldNames(target, submission, typed = null) {
+  if (!submission || submission.method === "dialog") return [];
+  const names = await target.locator
+    .evaluate(SENT_FIELDS_IN_PAGE, { kind: "sent-fields", typed: typeof typed === "string" && typed !== "" })
+    .catch(() => null);
+  if (!Array.isArray(names)) return [];
+  return names
+    .filter((name) => typeof name === "string" && name.trim())
+    .slice(0, 24)
+    .map((name) => maskedDisplayText(Array.from(name.replace(/\s+/g, " ").trim()).slice(0, 40).join("")));
+}
 
 // The entries a page reported for a free site search, with the typed text in
 // the field's own entry, or null when the answer is not exactly that shape.
@@ -3553,7 +3634,11 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (!consentRejection) {
       await allowStepOnce({
         operation: "click",
-        label: controlLabel(target.description) || "Activate this control",
+        label: promptLabel(
+          target.description,
+          "Activate this control",
+          await sentFieldNames(target, clickSubmission),
+        ),
         categoryTitle: approvalCategoryTitle(step),
         sourceOrigin,
         ...destination,
@@ -3580,7 +3665,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     assertStepOnTime();
     emitAction({
       type: "click",
-      label: `Click "${controlLabel(target.description)}"`,
+      label: `Click ${quotedControlLabel(target.description)}`,
       url: page.url(),
       x: box.x + box.width / 2,
       y: box.y + box.height / 2,
@@ -3656,8 +3741,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     await allowStepOnce({
       operation: submitting ? "form-submit" : "type",
       label: submitting
-        ? controlLabel(target.description) || "Submit this form"
-        : controlLabel(target.description) || "Type into this field",
+        ? promptLabel(
+          target.description,
+          "Submit this form",
+          readingStep ? [] : await sentFieldNames(target, typeSubmission, body.text),
+        )
+        : promptLabel(target.description, "Type into this field"),
       categoryTitle: approvalCategoryTitle(step),
       sourceOrigin,
       ...destination,
@@ -3681,7 +3770,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     assertStepOnTime();
     emitAction({
       type: "type",
-      label: `Type into "${controlLabel(target.description)}"`,
+      label: `Type into ${quotedControlLabel(target.description)}`,
       url: page.url(),
     });
     await target.locator.focus();
@@ -3782,8 +3871,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
           : "press-space"
         : "press-key",
       label: activationKey
-        ? controlLabel(target.description) || "Activate this control"
-        : `Press ${pressKey} on ${controlLabel(target.description) || "this field"}`,
+        ? promptLabel(
+          target.description,
+          "Activate this control",
+          readingStep ? [] : await sentFieldNames(target, pressSubmission),
+        )
+        : `Press ${pressKey} on ${promptLabel(target.description, "this field")}`,
       categoryTitle: approvalCategoryTitle(step),
       sourceOrigin,
       ...destination,

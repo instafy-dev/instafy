@@ -36,6 +36,12 @@
  *   keyActivatedButton(element)
  *     The button that Enter or Space on `element` clicks: the element or a
  *     <button> around it. Null for any other element.
+ *   sentFieldNames(element, typed)
+ *     The names a person knows the fields by that the submission through
+ *     `element` sends something from (typed text, a chosen item, a ticked
+ *     box), for a prompt to say what a step sends: a label, a group's legend
+ *     or the name attribute, never a value, and no hidden field. `typed`
+ *     counts `element` as filled.
  *
  * The rules, from the HTML form submission and implicit submission
  * algorithms, as Chromium runs them:
@@ -379,7 +385,116 @@
       return form ? describe(form, null, "", false) : null;
     }
 
-    return { submissionOf, implicitSubmission, keyActivatedButton };
+    const MAX_FIELD_NAMES = 24;
+    const MAX_FIELD_NAME_CHARS = 40;
+    // Inside a label these hold a value or a list of choices, never its words.
+    const NOT_LABEL_WORDS = new Set([
+      "input", "select", "textarea", "button", "option", "datalist", "output", "script", "style", "template", "noscript",
+    ]);
+    const tidy = (value) =>
+      String(value || "").replace(/\s+/g, " ").replace(/[\s:*]+$/, "").trim().slice(0, MAX_FIELD_NAME_CHARS).trim();
+    const ownWords = (node) => {
+      let text = "";
+      const visit = (current, depth) => {
+        if (depth > 32 || text.length > 400) return;
+        for (let child = current.firstChild; child; child = child.nextSibling) {
+          if (child.nodeType === 3) text += ` ${child.nodeValue || ""}`;
+          else if (child.nodeType === 1 && !NOT_LABEL_WORDS.has(tag(child))) visit(child, depth + 1);
+        }
+      };
+      try {
+        visit(node, 0);
+      } catch (_) {
+        return "";
+      }
+      return tidy(text);
+    };
+    const wordsOfIds = (element, name) => {
+      const doc = ownerDocumentOf.call(element);
+      return tidy(String(attribute(element, name) || "").split(/\s+/).filter(Boolean).slice(0, 8)
+        .map((id) => {
+          const node = doc.getElementById(id);
+          return node ? ownWords(node) : "";
+        })
+        .join(" "));
+    };
+    const ownName = (element) => tidy(attribute(element, "aria-label")) || wordsOfIds(element, "aria-labelledby");
+    const labelWords = (element) => {
+      try {
+        return tidy(Array.from(element.labels || [], ownWords).join(" "));
+      } catch (_) {
+        return "";
+      }
+    };
+    // The name of the group a radio or a box belongs to: its fieldset's
+    // legend, or a radio group's own name.
+    const groupName = (element) => {
+      let group = null;
+      try {
+        group = element.closest("fieldset, [role=radiogroup], [role=group]");
+      } catch (_) {
+        group = null;
+      }
+      if (!group) return "";
+      if (tag(group) === "fieldset") {
+        for (let child = firstElementChildOf.call(group); child; child = nextElementSiblingOf.call(child)) {
+          if (tag(child) === "legend") return ownWords(child) || ownName(group);
+        }
+      }
+      return ownName(group);
+    };
+    // A radio's own label, and a box's in a group, name a choice, which is a
+    // value: those are named by their group, or their name attribute.
+    const fieldName = (element) => {
+      const type = typeOf(element);
+      if (tag(element) === "input" && type === "radio") return groupName(element) || tidy(attribute(element, "name"));
+      if (tag(element) === "input" && type === "checkbox") {
+        return groupName(element) || ownName(element) || labelWords(element) || tidy(attribute(element, "name"));
+      }
+      return ownName(element) || labelWords(element) || tidy(attribute(element, "placeholder")) ||
+        tidy(attribute(element, "title")) || tidy(attribute(element, "name"));
+    };
+    // Whether the submission sends something of the person's from a control:
+    // typed text, a chosen item, a ticked box or a chosen file. A hidden
+    // field's value is the page's own, and a button is no field.
+    const sendsField = (control, filled) => {
+      const name = tag(control);
+      if (!["input", "select", "textarea"].includes(name) || !attribute(control, "name") || disabled(control)) return false;
+      const type = typeOf(control);
+      if (name === "input" && ["hidden", "submit", "image", "reset", "button"].includes(type)) return false;
+      if (name === "input" && (type === "checkbox" || type === "radio")) return control.checked === true;
+      if (name === "input" && type === "file") return Boolean(control.files && control.files.length > 0);
+      if (name === "select") return Boolean(control.selectedOptions && control.selectedOptions.length > 0);
+      return filled || String(control.value || "") !== "";
+    };
+
+    // What a person knows the fields by that the submission through
+    // `element` sends something from, in tree order, at most 24, never a
+    // value. `typed` counts `element` as filled: a step that types into it
+    // and submits fills it first. Empty for a dialog submission, which sends
+    // nothing, and for an element with no form.
+    function sentFieldNames(element, typed) {
+      let submission = null;
+      try {
+        submission = submissionOf(element, null);
+      } catch (_) {
+        return [];
+      }
+      if (!submission || !submission.form || submission.method === "dialog") return [];
+      const names = [];
+      const seen = new Set();
+      for (const control of listedControlsOf(submission.form)) {
+        if (!sendsField(control, typed === true && control === element)) continue;
+        const name = fieldName(control);
+        if (!name || seen.has(lower(name))) continue;
+        seen.add(lower(name));
+        names.push(name);
+        if (names.length >= MAX_FIELD_NAMES) break;
+      }
+      return names;
+    }
+
+    return { submissionOf, implicitSubmission, keyActivatedButton, sentFieldNames };
   }
 
   const lower = (value) => String(value || "").toLowerCase();

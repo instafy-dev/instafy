@@ -16,7 +16,9 @@
  *            true on a cookie or consent banner's button that refuses
  *            consent ("Reject all", "Only necessary"): it shares nothing, so
  *            a host may take it without a prompt in every approval mode,
- *            while it still keeps its own guards (no link, no form)
+ *            while it still keeps its own guards (no link, no form). A
+ *            control or link in the same banner whose words accept is
+ *            refused (`step_refused_consent`): accepting is the person's step
  *
  * A free ("allow") verdict only ever comes from structure: tag, role, link
  * shape, form method, page area. Label words and icon names only add risk.
@@ -168,6 +170,28 @@
   // "allow" or "accept" phrase, even "Allow necessary only": those words
   // add risk wherever they appear.
   const CONSENT_REJECT_EXACT = /^(?:reject(?:\s+all)?(?:\s+cookies)?|decline(?:\s+all)?(?:\s+cookies)?|refuse(?:\s+all)?|deny(?:\s+all)?|only\s+(?:necessary|essential|required)(?:\s+cookies)?|(?:necessary|essential|required)(?:\s+cookies)?\s+only|use\s+(?:only\s+)?(?:necessary|essential)(?:\s+cookies)?(?:\s+only)?|continue\s+without\s+accepting|alle\s+ablehnen|ablehnen|nur\s+(?:notwendige|erforderliche|essenzielle|technisch\s+notwendige)(?:\s+cookies)?|tout\s+refuser|refuser(?:\s+tout)?|continuer\s+sans\s+accepter|rechazar(?:\s+todo|\s+todas)?|rifiuta(?:\s+tutto|\s+tutti)?|rejeitar(?:\s+tudo|\s+todos|\s+todas)?|recusar(?:\s+tudo|\s+todos|\s+todas)?|apenas\s+(?:necess[aá]rios|essenciais)|alles\s+weigeren|weigeren)$/iu;
+  // Words that accept or agree in a consent banner, in the same languages:
+  // "Accept all", "I agree", "Agree and close", "Alle akzeptieren",
+  // "Tout accepter", "Aceptar", "Accetta", "aceitar e continuar", "Akkoord".
+  // Only these words: a banner's "Disagree" toggles, its cookie policy link
+  // and its settings stay ordinary steps.
+  const CONSENT_ACCEPT_SOURCE = [
+    "accept", "agree", "allow\\s+all", "allow\\s+(?:all\\s+)?cookies",
+    "akzeptieren", "akzeptiere", "zustimmen", "stimme\\s+zu", "einverstanden", "annehmen",
+    "alles?\\s+(?:zulassen|erlauben)",
+    "accepter", "accepte", "d['’]accord", "tout\\s+autoriser", "autoriser\\s+tout",
+    "aceptar", "acepto", "acepta", "de\\s+acuerdo", "permitir\\s+tod[oa]s?",
+    "accetta", "accetto", "accettare", "acconsento", "d['’]accordo", "consenti\\s+tutt[oi]",
+    "aceitar", "aceito", "aceite", "aceita", "concordo", "permitir\\s+tud[oa]",
+    "accepteren", "accepteer", "akkoord", "alles?\\s+toestaan",
+  ].join("|");
+  const CONSENT_ACCEPT = new RegExp(`${START}(?:${CONSENT_ACCEPT_SOURCE})${END}`, "iu");
+  // An accept word right after a "not" or "without" refuses ("Do not accept",
+  // "Continuer sans accepter →", "Não aceitar", "Nicht akzeptieren").
+  const CONSENT_NOT_ACCEPT = new RegExp(
+    `${START}(?:no|not|don['’]t|without|pas|sans|não|nao|sem|nicht|ohne|sin|senza|non|niet|zonder(?:\\s+te)?)\\s+(?:${CONSENT_ACCEPT_SOURCE})${END}`,
+    "giu",
+  );
   const DISMISS_EXACT = /^(?:reject\s+all|decline\s+all|only\s+necessary|necessary\s+only|use\s+necessary\s+only|essential\s+only|only\s+essential|close|dismiss|alle\s+ablehnen|nur\s+notwendige|nur\s+notwendige\s+cookies|nur\s+erforderliche|nur\s+essenzielle|schließen|×|✕)$/iu;
   const PAGE_LABEL = /^(?:\d{1,4}|next|next\s+page|previous|previous\s+page|prev|first|last|older|newer|weiter|zurück|vor|nächste|nächste\s+seite|vorherige|vorherige\s+seite|erste|letzte|seite\s+\d{1,4}|page\s+\d{1,4}|[‹›«»<>…]|\.\.\.)$/iu;
   // Whole names of controls that only open or close part of the page: a side
@@ -294,6 +318,10 @@
     upload: {
       code: "step_refused_upload",
       message: "Choosing or uploading files is the user's step. Ask the user to choose the file themselves.",
+    },
+    consent: {
+      code: "step_refused_consent",
+      message: "Accepting cookies or other consent is the user's step. Leave the banner up and read on under it.",
     },
     sensitive: {
       code: "sensitive_input_blocked",
@@ -464,6 +492,13 @@
     if (DOWNLOAD.test(label)) return "download";
     if (MESSAGE.test(label)) return "message";
     return null;
+  }
+
+  // A label that accepts consent: an accept word that no "not" or "without"
+  // turns into a refusal, and no refusal's own words.
+  function acceptsConsent(label) {
+    return Boolean(label) && !CONSENT_REJECT_EXACT.test(label) &&
+      CONSENT_ACCEPT.test(label.replace(CONSENT_NOT_ACCEPT, " "));
   }
 
   function riskyLabel(label) {
@@ -832,6 +867,13 @@
     // of this refusal, so the agent can reach the page and hand it over.
     if (!plainHttpLink && isButtonLike(target) && SIGN_IN_EXACT.test(label) && target.formHasPassword === true) {
       return refuse("sign_in", "sign-in button");
+    }
+
+    // Accepting a cookie or consent banner is the person's step, whatever the
+    // control is: a button, a purpose's toggle or a link, which would
+    // otherwise pass as plain navigation below.
+    if (target.consentContext === true && acceptsConsent(label)) {
+      return refuse("consent", "accept in a consent banner");
     }
 
     const href = cleanText(target.href);

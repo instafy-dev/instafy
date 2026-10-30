@@ -69,36 +69,92 @@ export function activityHostOf(origin: string | null | undefined): string | null
   return isActivityHost(host) ? host : null;
 }
 
+/**
+ * Where a step on the page goes, as a host with no scheme ("httpbin.org"),
+ * for the browser view's sheet to say "Goes to httpbin.org": a link's or a
+ * form's address. Null when the sentence already names it: a site prompt or
+ * a navigation names its page, and a form sent to another site says "It
+ * goes to …".
+ */
+export function browserApprovalGoesTo(
+  request: Pick<BrowserApprovalWordsRequest, "kind" | "operation" | "sourceOrigin" | "destinationOrigin" | "display">,
+): string | null {
+  if (request.kind !== "action" || request.operation === "navigate") return null;
+  const destination = shownHost(request.display.destinationOrigin) ?? shownHost(request.destinationOrigin);
+  if (!destination) return null;
+  const site = shownHost(request.sourceOrigin) ?? destination;
+  return request.operation === "form-submit" && destination !== site ? null : destination;
+}
+
 function shownHost(origin: string | null | undefined): string | null {
   const host = hostOf(origin);
   return host ? displayActivityHost(host) : null;
 }
 
-function cut(label: string): string {
+function cut(label: string, max = MAX_LABEL_CHARS): string {
   const characters = [...label.trim()];
-  return characters.length <= MAX_LABEL_CHARS ? characters.join("") : `${characters.slice(0, MAX_LABEL_CHARS - 1).join("")}…`;
+  return characters.length <= max ? characters.join("") : `${characters.slice(0, max - 1).join("")}…`;
+}
+
+/** The list of fields a prompt says a form step sends is cut to this many characters. */
+const MAX_SENDS_CHARS = 120;
+// How the runtime writes a control's two names and what a form step sends:
+// `Submit order · Sends: Customer name, Telephone` and
+// `Agree and close (also called "Agree and close: Agree to our data processing and close")`.
+const SENDS_SEPARATOR = " \u00b7 Sends: ";
+const ALSO_CALLED = /^(.*) \(also called "(.*)"\)$/su;
+// An older runtime led with the other name: `Learn More: Configure (shown as "Learn More")`.
+const SHOWN_AS = /^(.*) \(shown as "(.*)"\)$/su;
+
+type ControlWords = {
+  /** The text the control shows, which the person finds on the page. */
+  shown: string;
+  /** Its other name, when it says more than it shows. */
+  other: string;
+  /** The fields a form step sends, by name, never their values. */
+  sends: string;
+};
+
+function controlWords(name: string): ControlWords {
+  let rest = name;
+  let sends = "";
+  const at = rest.lastIndexOf(SENDS_SEPARATOR);
+  if (at >= 0) {
+    sends = rest.slice(at + SENDS_SEPARATOR.length).trim();
+    rest = rest.slice(0, at);
+  }
+  const also = ALSO_CALLED.exec(rest);
+  if (also) return { shown: also[1], other: also[2], sends };
+  const older = SHOWN_AS.exec(rest);
+  if (older) return { shown: older[2], other: older[1], sends };
+  return { shown: rest, other: "", sends };
 }
 
 /**
  * What the agent waits to do, in one sentence: "Octo wants to send the form
  * “Search” on visitlisboa.com." The label is the runtime's already-masked
  * name of the control, the only place the page's own words appear, because
- * the person needs them to decide.
+ * the person needs them to decide. Each of its names is cut on its own, so
+ * the text the control shows is never lost to a longer one, and a form step
+ * says which fields it sends: "Sends: Customer name, Telephone."
  */
 export function browserApprovalSentence(agent: string, request: BrowserApprovalWordsRequest): string {
   // The step's category leads the runtime's label ("Delete, cancel or sign
   // out: Delete account"): only the control's name goes in quotes, and the
   // category, when it adds something, follows as its own sentence.
-  const { label: name, note } = splitBrowserApprovalLabel(request.display.label);
-  const sentence = stepSentence(agent, request, name);
-  return note ? `${sentence} ${note}` : sentence;
+  const { label, note } = splitBrowserApprovalLabel(request.display.label);
+  const words = controlWords(label);
+  const sentence = stepSentence(agent, request, label, words);
+  const sends = words.sends ? ` Sends: ${cut(words.sends, MAX_SENDS_CHARS).replace(/[.\s]+$/u, "")}.` : "";
+  return `${sentence}${sends}${note ? ` ${note}` : ""}`;
 }
 
-function stepSentence(agent: string, request: BrowserApprovalWordsRequest, name: string): string {
+function stepSentence(agent: string, request: BrowserApprovalWordsRequest, name: string, words: ControlWords): string {
   const destination = shownHost(request.display.destinationOrigin) ?? shownHost(request.destinationOrigin);
   const site = shownHost(request.sourceOrigin) ?? destination ?? "this site";
-  const label = cut(name);
-  const quoted = label ? ` “${label}”` : "";
+  const label = cut(words.shown);
+  const other = cut(words.other);
+  const quoted = label ? ` “${label}”${other ? ` (also called “${other}”)` : ""}` : "";
   // The exact page a site prompt or a navigation will load, when the runtime names it.
   const page = sharedBrowserApprovalTargetAddress(request);
   switch (request.operation) {

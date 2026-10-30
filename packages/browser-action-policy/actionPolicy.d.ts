@@ -19,12 +19,14 @@ export type PersonalBrowserStepCategory =
   | "reveal_secret"
   | "sign_in"
   | "upload"
+  | "consent"
   | "sensitive";
 
 export type PersonalBrowserStepRefusalCode =
   | "step_refused_secret"
   | "step_refused_sign_in"
   | "step_refused_upload"
+  | "step_refused_consent"
   | "sensitive_input_blocked";
 
 export type PersonalBrowserStepClassification = {
@@ -42,7 +44,8 @@ export type PersonalBrowserStepClassification = {
    * Set on a cookie or consent banner's button that refuses consent ("Reject
    * all", "Only necessary"), found by its words and by the describer's
    * `consentContext`. It shares nothing, so a host may take it without a
-   * prompt in every approval mode.
+   * prompt in every approval mode. A control or link in the same banner
+   * whose words accept is refused instead (`step_refused_consent`).
    */
   consentRejection?: boolean;
 };

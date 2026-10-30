@@ -87,7 +87,7 @@ test.describe("Bench: /learn improves deterministic catalog pagination (opt-in)"
         "",
         "Open a live browser session (visible inline).",
         `Navigate to ${fixtureBaseUrl}/catalog`,
-        'If a cookie dialog appears, click "I agree".',
+        'If a cookie dialog appears, click "No thanks".',
         "Use the catalog pagination to reach page 2.",
         "Stop when page 2 is visible and the Delta listing is visible on that page.",
         "",
