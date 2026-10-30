@@ -616,16 +616,34 @@ describe("a step its turn ended before", () => {
     expect(live.kind === "step" && [live.step.state, live.step.label]).toEqual(["running", "Finding places to stay"]);
   });
 
-  it("never names the line again once a runtime status came after it", () => {
+  it("never names the line again once the turn's save came after it", () => {
     const stay = command(STAY, { status: "in_progress", exitCode: null });
     const saving = note("Syncing workspace changes…", "status", SAVING);
     const applying = note("Applying changes to workspace…", "status");
     expect(summarize([command(ADD_POINT), stay], "running").live).toBe("Finding places to stay…");
     expect(summarize([command(ADD_POINT), stay, saving], "running").live).toBe("Saving your changes…");
     expect(summarize([command(ADD_POINT), stay, saving, applying], "running").live).toBe("Thinking…");
-    // A step started after the status names the line as usual.
+    // A step started after the save names the line as usual.
     const later = command(WEB_READ, { status: "in_progress", exitCode: null });
     expect(summarize([stay, saving, applying, later], "running").live).toBe("Reading pages…");
+  });
+
+  // A retry in the middle of a turn is not its end: a lookup still running
+  // while the model is asked again names the line once the retry is over.
+  it("names the line again after Instafy tried the model again mid-turn", () => {
+    const stay = command(STAY, { status: "in_progress", exitCode: null });
+    const retrying = note("Retrying: unexpected status 502", "status", {
+      v: 1,
+      key: "runtime/retry",
+      role: "quiet",
+      live: "Trying again",
+      count: 1,
+      also: [],
+    });
+    expect(summarize([command(ADD_POINT), stay, retrying], "running").live).toBe("Trying again…");
+    expect(
+      summarize([command(ADD_POINT), stay, retrying, note("**Picking the hotels**", "reasoning")], "running").live,
+    ).toBe("Finding places to stay…");
   });
 });
 

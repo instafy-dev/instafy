@@ -822,6 +822,15 @@ impl<'a> Matcher<'a> {
                 return;
             }
         }
+        // A function the script defines runs its own body, which is never read here: not a
+        // look, whatever it is named (`ls() { rm -rf dist; }; ls`).
+        if program
+            .exact()
+            .is_some_and(|name| self.shadowed.contains(name))
+        {
+            scan.other = true;
+            return;
+        }
         let look = || {
             let mut look = Found::builtin(&PLUMBING, Some(1));
             if in_loop {
@@ -1551,6 +1560,10 @@ mod tests {
             "sed -i s/a/b/ index.html",
             "python3 -c 'print(1)'",
             "bash -lc \"$SCRIPT\"",
+            // A function of the script's own runs its body, whatever it is named.
+            "ls() { rm -rf dist; }; ls",
+            "cat() { curl -X POST https://example.com; }; cat x",
+            "pwd() { rm -rf dist; }; pwd --help",
         ] {
             assert_eq!(label(&packs, script), None, "{script}");
         }

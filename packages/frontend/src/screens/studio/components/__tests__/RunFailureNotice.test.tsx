@@ -325,6 +325,29 @@ describe("RunFailureMessageBody", () => {
     focus.mockRestore();
   });
 
+  // A failure whose Details would only repeat its sentence has none: focus
+  // goes to "Retried" itself, never to the page.
+  it("moves focus from a pressed Try again to Retried when there is no Details", async () => {
+    const plain = createMessage({
+      ...FAILURE,
+      id: "plain",
+      content: "Octo couldn't open a page in the browser, so this turn stopped.",
+    });
+    const requestRetry = vi.fn();
+    await render(contextValue({ requestRetry }), plain);
+    expect(query("run-failure-details-toggle")).toBeNull();
+    const retry = query("run-failure-retry");
+    retry?.focus();
+    await act(async () => {
+      retry?.click();
+    });
+    await render(contextValue({ requestRetry, pendingRetryKey: "plain" }), plain);
+    await render(contextValue({ requestRetry, isRetrySuperseded: () => true }), plain);
+    expect(query("run-failure-retry")).toBeNull();
+    expect(query("run-failure-retried")?.getAttribute("tabindex")).toBe("-1");
+    expect(document.activeElement).toBe(query("run-failure-retried"));
+  });
+
   it("never moves focus later when the press left Try again in place", async () => {
     // The resend was refused, so Try again stayed. Minutes later another
     // update retires the card while focus sits on the page: nothing here was
@@ -488,6 +511,22 @@ describe("RunFailureMessageBody", () => {
       expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
       focusSpy.mockRestore();
       expect(cancelAutoRetry).not.toHaveBeenCalled();
+    });
+
+    it("moves focus from Cancel to Try again when the countdown is dropped and there is no Details", async () => {
+      const plain = createMessage({
+        ...FAILURE,
+        id: "plain",
+        content: "Octo couldn't open a page in the browser, so this turn stopped.",
+      });
+      await render(
+        contextValue({ scheduledAutoRetry: { key: "plain", dueAt: Date.now() + 20_000 }, cancelAutoRetry: vi.fn() }),
+        plain,
+      );
+      query("run-failure-auto-retry-cancel")?.focus();
+      await render(contextValue({ scheduledAutoRetry: null }), plain);
+      expect(query("run-failure-details-toggle")).toBeNull();
+      expect(document.activeElement).toBe(query("run-failure-retry"));
     });
 
     it("leaves focus alone when the countdown ends while Cancel does not hold it", async () => {

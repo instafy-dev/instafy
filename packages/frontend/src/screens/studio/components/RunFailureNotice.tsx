@@ -234,6 +234,7 @@ export function RunFailureMessageBody({
   const retryButtonRef = useRef<HTMLButtonElement | null>(null);
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
   const detailsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const retriedRef = useRef<HTMLSpanElement | null>(null);
   const autoRetryLineRef = useRef<HTMLDivElement | null>(null);
   // When the press here retires its control (Try again turns into "Retried",
   // Cancel turns into Try again), focus follows to the replacement instead of
@@ -245,7 +246,7 @@ export function RunFailureMessageBody({
   // Whether Cancel holds focus. When the countdown ends on its own, Cancel goes
   // away under a keyboard or screen reader user; focus then moves to the
   // "Trying again…" line that replaces it (or to Details, when the countdown
-  // was dropped), instead of dropping to the page.
+  // was dropped, else to Try again), instead of dropping to the page.
   const cancelFocusedRef = useRef(false);
   useEffect(() => {
     const handOff = focusHandOffRef.current;
@@ -254,13 +255,15 @@ export function RunFailureMessageBody({
         cancelFocusedRef.current = false;
         const active = typeof document === "undefined" ? null : document.activeElement;
         if (!active || active === document.body) {
-          (detailsButtonRef.current ?? autoRetryLineRef.current)?.focus({ preventScroll: true });
+          (detailsButtonRef.current ?? autoRetryLineRef.current ?? retryButtonRef.current)?.focus({
+            preventScroll: true,
+          });
         }
       }
       return;
     }
     cancelFocusedRef.current = false;
-    let target: HTMLButtonElement | null = null;
+    let target: HTMLElement | null = null;
     if (handOff.to === "details") {
       if (retryPending) {
         // The resend is in flight and its spinner keeps Try again in place.
@@ -268,7 +271,8 @@ export function RunFailureMessageBody({
         return;
       }
       if (!retryButtonRef.current && handOff.sawPending) {
-        target = detailsButtonRef.current;
+        // With no Details, "Retried" itself takes it.
+        target = detailsButtonRef.current ?? retriedRef.current;
       }
     } else if (!cancelButtonRef.current) {
       target = retryButtonRef.current;
@@ -384,8 +388,12 @@ export function RunFailureMessageBody({
             ) : null}
             {showRetried ? (
               <span
+                ref={retriedRef}
+                // Takes focus only from the Try again it replaces, when there
+                // is no Details to take it; never a tab stop.
+                tabIndex={-1}
                 data-testid="run-failure-retried"
-                className="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400"
+                className="inline-flex items-center gap-1 rounded-md text-xs text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:text-slate-400 dark:focus-visible:ring-primary-300/80"
               >
                 <Check aria-hidden="true" className="h-3.5 w-3.5 flex-none" />
                 Retried

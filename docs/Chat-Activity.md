@@ -22,7 +22,7 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | From the send until the turn's first step | `Starting…`, however long that takes: the workspace starting, the turn waiting behind another, the model reasoning before its first step, the runtime retrying its request, and a turn Instafy resent by itself all read the same |
 | Running a labelled step | its running label, for example `Looking up places…` (the newest running step wins; in a chain, its first command that is not quiet) |
 | Running an unlabelled command or tool | `Working…`; a file edit says `Editing files…` |
-| A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives; a step still running from before it never names the line again |
+| A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives. A step still running from before the turn's save never names the line again; after a retry, it does |
 | The model is working with no step running, after the turn's first step | `Thinking…` (never its reasoning titles or notes), once there has been no step for 3 seconds; until then the line keeps the step before it |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
 | Done | what it made leads (the latest outcome), then the step that answered (the last "what it did" group) and the biggest other one (the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that made nothing labelled but opened or stopped a preview leads with the later of the two: `Opened a preview, edited a file`, `Stopped the preview`, and a site stopped and opened again reads `Opened a preview`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
@@ -148,8 +148,8 @@ from trusted data only, in this order:
    `grep`, `find`, `cd`, `echo`, `printf`, `true`, `test`, `[`, `sleep`, `which`, `stat`,
    `realpath`, `dirname` and `basename`, or a command asked for its own help (`uw cite --help`).
    Anything that writes a file (`echo hi > a.html`), deletes or runs something of its own
-   (`find -delete`, `find -exec`, `rg --pre`, a substitution) is not a look. Studio leaves looks
-   off the line.
+   (`find -delete`, `find -exec`, `rg --pre`, a substitution, a function the script defines under
+   one of those names) is not a look. Studio leaves looks off the line.
 5. **Anything else gets no label.** Studio counts those steps instead ("Ran 3 commands").
 
 A label is never built from command output, page text, a page title or text the model wrote. The

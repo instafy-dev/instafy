@@ -871,6 +871,8 @@ function stepLabel(kind: StepKind, message: ChatMessage, activity: StepActivity 
 // `rg --files`, a `--help`), as the runtime marks it. Its row reads as any
 // unlabelled command's; it only leaves the line's count.
 const PLUMBING_KEY = "builtin/plumbing";
+// The runtime's status for the save at the end of a turn (activity_labels.rs).
+const SAVE_KEY = "runtime/save";
 
 /** One step as Details shows it, or null when the message is not a step. */
 export function turnStepFromMessage(message: ChatMessage, jobId: string | null): TurnStep | null {
@@ -1049,6 +1051,10 @@ export function summarizeTurnActivity(
   // model reasoning or writing again, the save's own "done" status) ends it.
   let newestOtherIndex = -1;
   let newestStatus: { index: number; activity: StepActivity } | null = null;
+  // The turn's save ("Saving your changes" once the model is done) is a point
+  // the turn moved past: a step still running from before it never names the
+  // line again. A retry is not: the turn goes on after it.
+  let newestSaveIndex = -1;
 
   threadMessages.forEach((message, index) => {
     const type = (getMessageType(message) ?? "").trim().toLowerCase();
@@ -1074,6 +1080,9 @@ export function summarizeTurnActivity(
       const activity = readStepActivity(message, jobId);
       if (activity) {
         newestStatus = { index, activity };
+        if (activity.key === SAVE_KEY) {
+          newestSaveIndex = index;
+        }
       } else {
         newestOtherIndex = index;
       }
@@ -1131,13 +1140,10 @@ export function summarizeTurnActivity(
     live = "Status unavailable";
   } else if (phase === "running") {
     const status = newestStatus as { index: number; activity: StepActivity } | null;
-    // A runtime status marks a point the turn moved past ("Saving your
-    // changes" once the model is done): a step still running from before it
-    // no longer names the line, so the line never goes back to it.
     const runningStep =
       [...steps.keys()]
         .reverse()
-        .filter((index) => steps[index].state === "running" && (!status || stepMessageIndex[index] > status.index))
+        .filter((index) => steps[index].state === "running" && stepMessageIndex[index] > newestSaveIndex)
         .map((index) => steps[index])
         .at(0) ?? null;
     const runningEntry = runningStep?.activity ? primaryEntry(runningStep.activity) : null;
