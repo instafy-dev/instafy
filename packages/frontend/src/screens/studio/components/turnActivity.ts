@@ -1,5 +1,5 @@
 // A turn's plain-language activity line (docs/Chat-Activity.md): "Built the
-// map, looked up 14 places, read 6 pages" once it is done, "Looking up
+// map, read 6 pages, looked up 14 places" once it is done, "Looking up
 // places…" while it runs.
 //
 // The words come only from the `activity` a runtime attached to a step and the
@@ -268,7 +268,11 @@ export function readStepActivity(message: ChatMessage, jobId: string | null): St
 }
 
 export type StepKind = "command" | "tool" | "search" | "edit";
-export type StepState = "running" | "done" | "failed";
+/**
+ * "unfinished": the step was still running when its turn ended, so nothing it
+ * would have done is known to have happened.
+ */
+export type StepState = "running" | "done" | "failed" | "unfinished";
 
 export type TurnStep = {
   kind: StepKind;
@@ -278,9 +282,16 @@ export type TurnStep = {
   /**
    * The label Details shows beside the step: from its activity, else a
    * neutral one for its kind ("Ran a command"). A finished step reads in
-   * the past tense, a failed one as what it tried ("Tried searching the web").
+   * the past tense, a failed one as what it tried ("Tried searching the web"),
+   * and one its turn ended before as what it did not finish ("Didn't finish
+   * finding places to stay").
    */
   label: string;
+  /**
+   * A look around the workspace (`pwd`, `ls`, `cat`, a `--help`) that the
+   * runtime marked as such: Details lists it, the line never counts it.
+   */
+  plumbing?: true;
 };
 
 export type DetailItem =
@@ -312,7 +323,7 @@ export type TurnActivityPhase = "starting" | "running" | "completed" | "failed" 
 export type TurnActivity = {
   /** The running line ("Looking up places…"), while the turn runs. */
   live: string | null;
-  /** The done line ("Looked up 14 places, read 6 pages"), once it ended. */
+  /** The done line ("Read 6 pages, looked up 14 places"), once it ended. */
   summary: string | null;
   stepCount: number;
   details: DetailItem[];
@@ -428,8 +439,13 @@ function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many.replace("{n}", String(count));
 }
 
-/** "ran 5 commands, used 2 tools": what an unlabelled turn did, by kind. */
-function neutralCounts(steps: TurnStep[]): string | null {
+/**
+ * "ran 5 commands, used 2 tools": what an unlabelled turn did, by kind. A look
+ * around the workspace is not counted: a turn that only did that and answered
+ * (or posted a card) has no line, as a plain answer has none.
+ */
+function neutralCounts(allSteps: TurnStep[]): string | null {
+  const steps = allSteps.filter((step) => !step.plumbing);
   const commands = steps.filter((step) => step.kind === "command").length;
   const tools = steps.filter((step) => step.kind === "tool" || step.kind === "search").length;
   const files = new Set<string>();
@@ -526,11 +542,12 @@ function groupWords(group: Group, previousHost: string | null): string {
  * The done line from the turn's labelled steps, or null when none is shown,
  * with the host of the first group it shows.
  *
- * What the turn made leads ("Built the map, looked up 14 places, read 6
- * pages"), then the two biggest things it did. A step that failed counts for
- * nothing it would have done: when nothing else is left to say, the line says
- * what was tried ("Tried searching the web"). A look at the page the turn
- * started on never leads: it is named only when the turn did nothing else.
+ * What the turn made leads ("Built the map, read 6 pages, looked up 14
+ * places"), then the step that answered and the biggest other thing it did.
+ * Only a step that ended counts. A step that failed counts for nothing it
+ * would have done: when nothing else is left to say, the line says what was
+ * tried ("Tried searching the web"). A look at the page the turn started on
+ * never leads: it is named only when the turn did nothing else.
  */
 function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: string | null } {
   const groups = new Map<string, Group>();
@@ -554,22 +571,22 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
         }
         continue;
       }
+      // Only a step that ended counts, whatever its label's `when` says: one
+      // still running (or that its turn ended before) has found nothing yet.
+      if (step.state !== "done") {
+        continue;
+      }
       const previewResult = PREVIEW_RESULTS.get(entry.key);
       if (previewResult !== undefined) {
         // A chain's entries come in the order it ran them, so the later
         // preview step overwrites the earlier one.
-        if (step.state === "done") {
-          result = previewResult;
-        }
+        result = previewResult;
         continue;
       }
       if (entry.role === "quiet") {
         continue;
       }
       if (!entry.done) {
-        continue;
-      }
-      if (entry.when === "success" && step.state !== "done") {
         continue;
       }
       const groupKey = entry.host ? `${entry.key}@${entry.host}` : entry.key;
@@ -613,11 +630,28 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
   const namesASite = [...all, ...startPage.values()].some(
     (group) => group.entry.key.startsWith("browser/") && group.entry.host,
   );
-  const content = all
-    .filter((group) => group.entry.role === "content" && !(namesASite && group.entry.key === BROWSER_WITHOUT_SITE))
-    .sort((a, b) => weight(b) - weight(a) || a.first - b.first)
-    .slice(0, 2)
-    .sort((a, b) => a.first - b.first);
+  const contentGroups = all.filter(
+    (group) => group.entry.role === "content" && !(namesASite && group.entry.key === BROWSER_WITHOUT_SITE),
+  );
+  // The step that answered is the last thing the turn did, and it leads:
+  // "Read a page on carris.pt", never the first page opened on the way. The
+  // biggest of the rest follows it (the later one when they tie). On one site
+  // they read in the order they ran: "Searched visitlisboa.com, read 2 pages".
+  const answered = contentGroups.reduce<Group | null>(
+    (latest, group) => (latest === null || group.last > latest.last ? group : latest),
+    null,
+  );
+  const other = contentGroups
+    .filter((group) => group !== answered)
+    .sort((a, b) => weight(b) - weight(a) || b.last - a.last)
+    .at(0);
+  const content = !answered
+    ? []
+    : !other
+      ? [answered]
+      : other.entry.host !== undefined && other.entry.host === answered.entry.host && other.first < answered.first
+        ? [other, answered]
+        : [answered, other];
   const outcome = all
     .filter((group) => group.entry.role === "outcome")
     .sort((a, b) => b.last - a.last)
@@ -810,6 +844,11 @@ function stepLabel(kind: StepKind, message: ChatMessage, activity: StepActivity 
   if (state === "running") {
     return live;
   }
+  // Its turn ended first: it says what it did not finish, in the past, never
+  // as if it still ran ("Finding places to stay") or had found something.
+  if (state === "unfinished") {
+    return `Didn't finish ${lowerFirst(live)}`;
+  }
   // A failed step says what it tried ("Tried checking the map"), never what
   // it would have done ("Built the map").
   if (state === "failed") {
@@ -828,15 +867,38 @@ function stepLabel(kind: StepKind, message: ChatMessage, activity: StepActivity 
   return entry ? live : capitalize(neutralDone(kind, message));
 }
 
+// A command made only of looks around the workspace (`pwd`, `ls`, `cat`,
+// `rg --files`, a `--help`), as the runtime marks it. Its row reads as any
+// unlabelled command's; it only leaves the line's count.
+const PLUMBING_KEY = "builtin/plumbing";
+// The runtime's status for the save at the end of a turn (activity_labels.rs).
+const SAVE_KEY = "runtime/save";
+
 /** One step as Details shows it, or null when the message is not a step. */
 export function turnStepFromMessage(message: ChatMessage, jobId: string | null): TurnStep | null {
   const kind = STEP_TYPES[(getMessageType(message) ?? "").trim().toLowerCase()];
   if (!kind) {
     return null;
   }
-  const activity = readStepActivity(message, jobId);
+  const checked = readStepActivity(message, jobId);
+  const plumbing = kind === "command" && checked?.key === PLUMBING_KEY && checked.also.length === 0;
+  const activity = plumbing ? null : checked;
   const state = stepState(message);
-  return { kind, message, activity, state, label: stepLabel(kind, message, activity, state) };
+  return {
+    kind,
+    message,
+    activity,
+    state,
+    label: stepLabel(kind, message, activity, state),
+    ...(plumbing ? { plumbing: true as const } : {}),
+  };
+}
+
+/** The step as its turn left it: one still running when the turn ended did not finish. */
+function endedStep(step: TurnStep): TurnStep {
+  return step.state === "running"
+    ? { ...step, state: "unfinished", label: stepLabel(step.kind, step.message, step.activity, "unfinished") }
+    : step;
 }
 
 function isRuntimeStatus(message: ChatMessage): boolean {
@@ -980,6 +1042,8 @@ export function summarizeTurnActivity(
   const { jobId, phase } = options;
   const stepIndexByKey = new Map<string, number>();
   const steps: TurnStep[] = [];
+  // Where each step's newest message sits in the thread.
+  const stepMessageIndex: number[] = [];
   const order: Array<{ kind: "step"; key: string } | { kind: "update"; message: ChatMessage }> = [];
   const updateIds = new Set((options.updates ?? []).map((update) => update.id));
   // A runtime status ("Saving your changes", "Retrying") names the line only
@@ -987,6 +1051,10 @@ export function summarizeTurnActivity(
   // model reasoning or writing again, the save's own "done" status) ends it.
   let newestOtherIndex = -1;
   let newestStatus: { index: number; activity: StepActivity } | null = null;
+  // The turn's save ("Saving your changes" once the model is done) is a point
+  // the turn moved past: a step still running from before it never names the
+  // line again. A retry is not: the turn goes on after it.
+  let newestSaveIndex = -1;
 
   threadMessages.forEach((message, index) => {
     const type = (getMessageType(message) ?? "").trim().toLowerCase();
@@ -999,10 +1067,12 @@ export function summarizeTurnActivity(
       if (existing !== undefined) {
         // The newest message of a step stands for it (started, then completed).
         steps[existing] = step;
+        stepMessageIndex[existing] = index;
         return;
       }
       stepIndexByKey.set(key, steps.length);
       steps.push(step);
+      stepMessageIndex.push(index);
       order.push({ kind: "step", key });
       return;
     }
@@ -1010,6 +1080,9 @@ export function summarizeTurnActivity(
       const activity = readStepActivity(message, jobId);
       if (activity) {
         newestStatus = { index, activity };
+        if (activity.key === SAVE_KEY) {
+          newestSaveIndex = index;
+        }
       } else {
         newestOtherIndex = index;
       }
@@ -1020,6 +1093,13 @@ export function summarizeTurnActivity(
       order.push({ kind: "update", message });
     }
   });
+  // Once the turn has ended, a step still running did not finish: its row
+  // says so, with no spinner, and it counts for nothing it would have done.
+  if (phase === "completed" || phase === "failed" || phase === "cancelled") {
+    steps.forEach((step, index) => {
+      steps[index] = endedStep(step);
+    });
+  }
 
   const answered: AnsweredApproval[] = [];
   const details: DetailItem[] = order.flatMap((item): DetailItem[] => {
@@ -1060,7 +1140,12 @@ export function summarizeTurnActivity(
     live = "Status unavailable";
   } else if (phase === "running") {
     const status = newestStatus as { index: number; activity: StepActivity } | null;
-    const runningStep = [...steps].reverse().find((step) => step.state === "running") ?? null;
+    const runningStep =
+      [...steps.keys()]
+        .reverse()
+        .filter((index) => steps[index].state === "running" && stepMessageIndex[index] > newestSaveIndex)
+        .map((index) => steps[index])
+        .at(0) ?? null;
     const runningEntry = runningStep?.activity ? primaryEntry(runningStep.activity) : null;
     if (options.viewerCanAnswer) {
       live = WAITING_FOR_YOU_LINE;

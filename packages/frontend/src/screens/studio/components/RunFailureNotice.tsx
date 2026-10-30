@@ -172,6 +172,12 @@ export function useRunFailureAutoRetryActive(
  * collapsed behind the Details toggle. The stored message keeps the raw text.
  * A failed turn has this one Details: it also lists the turn's steps.
  */
+/** The same sentence, whatever its spacing: Details never repeats the block's own words. */
+function sameSentence(a: string, b: string): boolean {
+  const words = (text: string) => text.replace(/\s+/gu, " ").trim();
+  return words(a) === words(b);
+}
+
 export function RunFailureMessageBody({
   message,
   presentation,
@@ -217,6 +223,10 @@ export function RunFailureMessageBody({
   // "Try again" keeps its pending spinner until the request settles, then
   // reads "Retried".
   const quiet = autoRetrying || scheduledAutoRetry !== null;
+  // Details opens what the sentence above it leaves out: the raw text, unless
+  // it is that same sentence, and the turn's steps.
+  const detailsText = sameSentence(presentation.rawText, presentation.friendlyText) ? null : presentation.rawText;
+  const hasDetails = Boolean(detailsText?.trim()) || Boolean(steps);
   const showManualControls = retryContext !== null && !quiet && !needsAi && !usageLimit;
   const showRetry = showManualControls && (retryPending || !superseded);
   const showRetried = showManualControls && superseded && !retryPending;
@@ -224,6 +234,7 @@ export function RunFailureMessageBody({
   const retryButtonRef = useRef<HTMLButtonElement | null>(null);
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
   const detailsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const retriedRef = useRef<HTMLSpanElement | null>(null);
   const autoRetryLineRef = useRef<HTMLDivElement | null>(null);
   // When the press here retires its control (Try again turns into "Retried",
   // Cancel turns into Try again), focus follows to the replacement instead of
@@ -235,7 +246,7 @@ export function RunFailureMessageBody({
   // Whether Cancel holds focus. When the countdown ends on its own, Cancel goes
   // away under a keyboard or screen reader user; focus then moves to the
   // "Trying again…" line that replaces it (or to Details, when the countdown
-  // was dropped), instead of dropping to the page.
+  // was dropped, else to Try again), instead of dropping to the page.
   const cancelFocusedRef = useRef(false);
   useEffect(() => {
     const handOff = focusHandOffRef.current;
@@ -244,13 +255,15 @@ export function RunFailureMessageBody({
         cancelFocusedRef.current = false;
         const active = typeof document === "undefined" ? null : document.activeElement;
         if (!active || active === document.body) {
-          (detailsButtonRef.current ?? autoRetryLineRef.current)?.focus({ preventScroll: true });
+          (detailsButtonRef.current ?? autoRetryLineRef.current ?? retryButtonRef.current)?.focus({
+            preventScroll: true,
+          });
         }
       }
       return;
     }
     cancelFocusedRef.current = false;
-    let target: HTMLButtonElement | null = null;
+    let target: HTMLElement | null = null;
     if (handOff.to === "details") {
       if (retryPending) {
         // The resend is in flight and its spinner keeps Try again in place.
@@ -258,7 +271,8 @@ export function RunFailureMessageBody({
         return;
       }
       if (!retryButtonRef.current && handOff.sawPending) {
-        target = detailsButtonRef.current;
+        // With no Details, "Retried" itself takes it.
+        target = detailsButtonRef.current ?? retriedRef.current;
       }
     } else if (!cancelButtonRef.current) {
       target = retryButtonRef.current;
@@ -374,42 +388,50 @@ export function RunFailureMessageBody({
             ) : null}
             {showRetried ? (
               <span
+                ref={retriedRef}
+                // Takes focus only from the Try again it replaces, when there
+                // is no Details to take it; never a tab stop.
+                tabIndex={-1}
                 data-testid="run-failure-retried"
-                className="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400"
+                className="inline-flex items-center gap-1 rounded-md text-xs text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:text-slate-400 dark:focus-visible:ring-primary-300/80"
               >
                 <Check aria-hidden="true" className="h-3.5 w-3.5 flex-none" />
                 Retried
               </span>
             ) : null}
-            <Button
-              ref={detailsButtonRef}
-              variant="text"
-              tone="muted"
-              size="xs"
-              radius="xl"
-              data-testid="run-failure-details-toggle"
-              onPress={() => setDetailsOpen((current) => !current)}
-              aria-expanded={detailsOpen}
-              aria-controls={detailsOpen ? detailsId : undefined}
-            >
-              <span className="inline-flex items-center gap-0.5">
-                {detailsOpen ? "Hide details" : "Details"}
-                {detailsOpen ? (
-                  <NavArrowDown aria-hidden="true" className="h-3 w-3" />
-                ) : (
-                  <NavArrowRight aria-hidden="true" className="h-3 w-3" />
-                )}
-              </span>
-            </Button>
-          </div>
-          {detailsOpen ? (
-            <div id={detailsId} className="min-w-0 space-y-1.5">
-              <div
-                data-testid="run-failure-details"
-                className="whitespace-pre-wrap break-words text-xs text-slate-500 dark:text-slate-400"
+            {hasDetails ? (
+              <Button
+                ref={detailsButtonRef}
+                variant="text"
+                tone="muted"
+                size="xs"
+                radius="xl"
+                data-testid="run-failure-details-toggle"
+                onPress={() => setDetailsOpen((current) => !current)}
+                aria-expanded={detailsOpen}
+                aria-controls={detailsOpen ? detailsId : undefined}
               >
-                {presentation.rawText}
-              </div>
+                <span className="inline-flex items-center gap-0.5">
+                  {detailsOpen ? "Hide details" : "Details"}
+                  {detailsOpen ? (
+                    <NavArrowDown aria-hidden="true" className="h-3 w-3" />
+                  ) : (
+                    <NavArrowRight aria-hidden="true" className="h-3 w-3" />
+                  )}
+                </span>
+              </Button>
+            ) : null}
+          </div>
+          {detailsOpen && hasDetails ? (
+            <div id={detailsId} className="min-w-0 space-y-1.5">
+              {detailsText ? (
+                <div
+                  data-testid="run-failure-details"
+                  className="whitespace-pre-wrap break-words text-xs text-slate-500 dark:text-slate-400"
+                >
+                  {detailsText}
+                </div>
+              ) : null}
               {steps ? <div className="min-w-0">{steps}</div> : null}
             </div>
           ) : null}

@@ -696,7 +696,7 @@ function OctoRun({
   doneBeat: number;
   beat: number;
   playing: boolean;
-  /** The done line ("Edited 3 files, ran tests"). */
+  /** The done line ("Ran tests, edited 3 files"). */
   activity: string;
   summary: ReactNode;
   sections?: ReactNode;

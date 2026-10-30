@@ -282,6 +282,41 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     );
   });
 
+  // A local test: "Thinking…" was on screen 1.0 s when the failure block took
+  // its place; every other label holds at least its moment.
+  it("holds its last running label its moment before the failure block takes its place", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const running = earlierSteps();
+    await renderTurn(running);
+    expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+
+    live.inFlight = false;
+    const failure: ChatMessage = {
+      id: "failure",
+      role: "assistant",
+      authorId: null,
+      content: "Octo couldn't open a page in the browser, so this turn stopped.",
+      timestamp: base + 4_000,
+      files: null,
+      messageType: "error",
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: JOB_ID },
+    };
+    await renderTurn([...running, failure]);
+    expect(activityLine()?.textContent).toBe("Thinking…");
+    expect(container.querySelector('[data-testid="run-failure-body"]')).toBeNull();
+
+    await act(async () => {
+      vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
+    });
+    expect(activityLine()).toBeNull();
+    expect(container.querySelector('[data-testid="run-failure-body"]')?.textContent).toContain(
+      "Octo couldn't open a page in the browser, so this turn stopped.",
+    );
+  });
+
   it("settles with its reply while the run record still reads running", async () => {
     // A short reply landed while the run record still read running, and the
     // turn settled seconds later, with the run record. The reply alone settles

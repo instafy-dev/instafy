@@ -252,7 +252,7 @@ export interface SessionScenario {
   presenceHandle: string;
   opener: string;
   steps: [TurnStep, TurnStep, TurnStep, TurnStep, TurnStep];
-  /** The run's done line ("Edited 3 files, ran tests"), before Details. */
+  /** The run's done line ("Ran tests, edited 3 files"), before Details. */
   activity: string;
   /** Octo's summary as rendered. */
   summaryParts: MessagePart[];
@@ -417,7 +417,7 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
       { live: "Using a tool…" },
       { live: "Editing files…" },
     ],
-    activity: "Used 2 tools, edited a file",
+    activity: "Edited a file, used 2 tools",
     summaryParts: [
       "February is reconciled: 18 of 21 bank rows match the ledger, and Quill checked the VAT lines. Three rows need a second look, each with a note; the Acme charge at ",
       { file: "ledger/2026-02-review.csv", line: 2 },
@@ -453,7 +453,7 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
       { live: "Running tests…" },
       { live: "Working…" },
     ],
-    activity: "Edited 3 files, ran tests",
+    activity: "Ran tests, edited 3 files",
     summaryParts: [
       "Checkout is its own package now and the API routes import it. Canary ran ",
       { code: "pnpm test --filter payments" },
@@ -503,7 +503,7 @@ export const SESSION_SCENARIOS: SessionScenario[] = [
       { live: "Editing files…" },
       { live: "Making a public link…" },
     ],
-    activity: "Edited 2 files, made a public link",
+    activity: "Made a public link, edited 2 files",
     summaryParts: [
       "The pricing page follows notes/pricing.md, and Pixel did the layout. Preview URL: ",
       { link: SITE_BROWSER.url },

@@ -286,7 +286,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
-    expect(line?.textContent).toBe("Looked up 3 places, read 6 pages" + "Details");
+    expect(line?.textContent).toBe("Read 6 pages, looked up 3 places" + "Details");
   });
 
   it("shows the turn's plain-language line instead of the run rail, chips and command surface", async () => {
@@ -312,7 +312,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
     expect(line?.tagName).toBe("BUTTON");
-    expect(line?.textContent).toBe("Looked up 2 places, read 6 pages" + "Details");
+    expect(line?.textContent).toBe("Read 6 pages, looked up 2 places" + "Details");
     expect(line?.getAttribute("aria-expanded")).toBe("false");
     expect(container.textContent).toContain("Here's your Lisbon weekend.");
     for (const retired of [
@@ -421,7 +421,7 @@ describe("AgentJobThreadPreviewLayout", () => {
         });
         expect(container.querySelector('[data-testid="turn-activity-line"]'), String(showHeaderAvatar)).toBe(line);
         expect(line?.getAttribute("aria-expanded")).toBe(String(expectedOpen));
-        expect(line?.textContent).toBe(`Looked up a place, read 6 pages${expectedOpen ? "Hide details" : "Details"}`);
+        expect(line?.textContent).toBe(`Read 6 pages, looked up a place${expectedOpen ? "Hide details" : "Details"}`);
         expect(details() !== null).toBe(expectedOpen);
         expect({ header: header(), spine: spine() }, `header avatar ${showHeaderAvatar}`).toEqual(closedChrome);
       }
