@@ -447,9 +447,9 @@ describe("Shared Browser view while Octo drives", () => {
     expect(note()).toBeNull();
   });
 
-  // Live drive, Oct 30: a card's turn opened the site, a typed turn paused on
-  // its sign-in fields, and the reply said "then choose Let Octo continue";
-  // the narrow view had folded that button into the participants menu.
+  // A card's turn opened the site, a typed turn paused on its sign-in fields,
+  // and the reply said "then choose Let Octo continue"; a narrow view had
+  // folded that button into the participants menu.
   const CARD_RUN = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const PAUSE_RUN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const pauseAfterCard = () => [

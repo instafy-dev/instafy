@@ -1,11 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 import { browserPauseBoundaries } from "../../fixtures/browser-pause-continue/boundaries";
 
-// Live drive, Oct 30, at 1024×768: a card's browser turn opened a site, a
-// typed turn opened its sign-in page and paused on the fields, and the reply
-// said "then choose Let Octo continue". The chat's Browser view was narrow
-// enough that its toolbar folded that button into the participants menu, so
-// nothing on screen let the task go on. A phone folds it too.
+// A card's browser turn opened a site, a typed turn opened its sign-in page
+// and paused on the fields, and the reply said "then choose Let Octo
+// continue". In a 1024×768 window the chat's Browser view, beside the
+// sidebar, is narrow enough that its toolbar folded that button into the
+// participants menu, so nothing on screen let the task go on. A phone folds
+// it too.
 
 type Review = { takeControlCalls: number; continuations: string[] };
 const review = (page: Page) =>
@@ -23,7 +24,7 @@ async function mount(page: Page, control: "held" | "free") {
   }
   await page.goto(`/tests/fixtures/browser-pause-continue/index.html?control=${control}`);
   await expect(page.getByTestId("review-browser-page")).toBeVisible();
-  // As in the drive, the toolbar's own controls are folded into a menu.
+  // At both sizes the toolbar's own controls are folded into a menu.
   await expect(page.getByTestId("review-chat-panel")).toHaveAttribute("data-compact", "true");
   await expect(page.getByTestId("shared-browser-collaboration-toggle")).toBeVisible();
   return errors;
