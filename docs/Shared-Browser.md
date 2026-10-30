@@ -967,6 +967,37 @@ that follow the last answer (180 seconds by default), well inside the
 600-second turn cap. `INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS` overrides the
 window for tests, from 100 ms to 300 seconds; production never sets it.
 
+A step's own work has one time limit: 20 seconds, not counting a prompt that
+waits for the person (the clock stops while one is on screen). A page can hold
+a step far longer, with a script that keeps the page busy or a load that never
+settles, and the view and the turn's line would freeze while the step waited.
+When the time is up, the step takes no further action (no prompt, click, key,
+typing or navigation it had not started) and answers with the page as it is: a
+snapshot read within 8 more seconds, or, when the page is too busy to be read,
+its masked address alone, with no text and no controls. The answer carries
+`stepTimedOut: true` and a note that tells Octo to check what the step did
+before it acts again, and the Shared Browser policy says to take a snapshot
+and go on from there: only an approval's own outcome is final. On the turn's
+line it reads as a page read when the page was read, and like `status`
+("Browsed <site>") when only its address was, so it adds no new wording and
+never says a page was read when none was. The step's guards still hold while
+the page is read, then end as a step's guards end: a window the step opened
+is closed by its target (a busy page's window may not be a page Playwright can
+show yet) and fails the step as it would have in its time, as does a
+link-only load or a form post the guards stopped. A hand-off whose fields were
+not all highlighted in time leaves no prompt behind.
+`scripts/shared-browser-step-time-e2e.mjs` shows these in Chromium: a search
+whose results page keeps the page busy for a minute answers after about 29
+seconds, a prompt answered after 23 seconds is waited for, a click that opens
+a window and keeps the page busy fails with the window closed for good, and a
+hand-off on a page too busy to highlight in time leaves no prompt.
+
+In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
+step yields to the model only after the browser server's tool timeout (180
+seconds for the Shared Browser, 40 for the Personal Browser), not after Codex's
+default 30 seconds. Each earlier yield was one more model call, with the whole
+context, that could only wait for the same step again.
+
 A declined site is the one denial a run survives, once. The site stays closed
 for the rest of the run without another prompt (the run's state lists it in
 `declinedOrigins`), and the tool tells Octo to take another route that fits the
