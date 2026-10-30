@@ -45,6 +45,11 @@ const ORDER_FORM = `
     <fieldset>
       <legend> Pizza Toppings </legend>
       <p><label><input type="checkbox" name="topping" value="bacon"> Bacon </label></p>
+      <p><label><input type="checkbox" name="topping" value="onion" checked> Onion </label></p>
+    </fieldset>
+    <fieldset>
+      <legend> Your details </legend>
+      <p><label><input type="checkbox" name="news" checked> Send me offers </label></p>
     </fieldset>
     <p><label>Preferred delivery time: <input type="time" name="delivery"></label></p>
     <p><label>Delivery instructions: <textarea name="comments">Ring the doorbell, please.</textarea></label></p>
@@ -62,13 +67,15 @@ test("a submit names the fields it sends something from, never their values", ()
     "Telephone",
     "E-mail address",
     "Pizza Size",
+    "Pizza Toppings",
+    "Send me offers",
     "Delivery instructions",
     "Country",
   ]);
   const said = names.join(" ");
   for (const value of [
     "Alex Example", "555-0107", "alex@example.com", "Medium", "medium", "Small", "Ring the doorbell",
-    "Spain", "Portugal", "token-value-123", "csrf", "SAVE10", "Coupon", "Bacon", "Pizza Toppings",
+    "Spain", "Portugal", "token-value-123", "csrf", "SAVE10", "Coupon", "Bacon", "Onion", "Your details",
     "Preferred delivery time", "no name",
   ]) {
     assert.ok(!said.includes(value), `${value} in ${said}`);
