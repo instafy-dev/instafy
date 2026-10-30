@@ -420,8 +420,9 @@ const controlsFor = (targetId) => {
       { ...field("Sign in", "submit", "off"), tag: "button", ariaLabel: "", labels: "", text: "Sign in" },
     ];
   }
-  // A signed-out page: a site's own links, a federated sign-in button and
-  // the header's "Sign in" link to its sign-in page; no sign-in fields yet.
+  // A signed-out page: a site's own links, a federated sign-in button, an
+  // email-first form's "Log in" submit (it sends the form) and the header's
+  // "Sign in" link to its sign-in page; no sign-in fields yet.
   if (mode === "sign-in-link") {
     const link = (text, href) => ({
       ...descriptionFor(targetId), tag: "a", inputType: "", autocomplete: "", ariaLabel: "",
@@ -434,6 +435,10 @@ const controlsFor = (targetId) => {
       { ...descriptionFor(targetId), tag: "button", inputType: "button", autocomplete: "", ariaLabel: "",
         labels: "", placeholder: "", nameAttribute: "", idAttribute: "", text: "Sign in with Google",
         formAction: "", formMethod: "", formActionText: "" },
+      { ...descriptionFor(targetId), tag: "button", inputType: "submit", autocomplete: "", ariaLabel: "",
+        labels: "", placeholder: "", nameAttribute: "", idAttribute: "", text: "Log in",
+        formAction: "https://example.test/session", formMethod: "post", formActionText: "Log in",
+        policy: { ...basePolicy, formName: "Log in", formSubmitLabels: "Log in", formFieldCount: 1 } },
       link("Sign in", "https://example.test/login"),
     ];
   }
@@ -4387,15 +4392,16 @@ fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
 /// The same task stopped on the site's home page, whose header has only a
 /// "Sign in" link, with "use its Sign in control … tell me when you're ready":
 /// a page without sign-in fields named nothing. Such a page names the control
-/// that opens the sign-in page (never a federated sign-in), so the turn reaches
-/// the fields and pauses there; the real-Chromium sign-in fixture clicks it
-/// without a prompt.
+/// that opens the sign-in page (never a federated sign-in, nor a form's submit
+/// that would send it), so the turn reaches the fields and pauses there; the
+/// real-Chromium sign-in fixture clicks it without a prompt.
 #[test]
 fn a_page_with_a_sign_in_link_names_it_so_a_needed_sign_in_reaches_its_fields() {
     let fixture = EmbeddedControllerFixture::new();
     let snapshot = payload_of(&fixture.run("sign-in-link", "GET", "/v1/snapshot", None));
-    assert_eq!(snapshot["interactiveElements"][2]["label"], "Sign in");
-    assert_eq!(snapshot["signIn"]["open"], json!(2), "{snapshot}");
+    assert_eq!(snapshot["interactiveElements"][2]["label"], "Log in");
+    assert_eq!(snapshot["interactiveElements"][3]["label"], "Sign in");
+    assert_eq!(snapshot["signIn"]["open"], json!(3), "{snapshot}");
     assert!(snapshot["signIn"].get("fields").is_none(), "{snapshot}");
     let next = snapshot["signIn"]["next"]
         .as_str()

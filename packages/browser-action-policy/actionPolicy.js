@@ -968,13 +968,14 @@
   }
 
   // A link or button that only opens a site's sign-in page: named exactly
-  // "Sign in" ("Log in", "Anmelden", …) and outside any form with a password
-  // field, the header control the activation rules above leave free so the
-  // agent can reach the page and hand it over. A host names it on a page with
-  // no sign-in fields yet, so a sign-in the person needs gets to its fields.
+  // "Sign in" ("Log in", "Anmelden", …), outside any form with a password
+  // field and never a form's submit button (an email-first form's "Sign in"
+  // sends it), the header control the activation rules above leave free so
+  // the agent can reach the page and hand it over. A host names it on a page
+  // with no sign-in fields yet, so a sign-in the person needs gets to them.
   function isSignInOpener(target) {
     const safeTarget = target && typeof target === "object" ? target : {};
-    if (safeTarget.formHasPassword === true || isEditable(safeTarget)) return false;
+    if (safeTarget.formHasPassword === true || isEditable(safeTarget) || isSubmitControl(safeTarget)) return false;
     const linkLike = lower(safeTarget.tag) === "a" || lower(safeTarget.role) === "link";
     if (!linkLike && !isButtonLike(safeTarget)) return false;
     return [safeTarget.ariaLabel, safeTarget.text, safeTarget.title]

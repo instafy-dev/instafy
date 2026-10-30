@@ -117,8 +117,9 @@ export declare function isSearchField(target: PersonalBrowserStepTarget): boolea
 export declare function isSignInField(target: PersonalBrowserStepTarget): boolean;
 /**
  * A link or button that only opens a site's sign-in page ("Sign in", "Log in"
- * outside any form with a password field). Hosts name it on a page with no
- * sign-in fields yet, so a sign-in the person needs gets to its fields.
+ * outside any form with a password field, never a form's submit button).
+ * Hosts name it on a page with no sign-in fields yet, so a sign-in the person
+ * needs gets to its fields.
  */
 export declare function isSignInOpener(target: PersonalBrowserStepTarget): boolean;
 /**
