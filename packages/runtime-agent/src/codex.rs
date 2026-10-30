@@ -67,6 +67,9 @@ use crate::active_turn_input::{
 use crate::required_execution::RequiredExecutionGate;
 
 mod project_preferences;
+mod run_instructions;
+
+use run_instructions::RunInstructions;
 
 use crate::browser_host::mode::SHARED_BROWSER_NODE_BINARY_ENV;
 use crate::job_cancel::JobCancelSignal;
@@ -887,7 +890,9 @@ pub struct CodexRunOptions {
     pub shared_browser_page_id: Option<String>,
     /// A run of another chat held the Shared Browser page last: this turn
     /// starts on that chat's page (see
-    /// `crate::shared_browser::page_left_by_another_conversation`).
+    /// `crate::shared_browser::page_left_by_another_conversation`). The turn
+    /// is told so in a note for that turn only, which the thread's next turn
+    /// withdraws (`run_instructions_for_turn`).
     pub shared_browser_page_left_by_other_chat: bool,
     pub expect_mcp_tools: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -984,10 +989,8 @@ impl RoutingExecutionConfig {
         })
     }
 
-    fn append_to(&self, config: &mut Config, model: &ModelInfo) {
-        let instructions = config
-            .developer_instructions
-            .get_or_insert_with(String::new);
+    fn append_to(&self, run_instructions: &mut RunInstructions, model: &ModelInfo) {
+        let instructions = &mut run_instructions.policy;
         instructions
             .push_str("\n\nRuntime execution capabilities for routing (runtime-owned facts):\n");
         instructions.push_str(&self.facts(model).to_string());
@@ -1704,43 +1707,17 @@ impl CodexClient {
 
         let plain_text_final_mode =
             options.disable_final_output_json_schema && options.allow_plain_text_final_fallback;
-        let mode_developer_instructions = if granted_mode {
-            Some(granted_turn_developer_instructions())
-        } else if generic_mcp_mode {
-            Some(
-                optional_env("CODEX_MCP_MODE_DEVELOPER_INSTRUCTIONS")
-                    .unwrap_or_else(|| MCP_MODE_DEVELOPER_INSTRUCTIONS.to_string()),
-            )
-        } else if browser_mode {
-            Some(
-                optional_env("CODEX_BROWSER_MODE_DEVELOPER_INSTRUCTIONS")
-                    .unwrap_or_else(|| BROWSER_MODE_DEVELOPER_INSTRUCTIONS.to_string()),
-            )
-        } else {
-            Some(
-                optional_env("CODEX_DEVELOPER_INSTRUCTIONS").unwrap_or_else(|| {
-                    if plain_text_final_mode && options.plain_text_write_mode {
-                        PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string()
-                    } else if plain_text_final_mode {
-                        PLAIN_FINAL_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string()
-                    } else {
-                        STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string()
-                    }
-                }),
-            )
-        };
-        let mode_developer_instructions = mode_developer_instructions.map(|instructions| {
-            let instructions = append_browser_developer_instructions_for_turn(
-                instructions,
+        // The run's developer text reaches the model through the run's World State sections
+        // (`codex_extension_registry`), never the config, so a resumed thread reads it too.
+        let mut run_instructions = run_instructions_for_turn(
+            run_lane(
+                &options,
                 shared_browser_mode,
                 personal_browser_mode,
                 local_browser_mode,
-            );
-            append_shared_browser_page_start_instructions(
-                instructions,
-                shared_browser_mode && options.shared_browser_page_left_by_other_chat,
-            )
-        });
+            ),
+            optional_env,
+        );
         let base_instructions = runtime_base_instructions(
             RuntimeBaseInstructionsLane {
                 mcp: mcp_mode,
@@ -1767,7 +1744,6 @@ impl CodexClient {
             codex_linux_sandbox_exe: optional_env_path("CODEX_LINUX_SANDBOX_EXE"),
             // Runtime-scoped execution turns should not inherit external base instructions.
             base_instructions,
-            developer_instructions: mode_developer_instructions,
             show_raw_agent_reasoning: Some(show_raw_reasoning),
             // Web search stays off on every lane (`codex_policy`), whatever
             // CODEX_ENABLE_WEB_SEARCH says.
@@ -2062,7 +2038,7 @@ impl CodexClient {
             .await;
         crate::codex_policy::pin_instructions_for_resolved_model(&mut config, &model_info);
         if let Some(routing_execution) = routing_execution {
-            routing_execution.append_to(&mut config, &model_info);
+            routing_execution.append_to(&mut run_instructions, &model_info);
         }
         let input_images: &[PathBuf] = if native_image_inputs_allowed(
             native_chat_images_enabled(),
@@ -2121,6 +2097,7 @@ impl CodexClient {
                     &turn_start_token_usage,
                     &required_execution,
                     options.answer_only.as_ref(),
+                    &run_instructions,
                     options.project_id.map(|id| (id, self.workspace_dir())),
                 ),
                 Arc::new(EmptyUserInstructionsProvider),
@@ -2158,6 +2135,9 @@ impl CodexClient {
             if let Some(thread_id) = active_thread_id.clone() {
                 match thread_manager.get_thread(thread_id).await {
                     Ok(existing) => {
+                        // This attempt's manager is new, so this finds only a thread the attempt
+                        // itself started. Its run-instructions contributor holds this run's text:
+                        // a manager reused across runs would need a new one for each run.
                         thread_restore_source = "memory".to_string();
                         existing
                     }
@@ -4227,6 +4207,98 @@ fn should_refresh_mcp_servers(
     mcp_mode && has_mcp_servers && !personal_browser_mode
 }
 
+/// What decides a run's developer text (`run_instructions_for_turn`).
+#[derive(Clone, Copy, Debug, Default)]
+struct RunLane {
+    granted: bool,
+    generic_mcp: bool,
+    browser: bool,
+    plain_text_final: bool,
+    plain_text_write: bool,
+    shared_browser: bool,
+    personal_browser: bool,
+    local_browser: bool,
+    /// A Shared Browser turn that starts on a page a run of another chat left.
+    page_left_by_other_chat: bool,
+}
+
+/// The lane a run's options ask for, with the browsers this runtime resolved for the run.
+fn run_lane(
+    options: &CodexRunOptions,
+    shared_browser: bool,
+    personal_browser: bool,
+    local_browser: bool,
+) -> RunLane {
+    RunLane {
+        granted: options.granted.is_some(),
+        generic_mcp: options.expect_mcp_tools,
+        browser: options.expect_browser_session,
+        plain_text_final: options.disable_final_output_json_schema
+            && options.allow_plain_text_final_fallback,
+        plain_text_write: options.plain_text_write_mode,
+        shared_browser,
+        personal_browser,
+        local_browser,
+        page_left_by_other_chat: shared_browser && options.shared_browser_page_left_by_other_chat,
+    }
+}
+
+/// A run's instructions as its options ask for them, on a runtime that has the browsers they
+/// ask for.
+#[cfg(test)]
+pub(crate) fn run_instructions_for_options(options: &CodexRunOptions) -> RunInstructions {
+    run_instructions_for_turn(
+        run_lane(
+            options,
+            options.shared_browser,
+            options.personal_browser,
+            false,
+        ),
+        |_| None,
+    )
+}
+
+/// A run's developer text: its lane's contract (granted, then generic MCP, then browser, then
+/// the ordinary write, focused or structured lane; `env` reads each lane's operator override),
+/// then its browser policies. A note that holds for this turn only goes apart from it, so the
+/// thread's next turn can withdraw it. Each turn reads this text on a resumed thread as well
+/// (`run_instructions`).
+fn run_instructions_for_turn(
+    lane: RunLane,
+    env: impl Fn(&str) -> Option<String>,
+) -> RunInstructions {
+    let lane_text = if lane.granted {
+        granted_turn_developer_instructions()
+    } else if lane.generic_mcp {
+        env("CODEX_MCP_MODE_DEVELOPER_INSTRUCTIONS")
+            .unwrap_or_else(|| MCP_MODE_DEVELOPER_INSTRUCTIONS.to_string())
+    } else if lane.browser {
+        env("CODEX_BROWSER_MODE_DEVELOPER_INSTRUCTIONS")
+            .unwrap_or_else(|| BROWSER_MODE_DEVELOPER_INSTRUCTIONS.to_string())
+    } else {
+        env("CODEX_DEVELOPER_INSTRUCTIONS").unwrap_or_else(|| {
+            if lane.plain_text_final && lane.plain_text_write {
+                PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string()
+            } else if lane.plain_text_final {
+                PLAIN_FINAL_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string()
+            } else {
+                STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string()
+            }
+        })
+    };
+    RunInstructions {
+        policy: append_browser_developer_instructions_for_turn(
+            lane_text,
+            lane.shared_browser,
+            lane.personal_browser,
+            lane.local_browser,
+        ),
+        turn_note: lane
+            .page_left_by_other_chat
+            .then(|| SHARED_BROWSER_PAGE_FROM_OTHER_CHAT_INSTRUCTIONS.to_string()),
+    }
+}
+
 /// The browser policies a turn's mode instructions carry. The Shared Browser
 /// policy follows this process's own approval start, the same decision that
 /// seeds the run's approval state, so the policy the model reads matches the
@@ -4264,16 +4336,10 @@ fn append_shared_browser_developer_instructions(
     format!("{base}\n\n{policy}")
 }
 
-/// Said when this turn's Shared Browser page was last used by a run of
-/// another chat (the browser is shared across the space's chats).
+/// Said, as a note for that turn only, when this turn's Shared Browser page
+/// was last used by a run of another chat (the browser is shared across the
+/// space's chats).
 const SHARED_BROWSER_PAGE_FROM_OTHER_CHAT_INSTRUCTIONS: &str = "- The page this turn starts on was left open by a task in another chat. What it shows is not this task's earlier work: do not describe it as resuming or continuing there. When the person's message is about that page, use it as it is. Otherwise start this task's own step: `navigate` that page to what this task needs, or open a tab of your own.";
-
-fn append_shared_browser_page_start_instructions(base: String, left_by_other_chat: bool) -> String {
-    if !left_by_other_chat {
-        return base;
-    }
-    format!("{base}\n{SHARED_BROWSER_PAGE_FROM_OTHER_CHAT_INSTRUCTIONS}")
-}
 
 fn append_personal_browser_developer_instructions(base: String, enabled: bool) -> String {
     if !enabled {
@@ -4590,16 +4656,21 @@ impl TurnLifecycleContributor for TurnStartTokenUsageRecorder {
     }
 }
 
-/// The extension registry a run hands Codex. It records each turn's baseline into
+/// The extension registry a run hands Codex. It gives every turn on the run's threads the
+/// run's own instructions (`run_instructions`), records each turn's baseline into
 /// `turn_start_token_usage`, which the run's `CodexEventStreamAdapter` reads, and enforces
 /// `required_execution`, and a words-only run's `answer_only`, on the threads the run arms.
 fn codex_extension_registry(
     turn_start_token_usage: &TurnStartTokenUsage,
     required_execution: &RequiredExecutionGate,
     answer_only: Option<&crate::answer_only::AnswerOnly>,
+    run_instructions: &RunInstructions,
     project_context: Option<(uuid::Uuid, &Path)>,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.prompt_contributor(Arc::new(run_instructions::RunInstructionsContext::new(
+        run_instructions,
+    )));
     if let Some((project_id, workspace_dir)) = project_context {
         extensions.prompt_contributor(Arc::new(
             project_preferences::ProjectPreferencesContext::new(
@@ -4646,6 +4717,7 @@ pub(crate) async fn start_test_turn(
         turn_start_token_usage,
         &RequiredExecutionGate::default(),
         None,
+        &RunInstructions::default(),
         None,
     );
     for contributor in registry.turn_lifecycle_contributors() {
@@ -6113,7 +6185,7 @@ mod tests {
         .unwrap();
         config.features.enable(Feature::ShellTool).unwrap();
         config.agents_enabled = true;
-        config.developer_instructions = Some("existing developer instructions".into());
+        let mut run_instructions = run_instructions_for_turn(RunLane::default(), |_| None);
         let options = CodexRunOptions {
             final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
             disable_shell_tool: true,
@@ -6127,13 +6199,14 @@ mod tests {
             .unwrap()
             .models
             .remove(0);
-        captured.append_to(&mut config, &model);
-        let instructions = config.developer_instructions.as_deref().unwrap();
-        assert!(instructions.starts_with("existing developer instructions"));
+        captured.append_to(&mut run_instructions, &model);
+        // The facts follow the lane's text in the run's own instructions.
+        let instructions = run_instructions.policy.as_str();
+        assert!(instructions.starts_with(STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS));
         let facts: JsonValue = instructions
             .lines()
             .find_map(|line| serde_json::from_str(line).ok())
-            .expect("structured runtime facts reach the developer instructions");
+            .expect("structured runtime facts reach the run's instructions");
         assert_eq!(facts["normalParent"]["shellToolEnabledInConfig"], true);
         assert_eq!(
             facts["normalParent"]["modelShellType"],
@@ -6207,28 +6280,236 @@ mod tests {
         assert!(!own.retries_a_timed_out_run(1, 1));
     }
 
+    /// The turn is told in a note for that turn only, which the thread's next turn withdraws;
+    /// the run's policy stays byte for byte the same, so a later run with the same policy sends
+    /// nothing again.
     #[test]
     fn a_shared_turn_on_a_page_another_chat_left_is_told_so() {
-        let base = "Base".to_string();
-        assert_eq!(
-            append_shared_browser_page_start_instructions(base.clone(), false),
-            base
+        let shared = RunLane {
+            browser: true,
+            shared_browser: true,
+            ..RunLane::default()
+        };
+        let own_page = run_instructions_for_turn(shared, |_| None);
+        assert_eq!(own_page.turn_note, None);
+        let told = run_instructions_for_turn(
+            RunLane {
+                page_left_by_other_chat: true,
+                ..shared
+            },
+            |_| None,
         );
-        let told = append_shared_browser_page_start_instructions(base.clone(), true);
-        assert!(told.starts_with(
-            "Base\n- The page this turn starts on was left open by a task in another chat."
+        assert_eq!(told.policy, own_page.policy);
+        let note = told.turn_note.as_deref().expect("the turn is told");
+        assert!(note.starts_with(
+            "- The page this turn starts on was left open by a task in another chat."
         ));
-        assert!(told.contains("do not describe it as resuming or continuing there"));
+        assert!(note.contains("do not describe it as resuming or continuing there"));
         assert!(
-            told.contains(
+            note.contains(
                 "`navigate` that page to what this task needs, or open a tab of your own"
             )
         );
         // A person who asks about the page on screen still gets that page.
         assert!(
-            told.contains("When the person's message is about that page, use it as it is"),
-            "{told}"
+            note.contains("When the person's message is about that page, use it as it is"),
+            "{note}"
         );
+    }
+
+    /// Each lane's run text is its lane's contract, then its browser policies, byte for byte
+    /// the text a thread used to start with, now given on a resumed thread as well.
+    #[test]
+    fn every_lane_gets_its_own_run_text() {
+        use crate::browser_host::mode::{LazyMode, force_lazy_mode_for_tests};
+
+        let text = |lane: RunLane| {
+            let run = run_instructions_for_turn(lane, |_| None);
+            assert_eq!(run.turn_note, None, "{lane:?}");
+            run.policy
+        };
+        let ordinary = RunLane::default();
+        let browser = RunLane {
+            browser: true,
+            ..ordinary
+        };
+        let shared = RunLane {
+            shared_browser: true,
+            ..browser
+        };
+        {
+            let _ask = force_lazy_mode_for_tests(None);
+            assert_eq!(text(ordinary), STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS);
+            assert_eq!(
+                text(RunLane {
+                    plain_text_final: true,
+                    ..ordinary
+                }),
+                PLAIN_FINAL_RUNTIME_DEVELOPER_INSTRUCTIONS
+            );
+            assert_eq!(
+                text(RunLane {
+                    plain_text_final: true,
+                    plain_text_write: true,
+                    ..ordinary
+                }),
+                PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS
+            );
+            // Write mode alone, without a plain final, stays structured.
+            assert_eq!(
+                text(RunLane {
+                    plain_text_write: true,
+                    ..ordinary
+                }),
+                STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS
+            );
+            assert_eq!(
+                text(RunLane {
+                    generic_mcp: true,
+                    ..ordinary
+                }),
+                MCP_MODE_DEVELOPER_INSTRUCTIONS
+            );
+            assert_eq!(
+                text(RunLane {
+                    granted: true,
+                    ..ordinary
+                }),
+                granted_turn_developer_instructions()
+            );
+            assert_eq!(text(browser), BROWSER_MODE_DEVELOPER_INSTRUCTIONS);
+            // Granted, then generic MCP, then browser, then the ordinary lanes.
+            assert_eq!(
+                text(RunLane {
+                    granted: true,
+                    generic_mcp: true,
+                    plain_text_final: true,
+                    ..browser
+                }),
+                granted_turn_developer_instructions()
+            );
+            assert_eq!(
+                text(RunLane {
+                    generic_mcp: true,
+                    plain_text_final: true,
+                    ..browser
+                }),
+                MCP_MODE_DEVELOPER_INSTRUCTIONS
+            );
+            assert_eq!(
+                text(RunLane {
+                    plain_text_final: true,
+                    ..browser
+                }),
+                BROWSER_MODE_DEVELOPER_INSTRUCTIONS
+            );
+            // The browser policies follow the lane's text.
+            assert_eq!(
+                text(shared),
+                format!(
+                    "{BROWSER_MODE_DEVELOPER_INSTRUCTIONS}\n\n{SHARED_BROWSER_DEVELOPER_INSTRUCTIONS}"
+                )
+            );
+            assert_eq!(
+                text(RunLane {
+                    personal_browser: true,
+                    ..browser
+                }),
+                format!(
+                    "{BROWSER_MODE_DEVELOPER_INSTRUCTIONS}\n\n{PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS}"
+                )
+            );
+            assert_eq!(
+                text(RunLane {
+                    local_browser: true,
+                    ..ordinary
+                }),
+                format!(
+                    "{STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS}\n\n{LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS}"
+                )
+            );
+        }
+        // A Shared Browser run on an attested browser host starts in routine browsing.
+        let _routine = force_lazy_mode_for_tests(Some(LazyMode { persist: true }));
+        assert_eq!(
+            text(shared),
+            format!(
+                "{BROWSER_MODE_DEVELOPER_INSTRUCTIONS}\n\n{SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS}"
+            )
+        );
+    }
+
+    #[test]
+    fn an_operator_override_replaces_only_its_lanes_text() {
+        use crate::browser_host::mode::force_lazy_mode_for_tests;
+
+        let _ask = force_lazy_mode_for_tests(None);
+        let env = |key: &str| match key {
+            "CODEX_DEVELOPER_INSTRUCTIONS" => Some("Operator text.".to_string()),
+            "CODEX_MCP_MODE_DEVELOPER_INSTRUCTIONS" => Some("Operator MCP text.".to_string()),
+            "CODEX_BROWSER_MODE_DEVELOPER_INSTRUCTIONS" => {
+                Some("Operator browser text.".to_string())
+            }
+            _ => None,
+        };
+        let text = |lane: RunLane| run_instructions_for_turn(lane, env).policy;
+        let ordinary = RunLane::default();
+        assert_eq!(text(ordinary), "Operator text.");
+        assert_eq!(
+            text(RunLane {
+                plain_text_final: true,
+                plain_text_write: true,
+                ..ordinary
+            }),
+            "Operator text."
+        );
+        assert_eq!(
+            text(RunLane {
+                generic_mcp: true,
+                ..ordinary
+            }),
+            "Operator MCP text."
+        );
+        // A granted turn's text has no override.
+        assert_eq!(
+            text(RunLane {
+                granted: true,
+                ..ordinary
+            }),
+            granted_turn_developer_instructions()
+        );
+        // The browser policies still follow an overridden lane text.
+        assert_eq!(
+            text(RunLane {
+                browser: true,
+                shared_browser: true,
+                ..ordinary
+            }),
+            format!("Operator browser text.\n\n{SHARED_BROWSER_DEVELOPER_INSTRUCTIONS}")
+        );
+    }
+
+    /// A thread started before run instructions were a section of their own is recognized by
+    /// its lane's opening line (`run_instructions::LEGACY_LANE_HEADINGS`), so every lane's text
+    /// starts with one of those lines: a lane whose heading changes adds the new one there and
+    /// keeps the old one.
+    #[test]
+    fn every_lane_text_starts_with_a_heading_older_threads_are_recognized_by() {
+        for text in [
+            STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string(),
+            PLAIN_FINAL_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string(),
+            PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string(),
+            BROWSER_MODE_DEVELOPER_INSTRUCTIONS.to_string(),
+            MCP_MODE_DEVELOPER_INSTRUCTIONS.to_string(),
+            granted_turn_developer_instructions(),
+        ] {
+            assert!(
+                run_instructions::LEGACY_LANE_HEADINGS
+                    .iter()
+                    .any(|heading| text.starts_with(heading)),
+                "{text}"
+            );
+        }
     }
 
     /// Live drive, Oct 28: Octo pasted "net::ERR_TUNNEL_CONNECTION_FAILED"
@@ -6650,9 +6931,9 @@ mod tests {
     /// one rule the browser skill and the Shared Browser's `signIn` hint state:
     /// a sign-in the person asked for, or one a step they asked for needs, is
     /// opened and paused on; any other sign-in (a page read for research) ends
-    /// that page, not the task. A run on a resumed thread keeps the policy the
-    /// thread began with, so there the `signIn` hint in each result is what
-    /// says it.
+    /// that page, not the task. A run on a resumed thread reads its own policy
+    /// too (`run_instructions`), and the `signIn` hint in each result says it
+    /// again where it applies.
     #[test]
     fn every_browser_policy_opens_a_needed_sign_in_and_pauses_on_it() {
         for policy in [
@@ -7173,7 +7454,13 @@ mod tests {
     async fn run_registry_requires_execution_on_armed_threads_until_the_turn_stops() {
         use codex_extension_api::{ModelRequestInput, ModelRequestKind, TurnStopInput};
         let gate = RequiredExecutionGate::default();
-        let registry = codex_extension_registry(&TurnStartTokenUsage::default(), &gate, None, None);
+        let registry = codex_extension_registry(
+            &TurnStartTokenUsage::default(),
+            &gate,
+            None,
+            &RunInstructions::default(),
+            None,
+        );
         gate.arm("thread-a");
         let mut metadata = None;
         for contributor in registry.model_request_contributors() {
@@ -10782,6 +11069,7 @@ required = true
             &TurnStartTokenUsage::default(),
             &RequiredExecutionGate::default(),
             None,
+            &RunInstructions::default(),
             None,
         );
         let thread_store = ExtensionData::new("thread-main");

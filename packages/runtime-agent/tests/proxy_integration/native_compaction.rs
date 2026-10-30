@@ -413,6 +413,19 @@ async fn run_lifecycle(transport: Transport) -> Result<()> {
     // Check this last so the initial red run still proves proxy transport and
     // cold resume. Prefix-only delivery keeps A here and cannot refresh to B.
     assert_current_snapshot(&requests[2], project_id, "loaded", CORRECTED);
+    // The run's instructions are read once on every request: the compaction rebuilds them
+    // once, and the cold resume with the same run text adds none.
+    for (index, context) in [
+        "first sampling",
+        "compaction",
+        "continuation after the compaction",
+        "cold resume",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_run_instructions_once(&requests[index], context);
+    }
 
     drop(proxy_guard);
     drop(stub_guard);
@@ -465,6 +478,42 @@ fn input_text(request: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A run's instructions are developer messages: the proxy carries them, with Codex's own
+/// instructions, in the user-role instruction message it puts first, and nowhere else.
+fn assert_run_instructions_once(request: &Value, context: &str) {
+    const OPEN: &str = "<instafy_run_instructions>";
+    let items = request["input"].as_array().expect("provider input items");
+    assert_eq!(
+        items[0]["role"], "user",
+        "{context}: the proxy puts the instructions first"
+    );
+    let instructions = items[0]["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        instructions.matches(OPEN).count(),
+        1,
+        "{context}: the run's instructions must be read exactly once"
+    );
+    let block = &instructions[instructions.find(OPEN).unwrap() + OPEN.len()..];
+    assert!(
+        block
+            .trim_start()
+            .starts_with("Instafy Studio structured execution run:"),
+        "{context}: the run block is this run's lane text"
+    );
+    for (position, item) in items.iter().enumerate().skip(1) {
+        assert!(
+            !item.to_string().contains(OPEN),
+            "{context}: input[{position}] carries run instructions outside the instruction message"
+        );
+    }
 }
 
 fn assert_current_snapshot(request: &Value, project: Uuid, state: &str, content: &str) {

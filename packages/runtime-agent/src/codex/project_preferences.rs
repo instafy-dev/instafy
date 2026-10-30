@@ -184,15 +184,18 @@ mod tests {
 
     #[test]
     fn registry_only_adds_preferences_for_an_explicit_project_scope() {
-        use super::super::{TurnStartTokenUsage, codex_extension_registry};
+        use super::super::{RunInstructions, TurnStartTokenUsage, codex_extension_registry};
         use crate::required_execution::RequiredExecutionGate;
 
         let usage = TurnStartTokenUsage::default();
         let gate = RequiredExecutionGate::default();
-        assert!(
-            codex_extension_registry(&usage, &gate, None, None)
+        let run = RunInstructions::default();
+        // The run's own instructions are always there; preferences only with a project.
+        assert_eq!(
+            codex_extension_registry(&usage, &gate, None, &run, None)
                 .context_contributors()
-                .is_empty()
+                .len(),
+            1
         );
         let workspace = tempfile::tempdir().unwrap();
         assert_eq!(
@@ -200,11 +203,12 @@ mod tests {
                 &usage,
                 &gate,
                 None,
+                &run,
                 Some((Uuid::new_v4(), workspace.path()))
             )
             .context_contributors()
             .len(),
-            1
+            2
         );
     }
 }

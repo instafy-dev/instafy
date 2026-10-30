@@ -46,6 +46,7 @@ const DESTRUCTIVE_ACTIONS_TITLE: &str = "Destructive Actions";
 ///   Instafy has its own connectors and skills.
 /// - `# Using skills`: runtime-agent does not use Codex's native skill loading.
 ///   Its extension registry (`codex::codex_extension_registry`) holds only the
+///   run's instructions and project preferences (World State sections), the
 ///   turn-usage recorder and the required-execution gate. It never installs
 ///   `codex_skills_extension`, which at rust-v0.159.2 is what renders the
 ///   "## Skills" / "### Available skills" catalog this section refers to and
@@ -187,6 +188,12 @@ pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded: bool) -> 
     if let Some(instructions) = config.base_instructions.as_mut() {
         append_destructive_actions(instructions);
     }
+
+    // A run's developer text reaches the model only through the run's own World State section
+    // (`codex::run_instructions`), which a resumed thread is given again whenever it changes.
+    // Codex sends a config's `developer_instructions` only when a thread starts, so text a
+    // config file set there would stay with the thread whatever a later run says.
+    config.developer_instructions = None;
 
     // Model traffic uses only the configured provider route (the Instafy proxy).
     config.respect_system_proxy = false;
@@ -1203,6 +1210,28 @@ mod tests {
             // Codex forces unified exec on; a bounded browser turn is kept off
             // shell tools by ShellTool and by selecting no environment.
             assert!(config.features.enabled(Feature::UnifiedExec));
+        }
+    }
+
+    /// A run's developer text reaches the model only through the run's own World State section,
+    /// which a resumed thread is given again whenever it changes. A config file's
+    /// `developer_instructions` would instead start a thread as text no later run can change.
+    #[tokio::test]
+    async fn a_config_files_developer_instructions_never_reach_a_thread() {
+        for bounded in [false, true] {
+            let (_home, mut config) = load_config(
+                "gpt-6-luna",
+                None,
+                "developer_instructions = \"Text from a config file.\"\n",
+            )
+            .await;
+            assert_eq!(
+                config.developer_instructions.as_deref(),
+                Some("Text from a config file."),
+                "the config file sets it before the policy runs"
+            );
+            apply_runtime_codex_policy(&mut config, bounded).expect("policy");
+            assert_eq!(config.developer_instructions, None, "bounded={bounded}");
         }
     }
 

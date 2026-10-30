@@ -181,7 +181,7 @@ async function waitUntil(predicate, label) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  assert.fail(label);
+  assert.fail(typeof label === "function" ? label() : label);
 }
 
 test("a started host reports ready, keeps a persisted profile and stops every child on SIGTERM", withFixture(async (fixture, bin) => {
@@ -355,16 +355,28 @@ test("a profile that a running Chromium on this machine holds is refused", withF
   const env = hostEnvironment(fixture, bin);
   fs.mkdirSync(env.INSTAFY_BROWSER_HOST_PROFILE_DIR, { recursive: true });
   // A process named like Chromium on this host holds the lock. The kernel
-  // names a process after the file it runs, so run sleep through a link.
-  const holder = spawn("bash", ["-c", 'ln -s "$(command -v sleep)" "$1/chromium" && exec "$1/chromium" 30', "holder", fixture], { stdio: "ignore" });
+  // names a process after the file it runs, so the holder is this test's own
+  // node run through a link named chromium. Node runs under any name; a
+  // multi-call coreutils does not (uutils, Ubuntu 26.04's, refuses to run
+  // `sleep` as `chromium`).
+  const chromium = path.join(fixture, "chromium");
+  fs.symlinkSync(process.execPath, chromium);
+  const holder = spawn(chromium, ["-e", "setTimeout(() => {}, 30000)"], { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  let exited = null;
+  let comm = null;
+  holder.stderr.on("data", (chunk) => { stderr += chunk; });
+  holder.on("exit", (code, signal) => { exited = { code, signal }; });
   try {
     await waitUntil(() => {
       try {
-        return fs.readFileSync(`/proc/${holder.pid}/comm`, "utf8").startsWith("chrom");
-      } catch {
+        comm = fs.readFileSync(`/proc/${holder.pid}/comm`, "utf8").trim();
+        return comm.startsWith("chrom");
+      } catch (error) {
+        comm = error.code;
         return false;
       }
-    }, "holder process did not start");
+    }, () => `holder process did not start: ${JSON.stringify({ comm, exited, stderr: stderr.slice(0, 400) })}`);
     fs.symlinkSync(`${os.hostname()}-${holder.pid}`, path.join(env.INSTAFY_BROWSER_HOST_PROFILE_DIR, "SingletonLock"));
     const host = startHost(env);
     assert.equal(await host.firstStatus, "instafy-browser-host: failed profile_in_use");
