@@ -87,7 +87,7 @@ test.describe("Bench: /learn improves deterministic article-entry navigation (op
         "",
         "Open a live browser session (visible inline).",
         `Navigate directly to ${fixtureBaseUrl}/catalog?page=2`,
-        'If a cookie dialog appears, click "I agree".',
+        'If a cookie dialog appears, click "No thanks".',
         'Open the exact Delta article entry from the current page.',
         "Wait for the article page to load, then read the article heading, current URL, and article token from the browser.",
         "",

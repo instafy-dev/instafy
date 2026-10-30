@@ -82,7 +82,7 @@ function promptForAttempt(
     "",
     "Open a live browser session (visible inline).",
     `Navigate to ${fixtureBaseUrl}/`,
-    'If a cookie dialog appears, click "I agree".',
+    'If a cookie dialog appears, click "No thanks".',
     `Use the Search page (either click "Search" or navigate to ${fixtureBaseUrl}/search).`,
     'Search for "beta" (non-empty query) and submit.',
     'Open the Beta result (it should lead to /article/beta).',

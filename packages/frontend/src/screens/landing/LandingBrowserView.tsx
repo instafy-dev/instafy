@@ -259,12 +259,6 @@ function ApprovalSheet({ origin, pressed }: { origin: string; pressed: boolean }
                 {sentence}
               </Text>
             </div>
-            <Surface tone="raised" radius="xl" shadow="none" className={chrome.APPROVAL_SITE}>
-              <Text as="p" variant="caption" tone="muted">
-                Site
-              </Text>
-              <Text variant="mono" tone="primary" className={chrome.APPROVAL_SITE_TEXT}>{origin}</Text>
-            </Surface>
           </div>
           <StudioDialogFooter padding="default" divider className={chrome.APPROVAL_ACTIONS}>
             <span className={chrome.APPROVAL_BUTTON_SECONDARY}>Deny</span>

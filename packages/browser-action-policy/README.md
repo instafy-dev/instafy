@@ -30,6 +30,13 @@ load `redaction.js` first.
   items, tabs, tree items, disclosure and menu openers and navigation-area items
   never carry it, and a menu item named for a list ("Buchungen",
   "Stornobuchung") stays navigation.
+  In a cookie or consent banner (the describer's `consentContext`), a
+  refusal's button ("Reject all") is free with `consentRejection: true`, and a
+  control or link whose words accept, agree or consent, or only allow
+  ("Allow all cookies"), is refused
+  (`step_refused_consent`): accepting is the person's step. An accept limited
+  to the necessary cookies or to a selection ("Accept only necessary",
+  "Accept selection") saves a refusal, so it asks with `commit: true` instead.
   `unnamedControlName(hints)` names a control the page left unnamed from its
   tooltip attribute, image text, icon and position, so a prompt never shows an
   index such as "button 5".
@@ -54,8 +61,10 @@ load `redaction.js` first.
   `formNewWindow`, `formSubmission` and `formSubmits`, which `actionPolicy.js`
   judges. `stepSubmission(facts, step, key)` says which steps submit and where
   to; a field inside a submit button (`nested`), which a click and Enter send
-  in different ways, is one both hosts refuse. Publishes
-  `globalThis.__instafyBrowserFormSubmission`. `formSubmissionCases.json` is
+  in different ways, is one both hosts refuse. The rules' `sentFieldNames`
+  names the fields a submission sends something from, by their label, legend
+  or name attribute and never their values, for a prompt to say what a step
+  sends. Publishes `globalThis.__instafyBrowserFormSubmission`. `formSubmissionCases.json` is
   the one table of form steps both browsers' tests run.
 - `pageCapture.js`: `pageSecretSignalsInPage(sources)` runs inside a page and
   answers the four yes/no secret checks that `redactPageObservation` takes.

@@ -365,6 +365,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v14.md"),
     // From before a page that reads as busy got one more snapshot, then the place's own site.
     include_str!("legacy/browser-automation-v15.md"),
+    // From before a cookie banner with no reject button was left up and read under, and a
+    // learning example clicked "I agree".
+    include_str!("legacy/browser-automation-v16.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),

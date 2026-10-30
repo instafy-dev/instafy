@@ -14,15 +14,13 @@ Goal: use the browser capability exposed for this turn safely and report only re
 
 ## Browser terms
 
-Use these terms consistently:
-
 - `page` = a tab/page inside the current shared Chromium session
 - `isolated session` = a separate browser context inside the same runtime, used only when cookie/login isolation is required
 - `runtime-backed session` = a separate browser runtime / visible browser surface
 - `Personal Browser` = the private Chromium view embedded in the Instafy desktop app and controlled through its project-scoped local RPC broker
 - `owner-local browser` = a fresh headless Chromium process for credential-free, read-only public-page observation on an opted-in self-hosted runtime
 
-For interactive Personal or Shared Browser work, default to `page` first. Do not escalate from `page` to `isolated session` or `runtime-backed session` unless the user explicitly asks for isolation or the task clearly requires incompatible account state. Owner-local observation always uses a fresh one-URL context.
+For interactive Personal or Shared Browser work, default to `page` first. Do not escalate from `page` to `isolated session` or `runtime-backed session` unless the user explicitly asks for isolation or the task clearly requires incompatible account state.
 
 ## What Instafy's browser can reach
 
@@ -107,8 +105,9 @@ For every reader, browser or not:
   result names "not checked". Never names from memory, never placeholders such
   as "candidate 1".
 - A cookie banner with a reject button ("Reject all", "Only necessary"): press
-  it so it does not cover the page the person watches. Refusing shares nothing;
-  accepting is the person's choice.
+  it so it does not cover the page the person watches. With no reject button on
+  the banner itself, leave it up and read on. Refuse through its settings only
+  when the person asks; saving those settings asks once.
 
 ## Shared Browser command (only when Shared Browser is exposed)
 
@@ -327,7 +326,6 @@ not the task ("Finding a page" says what comes next).
 Good:
 - “Start from `/search`, fill the input labeled `Search`, submit with the visible search button, then read `ARTICLE_TOKEN` from the article labels.”
 - “Start from `/search`, fill the input labeled `Search`, submit with the visible search button, then read the page label `Article token:` and map it into the final `ARTICLE_TOKEN` reply line.”
-- “If a consent button labeled `I agree` is visible, click it once before continuing.”
 - Command JSON evidence that includes:
   - `workedCues.route = "/directory"`
   - `workedCues.field = "Team"`

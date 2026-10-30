@@ -79,6 +79,13 @@ const formEntriesFor = (arg) => ({
   ],
   own: 0,
 });
+// The fields a form step sends something from, by name, as the page's
+// sent-fields helper reports them.
+const sentFieldsFor = (arg) => mode === "submit-order"
+  ? ["Customer name", "Telephone", "E-mail address", "Pizza Size", "Delivery instructions"]
+  : mode === "submit-order-many"
+    ? ["Customer name", "Telephone", "E-mail address", "Pizza Size", "Pizza Toppings", "Preferred delivery time", "Delivery instructions"]
+    : [];
 const special = {
   "invite-button": { description: control("Invite member") },
   "generate-key": { description: control("Generate API key") },
@@ -88,7 +95,39 @@ const special = {
   "cookie-reject-pt": { description: control("Rejeitar todos"), policy: { consentContext: true, areas: "dialog" } },
   "cookie-reject-posts": { description: control("Reject all"), policy: { consentContext: true, areas: "dialog" } },
   "cookie-accept": { description: control("Accept all"), policy: { consentContext: true, areas: "dialog" } },
+  // The accept of a common consent dialog says "Consent"; "accept" is not in it.
+  "cookie-consent": { description: control("Consent"), policy: { consentContext: true, areas: "dialog" } },
+  // Accepts limited to the necessary cookies: refusals in effect.
+  "cookie-accept-necessary": {
+    description: control("Accept only necessary"), policy: { consentContext: true, areas: "dialog" },
+  },
+  "cookie-accept-necessary-pt": {
+    description: control("Aceitar apenas necess\u00e1rios"), policy: { consentContext: true, areas: "dialog" },
+  },
+  // A banner's accept as a link ("aceitar e continuar" is <a href>), which
+  // the plain-link rule would otherwise take as navigation.
+  "cookie-accept-link": {
+    description: control("aceitar e continuar", { tag: "a", inputType: "", href: "https://example.test/pages/329" }),
+    policy: { href: "https://example.test/pages/329", linkSelf: true, consentContext: true },
+  },
   "reject-outside-banner": { description: control("Reject all") },
+  // A form's submit button, and the fields its form sends something from,
+  // as the page's sent-fields helper names them.
+  "submit-order": {
+    description: control("Submit order", {
+      inputType: "submit", formMethod: "post", formAction: "https://example.test/post",
+      formActionText: "form post https://example.test/post Submit order",
+    }),
+    policy: {
+      formActionUrl: "https://example.test/post", formSubmission: "button", formSubmits: true,
+      formName: "Submit order", formSubmitLabels: "Submit order", formFieldCount: 4,
+    },
+  },
+  // A banner button whose name says more than the text it shows.
+  "learn-more": {
+    description: control("Learn More \u2192", { ariaLabel: "Learn More: Configure your consents" }),
+    policy: { consentContext: true, areas: "dialog" },
+  },
   // Script-driven save buttons: no form owner, only the commit word.
   "save-button": { description: control("Speichern") },
   "save-button-en": { description: control("Save changes") },
@@ -319,6 +358,7 @@ const special = {
     nameHints: { innerName: "Delete account", position: "top right" },
   },
 };
+special["submit-order-many"] = special["submit-order"];
 // "<mode>-typeless": the same button with no type attribute, which the
 // browser reports as type "submit" even outside a form.
 const typeless = mode.endsWith("-typeless");
@@ -658,7 +698,11 @@ const makePage = (targetId, opened = null) => {
   };
   const handleAt = (ordinal) => ({
     ...handle,
-    evaluate: async (_fn, arg) => arg && arg.kind === "form-entries" ? formEntriesFor(arg) : controlsFor(targetId)[ordinal],
+    evaluate: async (_fn, arg) => arg && arg.kind === "form-entries"
+      ? formEntriesFor(arg)
+      : arg && arg.kind === "sent-fields"
+        ? sentFieldsFor(arg)
+        : controlsFor(targetId)[ordinal],
     click: async () => {
       if (clickLogPath) fs.appendFileSync(clickLogPath, `${ordinal}\n`);
       return handle.click();
@@ -4864,7 +4908,13 @@ fn long_approval_labels_stay_valid_for_the_origin() {
             label,
             "{mode}"
         );
-        assert!(label.contains("Open report (shown as"), "{mode}: {label}");
+        // The text the control shows leads, cut on its own, and its other
+        // name follows whole.
+        assert!(label.contains("Quarterly team"), "{mode}: {label}");
+        assert!(
+            label.ends_with("\u{2026} (also called \"Open report\")"),
+            "{mode}: {label}"
+        );
         assert!(!label.contains('\u{FFFD}'), "{mode}: {label}");
     }
 }
@@ -9230,8 +9280,7 @@ async fn a_run_starts_with_the_sites_of_the_cards_the_person_pressed_on_their_pa
 
 /// Drive, Oct 28: "Allow this browser action? The AI agent is waiting to
 /// click 'Reject all'." A cookie banner's refusal shares nothing, so it
-/// never asks, in Ask too; the same words outside a banner, and a banner's
-/// "Accept all", still do.
+/// never asks, in Ask too; the same words outside a banner still do.
 #[test]
 fn a_cookie_banners_refusal_never_asks_while_the_same_words_elsewhere_still_do() {
     for mode in ["cookie-reject", "cookie-reject-pt"] {
@@ -9258,7 +9307,7 @@ fn a_cookie_banners_refusal_never_asks_while_the_same_words_elsewhere_still_do()
             "{mode}"
         );
     }
-    for mode in ["reject-outside-banner", "cookie-accept"] {
+    for mode in ["reject-outside-banner"] {
         let fixture = EmbeddedControllerFixture::new();
         let snapshot_id = fixture.snapshot_id(mode);
         let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
@@ -9274,6 +9323,175 @@ fn a_cookie_banners_refusal_never_asks_while_the_same_words_elsewhere_still_do()
         assert_eq!(requests.len(), 1, "{mode} did not ask");
         assert_eq!(requests[0]["operation"], "click", "{mode}");
         assert!(!output.status.success(), "{mode} ran although denied");
+    }
+}
+
+/// Accepting a cookie banner is the person's step: its "Accept all" button,
+/// its "aceitar e continuar" link and a "Consent" button are refused before
+/// any prompt, in Ask, under routine browsing and on a run that starts in it,
+/// and nothing is clicked. Before, the link went through as plain navigation,
+/// the "Accept all" button asked, and "Consent" was clicked under routine
+/// browsing without a prompt.
+#[test]
+fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
+    for mode in ["cookie-accept", "cookie-accept-link", "cookie-consent"] {
+        // Ask mode, with the site approved.
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+            &["https://example.test"],
+            &["allow_once"],
+        );
+        assert!(!output.status.success(), "{mode} ask mode");
+        assert!(
+            requests.is_empty(),
+            "{mode} prompted in ask mode: {requests:?}"
+        );
+        assert!(
+            failure_of(&output).contains("[step_refused_consent]"),
+            "{mode}: {}",
+            failure_of(&output)
+        );
+        assert!(
+            !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+
+        // Routine browsing.
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot = fixture.routine_snapshot(mode);
+        let body = json!({ "index": 0, "snapshotId": snapshot["snapshotId"] }).to_string();
+        let output = fixture
+            .command_for(mode, "page-target", "POST", "/v1/click", Some(&body))
+            .output()
+            .expect("refused routine step");
+        assert!(!output.status.success(), "{mode} routine");
+        assert!(
+            failure_of(&output).contains("[step_refused_consent]"),
+            "{mode} routine"
+        );
+        assert!(
+            !fixture.approval_dir.join("request.json").exists(),
+            "{mode} routine"
+        );
+        assert!(
+            !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode} routine"
+        );
+
+        // A run that starts in routine browsing.
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for(mode, "page-target", "POST", "/v1/click", Some(&body)),
+            &["allow_once"],
+        );
+        assert!(!output.status.success(), "{mode} routine start");
+        assert!(requests.is_empty(), "{mode} prompted on a routine start");
+        assert!(
+            failure_of(&output).contains("[step_refused_consent]"),
+            "{mode} routine start"
+        );
+    }
+}
+
+/// An accept limited to the necessary cookies ("Accept only necessary",
+/// "Aceitar apenas necessários") refuses the rest, so it is never refused as an
+/// accept: it asks once, under routine browsing too, and runs when allowed.
+/// Before, both were refused, so a person's "refuse them" could not be done.
+#[test]
+fn a_cookie_banners_accept_of_only_the_necessary_cookies_asks_once() {
+    for mode in ["cookie-accept-necessary", "cookie-accept-necessary-pt"] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot = fixture.routine_snapshot(mode);
+        let body = json!({ "index": 0, "snapshotId": snapshot["snapshotId"] }).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for(mode, "page-target", "POST", "/v1/click", Some(&body)),
+            &["allow_once"],
+        );
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(requests.len(), 1, "{mode} did not ask once: {requests:?}");
+        assert_eq!(requests[0]["operation"], "click", "{mode}");
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+}
+
+/// A prompt says what the step does in the words on the page: the text a
+/// control shows comes first and each of its names is cut on its own (before,
+/// the hidden name led and the pair was cut as one, so the shown text was
+/// lost), and a form step lists the fields it sends, never their values.
+#[test]
+fn a_prompt_leads_with_the_shown_text_and_lists_the_fields_a_form_sends() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("learn-more");
+    let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+    let (output, requests) = fixture.run_with_decisions(
+        "learn-more",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["display"]["label"],
+        "Change something: Learn More \u{2192} (also called \"Learn More: Configure your consents\")"
+    );
+    assert!(
+        fixture.action_log().contains(
+            r#"Click \"Learn More →\" (also called \"Learn More: Configure your consents\")"#
+        ),
+        "{}",
+        fixture.action_log()
+    );
+
+    for (mode, sends) in [
+        (
+            "submit-order",
+            "Customer name, Telephone, E-mail address, Pizza Size, Delivery instructions",
+        ),
+        (
+            "submit-order-many",
+            "Customer name, Telephone, E-mail address, Pizza Size, Pizza Toppings and 2 more",
+        ),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+            &["https://example.test"],
+            &["deny"],
+        );
+        assert!(!output.status.success(), "{mode} ran although denied");
+        assert_eq!(requests.len(), 1, "{mode}");
+        assert_eq!(
+            requests[0]["display"]["label"],
+            format!("Change something: Submit order \u{b7} Sends: {sends}"),
+            "{mode}"
+        );
     }
 }
 
