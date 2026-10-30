@@ -690,9 +690,9 @@ note for that turn only, next to its browser policy: the page was left by a
 task in another chat, it is not this task's earlier work, so Octo does not
 describe it as resuming there. When the person's message is about that page,
 Octo uses it as it is; otherwise it starts this task's own step (`navigate`
-that page, or a tab of its own). The chat's next turn withdraws the note. The
-first run on a page, a later run of the same chat, and a runtime that restarted
-get none.
+that page, or a tab of its own). The chat's next turn without such a page
+withdraws the note. The first run on a page, a later run of the same chat, and
+a runtime that restarted get none.
 
 ### How Octo finds a page
 
