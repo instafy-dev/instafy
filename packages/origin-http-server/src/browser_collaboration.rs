@@ -1743,6 +1743,112 @@ mod tests {
         assert!(state.control_owner.is_none());
     }
 
+    /// Local test, Oct 30: after a reload, the chat's Browser view showed
+    /// another chat's page and stayed there. The reloaded Studio joined as a
+    /// new session while the old one still held control in its grace, so it
+    /// did not get control, and once the grace ran out nobody had it: the
+    /// view's move to the chat's own tab was refused. A page that unloads now
+    /// leaves (Studio sends `leave` on `pagehide`), so the person's reloaded
+    /// session gets control as it joins, and control due back once Octo is
+    /// done goes to it too.
+    #[tokio::test]
+    async fn a_reloaded_page_leaves_so_the_persons_new_session_gets_control() {
+        let hub = test_hub();
+        let before = claims("session-before-reload", Some("Taylor"), true);
+        let old = hub
+            .join(&before, "session-before-reload", Some("PAGE1"))
+            .await
+            .expect("first join");
+        assert!(hub.has_human_control(&before).await);
+        // Another person in the space, who does not control the browser.
+        let teammate = claims("session-teammate", Some("Anna"), true);
+        let _anna = hub
+            .join(&teammate, "session-teammate", Some("PAGE1"))
+            .await
+            .expect("teammate join");
+        hub.apply_message(
+            &old.participant_id,
+            old.connection_id,
+            ClientMessage::Leave {},
+        )
+        .await
+        .expect("leave");
+        hub.disconnect(&old.participant_id, old.connection_id).await;
+
+        // The same person, after the reload: a new session of theirs.
+        let mut after = claims("session-after-reload", Some("Taylor"), true);
+        after.sub = before.sub.clone();
+        after.project_id = before.project_id.clone();
+        hub.join(&after, "session-after-reload", Some("PAGE1"))
+            .await
+            .expect("join after reload");
+        assert!(hub.has_human_control(&after).await);
+        assert!(!hub.has_human_control(&before).await);
+        assert!(!hub.has_human_control(&teammate).await);
+
+        // While Octo drives, the control the person gets back once Octo is
+        // done goes to the reloaded session too.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let marker_path = directory.path().join("agent-control.json");
+        let hub = BrowserCollaborationHub::new_with_agent_control_path(marker_path.clone());
+        let old = hub
+            .join(&before, "session-before-reload", Some("PAGE1"))
+            .await
+            .expect("first join");
+        write_test_marker(
+            &marker_path,
+            &marker_json(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                unix_time_millis() + 12_000,
+            ),
+        );
+        assert!(!hub.has_human_control(&before).await);
+        hub.apply_message(
+            &old.participant_id,
+            old.connection_id,
+            ClientMessage::Leave {},
+        )
+        .await
+        .expect("leave");
+        hub.join(&after, "session-after-reload", Some("PAGE1"))
+            .await
+            .expect("join after reload");
+        std::fs::remove_file(&marker_path).expect("Octo is done");
+        assert!(hub.has_human_control(&after).await);
+        assert!(!hub.has_human_control(&before).await);
+    }
+
+    /// A connection that only drops (a short Wi-Fi loss, with no page
+    /// unloading) keeps its control for the grace, even from another session
+    /// of the same person that joins meanwhile, such as their other window:
+    /// the dropped one reconnects with control.
+    #[tokio::test]
+    async fn a_dropped_connection_keeps_control_from_the_persons_other_sessions() {
+        let hub = test_hub();
+        let desktop = claims("session-desktop", Some("Taylor"), true);
+        let first = hub
+            .join(&desktop, "session-desktop", Some("PAGE1"))
+            .await
+            .expect("desktop join");
+        hub.disconnect(&first.participant_id, first.connection_id)
+            .await;
+        let mut other_window = claims("session-other-window", Some("Taylor"), true);
+        other_window.sub = desktop.sub.clone();
+        other_window.project_id = desktop.project_id.clone();
+        hub.join(&other_window, "session-other-window", Some("PAGE2"))
+            .await
+            .expect("other window join");
+        assert!(hub.has_human_control(&desktop).await);
+        assert!(!hub.has_human_control(&other_window).await);
+        hub.join(&desktop, "session-desktop", Some("PAGE1"))
+            .await
+            .expect("desktop reconnects");
+        assert!(hub.has_human_control(&desktop).await);
+        assert!(!hub.has_human_control(&other_window).await);
+    }
+
     #[tokio::test]
     async fn signed_session_is_authoritative_and_reconnect_replaces_old_socket() {
         let hub = test_hub();

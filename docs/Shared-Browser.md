@@ -193,7 +193,12 @@ check ownership immediately before CDP mutation. The separate CDP/WebRTC input
 socket checks every message, so an already-open former-driver connection cannot
 continue after handoff. A normal leave releases immediately; an unclean network
 disconnect keeps the same signed session for ten seconds so a short Wi-Fi loss
-can reconnect without stealing control. The UI fails closed while its presence
+can reconnect without stealing control, also from another session of the same
+person (their other window or device) that joins meanwhile. A Studio page that
+unloads (a reload, or its tab closing) leaves as an unmount does: it sends
+`leave` on `pagehide`, so control it held, or gets back once Octo is done, is
+free at once, and the reloaded Studio, a new session of the same person, takes
+it as it joins and can bring its chat's tab forward and type. The UI fails closed while its presence
 channel reconnects. It accepts only the exact bounded server schema (64 KiB,
 at most 32 participants and 32 requests); an invalid authoritative message
 clears local ownership immediately and closes/reconnects the socket rather than
@@ -625,28 +630,53 @@ read, so that page would go into this chat's reply and Details):
   `GET /browser/capabilities`. The turn
   then starts on a blank page, and its blank-page rule takes it to the task's
   address or the official site of what the task is about.
-- **The chat's Browser view shows that tab**, never a tab another chat left in
-  front. When the view comes on screen for a chat, and when the chat gets a new
-  tab, Studio brings the chat's tab to the front. While someone else (Octo
-  included) controls the browser the view shows what they do. When that was
-  another chat's turn or another person, the chat's tab comes forward once
-  they are done and no browser turn is under way; the chat's own turn leaves
-  the browser where it ends (its page, or a tab the person took over). A chat
-  with no tab yet gets its own blank one (as for its first browser turn), once
-  while the view is on screen, and "Octo is starting…" shows over it while a
-  turn of the chat is on its way. It never undoes the person's own pick.
+- **The chat's Browser view shows that tab, and only that tab.** When the view
+  comes on screen for a chat, and when the chat gets a new tab, Studio brings
+  the chat's tab to the front, once this person holds the browser's control
+  (only the driver may bring a tab forward; until then the view waits). The stage draws a picture, and the address bar
+  shows an address, only while a tab of the chat is in front: its own tab, or
+  Octo's tabs of the chat's turn while the browser lists them as Octo's
+  (during the turn, and after it until the tab list names the one Octo read in
+  last as the chat's page, which the view then does not move away from). A tab
+  of Octo's the list named before the chat's turn started is an earlier turn's,
+  never this one's. With RFB, which draws whatever tab is in front, the stage
+  draws no picture while someone else in control (another person, or the
+  person's other window) shows a tab that is none of the chat's. Any
+  other tab in front, or none the browser names in front (never its first tab
+  in its place), leaves the stage blank, with no address, and the person's
+  input does not reach the page. While a browser turn of another chat holds
+  the browser, the view shows none of it, only "Octo is working in another
+  chat": in a team space that page may be another person's, signed in. Once
+  that turn or another person is done and no browser turn is under way, the
+  chat's tab comes forward again; the chat's own turn leaves the browser where
+  it ends (its page, or a tab the person took over, which is the chat's tab
+  from then on when it is one the view shows: Take over pressed over the blank
+  stage, while another chat's page is still in front as the turn starts, leaves
+  the chat its own tab). A chat with no tab yet gets its own blank one (as for its
+  first browser turn), once while the view is on screen, and again once a tab
+  it had is gone (the browser started again, or Clear data); a chat with
+  nothing sent yet too, and that tab stays its tab once its first message
+  gives it an id. While a turn of the
+  chat is on its way and its page is blank or not in front yet, the stage says
+  "Octo is starting…" (or where Octo is going). On "Reconnecting…" the stage
+  keeps only a still of the chat's page in front, never the last picture the
+  view drew, which may be of another tab. It never undoes the person's own
+  pick.
 - **The page a browser turn leaves the chat.** A turn works on the chat's tab
-  (see Octo's own tabs). When it ends with that tab still blank, because Octo
-  read in tabs of its own, the tab Octo worked in last stays open (see Closed
-  at the end, unless kept), and `GET /browser/pages` names that turn on it
-  (`leftByRun: <run id>`, from runtime-agent's `chat-tabs.json`). Once the turn
-  has ended, that tab is the chat's tab: the page the person is left with is
-  the one Octo read, after a reload, on another device and for other members
-  too.
+  (see Octo's own tabs). When it ends with Octo reading last in a tab of its
+  own that shows a page, or with the chat's tab still blank, the tab Octo
+  worked in last stays open (see Closed at the end, unless kept), and `GET /browser/pages` names
+  that turn on it (`leftByRun: <run id>`, from runtime-agent's
+  `chat-tabs.json`). Once the turn has ended, that tab is the chat's tab: the
+  page the person is left with is the one Octo read last, after a reload, on
+  another device and for other members too.
 - A follow-up stays in the tab of the turn it continues (the tab that turn
   left the chat, when it left one), while no other chat took that tab since
   the turn started; otherwise the message is an ordinary
-  chat turn. Let Octo continue stays in the tab the person worked in. A message aimed at a page goes out in the
+  chat turn. Let Octo continue stays in the tab the person worked in when the
+  chat's view shows it, else in the chat's own tab; never another chat's page
+  in front, nor the browser's first tab when it names none in front, and with
+  no tab of the chat's it sends nothing. A message aimed at a page goes out in the
   person's own words: the page reaches the turn only as its bound tab, never as
   a sentence naming it, and a card's continuation sends the card's task alone.
 
@@ -678,7 +708,8 @@ again, from the space's own copy. That section, which the
 skill prints just that section with one command), says how every reader finds a
 page: an address the person, a skill or a search result gave, a link on a page
 read, or the official site's home page, never a search engine or a guessed
-path; a missing page's own site search; another source after two failed pages
+path; a missing page's own site search; one more snapshot of a page that reads
+as busy, then the place's own site; another source after two failed pages
 on one site, and the best result of the search for it read; facts from a place's
 own page, not a listing or a kiosk page; "not checked" on anything not read this
 turn; and a cookie banner's refusal, so the banner does not cover the page. A
@@ -688,6 +719,36 @@ reply rules end the research after a failed page. The research and comparison ev
 (`packages/instafy-bind/tests/web-research-eval.test.mjs`,
 `packages/instafy-cli/test/web-compare-eval.spec.ts`) grade these rules on
 fixture sites.
+
+A page that is not blank but reads with no text and no controls has not drawn
+yet (it is still loading, or hidden while it loads). A snapshot of it, and the
+read that follows a step, answers as a page too busy to be read does: its
+masked address alone, no title, and "The page is still busy, so it could not be
+read yet. Take a snapshot in a moment." It is never handed back as an empty
+page, which a turn would report as "no readable content", and its line reads
+like `status`, not as a page read.
+
+A turn that read pages or looked something up (the browser, `instafy web read`
+or `instafy web search`, a skill pack's lookups) checks its reply once before it
+posts: one more request on the turn's own thread, with the turn's instructions
+and tools, so the provider serves the thread from its cache. It marks a fact no
+page read for the turn states "not checked" or takes it out, never says a place,
+stop, route or time doesn't exist unless a page says so, and takes out a step
+the reply says is under way that the turn didn't start. Only the reply's words
+change, and they are finished as the turn's own were (the runtime's no-change
+line removed, an integration card's retry phrase added); a browser turn's finding
+lines for the building turn stay as the turn wrote them. The check answers in
+words only: the runtime reads each of its responses whole before Codex does, and
+one that calls a tool reaches Codex empty, so nothing runs, nothing is asked
+again, and the reply stays as it was (runtime-agent `answer_only.rs`). It is one
+request, never replayed, within 90 seconds (less when the turn's own limit is
+shorter), on a cancel signal of its own that a Stop or a lost lease cancels too:
+its time limit never ends the turn, and a Stop during it ends the turn as a Stop
+during the turn does. A check on a browser turn whose browser tools could not be
+confirmed gone keeps the browser Octo's and recycles the runtime at the end of
+the turn, as after any browser run. A turn that read nothing makes no such
+request, and a check that fails, runs out of time or calls a tool leaves the
+reply as it was (runtime-agent `jobs/reply_check.rs`).
 
 ### Octo's own tabs
 
@@ -800,17 +861,25 @@ Browser has tabs of its own (see Personal-Browser.md).
   `kept-tabs.json`). Studio keeps the tab on screen when the person takes over
   on one of Octo's tabs; it shows no separate **Keep tab** button, which was
   unexplained to a first-time user, since the person now watches Octo's tab
-  live while Octo works in it. When the person kept none and the run's page
-  (the chat's own tab) is still blank (`GET /json/list` says `about:blank` or a
-  new-tab page), the tab Octo worked in last (`currentTabId`, else its newest)
-  is kept the same way, as the chat's page, with no reload: it stays as Octo
-  left it, a refused cookie banner included. runtime-agent names it with the
+  live while Octo works in it. When the person kept none, the tab Octo worked
+  in last is kept the same way, as the chat's page, with no reload: it stays
+  as Octo left it, a refused cookie banner included. That is the tab Octo acts
+  on at the end (`currentTabId`) when it is one of Octo's own and shows a page
+  (`GET /json/list` says an `http(s)` address): Octo read there after the
+  run's page (the chat's own tab), whatever that page shows. A tab whose page
+  never loaded (blank, or the browser's error page) is not kept that way. When
+  Octo ended on the run's page, or in such a tab, one of Octo's tabs is kept
+  only while the run's page is still blank (`about:blank` or a new-tab page):
+  the newest that shows a page, else the one Octo worked in last. runtime-agent names the kept tab with the
   run in `chat-tabs.json`, the newest 24 such tabs, a record that outlives the
   run like the leftover record and grants nothing; the page list reports it
   as `leftByRun` on that tab while the tab is not one of Octo's. Then that tab, or else the run's
   page once any of Octo's tabs closed, comes to the front
   (`GET /json/activate/<id>`): Chromium would otherwise show a neighbouring
-  tab, which may be another chat's page. A tab the person kept stays where they
+  tab, which may be another chat's page. A tab kept as the chat's page is one
+  more of the person's tabs: once the browser has more than 24, the one used
+  least recently closes, as when Studio opens a chat's tab (never the kept tab,
+  the run's page, the tab used last, or one of Octo's). A tab the person kept stays where they
   are. A kept tab stays
   an ordinary tab no later run can use, and both records are cleared with the
   run's approval directory.
@@ -1032,7 +1101,8 @@ typing or navigation it had not started) and answers with the page as it is: a
 snapshot read within 8 more seconds, or, when the page is too busy to be read,
 its masked address alone, with no text and no controls. The answer carries
 `stepTimedOut: true` and a note that tells Octo to check what the step did
-before it acts again, and the Shared Browser policy says to take a snapshot
+before it acts again (it calls the read "the page as it is now" only when the
+page was read), and the Shared Browser policy says to take a snapshot
 and go on from there: only an approval's own outcome is final. On the turn's
 line it reads as a page read when the page was read, and like `status`
 ("Browsed <site>") when only its address was, so it adds no new wording and
@@ -1044,7 +1114,8 @@ link-only load or a form post the guards stopped. A hand-off whose fields were
 not all highlighted in time leaves no prompt behind.
 `scripts/shared-browser-step-time-e2e.mjs` shows these in Chromium: a search
 whose results page keeps the page busy for a minute answers after about 29
-seconds, a prompt answered after 23 seconds is waited for, a click that opens
+seconds, a loaded page whose content is still hidden reads as busy, a prompt
+answered after 23 seconds is waited for, a click that opens
 a window and keeps the page busy fails with the window closed for good, and a
 hand-off on a page too busy to highlight in time leaves no prompt.
 
@@ -1344,7 +1415,10 @@ ended less than ten minutes ago. Any other run uses the record up, so a run in
 between, another person, another page, a restarted runtime or browser (new
 page ids), or a run that ended without a confirmed shutdown starts with
 nothing, as every other run does. Octo's own tabs close with the run, and the
-sites approved in them go with them. Job metadata can only name the run; the
+sites approved in them go with them, apart from the tab the run left the chat
+as its page (`leftByRun`): a run that continues it there, as a follow-up does,
+starts with the sites approved in that tab and routine browsing, never the
+sites approved on the run's own page. Job metadata can only name the run; the
 runtime decides what carries. Manual navigation drops stale field guidance but
 keeps the manual-step controls, so login redirects can finish before continuation starts
 a fresh turn. A target change during asynchronous continuation aborts it; no

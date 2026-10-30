@@ -93,6 +93,8 @@ For every reader, browser or not:
   search engine or a guessed path.
 - A page that says it is missing ("not found", "are you lost?"): use that
   site's own search box or menu.
+- A page that reads as busy: take one more snapshot in a moment; still nothing,
+  go to the place's own site.
 - Two failed pages on one site: find another source with `instafy web search`
   (no key: `--chain reference-search`), then read its best result; with only
   browser tools, open the home page of another official source (the operator,

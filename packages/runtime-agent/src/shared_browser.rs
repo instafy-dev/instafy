@@ -731,9 +731,11 @@ const APPROVAL_STATE_MAX_BYTES: u64 = 16 * 1024;
 /// What the last run to hold the browser left for a run that continues it:
 /// the sites the person approved on the page they chose, and routine browsing
 /// when they allowed it. Octo's own tabs closed with that run, and the sites
-/// approved in them went with them. Kept in this process only, so a runtime
-/// that starts again (and its browser, whose page ids are new) carries
-/// nothing.
+/// approved in them went with them, apart from the tab the run left the chat
+/// as its page (`left_page`, see `tab_kept_for_the_chat`): a follow-up goes on
+/// there, with the sites approved in that tab. Kept in this process only, so
+/// a runtime that starts again (and its browser, whose page ids are new)
+/// carries nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EndedRunGrants {
     run_id: Uuid,
@@ -741,7 +743,16 @@ struct EndedRunGrants {
     browser_page_id: String,
     approved_origins: Vec<String>,
     routine_browsing_allowed: bool,
+    left_page: Option<LeftPageGrants>,
     ended_at: std::time::Instant,
+}
+
+/// The tab of Octo's a run left the chat as its page, and the sites approved
+/// in that tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LeftPageGrants {
+    page_id: String,
+    approved_origins: Vec<String>,
 }
 
 /// The last ended run's grants, by approval directory (one per runtime; a
@@ -790,7 +801,27 @@ fn ended_run_grants(approval_dir: &Path, binding: &RunBinding) -> Option<EndedRu
     )
     .ok()
     .flatten()?;
-    let origins = state.get("approvedOrigins")?.as_array()?;
+    let approved_origins = approved_origins_in(&state)?;
+    let routine_browsing_allowed = match state.get("routineBrowsingAllowed") {
+        None => false,
+        Some(value) => value.as_bool()?,
+    };
+    Some(EndedRunGrants {
+        run_id: binding.run_id,
+        initiator_user_id: binding.initiator_user_id,
+        browser_page_id: binding.browser_page_id.clone(),
+        approved_origins,
+        routine_browsing_allowed,
+        left_page: None,
+        ended_at: std::time::Instant::now(),
+    })
+}
+
+/// The sites approved in a record (`approvedOrigins`, as the approval script
+/// writes it in the run's state and in each of Octo's tabs). None when it is
+/// missing or not well formed.
+fn approved_origins_in(record: &JsonValue) -> Option<Vec<String>> {
+    let origins = record.get("approvedOrigins")?.as_array()?;
     if origins.len() > MAX_APPROVED_ORIGINS {
         return None;
     }
@@ -802,17 +833,29 @@ fn ended_run_grants(approval_dir: &Path, binding: &RunBinding) -> Option<EndedRu
         }
         approved_origins.push(origin.to_string());
     }
-    let routine_browsing_allowed = match state.get("routineBrowsingAllowed") {
-        None => false,
-        Some(value) => value.as_bool()?,
-    };
-    Some(EndedRunGrants {
-        run_id: binding.run_id,
-        initiator_user_id: binding.initiator_user_id,
-        browser_page_id: binding.browser_page_id.clone(),
-        approved_origins,
-        routine_browsing_allowed,
-        ended_at: std::time::Instant::now(),
+    Some(approved_origins)
+}
+
+/// The tab the run left the chat as its page, with the sites approved in it
+/// (the run's tab record, read before the run's records are revoked). A tab
+/// the record does not name, or names with sites not well formed, carries
+/// nothing.
+fn left_page_grants(
+    approval_dir: &Path,
+    binding: &RunBinding,
+    tab_id: &str,
+) -> Option<LeftPageGrants> {
+    let record = read_run_record(approval_dir, AGENT_TABS_FILE, &[1, 2], binding)
+        .ok()
+        .flatten()?;
+    let tab = record
+        .get("tabs")?
+        .as_array()?
+        .iter()
+        .find(|tab| tab.get("tabId").and_then(JsonValue::as_str) == Some(tab_id))?;
+    Some(LeftPageGrants {
+        page_id: tab_id.to_string(),
+        approved_origins: approved_origins_in(tab)?,
     })
 }
 
@@ -829,11 +872,14 @@ fn is_normalized_web_origin(raw: &str) -> bool {
 
 /// What a new run starts with from the run it continues. Studio's Let AI
 /// continue names that run (`browserContinuesRunId`) after the person took
-/// over or did a manual step; the grants carry only when it is the last run
-/// that held this browser, for the same person on the same page, and ended
-/// less than [`CONTINUATION_WINDOW`] ago. Any new run uses up the record, so
-/// a run in between, another person, another page or a restarted browser
-/// starts with nothing, as every other run does.
+/// over or did a manual step, and so does a follow-up; the grants carry only
+/// when it is the last run that held this browser, for the same person on the
+/// same page, and ended less than [`CONTINUATION_WINDOW`] ago. The same page
+/// is the run's own, or the tab of Octo's it left the chat as its page, where
+/// a follow-up goes on: there the sites approved in that tab carry, with
+/// routine browsing. Any new run uses up the record, so a run in between,
+/// another person, another page or a restarted browser starts with nothing,
+/// as every other run does.
 fn take_continued_run_grants(
     approval_dir: &Path,
     continues_run_id: Option<Uuid>,
@@ -841,11 +887,25 @@ fn take_continued_run_grants(
     browser_page_id: &str,
 ) -> Option<EndedRunGrants> {
     let grants = with_ended_run_grants(|records| records.remove(approval_dir))?;
-    (continues_run_id == Some(grants.run_id)
-        && grants.initiator_user_id == initiator_user_id
-        && grants.browser_page_id == browser_page_id
-        && grants.ended_at.elapsed() <= CONTINUATION_WINDOW)
-        .then_some(grants)
+    if continues_run_id != Some(grants.run_id)
+        || grants.initiator_user_id != initiator_user_id
+        || grants.ended_at.elapsed() > CONTINUATION_WINDOW
+    {
+        return None;
+    }
+    if grants.browser_page_id == browser_page_id {
+        return Some(grants);
+    }
+    let left = grants
+        .left_page
+        .clone()
+        .filter(|left| left.page_id == browser_page_id)?;
+    Some(EndedRunGrants {
+        browser_page_id: left.page_id,
+        approved_origins: left.approved_origins,
+        left_page: None,
+        ..grants
+    })
 }
 
 /// The most sites one job may name as the person's OK from pressed cards.
@@ -1463,18 +1523,27 @@ impl SharedBrowserAgentControlGuard {
         }
     }
 
-    /// The tab Octo worked in last, kept open as the chat's page when the
-    /// page the person chose for the run (the chat's own tab) is still blank:
-    /// Octo read in its own tabs, and closing them all would leave the person
-    /// a blank tab, or another chat's page in front. It is kept the way a
-    /// Take over keeps a tab (`kept-tabs.json`): an ordinary tab that is no
-    /// longer Octo's, as Octo left it, with no reload. The chat tab record
+    /// The tab Octo worked in last, kept open as the chat's page: the page
+    /// the person is left with is the one Octo read last. That is one of
+    /// Octo's own tabs whenever Octo read there after the page the person
+    /// chose for the run (the chat's own tab): the tab it acts on at the end
+    /// (`currentTabId`) is one of its own, and shows a page. A tab whose page
+    /// never loaded (blank, or the browser's error page) shows nothing Octo
+    /// read. Otherwise (Octo went back to the chat's own tab, or ended in
+    /// such a tab) the chat's page stays, unless that page is still blank:
+    /// then the newest of Octo's tabs that shows a page is kept (else the one
+    /// it worked in last), since closing them all would leave the person a
+    /// blank tab, or another chat's page in front. It is kept the way a Take
+    /// over keeps a tab (`kept-tabs.json`): an ordinary tab that is no longer
+    /// Octo's, as Octo left it, with no reload. The chat tab record
     /// (`chat-tabs.json`) names it with the run, so Studio shows it as the
     /// chat's page. None when the person kept a tab themselves, the run
-    /// opened none, or the page is not known to be blank.
-    fn tab_kept_for_the_chat(&self, run_tabs: &[String]) -> Option<String> {
+    /// opened none, the browser's tabs cannot be read, or Octo ended on the
+    /// chat's own page (or in a tab that shows none) and that page is not
+    /// blank.
+    fn tab_kept_for_the_chat(&self, run_tabs: &[String]) -> Option<KeptForChat> {
         let binding = self.binding();
-        if person_kept_a_tab(&self.approval_dir, &binding) {
+        if run_tabs.is_empty() || person_kept_a_tab(&self.approval_dir, &binding) {
             return None;
         }
         let current = read_run_record(&self.approval_dir, AGENT_TABS_FILE, &[1, 2], &binding)
@@ -1486,22 +1555,81 @@ impl SharedBrowserAgentControlGuard {
                     .and_then(JsonValue::as_str)
                     .map(str::to_string)
             });
-        let last = current
-            .filter(|tab_id| run_tabs.contains(tab_id))
-            .or_else(|| run_tabs.last().cloned())?;
         let (host, port) = self.cdp_base.as_ref()?;
-        match browser_page_url(host, *port, &self.browser_page_id) {
-            Ok(Some(url)) if is_blank_page_url(&url) => Some(last),
-            Ok(_) => None,
+        let tabs = match browser_tab_urls(host, *port) {
+            Ok(tabs) => tabs,
             Err(error) => {
                 tracing::warn!(
                     ?error,
-                    "Shared Browser could not read the run's page; Octo's tabs close as usual"
+                    "Shared Browser could not read its tabs; Octo's tabs close as usual"
                 );
-                None
+                return None;
             }
-        }
+        };
+        let url_of = |tab_id: &str| {
+            tabs.iter()
+                .find(|(id, _)| id == tab_id)
+                .map(|(_, url)| url.as_str())
+        };
+        // A tab Octo opened whose page never loaded (a blank tab, or the
+        // browser's error page) shows nothing Octo read.
+        let shows_a_page = |tab_id: &String| url_of(tab_id).is_some_and(is_web_page_url);
+        let worked_in = current.filter(|tab_id| run_tabs.contains(tab_id));
+        let tab_id = match worked_in.as_ref().filter(|tab_id| shows_a_page(tab_id)) {
+            Some(current) => current.clone(),
+            None => match url_of(&self.browser_page_id) {
+                Some(url) if is_blank_page_url(url) => run_tabs
+                    .iter()
+                    .rev()
+                    .find(|tab_id| shows_a_page(tab_id))
+                    .cloned()
+                    .or(worked_in)
+                    .or_else(|| run_tabs.last().cloned())?,
+                _ => return None,
+            },
+        };
+        Some(KeptForChat {
+            tab_id,
+            listed: tabs.into_iter().map(|(id, _)| id).collect(),
+        })
     }
+}
+
+/// The tab a run keeps as its chat's page (`tab_kept_for_the_chat`), and the
+/// browser's tabs as it read them then, newest used first.
+struct KeptForChat {
+    tab_id: String,
+    listed: Vec<String>,
+}
+
+/// The origin's `BROWSER_NEW_PAGE_MAX_PAGES`: the tabs Instafy's browser
+/// keeps before the one used least recently makes room for another.
+const MAX_BROWSER_TABS: usize = 24;
+
+/// A tab a run keeps as its chat's page is one more tab of the person's, so,
+/// as when Studio opens a tab for a chat, past [`MAX_BROWSER_TABS`] the tab
+/// used least recently makes room: never the kept tab, the run's page, the
+/// tab used last, or one of Octo's (`octo`: this run's tabs and earlier runs'
+/// leftovers). `listed` is the browser's tabs, newest used first, as read
+/// before Octo's other tabs closed.
+fn tab_making_room(
+    listed: &[String],
+    kept: &str,
+    run_page: &str,
+    octo: &[String],
+) -> Option<String> {
+    let open: Vec<&String> = listed
+        .iter()
+        .filter(|tab_id| tab_id.as_str() == kept || !octo.contains(tab_id))
+        .collect();
+    if open.len() <= MAX_BROWSER_TABS {
+        return None;
+    }
+    open.into_iter()
+        .skip(1)
+        .rev()
+        .find(|tab_id| tab_id.as_str() != kept && tab_id.as_str() != run_page)
+        .cloned()
 }
 
 /// Whether the person kept one of this run's tabs (`kept-tabs.json`). A
@@ -1528,23 +1656,31 @@ fn is_blank_page_url(url: &str) -> bool {
 /// The most of DevTools' tab list read: well over the 24 tabs Studio keeps.
 const DEVTOOLS_LIST_MAX_BYTES: usize = 256 * 1024;
 
-/// The address one tab shows, from the browser's loopback DevTools HTTP
-/// endpoint (`/json/list`); None when no tab has that id.
-fn browser_page_url(host: &str, port: u16, page_id: &str) -> Result<Option<String>> {
-    let page_id = validate_page_id(page_id)?;
+/// Whether a tab shows a page that loaded from the web (an `http(s)`
+/// address), not a blank tab or the browser's own error page.
+fn is_web_page_url(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
+/// The browser's tabs and the address each shows, newest used first, from
+/// its loopback DevTools HTTP endpoint (`/json/list`).
+fn browser_tab_urls(host: &str, port: u16) -> Result<Vec<(String, String)>> {
     let body = devtools_get(host, port, "/json/list", DEVTOOLS_LIST_MAX_BYTES)?;
     let targets: Vec<JsonValue> =
         serde_json::from_slice(&body).context("DevTools tab list is not JSON")?;
     Ok(targets
         .iter()
-        .find(|target| target.get("id").and_then(JsonValue::as_str) == Some(page_id.as_str()))
-        .map(|target| {
-            target
+        .filter(|target| target.get("type").and_then(JsonValue::as_str) == Some("page"))
+        .filter_map(|target| {
+            let id = target.get("id").and_then(JsonValue::as_str)?;
+            let url = target
                 .get("url")
                 .and_then(JsonValue::as_str)
-                .unwrap_or_default()
-                .to_string()
-        }))
+                .unwrap_or_default();
+            Some((id.to_string(), url.to_string()))
+        })
+        .collect())
 }
 
 /// Brings one tab to the front through the browser's loopback DevTools HTTP
@@ -2144,12 +2280,19 @@ impl Drop for SharedBrowserAgentControlGuard {
         {
             // Every tool process of the run is gone, so nothing opens another
             // tab. Octo's tabs close now, apart from those the person kept
-            // and the one kept as the chat's page while the run's page is
-            // still blank, and so do earlier runs' leftover tabs. A tab that
-            // does not close stays open, badged as Octo's in the leftover
-            // record, and no later run can use it.
+            // and the one kept as the chat's page (the tab Octo read in last,
+            // see `tab_kept_for_the_chat`), and so do earlier runs' leftover
+            // tabs. A tab that does not close stays open, badged as Octo's in
+            // the leftover record, and no later run can use it.
             let mut run_tabs = self.agent_tabs_to_close();
-            let kept_for_chat = self.tab_kept_for_the_chat(&run_tabs);
+            let kept = self.tab_kept_for_the_chat(&run_tabs);
+            let kept_for_chat = kept.as_ref().map(|kept| kept.tab_id.clone());
+            let octo_tabs = run_tabs.clone();
+            // The sites approved in that tab, read while its record is there:
+            // a follow-up goes on in it (`take_continued_run_grants`).
+            let left_page = kept_for_chat
+                .as_deref()
+                .and_then(|tab_id| left_page_grants(&self.approval_dir, &self.binding(), tab_id));
             run_tabs.retain(|tab_id| Some(tab_id) != kept_for_chat.as_ref());
             if let Some(tab_id) = kept_for_chat.as_deref() {
                 if let Err(error) =
@@ -2183,11 +2326,30 @@ impl Drop for SharedBrowserAgentControlGuard {
                     );
                 }
             }
+            if let (Some(kept), Some((host, port))) = (kept.as_ref(), self.cdp_base.as_ref()) {
+                let octo =
+                    merge_agent_tabs(octo_tabs, read_leftover_agent_tabs(&self.approval_dir));
+                if let Some(oldest) =
+                    tab_making_room(&kept.listed, &kept.tab_id, &self.browser_page_id, &octo)
+                {
+                    if let Err(failure) = close_browser_tab(host, *port, &oldest) {
+                        tracing::warn!(
+                            error = ?failure.error,
+                            "Shared Browser could not close the tab used least recently"
+                        );
+                    }
+                }
+            }
             // What the person approved on their page stays available to the
             // run that continues this one (Let Octo continue), and only to it.
             // It is read before the run's records are revoked, and kept only
             // once the run has let go of the browser.
-            let ended = ended_run_grants(&self.approval_dir, &self.binding());
+            let ended = ended_run_grants(&self.approval_dir, &self.binding()).map(|grants| {
+                EndedRunGrants {
+                    left_page,
+                    ..grants
+                }
+            });
             if let Err(error) = prepare_clean_approval_directory(&self.approval_dir) {
                 tracing::error!(
                     ?error,

@@ -7,11 +7,11 @@
 // maker's own "review" are in the results, a link-only shop has the price, and a search result carries poisoned text.
 // The maker's official website as Wikidata records it is its bare domain, which does not answer while its "www." host
 // does (28 Oct drive: roborock.com timed out, www.roborock.com answered, and the turn never tried it). Without a search
-// key the turn still researches: the official site through reference search, the reviews from a publisher's own pages,
+// key the turn still researches: the official site through reference search, the reviews from a reviewer's home page,
 // and builds the page with what it read (the drive asked for a key and the browser at once and built nothing).
 // OFFICIAL_DOWN_CASE is the third 28 Oct drive: the maker's site never answers at either address, there is no search key,
 // and the turn read nothing else, dropped every model because no price was read and built a page that read "No options
-// yet". It must read an independent source (a review publisher's own page names the latest models) and list every
+// yet". It must read an independent source (a reviewer's home page names the latest models) and list every
 // model, with "price unknown" and never as within the limit.
 // SEARCH_ONLY_CASE: the maker's site never answers, and every review a search finds refuses automated reads. Two failed
 // pages on one site send the turn to `instafy web search` (the browser skill's "Finding a page"); it lists the models
@@ -84,12 +84,12 @@ export const CASE = {
   },
   // Wikidata's official website for the brand (reference search, no key): the bare domain, which does not answer
   wikidata: { item: "https://www.wikidata.org/entity/Q999001", label: "Brightvac", description: "maker of robot vacuums", website: "https://brightvac.example/" },
-  // a review publisher's own page for robot vacuums, linking its reviews (read without a search)
-  hubs: [{ url: "https://www.review-one.example/robot-vacuums", title: "Robot vacuum reviews - Review One", reviews: ["review:s8:0", "review:s8-pro:0", "review:q5:0"] }],
+  // a reviewer's home page, linking its robot vacuum reviews (read without a search, never a guessed review address)
+  hubs: [{ url: "https://www.review-one.example/", title: "Robot vacuum reviews - Review One", reviews: ["review:s8:0", "review:s8-pro:0", "review:q5:0"] }],
 };
 
 /** The third 28 Oct drive: the maker's own site never answers (its www. host and its bare domain), there is no search key,
- *  and reference search names only the company. A review publisher's own page names the three latest models and links
+ *  and reference search names only the company. A reviewer's home page names the three latest models and links
  *  a review of each; no page gives a price. */
 export const OFFICIAL_DOWN_CASE = {
   ...CASE,
@@ -169,12 +169,12 @@ export function referenceAnswer(kase, hostname) {
 // ---------------------------------------------------------------------------------------------------------------
 // The reference turn's reply and page, from what its commands returned (the spec plays them)
 
-/** The reviews a publisher's own page links to (read without a search). */
+/** The reviews a reviewer's home page links to (read without a search). */
 const hubReviews = (kase) => new Set((kase.hubs || []).flatMap((hub) => hub.reviews.map((ref) => pageOf(kase, ref).url)));
 
 /**
  * The reference reply. `key`: the space has a search key (the reviews and the S8's shop were found by search; without
- * one, the reviews come from a publisher's own page); `links`: the guided links `instafy web link` gave, by item slug.
+ * one, the reviews come from a reviewer's home page); `links`: the guided links `instafy web link` gave, by item slug.
  * Each line keeps to the rules the grader checks, in plain words (no error code or status).
  */
 export function referenceReply(kase, readAt, { key, links }) {
@@ -208,7 +208,7 @@ export function referencePage(kase, readAt, { key }) {
   const at = (url, src) => ({ src, url, date });
   const spec = (url, src, v) => ({ v, ...at(url, src) });
   const reviews = (slug) => kase.reviews.filter((r) => r.item === slug && !r.model && r.independent !== false);
-  // with a key, the reviews a search found; without one, those a publisher's own page links to
+  // with a key, the reviews a search found; without one, those a reviewer's home page links to
   const hubbed = hubReviews(kase);
   const sources = (slug) => reviews(slug).filter((r) => key || hubbed.has(r.url)).map((r) => ({ name: r.title.split(" - ")[1], url: r.url }));
   const count = (slug) => `Reviews: ${sources(slug).length} of 2 found`;
@@ -578,7 +578,7 @@ export function gradeCompare(transcript, kase = CASE) {
     ...Object.entries(perHost).filter(([, n]) => n > 4).map(([h, n]) => `${n} reads of ${h} (at most 4)`),
   ]);
   // Without a search key the turn still researches and builds (28 Oct drive: it asked for a key and the browser at once
-  // and built nothing): something read without a search, the reviews a publisher's own pages give, the key card at
+  // and built nothing): something read without a search, the reviews a reviewer's home page links, the key card at
   // most once (only as the search offered it, never asked for in chat) and no browser card instead of reading.
   const noProvider = web.filter((s) => s.status === "no_provider");
   const offers = web.map((s) => s.offer).filter(Boolean);
@@ -587,7 +587,7 @@ export function gradeCompare(transcript, kase = CASE) {
   check("keeps_going_without_key", noProvider.length
     ? [
         ...(findings.length ? [] : ["read nothing without a search (reference search finds the official site; pages are read with no key)"]),
-        ...(wanted && !items.some((item) => counted(item) > 0) ? ["read no review without a search (a publisher's own pages need no key)"] : []),
+        ...(wanted && !items.some((item) => counted(item) > 0) ? ["read no review without a search (a reviewer's home page needs no key)"] : []),
         ...(cards.length > 1 ? [`puts ${cards.length} key cards in the reply (at most once)`] : []),
         ...(cards.some((c) => !offers.some((o) => o.name === c.name)) ? ["puts a key card the search did not offer"] : []),
         ...(/\bkey\b/i.test(reply) && !cards.length ? ["talks about a key with no card for it (never ask for a key in chat)"] : []),

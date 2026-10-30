@@ -53,7 +53,7 @@ export type ConversationBrowserState = {
   available: boolean;
   /** A browser approval waits for the viewer. */
   attention: boolean;
-  /** The title of the browser's active tab, where a message goes. */
+  /** The title of the chat's own tab, where a message goes. */
   pageTitle?: string | null;
   /** The agent using the browser now, or null. */
   agentName?: string | null;

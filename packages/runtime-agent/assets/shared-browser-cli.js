@@ -2065,6 +2065,13 @@ async function snapshot(page, { withhold = false } = {}) {
   if (detected) {
     await withholdDocument(page);
   }
+  // A page that is not blank but reads with no text and no controls has not
+  // drawn yet (still loading, or hidden while it loads). It is answered as
+  // busy, never as an empty page, so Octo reads it again instead of taking
+  // "nothing" for what the page says.
+  if (!view.secretScreen && !view.text.trim() && interactive.length === 0) {
+    return addressOnly(page);
+  }
   const pageOrigin = pageOriginOf(rawUrl);
   const maskLink = (href) => {
     if (!href) return href;
@@ -3192,12 +3199,24 @@ async function pageAsItIs(browser) {
   await within(GUARD_RELEASE_MS, Promise.all(guards.map((guard) => guard.release())));
   if (stopped) throw stopped;
   const view = read ?? addressOnly(resolvedPage);
+  const readSomething = read && !isBusyPageResult(read);
   emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
-  const note = `This step was still running after ${STEP_TIME_MS / 1000} seconds, so it stopped where it was. This is the page as it is now: check what the step did before you act again.`;
+  // Only a page that was read is "the page as it is now"; a busy one says so
+  // in its own message.
+  const note = `This step was still running after ${STEP_TIME_MS / 1000} seconds, so it stopped where it was. ${
+    readSomething ? "This is the page as it is now: check" : "Check"
+  } what the step did before you act again.`;
   return withActivity(
     { ...view, stepTimedOut: true, message: [view.message, note].filter(Boolean).join(" ") },
-    stepActivity(resolvedPage, read ? "snapshot" : "status", null),
+    stepActivity(resolvedPage, readSomething ? "snapshot" : "status", null),
   );
+}
+
+const BUSY_PAGE_MESSAGE = "The page is still busy, so it could not be read yet. Take a snapshot in a moment.";
+
+// Whether a read answered that the page is still busy (addressOnly).
+function isBusyPageResult(result) {
+  return result?.message === BUSY_PAGE_MESSAGE;
 }
 
 // The address alone of a page too busy to be read, checked and masked as a
@@ -3222,7 +3241,7 @@ function addressOnly(page) {
     visibleText: "",
     secretScreen: false,
     interactiveElements: [],
-    message: "The page is still busy, so it could not be read yet. Take a snapshot in a moment.",
+    message: BUSY_PAGE_MESSAGE,
   };
 }
 
@@ -3519,7 +3538,11 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       label: result.title || result.url,
       url: result.url,
     });
-    return withActivity(result, stepActivity(page, "snapshot", readingApproval()));
+    // A busy page was not read: its line names the page it is on, as status does.
+    return withActivity(
+      result,
+      stepActivity(page, isBusyPageResult(result) ? "status" : "snapshot", readingApproval()),
+    );
   }
 
   if (method === "POST" && requestPath === "/v1/request-human-input") {

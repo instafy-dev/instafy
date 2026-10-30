@@ -75,9 +75,8 @@ struct BrowserPageResponse {
     /// number): Octo is not reading it, and Keep tab makes it an ordinary tab.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     leftover: bool,
-    /// The run that left this ordinary tab open as its chat's page: Octo
-    /// worked in it last while the run's own page was still blank. Studio
-    /// shows it as that chat's page.
+    /// The run that left this ordinary tab open as its chat's page: the tab
+    /// of its own Octo read in last. Studio shows it as that chat's page.
     #[serde(skip_serializing_if = "Option::is_none")]
     left_by_run: Option<String>,
 }

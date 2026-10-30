@@ -184,6 +184,21 @@ describe("useSharedBrowserCollaboration", () => {
     });
   });
 
+  // Local test, Oct 30: after a reload, the old page's session kept control
+  // for its ten seconds of grace, so the reloaded view could not bring its
+  // chat's tab forward, and once the grace ran out nobody held control. A
+  // page that unloads now leaves, as an unmount does; a dropped connection
+  // does not.
+  it("leaves when the page unloads, and only then", async () => {
+    await act(async () => root.render(<Harness pageId="page-1" />));
+    const socket = FakeWebSocket.instances[0];
+    await act(async () => socket.emit("open"));
+    const leaves = () => socket.sent.map((value) => JSON.parse(value)).filter((message) => message.type === "leave");
+    expect(leaves()).toEqual([]);
+    await act(async () => window.dispatchEvent(new Event("pagehide")));
+    expect(leaves()).toEqual([{ type: "leave" }]);
+  });
+
   it("clears local authority while reconnecting, then releases and leaves using the current socket", async () => {
     vi.useFakeTimers();
     const participants = [

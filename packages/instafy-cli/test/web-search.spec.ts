@@ -557,7 +557,7 @@ describe("the person's own key (secret-request card)", () => {
     // No key never ends the task: the open routes first, a page with what was read, the card at most once and optional.
     expect(first.tell).toBe(
       "This space has no search key. Go on without it: find official sites with `instafy web search \"<name>\" --chain reference-search` (no key) and read them, " +
-        "and the pages of publishers you know cover this, with `instafy web read`. Then answer or build the page with what you read, each missing fact " +
+        "and for reviews a reviewer's home page and the pages it links, with `instafy web read`. Then answer or build the page with what you read, each missing fact " +
         "marked unknown with why. The person may send more pages with Send page to Octo. The card in `offer` (a `request_secret` action) may go in " +
         "your reply once, as a way to find more next time; never ask for the key in chat, and never wait for it.",
     );

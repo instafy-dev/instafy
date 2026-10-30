@@ -57,7 +57,6 @@ describe("useChatComposerBrowserTargeting", () => {
       browserTransport,
       focusInput,
       hasHiddenBrowserSession: false,
-      messages: [],
       onHiddenBrowserSessionUnavailable: vi.fn(),
       openBrowserSession,
       preferredBrowserRuntimeId: "runtime-1",
@@ -96,6 +95,8 @@ describe("useChatComposerBrowserTargeting", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  // Where a message goes is the chat's own tab now (chatBrowserTarget in
+  // chatBrowserTab.ts), never the tab in front: this hook only reads the tabs.
   it("exposes live Shared pages and supports Shared page selection", async () => {
     await act(async () => {
       root.render(<Harness browserTransport="shared" />);
@@ -108,98 +109,18 @@ describe("useChatComposerBrowserTargeting", () => {
         includePlaceholder: true,
       }),
     );
-    expect(latestResult?.browserSessionPages).toEqual(browserPages);
     expect(latestResult?.sharedBrowserChromePages).toEqual([
       blankBrowserPage,
       ...browserPages,
     ]);
-    expect(latestResult?.preferredBrowserPage).toEqual(browserPages[0]);
+    expect(latestResult?.sharedBrowserChromeResolved).toBe(true);
+    expect(latestResult).not.toHaveProperty("preferredBrowserPage");
+    expect(latestResult).not.toHaveProperty("sharedBrowserBindingPage");
 
     await act(async () => {
       await latestResult?.handleSelectBrowserSessionPage("shared-page-1");
     });
     expect(focusPageMock).toHaveBeenCalledWith("shared-page-1");
-  });
-
-  it("targets the browser's active tab with no page strip of its own", async () => {
-    // The pane's own tab picker chooses the active tab; the chat no longer
-    // repeats the tabs in a strip above the composer.
-    useBrowserSessionPagesMock.mockReturnValue({
-      pages: [
-        { ...browserPages[0], isActive: false },
-        { ...browserPages[0], id: "shared-page-2", url: "https://example.org/", host: "example.org", label: "Other", title: "Other", isActive: true },
-      ],
-      resolved: true,
-      focusPage: focusPageMock,
-    });
-    await act(async () => {
-      root.render(<Harness browserTransport="shared" />);
-    });
-
-    expect(latestResult?.preferredBrowserPage?.id).toBe("shared-page-2");
-    expect(latestResult?.sharedBrowserBindingPage?.id).toBe("shared-page-2");
-    expect(latestResult).not.toHaveProperty("showBrowserSessionPageStrip");
-  });
-
-  it("binds a task to the blank tab of a browser that just started, without targeting it", async () => {
-    const restartedBlankTab = { ...blankBrowserPage, isActive: true };
-    useBrowserSessionPagesMock.mockReturnValue({
-      pages: [restartedBlankTab],
-      resolved: true,
-      focusPage: focusPageMock,
-    });
-    await act(async () => {
-      root.render(<Harness browserTransport="shared" />);
-    });
-
-    // The browser bar still lists the blank tab, but nothing names it.
-    expect(latestResult?.sharedBrowserChromePages).toEqual([restartedBlankTab]);
-    expect(latestResult?.browserSessionPages).toEqual([]);
-    expect(latestResult?.preferredBrowserPage).toBeNull();
-    expect(latestResult?.sharedBrowserBindingPage).toEqual(restartedBlankTab);
-  });
-
-  it("binds a task to the real page over an active blank tab", async () => {
-    useBrowserSessionPagesMock.mockReturnValue({
-      pages: [{ ...blankBrowserPage, isActive: true }, { ...browserPages[0], isActive: false }],
-      resolved: true,
-      focusPage: focusPageMock,
-    });
-    await act(async () => {
-      root.render(<Harness browserTransport="shared" />);
-    });
-
-    expect(latestResult?.preferredBrowserPage?.id).toBe("shared-page-1");
-    expect(latestResult?.sharedBrowserBindingPage?.id).toBe("shared-page-1");
-  });
-
-  it("offers no page to bind to before the live pages are read", async () => {
-    useBrowserSessionPagesMock.mockReturnValue({
-      pages: [],
-      resolved: false,
-      focusPage: focusPageMock,
-    });
-    await act(async () => {
-      root.render(<Harness browserTransport="shared" />);
-    });
-
-    expect(latestResult?.sharedBrowserBindingPage).toBeNull();
-  });
-
-  it("offers no page to bind to while the live pages are stale", async () => {
-    // A failed poll keeps the last pages but marks them unread. Their blank
-    // tab may be gone, so a task must not bind to its id.
-    useBrowserSessionPagesMock.mockReturnValue({
-      pages: [{ ...blankBrowserPage, isActive: true }],
-      resolved: false,
-      focusPage: focusPageMock,
-    });
-    await act(async () => {
-      root.render(<Harness browserTransport="shared" />);
-    });
-
-    expect(latestResult?.preferredBrowserPage).toBeNull();
-    expect(latestResult?.sharedBrowserBindingPage).toBeNull();
   });
 
   it("reads the pages only while the browser view is opening or live", async () => {
@@ -229,13 +150,10 @@ describe("useChatComposerBrowserTargeting", () => {
     expect(useBrowserSessionPagesMock).toHaveBeenLastCalledWith(
       expect.objectContaining({ enabled: true }),
     );
-    expect(latestResult?.browserSessionPages).toEqual([]);
     expect(latestResult?.sharedBrowserChromePages).toEqual([
       blankBrowserPage,
       ...browserPages,
     ]);
-    expect(latestResult?.preferredBrowserPage).toBeNull();
-    expect(latestResult?.sharedBrowserBindingPage).toBeNull();
     expect(latestResult?.pendingBrowserLaunchMode).toBeNull();
 
     await act(async () => {
@@ -295,7 +213,6 @@ describe("useChatComposerBrowserTargeting", () => {
       latestResult?.handlePrepareNewBrowserSession();
     });
     expect(latestResult?.pendingBrowserLaunchMode).toBe("new_page");
-    expect(latestResult?.browserSessionPages).toEqual(browserPages);
     expect(focusPageMock).not.toHaveBeenCalled();
     expect(showStatus).toHaveBeenLastCalledWith(
       "Your next AI message will request a new tab while keeping the existing pages available.",
@@ -308,7 +225,6 @@ describe("useChatComposerBrowserTargeting", () => {
       latestResult?.handleClearPendingNewBrowserSession();
     });
     expect(latestResult?.pendingBrowserLaunchMode).toBeNull();
-    expect(latestResult?.browserSessionPages).toEqual(browserPages);
     expect(showStatus).toHaveBeenLastCalledWith(
       "New tab request canceled. Existing browser pages are unchanged.",
       "info",

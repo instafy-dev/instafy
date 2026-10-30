@@ -170,8 +170,22 @@ export function useSharedBrowserCollaboration({
 
     connect();
 
+    // A page that unloads (a reload, or its tab closing) leaves the browser
+    // as an unmount does, so control it held is free at once and the same
+    // person's reloaded Studio takes it when it joins. A connection that only
+    // drops (a short Wi-Fi loss) keeps the origin's grace, and with it the
+    // control, until it reconnects.
+    const leaveOnPageHide = () => {
+      const socket = socketRef.current;
+      if (openWebSocket(socket)) {
+        socket.send(JSON.stringify({ type: "leave" } satisfies SharedBrowserCollaborationClientMessage));
+      }
+    };
+    window.addEventListener("pagehide", leaveOnPageHide);
+
     return () => {
       disposed = true;
+      window.removeEventListener("pagehide", leaveOnPageHide);
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
       }
