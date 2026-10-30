@@ -397,6 +397,17 @@ describe("the chat's Browser view", () => {
     expect(view({ chatId: null }).step).toBe("none");
   });
 
+  // The browser started again (Clear data, or its machine came back) under
+  // new tab ids: the chat's tab is gone. Its view shows only the chat's own
+  // tab, so it gets a blank one again instead of a stage left blank.
+  it("gives a chat a blank tab again once the tab it had is gone", () => {
+    const first = view({});
+    expect(first.step).toBe("open-blank-tab");
+    const given = view({ tab: { id: "PAGE-BLANK", isActive: true }, state: first.state });
+    expect(given.step).toBe("none");
+    expect(view({ state: given.state }).step).toBe("open-blank-tab");
+  });
+
   // Octo's turn held the browser while the view was on screen. Once it is
   // done, the chat's tab comes forward, never the neighbour another chat left.
   it("brings the chat's tab forward once whoever else controls the browser is done", () => {

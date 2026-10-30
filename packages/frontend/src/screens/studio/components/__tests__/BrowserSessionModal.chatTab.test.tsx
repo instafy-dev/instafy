@@ -19,6 +19,8 @@ type Viewer = {
 };
 const mocks = vi.hoisted(() => ({
   fetchStatus: vi.fn(), requestAccessToken: vi.fn(), instances: [] as Viewer[],
+  /** Who holds the browser's control: this person, or someone else. */
+  owner: "self" as "self" | "other",
 }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   core: { enabled: true, baseUrl: "" },
@@ -34,7 +36,8 @@ vi.mock("../useSharedBrowserApproval", () => ({ useSharedBrowserApproval: () => 
 vi.mock("../useBrowserSessionActions", () => ({ useBrowserSessionActions: () => ({ actions: [], latestClick: null }) }));
 vi.mock("../useSharedBrowserCollaboration", () => ({ useSharedBrowserCollaboration: ({ active }: { active: boolean }) => ({
   client: { connectionStatus: active ? "connected" : "idle", participantId: active ? "self" : null,
-    state: active ? { revision: 1, participants: [], requests: [], controlOwner: { kind: "human", participantId: "self" } } : null, error: null },
+    state: active ? { revision: 1, participants: [], requests: [],
+      controlOwner: { kind: "human", participantId: mocks.owner } } : null, error: null },
   publishCursor: () => {}, requestControl: () => {}, takeControl: () => {}, releaseControl: () => {}, grantControl: () => {},
 }) }));
 vi.mock("@novnc/novnc/lib/rfb", () => ({ default: class {
@@ -80,6 +83,7 @@ describe("a chat's Browser view", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
     mocks.instances.length = 0;
+    mocks.owner = "self";
     mocks.fetchStatus.mockReset().mockResolvedValue({ runtimes: [session] });
     mocks.requestAccessToken.mockReset().mockResolvedValue({ token: "origin-token", endpoint: "https://origin.test", expiresIn: 300 });
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
@@ -104,6 +108,7 @@ describe("a chat's Browser view", () => {
     arriving?: boolean;
     /** A phone: one row of chrome. */
     compact?: boolean;
+    onPresenceChange?: (presence: unknown) => void;
   }) {
     await act(async () => root.render(<BrowserSessionModal isOpen transportActive={options.active ?? true}
       onOpenChange={noop} projectId={projectId} currentUserId="user-1"
@@ -115,6 +120,7 @@ describe("a chat's Browser view", () => {
       chatPageIds={options.chatPageIds === undefined ? [CHAT_TAB] : options.chatPageIds}
       anotherChatTurn={options.anotherChatTurn ?? false}
       agentArrival={options.arriving ? { site: null } : null}
+      onPresenceChange={options.onPresenceChange}
       sharedBrowserChrome={{ pages: options.pages, resolved: true, pendingAction: null, error: null, compact: options.compact,
         onNavigate: noop, onBack: noop, onForward: noop, onReload: noop, onFocusPage: noop, onClearError: noop }} />));
     await act(async () => { await vi.advanceTimersByTimeAsync(0); await vi.dynamicImportSettled(); });
@@ -212,6 +218,18 @@ describe("a chat's Browser view", () => {
     await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)], compact: true });
     expect(pictureShown()).toBe(true);
     expect(address()).toBe(GITHUB);
+  });
+
+  // Only the person who holds the browser's control may bring the chat's tab
+  // to the front: after a reload the view's one try was refused while the
+  // person's old session held it. Studio waits for this person to hold it.
+  it("says whether this person holds the browser's control", async () => {
+    const presence = vi.fn();
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true)], onPresenceChange: presence });
+    expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({ status: "known", selfControls: true }));
+    mocks.owner = "other";
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true)], onPresenceChange: presence });
+    expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({ status: "known", selfControls: false }));
   });
 
   // The stage drew whatever was in front while the browser named no tab

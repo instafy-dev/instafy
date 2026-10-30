@@ -682,9 +682,10 @@ export function BrowserSessionModal({
     (participant) => participant.id !== collaboration.client.participantId,
   ));
   const remoteControllerPresent = remoteController !== null;
+  const selfControls = collaborationSelfOwnsControl(collaboration.client);
   useEffect(() => {
-    onPresenceChange?.({ status: presenceStatus, othersPresent, remoteController: remoteControllerPresent });
-  }, [onPresenceChange, othersPresent, presenceStatus, remoteControllerPresent]);
+    onPresenceChange?.({ status: presenceStatus, othersPresent, remoteController: remoteControllerPresent, selfControls });
+  }, [onPresenceChange, othersPresent, presenceStatus, remoteControllerPresent, selfControls]);
   useEffect(() => () => onPresenceChange?.(null), [onPresenceChange]);
   const humanOwnsBrowserControl =
     canControlBrowser && collaborationSelfOwnsControl(collaboration.client) && controlOwner.kind === "human";
@@ -3263,11 +3264,14 @@ export function BrowserSessionModal({
     [fail, fallBackFromViewer],
   );
 
-  // While the view reconnects, its surface keeps what it last drew, which may
-  // be another tab than the one in front now (another chat's page): only a
-  // still of the page in front (frozenFrameUrl, kept for that page alone)
-  // stands in for the picture then.
-  const liveSurfaceShown = stageShowsPage && !(status === "connecting" && displayStatus === "connected");
+  // While the view reconnects, its surface keeps what it last drew. That is
+  // kept on screen only when it was drawn with the chat's page in front as it
+  // is now (`paintedFrameScopeRef`); a picture of another tab, such as
+  // another chat's page shown before, is dropped, and only a still of the
+  // page in front (frozenFrameUrl, kept for that page alone) stands in.
+  const heldPictureIsChats = paintedFrameScopeRef.current === frameScope;
+  const liveSurfaceShown = stageShowsPage &&
+    (heldPictureIsChats || !(status === "connecting" && displayStatus === "connected"));
   // While Octo drives, the stage shows the page it is on: the live picture
   // (a viewer that may watch, such as RFB's view-only lane), else a still
   // of that same page, else one plain line saying where Octo is. Never an

@@ -606,7 +606,8 @@ read, so that page would go into this chat's reply and Details):
   address or the official site of what the task is about.
 - **The chat's Browser view shows that tab, and only that tab.** When the view
   comes on screen for a chat, and when the chat gets a new tab, Studio brings
-  the chat's tab to the front. The stage draws a picture, and the address bar
+  the chat's tab to the front, once this person holds the browser's control
+  (only the driver may bring a tab forward; until then the view waits). The stage draws a picture, and the address bar
   shows an address, only while a tab of the chat is in front: its own tab, or
   while a browser turn of the chat is under way, Octo's tabs of that turn. Any
   other tab in front, or none the browser names in front (never its first tab
@@ -618,9 +619,10 @@ read, so that page would go into this chat's reply and Details):
   chat's tab comes forward again; the chat's own turn leaves the browser where
   it ends (its page, or a tab the person took over, which is the chat's tab
   from then on). A chat with no tab yet gets its own blank one (as for its
-  first browser turn), once while the view is on screen; a chat with nothing
-  sent yet too, and that tab stays its tab once its first message gives it an
-  id. While a turn of the
+  first browser turn), once while the view is on screen, and again once a tab
+  it had is gone (the browser started again, or Clear data); a chat with
+  nothing sent yet too, and that tab stays its tab once its first message
+  gives it an id. While a turn of the
   chat is on its way and its page is blank or not in front yet, the stage says
   "Octo is starting…" (or where Octo is going). On "Reconnecting…" the stage
   keeps only a still of the chat's page in front, never the last picture the

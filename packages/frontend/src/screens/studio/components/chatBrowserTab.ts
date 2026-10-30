@@ -350,7 +350,8 @@ export const CHAT_BROWSER_VIEW_START: ChatBrowserViewState = { shown: null, blan
  * Octo is working in another chat). This chat's own turn leaves the browser
  * where the turn ends (its page, or a tab the person took over, which is the
  * chat's from then on). A chat with no tab yet gets its own blank one, once
- * while the view is on screen.
+ * while the view is on screen, and again once a tab it had is gone (the
+ * browser started again).
  */
 export function nextChatBrowserViewStep(input: {
   onScreen: boolean;
@@ -378,6 +379,9 @@ export function nextChatBrowserViewStep(input: {
     if (!input.chatId || !input.canOpenTab || state.blankTabFor === input.chatId) return { state, step: "none" };
     return { state: { ...state, blankTabFor: input.chatId }, step: "open-blank-tab" };
   }
+  // The chat has a tab: should it go (the browser started again, or Clear
+  // data), the chat gets a blank one again rather than a stage left blank.
+  if (state.blankTabFor !== null) state = { ...state, blankTabFor: null };
   const shown = JSON.stringify([input.chatId, input.tab.id]);
   const step = input.tab.isActive ? "none" : "focus";
   if (state.shown !== shown) return { state: { ...state, shown, refocus: false }, step };

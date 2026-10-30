@@ -1912,6 +1912,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const chatBrowserTabActive = chatBrowserTab.tab?.isActive === true;
   const sharedBrowserPresenceKnown = sharedBrowserPresence?.status === "known";
   const sharedBrowserRemoteController = sharedBrowserPresence?.remoteController === true;
+  // Only the person who holds the browser's control may bring a tab to the
+  // front: until they do (nobody holds it, as after Release), the view waits,
+  // and brings the chat's tab forward once they take control.
+  const sharedBrowserSelfControls = sharedBrowserPresence?.selfControls !== false;
   const chatBrowserTurnUnderWay = browserTurnUnderWay(
     projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "chat");
   const anyBrowserTurnUnderWay = browserTurnUnderWay(
@@ -1935,7 +1939,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   useEffect(() => {
     const { state, step } = nextChatBrowserViewStep({
       onScreen: browserVisible && browserTransport === "shared",
-      free: sharedBrowserPresenceKnown && !sharedBrowserRemoteController,
+      free: sharedBrowserPresenceKnown && !sharedBrowserRemoteController && sharedBrowserSelfControls,
       chatId: chatBrowserScopeId,
       tab: chatBrowserTabId ? { id: chatBrowserTabId, isActive: chatBrowserTabActive } : null,
       canOpenTab: canWriteProject && sharedBrowserChromeResolved && sharedBrowserCanOpenPage !== null,
@@ -1961,6 +1965,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserChromeResolved,
     sharedBrowserPresenceKnown,
     sharedBrowserRemoteController,
+    sharedBrowserSelfControls,
   ]);
   const browserModeActive = browserSessionOpen && browserVisible;
   // A skill setup's composer answers the setup: its replies stay chat turns

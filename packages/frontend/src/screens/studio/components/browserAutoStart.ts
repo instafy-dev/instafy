@@ -56,6 +56,11 @@ export type SharedBrowserPresence = {
   othersPresent: boolean;
   /** Another person or agent run controls it. */
   remoteController: boolean;
+  /**
+   * This person holds control of it, so their view may bring a tab to the
+   * front. Absent where that is not known.
+   */
+  selfControls?: boolean;
 };
 
 export const BROWSER_AUTO_START_COPY = {
