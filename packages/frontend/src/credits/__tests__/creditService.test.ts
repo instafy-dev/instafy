@@ -149,6 +149,14 @@ describe("creditService", () => {
               metadata: { promptId: "prompt-1" },
               createdAt: "2025-03-05T00:00:00Z",
               chatName: " Plan 3 days in Lisbon "
+            },
+            {
+              delta: -3,
+              reason: "managed_ai_prompt",
+              metadata: { promptId: "prompt-2" },
+              createdAt: "2025-03-06T00:00:00Z",
+              chatName: "Plan 3 days in Lisbon",
+              spaceName: " Last week's space "
             }
           ]
         })
@@ -177,6 +185,14 @@ describe("creditService", () => {
         metadata: { promptId: "prompt-1" },
         createdAt: "2025-03-05T00:00:00Z",
         chatName: "Plan 3 days in Lisbon"
+      },
+      {
+        delta: -3,
+        reason: "managed_ai_prompt",
+        metadata: { promptId: "prompt-2" },
+        createdAt: "2025-03-06T00:00:00Z",
+        chatName: "Plan 3 days in Lisbon",
+        spaceName: "Last week's space"
       }
     ]);
   });

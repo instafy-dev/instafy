@@ -19,6 +19,30 @@ impl Ledger {
     /// The chat names the ledger gives `user`, by turn (`promptId`), and the
     /// rows that name none.
     async fn chat_names(&self, user: &Uuid) -> anyhow::Result<Vec<(String, Option<String>)>> {
+        Ok(self
+            .rows(user)
+            .await?
+            .into_iter()
+            .map(|(turn, chat, _)| (turn, chat))
+            .collect())
+    }
+
+    /// The space names the ledger gives `user`, by turn, for the chats it names.
+    async fn space_names(&self, user: &Uuid) -> anyhow::Result<Vec<(String, Option<String>)>> {
+        Ok(self
+            .rows(user)
+            .await?
+            .into_iter()
+            .filter(|(_, chat, _)| chat.is_some())
+            .map(|(turn, _, space)| (turn, space))
+            .collect())
+    }
+
+    /// Each row's turn (or reason), chat name and space name.
+    async fn rows(
+        &self,
+        user: &Uuid,
+    ) -> anyhow::Result<Vec<(String, Option<String>, Option<String>)>> {
         let token = crate::auth::issue_controller_token(&self.config, user)
             .map(|issued| issued.token)
             .map_err(|(_, error)| anyhow::anyhow!(error.0.message))?;
@@ -38,7 +62,7 @@ impl Ledger {
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
-        let mut names: Vec<(String, Option<String>)> = body["entries"]
+        let mut names: Vec<(String, Option<String>, Option<String>)> = body["entries"]
             .as_array()
             .context("entries")?
             .iter()
@@ -47,7 +71,11 @@ impl Ledger {
                     .as_str()
                     .map(|prompt| format!("{}:{prompt}", entry["reason"].as_str().unwrap_or("")))
                     .unwrap_or_else(|| entry["reason"].as_str().unwrap_or("").to_string());
-                (turn, entry["chatName"].as_str().map(str::to_string))
+                (
+                    turn,
+                    entry["chatName"].as_str().map(str::to_string),
+                    entry["spaceName"].as_str().map(str::to_string),
+                )
             })
             .collect();
         names.sort();
@@ -189,6 +217,15 @@ async fn a_turns_rows_name_its_chat_for_whoever_may_open_it() -> anyhow::Result<
                 expect([private.clone(), budget.clone(), None])
             );
             assert_eq!(ledger.chat_names(&guest).await?, expect([None, None, None]));
+            // A chat in another space names that space too, since chats in two
+            // spaces can share a name; a chat in the space asked from does not.
+            let mut spaces = vec![
+                (turn("managed_ai_adjustment", 0), None),
+                (turn("managed_ai_prompt", 0), None),
+                (turn("managed_ai_prompt", 2), Some("Second space".to_string())),
+            ];
+            spaces.sort();
+            assert_eq!(ledger.space_names(&owner).await?, spaces);
             Ok(())
         },
     )

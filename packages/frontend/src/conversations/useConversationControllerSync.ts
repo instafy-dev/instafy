@@ -426,6 +426,9 @@ export function useConversationControllerSync({
           if ((conversation.toolSource ?? null) !== toolSource) {
             dispatch({ type: "SET_TOOL_SOURCE", id: conversation.localId, toolSource });
           }
+          if ((conversation.startedByOther ?? false) === createdByIsSelf) {
+            dispatch({ type: "SET_STARTED_BY_OTHER", id: conversation.localId, startedByOther: !createdByIsSelf });
+          }
           if (conversation.remoteSummaryPending) {
             dispatch({
               type: "SET_REMOTE_SUMMARY_PENDING",
@@ -578,6 +581,7 @@ export function useConversationControllerSync({
           originMessageId: originMessageIdFromMetadata,
           delegatedByAgentId: delegatedByAgentIdFromMetadata,
           toolSource: toolSourceOf(metadata),
+          ...(createdByIsSelf ? {} : { startedByOther: true }),
           messages: [],
           draft: "",
           draftEditorState: null,

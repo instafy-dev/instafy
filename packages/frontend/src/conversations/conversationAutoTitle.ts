@@ -102,7 +102,14 @@ export function isReusableBlankConversation(
   if (conversation.lifecycleStatus !== "active" || conversation.visibility !== "public") {
     return false;
   }
-  if (conversation.parentConversationId || conversation.threadKind) {
+  if (conversation.parentConversationId || conversation.threadKind || conversation.toolSource) {
+    return false;
+  }
+  // Empty only when its whole history is known to be: a chat loaded from the
+  // controller keeps its history there, and an untitled one is "New chat"
+  // whatever it holds. And only one this person started: in a team space
+  // every member sees the others' chats.
+  if (conversation.hasRemoteMessages || conversation.remoteSummaryPending || conversation.startedByOther) {
     return false;
   }
   if (!isDefaultConversationTitle(conversation.title)) {

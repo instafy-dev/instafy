@@ -1166,9 +1166,10 @@ export function CreditsPanel() {
                           as="p"
                           variant="caption"
                           tone="muted"
-                          className="mt-0.5 font-medium leading-tight"
+                          className="mt-0.5 truncate font-medium leading-tight"
                         >
-                          {new Date(row.createdAt).toLocaleString()}
+                          {/* A turn from another space names it, as Home's rows do. */}
+                          {[row.space, new Date(row.createdAt).toLocaleString()].filter(Boolean).join(" · ")}
                         </Text>
                       </div>
 

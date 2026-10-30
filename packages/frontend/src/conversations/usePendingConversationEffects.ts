@@ -343,6 +343,7 @@ export function usePendingConversationEffects({
         // A tool's own work thread is kept out of the tab strip and the
         // person's chat list; see WorkspaceTabsProvider.
         toolSource: toolSourceOf(creation.metadata),
+        ...(createdByIsSelf ? {} : { startedByOther: true }),
         messages: [],
         draft: "",
         draftEditorState: null,
