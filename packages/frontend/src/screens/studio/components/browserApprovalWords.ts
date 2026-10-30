@@ -74,7 +74,9 @@ export function activityHostOf(origin: string | null | undefined): string | null
  * for the browser view's sheet to say "Goes to httpbin.org": a link's or a
  * form's address. Null when the sentence already names it: a site prompt or
  * a navigation names its page, and a form sent to another site says "It
- * goes to …".
+ * goes to …". On the page's own site only a step that sends fields goes
+ * somewhere: the runtime binds Enter, Space and a click on a box in a form
+ * to the page's address even when the step sends nothing.
  */
 export function browserApprovalGoesTo(
   request: Pick<BrowserApprovalWordsRequest, "kind" | "operation" | "sourceOrigin" | "destinationOrigin" | "display">,
@@ -83,7 +85,8 @@ export function browserApprovalGoesTo(
   const destination = shownHost(request.display.destinationOrigin) ?? shownHost(request.destinationOrigin);
   if (!destination) return null;
   const site = shownHost(request.sourceOrigin) ?? destination;
-  return request.operation === "form-submit" && destination !== site ? null : destination;
+  if (destination !== site) return request.operation === "form-submit" ? null : destination;
+  return controlWords(splitBrowserApprovalLabel(request.display.label).label).sends ? destination : null;
 }
 
 function shownHost(origin: string | null | undefined): string | null {

@@ -341,10 +341,12 @@ async function approveExpectedSharedBrowserRequest(
     expected.kind === "origin" ? /^\S+ wants to (?:use|open) / : /^\S+ wants to (?!use |open )/,
     { timeout: 60_000 },
   );
-  // The origin the request is bound to; the sheet's words name its host.
+  // The origin the request is bound to, and the words the person reads name
+  // its host: the sentence for a site, "Goes to …" for a step that leaves it.
   await expect(prompt).toHaveAttribute("data-approval-origin", expected.destination, { timeout: 60_000 });
   const approvedDestination = (await prompt.getAttribute("data-approval-origin"))?.trim() ?? "";
   expect(approvedDestination).not.toBe("");
+  await expect(prompt).toContainText(new URL(approvedDestination).hostname.replace(/^www\./, ""));
   await expect(prompt.getByTestId("shared-browser-approval-deny")).toBeFocused();
   const allow = prompt.getByTestId("shared-browser-approval-allow");
   await expect(allow).toHaveText(expected.kind === "origin" ? "Allow site" : "Allow");

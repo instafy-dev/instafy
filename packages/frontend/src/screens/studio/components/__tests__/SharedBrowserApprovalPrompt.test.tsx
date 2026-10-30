@@ -279,6 +279,42 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(goesTo()).toBeNull();
   });
 
+  it("says where a step goes only when it leaves the site or sends what the person typed", async () => {
+    // The runtime binds Enter or Space, and a click on a box inside a form,
+    // to the page's own address even when the step sends nothing: "Goes to"
+    // under Space on a banner's "Disagree" said something would happen that
+    // would not.
+    const step = (operation: string, label: string, destinationOrigin: string) => ({
+      ...originRequest,
+      approvalId: "44444444-4444-4444-8444-444444444444",
+      kind: "action" as const,
+      operation,
+      sourceOrigin: "https://example.test",
+      destinationOrigin,
+      display: { label, destinationOrigin },
+    });
+    const goesTo = () => container.querySelector('[data-testid="shared-browser-approval-destination"]')?.textContent ?? null;
+    const show = async (request: SharedBrowserApprovalPromptRequest) => {
+      await act(async () => root.render(
+        <SharedBrowserApprovalPrompt onDecision={vi.fn()} request={request} submitting={false} />,
+      ));
+    };
+
+    await show(step("press-space", "Change something: Disagree", "https://example.test"));
+    expect(goesTo()).toBeNull();
+    await show(step("press-enter", "Change something: Disagree", "https://example.test"));
+    expect(goesTo()).toBeNull();
+    await show(step("click", "Change something: Medium", "https://example.test"));
+    expect(goesTo()).toBeNull();
+    expect(container.textContent).not.toContain("Goes to");
+
+    // A step that sends the person's fields, and a link to another site, do go.
+    await show(step("press-enter", "Change something: Submit order · Sends: Customer name", "https://example.test"));
+    expect(goesTo()).toBe("Goes to example.test");
+    await show(step("click", "Opening hours", "https://other.example"));
+    expect(goesTo()).toBe("Goes to other.example");
+  });
+
   it("keeps both decisions disabled while a decision is being written", async () => {
     const onDecision = vi.fn();
     await act(async () => {
