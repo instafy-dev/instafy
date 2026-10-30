@@ -602,7 +602,9 @@ fn the_browser_skill_leaves_a_banner_without_a_reject_button_up() {
         include_str!("legacy/browser-automation-v14.md"),
         include_str!("legacy/browser-automation-v15.md"),
     ] {
-        assert!(previous.contains("If a consent button labeled `I agree` is visible, click it once"));
+        assert!(
+            previous.contains("If a consent button labeled `I agree` is visible, click it once")
+        );
         let tmp = scaffolded_space();
         let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
         fs::write(&skill, previous).unwrap();
