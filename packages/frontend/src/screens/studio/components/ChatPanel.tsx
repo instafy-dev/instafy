@@ -205,6 +205,7 @@ import { useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeti
 import {
   CHAT_BROWSER_VIEW_START,
   browserTurnUnderWay,
+  chatBrowserTarget,
   nextChatBrowserViewStep,
   useChatBrowserTab,
   type ChatBrowserViewState,
@@ -1827,8 +1828,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     handlePrepareNewBrowserSession,
     handleSelectBrowserSessionPage,
     pendingBrowserLaunchMode,
-    preferredBrowserPage,
-    sharedBrowserBindingPage,
     sharedBrowserCapabilities,
     sharedBrowserCapabilitiesResolved,
     sharedBrowserCapabilitiesUnsupported,
@@ -1856,7 +1855,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     browserTransport,
     focusInput,
     hasHiddenBrowserSession,
-    messages,
     onHiddenBrowserSessionUnavailable: handleHiddenBrowserSessionUnavailable,
     openBrowserSession,
     preferredBrowserRuntimeId,
@@ -1887,6 +1885,21 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   const chooseChatBrowserTab = chatBrowserTab.choose;
   const resolveChatBrowserTab = chatBrowserTab.resolveForTurn;
+  // A message aimed at the browser goes to this chat's own tab, and the
+  // Browser tab is named after it: never the tab another chat left in front.
+  const chatBrowserMessageTarget = useMemo(
+    () => browserTransport === "shared"
+      ? chatBrowserTarget({
+        tab: chatBrowserTab.tab,
+        pages: sharedBrowserChromePages,
+        resolved: sharedBrowserChromeResolved,
+        canOpenPage: sharedBrowserCanOpenPage,
+      })
+      : null,
+    [browserTransport, chatBrowserTab.tab, sharedBrowserCanOpenPage, sharedBrowserChromePages, sharedBrowserChromeResolved],
+  );
+  const preferredBrowserPage = chatBrowserMessageTarget?.page ?? null;
+  const sharedBrowserBindingPage = chatBrowserMessageTarget?.bindingPage ?? null;
   // The chat's Browser view shows the chat's own tab (nextChatBrowserViewStep).
   const chatBrowserViewRef = useRef<ChatBrowserViewState>(CHAT_BROWSER_VIEW_START);
   const chatBrowserTabId = chatBrowserTab.tab?.id ?? null;
@@ -1897,6 +1910,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "chat");
   const anyBrowserTurnUnderWay = browserTurnUnderWay(
     projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "any");
+  // The tabs this chat's Browser view shows (BrowserSessionModal): the chat's
+  // own tab and, while a browser turn of this chat is under way, the tabs Octo
+  // opened for it. Never another chat's page: any other tab in front leaves a
+  // blank stage. Null for an older browser that cannot give a chat a tab of
+  // its own: its view shows the tab in front, as before.
+  const chatViewPageIds = useMemo(() => {
+    if (browserTransport !== "shared" || sharedBrowserCanOpenPage === false) return null;
+    const ids = chatBrowserTabId ? [chatBrowserTabId] : [];
+    if (chatBrowserTurnUnderWay) {
+      for (const page of sharedBrowserChromePages) {
+        if (page.openedBy === "agent" && !page.leftover) ids.push(page.id);
+      }
+    }
+    return ids;
+  }, [browserTransport, chatBrowserTabId, chatBrowserTurnUnderWay, sharedBrowserCanOpenPage, sharedBrowserChromePages]);
+  const anotherChatBrowserTurn = anyBrowserTurnUnderWay && !chatBrowserTurnUnderWay;
   useEffect(() => {
     const { state, step } = nextChatBrowserViewStep({
       onScreen: browserVisible && browserTransport === "shared",
@@ -3295,8 +3324,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       (run.status === "in_progress" || run.status === "queued"));
   const browserAgentName =
     sharedBrowserControlOwner.kind === "agent" ? sharedBrowserControlOwner.displayName : BROWSER_AGENT_DEFAULT_NAME;
-  // The page a message goes to, the browser's active tab, as the pane's own
-  // tab picker names it.
+  // The page a message goes to, this chat's own tab, as the pane's own tab
+  // picker names it.
   const browserActivePageTitle = preferredBrowserPage
     ? preferredBrowserPage.title?.trim() || preferredBrowserPage.label.trim() || preferredBrowserPage.host
     : null;
@@ -5004,10 +5033,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const declineBrowserAutoStart = useCallback(() => {
     markBrowserAutoStartDeclined(browserRequestIdentity);
   }, [browserRequestIdentity]);
-  const takeOverSharedBrowser = useCallback((options?: { agentHoldsBrowser?: boolean }) => {
+  const takeOverSharedBrowser = useCallback(async (options?: { agentHoldsBrowser?: boolean }) => {
     declineBrowserAutoStart();
-    return browserHandoff.takeOverShared(options);
-  }, [browserHandoff, declineBrowserAutoStart]);
+    // The tab the person takes over is this chat's from then on: its Browser
+    // view goes on showing it once Octo's turn has ended.
+    const taken = sharedBrowserChromePages.find((page) => page.isActive) ?? null;
+    const tookOver = await browserHandoff.takeOverShared(options);
+    if (tookOver && taken) chooseChatBrowserTab(taken.id);
+    return tookOver;
+  }, [browserHandoff, chooseChatBrowserTab, declineBrowserAutoStart, sharedBrowserChromePages]);
 
   const handleStashDraft = useCallback(async (): Promise<boolean> => {
     if (!ensureProjectWriteAccess()) {
@@ -5801,9 +5835,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
 
   // A send from the browser's own composer that the submit flow would refuse
-  // (no browser runtime yet, or no tab at all) disables Send and says why
-  // instead of "Enter sends the message." A restored stash carries its own
-  // runtime and page, so it is left to the submit flow.
+  // (no browser runtime yet, or no tab the chat has or can get) disables Send
+  // and says why instead of "Enter sends the message." A restored stash
+  // carries its own runtime and page, so it is left to the submit flow.
   const sharedBrowserSendBlocker = useMemo(
     () =>
       resolveSharedBrowserSendBlocker({
@@ -5813,20 +5847,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           pendingBrowserLaunchMode !== "new_page" &&
           !restoredMessageStash,
         messageRequiresAi: inputRequiresAi && !deferAiGatesForAmbientParticipation,
-        pageAvailable: Boolean(sharedBrowserBindingPage),
+        pageAvailable: chatBrowserMessageTarget?.tabAvailable === true,
         resolvedRuntimeId: resolvedBrowserRuntimeId,
         terminalRequest: parseTerminalCommandRequest(inputValue),
       }),
     [
       browserComposerActive,
       browserTransport,
+      chatBrowserMessageTarget,
       deferAiGatesForAmbientParticipation,
       inputRequiresAi,
       inputValue,
       pendingBrowserLaunchMode,
       resolvedBrowserRuntimeId,
       restoredMessageStash,
-      sharedBrowserBindingPage,
     ],
   );
   const {
@@ -6648,6 +6682,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     spaceBusy={spaceRunActive}
                     runApproval={browserRunApproval}
                     conversationId={activeConversationId ?? null}
+                    chatPageIds={chatViewPageIds}
+                    anotherChatTurn={anotherChatBrowserTurn}
                     agentArrival={browserArrival}
                     spaceHasTeammates={spaceHasTeammates}
                   />

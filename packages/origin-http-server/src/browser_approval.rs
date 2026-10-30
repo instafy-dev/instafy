@@ -239,10 +239,10 @@ const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
 /// closes them or a person keeps one. runtime-agent and the origin both
 /// rewrite it, each under the approval directory's lock.
 const LEFTOVER_AGENT_TABS_FILE: &str = "leftover-tabs.json";
-/// The tab each run left open as its chat's page (the tab Octo worked in
-/// last, while the run's own page was still blank), with that run, written by
-/// runtime-agent (`chat-tabs.json`). It outlives the run and grants nothing:
-/// Studio reads it to show that tab as the chat's page.
+/// The tab each run left open as its chat's page (the tab of its own Octo
+/// read in last), with that run, written by runtime-agent (`chat-tabs.json`).
+/// It outlives the run and grants nothing: Studio reads it to show that tab
+/// as the chat's page.
 const CHAT_TABS_FILE: &str = "chat-tabs.json";
 /// runtime-agent's `CHAT_TABS_FILE_MAX_BYTES` and `MAX_CHAT_TABS`.
 const CHAT_TABS_MAX_BYTES: u64 = 16 * 1024;

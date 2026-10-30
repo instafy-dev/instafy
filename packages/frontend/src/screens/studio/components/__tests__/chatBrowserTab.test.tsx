@@ -9,6 +9,7 @@ import {
   CHAT_BROWSER_TAB_COPY,
   CHAT_BROWSER_VIEW_START,
   chatBrowserTab,
+  chatBrowserTarget,
   forgetChatBrowserTabsForTests,
   lastChatBrowserTab,
   browserTurnUnderWay,
@@ -315,6 +316,47 @@ describe("the page a browser turn leaves its chat", () => {
       await act(async () => root.unmount());
       delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
     }
+  });
+});
+
+// Local drive, Oct 30: the composer aimed a message, and named the Browser
+// tab, after the tab in front, which was another chat's page; when the
+// browser named none in front, after its first tab.
+describe("where a chat's messages go in Instafy's browser", () => {
+  const otherChat = page("PAGE-PICO", "https://www.raspberrypi.com/products/raspberry-pi-pico-2/", { isActive: true });
+  const own = page("PAGE-GITHUB", "https://github.com/");
+  const blank = page("PAGE-BLANK", "about:blank");
+
+  it("is the chat's own tab, never the tab another chat left in front", () => {
+    expect(chatBrowserTarget({ tab: own, pages: [otherChat, own], resolved: true, canOpenPage: true }))
+      .toEqual({ page: own, bindingPage: own, tabAvailable: true });
+    // A chat with no tab yet names no page; a turn sent now gets a tab of its own.
+    expect(chatBrowserTarget({ tab: null, pages: [otherChat, own], resolved: true, canOpenPage: true }))
+      .toEqual({ page: null, bindingPage: null, tabAvailable: true });
+    expect(chatBrowserTarget({ tab: null, pages: [otherChat], resolved: true, canOpenPage: null }))
+      .toEqual({ page: null, bindingPage: null, tabAvailable: true });
+    // Nor the browser's first tab when the browser names none in front.
+    expect(chatBrowserTarget({ tab: null, pages: [{ ...otherChat, isActive: false }, own], resolved: true, canOpenPage: true }).page)
+      .toBeNull();
+  });
+
+  it("binds a turn to the chat's blank tab without naming it", () => {
+    expect(chatBrowserTarget({ tab: blank, pages: [otherChat, blank], resolved: true, canOpenPage: true }))
+      .toEqual({ page: null, bindingPage: blank, tabAvailable: true });
+  });
+
+  it("keeps the tab in front only for an older browser that cannot open a tab", () => {
+    expect(chatBrowserTarget({ tab: null, pages: [otherChat], resolved: true, canOpenPage: false }))
+      .toEqual({ page: otherChat, bindingPage: otherChat, tabAvailable: true });
+    expect(chatBrowserTarget({ tab: own, pages: [otherChat, own], resolved: true, canOpenPage: false }).page).toBe(own);
+    expect(chatBrowserTarget({ tab: null, pages: [{ ...otherChat, isActive: false }], resolved: true, canOpenPage: false }))
+      .toEqual({ page: null, bindingPage: null, tabAvailable: false });
+  });
+
+  it("offers nothing until the tabs are read, or while they are stale", () => {
+    expect(chatBrowserTarget({ tab: own, pages: [own], resolved: false, canOpenPage: true }))
+      .toEqual({ page: null, bindingPage: null, tabAvailable: false });
+    expect(chatBrowserTarget({ tab: null, pages: [], resolved: true, canOpenPage: true }).tabAvailable).toBe(false);
   });
 });
 

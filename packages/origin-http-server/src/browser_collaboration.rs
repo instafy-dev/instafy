@@ -740,6 +740,36 @@ impl BrowserCollaborationHub {
         if !can_control && state.suspended_human_owner.as_deref() == Some(participant_id.as_str()) {
             state.suspended_human_owner = None;
         }
+        // A person who reloads Studio comes back as a new session while the
+        // old one is still in its grace. Control they held there passes to
+        // this session at once: that page is gone, and until the grace ran
+        // out this one could neither bring its chat's tab forward nor type,
+        // and once it ran out nobody held control at all. Only the same
+        // person's control moves, and only from a session with no connection.
+        if can_control {
+            let own_departed_session = |state: &HubState, id: &str| {
+                id != participant_id
+                    && state.participants.get(id).is_some_and(|participant| {
+                        participant.subject == claims.sub && participant.connection_id.is_none()
+                    })
+            };
+            if matches!(
+                state.control_owner.as_ref(),
+                Some(ControlOwner::Human { participant_id: owner }) if own_departed_session(&state, owner)
+            ) {
+                state.control_owner = Some(ControlOwner::Human {
+                    participant_id: participant_id.clone(),
+                });
+                state.requests.retain(|request| request != &participant_id);
+            }
+            if state
+                .suspended_human_owner
+                .as_deref()
+                .is_some_and(|owner| own_departed_session(&state, owner))
+            {
+                state.suspended_human_owner = Some(participant_id.clone());
+            }
+        }
         if can_control
             && state.suspended_human_owner.is_none()
             && matches!(state.control_owner, Some(ControlOwner::Agent { .. }))
@@ -1741,6 +1771,94 @@ mod tests {
         let state = hub.state.lock().await;
         assert!(state.participants.is_empty());
         assert!(state.control_owner.is_none());
+    }
+
+    /// Local drive, Oct 30: after a reload, the chat's Browser view showed
+    /// another chat's page and stayed there. The reloaded Studio joined as a
+    /// new session while the old one still held control in its grace, so it
+    /// did not get control, and once the grace ran out nobody had it: the
+    /// view's move to the chat's own tab was refused. Control now passes to
+    /// the person's new session; another person's stays theirs.
+    #[tokio::test]
+    async fn a_reload_keeps_the_persons_control_in_their_new_session() {
+        let hub = test_hub();
+        let before = claims("session-before-reload", Some("Taylor"), true);
+        let old = hub
+            .join(&before, "session-before-reload", Some("PAGE1"))
+            .await
+            .expect("first join");
+        assert!(hub.has_human_control(&before).await);
+        // Another person in the space, who does not control the browser.
+        let teammate = claims("session-teammate", Some("Anna"), true);
+        let anna = hub
+            .join(&teammate, "session-teammate", Some("PAGE1"))
+            .await
+            .expect("teammate join");
+        hub.disconnect(&old.participant_id, old.connection_id).await;
+
+        // The same person, after the reload: a new session of theirs.
+        let mut after = claims("session-after-reload", Some("Taylor"), true);
+        after.sub = before.sub.clone();
+        after.project_id = before.project_id.clone();
+        hub.join(&after, "session-after-reload", Some("PAGE1"))
+            .await
+            .expect("join after reload");
+        assert!(hub.has_human_control(&after).await);
+        assert!(!hub.has_human_control(&before).await);
+        assert!(!hub.has_human_control(&teammate).await);
+
+        drop(anna);
+
+        // While Octo drives, the control the person gets back once Octo is
+        // done moves too.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let marker_path = directory.path().join("agent-control.json");
+        let hub = BrowserCollaborationHub::new_with_agent_control_path(marker_path.clone());
+        let old = hub
+            .join(&before, "session-before-reload", Some("PAGE1"))
+            .await
+            .expect("first join");
+        write_test_marker(
+            &marker_path,
+            &marker_json(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                unix_time_millis() + 12_000,
+            ),
+        );
+        assert!(!hub.has_human_control(&before).await);
+        hub.disconnect(&old.participant_id, old.connection_id).await;
+        hub.join(&after, "session-after-reload", Some("PAGE1"))
+            .await
+            .expect("join after reload");
+        std::fs::remove_file(&marker_path).expect("Octo is done");
+        assert!(hub.has_human_control(&after).await);
+        assert!(!hub.has_human_control(&before).await);
+
+        // Another person's control never moves to someone else's new session,
+        // nor to the same person's session while the old one is connected.
+        let hub = test_hub();
+        let owner = hub
+            .join(&teammate, "session-teammate", Some("PAGE1"))
+            .await
+            .expect("teammate owns");
+        hub.disconnect(&owner.participant_id, owner.connection_id)
+            .await;
+        hub.join(&before, "session-before-reload", Some("PAGE1"))
+            .await
+            .expect("other person joins");
+        assert!(hub.has_human_control(&teammate).await);
+        assert!(!hub.has_human_control(&before).await);
+        let hub = test_hub();
+        hub.join(&before, "session-before-reload", Some("PAGE1"))
+            .await
+            .expect("first tab");
+        hub.join(&after, "session-after-reload", Some("PAGE1"))
+            .await
+            .expect("second tab, both open");
+        assert!(hub.has_human_control(&before).await);
+        assert!(!hub.has_human_control(&after).await);
     }
 
     #[tokio::test]

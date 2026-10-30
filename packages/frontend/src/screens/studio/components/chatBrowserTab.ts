@@ -25,14 +25,15 @@ import {
  * A chat without one gets a blank tab that no chat uses, the one a browser
  * that just started shows or a new one Studio opens for it, and the turn's
  * blank-page rule takes it to the task's site. The chat's Browser view shows
- * that tab (ChatPanel brings it forward).
+ * that tab (ChatPanel brings it forward), and only that tab: with another tab
+ * in front its stage is blank (BrowserSessionModal's `chatPageIds`).
  *
- * When a browser turn ends with the chat's tab still blank (Octo read in tabs
- * of its own), the runtime keeps the tab Octo worked in last open, as Take
- * over keeps a tab, and the browser's tab list names that turn on it
- * (`leftByRun`). Once the turn has ended that tab is the chat's: the page the
- * person is left with is the one Octo read, on every device and after a
- * reload too.
+ * When a browser turn ends with Octo reading last in a tab of its own (or
+ * the chat's tab still blank), the runtime keeps the tab Octo worked in last
+ * open, as Take over keeps a tab, and the browser's tab list names that turn
+ * on it (`leftByRun`). Once the turn has ended that tab is the chat's: the
+ * page the person is left with is the one Octo read last, on every device and
+ * after a reload too.
  */
 
 /** A tab a chat chose or ran in, and when. */
@@ -249,6 +250,40 @@ export function chatBrowserTab<Page extends { id: string; leftByRun?: string }>(
 }
 
 /**
+ * Where this chat's messages go in Instafy's browser: the chat's own tab
+ * (`chatBrowserTab`), never the tab another chat left in front, nor the
+ * browser's first tab when it names none in front.
+ * - `page`: the page a message aimed at the browser goes to, and the one the
+ *   chat's Browser tab is named after: the chat's tab while it shows a page.
+ * - `bindingPage`: the tab a browser turn binds to when it gets none of its
+ *   own (`useChatBrowserTab`'s `resolveForTurn` gives it one otherwise).
+ * - `tabAvailable`: a browser turn sent now finds a tab, its chat's own or a
+ *   new one the browser opens for it.
+ * Only an older browser that cannot open a tab (`canOpenPage` false) keeps
+ * the earlier behaviour: the tab in front, for a chat without a tab. Nothing
+ * while the tabs are not read (or stale: a blank tab there may be gone).
+ */
+export function chatBrowserTarget<Page extends BrowserSessionPage>(input: {
+  /** The chat's own tab (`chatBrowserTab`). */
+  tab: Page | null;
+  /** The browser's open tabs, blank ones included. */
+  pages: readonly Page[];
+  /** The tabs are read, and current. */
+  resolved: boolean;
+  /** Whether the browser opens a tab: false for an older one, null until it said. */
+  canOpenPage: boolean | null;
+}): { page: Page | null; bindingPage: Page | null; tabAvailable: boolean } {
+  if (!input.resolved) return { page: null, bindingPage: null, tabAvailable: false };
+  const bindingPage = input.tab ??
+    (input.canOpenPage === false ? input.pages.find((page) => page.isActive) ?? null : null);
+  return {
+    page: bindingPage && !browserSessionPageIsPlaceholder(bindingPage) ? bindingPage : null,
+    bindingPage,
+    tabAvailable: bindingPage !== null || (input.canOpenPage !== false && input.pages.length > 0),
+  };
+}
+
+/**
  * A blank tab no chat uses, to give a chat as its own: never one a turn of any
  * chat was sent for, nor one remembered for another chat. The tab on screen
  * first, so a browser that just started keeps its one tab.
@@ -286,10 +321,12 @@ export const CHAT_BROWSER_VIEW_START: ChatBrowserViewState = { shown: null, blan
  * chat's turn, or another person), when they are done and no browser turn is
  * under way; each time unless it is in front already. Never over the
  * person's own pick (a pick is the chat's tab), and not while someone else,
- * Octo included, controls the browser: the view then shows what they do.
- * This chat's own turn leaves the browser where the turn ends (its page, or a
- * tab the person took over). A chat with no tab yet gets its own blank one,
- * once while the view is on screen.
+ * Octo included, controls the browser: the view then shows this chat's own
+ * turn as it goes, and nothing of another chat's (a blank stage that says
+ * Octo is working in another chat). This chat's own turn leaves the browser
+ * where the turn ends (its page, or a tab the person took over, which is the
+ * chat's from then on). A chat with no tab yet gets its own blank one, once
+ * while the view is on screen.
  */
 export function nextChatBrowserViewStep(input: {
   onScreen: boolean;

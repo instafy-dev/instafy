@@ -193,7 +193,12 @@ check ownership immediately before CDP mutation. The separate CDP/WebRTC input
 socket checks every message, so an already-open former-driver connection cannot
 continue after handoff. A normal leave releases immediately; an unclean network
 disconnect keeps the same signed session for ten seconds so a short Wi-Fi loss
-can reconnect without stealing control. The UI fails closed while its presence
+can reconnect without stealing control. A reloaded Studio is a new session of
+the same person while the old one is still in those ten seconds: control that
+person held there (or gets back once Octo is done) passes to their new session
+when it joins, so the reloaded view can bring its chat's tab forward and type
+at once. Only the same person's control moves, and only from a session with no
+connection; another person's stays theirs. The UI fails closed while its presence
 channel reconnects. It accepts only the exact bounded server schema (64 KiB,
 at most 32 participants and 32 requests); an invalid authoritative message
 clears local ownership immediately and closes/reconnects the socket rather than
@@ -599,24 +604,34 @@ read, so that page would go into this chat's reply and Details):
   `GET /browser/capabilities`. The turn
   then starts on a blank page, and its blank-page rule takes it to the task's
   address or the official site of what the task is about.
-- **The chat's Browser view shows that tab**, never a tab another chat left in
-  front. When the view comes on screen for a chat, and when the chat gets a new
-  tab, Studio brings the chat's tab to the front. While someone else (Octo
-  included) controls the browser the view shows what they do. When that was
-  another chat's turn or another person, the chat's tab comes forward once
-  they are done and no browser turn is under way; the chat's own turn leaves
-  the browser where it ends (its page, or a tab the person took over). A chat
-  with no tab yet gets its own blank one (as for its first browser turn), once
-  while the view is on screen, and "Octo is starting…" shows over it while a
-  turn of the chat is on its way. It never undoes the person's own pick.
+- **The chat's Browser view shows that tab, and only that tab.** When the view
+  comes on screen for a chat, and when the chat gets a new tab, Studio brings
+  the chat's tab to the front. The stage draws a picture, and the address bar
+  shows an address, only while a tab of the chat is in front: its own tab, or
+  while a browser turn of the chat is under way, Octo's tabs of that turn. Any
+  other tab in front, or none the browser names in front (never its first tab
+  in its place), leaves the stage blank, with no address, and the person's
+  input does not reach the page. While a browser turn of another chat holds
+  the browser, the view shows none of it, only "Octo is working in another
+  chat": in a team space that page may be another person's, signed in. Once
+  that turn or another person is done and no browser turn is under way, the
+  chat's tab comes forward again; the chat's own turn leaves the browser where
+  it ends (its page, or a tab the person took over, which is the chat's tab
+  from then on). A chat with no tab yet gets its own blank one (as for its
+  first browser turn), once while the view is on screen. While a turn of the
+  chat is on its way and its page is blank or not in front yet, the stage says
+  "Octo is starting…" (or where Octo is going). On "Reconnecting…" the stage
+  keeps only a still of the chat's page in front, never the last picture the
+  view drew, which may be of another tab. It never undoes the person's own
+  pick.
 - **The page a browser turn leaves the chat.** A turn works on the chat's tab
-  (see Octo's own tabs). When it ends with that tab still blank, because Octo
-  read in tabs of its own, the tab Octo worked in last stays open (see Closed
-  at the end, unless kept), and `GET /browser/pages` names that turn on it
-  (`leftByRun: <run id>`, from runtime-agent's `chat-tabs.json`). Once the turn
-  has ended, that tab is the chat's tab: the page the person is left with is
-  the one Octo read, after a reload, on another device and for other members
-  too.
+  (see Octo's own tabs). When it ends with Octo reading last in a tab of its
+  own, or with the chat's tab still blank, the tab Octo worked in last stays
+  open (see Closed at the end, unless kept), and `GET /browser/pages` names
+  that turn on it (`leftByRun: <run id>`, from runtime-agent's
+  `chat-tabs.json`). Once the turn has ended, that tab is the chat's tab: the
+  page the person is left with is the one Octo read last, after a reload, on
+  another device and for other members too.
 - A follow-up stays in the tab of the turn it continues (the tab that turn
   left the chat, when it left one), while no other chat took that tab since
   the turn started; otherwise the message is an ordinary
@@ -774,11 +789,13 @@ Browser has tabs of its own (see Personal-Browser.md).
   `kept-tabs.json`). Studio keeps the tab on screen when the person takes over
   on one of Octo's tabs; it shows no separate **Keep tab** button, which was
   unexplained to a first-time user, since the person now watches Octo's tab
-  live while Octo works in it. When the person kept none and the run's page
-  (the chat's own tab) is still blank (`GET /json/list` says `about:blank` or a
-  new-tab page), the tab Octo worked in last (`currentTabId`, else its newest)
-  is kept the same way, as the chat's page, with no reload: it stays as Octo
-  left it, a refused cookie banner included. runtime-agent names it with the
+  live while Octo works in it. When the person kept none, the tab Octo worked
+  in last is kept the same way, as the chat's page, with no reload: it stays
+  as Octo left it, a refused cookie banner included. That is the tab Octo acts
+  on at the end (`currentTabId`) when it is one of Octo's own: Octo read there
+  after the run's page (the chat's own tab), whatever that page shows. When
+  Octo ended on the run's page, Octo's newest tab is kept only while that page
+  is still blank (`GET /json/list` says `about:blank` or a new-tab page). runtime-agent names it with the
   run in `chat-tabs.json`, the newest 24 such tabs, a record that outlives the
   run like the leftover record and grants nothing; the page list reports it
   as `leftByRun` on that tab while the tab is not one of Octo's. Then that tab, or else the run's

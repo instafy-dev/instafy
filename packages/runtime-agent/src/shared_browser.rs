@@ -1463,15 +1463,20 @@ impl SharedBrowserAgentControlGuard {
         }
     }
 
-    /// The tab Octo worked in last, kept open as the chat's page when the
-    /// page the person chose for the run (the chat's own tab) is still blank:
-    /// Octo read in its own tabs, and closing them all would leave the person
-    /// a blank tab, or another chat's page in front. It is kept the way a
-    /// Take over keeps a tab (`kept-tabs.json`): an ordinary tab that is no
-    /// longer Octo's, as Octo left it, with no reload. The chat tab record
-    /// (`chat-tabs.json`) names it with the run, so Studio shows it as the
-    /// chat's page. None when the person kept a tab themselves, the run
-    /// opened none, or the page is not known to be blank.
+    /// The tab Octo worked in last, kept open as the chat's page: the page
+    /// the person is left with is the one Octo read last. That is one of
+    /// Octo's own tabs whenever Octo read there after the page the person
+    /// chose for the run (the chat's own tab): the tab it acts on at the end
+    /// (`currentTabId`) is one of its own. Otherwise (Octo went back to the
+    /// chat's own tab) the chat's page stays, unless that page is still
+    /// blank: then the newest of Octo's tabs is kept, since closing them all
+    /// would leave the person a blank tab, or another chat's page in front.
+    /// It is kept the way a Take over keeps a tab (`kept-tabs.json`): an
+    /// ordinary tab that is no longer Octo's, as Octo left it, with no
+    /// reload. The chat tab record (`chat-tabs.json`) names it with the run,
+    /// so Studio shows it as the chat's page. None when the person kept a tab
+    /// themselves, the run opened none, or Octo ended on the chat's own page
+    /// and that page is not known to be blank.
     fn tab_kept_for_the_chat(&self, run_tabs: &[String]) -> Option<String> {
         let binding = self.binding();
         if person_kept_a_tab(&self.approval_dir, &binding) {
@@ -1486,10 +1491,11 @@ impl SharedBrowserAgentControlGuard {
                     .and_then(JsonValue::as_str)
                     .map(str::to_string)
             });
-        let last = current
-            .filter(|tab_id| run_tabs.contains(tab_id))
-            .or_else(|| run_tabs.last().cloned())?;
         let (host, port) = self.cdp_base.as_ref()?;
+        if let Some(current) = current.filter(|tab_id| run_tabs.contains(tab_id)) {
+            return Some(current);
+        }
+        let last = run_tabs.last().cloned()?;
         match browser_page_url(host, *port, &self.browser_page_id) {
             Ok(Some(url)) if is_blank_page_url(&url) => Some(last),
             Ok(_) => None,
@@ -2144,10 +2150,10 @@ impl Drop for SharedBrowserAgentControlGuard {
         {
             // Every tool process of the run is gone, so nothing opens another
             // tab. Octo's tabs close now, apart from those the person kept
-            // and the one kept as the chat's page while the run's page is
-            // still blank, and so do earlier runs' leftover tabs. A tab that
-            // does not close stays open, badged as Octo's in the leftover
-            // record, and no later run can use it.
+            // and the one kept as the chat's page (the tab Octo read in last,
+            // see `tab_kept_for_the_chat`), and so do earlier runs' leftover
+            // tabs. A tab that does not close stays open, badged as Octo's in
+            // the leftover record, and no later run can use it.
             let mut run_tabs = self.agent_tabs_to_close();
             let kept_for_chat = self.tab_kept_for_the_chat(&run_tabs);
             run_tabs.retain(|tab_id| Some(tab_id) != kept_for_chat.as_ref());

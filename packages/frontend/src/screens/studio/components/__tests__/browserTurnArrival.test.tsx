@@ -66,6 +66,27 @@ describe("a chat's browser turn on its way to a blank tab", () => {
     expect(browserArrivalNote(typed, { url: "" }, "Octo")).toBe("Octo is starting…");
   });
 
+  // Local drive, Oct 30: during another chat's turn, this chat's view showed
+  // that chat's page, and before its own turn's first page, the tab another
+  // chat left in front. The view shows none of them now, and says why.
+  it("says Octo is working in another chat while that chat's turn holds the browser", () => {
+    const arrival = browserTurnArrival(
+      [run("queued", { browserTransport: "shared", browserRequestOf: "job:card-job" })],
+      messages,
+    );
+    expect(browserArrivalNote(null, PAGE, "Octo", { anotherChatTurn: true })).toBe("Octo is working in another chat");
+    expect(browserArrivalNote(arrival, BLANK, "Octo", { anotherChatTurn: true })).toBe("Octo is working in another chat");
+  });
+
+  it("says where Octo is going while none of the chat's pages is in front yet", () => {
+    const arrival = browserTurnArrival(
+      [run("in_progress", { browserTransport: "shared", browserRequestOf: "job:card-job" })],
+      messages,
+    );
+    expect(browserArrivalNote(arrival, null, "Octo")).toBe("Octo is opening visitlisboa.com…");
+    expect(browserArrivalNote(null, null, "Octo")).toBeNull();
+  });
+
   it("says nothing over a page, or with no browser turn of the chat on its way", () => {
     const arrival = browserTurnArrival(
       [run("in_progress", { browserTransport: "shared", browserRequestOf: "job:card-job" })],

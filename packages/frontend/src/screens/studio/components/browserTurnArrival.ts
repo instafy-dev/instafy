@@ -47,15 +47,21 @@ export function browserTurnArrival(
 }
 
 /**
- * What the Browser view says over a blank tab while the chat's browser turn
- * is on its way: "Octo is opening visitlisboa.com…", or "Octo is starting…"
- * when its card named no site. Null once the tab shows a page.
+ * What the chat's Browser view says over its blank stage. While a browser
+ * turn of another chat holds the browser: "Octo is working in another chat"
+ * (the view shows none of that chat's page). While the chat's own browser
+ * turn is on its way and the chat's page in front (`page`) is blank, or none
+ * of the chat's pages is in front yet (`page` null): "Octo is opening
+ * visitlisboa.com…", or "Octo is starting…" when its card named no site.
+ * Null once the chat's page shows a page.
  */
 export function browserArrivalNote(
   arrival: BrowserTurnArrival | null,
   page: Pick<BrowserSessionPage, "url"> | null,
   agentName: string,
+  options: { anotherChatTurn?: boolean } = {},
 ): string | null {
-  if (!arrival || !page || !browserSessionPageIsPlaceholder(page)) return null;
+  if (options.anotherChatTurn) return `${agentName} is working in another chat`;
+  if (!arrival || (page && !browserSessionPageIsPlaceholder(page))) return null;
   return arrival.site ? `${agentName} is opening ${arrival.site}…` : `${agentName} is starting…`;
 }

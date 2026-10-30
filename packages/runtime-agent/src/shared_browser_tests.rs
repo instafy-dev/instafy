@@ -6997,7 +6997,6 @@ async fn a_run_that_read_only_in_its_own_tabs_leaves_the_last_one_as_the_chats_p
     assert_eq!(
         seen,
         strings(&[
-            "GET /json/list HTTP/1.1",
             "GET /json/close/TAB-A HTTP/1.1",
             "GET /json/activate/TAB-B HTTP/1.1",
         ])
@@ -7033,12 +7032,12 @@ async fn a_run_that_read_only_in_its_own_tabs_leaves_the_last_one_as_the_chats_p
         chat_tabs(),
         json!({ "version": 1, "tabs": [{ "tabId": "TAB-B", "runId": second.to_string() }] })
     );
-    // The chat's page shows a page of its own: every tab of Octo's closes, and
-    // that page comes to the front, never the neighbour Chromium would show.
-    // Nothing is added to the record.
+    // The chat's page shows a page of its own, and Octo went back to it at
+    // the end: every tab of Octo's closes, and that page comes to the front,
+    // never the neighbour Chromium would show. Nothing is added to the record.
     let (seen, _) = end_run(
         "https://www.visitlisboa.example/en/places/belem",
-        json!("TAB-B"),
+        JsonValue::Null,
     );
     assert_eq!(
         seen,
@@ -7052,6 +7051,64 @@ async fn a_run_that_read_only_in_its_own_tabs_leaves_the_last_one_as_the_chats_p
     assert_eq!(
         chat_tabs(),
         json!({ "version": 1, "tabs": [{ "tabId": "TAB-B", "runId": second.to_string() }] })
+    );
+}
+
+/// A browser turn that read the chat's own page, then went on in a tab of
+/// its own and read there last (local drive, Oct 30: Visit Porto's search in
+/// the chat's tab, then Metro do Porto in Octo's tab 2). The page the person
+/// is left with is the one Octo read last: that tab stays as the chat's page
+/// and comes to the front, although the chat's own tab shows a page. Before,
+/// it closed, and the chat went back to the older page.
+#[tokio::test]
+async fn a_run_that_read_last_in_its_own_tab_leaves_that_tab_as_the_chats_page() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    let (port, requests) =
+        devtools_listing_run_page("https://www.visitporto.example/en-GB/search?q=lello");
+    let cancel_signal = JobCancelSignal::new();
+    let run_id = Uuid::new_v4();
+    let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        directory.path().join("agent-control.json"),
+        approval_dir.clone(),
+        ApprovalStart::Routine,
+        run_id,
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire run");
+    guard.cdp_base = Some(("127.0.0.1".to_string(), port));
+    write_run_record(
+        &approval_dir,
+        "tabs.json",
+        &guard,
+        json!({
+            "currentTabId": "TAB-A",
+            "tabs": [
+                { "tabId": "TAB-A", "approvedOrigins": [] },
+                { "tabId": "TAB-B", "approvedOrigins": [] }
+            ]
+        }),
+    );
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+    assert_eq!(
+        *requests.lock().expect("requests"),
+        strings(&[
+            "GET /json/close/TAB-B HTTP/1.1",
+            "GET /json/activate/TAB-A HTTP/1.1",
+        ])
+    );
+    let chat_tabs: JsonValue = serde_json::from_slice(
+        &std::fs::read(approval_dir.join("chat-tabs.json")).expect("chat tabs"),
+    )
+    .expect("chat tabs JSON");
+    assert_eq!(
+        chat_tabs,
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-A", "runId": run_id.to_string() }] })
     );
 }
 

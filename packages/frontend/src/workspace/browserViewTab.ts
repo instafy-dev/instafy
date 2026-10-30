@@ -5,7 +5,7 @@ const PAGE_TITLE_MAX_CHARS = 120;
 
 /**
  * What the conversation's Browser view tab says beyond its name: the tab a
- * message goes to (the browser's active tab, which the pane's own tab picker
+ * message goes to (the chat's own tab, which the pane's own tab picker
  * chooses) as its tooltip and accessible description, and, while an agent
  * uses the browser, a violet dot with "{agent} is using the browser" for
  * screen readers. The chat has no page strip of its own.

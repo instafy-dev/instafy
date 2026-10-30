@@ -336,10 +336,10 @@ describe("SharedBrowserChrome", () => {
     }
   });
 
-  it("falls back to the first page and navigates on Enter, with no Go button", async () => {
+  it("navigates the tab in front on Enter, with no Go button", async () => {
     const onNavigate = vi.fn();
     const model = props({
-      pages: [page({ id: "fallback", isActive: false })],
+      pages: [page({ id: "front", isActive: true })],
       onNavigate,
     });
     await act(async () => root.render(<SharedBrowserChrome {...model} />));
@@ -353,8 +353,31 @@ describe("SharedBrowserChrome", () => {
     expect(input.value).toBe("instafy.dev/docs");
     await act(async () => pressEnter(input));
 
-    expect(onNavigate).toHaveBeenCalledWith("fallback", "https://instafy.dev/docs");
+    expect(onNavigate).toHaveBeenCalledWith("front", "https://instafy.dev/docs");
     expect(input.value).toBe("https://instafy.dev/docs");
+  });
+
+  // Local drive, Oct 30: after a reload the browser named no tab in front,
+  // and the bar showed the address of its first tab, another chat's page.
+  it("shows no address, and acts on no tab, when no tab is named in front", async () => {
+    const onNavigate = vi.fn();
+    const onReload = vi.fn();
+    const model = props({
+      pages: [
+        page({ id: "other-chat", url: "https://www.raspberrypi.com/products/raspberry-pi-pico-2/", isActive: false }),
+        page({ id: "this-chat", url: "https://github.com/", isActive: false }),
+      ],
+      onNavigate,
+      onReload,
+    });
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    expect(input.value).toBe("");
+    expect(input.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-reload"]')?.disabled).toBe(true);
+    expect(container.textContent).not.toContain("raspberrypi.com/products");
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(onReload).not.toHaveBeenCalled();
   });
 
   it("keeps an in-progress edit while focused and catches up after blur", async () => {
