@@ -14,6 +14,34 @@ function hasProtectedControllerOverride(parsed: URL): boolean {
   return false;
 }
 
+// The parameters the page's auth client acts on when it reads its own
+// address, plus the rest of a token-shaped sign-in result. Sign-in results
+// come back through instafy://auth only, so a navigation link carrying one
+// was not made by Instafy: opened as a page, it would replace or end the
+// session.
+const SESSION_QUERY_KEYS = new Set([
+  "access_token",
+  "refresh_token",
+  "code",
+  "error",
+  "error_code",
+  "error_description",
+  "provider_token",
+  "provider_refresh_token",
+  "expires_in",
+  "expires_at",
+  "token_type",
+]);
+
+function hasSessionParameter(parsed: URL): boolean {
+  for (const key of parsed.searchParams.keys()) {
+    if (SESSION_QUERY_KEYS.has(key.trim().toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function normalizeRoutePath(pathname: string): string {
   const trimmed = pathname.trim();
   if (!trimmed) {
@@ -61,10 +89,9 @@ export function resolveDesktopDeepLinkTargetUrl(rawUrl: string, startUrl: string
 
   const routePath = buildDeepLinkRoutePath(parsed);
   if (routePath === "/auth") {
-    // Not a navigation target: an auth callback carries the session in its
-    // fragment and must reach the renderer as data. Loading it as a URL would
-    // discard the fragment and strand the sign-in. See
-    // isDesktopAuthCallbackDeepLink, which the caller uses to route it.
+    // Not a navigation target: an auth callback reaches the renderer as data,
+    // and the renderer decides whether it belongs to a sign-in it started.
+    // See isDesktopAuthCallbackDeepLink, which the caller uses to route it.
     return null;
   }
 
@@ -80,16 +107,23 @@ export function resolveDesktopDeepLinkTargetUrl(rawUrl: string, startUrl: string
   if (hasProtectedControllerOverride(parsed)) {
     return null;
   }
+  // Nor session state: see SESSION_QUERY_KEYS.
+  if (hasSessionParameter(parsed)) {
+    return null;
+  }
 
   target.pathname = routePath;
   target.search = parsed.search;
-  target.hash = parsed.hash;
+  // No Instafy link carries a fragment, and the page's auth client reads one
+  // (#access_token=..., #error_description=...) the way it reads the query.
+  target.hash = "";
   return target.toString();
 }
 
-// An OAuth provider returning through instafy://auth#access_token=... . The
-// shell must hand this to the renderer rather than navigate to it: the
-// fragment is the session, and navigation drops it.
+// An OAuth provider returning through instafy://auth?code=... (or with a
+// fragment). The shell must hand this to the renderer rather than navigate to
+// it: navigation drops the fragment, and the renderer decides whether the
+// callback belongs to a sign-in it started.
 export function isDesktopAuthCallbackDeepLink(rawUrl: string | null | undefined): boolean {
   if (typeof rawUrl !== "string" || !rawUrl.trim()) {
     return false;
@@ -104,6 +138,36 @@ export function isDesktopAuthCallbackDeepLink(rawUrl: string | null | undefined)
     return false;
   }
   return buildDeepLinkRoutePath(parsed) === "/auth";
+}
+
+/** How long the shell holds an auth callback no window has collected yet. */
+export const DESKTOP_AUTH_CALLBACK_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * The one auth callback the shell holds for a renderer that is not listening
+ * yet (a cold start, or no window open). A sign-in collects its callback
+ * within seconds of it arriving; one left over long after that belongs to no
+ * sign-in anyone is waiting for, so it expires instead of reaching whichever
+ * login screen opens next. Taking it always empties the slot.
+ */
+export function createHeldDesktopAuthCallback({
+  ttlMs = DESKTOP_AUTH_CALLBACK_TTL_MS,
+  now = Date.now,
+}: { ttlMs?: number; now?: () => number } = {}) {
+  let held: { url: string; receivedAt: number } | null = null;
+  return {
+    hold(url: string): void {
+      held = { url, receivedAt: now() };
+    },
+    take(): string | null {
+      const current = held;
+      held = null;
+      if (!current) {
+        return null;
+      }
+      return Math.abs(now() - current.receivedAt) <= ttlMs ? current.url : null;
+    },
+  };
 }
 
 /** Only IDs-only Studio notification routes may cross the renderer IPC boundary. */

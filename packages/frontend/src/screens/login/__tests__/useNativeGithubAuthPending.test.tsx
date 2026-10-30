@@ -9,12 +9,15 @@ import {
   NATIVE_AUTH_ERROR_EVENT,
   NATIVE_AUTH_ERROR_STORAGE_KEY,
   parseNativeAuthCallbackUrl,
+  readPendingNativeAuthAttempt,
   readSignInReturnPath,
+  writeNativeAuthError,
 } from "../../../auth/nativeAuth";
 
 const supabaseMock = vi.hoisted(() => ({
   signInWithOAuth: vi.fn(),
   exchangeCodeForSession: vi.fn(),
+  setSession: vi.fn(),
 }));
 
 const telemetry = vi.hoisted(() => ({
@@ -25,6 +28,8 @@ const platform = vi.hoisted(() => ({
   native: false,
   desktop: false,
   desktopListener: null as ((url: string) => void) | null,
+  // The callback the shell holds for the next window that drains it.
+  parkedDesktopCallback: null as string | null,
   openDesktopExternalUrl: vi.fn(async () => undefined),
   browserOpen: vi.fn(async () => undefined),
 }));
@@ -36,6 +41,7 @@ vi.mock("../../../lib/supabaseClient", () => ({
     auth: {
       signInWithOAuth: supabaseMock.signInWithOAuth,
       exchangeCodeForSession: supabaseMock.exchangeCodeForSession,
+      setSession: supabaseMock.setSession,
     },
   },
 }));
@@ -46,7 +52,11 @@ vi.mock("../../../lib/desktopShell", () => ({
     platform.desktopListener = listener;
     return () => {};
   },
-  consumeDesktopAuthCallback: async () => null,
+  consumeDesktopAuthCallback: async () => {
+    const parked = platform.parkedDesktopCallback;
+    platform.parkedDesktopCallback = null;
+    return parked;
+  },
   openDesktopExternalUrl: platform.openDesktopExternalUrl,
 }));
 vi.mock("@capacitor/core", () => ({
@@ -95,12 +105,14 @@ describe("useNativeGithubAuth pending status", () => {
     platform.native = false;
     platform.desktop = false;
     platform.desktopListener = null;
+    platform.parkedDesktopCallback = null;
     platform.openDesktopExternalUrl.mockClear();
     platform.browserOpen.mockClear();
     telemetry.post.mockClear();
     supabaseMock.signInWithOAuth.mockReset();
     supabaseMock.signInWithOAuth.mockResolvedValue({ data: { url: "https://auth.example/authorize" }, error: null });
     supabaseMock.exchangeCodeForSession.mockReset();
+    supabaseMock.setSession.mockReset();
     setError.mockReset();
     setPendingProvider.mockReset();
     setAwaitingBrowser.mockReset();
@@ -383,6 +395,261 @@ describe("useNativeGithubAuth pending status", () => {
     expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("auth-code");
     expect(setAwaitingBrowser).toHaveBeenLastCalledWith(null);
     expect(setError).toHaveBeenLastCalledWith(null);
+  });
+
+  it("completes a sign-in from the callback the shell held while the page was away", async () => {
+    platform.desktop = true;
+    supabaseMock.exchangeCodeForSession.mockResolvedValue({
+      data: { user: { email: "dev@example.com" } },
+      error: null,
+    });
+    await mount();
+    await act(async () => handlers?.handleGithubLogin());
+    await act(async () => root.unmount());
+    platform.parkedDesktopCallback = "instafy://auth?code=held-code";
+    root = createRoot(container);
+
+    await mount();
+
+    expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("held-code");
+    expect(setAwaitingBrowser).toHaveBeenLastCalledWith(null);
+  });
+
+  // Any page or app can open instafy://auth, so the desktop shell acts only on
+  // what a sign-in it started returns: a code its verifier can exchange, or
+  // the provider's refusal.
+  describe("desktop callbacks this app did not ask for", () => {
+    it("ignores a code when no sign-in is pending, and leaves it unclaimed", async () => {
+      platform.desktop = true;
+      const callback = "instafy://auth?code=code-from-a-link";
+      await mount();
+
+      await act(async () => platform.desktopListener?.(callback));
+
+      expect(supabaseMock.exchangeCodeForSession).not.toHaveBeenCalled();
+      expect(setError).not.toHaveBeenCalled();
+      expect(setAwaitingBrowser).not.toHaveBeenCalled();
+      expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
+      expect(telemetry.post).not.toHaveBeenCalled();
+      expect(claimNativeAuthCallback(parseNativeAuthCallbackUrl(callback)!)).toBe(true);
+    });
+
+    it("ignores a held callback the page drains when no sign-in is pending", async () => {
+      platform.desktop = true;
+      platform.parkedDesktopCallback = "instafy://auth?code=held-code";
+
+      await mount();
+
+      expect(platform.parkedDesktopCallback).toBeNull();
+      expect(supabaseMock.exchangeCodeForSession).not.toHaveBeenCalled();
+      expect(setError).not.toHaveBeenCalled();
+    });
+
+    it("shows no refusal when no sign-in is pending", async () => {
+      platform.desktop = true;
+      await mount();
+
+      await act(async () => platform.desktopListener?.("instafy://auth?error_description=access_denied"));
+
+      expect(setError).not.toHaveBeenCalled();
+      expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
+    });
+
+    it("never sets a session from a token pair, even while a sign-in is pending", async () => {
+      platform.desktop = true;
+      supabaseMock.exchangeCodeForSession.mockResolvedValue({
+        data: { user: { email: "dev@example.com" } },
+        error: null,
+      });
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+
+      await act(async () =>
+        platform.desktopListener?.(
+          "instafy://auth#access_token=another-account&refresh_token=another-account&expires_in=3600&token_type=bearer",
+        ),
+      );
+
+      expect(supabaseMock.setSession).not.toHaveBeenCalled();
+      expect(setError.mock.calls).toEqual([[null]]);
+      expect(readPendingNativeAuthAttempt()).not.toBeNull();
+
+      // The sign-in this app started still finishes.
+      await act(async () => platform.desktopListener?.("instafy://auth?code=auth-code"));
+
+      expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("auth-code");
+      expect(setAwaitingBrowser).toHaveBeenLastCalledWith(null);
+    });
+
+    it("lets the sign-in finish after a refusal it did not send", async () => {
+      // A stale browser tab's Cancel, or any app that opens the link.
+      platform.desktop = true;
+      supabaseMock.exchangeCodeForSession.mockResolvedValue({
+        data: { user: { email: "dev@example.com" } },
+        error: null,
+      });
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+
+      await act(async () => platform.desktopListener?.("instafy://auth?error=access_denied"));
+      expect(setError).toHaveBeenLastCalledWith("GitHub sign-in was cancelled or refused. Try again.");
+      expect(setAwaitingBrowser).toHaveBeenLastCalledWith(null);
+
+      await act(async () => platform.desktopListener?.("instafy://auth?code=auth-code"));
+
+      expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("auth-code");
+      expect(setError).toHaveBeenLastCalledWith(null);
+    });
+
+    it("lets the sign-in finish after a code from another tab fails to exchange", async () => {
+      // Pressing the provider twice opens two tabs; only the newer one's code
+      // matches the verifier this app holds.
+      platform.desktop = true;
+      supabaseMock.exchangeCodeForSession
+        .mockResolvedValueOnce({ data: { session: null, user: null }, error: new Error("invalid flow state") })
+        .mockResolvedValueOnce({ data: { user: { email: "dev@example.com" } }, error: null });
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+      await act(async () => handlers?.handleGithubLogin());
+
+      await act(async () => platform.desktopListener?.("instafy://auth?code=older-tab"));
+      expect(setError).toHaveBeenLastCalledWith(
+        "Sign-in could not be completed on this device. Start signing in again from here.",
+      );
+
+      await act(async () => platform.desktopListener?.("instafy://auth?code=newer-tab"));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["older-tab"], ["newer-tab"]]);
+      expect(setError).toHaveBeenLastCalledWith(null);
+    });
+
+    it("lets the sign-in finish when the page reloads after a refusal", async () => {
+      // Cancel at the provider, reload, then go back and approve in the same tab.
+      platform.desktop = true;
+      supabaseMock.exchangeCodeForSession.mockResolvedValue({
+        data: { user: { email: "dev@example.com" } },
+        error: null,
+      });
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+      await act(async () => platform.desktopListener?.("instafy://auth?error=access_denied"));
+      expect(setError).toHaveBeenLastCalledWith("GitHub sign-in was cancelled or refused. Try again.");
+      await act(async () => root.unmount());
+      setError.mockClear();
+      root = createRoot(container);
+
+      await mount();
+      // The page showed the refusal and kept no copy, so the reloaded page
+      // shows nothing, and the sign-in is still waiting for its code.
+      expect(setError).not.toHaveBeenCalled();
+      expect(readPendingNativeAuthAttempt()).not.toBeNull();
+      await act(async () => platform.desktopListener?.("instafy://auth?code=auth-code"));
+
+      expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("auth-code");
+      expect(setError).toHaveBeenLastCalledWith(null);
+    });
+
+    it("lets the sign-in finish after the handler throws on a callback", async () => {
+      platform.desktop = true;
+      supabaseMock.exchangeCodeForSession
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+        .mockResolvedValueOnce({ data: { user: { email: "dev@example.com" } }, error: null });
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+
+      await act(async () => platform.desktopListener?.("instafy://auth?code=first-try"));
+      expect(setError).toHaveBeenLastCalledWith("Failed to fetch");
+
+      await act(async () => platform.desktopListener?.("instafy://auth?code=second-try"));
+
+      expect(supabaseMock.exchangeCodeForSession.mock.calls).toEqual([["first-try"], ["second-try"]]);
+      expect(setError).toHaveBeenLastCalledWith(null);
+    });
+
+    it("keeps a new sign-in pending when the page comes back after an earlier failure", async () => {
+      platform.desktop = true;
+      supabaseMock.exchangeCodeForSession.mockResolvedValue({
+        data: { user: { email: "dev@example.com" } },
+        error: null,
+      });
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+      await act(async () => platform.desktopListener?.("instafy://auth?error_description=access_denied"));
+      // The page showed that failure, so it keeps no copy for the next visit.
+      // Seed a failure kept from elsewhere: by the app-wide native handler, or
+      // by an older build.
+      expect(window.sessionStorage.getItem(NATIVE_AUTH_ERROR_STORAGE_KEY)).toBeNull();
+      writeNativeAuthError("access_denied");
+
+      // Try again; the page remounts before the browser comes back.
+      await act(async () => handlers?.handleGithubLogin());
+      setError.mockClear();
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await mount();
+      // The new sign-in replaced the old failure, so the page does not show it again.
+      expect(setError).not.toHaveBeenCalledWith("access_denied");
+      await act(async () => platform.desktopListener?.("instafy://auth?code=second-try"));
+
+      expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("second-try");
+    });
+
+    it("shows a failure kept from before a reload and still takes the sign-in's code", async () => {
+      platform.desktop = true;
+      supabaseMock.exchangeCodeForSession.mockResolvedValue({
+        data: { user: { email: "dev@example.com" } },
+        error: null,
+      });
+      await mount();
+      await act(async () => handlers?.handleGithubLogin());
+      // A failure kept for the next login page, here one that comes back after a reload.
+      writeNativeAuthError("access_denied");
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await mount();
+
+      expect(setError).toHaveBeenCalledWith("access_denied");
+      expect(readPendingNativeAuthAttempt()).not.toBeNull();
+      await act(async () => platform.desktopListener?.("instafy://auth?code=after-reload"));
+      expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("after-reload");
+    });
+  });
+
+  it("still ends a native sign-in when its callback is refused or its code fails", async () => {
+    // Desktop keeps a sign-in pending after a failure; mobile does not.
+    platform.native = true;
+    supabaseMock.exchangeCodeForSession.mockResolvedValue({
+      data: { session: null, user: null },
+      error: new Error("invalid flow state"),
+    });
+    const listeners = installNativePlugins();
+    await mount();
+
+    await act(async () => handlers?.handleGithubLogin());
+    expect(readPendingNativeAuthAttempt()).not.toBeNull();
+    await act(async () => listeners.appUrlOpen?.({ url: "instafy://auth?error=access_denied" }));
+    expect(readPendingNativeAuthAttempt()).toBeNull();
+
+    await act(async () => handlers?.handleGithubLogin());
+    expect(readPendingNativeAuthAttempt()).not.toBeNull();
+    await act(async () => listeners.appUrlOpen?.({ url: "instafy://auth?code=spent-code" }));
+    expect(readPendingNativeAuthAttempt()).toBeNull();
+  });
+
+  it("still completes a native callback that arrives with no attempt pending", async () => {
+    // Mobile is unchanged: an Android deep link can start a new process after
+    // the attempt is gone, and the app-wide handler shares these callbacks.
+    platform.native = true;
+    supabaseMock.exchangeCodeForSession.mockResolvedValue({
+      data: { user: { email: "dev@example.com" } },
+      error: null,
+    });
+    const listeners = installNativePlugins();
+    await mount();
+
+    await act(async () => listeners.appUrlOpen?.({ url: "instafy://auth?code=native-code" }));
+
+    expect(supabaseMock.exchangeCodeForSession).toHaveBeenCalledWith("native-code");
   });
 
   it("reports a failed start as an error and releases the button", async () => {

@@ -133,10 +133,13 @@ export function useNativeGithubAuth({
       nextMessage: string,
       metadata: Record<string, unknown> = {},
       telemetryMessage: string = nextMessage,
+      { keepPendingAttempt = false }: { keepPendingAttempt?: boolean } = {},
     ) => {
       const pendingAttempt = readPendingNativeAuthAttempt();
       clearNativeAuthCallbackAttemptId();
-      clearPendingNativeAuthAttempt();
+      if (!keepPendingAttempt) {
+        clearPendingNativeAuthAttempt();
+      }
       clearNativeAuthLaunchState();
       // This page shows the error now; a stored copy would show it again on the
       // next visit to the login page, after any later sign-in.
@@ -218,7 +221,13 @@ export function useNativeGithubAuth({
       return;
     }
     clearNativeAuthCallbackAttemptId();
-    clearPendingNativeAuthAttempt();
+    // This page keeps no copy of a failure it shows, so a stored one now
+    // comes from the app-wide native handler or was left by an older build.
+    // On desktop it must still not end a sign-in that is pending: the code
+    // that sign-in is waiting for can still arrive.
+    if (!isDesktopShell()) {
+      clearPendingNativeAuthAttempt();
+    }
     writeNativeAuthError(null);
     setError(nativeAuthError);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -362,7 +371,7 @@ export function useNativeGithubAuth({
       return null;
     };
 
-    const handleCallbackUrl = async (rawUrl: string) => {
+    const handleCallbackUrl = async (rawUrl: string, transport: "desktop" | "native") => {
       if (cancelled) {
         return;
       }
@@ -372,29 +381,50 @@ export function useNativeGithubAuth({
       }
 
       const parsed = parseNativeAuthCallbackUrl(trimmed);
-      if (!parsed || !claimNativeAuthCallback(parsed)) {
+      if (!parsed) {
         return;
       }
+      const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
+      const hashParams = new URLSearchParams(hash);
+      const code = extractAuthParam(parsed, hashParams, "code");
+      const accessToken = extractAuthParam(parsed, hashParams, "access_token");
+      const refreshToken = extractAuthParam(parsed, hashParams, "refresh_token");
+      const oauthError =
+        extractAuthParam(parsed, hashParams, "error_description") ??
+        extractAuthParam(parsed, hashParams, "error") ??
+        null;
 
       const pendingAttempt = readPendingNativeAuthAttempt();
+      // Any page or app can open instafy://auth. So on desktop a callback is
+      // acted on only while a sign-in this app started is pending, and only
+      // when it is what that sign-in returns: a PKCE code, which only this
+      // app's verifier can exchange, or the provider's refusal. A token pair,
+      // or a callback with no sign-in pending, would let whoever opened the
+      // link choose the account this app is signed in to, or sign it out. It
+      // is dropped unclaimed and without a message, since its contents are
+      // the sender's.
+      if (transport === "desktop" && (!pendingAttempt || (!code && !oauthError))) {
+        return;
+      }
+      if (!claimNativeAuthCallback(parsed)) {
+        return;
+      }
       if (pendingAttempt?.attemptId) {
         writeNativeAuthCallbackAttemptId(pendingAttempt.attemptId);
       }
       const provider = nativeAuthAttemptProvider(pendingAttempt);
       const kind = (event: string) => `auth.login.${provider}.${event}`;
+      // On desktop a failed callback shows its error but leaves the sign-in
+      // pending, also across a reload of this page: the refusal or the code
+      // that would not exchange may come from another browser tab, or from
+      // whoever opened the link, and the code this sign-in is waiting for can
+      // still follow. The attempt ends on success, when a sign-in starts or
+      // the page resets for another way of signing in, or 30 minutes after
+      // it started.
+      const failureOptions = { keepPendingAttempt: transport === "desktop" };
 
       inFlight = true;
       try {
-        const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
-        const hashParams = new URLSearchParams(hash);
-        const code = extractAuthParam(parsed, hashParams, "code");
-        const accessToken = extractAuthParam(parsed, hashParams, "access_token");
-        const refreshToken = extractAuthParam(parsed, hashParams, "refresh_token");
-        const oauthError =
-          extractAuthParam(parsed, hashParams, "error_description") ??
-          extractAuthParam(parsed, hashParams, "error") ??
-          null;
-
         postGithubAuthTelemetry(kind("callback_received"), "info", null, pendingAttempt, {
           hasCode: Boolean(code),
           hasAccessToken: Boolean(accessToken),
@@ -412,6 +442,7 @@ export function useNativeGithubAuth({
               source: "login_page_direct_plugins",
             },
             oauthError,
+            failureOptions,
           );
           return;
         }
@@ -426,6 +457,8 @@ export function useNativeGithubAuth({
                 phase: "exchange_code_for_session",
                 source: "login_page_direct_plugins",
               },
+              undefined,
+              failureOptions,
             );
             return;
           }
@@ -465,10 +498,16 @@ export function useNativeGithubAuth({
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        failPendingGithubLoginAttempt(kind("callback_handler_failed"), message, {
-          phase: "callback_handler",
-          source: "login_page_direct_plugins",
-        });
+        failPendingGithubLoginAttempt(
+          kind("callback_handler_failed"),
+          message,
+          {
+            phase: "callback_handler",
+            source: "login_page_direct_plugins",
+          },
+          undefined,
+          failureOptions,
+        );
       } finally {
         inFlight = false;
       }
@@ -478,31 +517,32 @@ export function useNativeGithubAuth({
       const result = await nativeAuthBridgePlugin?.consumePendingUrl?.();
       const pendingUrl = typeof result?.url === "string" ? result.url.trim() : "";
       if (pendingUrl) {
-        await handleCallbackUrl(pendingUrl);
+        await handleCallbackUrl(pendingUrl, "native");
       }
     };
 
     // The desktop shell returns through the same instafy://auth callback, so
-    // it reuses handleCallbackUrl verbatim -- the parsing, the PKCE-or-token
-    // branch, and the telemetry are identical. Only the transport differs:
-    // an Electron IPC message rather than a Capacitor plugin event. Drain
-    // first, because the callback can land before this effect runs (the app
-    // may have been launched cold by the deep link, or been running with no
-    // window at all).
+    // it reuses handleCallbackUrl -- the parsing and the telemetry are
+    // identical. The transport differs (an Electron IPC message rather than a
+    // Capacitor plugin event), and desktop accepts less: only a code or a
+    // refusal, and only for a sign-in this app started. Drain first, because
+    // the callback can land before this effect runs (the app may have been
+    // launched cold by the deep link, or been running with no window at all).
     let desktopUnsubscribe: (() => void) | null = null;
     if (isDesktopShell() && desktopCanReceiveAuthCallback()) {
       desktopUnsubscribe = onDesktopAuthCallback((url) => {
-        void handleCallbackUrl(url);
+        void handleCallbackUrl(url, "desktop");
         // The shell parks every callback *and* sends it, so a live delivery
         // leaves a copy behind. Clear it, or the next mount of this page
         // drains a spent token and reports a failure over a good sign-in.
-        // handleCallbackUrl has already recorded the URL synchronously, so
-        // the drained value is deduplicated rather than replayed.
+        // The drained copy is discarded: handleCallbackUrl has already acted
+        // on this callback, dropped it unclaimed, or skipped it because
+        // another callback was still being exchanged.
         void consumeDesktopAuthCallback();
       });
       void consumeDesktopAuthCallback().then((pending) => {
         if (pending) {
-          void handleCallbackUrl(pending);
+          void handleCallbackUrl(pending, "desktop");
         }
       });
     }
@@ -513,16 +553,16 @@ export function useNativeGithubAuth({
       }
       bridgeListener = (await nativeAuthBridgePlugin.addListener?.("urlOpen", (event) => {
         const url = typeof event?.url === "string" ? event.url : "";
-        void handleCallbackUrl(url);
+        void handleCallbackUrl(url, "native");
       })) ?? null;
       await drainPendingBridgeUrl();
       const launchUrl = await appPlugin.getLaunchUrl?.();
       if (typeof launchUrl?.url === "string" && launchUrl.url.trim().length > 0) {
-        await handleCallbackUrl(launchUrl.url);
+        await handleCallbackUrl(launchUrl.url, "native");
       }
       appUrlListener = (await appPlugin.addListener?.("appUrlOpen", (event) => {
         const url = typeof event?.url === "string" ? event.url : "";
-        void handleCallbackUrl(url);
+        void handleCallbackUrl(url, "native");
       })) ?? null;
       resumeListener = (await appPlugin.addListener?.("resume", () => {
         if (resumeDrainTimeout !== null) {
@@ -572,6 +612,9 @@ export function useNativeGithubAuth({
       return;
     }
     resetNativeAuthState();
+    // A new sign-in supersedes a stored failure, so a remount of this page
+    // before the callback returns does not show it again.
+    writeNativeAuthError(null);
     releaseNativeAuthCallbackUrlClaims();
     setError(null);
     setAwaitingBrowser(null);

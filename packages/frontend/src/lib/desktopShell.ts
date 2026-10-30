@@ -15,6 +15,27 @@ export function isDesktopShell(shellWindow: ShellWindow | undefined = defaultWin
   return Boolean(shellWindow?.instafyDesktop);
 }
 
+type FrameWindow = ShellWindow & { top?: unknown };
+
+/**
+ * True in the shell's main frame and in any same-origin frame inside it. The
+ * preload bridge exists only in the main frame, but a same-origin frame (an
+ * Instafy page that a site preview navigated to, for instance) shares that
+ * frame's storage and session, so what protects the session must hold there
+ * too. A parent on another origin cannot be read and does not count.
+ */
+export function isInsideDesktopShell(frame: FrameWindow | undefined = defaultWindow()): boolean {
+  if (isDesktopShell(frame)) {
+    return true;
+  }
+  try {
+    const top = frame?.top as ShellWindow | null | undefined;
+    return Boolean(top && top !== frame && isDesktopShell(top));
+  } catch {
+    return false;
+  }
+}
+
 // The login page's "Back to landing" link exists for web visitors who arrived
 // from the marketing site. Native apps, extension embeds, and the desktop
 // shell all boot straight into login -- there is no landing page behind them,
