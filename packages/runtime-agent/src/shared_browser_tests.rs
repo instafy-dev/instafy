@@ -95,6 +95,15 @@ const special = {
   "cookie-reject-pt": { description: control("Rejeitar todos"), policy: { consentContext: true, areas: "dialog" } },
   "cookie-reject-posts": { description: control("Reject all"), policy: { consentContext: true, areas: "dialog" } },
   "cookie-accept": { description: control("Accept all"), policy: { consentContext: true, areas: "dialog" } },
+  // The accept of a common consent dialog says "Consent"; "accept" is not in it.
+  "cookie-consent": { description: control("Consent"), policy: { consentContext: true, areas: "dialog" } },
+  // Accepts limited to the necessary cookies: refusals in effect.
+  "cookie-accept-necessary": {
+    description: control("Accept only necessary"), policy: { consentContext: true, areas: "dialog" },
+  },
+  "cookie-accept-necessary-pt": {
+    description: control("Aceitar apenas necess\u00e1rios"), policy: { consentContext: true, areas: "dialog" },
+  },
   // A banner's accept as a link ("aceitar e continuar" is <a href>), which
   // the plain-link rule would otherwise take as navigation.
   "cookie-accept-link": {
@@ -8824,14 +8833,15 @@ fn a_cookie_banners_refusal_never_asks_while_the_same_words_elsewhere_still_do()
     }
 }
 
-/// Accepting a cookie banner is the person's step: its "Accept all" button
-/// and its "aceitar e continuar" link are refused before any prompt, in Ask,
-/// under routine browsing and on a run that starts in it, and nothing is
-/// clicked. Before, the link went through as plain navigation and the button
-/// asked.
+/// Accepting a cookie banner is the person's step: its "Accept all" button,
+/// its "aceitar e continuar" link and a "Consent" button are refused before
+/// any prompt, in Ask, under routine browsing and on a run that starts in it,
+/// and nothing is clicked. Before, the link went through as plain navigation,
+/// the "Accept all" button asked, and "Consent" was clicked under routine
+/// browsing without a prompt.
 #[test]
 fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
-    for mode in ["cookie-accept", "cookie-accept-link"] {
+    for mode in ["cookie-accept", "cookie-accept-link", "cookie-consent"] {
         // Ask mode, with the site approved.
         let fixture = EmbeddedControllerFixture::new();
         let snapshot_id = fixture.snapshot_id(mode);
@@ -8896,6 +8906,34 @@ fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
         assert!(
             failure_of(&output).contains("[step_refused_consent]"),
             "{mode} routine start"
+        );
+    }
+}
+
+/// An accept limited to the necessary cookies ("Accept only necessary",
+/// "Aceitar apenas necessários") refuses the rest, so it is never refused as an
+/// accept: it asks once, under routine browsing too, and runs when allowed.
+/// Before, both were refused, so a person's "refuse them" could not be done.
+#[test]
+fn a_cookie_banners_accept_of_only_the_necessary_cookies_asks_once() {
+    for mode in ["cookie-accept-necessary", "cookie-accept-necessary-pt"] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot = fixture.routine_snapshot(mode);
+        let body = json!({ "index": 0, "snapshotId": snapshot["snapshotId"] }).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for(mode, "page-target", "POST", "/v1/click", Some(&body)),
+            &["allow_once"],
+        );
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(requests.len(), 1, "{mode} did not ask once: {requests:?}");
+        assert_eq!(requests[0]["operation"], "click", "{mode}");
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
         );
     }
 }

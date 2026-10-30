@@ -45,7 +45,9 @@ export type PersonalBrowserStepClassification = {
    * all", "Only necessary"), found by its words and by the describer's
    * `consentContext`. It shares nothing, so a host may take it without a
    * prompt in every approval mode. A control or link in the same banner
-   * whose words accept is refused instead (`step_refused_consent`).
+   * whose words accept is refused instead (`step_refused_consent`), unless
+   * the accept is limited to the necessary cookies or to a selection, which
+   * asks with `commit`.
    */
   consentRejection?: boolean;
 };
