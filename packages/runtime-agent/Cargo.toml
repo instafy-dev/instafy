@@ -73,6 +73,13 @@ code-mode-host = ["dep:codex-code-mode-host"]
 name = "runtime_agent"
 path = "src/lib.rs"
 
+# Codex starts this binary as the Shared Browser MCP server of a Shared Browser turn, which a
+# libtest binary cannot serve.
+[[test]]
+name = "run_instructions"
+path = "tests/run_instructions.rs"
+harness = false
+
 [dev-dependencies]
 axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
 # Paused time for the rolling saves' cadence tests.

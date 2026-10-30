@@ -195,6 +195,26 @@ struct Provider {
 fn input_text(body: &Value) -> String {
     body["input"].to_string()
 }
+/// The run-instruction blocks of a request: Codex's developer messages, which the proxy carries
+/// in the user-role instruction message it puts first.
+fn run_instruction_blocks(body: &Value) -> Vec<String> {
+    let first = &body["input"][0];
+    if first["role"] != "user" {
+        return Vec::new();
+    }
+    let text = first["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.split("<instafy_run_instructions>")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("</instafy_run_instructions>"))
+        .map(|(block, _)| block.trim().to_string())
+        .collect()
+}
 fn output(body: &Value, call_id: &str) -> Option<String> {
     body["input"]
         .as_array()?
@@ -778,6 +798,15 @@ async fn exercise(case: Case) -> Result<()> {
             !calls[1].is_empty() && !calls[2].is_empty(),
             "provider must observe both native child threads"
         );
+        // A native child reads its parent run's instructions once, as the parent's thread does.
+        for child in &calls[1..] {
+            let blocks = run_instruction_blocks(&child[0]);
+            anyhow::ensure!(
+                blocks.len() == 1
+                    && blocks[0].starts_with("Instafy Studio structured execution run:"),
+                "a native child's first request must carry its parent run's instructions once: {blocks:?}"
+            );
+        }
         anyhow::ensure!(
             ingress.calls.lock().unwrap().len() == calls.iter().map(Vec::len).sum::<usize>(),
             "every native root/child provider request must traverse the scoped Instafy proxy"

@@ -1206,6 +1206,28 @@ mod tests {
         }
     }
 
+    /// A run's developer text reaches the model only through the run's own World State section,
+    /// which a resumed thread is given again whenever it changes. A config file's
+    /// `developer_instructions` would instead start a thread as text no later run can change.
+    #[tokio::test]
+    async fn a_config_files_developer_instructions_never_reach_a_thread() {
+        for bounded in [false, true] {
+            let (_home, mut config) = load_config(
+                "gpt-6-luna",
+                None,
+                "developer_instructions = \"Text from a config file.\"\n",
+            )
+            .await;
+            assert_eq!(
+                config.developer_instructions.as_deref(),
+                Some("Text from a config file."),
+                "the config file sets it before the policy runs"
+            );
+            apply_runtime_codex_policy(&mut config, bounded).expect("policy");
+            assert_eq!(config.developer_instructions, None, "bounded={bounded}");
+        }
+    }
+
     /// Every kind of AI a runtime turn runs on, as its job arrives: Lite runs the managed model,
     /// an own OpenAI key or a ChatGPT login the own-AI default unless the person picked another.
     /// Each comes with a Codex config that asks for web search the way a person's own setup could
