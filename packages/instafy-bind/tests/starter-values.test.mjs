@@ -217,6 +217,34 @@ test("compare: candidates nothing could be read for are a table of unknowns, nev
   }
 });
 
+// A comparison whose maker's site never answered: the models come only from a search result. Each row says it is not
+// checked by its shape ("found": the result's site), so its page never presents a search's names as checked.
+test("compare: a row only a search result names says \"Not checked\" and where it was named", async () => {
+  const data = compareData();
+  data.items = ["Model One", "Model Two"].map((name, i) => item(`m${i + 1}`, name, { price: { note: "maker.example did not answer" } }, { found: "reviews.example.net" }));
+  data.items.push(item("read", "Read Model", { price: { v: "€549", src: "Shop One", url: "https://shop-one.example/read", date: DAY } }));
+  for (const width of [1280, 390]) {
+    const { document } = await draw("compare", data, { width, search: "?show=all&open=m1" });
+    const named = rowText(document, "option:m1");
+    assert.match(named, /Model One\s*Not checked/, `${width}px: ${named}`);
+    assert.match(document.getElementById("list").textContent, /Named in a search result on reviews\.example\.net\./, `${width}px: its details name the result's site`);
+    assert.doesNotMatch(rowText(document, "option:read"), /Not checked/, `${width}px: a row read on a page is not marked`);
+  }
+});
+
+// The first build of a comparison whose maker's site never answered: no row, and an "unchecked" list the page did not
+// show, while the reply said the page marks what is unknown. An empty page still says what was not checked.
+test("compare: an empty page still lists what was not checked", async () => {
+  const data = compareData();
+  data.items = [];
+  data.unchecked = ["The models: the maker's site did not answer"];
+  const { document } = await draw("compare", data);
+  assert.match(document.getElementById("list").textContent, /No options yet\./);
+  const notes = document.getElementById("notes");
+  assert.equal(notes.hidden, false);
+  assert.match(notes.textContent, /Still to confirm\s*The models: the maker's site did not answer/);
+});
+
 test("compare: no cell is blank or a dash, and every value cites its page and day", async () => {
   const { document } = await draw("compare", compareData(), { search: "?show=all" });
   const read = rowText(document, "option:read");

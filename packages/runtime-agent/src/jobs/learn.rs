@@ -100,6 +100,8 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     include_str!("legacy/agents-doc-v1.md"),
     // From before it said to tell what was done, not what the tools saw ("The browser was blank, so…").
     include_str!("legacy/agents-doc-v2.md"),
+    // From before it named inside words a reply leaves out ("the shared browser", "placeholder rows").
+    include_str!("legacy/agents-doc-v3.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -347,6 +349,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before "Finding a page": a missing page's site search, another source after two
     // failures, own pages, "not checked", the names a comparison lists and a cookie banner's refusal.
     include_str!("legacy/browser-automation-v11.md"),
+    // From before a stopped page ended only that page, not the task, and another source a search
+    // found was read.
+    include_str!("legacy/browser-automation-v12.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -2078,6 +2083,33 @@ mod tests {
         }
         let previous = include_str!("legacy/agents-doc-v2.md");
         assert!(!previous.contains("The browser was blank"));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+    }
+
+    /// A reply leaves out inside words ("in the shared browser", "needs a validation pass", "The page check
+    /// produced no visible report", "I could not visually inspect those images", "placeholder rows"): `AGENTS.md`
+    /// gives each as a don't, next to what to say. The copy from before is upgraded.
+    #[test]
+    fn agents_doc_names_the_inside_words_a_reply_leaves_out() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        for needle in [
+            "\"I couldn't check how the page looks yet\", not \"The page check returned no output…\", \"produced no visible report\" or \"I could not visually inspect those images\"",
+            "\"Instafy's browser\", not \"the shared browser\"",
+            "not \"the map needs a validation pass\"",
+            "\"models I couldn't confirm, marked not checked\", not \"placeholder rows\"",
+        ] {
+            assert!(doc.contains(needle), "{needle}");
+        }
+        // What could not be looked at stays in the reply, in plain words (the builder skill's "what is unverified").
+        assert!(!doc.contains("Leave out what you could not look at"));
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        let previous = include_str!("legacy/agents-doc-v3.md");
+        assert!(!previous.contains("the shared browser"));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
         fs::write(&path, previous).unwrap();

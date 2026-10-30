@@ -9,8 +9,9 @@
 // for a key and the browser and built nothing) fails exactly the checks for that rule. When the maker's site never
 // answers (the third 28 Oct drive), the turn reads a review publisher's own page and lists every model it names, each
 // price unknown and never within the limit; the drive's turn (the maker's site only, then a page with no rows) fails.
-// When no review can be read either (29 Oct drive 4), the turn searches, tries every review the search found, and lists
-// the models the search results name, each "not checked"; the drive's rows ("candidate 1/2/3") fail.
+// When no review can be read either, the turn searches, tries every review the search found, and lists the models the
+// search results name, each "not checked" (its row names the result's site in "found"); placeholder rows ("candidate
+// 1/2/3") and rows that say nowhere where they come from fail.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -377,7 +378,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     }
   });
 
-  it("only a search names the models: the turn tries every review it found and lists the models, each not checked; the drive's placeholder rows fail", async () => {
+  it("only a search names the models: the turn tries every review it found and lists the models, each not checked; placeholder rows fail", async () => {
     const reference = await searchOnlyTurn();
     expect(reference.reads.map((r: Transcript) => [new URL(r.url).host, r.status])).toEqual([
       ["brightvac.example", "failed"],
@@ -388,6 +389,8 @@ describe("the shopping comparison eval (fixtures)", () => {
     ]);
     const data = JSON.parse(fs.readFileSync(path.join(reference.site, "data.json"), "utf8"));
     expect(data.items.map((row: Transcript) => row.name)).toEqual(SEARCH_ONLY_CASE.items.map((i) => i.name));
+    // each row names the site of the search result that names it, which is where its reviews were found
+    expect(data.items.map((row: Transcript) => row.found)).toEqual(SEARCH_ONLY_CASE.items.map(() => "www.review-one.example"));
     const checks = gradeCompare(reference, SEARCH_ONLY_CASE);
     expect(failedIds(checks), JSON.stringify(checks.filter((c) => !c.pass))).toEqual([]);
     for (const [what, breakIt, expected] of SEARCH_ONLY_BREAKERS) {
@@ -425,11 +428,17 @@ describe("the shopping comparison eval (fixtures)", () => {
     const browser = flat(fs.readFileSync(path.join(skills, "instafy-browser-automation/SKILL.md"), "utf8"));
     for (const rule of [
       "## Finding a page",
-      "Two failed pages on one site: find another source with `instafy web search` (no key: `--chain reference-search`)",
+      "Two failed pages on one site: find another source with `instafy web search` (no key: `--chain reference-search`), then read its best result;",
       "Comparing: list the models a page you read names, and mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
+      // a stopped page ends that page, never the research: the next source is "Finding a page"'s
+      "ends that page, not the task: \"Finding a page\" says what comes next. Never retry that page another way.",
     ]) {
       expect(browser, rule).toContain(rule);
     }
+    // The compare starter says how a row names where it comes from, and draws a search's names "Not checked".
+    const starter = flat(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../instafy-bind/src/starters/compare/app.js"), "utf8").replace(/\n\s*\*\s+/g, " "));
+    expect(starter).toContain("When only a search result names it, \"found\" is that result's site instead, and the row says \"Not checked\".");
+    expect(starter).toContain("`instafy bind check` fails a row with neither: a guess or a placeholder.");
     const hub = flat(fs.readFileSync(path.join(skills, "instafy-interactive-artifacts/SKILL.md"), "utf8"));
     for (const rule of [
       "each value names the page it was read on and the day; one nobody found reads `Unknown` and why",

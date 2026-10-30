@@ -3314,7 +3314,7 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - Whenever a web page would help (to look something up, check a page, or walk the person through a provider's screens), open Instafy's browser yourself, without asking in chat first or waiting for them to mention a browser; this replaces any earlier instruction to offer it first.\n\
 - It opens public web addresses only; its safety policy blocks this space's own addresses (localhost, 127.0.0.1, private addresses, ports here). A site running in this space is shown to people with a private Studio preview card (`instafy preview open`), not this browser.\n\
-- With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do and where to stop. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
+- With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
 - `continueBuilding: true` only when you build something from what it finds (a page, a map); for a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
 - In `summary`, say in one sentence where the browser goes and why; never say a page opened, or what it shows, before a browser tool saw it.\n\
@@ -9889,7 +9889,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
             - For recommendation-seeking browser tasks, prefer map/listing/review pages over repeating search-result links. If needed, inspect a few likely candidates and summarize the strongest observed option with concrete details.\n\
             - Use loaded skills and learned blocks for workflow behavior. Treat Rust/runtime prompts as execution invariants only, not as the source of task-specific strategy.\n\
-            - If a browser tool fails, say in plain words what did not work and stop (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution. No browser tools on this turn is not a failure: emit `request_browser`.\n\
+            - If a browser tool fails, say in plain words what did not work (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution. No browser tools on this turn is not a failure: emit `request_browser`.\n\
             - Ask for clarification if you lack enough information to act.
             "
         );
