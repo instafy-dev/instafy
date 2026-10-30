@@ -144,7 +144,7 @@ macro_rules! shared_browser_developer_instructions {
             $approval_start,
             "\n",
             r#"- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
-- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]` or `[step_refused_upload]` is final in every approval mode: revealing or copying a credential, signing in, and choosing files are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields.
+- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]`, `[step_refused_upload]` or `[step_refused_consent]` is final in every approval mode: revealing or copying a credential, signing in, choosing files and accepting cookies are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields. For `[step_refused_consent]`: accepting is the person's step; read on under the banner.
 - Downloads are blocked in this browser. Do not try to download or export files through it.
 - A denial, an approval that ran out of time, a stale target, a changed page, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.
 - A page the network did not deliver fails with a plain reason, such as "Instafy's browser couldn't reach that site", and the browser's code only in `error.details`. Tell the person that reason in your own words; the code is for diagnosis, never for your reply.
@@ -6590,6 +6590,16 @@ mod tests {
             ] {
                 assert!(instructions.contains(code), "{code}");
             }
+        }
+        // Only the Shared Browser's page describer finds a cookie banner, so
+        // only it refuses an accept there; the turn reads on under it.
+        for instructions in [
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
+        ] {
+            assert!(instructions.contains(
+                "For `[step_refused_consent]`: accepting is the person's step; read on under the banner."
+            ));
         }
         assert!(SHARED_BROWSER_DEVELOPER_INSTRUCTIONS.contains("Downloads are blocked"));
         assert!(SHARED_BROWSER_DEVELOPER_INSTRUCTIONS.contains(

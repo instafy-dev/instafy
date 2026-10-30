@@ -14188,7 +14188,9 @@ fn terminal_shared_browser_summary(code: &str) -> &'static str {
         "approval_timeout" => {
             "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
         }
-        "approval_denied" => "You declined, so I stopped before that step.",
+        "approval_denied" => {
+            "You said no, so that step didn't happen, and nothing from it was sent."
+        }
         "browser_unavailable" => {
             "Instafy's browser closed or stopped responding, so I stopped there. Open the browser again and send a message to continue."
         }
@@ -25894,7 +25896,9 @@ mod tests {
             ));
 
             let expected = match code {
-                "approval_denied" => "You declined, so I stopped before that step.",
+                "approval_denied" => {
+                    "You said no, so that step didn't happen, and nothing from it was sent."
+                }
                 _ => {
                     "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
                 }

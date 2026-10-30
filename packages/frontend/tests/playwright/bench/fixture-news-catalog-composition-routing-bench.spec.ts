@@ -80,7 +80,7 @@ test.describe("Bench: seeded learned blocks compose on catalog flow (opt-in)", (
         "",
         "Open a live browser session (visible inline).",
         `Navigate to ${fixtureBaseUrl}/catalog`,
-        'If a cookie dialog appears, click "I agree".',
+        'If a cookie dialog appears, click "No thanks".',
         "Use the catalog pagination to reach page 2.",
         "Open the Delta listing (it is only visible on page 2).",
         "Wait for the article page to load, then read the article heading, current URL, and article token from the browser.",
@@ -132,7 +132,7 @@ Apply when a browser task starts at the catalog listing and the Delta entry is o
 
 Procedure:
 - Start from the relative route \`/catalog\`.
-- If a consent button labeled \`I agree\` is visible, click it once.
+- If a consent button labeled \`No thanks\` is visible, click it once.
 - Use the visible pagination control labeled \`Next page\`; if it is absent, use the exact page control text \`2\`.
 - Stop once page 2 is loaded and the Delta listing is visible.
 

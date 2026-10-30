@@ -341,10 +341,12 @@ async function approveExpectedSharedBrowserRequest(
     expected.kind === "origin" ? /^\S+ wants to (?:use|open) / : /^\S+ wants to (?!use |open )/,
     { timeout: 60_000 },
   );
-  const destination = prompt.getByTestId("shared-browser-approval-destination");
-  await expect(destination).toHaveText(expected.destination, { timeout: 60_000 });
-  const approvedDestination = (await destination.textContent())?.trim() ?? "";
+  // The origin the request is bound to, and the words the person reads name
+  // its host: the sentence for a site, "Goes to …" for a step that leaves it.
+  await expect(prompt).toHaveAttribute("data-approval-origin", expected.destination, { timeout: 60_000 });
+  const approvedDestination = (await prompt.getAttribute("data-approval-origin"))?.trim() ?? "";
   expect(approvedDestination).not.toBe("");
+  await expect(prompt).toContainText(new URL(approvedDestination).hostname.replace(/^www\./, ""));
   await expect(prompt.getByTestId("shared-browser-approval-deny")).toBeFocused();
   const allow = prompt.getByTestId("shared-browser-approval-allow");
   await expect(allow).toHaveText(expected.kind === "origin" ? "Allow site" : "Allow");
@@ -412,10 +414,7 @@ async function approveIanaRedirectOriginsUntilAgentYields(
             // card still fails at the bounded timeout.
             return false;
           }
-          const rawDestination =
-            (await prompt
-              .getByTestId("shared-browser-approval-destination")
-              .textContent())?.trim() ?? "";
+          const rawDestination = (await prompt.getAttribute("data-approval-origin"))?.trim() ?? "";
           const origin = normalizedIanaOrigin(rawDestination);
           if (!origin) {
             throw new Error(

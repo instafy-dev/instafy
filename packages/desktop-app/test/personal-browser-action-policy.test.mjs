@@ -47,7 +47,7 @@ test("the case table covers every ask category and every refusal in English and 
     }
   }
   const refused = new Set(table.cases.filter((entry) => entry.verdict === "refuse").map((entry) => entry.code));
-  for (const code of ["step_refused_secret", "step_refused_sign_in", "step_refused_upload"]) {
+  for (const code of ["step_refused_secret", "step_refused_sign_in", "step_refused_upload", "step_refused_consent"]) {
     assert.ok(refused.has(code), `missing refusal ${code}`);
   }
 });

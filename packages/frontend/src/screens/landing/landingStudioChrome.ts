@@ -468,8 +468,6 @@ export const APPROVAL_CONTENT = "min-h-0 flex-1 overflow-hidden overscroll-conta
 export const APPROVAL_LOCK = "mt-0.5 h-4 w-4 shrink-0";
 // The sentence the studio's sheet asks with (its title).
 export const APPROVAL_SENTENCE = "min-w-0 flex-1 break-words";
-export const APPROVAL_SITE = "px-3 py-2.5";
-export const APPROVAL_SITE_TEXT = "mt-0.5 break-all";
 export const APPROVAL_ACTIONS = "flex flex-col gap-2 min-[420px]:flex-row min-[420px]:justify-end";
 // Button preset=form: flat 12px corners and pointer-adaptive targets. These
 // spans retain the landing's simulation rather than introducing real controls.

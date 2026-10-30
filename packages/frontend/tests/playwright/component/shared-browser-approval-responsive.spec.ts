@@ -92,9 +92,8 @@ for (const viewport of [
     const prompt = page.getByTestId("shared-browser-approval-prompt");
     await expect(prompt).toBeVisible();
     await expect(prompt).toHaveAccessibleName("Octo wants to use a-long-destination-name.example.test.");
-    await expect(page.getByTestId("shared-browser-approval-destination")).toContainText(
-      "a-long-destination-name.example.test",
-    );
+    // The sentence names the site, so no box repeats it.
+    await expect(page.getByTestId("shared-browser-approval-destination")).toHaveCount(0);
     await expect(page.getByTestId("shared-browser-approval-deny")).toBeFocused();
 
     const bounds = await prompt.evaluate((element) => {

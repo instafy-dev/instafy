@@ -87,7 +87,7 @@ test.describe("Bench: /learn improves deterministic filter-table navigation (opt
         "",
         "Open a live browser session (visible inline).",
         `Navigate to ${fixtureBaseUrl}/directory`,
-        'If a cookie dialog appears, click "I agree".',
+        'If a cookie dialog appears, click "No thanks".',
         'Use the filter UI to choose team "green" and apply the filter.',
         "Open the Epsilon account from the filtered table.",
         "Wait for the article page to load, then read the article heading, current URL, and article token from the browser.",

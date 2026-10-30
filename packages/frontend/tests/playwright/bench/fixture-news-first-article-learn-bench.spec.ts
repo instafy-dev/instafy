@@ -101,7 +101,7 @@ test.describe("Bench: /learn improves deterministic fixture-site navigation (opt
         "",
         "Open a live browser session (visible inline).",
         `Navigate to ${fixtureBaseUrl}/`,
-        'If a cookie dialog appears, click "I agree".',
+        'If a cookie dialog appears, click "No thanks".',
         "Open the first visible story/article on the homepage.",
         "Wait for the article page to load, then read the article heading and the current URL from the browser.",
         "",

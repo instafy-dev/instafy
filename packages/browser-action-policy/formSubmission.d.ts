@@ -34,6 +34,12 @@ export type FormSubmissionRules = {
   submissionOf(element: Element, fallbackForm?: HTMLFormElement | null): (FormSubmissionFacts & { form: HTMLFormElement }) | null;
   implicitSubmission(element: Element): { form: HTMLFormElement; button: HTMLElement | null; blocked: boolean } | null;
   keyActivatedButton(element: Element): HTMLElement | null;
+  /**
+   * What a person knows the fields by that the submission through `element`
+   * sends something from (a label, a group's legend or the name attribute),
+   * never a value and no hidden field. `typed` counts `element` as filled.
+   */
+  sentFieldNames(element: Element, typed?: boolean): string[];
 };
 
 /**
