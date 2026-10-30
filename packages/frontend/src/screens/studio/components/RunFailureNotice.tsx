@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -142,6 +143,26 @@ function AutoRetryCountdown({ dueAt }: { dueAt: number }) {
 
 const NO_DETAILS = () => {};
 
+// The failed turn whose block held focus when the chat folded it into the
+// turn that replaced it (automaticRetryFold). That turn mounts in the same
+// commit and takes focus (takeFoldedRetryFocus), so a keyboard or screen
+// reader user resting on the block never lands on the page. The note lasts
+// only for that commit.
+let foldedRetryFocusFrom: string | null = null;
+
+/**
+ * True, once, when the block of one of these failures held focus as the chat
+ * folded it away: the turn that replaced it takes focus.
+ */
+export function takeFoldedRetryFocus(failureIds: readonly (string | null)[]): boolean {
+  const from = foldedRetryFocusFrom;
+  if (from === null || !failureIds.includes(from)) {
+    return false;
+  }
+  foldedRetryFocusFrom = null;
+  return true;
+}
+
 /** The words of the one line a turn shows while Instafy tries it again by itself. */
 export const AUTO_RETRY_LINE_TEXT = "Trying again…";
 
@@ -271,8 +292,9 @@ export function RunFailureMessageBody({
         return;
       }
       if (!retryButtonRef.current && handOff.sawPending) {
-        // With no Details, "Retried" itself takes it.
-        target = detailsButtonRef.current ?? retriedRef.current;
+        // With no Details, "Retried" itself takes it; once the resend went
+        // out and the turn is one quiet line, that line does.
+        target = detailsButtonRef.current ?? retriedRef.current ?? autoRetryLineRef.current;
       }
     } else if (!cancelButtonRef.current) {
       target = retryButtonRef.current;
@@ -285,6 +307,24 @@ export function RunFailureMessageBody({
     // The card may sit above the fold; keep the transcript where it is.
     target.focus({ preventScroll: true });
   });
+
+  // Runs before React takes the block off the page, so focus is still in it.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const messageId = message.id;
+  useLayoutEffect(() => {
+    const blockRoot = rootRef.current;
+    return () => {
+      if (!blockRoot || typeof document === "undefined" || !blockRoot.contains(document.activeElement)) {
+        return;
+      }
+      foldedRetryFocusFrom = messageId;
+      queueMicrotask(() => {
+        if (foldedRetryFocusFrom === messageId) {
+          foldedRetryFocusFrom = null;
+        }
+      });
+    };
+  }, [messageId]);
 
   const handleRetry = useCallback(() => {
     if (!retryContext || retryContext.pendingRetryKey !== null) {
@@ -301,7 +341,7 @@ export function RunFailureMessageBody({
   // The polite region stays mounted, first, in both states: a region that
   // appears already filled is not announced by many screen readers.
   return (
-    <div className="min-w-0" data-testid={quiet ? "run-failure-auto-retry" : "run-failure-body"}>
+    <div ref={rootRef} className="min-w-0" data-testid={quiet ? "run-failure-auto-retry" : "run-failure-body"}>
       {retryContext !== null ? <AutoRetryAnnouncement dueAt={scheduledAutoRetry?.dueAt ?? null} /> : null}
       {scheduledAutoRetry ? (
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -331,7 +371,7 @@ export function RunFailureMessageBody({
       ) : autoRetrying ? (
         <div
           ref={autoRetryLineRef}
-          // Takes focus only from the Cancel it replaces; never a tab stop.
+          // Takes focus only from the Cancel or Try again it replaces; never a tab stop.
           tabIndex={-1}
           className="min-w-0 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:focus-visible:ring-primary-300/80"
           data-testid="run-failure-auto-retrying"

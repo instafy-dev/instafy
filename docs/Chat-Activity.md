@@ -25,10 +25,10 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives. A step still running from before the turn's save never names the line again; after a retry, it does |
 | The model is working with no step running, after the turn's first step | `Thinking…` (never its reasoning titles or notes), once there has been no step for 3 seconds; until then the line keeps the step before it |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
-| Done | what it made leads (the latest outcome), then the step that answered (the last "what it did" group) and the biggest other one (the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that made nothing labelled but opened or stopped a preview leads with the later of the two: `Opened a preview, edited a file`, `Stopped the preview`, and a site stopped and opened again reads `Opened a preview`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
+| Done | what it made leads (the latest outcome), then the step that answered (the last "what it did" group) and the biggest other one (the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. The steps are read in the order they last changed (a step that started before another and ended after it is the later one), as the chat's thread holds them and as the controller stores them with the reply, so the line reads the same when the reply lands. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that opened or stopped a preview names the later of the two, and a site stopped and opened again reads `Opened a preview`. The preview card already says a preview opened, so `Opened a preview` shows only when no other step of the turn finished; no card says a site stopped, so a turn that made nothing else leads with it: `Stopped the preview, edited a file`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files`; a look around the workspace (`pwd`, `ls`, `cat`, `rg --files`) is not counted, so a turn that only looked and answered, or only posted a card, has no line |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
-| Done, nothing of its own after an automatic retry | `Took two tries`, so Details opens on the first try |
+| Done, nothing of its own after a retry | `Took two tries` (`Took three tries`, …), so Details opens on the first try |
 | Stopped by the person | `Stopped · looked up 9 places`, or `Stopped` |
 | No news for 45 seconds while not in flight | `Status unavailable` |
 
@@ -68,7 +68,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   "provider", "credential", "runtime", "switch", "Codex", "workspace" or "request"; an
   unclassified failure shows its own first line only when that line uses none of these words (nor
   JSON, a URL or an exit code), and otherwise "Something went wrong, so this turn stopped." The
-  raw text behind Details keeps them all (`runFailurePresentation.ts`).
+  raw text behind Details keeps them all (`runFailurePresentation.ts`), except the proxy's own
+  address that Codex adds to its diagnostic (", url: http://proxy:…"): an AI that didn't answer
+  keeps its status and what the service said.
 - While Instafy tries a failed turn again by itself (`useRunFailureAutoRetry`), the turn is one
   quiet line, "Trying again…", with no failure sentence, no red and no actions; a countdown before
   a rate-limited resend reads "Trying again in 20 s" with Cancel. Only a dropped reply and a short
@@ -80,15 +82,24 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   that left the person nothing costs nothing either
   ([Failed turns](Credits-Billing.md#failed-turns)). A hand-back is never
   sent again by itself: its words alone would go out as a turn of their own, without what the
-  browser found, and be charged (`isRunFailurePromptAutoResendable`). The resent prompt is
-  marked `retryAutomatic` and the chat leaves it out, since it repeats the person's own words, and
-  the failed attempt moves into the Details of the turn that replaced it, under "First try"
-  (`automaticRetryFold.ts`). The mark is the sender's
-  word, so the chat leaves a prompt out only when the failed turn is in view and the prompt
-  repeats, from the same person, the words that turn answered. If that retry succeeds, the turn
-  reads as a normal success; only if it fails too does the failure block show. A resend the
-  controller refused before any job ran it ends "Trying again…", and both failures show. A
-  resend the person asked for with "Try again" stays as they sent it.
+  browser found, and be charged (`isRunFailurePromptAutoResendable`). An AI that didn't answer
+  (`ai_unavailable`) is not sent again by itself either: at once it would most likely fail the
+  same way, so the person decides when to press "Try again". Every resend names the failure it
+  retries (`retryOfMessageId`); Instafy's own is also marked `retryAutomatic`, which only billing
+  reads. The chat leaves the resent prompt out, Instafy's or the person's alike, since it repeats
+  the person's own words, and the failed attempt moves into the Details of the turn that replaced
+  it, under "First try" (`automaticRetryFold.ts`); a resend the person asked for is still their
+  turn, and charged as one. The mark is the sender's
+  word, so the chat leaves a prompt out only when the failed turn is in view, the prompt
+  repeats, from the same person, the words that turn answered, and no other turn (anyone's
+  prompt, or another run's messages) came between the failure and the resend: "Try again" on an
+  older failure, or a resend that waited behind a busy turn, stays as sent, with the failed turn
+  where it was, so its answer never reads as a reply to a later message. If that retry succeeds,
+  the turn reads as a normal success; only if it fails too does the failure block show, and a
+  "Try again" there folds the same way: the turn that answers lists every try before it, oldest
+  first ("First try", "Second try", …). A resend the controller refused before any job ran it ends
+  "Trying again…", and both failures show. Focus on the failed turn (after "Try again", or Cancel
+  on a countdown) moves to its "Trying again…" line, and then to the turn that replaced it.
 - Details (`TurnActivityDetails.tsx`) lists the turn in order: each command with its label, the
   command without its shell wrapper (the full line is its title), its state and its output behind
   a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes,
@@ -107,10 +118,16 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   its turn ended reads as what it did not finish ("Didn't finish finding places to stay"), with no
   spinner and no tick. A row with no label reads
   "Ran a command" ("Running a command" while it runs; "Used a tool" for a tool), never a guess at what it did: the command
-  itself is only its second line. It shows the newest 60 rows, with "Show earlier steps" above
+  itself is only its second line. Steps in a row that read the same and hold nothing behind them
+  are one row that says how many times ("Browsed httpbin.org ×9"); a command keeps its own row,
+  since its output is behind it. It shows the newest 60 rows, with "Show earlier steps" above
   them; pressing that moves focus to the first row it reveals.
 - Cards (secrets, connections, action and preview cards, team plans) stay in the turn's default
   view, and the file changes stay under the reply. Run traces keep their full view.
+- Replies Octo offers for the person to send next are buttons, never text in the reply: a JSON
+  reply's `suggestions`, or the last line of a plain-text reply when it is only 2-3 quoted replies
+  joined by ` · ` (`"Add another option" · "Make it shorter"`, as the runtime's plain-text
+  instructions ask), which the runtime moves out of the reply (`jobs/mod.rs`).
 - A command on its own in the conversation is one row: its label (or "Ran a command"), its
   state and a chevron that shows the command and its output.
 - The typing row that shows before the turn's own line, or under a newer message while a turn
@@ -137,8 +154,8 @@ from trusted data only, in this order:
    is "Searching the web" (the step itself keeps only the query and the number of results);
    `instafy preview open` and `instafy preview check` are quiet (the preview card already says it),
    with a past form for Details ("opened a preview", "checked the page"); `instafy preview close`
-   is "stopped the preview" once it exits 0 (Studio names a preview opened or stopped only when
-   the turn made nothing else, and then the later of the two); `instafy bind init|serve`,
+   is "stopped the preview" once it exits 0 (Studio names the later of the two: a preview opened
+   only when no other step of the turn finished, one stopped when the turn made nothing else); `instafy bind init|serve`,
    `instafy tunnel start` and `instafy conversation search|grep|show` have their own words;
    `instafy secrets …` and `instafy agents context …` are quiet.
 3. **A few common tools**: package installs (`pnpm`/`npm`/`yarn` `install|i|add`), test runners
@@ -150,7 +167,9 @@ from trusted data only, in this order:
 4. **A look around the workspace** is marked as one (`builtin/plumbing`, quiet, in an unlabelled
    command's words): a command made only of `pwd`, `ls`, `cat`, `head`, `tail`, `wc`, `rg`,
    `grep`, `find`, `cd`, `echo`, `printf`, `true`, `test`, `[`, `sleep`, `which`, `stat`,
-   `realpath`, `dirname` and `basename`, or a command asked for its own help (`uw cite --help`).
+   `realpath`, `dirname` and `basename`, a command asked for its own help (`uw cite --help`), or
+   the runtime's own memory script on its own (`python AGENTS.py`, which only prints the space's
+   memory at the start of a turn).
    Anything that writes a file (`echo hi > a.html`), deletes or runs something of its own
    (`find -delete`, `find -exec`, `rg --pre`, a substitution, a function the script defines under
    one of those names) is not a look. Studio leaves looks off the line.

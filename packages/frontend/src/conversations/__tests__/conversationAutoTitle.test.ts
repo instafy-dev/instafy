@@ -397,6 +397,21 @@ describe("conversationAutoTitle", () => {
       .toBe("Compare a.example.com and b.example.org");
     // A site named without a link reads the same.
     expect(getFallbackConversationTitle("Open carris.pt and find tram 15E")).toBe("Open carris.pt and find tram");
+    // A local test: "Open httpbin.org/forms/post in your browser, fill in
+    // a test pizza order…" left its chat "New chat": its address, written
+    // without "https://", was taken out as a file path, and "Open" alone is no
+    // title. Such an address is a link too.
+    expect(
+      getFallbackConversationTitle(
+        "Open httpbin.org/forms/post in your browser, fill in a test pizza order with made-up details and submit it.",
+      ),
+    ).toBe("Open httpbin.org in your browser, fill…");
+    expect(getFallbackConversationTitle("Check visitporto.travel/en-GB/search for the hours")).toBe(
+      "Check visitporto.travel for the hours",
+    );
+    // A file path is still a path, and an address that opens the sentence still goes.
+    expect(getFallbackConversationTitle("Fix the bug in src/components/Card.tsx where it overflows")).toBe("Fix the bug");
+    expect(getFallbackConversationTitle("httpbin.org/forms/post fill in a test order")).toBe("Fill in a test order");
     // Never a sign-in, an address, a local-only name, digits or an overlong name.
     for (const message of [
       "Open https://user:secret@example.com/account and check it",
@@ -405,6 +420,9 @@ describe("conversationAutoTitle", () => {
       "Open http://localhost:3000 and check the page",
       "Open https://9gag.example.com and find the post",
       "Open https://a-really-long-subdomain-name.example.com and look",
+      "Open user:secret@example.com/account and check it",
+      "Open 192.168.1.1/admin and fix the router",
+      "Open printer.local/queue and print it",
     ]) {
       expect(getFallbackConversationTitle(message), message).toBeNull();
     }

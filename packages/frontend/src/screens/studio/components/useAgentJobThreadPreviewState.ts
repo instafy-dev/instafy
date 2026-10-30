@@ -132,6 +132,7 @@ function earlierAttemptDetails(attemptMessages: readonly ChatMessage[], index: n
     : "";
   return {
     id: `attempt:${attemptJobId ?? failure?.id ?? index}`,
+    failureId: failure?.id ?? null,
     details,
     failureText: failureText || null,
   };

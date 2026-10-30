@@ -11,7 +11,8 @@
 //! 2. Instafy's own CLI (`instafy web read`, `instafy preview open`, ...);
 //! 3. a few common tools (installs, tests, builds, `git clone`);
 //! 4. a command made only of looks around the workspace (`pwd`, `ls`, `cat`, `rg --files`, a
-//!    `--help`) is marked as such, and Studio leaves it off the line;
+//!    `--help`, the runtime's own memory script `python AGENTS.py`) is marked as such, and Studio
+//!    leaves it off the line;
 //! 5. anything else gets no label, and Studio counts it ("Ran 3 commands").
 //!
 //! Only a command's argv is read: never its output, its exit text or the workspace. A script is
@@ -90,7 +91,7 @@ const WEB_SEARCH_COMMAND: BuiltinLabel = BuiltinLabel {
     ),
 };
 // Quiet: the preview card already says the preview opened. Studio names it as the turn's result
-// only when nothing else the turn made is (docs/Chat-Activity.md). Its `done` is the step's
+// only when no other step of the turn finished (docs/Chat-Activity.md). Its `done` is the step's
 // past tense in Details.
 const PREVIEW_OPEN: BuiltinLabel = BuiltinLabel {
     key: "instafy/preview-open",
@@ -257,6 +258,9 @@ const LOOK_PROGRAMS: &[&str] = &[
     "pwd", "ls", "cat", "head", "tail", "wc", "rg", "grep", "find", "cd", "echo", "printf", "true",
     "test", "[", "sleep", "which", "stat", "realpath", "dirname", "basename",
 ];
+/// Programs that run the runtime's own memory script (`python AGENTS.py`), which only prints
+/// the workspace's memory: the start of a turn, as INSTAFY.md and `/learn` tell the model.
+const MEMORY_SCRIPT_PROGRAMS: &[&str] = &["python", "python3"];
 /// `find` options that act on what it finds: deleting, running a command, writing a file.
 const FIND_ACTIONS: &[&str] = &[
     "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls",
@@ -1059,11 +1063,14 @@ fn writes_a_file(redirect: Node<'_>, src: &str) -> bool {
 }
 
 /// A simple command that only looks around the workspace: a [`LOOK_PROGRAMS`] program with
-/// arguments that run nothing of their own.
+/// arguments that run nothing of their own, or the runtime's memory script on its own.
 fn is_look(words: &[Word]) -> bool {
     let Some(program) = words.first().and_then(Word::exact).map(basename) else {
         return false;
     };
+    if is_memory_script(program, words) {
+        return true;
+    }
     if !LOOK_PROGRAMS.contains(&program) || words.iter().any(|word| word.opaque) {
         return false;
     }
@@ -1079,6 +1086,16 @@ fn is_look(words: &[Word]) -> bool {
         }),
         _ => true,
     }
+}
+
+/// `python AGENTS.py` (or `python3 ./AGENTS.py`) and nothing more: the script the runtime puts
+/// in every workspace to print its memory ([`super::learn::AGENTS_SCRIPT_FILENAME`]).
+fn is_memory_script(program: &str, words: &[Word]) -> bool {
+    MEMORY_SCRIPT_PROGRAMS.contains(&program)
+        && words.len() == 2
+        && words[1].exact().is_some_and(|script| {
+            script.strip_prefix("./").unwrap_or(script) == super::learn::AGENTS_SCRIPT_FILENAME
+        })
 }
 
 fn is_shell_name(name: &str) -> bool {
@@ -1610,6 +1627,38 @@ mod tests {
             keys(&looped),
             vec![("builtin/plumbing".to_string(), JsonValue::Null)]
         );
+    }
+
+    // A local test: a turn that only posted a browser card read "Ran a command" for
+    // `python AGENTS.py`, the runtime's own memory script, which INSTAFY.md tells the model to run.
+    #[test]
+    fn the_memory_script_is_a_look() {
+        let root = tempfile::tempdir().expect("tmp");
+        let packs = map_packs(root.path());
+        for script in [
+            "python AGENTS.py",
+            "python3 AGENTS.py",
+            "python3 ./AGENTS.py",
+            "cd /workspace && python AGENTS.py",
+        ] {
+            let activity = label(&packs, script).unwrap_or_else(|| panic!("{script}"));
+            assert_eq!(activity["key"], json!("builtin/plumbing"), "{script}");
+        }
+        assert_eq!(
+            label_command_with(&packs, Some(&json!(["python3", "AGENTS.py"])), "").unwrap()["key"],
+            json!("builtin/plumbing")
+        );
+        // Another script, another argument, or the script's output sent to a file is not it.
+        for script in [
+            "python agents.py",
+            "python tools/AGENTS.py",
+            "python AGENTS.py --write",
+            "python AGENTS.py > memory.txt",
+            "python -c 'import AGENTS'",
+            "node AGENTS.py",
+        ] {
+            assert_eq!(label(&packs, script), None, "{script}");
+        }
     }
 
     // A local test: Details read "Read a source" for `uw cite --help` and

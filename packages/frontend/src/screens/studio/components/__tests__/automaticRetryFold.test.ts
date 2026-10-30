@@ -206,21 +206,155 @@ describe("an automatic retry reads as one turn", () => {
     expect(isAutomaticRetryPending(rows[1])).toBe(false);
   });
 
-  it("keeps a resend the person asked for with Try again as they sent it", () => {
+});
+
+// A local test: a turn failed (the AI didn't answer), the person
+// pressed Try again, and the chat showed their message twice. Their resend now
+// folds as Instafy's own does; it is still their turn (billing reads only
+// `retryAutomatic`, which it does not carry).
+describe("a resend the person asked for with Try again reads as one turn", () => {
+  it("leaves out the repeated prompt and moves the failed attempt into the retry's Details", () => {
+    const personResend = resend({ automatic: false, runId: RETRY_RUN });
+    expect(JSON.stringify(personResend.metadata)).not.toContain("retryAutomatic");
     const rows = transcript([
       prompt,
       ...failedAttempt,
-      resend({ automatic: false, runId: RETRY_RUN }),
+      personResend,
       step("retry-pwd", RETRY_JOB, RETRY_RUN, 6),
       retryReply,
     ]);
 
-    expect(rows.map((row) => row.id)).toEqual([
-      "prompt",
-      `agent-job-thread:${FAILED_JOB}`,
-      "resend",
-      `agent-job-thread:${RETRY_JOB}`,
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${RETRY_JOB}`]);
+    expect(readEarlierAttempts(rows[1]).map((attempt) => attempt.map((entry) => entry.id))).toEqual([
+      ["retry-status", "failed-pwd", "failure"],
     ]);
-    expect(readEarlierAttempts(rows[3])).toEqual([]);
+  });
+
+  it("marks the failed turn as trying again until the retry shows something", () => {
+    const rows = transcript([prompt, ...failedAttempt, resend({ automatic: false, runId: RETRY_RUN })]);
+
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${FAILED_JOB}`]);
+    expect(isAutomaticRetryPending(rows[1])).toBe(true);
+  });
+
+  it("shows a resend with other words, or from someone else, as sent", () => {
+    for (const other of [
+      resend({ automatic: false, runId: RETRY_RUN, content: "Try roborock.de instead." }),
+      { ...resend({ automatic: false, runId: RETRY_RUN }), authorId: "someone-else" },
+    ]) {
+      const rows = transcript([prompt, ...failedAttempt, other, step("retry-pwd", RETRY_JOB, RETRY_RUN, 6), retryReply]);
+
+      expect(rows.map((row) => row.id)).toEqual([
+        "prompt",
+        `agent-job-thread:${FAILED_JOB}`,
+        "resend",
+        `agent-job-thread:${RETRY_JOB}`,
+      ]);
+      expect(readEarlierAttempts(rows[3])).toEqual([]);
+    }
+  });
+
+  // Try again stays on an older failure, and a resend can wait behind a busy
+  // turn: folded, the answer would sit under a later, unrelated message, and
+  // the first prompt would have no answer.
+  it("shows a resend that went out after another turn, and keeps the failed turn in place", () => {
+    const OTHER_JOB = "c7a1b2d3-0000-4000-8000-000000000001";
+    const OTHER_RUN = "c7a1b2d3-0000-4000-8000-000000000002";
+    const otherPrompt = message({
+      id: "other",
+      role: "user",
+      content: "Never mind, what's the weather in Porto?",
+      timestamp: 4.2,
+      metadata: { runId: OTHER_RUN },
+    });
+    const otherReply = message({
+      id: "other-reply",
+      content: "Sunny, 21 degrees.",
+      timestamp: 4.4,
+      metadata: { jobId: OTHER_JOB, runId: OTHER_RUN, source: "agent", outcome: "succeeded" },
+    });
+    for (const between of [[otherPrompt, otherReply], [otherReply]]) {
+      for (const automatic of [false, true]) {
+        const rows = transcript([
+          prompt,
+          ...failedAttempt,
+          ...between,
+          resend({ automatic, runId: RETRY_RUN }),
+          step("retry-pwd", RETRY_JOB, RETRY_RUN, 6),
+          retryReply,
+        ]);
+
+        expect(rows.map((row) => row.id)).toEqual([
+          "prompt",
+          `agent-job-thread:${FAILED_JOB}`,
+          ...between.map((entry) => entry.id),
+          "resend",
+          `agent-job-thread:${RETRY_JOB}`,
+        ]);
+        expect(isAutomaticRetryPending(rows[1])).toBe(false);
+        expect(readEarlierAttempts(rows.at(-1) as ChatMessage)).toEqual([]);
+      }
+    }
+    // The retry's own first step stored just before its prompt is no other turn.
+    const rows = transcript([
+      prompt,
+      ...failedAttempt,
+      step("retry-pwd", RETRY_JOB, RETRY_RUN, 4.5),
+      resend({ automatic: false, runId: RETRY_RUN }),
+      retryReply,
+    ]);
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${RETRY_JOB}`]);
+  });
+
+  // Pressing Try again on a retry that failed too: the turn carries every try
+  // before the one that answered, oldest first.
+  it("carries every earlier try when a retry failed and was tried again", () => {
+    const THIRD_JOB = "5b0c7d1e-0000-4000-8000-000000000003";
+    const THIRD_RUN = "5b0c7d1e-0000-4000-8000-000000000004";
+    const secondFailure = message({
+      id: "failure-2",
+      content: RAW_FAILURE,
+      timestamp: 6.5,
+      messageType: "error",
+      metadata: { jobId: RETRY_JOB, runId: RETRY_RUN, source: "agent", outcome: "failed", messageType: "error" },
+    });
+    const secondResend = message({
+      id: "resend-2",
+      role: "user",
+      content: PROMPT_TEXT,
+      timestamp: 7,
+      metadata: {
+        runId: THIRD_RUN,
+        prompt_metadata: buildRunFailureRetryMetadata(secondFailure, { automatic: false }),
+      },
+    });
+    const thirdReply = message({
+      id: "third-reply",
+      content: "Built the comparison page.",
+      timestamp: 9,
+      metadata: { jobId: THIRD_JOB, runId: THIRD_RUN, source: "agent", outcome: "succeeded" },
+    });
+    const head = [
+      prompt,
+      ...failedAttempt,
+      resend({ automatic: false, runId: RETRY_RUN }),
+      step("retry-pwd", RETRY_JOB, RETRY_RUN, 6),
+      secondFailure,
+      secondResend,
+    ];
+
+    const pending = transcript(head);
+    expect(pending.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${RETRY_JOB}`]);
+    expect(isAutomaticRetryPending(pending[1])).toBe(true);
+
+    const rows = transcript([...head, step("third-pwd", THIRD_JOB, THIRD_RUN, 8), thirdReply]);
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${THIRD_JOB}`]);
+    expect(readEarlierAttempts(rows[1]).map((attempt) => attempt.map((entry) => entry.id))).toEqual([
+      ["retry-status", "failed-pwd", "failure"],
+      ["retry-pwd", "failure-2"],
+    ]);
+    expect(agentJobThreadAcknowledgementIds(rows[1])).toEqual(
+      expect.arrayContaining(["failure", "failure-2", "third-reply"]),
+    );
   });
 });
