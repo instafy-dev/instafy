@@ -2098,14 +2098,15 @@ mod tests {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
-            "not \"The page check returned no output…\" or \"produced no visible report\"",
-            "Leave out what you could not look at unless they asked (\"I could not visually inspect those images\")",
+            "\"I couldn't check how the page looks yet\", not \"The page check returned no output…\", \"produced no visible report\" or \"I could not visually inspect those images\"",
             "\"Instafy's browser\", not \"the shared browser\"",
             "not \"the map needs a validation pass\"",
             "\"models I couldn't confirm, marked not checked\", not \"placeholder rows\"",
         ] {
             assert!(doc.contains(needle), "{needle}");
         }
+        // What could not be looked at stays in the reply, in plain words (the builder skill's "what is unverified").
+        assert!(!doc.contains("Leave out what you could not look at"));
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
         let previous = include_str!("legacy/agents-doc-v3.md");
         assert!(!previous.contains("the shared browser"));

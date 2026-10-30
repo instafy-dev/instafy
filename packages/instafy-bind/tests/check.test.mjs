@@ -19,7 +19,8 @@ function compareSite(items) {
   execFileSync(process.execPath, [BIN, "init", dir, "--starter", "compare"], { env: cleanEnv });
   const data = JSON.parse(fs.readFileSync(path.join(dir, "data.json"), "utf8"));
   data.title = "Three running shoes for flat feet";
-  data.items = items.map((name, i) => ({ ref: `shoes:item-${i}`, name, facts: {} }));
+  // each row says where it comes from (a search result's site), so these tests judge only which items are shown
+  data.items = items.map((name, i) => ({ ref: `shoes:item-${i}`, name, facts: {}, found: "reviews.example.net" }));
   fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify(data, null, 2));
   return dir;
 }
@@ -96,11 +97,6 @@ test("text that only says an item is unavailable does not count as showing it", 
 test("check with nothing to check says how to give the list (exit 2)", () => {
   const dir = compareSite(["Brooks Adrenaline GTS 24"]);
   try {
-    // the row says where it comes from (a search result's site), so only the list of requested items is missing
-    const file = path.join(dir, "data.json");
-    const data = JSON.parse(fs.readFileSync(file, "utf8"));
-    data.items[0].found = "reviews.example.net";
-    fs.writeFileSync(file, JSON.stringify(data));
     const out = run("check", dir);
     assert.equal(out.status, 2);
     assert.match(out.stdout, /nothing to check: pass --expect/);
@@ -236,8 +232,9 @@ test("on a ranked page, a row with no price at all is noted as listed apart too"
 });
 
 // A comparison whose maker's site never answered listed "Latest eligible model 1/2/3", every cell unknown, although a
-// search had named the models. A row is a candidate something named: the request, a page read, or only a search
-// result ("found"). The check reads that from the data's shape, never from the row's words.
+// search had named the models. A row is a candidate a page read names, or only a search result ("found", that result's
+// site). The check reads that from the data's shape, never from the row's words, and the lists the same turn writes
+// (`--expect`, data.json's "expect") never vouch for a row.
 test("check fails a comparison row that says nowhere where it comes from", () => {
   const unread = { note: "no official product page could be read" };
   const row = (name, extra = {}) => ({ ref: `vacuum:${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, name, why: "", facts: { price: unread, weight: unread, rating: unread, warranty: unread }, ...extra });
@@ -272,11 +269,42 @@ test("check fails a comparison row that says nowhere where it comes from", () =>
     row("G", { sources: [{ name: "Review One", url: "http://reviews.example.net/s8" }] }),
     row("H", { store: { name: "Shop", url: "https://shop.example.net/h", readable: true }, found: " " }),
   ])).map((r) => r.item), ["E", "F", "G", "H"]);
-  // what the request named is a row by itself, from --expect or the data's own list
-  assert.deepEqual(uncitedRows(data([row("Brightvac S8 Pro")]), ["Brightvac S8 Pro"]), []);
-  assert.deepEqual(uncitedRows(data([row("Brightvac S8 Pro")], { expect: ["Brightvac S8 Pro"] })), []);
+  // "found" names a site, as a search result gives it, not a word ("search") or an address
+  assert.deepEqual(uncitedRows(data([
+    row("I", { found: "search" }),
+    row("J", { found: "https://reviews.example.net/s8" }),
+    row("K", { found: "reviews.example.net" }),
+  ])).map((r) => r.item), ["I", "J"]);
+  // a list of names the turn writes itself is no source: the data's own "expect" does not let a row pass
+  assert.deepEqual(uncitedRows(data([row("Brightvac S8 Pro")], { expect: ["Brightvac S8 Pro"] })).map((r) => r.item), ["Brightvac S8 Pro"]);
   // a ranked page (no columns) is not judged by this rule
   assert.deepEqual(uncitedRows({ items: [{ name: "Top pick", price: unread }] }), []);
+});
+
+// The rows a turn built when the maker's site never answered: each cell unknown, nothing read, and the turn listed the
+// rows' own names (or the brand) as the request's items. Listing a row is not where it comes from, so the check fails.
+test("check fails placeholder rows even when --expect or the data's own list names them", () => {
+  const unread = { note: "Unknown: no official product page could be read" };
+  const names = [1, 2, 3].map((n) => `Latest eligible Brightvac model ${n}`);
+  const dir = optionsSite("compare", (data) => ({
+    ...data,
+    items: names.map((name, i) => ({ ref: `vacuum:model-${i + 1}`, name, why: "", facts: { price: unread, weight: unread, rating: unread, warranty: unread } })),
+  }));
+  try {
+    for (const expect of [names.join(","), "Brightvac"]) {
+      const out = run("check", dir, "--expect", expect);
+      assert.equal(out.status, 1, `--expect ${expect}: ${out.stdout}`);
+      assert.match(out.stdout, /^VALUES: 3 value\(s\) to fix in data\.json:$/m);
+      assert.match(out.stdout, /Latest eligible Brightvac model 1: nothing says where this row comes from\./);
+    }
+    const file = path.join(dir, "data.json");
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), expect: names }));
+    const own = run("check", dir);
+    assert.equal(own.status, 1, own.stdout);
+    assert.match(own.stdout, /^VALUES: 3 value\(s\) to fix in data\.json:$/m);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a filter without a label fails the check: the page would have nothing to call the limit", () => {

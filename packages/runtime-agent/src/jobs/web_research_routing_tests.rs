@@ -964,7 +964,15 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
         assert!(carried.contains(needle), "{needle}");
     }
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
-    assert!(!flat(BROWSER_SKILL).contains("ends that page; never retry it"));
+    // The whole skill, as a turn that reads it sees it, not only its carried part.
+    let whole = flat(BROWSER_SKILL);
+    assert!(!whole.contains("ends that page; never retry it"));
+    for stop in ["and stop", "where to stop"] {
+        assert!(!whole.contains(stop), "{stop}");
+    }
+    assert!(whole.contains(
+        "If the tool returns an error, retry it at most once, then say in plain words what did not work: a failed page ends that page, not the task (\"Finding a page\" says what comes next)."
+    ));
 
     let tmp = scaffolded_space();
     let prompt = fresh_prompt(

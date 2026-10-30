@@ -317,8 +317,9 @@ The high-level `instafy_shared_browser` MCP server is the only normal Shared
 Browser automation path. It attaches to provisioned headed Chromium, selects the
 focused page, bounds snapshot output, and emits cursor/ticker events. Do not
 replace it with shell commands, inline Node, Playwright, CDP, direct action-log
-writes, or a new browser process. If the tool returns an error, say in plain
-words what did not work and stop after at most one focused retry.
+writes, or a new browser process. If the tool returns an error, retry it at most
+once, then say in plain words what did not work: a failed page ends that page,
+not the task ("Finding a page" says what comes next).
 
 ## Browser learning examples
 
