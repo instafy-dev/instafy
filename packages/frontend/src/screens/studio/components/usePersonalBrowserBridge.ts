@@ -847,7 +847,7 @@ export function usePersonalBrowserBridge({
       }
       const mutationEpoch = ++agentControlMutationEpochRef.current;
       // Every enable names the handoff Studio saw, so Desktop never resumes
-      // a different pending handoff. Toast, pill, Retry and Let AI continue
+      // a different pending handoff. Toast, pill, Retry and Let Octo continue
       // all pass through here.
       const bound = boundHandoffRef.current;
       if (bound && (bound.ownerId !== ownerId || Date.now() >= bound.expiresAtMs)) {
@@ -1034,7 +1034,7 @@ export function usePersonalBrowserBridge({
   return {
     /** The person's own choice; null until they pick one. */
     approvalModeChoice,
-    /** The mode a press, Resume, Retry or Let AI continue asks for. */
+    /** The mode a press, Resume, Retry or Let Octo continue asks for. */
     preferredApprovalMode,
     setPreferredApprovalMode,
     agentError,
@@ -1057,7 +1057,7 @@ export function usePersonalBrowserBridge({
         ? status.ownerId
         : null,
     /**
-     * A sign-in handoff still waiting for Let AI continue. Unlike
+     * A sign-in handoff still waiting for Let Octo continue. Unlike
      * `status.humanInputRequest`, it survives the navigations that follow a
      * sign-in, so a new browser task stays blocked until the handoff is used.
      */

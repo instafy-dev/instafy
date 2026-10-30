@@ -19,6 +19,8 @@ export type BrowserSessionPage = {
   agentTabNumber?: number;
   /** One of Octo's tabs that an earlier run left open ("Octo's earlier tab"). */
   leftover?: boolean;
+  /** The run that left this ordinary tab open as its chat's page. */
+  leftByRun?: string;
 };
 
 export type BrowserSessionPageTarget = Pick<BrowserSessionPage, "id" | "url" | "host" | "label">;

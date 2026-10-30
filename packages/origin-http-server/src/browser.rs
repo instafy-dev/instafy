@@ -75,6 +75,11 @@ struct BrowserPageResponse {
     /// number): Octo is not reading it, and Keep tab makes it an ordinary tab.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     leftover: bool,
+    /// The run that left this ordinary tab open as its chat's page: Octo
+    /// worked in it last while the run's own page was still blank. Studio
+    /// shows it as that chat's page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    left_by_run: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1138,6 +1143,7 @@ async fn handle_browser_pages(
                 kept: agent_tabs.kept.contains(&target.id),
                 agent_tab_number: agent_tabs.number_of(&target.id),
                 leftover: agent_tabs.is_leftover(&target.id),
+                left_by_run: agent_tabs.left_by_run(&target.id).map(str::to_string),
             }
         })
         .collect();
@@ -2399,6 +2405,7 @@ mod tests {
             kept: false,
             agent_tab_number: None,
             leftover: false,
+            left_by_run: None,
         };
         let value = serde_json::to_value(page).expect("serialize browser page");
         assert_eq!(
@@ -2415,6 +2422,29 @@ mod tests {
         assert!(value.get("kept").is_none());
         assert!(value.get("agentTabNumber").is_none());
         assert!(value.get("leftover").is_none());
+        assert!(value.get("leftByRun").is_none());
+    }
+
+    #[test]
+    fn a_tab_a_run_left_its_chat_names_that_run_in_the_page_list() {
+        let page = BrowserPageResponse {
+            id: "page-4".to_string(),
+            url: "https://www.trams.example/planner".to_string(),
+            host: "www.trams.example".to_string(),
+            label: "Planner".to_string(),
+            title: None,
+            is_active: true,
+            can_go_back: false,
+            can_go_forward: false,
+            opened_by: None,
+            kept: false,
+            agent_tab_number: None,
+            leftover: false,
+            left_by_run: Some("7a1f6f0e-2c4b-4c1e-9a43-0d6c2b1e5f10".to_string()),
+        };
+        let value = serde_json::to_value(page).expect("serialize browser page");
+        assert_eq!(value["leftByRun"], "7a1f6f0e-2c4b-4c1e-9a43-0d6c2b1e5f10");
+        assert!(value.get("openedBy").is_none());
     }
 
     #[test]
@@ -2432,6 +2462,7 @@ mod tests {
             kept: true,
             agent_tab_number: Some(2),
             leftover: false,
+            left_by_run: None,
         };
         let value = serde_json::to_value(page).expect("serialize browser page");
         assert_eq!(value["openedBy"], "agent");
@@ -2453,6 +2484,7 @@ mod tests {
             kept: false,
             agent_tab_number: None,
             leftover: true,
+            left_by_run: None,
         };
         let value = serde_json::to_value(earlier).expect("serialize browser page");
         assert_eq!(value["openedBy"], "agent");

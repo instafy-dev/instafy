@@ -105,6 +105,27 @@ function emitInputReady(socket: FakeWebSocket | undefined) {
   );
 }
 
+/** The origin's answer to a resize it took: the page has that size now. */
+function answerResizes(socket: FakeWebSocket) {
+  for (const sent of socket.sent.map((value) => JSON.parse(value))) {
+    if (sent.type !== "resize") continue;
+    socket.emit(
+      "message",
+      Object.assign(new Event("message"), {
+        data: JSON.stringify({
+          type: "viewport",
+          pageId: "PAGE",
+          width: sent.width,
+          height: sent.height,
+          dpr: sent.dpr,
+          deviceWidth: Math.round(sent.width * sent.dpr),
+          deviceHeight: Math.round(sent.height * sent.dpr),
+        }),
+      }),
+    );
+  }
+}
+
 function socketsMatching(path: string): FakeWebSocket[] {
   return FakeWebSocket.instances.filter((socket) => socket.url.includes(path));
 }
@@ -709,6 +730,7 @@ describe("CdpScreencastViewer", () => {
     // Its input comes back, for the same driver: the page gets the new size.
     await act(async () => root.render(renderViewer(true, true)));
     expect(resizes()).toEqual([{ type: "resize", width: 1024, height: 600, dpr: 1 }]);
+    await act(async () => answerResizes(inputSocket));
 
     // Off screen and back, nothing changed: nothing is sent again.
     await act(async () => root.render(renderViewer(false, true)));
@@ -773,6 +795,7 @@ describe("CdpScreencastViewer", () => {
     expect(
       inputSocket.sent.map((value) => JSON.parse(value)).filter((value) => value.type === "resize"),
     ).toHaveLength(1);
+    await act(async () => answerResizes(inputSocket));
 
     await act(async () => root.render(renderViewer(false, null)));
     await act(async () => root.render(renderViewer(true, "human:member")));
@@ -785,5 +808,92 @@ describe("CdpScreencastViewer", () => {
     expect(
       inputSocket.sent.map((value) => JSON.parse(value)).filter((value) => value.type === "resize"),
     ).toHaveLength(2);
+  });
+
+  // A view that could not drive yet when its input connected: the origin
+  // echoes the size it asked for without setting it. Once this view drives,
+  // the page takes its size; before, a phone kept the desktop's page, tiny
+  // and letterboxed.
+  it("sets the page to this view's size when it could not drive yet as its input connected", async () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    const renderViewer = (inputEnabled: boolean) => (
+      <CdpScreencastViewer
+        wsUrl="wss://runtime.test/browser/screencast"
+        connectionGeneration={0}
+        inputWsUrl="wss://runtime.test/browser/input"
+        inputAvailable
+        inputAuthorityKey="human:owner"
+        active
+        inputEnabled={inputEnabled}
+        onConnected={vi.fn()}
+        onDisconnected={vi.fn()}
+        onTransportError={vi.fn()}
+      />
+    );
+    canvasRect = { ...canvasRect, width: 375, height: 640 } as DOMRect;
+    await act(async () => root.render(renderViewer(false)));
+    const [inputSocket] = socketsMatching("/browser/input");
+    const resizes = () =>
+      inputSocket.sent.map((value) => JSON.parse(value)).filter((value) => value.type === "resize");
+    // This view gets to drive before the origin's ready arrives.
+    await act(async () => root.render(renderViewer(true)));
+    await act(async () => {
+      inputSocket.emit(
+        "message",
+        Object.assign(new Event("message"), {
+          data: JSON.stringify({ type: "ready", pageId: "PAGE", width: 375, height: 640, dpr: 1, deviceWidth: 375, deviceHeight: 640 }),
+        }),
+      );
+    });
+    expect(resizes()).toEqual([{ type: "resize", width: 375, height: 640, dpr: 1 }]);
+  });
+
+  // A size sent while control was changing hands that the browser never took
+  // (no answer) goes again when the view is back on screen with its input.
+  it("sends this view's size again when the browser never took it", async () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    vi.useFakeTimers();
+    const renderViewer = (active: boolean) => (
+      <CdpScreencastViewer
+        wsUrl="wss://runtime.test/browser/screencast"
+        connectionGeneration={0}
+        inputWsUrl="wss://runtime.test/browser/input"
+        inputAvailable
+        inputAuthorityKey="human:owner"
+        active={active}
+        inputEnabled
+        onConnected={vi.fn()}
+        onDisconnected={vi.fn()}
+        onTransportError={vi.fn()}
+      />
+    );
+    await act(async () => root.render(renderViewer(true)));
+    const [inputSocket] = socketsMatching("/browser/input");
+    await act(async () => emitInputReady(inputSocket));
+    const resizes = () =>
+      inputSocket.sent.map((value) => JSON.parse(value)).filter((value) => value.type === "resize");
+    canvasRect = { ...canvasRect, width: 375, height: 640 } as DOMRect;
+    FakeResizeObserver.instances[0]?.trigger();
+    await act(async () => {
+      vi.advanceTimersByTime(120);
+    });
+    expect(resizes()).toEqual([{ type: "resize", width: 375, height: 640, dpr: 1 }]);
+    // No answer came. Off screen and back: the page gets this size again.
+    await act(async () => root.render(renderViewer(false)));
+    await act(async () => root.render(renderViewer(true)));
+    expect(resizes()).toHaveLength(2);
+    // Once the browser took it, coming back sends nothing.
+    await act(async () => answerResizes(inputSocket));
+    await act(async () => root.render(renderViewer(false)));
+    await act(async () => root.render(renderViewer(true)));
+    expect(resizes()).toHaveLength(2);
   });
 });

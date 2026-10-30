@@ -26,7 +26,14 @@ export type RuntimeBrowserSessionPage = {
    * no number, and not one Octo is reading.
    */
   leftover?: boolean;
+  /**
+   * The run that left this ordinary tab open as its chat's page: Octo worked
+   * in it last while the run's own page was still blank.
+   */
+  leftByRun?: string;
 };
+
+const RUN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The highest number a Shared Browser run gives one of Octo's tabs. */
 const MAX_AGENT_TAB_NUMBER = 999;
@@ -320,6 +327,9 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
         ...(openedBy === "agent" && record.kept === true ? { kept: true } : {}),
         ...(agentTabNumber ? { agentTabNumber } : {}),
         ...(openedBy === "agent" && record.leftover === true ? { leftover: true } : {}),
+        ...(openedBy !== "agent" && typeof record.leftByRun === "string" && RUN_ID_PATTERN.test(record.leftByRun)
+          ? { leftByRun: record.leftByRun }
+          : {}),
       } satisfies RuntimeBrowserSessionPage;
     })
     .filter((page): page is RuntimeBrowserSessionPage => Boolean(page));

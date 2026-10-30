@@ -184,7 +184,7 @@ describe("Personal handoff with the real React browser bridge", () => {
     else expect(call).not.toHaveProperty("knownHosts");
   });
 
-  it("binds Let AI continue to the sign-in handoff and refuses a card press until it is used", async () => {
+  it("binds Let Octo continue to the sign-in handoff and refuses a card press until it is used", async () => {
     let listener: ((status: InstafyDesktopPersonalBrowserStatus) => void) | null = null;
     window.instafyDesktop = { ...window.instafyDesktop!, onPersonalBrowserStatus: (next) => {
       listener = next;
@@ -217,7 +217,7 @@ describe("Personal handoff with the real React browser bridge", () => {
     expect(await pending).toBe(true);
   });
 
-  it("keeps refusing a card press after Let AI continue failed before Desktop took the handoff", async () => {
+  it("keeps refusing a card press after Let Octo continue failed before Desktop took the handoff", async () => {
     let listener: ((status: InstafyDesktopPersonalBrowserStatus) => void) | null = null;
     window.instafyDesktop = { ...window.instafyDesktop!, onPersonalBrowserStatus: (next) => {
       listener = next;

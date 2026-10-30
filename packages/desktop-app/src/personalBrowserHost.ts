@@ -192,7 +192,7 @@ type PersonalBrowserResolvedTarget = {
   descriptor: PersonalBrowserTargetDescriptor;
 };
 
-// A sign-in handoff keeps the run's approval mode: Let AI continue within the
+// A sign-in handoff keeps the run's approval mode: Let Octo continue within the
 // handoff's window, for the same project, profile and owner, in the same mode,
 // does not show the start confirmation again.
 type PersonalBrowserHandoffResume = {
@@ -960,7 +960,7 @@ export class PersonalBrowserHost {
     const requestedHosts = approvalMode === "routine"
       ? normalizePersonalBrowserKnownHosts(Array.isArray(requestedKnownHosts) ? requestedKnownHosts : [])
       : [];
-    // Let AI continue after a sign-in handoff keeps the run's mode and its
+    // Let Octo continue after a sign-in handoff keeps the run's mode and its
     // hosts. A start that names a host the owner has not seen in a start
     // dialog shows the dialog again.
     const handoff = this.agentControlEnabled

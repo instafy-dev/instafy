@@ -31,7 +31,7 @@ export function personalBrowserOwnerTier(status: PersonalBrowserApprovalStatus |
  * - Studio starting the browser by itself asks for routine only from an
  *   owner-tier Desktop and only when the person has not chosen Ask, so it
  *   never requests an older host's routine.
- * - Otherwise (a press, Resume, Retry, Let AI continue) the person's choice.
+ * - Otherwise (a press, Resume, Retry, Let Octo continue) the person's choice.
  */
 export function resolvePersonalBrowserApprovalMode(input: {
   status: PersonalBrowserApprovalStatus | null | undefined;

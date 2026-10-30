@@ -130,11 +130,16 @@ type HostProps = {
   pageUrl?: string;
   agentPageIds?: string[];
   hidden?: boolean;
+  /** A narrow view: the toolbar's controls fold into a menu. */
+  compact?: boolean;
+  /** The person's own turn paused on their fields (`request_human_input`). */
+  pausedRunId?: string;
+  teammates?: boolean;
 };
 
 /** Studio's part: tabs are read only while the view is opening or live. */
 function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl = "https://www.visitlisboa.com/",
-  agentPageIds, hidden = false }: HostProps) {
+  agentPageIds, hidden = false, compact = false, pausedRunId, teammates = false }: HostProps) {
   const [kind, setKind] = useState<HostedBrowserViewKind | null>(null);
   const pagesActive = hostedBrowserPagesActive(kind);
   const [ready, setReady] = useState(false);
@@ -156,11 +161,21 @@ function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl
     controlOwner={agentHolds ? { kind: "agent", displayName: "Octo" } : { kind: "human" }}
     onTakeOverAgent={async () => true} spaceBusy={agentHolds}
     onViewStateChange={setKind} conversationId={conversationId}
+    {...(pausedRunId ? { humanInputIdentityKey: `user-1:${conversationId}`, humanInputRunIds: new Set([pausedRunId]) } : {})}
+    spaceHasTeammates={teammates}
     sharedBrowserCapabilitiesResolved sharedBrowserCapabilitiesAvailable
     sharedBrowserViewerKind="rfb" sharedBrowserAvailableViewerKinds={["rfb"]}
     sharedBrowserRfbCapabilities={{ renderScale: 1, maxFramebufferPixels: 8_294_400, ...(viewOnly ? { viewOnly: true } : {}) }}
-    sharedBrowserChrome={{ pages, resolved: true, pendingAction: null, error: null, agentPageIds,
+    sharedBrowserChrome={{ pages, resolved: true, pendingAction: null, error: null, agentPageIds, compact,
       onNavigate: noop, onBack: noop, onForward: noop, onReload: noop, onFocusPage: noop, onClearError: noop }} />;
+}
+
+function signInPause(seq: number, runId: string): RuntimeBrowserSessionAction {
+  return { ...action(seq, "Waiting for you"), type: "human_input", humanInputRequest: {
+    version: 1, handoffId: "handoff-1", runId, initiatorUserId: "user-1", browserPageId: "PAGE1",
+    origin: "https://www.visitlisboa.com", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000,
+    fields: [{ label: "Email" }, { label: "Password" }],
+  } } as RuntimeBrowserSessionAction;
 }
 
 function action(seq: number, label: string): RuntimeBrowserSessionAction {
@@ -381,5 +396,35 @@ describe("Shared Browser view while Octo drives", () => {
     await advance(50);
     expect(await handOverOutsideAct({ kind: "human", participantId: "self" },
       { agentHolds: false, viewOnly: true, agentPageIds: ["PAGE1"] }, "/browser/vnc")).toEqual(["driving /browser/vnc"]);
+  });
+  // The line that says a sign-in stays in the space's browser sat in the
+  // toolbar's controls, which a narrow view (every phone, a split view) folds
+  // into the participants menu: the person never saw it before signing in.
+  it("says what a sign-in leaves in the space's browser in a row of its own, at every width", async () => {
+    const RUN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const note = () => document.querySelector('[data-testid="browser-human-input-sign-in-note"]');
+    await act(async () => root.render(<Host agentHolds={false} compact pausedRunId={RUN} />));
+    await advance(1_000);
+    expect(note()).toBeNull();
+    mocks.actions = [signInPause(1, RUN)];
+    await act(async () => root.render(<Host agentHolds={false} compact pausedRunId={RUN} />));
+    await advance(100);
+    expect(note()?.textContent).toBe("This space's browser keeps you signed in for its chats until you clear it.");
+    expect(note()?.getAttribute("role")).toBe("status");
+    // Not inside the folded menu: no menu is open.
+    expect(document.querySelector('[aria-label="Browser participants and control"]')).toBeNull();
+    // In a team space it names the members.
+    await act(async () => root.render(<Host agentHolds={false} compact pausedRunId={RUN} teammates />));
+    await advance(100);
+    expect(note()?.textContent).toBe("This space's browser keeps you signed in for its chats and members until you clear it.");
+    // Wide too.
+    await act(async () => root.render(<Host agentHolds={false} pausedRunId={RUN} />));
+    await advance(100);
+    expect(note()?.textContent).toBe("This space's browser keeps you signed in for its chats until you clear it.");
+    // Another person's pause, or none, says nothing.
+    mocks.actions = [];
+    await act(async () => root.render(<Host agentHolds={false} pausedRunId={RUN} />));
+    await advance(100);
+    expect(note()).toBeNull();
   });
 });

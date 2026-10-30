@@ -171,7 +171,7 @@ it waits while a manual step is pending here, and a turn that stopped for one is
 back (see "Hand-back" in [Shared Browser](Shared-Browser.md)).
 
 Desktop reports `approvalPolicyVersion: 2` in its status. On such a host
-"routine" is the owner's tier, the same for a press, Resume, **Let AI continue**
+"routine" is the owner's tier, the same for a press, Resume, **Let Octo continue**
 and a start Studio makes by itself. Electron shows one native confirmation per
 run with three buttons: **Cancel** ends the start, **Ask me each step** starts
 the run in Ask mode, and **Allow** starts routine. When Studio passes the card's
@@ -604,7 +604,7 @@ only in the visible browser, so the rules are the ones a person sees:
 ### Manual steps and continuation
 
 **Take over** in the surface dialog pauses agent control for a manual step, even
-when the AI has not requested one. After control returns, **Let AI continue**
+when the AI has not requested one. After control returns, **Let Octo continue**
 appears in the existing browser toolbar; no extra takeover header is added.
 Whenever the agent holds control of the Personal Browser, with or without a
 turn of the conversation on screen working, a compact **Octo is reading** row
@@ -625,7 +625,7 @@ finish; revocation alone is not sufficient. Until then, manual input and Resume
 remain blocked. A 15-second drain timeout reports an error but keeps the shield
 locked rather than falsely claiming control has returned.
 
-**Let AI continue** is an explicit new browser turn, not resumption of a suspended
+**Let Octo continue** is an explicit new browser turn, not resumption of a suspended
 tool call. During a manual step, it is the only resume-and-send action: ordinary
 toolbar Resume and Retry agent control are hidden, including after a failed
 continuation. Retrying waits for the fresh runtime's readiness rather than reusing
@@ -636,7 +636,7 @@ control. If startup fails before a fresh runtime can be identified,
 use Pause to return manual control before retrying continuation.
 Continuation clears highlights and creates fresh control authority; the new
 turn observes the page again instead of replaying old indices.
-A handoff keeps the run's approval mode: **Let AI continue** within the
+A handoff keeps the run's approval mode: **Let Octo continue** within the
 request's 10-minute window, for the same project, browser profile and owner,
 and in the same mode, does not show the routine start confirmation again, and
 the card's hosts carry over. A start that names a host the owner has not seen
@@ -646,7 +646,7 @@ once. Turning agent control off, Clear data, closing or releasing the browser,
 or a change of owner or project cancels it (Escape does not apply while the
 handoff has already paused control), and a different mode shows the
 confirmation as usual. Studio passes the handoff's `handoffId` on every enable,
-including toolbar Resume, the status pill and Let AI continue, until the
+including toolbar Resume, the status pill and Let Octo continue, until the
 handoff expires or a newer one replaces it, so Desktop never resumes a
 different handoff. Desktop clears the request from its status on every
 navigation, including a sign-in redirect, but Studio keeps the manual step

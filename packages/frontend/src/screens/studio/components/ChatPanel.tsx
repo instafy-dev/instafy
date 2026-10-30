@@ -202,8 +202,14 @@ import { shouldSuppressOuterAvatarForConversationThread } from "./conversationTh
 import { resolveComposerGhostSuggestion } from "./composerGhostSuggestion";
 import { useChatBrowserSessionState } from "./useChatBrowserSessionState";
 import { useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeting";
-import { useChatBrowserTab } from "./chatBrowserTab";
-import { useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
+import {
+  CHAT_BROWSER_VIEW_START,
+  browserTurnUnderWay,
+  nextChatBrowserViewStep,
+  useChatBrowserTab,
+  type ChatBrowserViewState,
+} from "./chatBrowserTab";
+import { useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
 import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
 import { canUseDesktopCodexAuthJson } from "./desktopCodexAuthJson";
@@ -830,6 +836,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     },
     [browserSessionOpen, handleToggleBrowserSession, setBrowserSubtab],
   );
+  // Octo paused on the person's fields: the page where they sign in comes
+  // forward, as the Browser tab would.
+  const showBrowserForHumanInput = useCallback(() => handleBrowserSubtabChange("browser"), [handleBrowserSubtabChange]);
+  const runRecords = useMemo(() => Object.values(runs ?? {}), [runs]);
+  useShowBrowserOnHumanInput({
+    identity: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
+    userId: currentUserId,
+    messages,
+    runs: runRecords,
+    show: showBrowserForHumanInput,
+  });
   useEffect(() => {
     if (conversationWorkspace && !jobThread && surfaces.activeId === "browser" && hasHiddenBrowserSession && !browserSessionOpen) {
       handleToggleBrowserSession();
@@ -1855,7 +1872,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   // This chat's own tab in Instafy's browser (chatBrowserTab.ts): its browser
   // turns go there, never to a page another chat left on screen.
-  const projectRuns = useMemo(() => Object.values(runs ?? {}), [runs]);
+  const projectRuns = runRecords;
   const chatBrowserTab = useChatBrowserTab({
     scope: {
       userId: currentUserId,
@@ -1870,40 +1887,50 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   const chooseChatBrowserTab = chatBrowserTab.choose;
   const resolveChatBrowserTab = chatBrowserTab.resolveForTurn;
-  // The chat's Browser view shows the chat's tab: once when the view comes on
-  // screen for this chat, and once for each new tab the chat gets. Never over
-  // the person's own pick, and never while someone else (Octo included)
-  // controls the browser: the view then shows what they do.
-  const shownChatBrowserTabRef = useRef<string | null>(null);
+  // The chat's Browser view shows the chat's own tab (nextChatBrowserViewStep).
+  const chatBrowserViewRef = useRef<ChatBrowserViewState>(CHAT_BROWSER_VIEW_START);
   const chatBrowserTabId = chatBrowserTab.tab?.id ?? null;
   const chatBrowserTabActive = chatBrowserTab.tab?.isActive === true;
   const sharedBrowserPresenceKnown = sharedBrowserPresence?.status === "known";
   const sharedBrowserRemoteController = sharedBrowserPresence?.remoteController === true;
+  const chatBrowserTurnUnderWay = browserTurnUnderWay(
+    projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "chat");
+  const anyBrowserTurnUnderWay = browserTurnUnderWay(
+    projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "any");
   useEffect(() => {
-    if (!browserVisible || browserTransport !== "shared") {
-      shownChatBrowserTabRef.current = null;
-      return;
-    }
-    if (!chatBrowserTabId || !sharedBrowserPresenceKnown) return;
-    const shown = JSON.stringify([activeConversationControllerId, chatBrowserTabId]);
-    if (shownChatBrowserTabRef.current === shown) return;
-    shownChatBrowserTabRef.current = shown;
-    if (chatBrowserTabActive || sharedBrowserRemoteController) return;
-    void focusSharedBrowserPageQuietly(chatBrowserTabId).catch(() => false);
+    const { state, step } = nextChatBrowserViewStep({
+      onScreen: browserVisible && browserTransport === "shared",
+      free: sharedBrowserPresenceKnown && !sharedBrowserRemoteController,
+      chatId: activeConversationControllerId,
+      tab: chatBrowserTabId ? { id: chatBrowserTabId, isActive: chatBrowserTabActive } : null,
+      canOpenTab: canWriteProject && sharedBrowserChromeResolved && sharedBrowserCanOpenPage !== null,
+      chatTurnUnderWay: chatBrowserTurnUnderWay,
+      anyTurnUnderWay: anyBrowserTurnUnderWay,
+      state: chatBrowserViewRef.current,
+    });
+    chatBrowserViewRef.current = state;
+    if (step === "open-blank-tab") void resolveChatBrowserTab().catch(() => null);
+    else if (step === "focus" && chatBrowserTabId) void focusSharedBrowserPageQuietly(chatBrowserTabId).catch(() => false);
   }, [
     activeConversationControllerId,
+    anyBrowserTurnUnderWay,
     browserTransport,
     browserVisible,
+    canWriteProject,
     chatBrowserTabActive,
+    chatBrowserTurnUnderWay,
     chatBrowserTabId,
     focusSharedBrowserPageQuietly,
+    resolveChatBrowserTab,
+    sharedBrowserCanOpenPage,
+    sharedBrowserChromeResolved,
     sharedBrowserPresenceKnown,
     sharedBrowserRemoteController,
   ]);
   const browserModeActive = browserSessionOpen && browserVisible;
   // A skill setup's composer answers the setup: its replies stay chat turns
   // while the browser is shown, and a walk there goes on only through the
-  // browser's own controls (the card's button, Let AI continue).
+  // browser's own controls (the card's button, Let Octo continue).
   const skillSetupConversation = useMemo(
     () => isSkillSetupConversation({
       messages: recentMessages,
@@ -6622,6 +6649,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     runApproval={browserRunApproval}
                     conversationId={activeConversationId ?? null}
                     agentArrival={browserArrival}
+                    spaceHasTeammates={spaceHasTeammates}
                   />
                 </div>
               ) : null}

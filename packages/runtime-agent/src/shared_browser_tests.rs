@@ -1822,18 +1822,26 @@ fn runtime_approval_directory_is_fixed_protected_and_cleaned() {
     .expect("write stale approval temp");
 
     prepare_clean_approval_directory(&approval_dir).expect("clean approval directory");
-    // Every run-scoped file is revoked; only the record of Octo's tabs that
-    // may still be open outlives the run.
-    assert_eq!(
-        std::fs::read_dir(&approval_dir)
-            .expect("read cleaned approval directory")
-            .map(|entry| entry
+    // Every run-scoped file is revoked; only the records of tabs that may
+    // still be open (Octo's leftovers, and the pages runs left their chats)
+    // outlive the run.
+    let mut kept = std::fs::read_dir(&approval_dir)
+        .expect("read cleaned approval directory")
+        .map(|entry| {
+            entry
                 .expect("entry")
                 .file_name()
                 .to_string_lossy()
-                .into_owned())
-            .collect::<Vec<_>>(),
-        vec![LEFTOVER_AGENT_TABS_FILE.to_string()]
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    kept.sort();
+    assert_eq!(
+        kept,
+        vec![
+            CHAT_TABS_FILE.to_string(),
+            LEFTOVER_AGENT_TABS_FILE.to_string()
+        ]
     );
     #[cfg(unix)]
     assert_eq!(
@@ -6292,7 +6300,7 @@ async fn a_run_keeps_the_last_runs_approvals_only_when_it_continues_that_run_for
     end(run);
     assert!(state().is_none(), "the run's own records are revoked");
 
-    // Let AI continue names that run: the new run starts with its grants,
+    // Let Octo continue names that run: the new run starts with its grants,
     // bound to the new run.
     let second = Uuid::new_v4();
     let run = acquire(second, person, "page-target", Some(first));
@@ -6402,7 +6410,7 @@ async fn let_ai_continue_keeps_the_site_the_person_approved_and_a_fresh_turn_ask
     assert_eq!(requests.len(), 1);
     end(run);
 
-    // Let AI continue: the approved site opens without asking again.
+    // Let Octo continue: the approved site opens without asking again.
     let run = acquire(Uuid::new_v4(), Some(first));
     let (page, requests) = navigate("https://transport.example/tram-15", &[]);
     assert_eq!(page["url"], "https://transport.example/tram-15");
@@ -6885,6 +6893,206 @@ async fn the_end_of_a_run_closes_octos_tabs_apart_from_those_the_person_kept() {
     );
     drop(guard);
     assert!(requests.lock().expect("requests").is_empty());
+}
+
+/// A loopback stand-in for Chromium's DevTools HTTP endpoint whose tab list
+/// (`/json/list`) shows the run's page at `run_page_url`; every other request
+/// succeeds. It records the request line of every connection.
+fn devtools_listing_run_page(run_page_url: &str) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("fake devtools");
+    let port = listener.local_addr().expect("fake devtools address").port();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let list = json!([
+        { "id": "TAB-OTHER-CHAT", "type": "page", "url": "https://roborock.example/" },
+        { "id": "page-target", "type": "page", "url": run_page_url },
+        { "id": "TAB-A", "type": "page", "url": "https://metro.example/maps" },
+        { "id": "TAB-B", "type": "page", "url": "https://trams.example/planner" }
+    ])
+    .to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut line = String::new();
+            let mut reader = BufReader::new(stream.try_clone().expect("stream"));
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let line = line.trim().to_string();
+            let body = if line.starts_with("GET /json/list ") {
+                list.clone()
+            } else {
+                String::new()
+            };
+            seen.lock().expect("requests").push(line);
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    (port, requests)
+}
+
+/// A browser turn that read only in its own tabs, while the chat's own tab
+/// (the run's page) stayed blank: the tab it worked in last stays open as the
+/// chat's page, untouched (a cookie banner it refused stays refused), and
+/// comes to the front. Without this, every tab Octo read closed and Chromium
+/// showed its neighbour, another chat's page.
+///
+/// The chat tab record names that tab with its run, and outlives the run, so
+/// Studio finds the chat's page after a reload, on another device or for
+/// another member too, not only in a page that watched the turn.
+#[tokio::test]
+async fn a_run_that_read_only_in_its_own_tabs_leaves_the_last_one_as_the_chats_page() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    let chat_tabs = || -> JsonValue {
+        serde_json::from_slice(
+            &std::fs::read(approval_dir.join("chat-tabs.json")).expect("chat tabs"),
+        )
+        .expect("chat tabs JSON")
+    };
+    let end_run = |run_page_url: &str, current: JsonValue| {
+        let (port, requests) = devtools_listing_run_page(run_page_url);
+        let cancel_signal = JobCancelSignal::new();
+        let run_id = Uuid::new_v4();
+        let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+            directory.path().join("agent-control.json"),
+            approval_dir.clone(),
+            ApprovalStart::Routine,
+            run_id,
+            Uuid::new_v4(),
+            "page-target",
+            "Octo",
+            cancel_signal.clone(),
+            Duration::from_secs(60),
+        )
+        .expect("acquire run");
+        guard.cdp_base = Some(("127.0.0.1".to_string(), port));
+        write_run_record(
+            &approval_dir,
+            "tabs.json",
+            &guard,
+            json!({
+                "currentTabId": current,
+                "tabs": [
+                    { "tabId": "TAB-A", "approvedOrigins": [] },
+                    { "tabId": "TAB-B", "approvedOrigins": [] }
+                ]
+            }),
+        );
+        cancel_signal.confirm_shared_browser_shutdown();
+        drop(guard);
+        let seen = requests.lock().expect("requests").clone();
+        (seen, run_id)
+    };
+
+    // Octo worked in tab B last: it stays, A closes, and B comes to the front.
+    let (seen, first) = end_run("about:blank", json!("TAB-B"));
+    assert_eq!(
+        seen,
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-A HTTP/1.1",
+            "GET /json/activate/TAB-B HTTP/1.1",
+        ])
+    );
+    // The record names B as the page that run left its chat, and outlives the
+    // run's own records.
+    assert_eq!(
+        chat_tabs(),
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-B", "runId": first.to_string() }] })
+    );
+    assert!(!approval_dir.join("tabs.json").exists());
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(approval_dir.join("chat-tabs.json"))
+            .expect("chat tabs")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    // Back on the chat's own page at the end: the newest of its tabs stays,
+    // and the record names it for this run, the latest one for that tab.
+    let (seen, second) = end_run("chrome://newtab/", JsonValue::Null);
+    assert_eq!(
+        seen,
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-A HTTP/1.1",
+            "GET /json/activate/TAB-B HTTP/1.1",
+        ])
+    );
+    assert_eq!(
+        chat_tabs(),
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-B", "runId": second.to_string() }] })
+    );
+    // The chat's page shows a page of its own: every tab of Octo's closes, and
+    // that page comes to the front, never the neighbour Chromium would show.
+    // Nothing is added to the record.
+    let (seen, _) = end_run(
+        "https://www.visitlisboa.example/en/places/belem",
+        json!("TAB-B"),
+    );
+    assert_eq!(
+        seen,
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-A HTTP/1.1",
+            "GET /json/close/TAB-B HTTP/1.1",
+            "GET /json/activate/page-target HTTP/1.1",
+        ])
+    );
+    assert_eq!(
+        chat_tabs(),
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-B", "runId": second.to_string() }] })
+    );
+}
+
+/// The record of the pages earlier runs left their chats (`chat-tabs.json`)
+/// outlives the runs, so a later run's controller works beside it.
+#[test]
+fn a_run_works_beside_the_record_of_pages_earlier_runs_left_their_chats() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    record_tab_left_for_chat(&fixture.approval_dir, "TAB-EARLIER", Uuid::new_v4()).expect("record");
+    payload_of(&fixture.call("safe", "GET", "/v1/snapshot", None));
+}
+
+/// The chat tab record is bounded, newest last, and one that cannot be read
+/// safely names no tab.
+#[test]
+fn the_chat_tab_record_keeps_the_newest_tabs() {
+    let directory = tempfile::tempdir().expect("approval tempdir");
+    let approval_dir = directory.path().join("approvals");
+    prepare_clean_approval_directory(&approval_dir).expect("approval directory");
+    let runs: Vec<Uuid> = (0..MAX_CHAT_TABS + 2).map(|_| Uuid::new_v4()).collect();
+    for (index, run_id) in runs.iter().enumerate() {
+        record_tab_left_for_chat(&approval_dir, &format!("TAB-{index}"), *run_id).expect("record");
+    }
+    let entries = read_chat_tabs(&approval_dir);
+    assert_eq!(entries.len(), MAX_CHAT_TABS);
+    assert_eq!(entries.first(), Some(&("TAB-2".to_string(), runs[2])));
+    assert_eq!(
+        entries.last(),
+        Some(&(
+            format!("TAB-{}", MAX_CHAT_TABS + 1),
+            runs[MAX_CHAT_TABS + 1]
+        ))
+    );
+    std::fs::write(
+        approval_dir.join("chat-tabs.json"),
+        br#"{"version":1,"tabs":[{"tabId":"TAB-1","runId":"not-a-run"}]}"#,
+    )
+    .expect("write");
+    assert!(read_chat_tabs(&approval_dir).is_empty());
+    assert!(record_tab_left_for_chat(&approval_dir, "../TAB", runs[0]).is_err());
 }
 
 // Hardening of Octo's tabs: the link-only guard in every tab Octo drives,

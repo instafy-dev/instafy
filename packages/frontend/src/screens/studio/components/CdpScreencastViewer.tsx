@@ -48,6 +48,10 @@ function measuredViewport(element: HTMLElement): CdpScreencastViewport | null {
   });
 }
 
+function sameViewport(left: CdpScreencastViewport, right: CdpScreencastViewport): boolean {
+  return left.width === right.width && left.height === right.height && left.dpr === right.dpr;
+}
+
 function initialViewport(element: HTMLElement): CdpScreencastViewport {
   return (
     measuredViewport(element) ??
@@ -288,9 +292,17 @@ export function CdpScreencastViewer({
     let ready = false;
     let currentViewport = initialViewport(canvas);
     let lastSentViewport = inputEnabledRef.current ? currentViewport : null;
+    // The size the browser took for this view: its answer to a resize, or
+    // the size it opened with for a view that could already drive. A size it
+    // never took (sent while control was changing hands, or opened with
+    // before this view could drive) is sent again whenever the view is on
+    // screen with its input, so the page never stays a desktop's size on a
+    // phone, or a phone's on a desktop.
+    let confirmedViewport: CdpScreencastViewport | null = null;
     let authorityResizePending = false;
     let resizeTimer: number | null = null;
-    inputSocketStartedWithAuthorityRef.current = inputEnabledRef.current;
+    const startedWithAuthority = inputEnabledRef.current;
+    inputSocketStartedWithAuthorityRef.current = startedWithAuthority;
     const socket = new WebSocket(withInitialViewport(inputWsUrl, currentViewport));
     const readyTimer = window.setTimeout(() => {
       if (!disposed && !ready) {
@@ -345,7 +357,11 @@ export function CdpScreencastViewer({
       lastSentViewport = currentViewport;
       authorityResizePending = false;
     };
-    requestInputResizeRef.current = sendResize;
+    requestInputResizeRef.current = (force) => {
+      const next = ready ? measuredViewport(canvas) : null;
+      const taken = next !== null && confirmedViewport !== null && sameViewport(next, confirmedViewport);
+      sendResize(force || (ready && !taken));
+    };
     const scheduleResize = () => {
       if (resizeTimer !== null) {
         window.clearTimeout(resizeTimer);
@@ -367,18 +383,24 @@ export function CdpScreencastViewer({
       }
       if (message.type === "ready" || message.type === "viewport") {
         currentViewport = message;
+        if (message.type === "viewport") confirmedViewport = message;
         if (message.type === "ready") {
           ready = true;
           setReadyInputConnectionKey(inputConnectionKey);
           window.clearTimeout(readyTimer);
           if (authorityResizePending) {
             sendResize(true);
-          } else if (inputEnabledRef.current) {
+          } else if (inputEnabledRef.current && startedWithAuthority) {
             // The origin awaits its initial device-metrics override before it
             // emits ready for the live driver. Seed the dedupe tuple from that
             // authoritative viewport instead of immediately overriding it a
             // second time from the client.
             lastSentViewport = currentViewport;
+            confirmedViewport = currentViewport;
+          } else if (inputEnabledRef.current) {
+            // This view could not drive yet when it connected, so the origin
+            // echoes the size it asked for without setting it.
+            sendResize(true);
           }
         }
       } else if (message.type === "error") {
@@ -431,9 +453,9 @@ export function CdpScreencastViewer({
     }
     // A new driver sets the page's size again. The same driver coming back
     // (the view on screen again, or its input back) sends the size this view
-    // has now when it differs from the last one it sent: a resize while it
+    // has now unless the browser already took that size: a resize while it
     // could not drive never reached the page, which kept a phone's width on
-    // a desktop.
+    // a desktop, and a desktop's on a phone.
     const authorityChanged =
       Boolean(normalizedAuthorityKey) &&
       normalizedAuthorityKey !== previousAuthorityKey &&

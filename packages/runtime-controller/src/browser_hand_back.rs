@@ -570,7 +570,7 @@ pub(crate) async fn require_hand_back(
         return Err(hand_back_refused(
             StatusCode::CONFLICT,
             HAND_BACK_PAUSED_CODE,
-            "That browser turn stopped for a step of yours. Finish it in the browser and choose Let AI continue.",
+            "That browser turn stopped for a step of yours. Finish it in the browser and choose Let Octo continue.",
         ));
     }
 

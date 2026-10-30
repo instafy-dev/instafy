@@ -192,6 +192,8 @@ const LEGACY_INTEGRATION_ONBOARDING_TEMPLATES: &[&str] = &[
     include_str!("legacy/integration-onboarding-v2.md"),
     include_str!("legacy/integration-onboarding-v3.md"),
     include_str!("legacy/integration-onboarding-v4.md"),
+    // From before the button that continues after a sign-in was "Let Octo continue".
+    include_str!("legacy/integration-onboarding-v5.md"),
 ];
 const BYOC_AI_CREDENTIALS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -352,6 +354,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before a stopped page ended only that page, not the task, and another source a search
     // found was read.
     include_str!("legacy/browser-automation-v12.md"),
+    // From before a card's reads went one by one on the chat's own page, and the button that
+    // continues after a sign-in was "Let AI continue".
+    include_str!("legacy/browser-automation-v13.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -2436,16 +2441,22 @@ mod tests {
         );
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("`request_browser`"));
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("open Instafy's browser without asking"));
-        // Every earlier copy predates the browser offer, except the last, which
-        // predates the repo-import and auth-failure routing keywords.
+        // Every earlier copy predates the browser offer, except the last two:
+        // the one before predates the repo-import and auth-failure routing
+        // keywords, and the last names the button that goes on after a
+        // sign-in "Let AI continue", where Studio now says "Let Octo continue".
         let (last, earlier) = LEGACY_INTEGRATION_ONBOARDING_TEMPLATES
             .split_last()
             .expect("legacy copies");
+        let (keywords, earlier) = earlier.split_last().expect("legacy copies");
         for previous in earlier {
             assert!(!previous.contains("open Instafy's browser without asking"));
         }
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("permission denied, 401, 403"));
-        assert!(!last.contains("permission denied, 401, 403"));
+        assert!(!keywords.contains("permission denied, 401, 403"));
+        assert!(last.contains("Let AI continue"));
+        assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("Let Octo continue"));
+        assert!(!INTEGRATION_ONBOARDING_TEMPLATE.contains("Let AI continue"));
         for previous in LEGACY_INTEGRATION_ONBOARDING_TEMPLATES {
             fs::write(&skill, previous).unwrap();
             ensure_project_memory_scaffold(workspace.path());

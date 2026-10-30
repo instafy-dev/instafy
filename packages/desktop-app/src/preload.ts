@@ -514,7 +514,7 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
     approvalMode?: "ask" | "routine";
     /** The card's hosts, at most three; used only by a routine run. */
     knownHosts?: string[];
-    /** The sign-in handoff that Let AI continue resumes, when known. */
+    /** The sign-in handoff that Let Octo continue resumes, when known. */
     handoffId?: string;
   }): Promise<PersonalBrowserStatus> => {
     return (await ipcRenderer.invoke(

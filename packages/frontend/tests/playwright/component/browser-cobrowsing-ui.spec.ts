@@ -45,7 +45,7 @@ async function mountPersonalControls(page: Page) {
             window.__continuationAttempts = (window.__continuationAttempts ?? 0) + 1;
             if (window.__failNextContinuation) {
               window.__failNextContinuation = false;
-              setAgentError("Fixture continuation failed; try Let AI continue again");
+              setAgentError("Fixture continuation failed; try Let Octo continue again");
               return false;
             }
             window.__continuation = message;
@@ -110,7 +110,7 @@ for (const hasTouch of [false, true]) {
         await page.evaluate(() => (window as unknown as { __confirmNativeDrain: () => void }).__confirmNativeDrain());
         await expect(page.getByTestId("browser-human-input-continue")).toBeEnabled();
         await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
-        await expect(page.getByTestId("browser-human-input-continue")).toHaveText("Let AI continue");
+        await expect(page.getByTestId("browser-human-input-continue")).toHaveText("Let Octo continue");
         const screenshotPath = testInfo.outputPath(`personal-takeover-expanded-${width}px.png`);
         await page.screenshot({ animations: "disabled", path: screenshotPath });
         await testInfo.attach(`Expanded Personal takeover at ${width}px`, { contentType: "image/png", path: screenshotPath });

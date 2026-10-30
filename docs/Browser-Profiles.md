@@ -128,11 +128,11 @@ the skill asks for (see [Product](Product.md)). In a chat opened with
 `/skills import <source> --start` or `/skills start <name>`, the composer stays a chat
 composer for the rest of that chat, even while the browser is shown: a reply goes out as a
 chat turn, and is never aimed at the open page because of its words. Only the browser's own
-controls (the card's button, **Let AI continue**, a new browser page) carry the walk on. When
+controls (the card's button, **Let Octo continue**, a new browser page) carry the walk on. When
 the chat's opener is older than the loaded messages, a chat titled the way Studio titles a
 connector's setup (such as "Connect FreeFinance") counts as one too. On Personal and Shared
 Browser turns the agent is told to pause at a sign-in, one-time code or consent step with
-`request_human_input`, so the person completes it on the page and chooses **Let AI continue**,
+`request_human_input`, so the person completes it on the page and chooses **Let Octo continue**,
 and never to open, or ask the person to open, a screen, dialog or field that shows a
 credential value: it stops on the screen that lists it, names the control that opens it, and
 asks the person to open that page in a tab of their own browser to see and copy the value.
@@ -140,8 +140,8 @@ That is turn guidance for the model, not a block the browser enforces.
 Paused native control uses the existing Resume flow with the Browser settings
 approval choice. Until the person chooses, it defaults to routine on a Desktop reporting
 approval policy version 2 and to Ask on an older one; an explicit choice, either way, is
-kept for presses, Resume, Retry and **Let AI continue**. Already active control keeps its
-settings. A pending manual step must be finished with **Let AI continue** before another task can start.
+kept for presses, Resume, Retry and **Let Octo continue**. Already active control keeps its
+settings. A pending manual step must be finished with **Let Octo continue** before another task can start.
 
 Studio first reuses the browser location saved for this conversation on this
 device. For a new conversation, it uses the user's explicit location preference,
@@ -254,9 +254,9 @@ Recognized high-impact actions still ask and secret entry remains manual; a
 website can attach unexpected side effects to an otherwise ordinary control.
 See each mode's policy for scope and revocation.
 
-**Take over → fill highlighted fields → Let AI continue** is a sequential handoff.
+**Take over → fill highlighted fields → Let Octo continue** is a sequential handoff.
 The browser must confirm that agent operations have stopped before manual input
-is enabled. **Let AI continue** sends a fixed message without entered values and
+is enabled. **Let Octo continue** sends a fixed message without entered values and
 starts a fresh browser turn on that page. Shared page contents are still visible to
 project members; expansion and manual input do not make a Shared page private.
 

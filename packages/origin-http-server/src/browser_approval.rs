@@ -239,6 +239,14 @@ const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
 /// closes them or a person keeps one. runtime-agent and the origin both
 /// rewrite it, each under the approval directory's lock.
 const LEFTOVER_AGENT_TABS_FILE: &str = "leftover-tabs.json";
+/// The tab each run left open as its chat's page (the tab Octo worked in
+/// last, while the run's own page was still blank), with that run, written by
+/// runtime-agent (`chat-tabs.json`). It outlives the run and grants nothing:
+/// Studio reads it to show that tab as the chat's page.
+const CHAT_TABS_FILE: &str = "chat-tabs.json";
+/// runtime-agent's `CHAT_TABS_FILE_MAX_BYTES` and `MAX_CHAT_TABS`.
+const CHAT_TABS_MAX_BYTES: u64 = 16 * 1024;
+const MAX_CHAT_TABS: usize = 24;
 const AGENT_TABS_MAX_BYTES: u64 = 8 * 1024;
 const KEPT_AGENT_TABS_MAX_BYTES: usize = 4 * 1024;
 /// The most tabs of its own Octo may have open in one run (runtime-agent's
@@ -289,6 +297,20 @@ struct LeftoverAgentTab {
     tab_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatTabsRecord {
+    version: u8,
+    tabs: Vec<ChatTab>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatTab {
+    tab_id: String,
+    run_id: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct KeptAgentTabsRecord {
@@ -314,6 +336,8 @@ pub(crate) struct AgentTabs {
     /// that numbered them has ended and the next one numbers its own tabs
     /// from 1 again, and Octo is not reading them.
     pub(crate) leftover: Vec<String>,
+    /// Ordinary tabs a run left open as its chat's page, with that run.
+    pub(crate) left_by_run: Vec<(String, String)>,
 }
 
 impl AgentTabs {
@@ -326,6 +350,18 @@ impl AgentTabs {
 
     pub(crate) fn is_leftover(&self, tab_id: &str) -> bool {
         self.leftover.iter().any(|id| id == tab_id)
+    }
+
+    /// The run that left this tab open as its chat's page, unless the tab is
+    /// one of Octo's now.
+    pub(crate) fn left_by_run(&self, tab_id: &str) -> Option<&str> {
+        if self.tab_ids.iter().any(|id| id == tab_id) {
+            return None;
+        }
+        self.left_by_run
+            .iter()
+            .find(|(id, _)| id == tab_id)
+            .map(|(_, run_id)| run_id.as_str())
     }
 
     /// These tabs, then `leftovers` they do not name yet.
@@ -659,7 +695,9 @@ impl BrowserApprovalBridge {
             }
             _ => AgentTabs::default(),
         };
-        run_tabs.with_leftovers(read_leftover_agent_tabs(&dir).unwrap_or_default())
+        let mut tabs = run_tabs.with_leftovers(read_leftover_agent_tabs(&dir).unwrap_or_default());
+        tabs.left_by_run = read_chat_tabs(&dir).unwrap_or_default();
+        tabs
     }
 
     /// Keeps one of Octo's tabs open past the end of the run. It gives no
@@ -900,7 +938,32 @@ fn read_agent_tabs(dir: &Dir, marker: &AgentControlMarker) -> Result<AgentTabs, 
         kept,
         numbers,
         leftover: Vec::new(),
+        left_by_run: Vec::new(),
     })
+}
+
+/// The tabs runs left open as their chats' pages (`chat-tabs.json`), each
+/// with its run. A record that cannot be read safely names no tab.
+fn read_chat_tabs(dir: &Dir) -> Result<Vec<(String, String)>, String> {
+    let Some(bytes) = read_protected_child(dir, OsStr::new(CHAT_TABS_FILE), CHAT_TABS_MAX_BYTES)?
+    else {
+        return Ok(Vec::new());
+    };
+    let record: ChatTabsRecord =
+        serde_json::from_slice(&bytes).map_err(|_| "chat-tabs.json is malformed".to_string())?;
+    if record.version != 1 || record.tabs.len() > MAX_CHAT_TABS {
+        return Err("chat-tabs.json is out of bounds".to_string());
+    }
+    let mut tabs: Vec<(String, String)> = Vec::with_capacity(record.tabs.len());
+    for tab in record.tabs {
+        validate_page_id_string(&tab.tab_id)?;
+        validate_canonical_uuid_string(&tab.run_id, "runId")?;
+        if tabs.iter().any(|(tab_id, _)| tab_id == &tab.tab_id) {
+            return Err("chat-tabs.json repeats a tab".to_string());
+        }
+        tabs.push((tab.tab_id, tab.run_id));
+    }
+    Ok(tabs)
 }
 
 /// The tabs earlier runs left open (`leftover-tabs.json`). A record that
