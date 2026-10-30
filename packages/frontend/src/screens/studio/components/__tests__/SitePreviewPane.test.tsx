@@ -188,6 +188,49 @@ describe("SitePreviewPane", () => {
     stop();
   });
 
+  // Seen Oct 30: after the map card's press the pane was dark and
+  // empty for 2 to 5 s with nothing said. The line went at the frame's load,
+  // and the map draws itself after its page loads. A page like that says so
+  // in its layout-ack and says `ready` once drawn; the line stays until then.
+  it("goes on saying it is opening the site until a page that draws itself after it loads has drawn", async () => {
+    const progress = () => container.querySelector("[data-testid=site-preview-progress]")?.textContent ?? null;
+    const origin = new URL(FIRST).origin;
+    await render();
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await post({ source: "site-kit", v: 1, type: "layout-ack", payload: { supports: ["view", "ready"] } }, origin, frame()!.contentWindow);
+    await advance(5_000);
+    expect(progress()).toContain("Opening Docs site…");
+    // From another window it counts for nothing.
+    await post({ source: "site-kit", v: 1, type: "ready" }, origin, window);
+    expect(progress()).toContain("Opening Docs site…");
+    await post({ source: "site-kit", v: 1, type: "ready" }, origin, frame()!.contentWindow);
+    expect(progress()).toBeNull();
+    // Reload: the new page draws again, under "Loading…".
+    await click("[data-testid=site-preview-reload]");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await post({ source: "site-kit", v: 1, type: "layout-ack", payload: { supports: ["ready"] } }, origin, frame()!.contentWindow);
+    expect(progress()).toContain("Loading…");
+    await post({ source: "site-kit", v: 1, type: "ready" }, origin, frame()!.contentWindow);
+    expect(progress()).toBeNull();
+  });
+
+  it("shows a page that never said it draws later at its load, and stops waiting for one that never says it has", async () => {
+    const progress = () => container.querySelector("[data-testid=site-preview-progress]");
+    const origin = new URL(FIRST).origin;
+    await render();
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await post({ source: "site-kit", v: 1, type: "layout-ack", payload: { supports: ["view", "tap"] } }, origin, frame()!.contentWindow);
+    expect(progress()).toBeNull();
+    await click("[data-testid=site-preview-reload]");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await post({ source: "site-kit", v: 1, type: "layout-ack", payload: { supports: ["ready"] } }, origin, frame()!.contentWindow);
+    expect(progress()).not.toBeNull();
+    await advance(14_000);
+    expect(progress()).not.toBeNull();
+    await advance(1_000);
+    expect(progress()).toBeNull();
+  });
+
   // The frame of a site that stopped answering goes, and a new one loads when
   // it answers again: at the same address, so the page that loaded in the
   // frame before is no sign this one has.

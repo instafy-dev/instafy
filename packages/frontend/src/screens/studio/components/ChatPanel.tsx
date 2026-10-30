@@ -1817,6 +1817,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // Who else is in the browser view (from the view's collaboration socket).
   // Its page list and the automatic-open decision below both read it.
   const [sharedBrowserPresence, setSharedBrowserPresence] = useState<SharedBrowserPresence | null>(null);
+  // A card is opening Instafy's browser by itself (useChatBrowserRequest): its
+  // tabs are read at the fast pace meanwhile, so the card's turn goes out as
+  // soon as the browser lists one, with the person in Chat too.
+  const [browserCardOpening, setBrowserCardOpening] = useState(false);
   // Work is running in the space. The browser view polls fast only then, and
   // Clear data's confirmation says that clearing restarts the machine.
   const spaceRunActive = useMemo(() => {
@@ -1868,6 +1872,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserPagesActive,
     sharedBrowserPagesPollFast:
       spaceRunActive ||
+      browserCardOpening ||
       sharedBrowserPresence?.remoteController === true ||
       sharedBrowserPresence?.othersPresent === true,
     sharedBrowserSurfaceVisible: browserVisible,
@@ -2218,6 +2223,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     conversationId: activeConversationControllerId,
     rootRef: scrollContainerRef,
     enabled: chatVisible && !jobThread,
+    // A reply that lands while this chat is open, in Chat or in its Browser
+    // view, is read: Home and the badges never flag the chat the person is in.
+    arrivals: hasResolvedRecentHistory && !jobThread ? latestArrivalMessages : null,
+    open: (chatVisible || browserVisible) && !jobThread,
   });
   useConversationOnScreen(activeConversationControllerId, { chatVisible, browserVisible, jobThread: Boolean(jobThread) });
 
@@ -4904,7 +4913,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalAvailable: personalBrowser.available,
     personalTurnsAllowed,
     personalReady: personalBrowser.status?.state === "ready",
-    sharedReady: Boolean(resolvedBrowserRuntimeId && browserHandoffPage),
+    // A card's turn finds a tab: the chat's own, or a blank one it gets as it
+    // is sent (resolveForTurn), with the person in Chat too. A chat with no tab
+    // yet has no page on screen (browserHandoffPage) until its view shows.
+    sharedReady: Boolean(resolvedBrowserRuntimeId && chatBrowserMessageTarget?.tabAvailable),
     sharedRuntimeId: resolvedBrowserRuntimeId,
     sharedUnavailable: sharedBrowserCapabilitiesUnsupported,
     sharedHost: {
@@ -4999,6 +5011,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   useEffect(() => {
     setBrowserAutoWaiting(browserRequestAutoWaiting);
   }, [browserRequestAutoWaiting]);
+  const browserCardOpeningNow = useMemo(
+    () => [...browserRequestState.cardStates.values()].some((state) => state.kind === "opening"),
+    [browserRequestState.cardStates],
+  );
+  useEffect(() => {
+    setBrowserCardOpening(browserCardOpeningNow);
+  }, [browserCardOpeningNow]);
   // A continuation whose dispatch failed continues no card; the failure also
   // sets that card's state, which recomputes this.
   const browserRequestContinued = useMemo(

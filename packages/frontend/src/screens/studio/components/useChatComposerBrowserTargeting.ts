@@ -23,7 +23,7 @@ type UseChatComposerBrowserTargetingOptions = {
    * hidden one): only then are its pages read.
    */
   sharedBrowserPagesActive?: boolean;
-  /** A run is active, someone else controls, or others are in the browser. */
+  /** A run is active, a card is opening the browser, someone else controls, or others are in the browser. */
   sharedBrowserPagesPollFast?: boolean;
   /** The browser surface is on screen. */
   sharedBrowserSurfaceVisible?: boolean;

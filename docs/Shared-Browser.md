@@ -1915,7 +1915,9 @@ unless the policy is `"covered"`.
   keeps failing to read, or stays held, stops being read once it is too old to
   open by itself. Studio then opens that exact machine's browser as
   `attachOnly`, so it may start the browser but never the machine, and sends
-  the task only once the browser shows that machine's first page and a fresh
+  the task only once the browser lists that machine's tabs (the turn takes the
+  chat's own tab, or a blank one no chat uses, whether the chat's Browser view
+  is on screen or not; the tabs are read every 2.5 seconds meanwhile) and a fresh
   `GET browser/host` read after the open says `ready` (and, while the Browser
   view is on screen, once its roster has connected). It waits for each of
   these within the two-minute bound, which also ends a read that has not

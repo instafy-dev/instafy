@@ -30,7 +30,9 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    [The card's picture and facts](#the-cards-picture-and-facts)).
 4. A member presses the card. Studio asks the controller for a viewer session and shows the site as a tab in the
    conversation's side pane, next to Chat, Browser and files, under the same browser bar (title, Reload, Open in new
-   tab). The card never opens by itself, and cards in history never open anything.
+   tab). The pane says "Opening <title>…" from the press until the site's page is in: loaded, and for a page that
+   draws itself after it loads (a map), drawn (see `ready` under [Messages](#messages)). The card never opens by
+   itself, and cards in history never open anything.
 5. The tab's × closes the pane and revokes its session. The card says nothing while the site is live. If the preview
    is closed, the machine stops, or the server stops answering (Octo stopped it, say), the card reads "Stopped", with
    how to get it back (see [Waking a stopped site](#waking-a-stopped-site)), and the pane says "This site is stopped."
@@ -443,6 +445,18 @@ Site → Studio:
 ```
 
 `id` is the site's own short id (`[A-Za-z0-9:._-]{1,64}`). It only comes back to that site.
+
+A page that draws itself after it loads (a map, a chart) lists `ready` in its `layout-ack` and says when its first
+view is drawn, the moment it sets `data-instafy-ready="true"` (see
+[The card's picture and facts](#the-cards-picture-and-facts)):
+
+```
+{ "source": "my-site", "v": 1, "type": "layout-ack", "payload": { "supports": ["ready"] } }
+{ "source": "my-site", "v": 1, "type": "ready" }
+```
+
+Until then the pane goes on saying it is opening the site ("Loading…" after Reload), for at most 15 s. Any other page
+is shown once its frame has loaded.
 
 Studio → site:
 

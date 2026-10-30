@@ -454,6 +454,10 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
     setPageLoadedOnce(true);
     host.onFrameLoad();
   };
+  // A page that draws itself after it loads (a map) is empty until it says it
+  // has drawn (useSiteHost's `drawing`): the pane goes on saying it is opening
+  // the site meanwhile. Any other page shows once it has loaded.
+  const drawing = frameShown && !frameLoading && host.drawing;
   // A card that started the site says "Starting…" until a pane shows its
   // page: this one while it holds the page, or none once it closes.
   const pageShown = frameShown && !frameLoading;
@@ -529,11 +533,12 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
             onStop={() => { if (host.location.site) setLocationStopped(host.location.site, true); host.location.dismissToast(); }} />
         ) : followNote ? <FollowToast text={followNote} />
           : follow.locationLeftOut && follow.state.role === "presenting" ? <FollowToast text="📍 Your location is left out" testId="follow-location-toast" /> : null}
-        {shown === "opening" || shown === "starting" || frameLoading ? (
+        {shown === "opening" || shown === "starting" || frameLoading || drawing ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400" data-testid="site-preview-progress">
             <Spinner aria-hidden="true" tone="slate" size="sm" />{" "}
             {/* One line from the press to the site's first page, never a blank pane in between. */}
-            {shown === "starting" ? `Starting ${title}…` : shown === "opening" || !pageLoadedOnce ? `Opening ${title}…` : "Loading…"}
+            {shown === "starting" ? `Starting ${title}…`
+              : shown === "opening" || !pageLoadedOnce || (drawing && !host.drawnOnce) ? `Opening ${title}…` : "Loading…"}
           </div>
         ) : null}
         {problemShown ? (

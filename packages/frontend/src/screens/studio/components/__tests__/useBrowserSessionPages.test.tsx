@@ -334,6 +334,53 @@ describe("useBrowserSessionPages", () => {
     expect(latestResult?.pages.find((page) => page.isActive)?.id).toBe("page-1");
   });
 
+  // Seen Oct 30: a chat's Browser view, opened while another chat's
+  // page was in front, showed the chat's address over a black stage for 15 s
+  // and more. Studio brought the chat's tab forward, a page read from before
+  // that answered with the other tab, the next read brought the chat's tab
+  // back: three picture streams in a fifth of a second, and the browser
+  // refused the one for the chat's page ("pixel stream capacity is full").
+  it.each([
+    ["before the focus was asked for", "before"],
+    ["while the focus is on its way", "during"],
+  ] as const)("keeps the tab a focus brought forward when a read from %s still names the other tab", async (_name, when) => {
+    const page = (id: string, isActive: boolean) => ({
+      id, url: `https://${id}.example/`, host: `${id}.example`, label: id, title: id, isActive, canGoBack: false, canGoForward: false,
+    });
+    fetchPagesMock.mockResolvedValue([page("other-chat", true), page("this-chat", false)]);
+    await renderHook();
+    const fronts: string[] = [];
+    const front = () => latestResult?.pages.find((entry) => entry.isActive)?.id ?? "none";
+    fronts.push(front());
+
+    let answerRead: ((pages: unknown[]) => void) | null = null;
+    let answerFocus: ((focused: boolean) => void) | null = null;
+    fetchPagesMock.mockReturnValueOnce(new Promise((resolve) => { answerRead = resolve; }));
+    focusPageMock.mockReturnValueOnce(new Promise<boolean>((resolve) => { answerFocus = resolve; }));
+    let focusing: Promise<boolean> | undefined;
+    await act(async () => {
+      if (when === "before") void latestResult!.refresh();
+      focusing = latestResult!.focusPage("this-chat");
+      if (when === "during") void latestResult!.refresh();
+      await Promise.resolve();
+    });
+    fronts.push(front());
+    // The read answers with the tab that was in front before the focus.
+    await act(async () => {
+      answerRead?.([page("other-chat", true), page("this-chat", false)]);
+      await Promise.resolve(); await Promise.resolve();
+    });
+    fronts.push(front());
+    // The browser took the focus: the read after it names the chat's tab.
+    fetchPagesMock.mockResolvedValue([page("other-chat", false), page("this-chat", true)]);
+    await act(async () => {
+      answerFocus?.(true);
+      await expect(focusing).resolves.toBe(true);
+    });
+    fronts.push(front());
+    expect(fronts).toEqual(["other-chat", "this-chat", "this-chat", "this-chat"]);
+  });
+
   it("ignores a capability response from the previous project scope", async () => {
     let resolveOldCapabilities: ((value: unknown) => void) | null = null;
     fetchCapabilitiesMock
