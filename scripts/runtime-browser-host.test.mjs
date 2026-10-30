@@ -355,10 +355,13 @@ test("a profile that a running Chromium on this machine holds is refused", withF
   const env = hostEnvironment(fixture, bin);
   fs.mkdirSync(env.INSTAFY_BROWSER_HOST_PROFILE_DIR, { recursive: true });
   // A process named like Chromium on this host holds the lock. The kernel
-  // names a process after the file it runs, so run sleep through a link. A
-  // multi-call coreutils (uutils, as on Ubuntu 26.04) picks its command from
-  // argv[0], so that stays "sleep".
-  const holder = spawn("bash", ["-c", 'ln -s "$(command -v sleep)" "$1/chromium" && exec -a sleep "$1/chromium" 30', "holder", fixture], { stdio: ["ignore", "ignore", "pipe"] });
+  // names a process after the file it runs, so the holder is this test's own
+  // node run through a link named chromium. Node runs under any name; a
+  // multi-call coreutils does not (uutils, Ubuntu 26.04's, refuses to run
+  // `sleep` as `chromium`).
+  const chromium = path.join(fixture, "chromium");
+  fs.symlinkSync(process.execPath, chromium);
+  const holder = spawn(chromium, ["-e", "setTimeout(() => {}, 30000)"], { stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
   let exited = null;
   let comm = null;
@@ -373,10 +376,7 @@ test("a profile that a running Chromium on this machine holds is refused", withF
         comm = error.code;
         return false;
       }
-    }, () => {
-      const sleep = spawnSync("bash", ["-c", 'command -v sleep; readlink -f "$(command -v sleep)"'], { encoding: "utf8" }).stdout.trim();
-      return `holder process did not start: ${JSON.stringify({ comm, exited, stderr: stderr.slice(0, 400), sleep })}`;
-    });
+    }, () => `holder process did not start: ${JSON.stringify({ comm, exited, stderr: stderr.slice(0, 400) })}`);
     fs.symlinkSync(`${os.hostname()}-${holder.pid}`, path.join(env.INSTAFY_BROWSER_HOST_PROFILE_DIR, "SingletonLock"));
     const host = startHost(env);
     assert.equal(await host.firstStatus, "instafy-browser-host: failed profile_in_use");
