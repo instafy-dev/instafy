@@ -1643,7 +1643,6 @@ export function BrowserSessionModal({
       const statusEntries = Array.isArray(statusSnapshot?.runtimes) ? statusSnapshot.runtimes : [];
       if (!statusSnapshot) {
         fail("failed", "Could not discover Shared sessions. Refresh sessions to retry.");
-        setSessionChooserOpen(sessionControlsVisibleRef.current);
         setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: "Session discovery is unavailable; no new browser was started." });
         return;
       }
@@ -1742,7 +1741,11 @@ export function BrowserSessionModal({
             fail("notice", message);
           }
           setSessionChoices({ scope: selectionScope, candidates, loading: false, error: message });
-          setSessionChooserOpen(sessionControlsVisibleRef.current);
+          // A browser this open did not name, or one that is gone: the
+          // choice is the only way on, so Browser options opens with it. An
+          // open that names a live machine (a press on a card, or Studio
+          // opening one by itself) is selected above and never gets here.
+          if (selection.kind !== "new") setSessionChooserOpen(sessionControlsVisibleRef.current);
           return;
         }
         if (selection.kind === "selected") {
