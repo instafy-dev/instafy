@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Local drive, Oct 30: a chat's Browser view showed other chats' pages. It
+// Local test, Oct 30: a chat's Browser view showed other chats' pages. It
 // mounted on the address another chat left in front; during the chat's first
 // browser turn its stage held another chat's picture under its own address,
 // with "Reconnecting…", for 31 s; after a reload it showed the browser's
@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   fetchStatus: vi.fn(), requestAccessToken: vi.fn(), instances: [] as Viewer[],
   /** Who holds the browser's control: this person, or someone else. */
   owner: "self" as "self" | "other",
+  /** The others in the browser, and the tab each one's view shows. */
+  participants: [] as Array<{ id: string; displayName: string; color: string; pageId: string | null; cursor: null; canControl: boolean }>,
 }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   core: { enabled: true, baseUrl: "" },
@@ -36,7 +38,7 @@ vi.mock("../useSharedBrowserApproval", () => ({ useSharedBrowserApproval: () => 
 vi.mock("../useBrowserSessionActions", () => ({ useBrowserSessionActions: () => ({ actions: [], latestClick: null }) }));
 vi.mock("../useSharedBrowserCollaboration", () => ({ useSharedBrowserCollaboration: ({ active }: { active: boolean }) => ({
   client: { connectionStatus: active ? "connected" : "idle", participantId: active ? "self" : null,
-    state: active ? { revision: 1, participants: [], requests: [],
+    state: active ? { revision: 1, participants: mocks.participants, requests: [],
       controlOwner: { kind: "human", participantId: mocks.owner } } : null, error: null },
   publishCursor: () => {}, requestControl: () => {}, takeControl: () => {}, releaseControl: () => {}, grantControl: () => {},
 }) }));
@@ -84,6 +86,7 @@ describe("a chat's Browser view", () => {
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
     mocks.instances.length = 0;
     mocks.owner = "self";
+    mocks.participants = [];
     mocks.fetchStatus.mockReset().mockResolvedValue({ runtimes: [session] });
     mocks.requestAccessToken.mockReset().mockResolvedValue({ token: "origin-token", endpoint: "https://origin.test", expiresIn: 300 });
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
@@ -109,13 +112,15 @@ describe("a chat's Browser view", () => {
     /** A phone: one row of chrome. */
     compact?: boolean;
     onPresenceChange?: (presence: unknown) => void;
+    /** RFB's view-only lane, for a person who does not drive. */
+    viewOnlyLane?: boolean;
   }) {
     await act(async () => root.render(<BrowserSessionModal isOpen transportActive={options.active ?? true}
       onOpenChange={noop} projectId={projectId} currentUserId="user-1"
       browserSessionId="browser-session-1" preferRuntimeId={null} resumeRuntimeId={runtimeId}
       presentation="docked" fillContainer canControlBrowser canClearBrowserData sharedBrowserCapabilitiesResolved sharedBrowserCapabilitiesAvailable
       sharedBrowserViewerKind="rfb" sharedBrowserAvailableViewerKinds={["rfb"]}
-      sharedBrowserRfbCapabilities={{ renderScale: 1, maxFramebufferPixels: 8_294_400 }}
+      sharedBrowserRfbCapabilities={{ renderScale: 1, maxFramebufferPixels: 8_294_400, viewOnly: options.viewOnlyLane }}
       conversationId="chat-github"
       chatPageIds={options.chatPageIds === undefined ? [CHAT_TAB] : options.chatPageIds}
       anotherChatTurn={options.anotherChatTurn ?? false}
@@ -234,7 +239,7 @@ describe("a chat's Browser view", () => {
 
   // The stage drew whatever was in front while the browser named no tab
   // there, under the chat's own address; on "Reconnecting…" that picture
-  // stayed as the chat's page (another chat's, in the drive) for 31 s.
+  // stayed as the chat's page (another chat's) for 31 s.
   it("keeps no picture drawn while no tab of the chat was named in front, on Reconnecting…", async () => {
     await render({ pages: [tab(CHAT_TAB, GITHUB, false), tab(OTHER_TAB, PICO, false)] });
     await paint();
@@ -243,5 +248,48 @@ describe("a chat's Browser view", () => {
     expect(still()).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); await vi.dynamicImportSettled(); });
     expect(still()).toBeNull();
+  });
+  // On "Reconnecting…" the surface keeps what it drew last. It was drawn
+  // while another chat's tab was in front; the chat's own tab came forward
+  // with no new picture since, so the held picture is still the other page.
+  it("drops a held picture of another tab on Reconnecting…, even once the chat's tab is in front", async () => {
+    await render({ pages: [tab(CHAT_TAB, GITHUB, false), tab(OTHER_TAB, PICO, true)] });
+    await paint();
+    const held = surface();
+    expect(pictureShown()).toBe(false);
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)] });
+    expect(pictureShown()).toBe(true);
+    await act(async () => latest().listeners.disconnect());
+    expect(held.classList.contains("invisible")).toBe(true);
+    expect(still()).toBeNull();
+  });
+
+  it("keeps the chat's own picture on Reconnecting…", async () => {
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)] });
+    await paint();
+    const held = surface();
+    expect(pictureShown()).toBe(true);
+    await act(async () => latest().listeners.disconnect());
+    expect(held.classList.contains("invisible")).toBe(false);
+  });
+
+  // RFB draws whatever tab is in front. Someone else in control (another
+  // person, or this person's other window) brought their own chat's tab
+  // forward: this view drew it until its next read of the tab list.
+  it("draws no picture of the tab someone else in control brought forward, before the tab list says so", async () => {
+    mocks.owner = "other";
+    mocks.participants = [{ id: "other", displayName: "Anna", color: "#2563eb", pageId: OTHER_TAB, cursor: null, canControl: true }];
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)], viewOnlyLane: true });
+    await paint();
+    expect(pictureShown()).toBe(false);
+    // A picture drawn then is never kept as the chat's page.
+    await act(async () => latest().listeners.disconnect());
+    expect(still()).toBeNull();
+    // Back on the chat's tab: its picture shows again.
+    mocks.participants = [{ ...mocks.participants[0], pageId: CHAT_TAB }];
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)], viewOnlyLane: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); await vi.dynamicImportSettled(); });
+    await paint();
+    expect(pictureShown()).toBe(true);
   });
 });

@@ -205,10 +205,13 @@ import { useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeti
 import {
   CHAT_BROWSER_VIEW_START,
   browserTurnUnderWay,
+  chatBrowserHandoffPage,
   chatBrowserTarget,
+  chatPageOnScreen,
   newChatBrowserTabId,
   nextChatBrowserViewStep,
   useChatBrowserTab,
+  useChatViewTabs,
   type ChatBrowserViewState,
 } from "./chatBrowserTab";
 import { useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
@@ -1908,8 +1911,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const sharedBrowserBindingPage = chatBrowserMessageTarget?.bindingPage ?? null;
   // The chat's Browser view shows the chat's own tab (nextChatBrowserViewStep).
   const chatBrowserViewRef = useRef<ChatBrowserViewState>(CHAT_BROWSER_VIEW_START);
-  const chatBrowserTabId = chatBrowserTab.tab?.id ?? null;
-  const chatBrowserTabActive = chatBrowserTab.tab?.isActive === true;
   const sharedBrowserPresenceKnown = sharedBrowserPresence?.status === "known";
   const sharedBrowserRemoteController = sharedBrowserPresence?.remoteController === true;
   // Only the person who holds the browser's control may bring a tab to the
@@ -1921,27 +1922,29 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const anyBrowserTurnUnderWay = browserTurnUnderWay(
     projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "any");
   // The tabs this chat's Browser view shows (BrowserSessionModal): the chat's
-  // own tab and, while a browser turn of this chat is under way, the tabs Octo
-  // opened for it. Never another chat's page: any other tab in front leaves a
-  // blank stage. Null for an older browser that cannot give a chat a tab of
-  // its own: its view shows the tab in front, as before.
-  const chatViewPageIds = useMemo(() => {
-    if (browserTransport !== "shared" || sharedBrowserCanOpenPage === false) return null;
-    const ids = chatBrowserTabId ? [chatBrowserTabId] : [];
-    if (chatBrowserTurnUnderWay) {
-      for (const page of sharedBrowserChromePages) {
-        if (page.openedBy === "agent" && !page.leftover) ids.push(page.id);
-      }
-    }
-    return ids;
-  }, [browserTransport, chatBrowserTabId, chatBrowserTurnUnderWay, sharedBrowserCanOpenPage, sharedBrowserChromePages]);
+  // own tab and the tabs Octo opened in the chat's turns, while the browser
+  // lists them as Octo's: during the turn, and after it until the list names
+  // the one Octo read in last as the chat's page. Never another chat's page:
+  // any other tab in front leaves a blank stage. Null for an older browser
+  // that cannot give a chat a tab of its own: its view shows the tab in
+  // front, as before.
+  const chatView = useChatViewTabs({
+    chatKey: JSON.stringify([currentUserId, activeProjectId ?? null, chatBrowserScopeId, resolvedBrowserRuntimeId]),
+    enabled: browserTransport === "shared" && sharedBrowserCanOpenPage !== false,
+    chatTab: chatBrowserTab.tab,
+    pages: sharedBrowserChromePages,
+    chatTurnUnderWay: chatBrowserTurnUnderWay,
+  });
+  const chatViewPageIds = chatView.pageIds;
+  const chatViewStepTabId = chatView.stepTab?.id ?? null;
+  const chatViewStepTabActive = chatView.stepTab?.isActive === true;
   const anotherChatBrowserTurn = anyBrowserTurnUnderWay && !chatBrowserTurnUnderWay;
   useEffect(() => {
     const { state, step } = nextChatBrowserViewStep({
       onScreen: browserVisible && browserTransport === "shared",
       free: sharedBrowserPresenceKnown && !sharedBrowserRemoteController && sharedBrowserSelfControls,
       chatId: chatBrowserScopeId,
-      tab: chatBrowserTabId ? { id: chatBrowserTabId, isActive: chatBrowserTabActive } : null,
+      tab: chatViewStepTabId ? { id: chatViewStepTabId, isActive: chatViewStepTabActive } : null,
       canOpenTab: canWriteProject && sharedBrowserChromeResolved && sharedBrowserCanOpenPage !== null,
       chatTurnUnderWay: chatBrowserTurnUnderWay,
       anyTurnUnderWay: anyBrowserTurnUnderWay,
@@ -1949,16 +1952,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     });
     chatBrowserViewRef.current = state;
     if (step === "open-blank-tab") void resolveChatBrowserTab().catch(() => null);
-    else if (step === "focus" && chatBrowserTabId) void focusSharedBrowserPageQuietly(chatBrowserTabId).catch(() => false);
+    else if (step === "focus" && chatViewStepTabId) void focusSharedBrowserPageQuietly(chatViewStepTabId).catch(() => false);
   }, [
     anyBrowserTurnUnderWay,
     browserTransport,
     browserVisible,
     canWriteProject,
     chatBrowserScopeId,
-    chatBrowserTabActive,
     chatBrowserTurnUnderWay,
-    chatBrowserTabId,
+    chatViewStepTabActive,
+    chatViewStepTabId,
     focusSharedBrowserPageQuietly,
     resolveChatBrowserTab,
     sharedBrowserCanOpenPage,
@@ -4698,7 +4701,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   submitMessageRef.current = submitMessage;
 
-  const browserHandoffPage = sharedBrowserChrome?.pages.find((page) => page.isActive) ?? sharedBrowserChrome?.pages[0] ?? null;
+  // The page Take over and Let Octo continue act on: the tab the chat's view
+  // shows, else the chat's own tab. Never another chat's page in front, nor
+  // the browser's first tab when it names none in front.
+  const browserHandoffPage = sharedBrowserChrome
+    ? chatBrowserHandoffPage({ pages: sharedBrowserChrome.pages, chatPageIds: chatViewPageIds, chatTab: chatBrowserTab.tab })
+    : null;
   const browserHumanInputRunIds = useMemo(() => sharedBrowserConversationRunIds(Object.values(runs ?? {}), {
     projectId: activeProjectId ?? null,
     conversationId: activeConversationEntry?.controllerId ?? null,
@@ -5046,13 +5054,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [browserRequestIdentity]);
   const takeOverSharedBrowser = useCallback(async (options?: { agentHoldsBrowser?: boolean }) => {
     declineBrowserAutoStart();
-    // The tab the person takes over is this chat's from then on: its Browser
-    // view goes on showing it once Octo's turn has ended.
-    const taken = sharedBrowserChromePages.find((page) => page.isActive) ?? null;
+    // The tab the person takes over is this chat's from then on, when it is
+    // one the chat's view shows: its Browser view goes on showing it once
+    // Octo's turn has ended. Take over pressed over a blank stage (another
+    // chat's page still in front as the turn starts) leaves the chat its own
+    // tab, and that page the other chat's.
+    const taken = chatPageOnScreen(sharedBrowserChromePages, chatViewPageIds);
     const tookOver = await browserHandoff.takeOverShared(options);
     if (tookOver && taken) chooseChatBrowserTab(taken.id);
     return tookOver;
-  }, [browserHandoff, chooseChatBrowserTab, declineBrowserAutoStart, sharedBrowserChromePages]);
+  }, [browserHandoff, chatViewPageIds, chooseChatBrowserTab, declineBrowserAutoStart, sharedBrowserChromePages]);
 
   const handleStashDraft = useCallback(async (): Promise<boolean> => {
     if (!ensureProjectWriteAccess()) {

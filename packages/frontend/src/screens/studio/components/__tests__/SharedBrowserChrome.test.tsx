@@ -357,7 +357,7 @@ describe("SharedBrowserChrome", () => {
     expect(input.value).toBe("https://instafy.dev/docs");
   });
 
-  // Local drive, Oct 30: after a reload the browser named no tab in front,
+  // Local test, Oct 30: after a reload the browser named no tab in front,
   // and the bar showed the address of its first tab, another chat's page.
   it("shows no address, and acts on no tab, when no tab is named in front", async () => {
     const onNavigate = vi.fn();

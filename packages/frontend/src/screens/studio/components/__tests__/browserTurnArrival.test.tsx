@@ -66,7 +66,7 @@ describe("a chat's browser turn on its way to a blank tab", () => {
     expect(browserArrivalNote(typed, { url: "" }, "Octo")).toBe("Octo is starting…");
   });
 
-  // Local drive, Oct 30: during another chat's turn, this chat's view showed
+  // Local test, Oct 30: during another chat's turn, this chat's view showed
   // that chat's page, and before its own turn's first page, the tab another
   // chat left in front. The view shows none of them now, and says why.
   it("says Octo is working in another chat while that chat's turn holds the browser", () => {

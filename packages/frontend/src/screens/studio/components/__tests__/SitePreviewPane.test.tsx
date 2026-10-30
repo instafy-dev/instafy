@@ -167,7 +167,7 @@ describe("SitePreviewPane", () => {
   });
 
   // A local test: a restarted site's pane was blank for 16 to 26 s, and the
-  // map's for 5 to 18 s, with nothing said. Local drive, Oct 30: after a
+  // map's for 5 to 18 s, with nothing said. Local test, Oct 30: after a
   // press the pane said "Opening …", then "Loading…", then went blank: the
   // line it opened with now stays until the site's first page.
   it("says it is opening the site until its first page loads, Loading… after that, and tells the cards once it has", async () => {

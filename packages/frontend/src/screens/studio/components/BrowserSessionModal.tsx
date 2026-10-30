@@ -588,12 +588,13 @@ export function BrowserSessionModal({
    */
   conversationId?: string | null;
   /**
-   * The tabs this chat's view shows: the chat's own tab and, while its
-   * browser turn is under way, Octo's tabs of that turn. The stage draws a
-   * picture, and the address bar an address, only while one of them is in
-   * front; any other tab (another chat's page, or none named in front)
-   * leaves the stage blank. Null for a view that is not a chat's own (an
-   * older browser that cannot give a chat a tab): it shows the tab in front.
+   * The tabs this chat's view shows (chatBrowserTab.ts's `useChatViewTabs`):
+   * the chat's own tab and Octo's tabs of its turns while the browser lists
+   * them as Octo's. The stage draws a picture, and the address bar an
+   * address, only while one of them is in front; any other tab (another
+   * chat's page, or none named in front) leaves the stage blank. Null for a
+   * view that is not a chat's own (an older browser that cannot give a chat
+   * a tab): it shows the tab in front.
    */
   chatPageIds?: readonly string[] | null;
   /**
@@ -1043,6 +1044,23 @@ export function BrowserSessionModal({
     activeSharedBrowserViewerKind === "rfb" && rfbViewOnlyAvailable && !humanInputEnabled;
   const rfbViewOnlyLaneRef = useRef(rfbViewOnlyLane);
   rfbViewOnlyLaneRef.current = rfbViewOnlyLane;
+  // RFB draws whatever tab is in front, with no page of its own, so someone
+  // else in control (another person, or this person's other window) can
+  // bring another tab forward before the tab list is read again. Their view
+  // says which tab it shows: while that is none of the chat's tabs, or it
+  // names none, the stage draws no picture, and none is kept as the chat's.
+  const collaborationOwner = collaboration.client.connectionStatus === "connected"
+    ? collaboration.client.state?.controlOwner ?? null
+    : null;
+  const remoteHumanPageId = collaborationOwner?.kind === "human" && collaboration.client.participantId &&
+    collaborationOwner.participantId !== collaboration.client.participantId
+    ? collaboration.client.state?.participants.find((participant) => participant.id === collaborationOwner.participantId)?.pageId ?? null
+    : undefined;
+  const rfbShowsAnotherTab = activeSharedBrowserViewerKind === "rfb" && sharedBrowserViewportOnly &&
+    chatPageIds !== null && remoteHumanPageId !== undefined &&
+    (remoteHumanPageId === null || !chatPageIds.includes(remoteHumanPageId));
+  const rfbShowsAnotherTabRef = useRef(rfbShowsAnotherTab);
+  rfbShowsAnotherTabRef.current = rfbShowsAnotherTab;
   const sharedBrowserConnectionPageId =
     activeSharedBrowserViewerKind === "rfb" ? null : sharedBrowserPageId;
   // URL resolution follows renderer selection in an effect. Never mount the
@@ -2821,7 +2839,9 @@ export function BrowserSessionModal({
         disposeFrameObserver = observeBrowserRfbFrames(rfb, () => {
           if (cancelled || !retainFrameRef.current || browserDataClearInFlightRef.current) return;
           painted = true;
-          paintedFrameScopeRef.current = frameScopeRef.current;
+          // A picture of a tab someone else brought forward is never kept as
+          // the chat's page (rfbShowsAnotherTab).
+          paintedFrameScopeRef.current = rfbShowsAnotherTabRef.current ? null : frameScopeRef.current;
           paintedFrameSurfaceRef.current = rfb?._canvas ?? null;
           markFrameConnected();
         }, () => `${framePaintEpochRef.current}:${frameScopeRef.current}`);
@@ -3270,7 +3290,7 @@ export function BrowserSessionModal({
   // another chat's page shown before, is dropped, and only a still of the
   // page in front (frozenFrameUrl, kept for that page alone) stands in.
   const heldPictureIsChats = paintedFrameScopeRef.current === frameScope;
-  const liveSurfaceShown = stageShowsPage &&
+  const liveSurfaceShown = stageShowsPage && !rfbShowsAnotherTab &&
     (heldPictureIsChats || !(status === "connecting" && displayStatus === "connected"));
   // While Octo drives, the stage shows the page it is on: the live picture
   // (a viewer that may watch, such as RFB's view-only lane), else a still
