@@ -151,9 +151,10 @@ outer rail. Opening search shows the full team/space path for adjusting search s
 The controls stay in place when the inner sidebar collapses. The adjacent sidebar
 contains a Chats entry and workspace tools. Its expand/collapse control stays at the same
 position in either width, with **New chat** beside it when expanded and below it when compact.
-New chat makes a chat at once, here, in the tab bar and in the phone's More menu alike; in a chat
-where nothing has been said yet it stays there, and with such a chat open elsewhere it goes to that
-one, so an empty chat never stays behind beside the new one. A private
+New chat makes a chat at once, here, in the tab bar and in the phone's More menu alike; in an empty
+chat the person started (nothing said in it, here or on another device) it stays there, and with
+such a chat open elsewhere it goes to that one, so an empty chat never stays behind beside the new
+one. A teammate's empty chat, or a tool's thread, is never taken over. A private
 chat starts from the composer's Invite menu, where **New private chat** lists the space's teammates.
 New chat stays available for the active accessible space when another tab, including personal
 Settings, is selected. It is unavailable on Home or when no space in the selected team is active.

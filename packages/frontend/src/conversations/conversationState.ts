@@ -49,6 +49,12 @@ export interface ConversationState {
    * threads" filter instead of among the person's chats.
    */
   toolSource?: string | null;
+  /**
+   * True for a chat someone else started (or Instafy did, for a suggestion),
+   * as the controller says; absent for one this person started. New chat never
+   * takes it over, however empty it is.
+   */
+  startedByOther?: boolean;
   messages: ChatMessage[];
   draft: string;
   draftEditorState: string | null;
@@ -125,6 +131,7 @@ export type ConversationsAction =
   | { type: "SET_GOAL"; id: string; goal: ConversationGoal | null }
   | { type: "SET_VISIBILITY"; id: string; visibility: ConversationVisibility }
   | { type: "SET_TOOL_SOURCE"; id: string; toolSource: string | null }
+  | { type: "SET_STARTED_BY_OTHER"; id: string; startedByOther: boolean }
   | {
       type: "SET_THREAD_META";
       id: string;
@@ -685,6 +692,16 @@ export function conversationsReducer(
         conversations: state.conversations.map((conversation) =>
           conversation.localId === action.id
             ? { ...conversation, hasRemoteMessages: action.hasMessages }
+            : conversation,
+        ),
+      };
+    }
+    case "SET_STARTED_BY_OTHER": {
+      return {
+        ...state,
+        conversations: state.conversations.map((conversation) =>
+          conversation.localId === action.id
+            ? { ...conversation, startedByOther: action.startedByOther }
             : conversation,
         ),
       };

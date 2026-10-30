@@ -9,11 +9,13 @@ import { isUUID } from "../../utils/uuid";
 export const NEW_CHAT_GREETING = "How can I help with your space?";
 
 /**
- * New chat, from the sidebar, the tab bar or the phone's menu. In a chat where
- * nothing has been said yet it stays in that chat, and with such a chat open
+ * New chat, from the sidebar, the tab bar or the phone's menu. In an empty
+ * chat this person started it stays in that chat, and with such a chat open
  * elsewhere it goes there, instead of making another: the space's first empty
- * "New chat" stayed in the tab bar beside the chats made after it. Otherwise
- * it makes a chat at once and opens it.
+ * "New chat" stayed in the tab bar beside the chats made after it. A chat is
+ * empty only when its whole history is known to be (isReusableBlankConversation):
+ * never one with history on the server, a teammate's or a tool's. Otherwise it
+ * makes a chat at once and opens it.
  */
 export function useStartNewChat({
   activeProjectId,

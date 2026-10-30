@@ -104,6 +104,36 @@ describe("New chat", () => {
     expect(openTab).toHaveBeenCalledWith("empty");
   });
 
+  // A chat loaded from the server keeps its history there until it is
+  // opened, and an untitled one is still "New chat": that is no empty chat.
+  it("never takes a chat with history on the server for an empty one", async () => {
+    const history = chat({ localId: "history", controllerId: "44444444-4444-4444-8444-444444444444", hasRemoteMessages: true });
+    mocks.conversations = [history, chat({ localId: "rebuilt", remoteSummaryPending: true })];
+    mocks.activeConversationId = "history";
+    await render();
+    await act(async () => start());
+    expect(mocks.createConversation).toHaveBeenCalledOnce();
+    expect(openTab).toHaveBeenCalledWith("made");
+  });
+
+  // In a team space every member sees the others' chats: one a teammate just
+  // made, empty, is theirs. Nor is a tool's own thread a chat to land in.
+  it("never takes someone else's empty chat, or a tool's", async () => {
+    mocks.conversations = [
+      chat({ localId: "teammate", controllerId: "55555555-5555-4555-8555-555555555555", startedByOther: true }),
+      chat({ localId: "tool", toolSource: "site" }),
+    ];
+    for (const active of ["teammate", "tool", null]) {
+      vi.clearAllMocks();
+      mocks.createConversation.mockImplementation(() => chat({ localId: "made" }));
+      mocks.activeConversationId = active;
+      await render();
+      await act(async () => start());
+      expect(mocks.createConversation, String(active)).toHaveBeenCalledOnce();
+      expect(openTab, String(active)).toHaveBeenCalledWith("made");
+    }
+  });
+
   it("makes a chat when every chat has something in it, or a draft", async () => {
     mocks.conversations = [
       chat({ localId: "busy", title: "Plan a weekend", messages: [{ id: "u", role: "user", content: "Plan a weekend", timestamp: 2 }] }),

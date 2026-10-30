@@ -1,3 +1,4 @@
+import { spaceDisplayName } from "../projects/spaceName";
 import type { CreditLedgerEntry } from "./creditService";
 
 /** One row of the Credits panel's activity log. */
@@ -5,6 +6,11 @@ export type LedgerActivityRow = {
   key: string;
   /** Plain words: the chat an Instafy AI turn was in, or what the entry was. */
   label: string;
+  /**
+   * The space of a turn's chat when it is not the open space: chats in two
+   * spaces can share a name. Null otherwise.
+   */
+  space: string | null;
   delta: number;
   createdAt: string;
 };
@@ -43,6 +49,11 @@ function saysTurnHasReserve(entry: CreditLedgerEntry): boolean {
   return typeof reserved === "number" && reserved > 0;
 }
 
+/** The space a turn's chat is in, when the ledger says it is another space. */
+function spaceOf(entry: CreditLedgerEntry): string | null {
+  return entry.chatName?.trim() && typeof entry.spaceName === "string" ? spaceDisplayName(entry.spaceName) : null;
+}
+
 function timeOf(createdAt: string): number {
   const time = Date.parse(createdAt);
   return Number.isNaN(time) ? 0 : time;
@@ -70,6 +81,7 @@ export function ledgerActivityRows(
       rows.push({
         key: `${entry.createdAt}-${entry.reason}-${index}`,
         label: isTurnEntry(entry) ? chatName ?? UNNAMED_CHAT_LABEL : labelFor(entry.reason),
+        space: spaceOf(entry),
         delta: entry.delta,
         createdAt: entry.createdAt,
       });
@@ -81,6 +93,7 @@ export function ledgerActivityRows(
       const row = {
         key: `turn-${turnId}`,
         label: chatName ?? UNNAMED_CHAT_LABEL,
+        space: spaceOf(entry),
         delta: entry.delta,
         createdAt: entry.createdAt,
       };
@@ -92,7 +105,10 @@ export function ledgerActivityRows(
     turn.reserveLoaded ||= isReserve;
     turn.hasReserve ||= isReserve || saysTurnHasReserve(entry);
     if (timeOf(entry.createdAt) < timeOf(turn.row.createdAt)) turn.row.createdAt = entry.createdAt;
-    if (chatName && turn.row.label === UNNAMED_CHAT_LABEL) turn.row.label = chatName;
+    if (chatName && turn.row.label === UNNAMED_CHAT_LABEL) {
+      turn.row.label = chatName;
+      turn.row.space = spaceOf(entry);
+    }
   });
   const leftOut = new Set(
     [...turns.values()]

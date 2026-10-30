@@ -542,6 +542,7 @@ fn build_credit_snapshot(
                 metadata: entry.metadata,
                 created_at: entry.created_at.to_rfc3339(),
                 chat_name: None,
+                space_name: None,
             })
             .collect(),
     }
