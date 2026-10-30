@@ -190,6 +190,24 @@ ${body}<script>${script}</script></html>`;
 <div style="width:40px;height:40px;overflow:hidden;transform:translateZ(0)"><dialog id="confirm"><p>Delete this receipt permanently?</p><button type="button">Confirm delete</button><button type="button">Cancel</button></dialog></div>`,
     `document.getElementById("confirm").showModal();`);
   }
+  if (name === "consent") {
+    return page("Opening hours", "", `<h1>Opening hours</h1><p>Open daily.</p>
+<div id="cookie-banner" class="cookie-consent"><p>This site uses cookies.</p>
+<a href="/rules/accepted">aceitar e continuar</a> <a href="/rules/visible">Pol\u00edtica de cookies</a></div>`, "");
+  }
+  if (name === "order") {
+    return page("Order", "", `<h1>Order</h1><form id="order" method="post" action="/rules/ordered">
+<input type="hidden" name="csrf" value="inert-fixture">
+<p><label>Customer name: <input name="custname"></label></p>
+<p><label>Telephone: <input type="tel" name="custtel"></label></p>
+<fieldset><legend>Pizza Size</legend><label><input type="radio" name="size" value="small"> Small</label>
+<label><input type="radio" name="size" value="medium"> Medium</label></fieldset>
+<p><label>Delivery instructions: <textarea name="comments"></textarea></label></p>
+<p><button>Submit order</button></p></form>`,
+    `document.getElementById("order").addEventListener("submit", (event) => {
+  event.preventDefault(); event.currentTarget.dataset.sent = "1";
+});`);
+  }
   if (name === "transition") {
     return page("Menu", `#belege-sub{max-height:0;overflow:hidden;transition:max-height 900ms linear}#belege-sub[data-open]{max-height:336px}#belege-sub a{display:block;height:28px}`,
       `<button type="button" aria-expanded="false" aria-controls="belege-sub">Belege öffnen</button>
@@ -841,6 +859,27 @@ export async function runSharedBrowserCobrowsingFixture() {
     rules = (await successfulTool("POST", "/v1/click", target(rules, "Belege öffnen"))).payload;
     assert.deepEqual(linksTo(rules, /\/rules\/belege\//), RULE_TRANSITION_ITEMS, "The click's result showed the menu half open");
     assert.equal(observedApprovals.length, 2 + expectedSubmissions + 2, "Routine snapshots, menus and drawers repeated a prompt");
+
+    // A cookie banner's accept link is the person's step: refused before any
+    // prompt, though a plain link would be navigation, and the page stays.
+    rules = (await successfulTool("POST", "/v1/navigate", { url: "/rules/consent" })).payload;
+    const accepted = await runTool("POST", "/v1/click", target(rules, "aceitar e continuar"));
+    assert.notEqual(accepted.code, 0, "The banner's accept link was followed");
+    assert.match(accepted.stderr, /\[step_refused_consent\]/, accepted.stderr);
+    assert.equal(observedApprovals.length, 2 + expectedSubmissions + 2, "The banner's accept asked");
+    assert.equal(new URL(page.url()).pathname, "/rules/consent", "The banner's accept link navigated");
+    freshTurn();
+    // A form's submit says which fields it sends, by the page's names for
+    // them, and never their values.
+    rules = (await successfulTool("POST", "/v1/navigate", { url: "/rules/order" }, "allow_routine")).payload;
+    await page.locator("input[name=custname]").fill("Inert Visitor");
+    await page.locator("input[name=custtel]").fill("555-0100");
+    await page.locator("input[value=medium]").check();
+    const ordered = await runTool("POST", "/v1/click", target(rules, "Submit order"), "allow_once", async (request) => {
+      assert.equal(request.display.label, "Change something: Submit order \u00b7 Sends: Customer name, Telephone, Pizza Size");
+    });
+    assert.equal(ordered.code, 0, `Approved order submit failed: ${ordered.stderr}`);
+    assert.equal(await page.locator("#order").getAttribute("data-sent"), "1");
 
     const result = {
       status: "passed", fixtureVersion: 1, browserVersion: context.browser()?.version() ?? "unknown",
