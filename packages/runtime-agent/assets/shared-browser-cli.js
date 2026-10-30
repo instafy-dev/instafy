@@ -141,6 +141,10 @@ class BrowserUnavailableError extends Error {}
 const STEP_TIME_MS = 20_000;
 // How long reading the page as it is may take once the step's time is up.
 const LATE_READ_MS = 8_000;
+// How long ending a step's guards (guardStepDocuments) may take once its time
+// is up. A busy page holds a guard's own release; the command's end lets go of
+// the page anyway, and the windows are closed by their targets first.
+const GUARD_RELEASE_MS = 1_000;
 class StepTimeUp extends Error {
   constructor() {
     super("This step's time was up, so it took no further action.");
@@ -3014,6 +3018,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
 // The step within its time (STEP_TIME_MS): its own answer, or, once its time is
 // up, the page as it is.
 async function executeWithinStepTime(browser, browserSession, method, requestPath, body) {
+  stepBrowserSession = browserSession;
   stepClock.start();
   const step = execute(browser, browserSession, method, requestPath, body);
   const finished = await Promise.race([
@@ -3031,29 +3036,51 @@ async function executeWithinStepTime(browser, browserSession, method, requestPat
   return await pageAsItIs(browser);
 }
 
-// The answer of a step whose time ran out: the page as it is now, read like a
-// snapshot within LATE_READ_MS, or its address alone when the page is too busy
-// to be read. It says that the step's time ran out, so Octo checks what the step
-// did before it acts again, and its activity is a read of the page: nothing new
-// on the turn's line.
-async function pageAsItIs(browser) {
-  const read = (async () => snapshotForResult(await resolveExpectedPage(browser)))();
-  read.catch(() => {});
+// Resolves to `promise`'s value, or to `fallback` once `ms` have passed.
+async function within(ms, promise, fallback = null) {
+  promise.catch(() => {});
   let timer;
-  const late = new Promise((resolve) => {
-    timer = setTimeout(() => resolve(null), LATE_READ_MS);
-  });
-  let view;
   try {
-    view = (await Promise.race([read, late])) ?? addressOnly(resolvedPage);
+    return await Promise.race([promise, new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fallback), ms);
+    })]);
   } finally {
     clearTimeout(timer);
   }
+}
+
+// The answer of a step whose time ran out: the page as it is now, read like a
+// snapshot within LATE_READ_MS, or its address alone when the page is too busy
+// to be read. It says that the step's time ran out, so Octo checks what the step
+// did before it acts again. Its activity says what it is: a read of the page,
+// or, for the address alone, the page it is on, as status names it. The step's
+// guards still hold while the page is read, then end as a step's guards end: a
+// window it opened is closed, and what they stopped fails the step as it would
+// have in its time.
+async function pageAsItIs(browser) {
+  const read = await within(LATE_READ_MS, (async () => snapshotForResult(await resolveExpectedPage(browser)))());
+  const guards = [...openStepGuards];
+  let stopped = null;
+  try {
+    await within(GUARD_RELEASE_MS, Promise.all(guards.map((guard) => guard.closeUnseenWindows())));
+  } catch (_) {
+    stopped = new Error("This step's time ran out, and Shared Browser could not check for windows it opened, so it stopped there. Take a snapshot before you act again.");
+  }
+  for (const guard of guards) {
+    try {
+      guard.assertNoneBlocked();
+    } catch (error) {
+      stopped ??= error;
+    }
+  }
+  await within(GUARD_RELEASE_MS, Promise.all(guards.map((guard) => guard.release())));
+  if (stopped) throw stopped;
+  const view = read ?? addressOnly(resolvedPage);
   emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
   const note = `This step was still running after ${STEP_TIME_MS / 1000} seconds, so it stopped where it was. This is the page as it is now: check what the step did before you act again.`;
   return withActivity(
     { ...view, stepTimedOut: true, message: [view.message, note].filter(Boolean).join(" ") },
-    stepActivity(resolvedPage, "snapshot", null),
+    stepActivity(resolvedPage, read ? "snapshot" : "status", null),
   );
 }
 
@@ -3121,6 +3148,20 @@ async function execute(browser, browserSession, method, requestPath, body) {
   }
 }
 
+// The guards (guardStepDocuments) of the step that is running, so a step whose
+// time runs out still ends them (pageAsItIs).
+const openStepGuards = new Set();
+// The browser's own CDP session for this command (denyDownloads), which lists
+// and closes windows whose page is too busy to answer.
+let stepBrowserSession = null;
+
+async function pageTargetIds() {
+  const { targetInfos } = await stepBrowserSession.send("Target.getTargets");
+  return (Array.isArray(targetInfos) ? targetInfos : [])
+    .filter((info) => info && info.type === "page" && validTabId(info.targetId))
+    .map((info) => info.targetId);
+}
+
 // While a step of Octo's runs, in any tab (its own tabs and the page the
 // person chose alike), the tab itself loads no document from a link-only
 // site: a link, form or redirect that would take it there is stopped before
@@ -3145,6 +3186,9 @@ async function guardStepDocuments(page) {
     if (!knownPages.has(opened) && !windows.includes(opened)) windows.push(opened);
   };
   let windowRequestStopped = false;
+  // Windows closed by their target alone (closeUnseenWindows).
+  let unseenWindows = 0;
+  let targetsAtStart = null;
   const stopWindowRequests = async (route) => {
     const request = route.request();
     let owner = null;
@@ -3166,6 +3210,9 @@ async function guardStepDocuments(page) {
   };
   let session;
   try {
+    // The browser's list of pages too: a window a busy page opens is listed
+    // there long before Playwright can show it as a page.
+    targetsAtStart = new Set(await pageTargetIds());
     context.on("page", noteWindow);
     await context.route("**/*", stopWindowRequests);
     session = await page.context().newCDPSession(page);
@@ -3224,12 +3271,15 @@ async function guardStepDocuments(page) {
     await context.unroute("**/*", stopWindowRequests).catch(() => {});
     throw new Error("Shared Browser could not guard the tab against link-only sites, so the step was not performed");
   }
-  return {
+  let released = null;
+  const guard = {
     // The sites the tab may send a form to from now on (stepPostOrigins).
     limitFormPosts: (origins) => {
       postOrigins = origins === null ? null : new Set(origins.filter(Boolean));
     },
-    release: async () => {
+    // Ends the guard once, whoever asks first: the step, or pageAsItIs once
+    // the step's time is up (a busy page can hold the step's own release).
+    release: () => (released ??= (async () => {
       await session.send("Fetch.disable").catch(() => {});
       await session.detach().catch(() => {});
       // A window that appeared after the step's last check is closed too.
@@ -3243,6 +3293,20 @@ async function guardStepDocuments(page) {
       // person's tab: the tab the step ran in comes to the front again.
       if (windows.length && !page.isClosed()) {
         await page.bringToFront().catch(() => {});
+      }
+    })().finally(() => openStepGuards.delete(guard))),
+    // Once a step's time is up its page may be too busy for Playwright to show
+    // a window the step opened as a page: such a window is closed by its
+    // target, as every page that appears during the step is the step's.
+    closeUnseenWindows: async () => {
+      for (const targetId of await pageTargetIds()) {
+        if (targetsAtStart.has(targetId)) continue;
+        await stepBrowserSession.send("Target.closeTarget", { targetId }).catch(() => {});
+        unseenWindows += 1;
+      }
+      // As release does, the tab the step ran in comes to the front again.
+      if (unseenWindows) {
+        await stepBrowserSession.send("Target.activateTarget", { targetId: activePageId }).catch(() => {});
       }
     },
     // An approval code in `cause` still ends the run, so it is kept.
@@ -3261,13 +3325,15 @@ async function guardStepDocuments(page) {
           `During this step the page sent a form to ${maskedDisplayText(strayPosts[0])}, which the step was not approved to send to, so it was stopped before it left the browser. Nothing was sent there. Leave this form to the person.`,
         );
       }
-      if (windows.length || windowRequestStopped) {
+      if (windows.length || windowRequestStopped || unseenWindows) {
         throw new Error(
           "The step opened another window, which Octo never uses, so it was closed before it loaded anything. Open the address with open_tab instead.",
         );
       }
     },
   };
+  openStepGuards.add(guard);
+  return guard;
 }
 
 // A control that leads to a link-only site is refused before any prompt. On a
@@ -3358,21 +3424,28 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       throw new Error("Human input targets must be observed editable fields");
     }
     await clearHumanInputHighlights(page);
-    assertStepOnTime();
-    for (const entry of selected) {
-      await entry.locator.evaluate((element) => {
-        // Fixed native DOM styling follows scrolling/reflow. No values or
-        // DOM-derived text are copied to the handoff or action log.
-        const key = "__instafyHumanInputHighlights";
-        const records = Array.isArray(globalThis[key]) ? globalThis[key] : [];
-        if (records.length >= 8) throw new Error("Human input highlight limit");
-        const record = { element, outline: element.style.outline, offset: element.style.outlineOffset };
-        records.push(record);
-        globalThis[key] = records;
-        element.style.outline = "3px solid #f59e0b";
-        element.style.outlineOffset = "3px";
-        record.appliedOutline = element.style.outline;
-      });
+    try {
+      for (const entry of selected) {
+        assertStepOnTime();
+        await entry.locator.evaluate((element) => {
+          // Fixed native DOM styling follows scrolling/reflow. No values or
+          // DOM-derived text are copied to the handoff or action log.
+          const key = "__instafyHumanInputHighlights";
+          const records = Array.isArray(globalThis[key]) ? globalThis[key] : [];
+          if (records.length >= 8) throw new Error("Human input highlight limit");
+          const record = { element, outline: element.style.outline, offset: element.style.outlineOffset };
+          records.push(record);
+          globalThis[key] = records;
+          element.style.outline = "3px solid #f59e0b";
+          element.style.outlineOffset = "3px";
+          record.appliedOutline = element.style.outline;
+        });
+      }
+      // A step that answered with the page as it is asks the person for nothing.
+      assertStepOnTime();
+    } catch (error) {
+      if (error instanceof StepTimeUp) await clearHumanInputHighlights(page).catch(() => {});
+      throw error;
     }
     assertSameOrigin(page.url(), sourceOrigin);
     const authority = approvalProtocol.authority();

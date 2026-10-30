@@ -15,7 +15,9 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // a real Chromium over CDP against a loopback fixture site. A search whose
 // results page keeps the page busy for a minute answers once the step's time
 // is up, with the page as it is, instead of waiting for the page; a prompt the
-// person answers after more than the step's time is never cut short. No model,
+// person answers after more than the step's time is never cut short. A step
+// whose time runs out still ends as every step ends: a window it opened is
+// closed and said, and a hand-off it had not finished is never left behind. No model,
 // Studio, controller, account or external site is used, and Chromium resolves
 // no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -51,6 +53,12 @@ const LATE_READ_MS = 8_000;
 const BUSY_MS = 60_000;
 // How long the person takes to answer a prompt: longer than a step's time.
 const SLOW_ANSWER_MS = 23_000;
+// How long a click keeps the page busy after it opened a window: longer than
+// a step's time and its late read, so the step answers before the page frees.
+const WINDOW_BUSY_MS = 32_000;
+// How long a form keeps the page busy once a field is highlighted: longer than
+// a step's time, shorter than the step's time and its late read.
+const FORM_BUSY_MS = 24_000;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -69,6 +77,22 @@ const page = (title, body, script = "") => `<!doctype html><html lang="en"><head
 const SEARCH = `<form action="/results" method="get" role="search"><input type="search" name="q" aria-label="Search places"><button>Search</button></form>`;
 const RESULTS = "<p>Results for your search.</p><p><a href=\"/places/tower\">The tower</a></p>";
 const BUSY = `setTimeout(() => { const end = Date.now() + ${BUSY_MS}; while (Date.now() < end) {} }, 100);`;
+// A button that opens another window, then keeps the page busy; once free, the
+// page sends that window somewhere else.
+const WINDOW = `<button id="open" type="button">Open details</button>`;
+const OPENS_WINDOW = `document.getElementById("open").addEventListener("click", () => {
+  const opened = window.open("/popup");
+  const end = Date.now() + ${WINDOW_BUSY_MS}; while (Date.now() < end) {}
+  try { opened.location = "/popup?later=1"; } catch (_) {}
+});`;
+// A form whose script does heavy work once one of its fields is highlighted.
+const FORM = `<form><label>Your name <input name="name"></label><label>Your city <input name="city"></label></form>`;
+const BUSY_ON_HIGHLIGHT = `let busy = false;
+new MutationObserver(() => {
+  if (busy || !document.querySelector("input[style*=outline]")) return;
+  busy = true;
+  setTimeout(() => { const end = Date.now() + ${FORM_BUSY_MS}; while (Date.now() < end) {} }, 0);
+}).observe(document.body, { subtree: true, attributes: true, attributeFilter: ["style"] });`;
 
 export async function runSharedBrowserStepTimeFixture() {
   assert.ok(fs.existsSync(executablePath), "Locked Playwright Chromium is missing; run pnpm --filter @instafy/frontend exec playwright install chromium");
@@ -89,7 +113,10 @@ export async function runSharedBrowserStepTimeFixture() {
     server = createServer((request, response) => {
       const url = new URL(request.url, "http://fixture.invalid");
       requests.push(`${request.method} ${url.pathname}${url.search}`);
-      const body = { "/": [page("Places", SEARCH)], "/results": [page("Results", RESULTS, BUSY)], "/places/tower": [page("The tower", "<p>Open daily.</p>")] }[url.pathname];
+      const body = {
+        "/": [page("Places", SEARCH)], "/results": [page("Results", RESULTS, BUSY)], "/places/tower": [page("The tower", "<p>Open daily.</p>")],
+        "/window": [page("Details", WINDOW, OPENS_WINDOW)], "/popup": [page("Popup", "<p>Another window.</p>")], "/form": [page("Your details", FORM, BUSY_ON_HIGHLIGHT)],
+      }[url.pathname];
       if (!body) {
         response.writeHead(404).end();
         return;
@@ -223,14 +250,51 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.ok(slow.wallMs >= SLOW_ANSWER_MS, `The step waited for the answer (${Math.round(slow.wallMs)} ms)`);
     assert.equal(slow.payload.stepTimedOut, undefined, "A step waiting for the person is not cut short");
     assert.equal(slow.payload.url, `${origin}/`);
-    const field = slow.payload.interactiveElements.find((element) => element.label === "Search places");
+    assert.ok(slow.payload.interactiveElements.some((element) => element.label === "Search places"), "The search box is observed");
+    const actions = () => fs.readFileSync(actionsPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+
+    // 2. A click that opens another window and then keeps the page busy: the
+    // step's time runs out, and it still ends as a step does. The window is
+    // closed before it loads anything and the step says so, and once the page
+    // is free it can send that window nowhere.
+    await ok("POST", "/v1/navigate", { url: `${origin}/window` });
+    const details = await ok("GET", "/v1/snapshot");
+    const button = details.payload.interactiveElements.find((element) => element.label === "Open details");
+    assert.ok(button, "The button is observed");
+    requests.length = 0;
+    const clicked = await runTool("POST", "/v1/click", { index: button.index, snapshotId: details.payload.snapshotId });
+    const clickedAt = performance.now() - clicked.wallMs;
+    assert.equal(clicked.code, 1, `The step fails as it would in its time: ${clicked.stdout}`);
+    assert.match(clicked.stderr, /The step opened another window, which Octo never uses, so it was closed before it loaded anything\./);
+    assert.ok(clicked.wallMs < STEP_TIME_MS + LATE_READ_MS + 10_000, `It did not wait for the busy page (${Math.round(clicked.wallMs)} ms)`);
+    await delay(Math.max(0, clickedAt + WINDOW_BUSY_MS + 3_000 - performance.now()));
+    assert.deepEqual(context.pages().map((open) => new URL(open.url()).pathname), ["/window"], "Only the run's page is left");
+    assert.deepEqual(requests.filter((request) => request.includes("/popup")), [], "The window never loaded anything, then or later");
+
+    // 3. A hand-off whose fields the page is too busy to highlight in time:
+    // the step answers with the page as it is, and no hand-off is left behind
+    // for the person once the page is free.
+    await ok("POST", "/v1/navigate", { url: `${origin}/form` });
+    const form = await ok("GET", "/v1/snapshot");
+    const fields = form.payload.interactiveElements.filter((element) => /^Your (name|city)$/.test(element.label)).map((element) => element.index);
+    assert.equal(fields.length, 2, "Both fields are observed");
+    const handoff = await ok("POST", "/v1/request-human-input", { indices: fields, snapshotId: form.payload.snapshotId });
+    assert.equal(handoff.payload.stepTimedOut, true);
+    assert.ok(handoff.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(handoff.wallMs)} ms)`);
+    await delay(1_000);
+    assert.deepEqual(actions().filter((action) => action.type === "human_input"), [], "No hand-off after the step answered");
+
+    // 4. Back to the site's own search.
+    await ok("POST", "/v1/navigate", { url: `${origin}/` });
+    const start = await ok("GET", "/v1/snapshot");
+    const field = start.payload.interactiveElements.find((element) => element.label === "Search places");
     assert.ok(field, "The search box is observed");
 
-    // 2. The site's own search, whose results page then keeps the page busy:
+    // 5. The site's own search, whose results page then keeps the page busy:
     // the step answers once its time is up, with the page as it is, and says
     // so. It never waits out the busy page.
     requests.length = 0;
-    const searched = await ok("POST", "/v1/type", { index: field.index, snapshotId: slow.payload.snapshotId, text: "tower", submit: true });
+    const searched = await ok("POST", "/v1/type", { index: field.index, snapshotId: start.payload.snapshotId, text: "tower", submit: true });
     assert.deepEqual(requests, ["GET /results?q=tower"], "The search was sent once, as the form makes it");
     assert.ok(searched.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(searched.wallMs)} ms)`);
     assert.ok(searched.wallMs < STEP_TIME_MS + LATE_READ_MS + 10_000, `It did not wait for the busy page (${Math.round(searched.wallMs)} ms)`);
@@ -240,8 +304,9 @@ export async function runSharedBrowserStepTimeFixture() {
     // A page too busy to be read lists no controls, so no action can use it.
     assert.deepEqual(searched.payload.interactiveElements, []);
     assert.equal(searched.payload.visibleText, "");
-    // Its line says the page was read, not that the step did anything new.
-    assert.deepEqual(searched.payload.activity, { step: "snapshot", url: `${origin}/results?q=tower` });
+    // Nothing was read, so its line does not say a page was read: like status,
+    // it names the page it is on.
+    assert.deepEqual(searched.payload.activity, { step: "status", url: `${origin}/results?q=tower` });
     assert.equal(prompts.length, 1, "Nothing asked during the search");
 
     const result = {
@@ -249,9 +314,11 @@ export async function runSharedBrowserStepTimeFixture() {
       fixtureVersion: 1,
       checks: [
         "a prompt answered after more than a step's time is waited for, and the step then reads the page as usual",
-        "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note, never waiting out the page",
+        "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
+        "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
+        "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note, never waiting out the page; its line says no page was read",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), busySearchMs: Math.round(searched.wallMs) },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs) },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);

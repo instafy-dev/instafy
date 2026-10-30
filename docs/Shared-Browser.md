@@ -967,11 +967,21 @@ typing or navigation it had not started) and answers with the page as it is: a
 snapshot read within 8 more seconds, or, when the page is too busy to be read,
 its masked address alone, with no text and no controls. The answer carries
 `stepTimedOut: true` and a note that tells Octo to check what the step did
-before it acts again. It reads as a page read on the turn's line, so it adds
-no new wording there. `scripts/shared-browser-step-time-e2e.mjs` shows both
-sides in Chromium: a search whose results page keeps the page busy for a
-minute answers after about 28 seconds, and a prompt answered after 23 seconds
-is waited for.
+before it acts again, and the Shared Browser policy says to take a snapshot
+and go on from there: only an approval's own outcome is final. On the turn's
+line it reads as a page read when the page was read, and like `status`
+("Browsed <site>") when only its address was, so it adds no new wording and
+never says a page was read when none was. The step's guards still hold while
+the page is read, then end as a step's guards end: a window the step opened
+is closed by its target (a busy page's window may not be a page Playwright can
+show yet) and fails the step as it would have in its time, as does a
+link-only load or a form post the guards stopped. A hand-off whose fields were
+not all highlighted in time leaves no prompt behind.
+`scripts/shared-browser-step-time-e2e.mjs` shows these in Chromium: a search
+whose results page keeps the page busy for a minute answers after about 29
+seconds, a prompt answered after 23 seconds is waited for, a click that opens
+a window and keeps the page busy fails with the window closed for good, and a
+hand-off on a page too busy to highlight in time leaves no prompt.
 
 In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
 step yields to the model only after the browser server's tool timeout (180
