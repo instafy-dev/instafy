@@ -223,9 +223,12 @@ separate snapshot route so older servers reject it without silently acknowledgin
 newer activity. Mutation callers pin their account and access token across async
 work and reject a substituted controller credential.
 
-Reading a normal conversation acknowledges only persisted message IDs actually
-visible in the chat viewport while the document and chat pane are visible.
-Offscreen messages and messages covered by a dialog are not acknowledged. The
+Reading a normal conversation acknowledges the persisted message IDs actually
+visible in the chat viewport while the document and chat pane are visible;
+offscreen messages and messages covered by a dialog are not acknowledged. A
+message that lands while its conversation is open, in Chat or in its Browser
+view, with the document visible, is acknowledged as it lands: the person is in
+that chat. The history the conversation opened on never is. The
 account-pinned `POST /me/notifications/conversation-read` endpoint accepts a
 `conversationId`, at most 100 `messageIds`, and `expectedUserId`; it rechecks
 current access and marks only that user's matching `conversation.reply` events
