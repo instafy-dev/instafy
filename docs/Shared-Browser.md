@@ -680,7 +680,8 @@ page read for the turn states "not checked" or takes it out, never says a place,
 stop, route or time doesn't exist unless a page says so, and takes out a step
 the reply says is under way that the turn didn't start. Only the reply's words
 change, and they are finished as the turn's own were (the runtime's no-change
-line removed, an integration card's retry phrase added). The check answers in
+line removed, an integration card's retry phrase added); a browser turn's finding
+lines for the building turn stay as the turn wrote them. The check answers in
 words only: the runtime reads each of its responses whole before Codex does, and
 one that calls a tool reaches Codex empty, so nothing runs, nothing is asked
 again, and the reply stays as it was (runtime-agent `answer_only.rs`). It is one
