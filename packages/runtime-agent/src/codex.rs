@@ -1710,18 +1710,12 @@ impl CodexClient {
         // The run's developer text reaches the model through the run's World State sections
         // (`codex_extension_registry`), never the config, so a resumed thread reads it too.
         let mut run_instructions = run_instructions_for_turn(
-            RunLane {
-                granted: granted_mode,
-                generic_mcp: generic_mcp_mode,
-                browser: browser_mode,
-                plain_text_final: plain_text_final_mode,
-                plain_text_write: options.plain_text_write_mode,
-                shared_browser: shared_browser_mode,
-                personal_browser: personal_browser_mode,
-                local_browser: local_browser_mode,
-                page_left_by_other_chat: shared_browser_mode
-                    && options.shared_browser_page_left_by_other_chat,
-            },
+            run_lane(
+                &options,
+                shared_browser_mode,
+                personal_browser_mode,
+                local_browser_mode,
+            ),
             optional_env,
         );
         let base_instructions = runtime_base_instructions(
@@ -4226,6 +4220,42 @@ struct RunLane {
     local_browser: bool,
     /// A Shared Browser turn that starts on a page a run of another chat left.
     page_left_by_other_chat: bool,
+}
+
+/// The lane a run's options ask for, with the browsers this runtime resolved for the run.
+fn run_lane(
+    options: &CodexRunOptions,
+    shared_browser: bool,
+    personal_browser: bool,
+    local_browser: bool,
+) -> RunLane {
+    RunLane {
+        granted: options.granted.is_some(),
+        generic_mcp: options.expect_mcp_tools,
+        browser: options.expect_browser_session,
+        plain_text_final: options.disable_final_output_json_schema
+            && options.allow_plain_text_final_fallback,
+        plain_text_write: options.plain_text_write_mode,
+        shared_browser,
+        personal_browser,
+        local_browser,
+        page_left_by_other_chat: shared_browser && options.shared_browser_page_left_by_other_chat,
+    }
+}
+
+/// A run's instructions as its options ask for them, on a runtime that has the browsers they
+/// ask for.
+#[cfg(test)]
+pub(crate) fn run_instructions_for_options(options: &CodexRunOptions) -> RunInstructions {
+    run_instructions_for_turn(
+        run_lane(
+            options,
+            options.shared_browser,
+            options.personal_browser,
+            false,
+        ),
+        |_| None,
+    )
 }
 
 /// A run's developer text: its lane's contract (granted, then generic MCP, then browser, then

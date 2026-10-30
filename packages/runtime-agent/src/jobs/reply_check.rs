@@ -279,6 +279,55 @@ mod tests {
         assert!(check_run_options(&run, Some(&elsewhere), None).is_none());
     }
 
+    /// The check reads the run instructions its turn read, so on the turn's thread it sends none
+    /// again: its requests start as the turn's last one did, and the provider serves that start
+    /// from its cache.
+    #[test]
+    fn the_check_reads_the_run_instructions_its_turn_read() {
+        let home = tempfile::tempdir().expect("tmp");
+        let rollout = home.path().join("rollout.jsonl");
+        std::fs::write(&rollout, "{}\n").expect("rollout");
+        let thread = json!({
+            "defaultThreadId": "019a0000-0000-7000-8000-000000000001",
+            "defaultRolloutPath": rollout.display().to_string(),
+            "browserThreadId": "019a0000-0000-7000-8000-000000000002",
+            "browserRolloutPath": rollout.display().to_string(),
+        });
+        let turn = CodexRunOptions {
+            persist_conversation_thread: true,
+            ..Default::default()
+        };
+        for run in [
+            CodexRunOptions {
+                shared_browser: true,
+                expect_browser_session: true,
+                shared_browser_page_left_by_other_chat: true,
+                ..turn.clone()
+            },
+            CodexRunOptions {
+                personal_browser: true,
+                expect_browser_session: true,
+                ..turn.clone()
+            },
+            CodexRunOptions {
+                expect_browser_session: true,
+                ..turn.clone()
+            },
+            CodexRunOptions {
+                disable_final_output_json_schema: true,
+                allow_plain_text_final_fallback: true,
+                ..turn.clone()
+            },
+            turn.clone(),
+        ] {
+            let check = check_run_options(&run, Some(&thread), None).expect("resumable");
+            assert_eq!(
+                crate::codex::run_instructions_for_options(&check),
+                crate::codex::run_instructions_for_options(&run)
+            );
+        }
+    }
+
     // The check kept the turn's own limit (ten minutes) and the job's own cancel signal, which a
     // browser run's time limit cancels: a check that ran out of time on a browser turn would have
     // ended the finished turn as if its lease was lost, and its reply would never have posted.
