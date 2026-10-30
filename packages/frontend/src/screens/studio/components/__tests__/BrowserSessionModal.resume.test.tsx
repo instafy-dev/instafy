@@ -209,9 +209,17 @@ describe("production Shared modal resume selection", () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
     await render(secondId);
     expect(onResolved).not.toHaveBeenCalled(); expect(mocks.ensure).not.toHaveBeenCalled();
-    // The other session waits behind Browser options (⋯), which never opens by itself.
-    expect(document.querySelector('[data-testid="shared-browser-session-control"]')).toBeNull();
-    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    // The browser asked for is gone and the open named no other: Browser
+    // options opens by itself, with the running one and Start new session.
+    const options = () => document.querySelector('[role="dialog"][aria-label="Browser options"]');
+    expect(options()).not.toBeNull();
+    expect(options()?.textContent).toContain("Start new session");
+    // Try again asks for the same browser, so it offers that choice again
+    // instead of the same sentence.
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close browser options"]')!.click());
+    expect(options()).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]')!.click());
+    expect(options()).not.toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="Resume Shared session ${firstId}"]`)!.click());
     expect(onResolved).toHaveBeenCalledWith(firstId); expect(mocks.ensure).not.toHaveBeenCalled();
   });
@@ -261,12 +269,13 @@ describe("production Shared modal resume selection", () => {
     await render(null);
     expect(onResolved).not.toHaveBeenCalled(); expect(mocks.ensure).not.toHaveBeenCalled();
     expect(document.querySelector('[data-testid="browser-session-status"]')?.textContent).toBe("Choose session");
-    // Opening the browser never opens Browser options by itself: the choice waits behind ⋯.
-    expect(document.querySelector('[data-testid="shared-browser-session-control"]')).toBeNull();
+    // The open named no browser, so the choice is on screen at once: the
+    // pill alone, hidden in compact chrome, would leave no way on.
+    expect(document.querySelector('[role="dialog"][aria-label="Browser options"]')).not.toBeNull();
+    expect(document.body.textContent?.match(/Several Shared sessions/g)).toHaveLength(1);
     expect(document.querySelector('[data-testid="browser-session-state-card"]')).toBeNull();
     expect(document.querySelector('[data-testid="browser-session-error-notice"]')).toBeNull();
     expect(document.querySelector('[role="alert"]')).toBeNull();
-    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
     await act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="Resume Shared session ${secondId}"]`)!.click());
     expect(onResolved).toHaveBeenCalledWith(secondId);
   });

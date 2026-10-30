@@ -175,7 +175,7 @@ export function sharedBrowserHostHeldByOther(host: SharedBrowserHostSnapshot): b
  * | 1 | the browser on this device                                  | personal, or a button           |
  * | 2 | no host policy, or it is off                                | today's hosted buttons          |
  * | 3 | the conversation's machine is not a live host               | today's hosted buttons          |
- * | 4 | a separate browser session is running                       | button (other or several)       |
+ * | 4 | a separate browser session is running                       | button, no reason               |
  * | 5 | no reading of the host, or one older than five seconds     | pending                         |
  * | 6 | the host says it has no browser, or it is poisoned          | button                          |
  * | 7 | someone else has it, controls it, runs in it or starts it   | button (opens once free)        |
@@ -201,8 +201,11 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
   // space's own machine with Instafy's browser on demand is not one.
   const sessions = listBrowserSessionCandidates([...input.runtimes]);
   const hostRuntimeId = conversationBrowserHostId(input);
-  // Rows 2 to 4: a press decides, as before.
-  if (!hostRuntimeId || sessions.length > 0) return hostedButton(input.runtimes, sessions);
+  // Rows 2 and 3: a press decides, as before.
+  if (!hostRuntimeId) return hostedButton(input.runtimes, sessions);
+  // Row 4: a press opens the conversation's own machine, not the session,
+  // so the card names neither.
+  if (sessions.length > 0) return { kind: "button", reason: null };
   const now = input.nowMs ?? Date.now();
   const readAt = input.hostReadAtMs ?? null;
   if (readAt === null || now - readAt > SHARED_BROWSER_HOST_SNAPSHOT_MAX_AGE_MS) return { kind: "pending" };
@@ -218,6 +221,28 @@ export function browserAutoStartPlan(input: BrowserAutoStartPlanInput): BrowserA
   // Idle, stopped after a failure, stopping or in a state Studio does not
   // know: the open starts it, as a press does, and waits until it is ready.
   return { kind: "attach", runtimeId: hostRuntimeId };
+}
+
+/**
+ * What a press on a card opens. In a covered space it is the conversation's
+ * own machine by name, as Studio opening the card by itself does, so a press
+ * never asks which machine; a browser this conversation already opened on a
+ * machine stays the one it reopens. Otherwise it is the browser the
+ * conversation used last, or none, and the view asks only when it cannot
+ * tell which one is meant.
+ */
+export function browserPressRuntime(input: {
+  transport: BrowserTransport;
+  /** conversationBrowserHostId: the conversation's own machine, when covered. */
+  hostRuntimeId: string | null;
+  /** The machine this conversation's browser opened on, named exactly. */
+  exactRuntimeId: string | null;
+  /** The browser this conversation used last. */
+  resolvedRuntimeId: string | null;
+}): { resume: string } | { open: string | null } {
+  if (input.transport !== "shared") return { open: null };
+  if (input.hostRuntimeId && !input.exactRuntimeId) return { resume: input.hostRuntimeId };
+  return { open: input.resolvedRuntimeId };
 }
 
 /** What a press would open, when Studio does not open Instafy's browser by itself. */
@@ -240,10 +265,10 @@ function hostedButton(
   // own one.
   const machines = runtimes.filter(isLiveHostedMachine);
   if (machines.length === 0) return { kind: "button", reason: BROWSER_AUTO_START_COPY.firstMachine };
-  if (machines.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.anotherMachine };
   // Instafy's browser on the space's own machine opens in place; a press
   // neither restarts nor adds a machine.
-  if (runtimeEntryIsLazyBrowserHost(machines[0])) return { kind: "button", reason: null };
+  if (machines.some(runtimeEntryIsLazyBrowserHost)) return { kind: "button", reason: null };
+  if (machines.length > 1) return { kind: "button", reason: BROWSER_AUTO_START_COPY.anotherMachine };
   const displayName = machines[0]!.displayName?.trim().toLowerCase() ?? "";
   return {
     kind: "button",

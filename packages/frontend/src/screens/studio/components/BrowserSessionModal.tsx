@@ -847,6 +847,8 @@ export function BrowserSessionModal({
   const [hostAttach, setHostAttach] = useState<{ scope: string; runtimeId: string } | null>(null);
   const attachMode = hostAttach?.scope === selectionScope;
   const sessionControlsVisible = isOpen && transportActive;
+  const sessionControlsVisibleRef = useRef(sessionControlsVisible);
+  sessionControlsVisibleRef.current = sessionControlsVisible;
   useLayoutEffect(() => {
     // The browser stays mounted while Chat or another resource is selected.
     // Its portalled menu must not outlive the visible toolbar that anchors it.
@@ -1738,9 +1740,12 @@ export function BrowserSessionModal({
           } else {
             fail("notice", message);
           }
-          // The choice waits behind Browser options (⋯): opening the
-          // browser never opens that menu by itself.
           setSessionChoices({ scope: selectionScope, candidates, loading: false, error: message });
+          // A browser this open did not name, or one that is gone: the
+          // choice is the only way on, so Browser options opens with it. An
+          // open that names a live machine (a press on a card, or Studio
+          // opening one by itself) is selected above and never gets here.
+          if (selection.kind !== "new") setSessionChooserOpen(sessionControlsVisibleRef.current);
           return;
         }
         if (selection.kind === "selected") {

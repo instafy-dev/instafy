@@ -9,6 +9,7 @@ import {
   browserAutoStartHeldByOther,
   browserAutoStartPlan,
   browserAutoStartedRecently,
+  browserPressRuntime,
   claimBrowserAutoStart,
   conversationBrowserHostId,
   forgetBrowserAutoStartsForTests,
@@ -207,10 +208,15 @@ describe("browserAutoStartPlan for Instafy's browser on the conversation's own m
   });
 
   it("leaves a separate browser session running beside it to a press (row 4)", () => {
+    // The press opens the conversation's own machine, not that session, so
+    // the card says nothing about the session or a choice.
     expect(hostPlan({ runtimes: [lazyHost(), browserSession] }))
-      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
+      .toEqual({ kind: "button", reason: null });
     expect(hostPlan({ runtimes: [lazyHost(), browserSession, { ...browserSession, runtimeId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }] }))
-      .toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.severalSessions });
+      .toEqual({ kind: "button", reason: null });
+    expect(browserPressRuntime({
+      transport: "shared", hostRuntimeId: MACHINE_ID, exactRuntimeId: null, resolvedRuntimeId: SESSION_ID,
+    })).toEqual({ resume: MACHINE_ID });
   });
 
   it("asks for a fresh reading first when it has none or the last arrived over five seconds ago (row 5)", () => {
@@ -275,6 +281,41 @@ describe("browserAutoStartPlan for Instafy's browser on the conversation's own m
     expect(hostPlan({ conversationRuntimeId: null, sharedBrowserHostPolicy: null })).not.toMatchObject({ kind: "attach" });
     // A conversation that names another machine never opens this one.
     expect(hostPlan({ conversationRuntimeId: SECOND_MACHINE_ID })).not.toMatchObject({ kind: "attach" });
+  });
+
+  it("never says a press starts another machine when the space's machine is already up", () => {
+    // Two of the space's own machines (one left from before a space got one
+    // per space): a press opens one of them and starts nothing.
+    expect(hostPlan({ conversationRuntimeId: null, runtimes: [lazyHost(), lazyHost({ runtimeId: SECOND_MACHINE_ID })] }))
+      .toEqual({ kind: "button", reason: null });
+    expect(plan({ runtimes: [runtime(), lazyHost({ runtimeId: SECOND_MACHINE_ID })] }))
+      .toEqual({ kind: "button", reason: null });
+  });
+});
+
+describe("browserPressRuntime: which browser a press on a card opens", () => {
+  const press = (overrides: Partial<Parameters<typeof browserPressRuntime>[0]> = {}) => browserPressRuntime({
+    transport: "shared", hostRuntimeId: null, exactRuntimeId: null, resolvedRuntimeId: null, ...overrides,
+  });
+
+  it("opens the conversation's own machine by name, as Studio opening it by itself does", () => {
+    expect(press({ hostRuntimeId: MACHINE_ID })).toEqual({ resume: MACHINE_ID });
+    // A browser the chat last used without naming it does not take its place.
+    expect(press({ hostRuntimeId: MACHINE_ID, resolvedRuntimeId: SESSION_ID })).toEqual({ resume: MACHINE_ID });
+  });
+
+  it("reopens the browser this conversation already opened on a machine", () => {
+    expect(press({ hostRuntimeId: MACHINE_ID, exactRuntimeId: SESSION_ID, resolvedRuntimeId: SESSION_ID }))
+      .toEqual({ open: SESSION_ID });
+  });
+
+  it("opens the browser the conversation used last, or none, when it has no machine of its own", () => {
+    expect(press({ resolvedRuntimeId: SESSION_ID })).toEqual({ open: SESSION_ID });
+    expect(press()).toEqual({ open: null });
+  });
+
+  it("names no machine for the browser on this device", () => {
+    expect(press({ transport: "personal", hostRuntimeId: MACHINE_ID, resolvedRuntimeId: SESSION_ID })).toEqual({ open: null });
   });
 });
 
