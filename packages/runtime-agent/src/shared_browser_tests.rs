@@ -420,6 +420,23 @@ const controlsFor = (targetId) => {
       { ...field("Sign in", "submit", "off"), tag: "button", ariaLabel: "", labels: "", text: "Sign in" },
     ];
   }
+  // A signed-out page: a site's own links, a federated sign-in button and
+  // the header's "Sign in" link to its sign-in page; no sign-in fields yet.
+  if (mode === "sign-in-link") {
+    const link = (text, href) => ({
+      ...descriptionFor(targetId), tag: "a", inputType: "", autocomplete: "", ariaLabel: "",
+      labels: "", placeholder: "", nameAttribute: "", idAttribute: "", text, href,
+      formAction: "", formMethod: "", formActionText: "",
+      policy: { ...basePolicy, href, linkSelf: true },
+    });
+    return [
+      link("Pricing", "https://example.test/pricing"),
+      { ...descriptionFor(targetId), tag: "button", inputType: "button", autocomplete: "", ariaLabel: "",
+        labels: "", placeholder: "", nameAttribute: "", idAttribute: "", text: "Sign in with Google",
+        formAction: "", formMethod: "", formActionText: "" },
+      link("Sign in", "https://example.test/login"),
+    ];
+  }
   if (mode === "page-links") {
     const link = (text, href) => ({
       ...descriptionFor(targetId), tag: "a", inputType: "", autocomplete: "", ariaLabel: "",
@@ -4284,24 +4301,29 @@ fn a_snapshot_lists_only_what_a_person_can_see_and_actions_index_the_same_list()
 /// with "sign in yourself, then tell me", twice). The pause on
 /// those fields ends the turn for the person; Octo still never types into
 /// them. A page without sign-in fields, and Octo's own tabs, which are for
-/// reading, say nothing of it.
+/// reading, say nothing of it. The hint states the one rule the policies and
+/// the browser skill state: a sign-in the person asked for, or one a step
+/// they asked for needs, is paused on; any other ends that page, not the task.
 #[test]
 fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
     let fixture = EmbeddedControllerFixture::new();
     let snapshot = payload_of(&fixture.run("sign-in-page", "GET", "/v1/snapshot", None));
     // The email and the password; never the checkbox or the button.
     assert_eq!(snapshot["signIn"]["fields"], json!([0, 1]));
+    assert!(snapshot["signIn"].get("open").is_none(), "{snapshot}");
     let next = snapshot["signIn"]["next"]
         .as_str()
         .expect("what to do next");
     for words in [
         "Signing in is the person's step.",
-        "call request_human_input with this snapshotId and these fields' indices, then end the turn",
+        "If the person asked to sign in, or a step they asked for needs it, call request_human_input with this snapshotId and these fields' indices, then end the turn",
         "choose Let Octo continue",
+        "Otherwise never sign in: use what the page shows without it and go on with the task.",
         "Never type into these fields.",
     ] {
         assert!(next.contains(words), "{words}: {next}");
     }
+    assert!(!next.contains("goes on past"), "{next}");
     let snapshot_id = snapshot["snapshotId"].as_str().expect("snapshot id");
 
     // Typing there is still refused, before any prompt.
@@ -4346,7 +4368,8 @@ fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
     );
     assert!(!log.contains("someone@example.test"));
 
-    // A page with no sign-in fields says nothing of it.
+    // A page with no sign-in fields and nothing that opens a sign-in page
+    // says nothing of it.
     let plain = payload_of(&fixture.run("safe", "GET", "/v1/snapshot", None));
     assert!(plain.get("signIn").is_none(), "{plain}");
 
@@ -4357,6 +4380,35 @@ fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
     let in_tab = payload_of(&fixture.call("sign-in-page", "GET", "/v1/snapshot", None));
     assert!(in_tab["tabId"].is_string(), "{in_tab}");
     assert!(in_tab.get("signIn").is_none(), "{in_tab}");
+    let in_tab = payload_of(&fixture.call("sign-in-link", "GET", "/v1/snapshot", None));
+    assert!(in_tab.get("signIn").is_none(), "{in_tab}");
+}
+
+/// The same task stopped on the site's home page, whose header has only a
+/// "Sign in" link, with "use its Sign in control … tell me when you're ready":
+/// a page without sign-in fields named nothing. Such a page names the control
+/// that opens the sign-in page (never a federated sign-in), so the turn reaches
+/// the fields and pauses there; the real-Chromium sign-in fixture clicks it
+/// without a prompt.
+#[test]
+fn a_page_with_a_sign_in_link_names_it_so_a_needed_sign_in_reaches_its_fields() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = payload_of(&fixture.run("sign-in-link", "GET", "/v1/snapshot", None));
+    assert_eq!(snapshot["interactiveElements"][2]["label"], "Sign in");
+    assert_eq!(snapshot["signIn"]["open"], json!(2), "{snapshot}");
+    assert!(snapshot["signIn"].get("fields").is_none(), "{snapshot}");
+    let next = snapshot["signIn"]["next"]
+        .as_str()
+        .expect("what to do next");
+    for words in [
+        "This opens the site's sign-in page.",
+        "If the person asked to sign in, or a step they asked for needs it, click it, then pause on the sign-in page's fields with request_human_input.",
+        "Otherwise leave it.",
+    ] {
+        assert!(next.contains(words), "{words}: {next}");
+    }
+    // A readable page with a sign-in link is still read: nothing says it ends.
+    assert!(!next.contains("ends"), "{next}");
 }
 
 #[test]

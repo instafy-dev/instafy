@@ -967,6 +967,20 @@
     return classifyTyping(safeTarget, {}).code === REFUSALS.sign_in.code;
   }
 
+  // A link or button that only opens a site's sign-in page: named exactly
+  // "Sign in" ("Log in", "Anmelden", …) and outside any form with a password
+  // field, the header control the activation rules above leave free so the
+  // agent can reach the page and hand it over. A host names it on a page with
+  // no sign-in fields yet, so a sign-in the person needs gets to its fields.
+  function isSignInOpener(target) {
+    const safeTarget = target && typeof target === "object" ? target : {};
+    if (safeTarget.formHasPassword === true || isEditable(safeTarget)) return false;
+    const linkLike = lower(safeTarget.tag) === "a" || lower(safeTarget.role) === "link";
+    if (!linkLike && !isButtonLike(safeTarget)) return false;
+    return [safeTarget.ariaLabel, safeTarget.text, safeTarget.title]
+      .some((name) => SIGN_IN_EXACT.test(cleanText(name)));
+  }
+
   function classifySubmit(target, ctx) {
     if (ctx && ctx.sensitive === true) return refuse("sensitive", "sensitive field");
     if (isSignInForm(target)) return refuse("sign_in", "sign-in form submit");
@@ -1045,6 +1059,7 @@
     isEditable,
     isSearchField,
     isSignInField,
+    isSignInOpener,
     isFreeSiteSearch,
   });
 });

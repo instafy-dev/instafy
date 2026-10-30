@@ -3302,9 +3302,12 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// page was opened before a browser tool saw it, so it stays true when the
 /// card is only a button.
 ///
-/// A sign-in the person asked for, or one their task goes on past, is opened
-/// and paused on (`request_human_input`), so the task can go on after it
-/// instead of the turn ending with "sign in yourself".
+/// A sign-in the person asked for, or one a step they asked for needs, is
+/// opened and paused on (`request_human_input`), so the task can go on after
+/// it instead of the turn ending with "sign in yourself". Any other sign-in,
+/// such as a page read for research, ends that page, not the task: the Shared
+/// and Personal Browser policies, the browser skill and the Shared Browser's
+/// `signIn` hint all state this one rule.
 ///
 /// It supersedes the consent-first wording older provider threads carry in
 /// their history, so it says so.
@@ -3325,7 +3328,7 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - In `summary`, never say a page opened, or what it shows, before a browser tool saw it.\n\
 - Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
-- The person does their own sign-ins, codes and consent screens; a browser turn opens the sign-in page and pauses on its fields for them. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
+- The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
 
 /// A turn nobody is watching as it happens: a scheduled automation or a
 /// space review. The controller stamps `automation` on every automation run

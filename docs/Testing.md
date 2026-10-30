@@ -1630,8 +1630,10 @@ that moves the form there too.
 
 Last, `scripts/shared-browser-sign-in-e2e.mjs` plays a task that goes on past a
 sign-in ("sign in, then star the repository") on a loopback code host. The
-repository page names no sign-in fields; the sign-in page's result names its
-username and password fields and says to pause there with `request_human_input`;
+signed-out repository page has no sign-in fields, so its result names its "Sign
+in" link, which opens the sign-in page without a prompt; the sign-in page's
+result names its username and password fields and says to pause there with
+`request_human_input`;
 typing into them is refused; the pause highlights exactly those fields and ends
 the turn with nothing sent. The person then signs in on the page, and a fresh run
 on the same page (what **Let Octo continue** starts) stars the repository, asking

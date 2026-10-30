@@ -13,11 +13,12 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // star the repository"): the production controller script, composed as
 // runtime-agent composes it, drives a real Chromium over CDP against a
 // loopback fixture site. The turn's steps are played as the browser policy
-// and the tool results say: the sign-in page's result names its fields and
-// says to pause there; Octo cannot type into them; the pause highlights them
-// and ends the turn; the person signs in on the page; the next turn (what
-// "Let Octo continue" starts) carries on and stars the repository, asking
-// before the form post. No model, Studio, controller, account or external
+// and the tool results say: the signed-out repository page's result names its
+// "Sign in" link; the sign-in page's result names its fields and says to
+// pause there; Octo cannot type into them; the pause highlights them and ends
+// the turn; the person signs in on the page; the next turn (what "Let Octo
+// continue" starts) carries on and stars the repository, asking before the
+// form post. No model, Studio, controller, account or external
 // site is used, and Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -270,14 +271,18 @@ export async function runSharedBrowserSignInFixture() {
     const outline = (selector) => personPage.locator(selector).evaluate((element) => getComputedStyle(element).outlineWidth);
 
     // Turn 1, the card's browser turn: "Sign in to the code host, then star
-    // fixture/repository." The repository page asks for a sign-in; its own
-    // result names no fields, since it has none.
+    // fixture/repository." The repository page asks for a sign-in; it has no
+    // sign-in fields, so its result names the header's Sign in link instead.
     freshTurn();
     let observed = await ok("POST", "/v1/navigate", { url: `${origin}/fixture/repository` }, ["allow_routine"]);
     assert.equal(prompts.length, 1, "The site asked once");
-    assert.equal(observed.signIn, undefined, "A page with no sign-in fields names none");
-    // The header's Sign in link is free, so Octo reaches the sign-in page.
-    observed = await ok("POST", "/v1/click", control(observed, "Sign in"));
+    assert.ok(observed.signIn, `The repository page names what opens the sign-in page: ${JSON.stringify(observed)}`);
+    assert.equal(observed.signIn.fields, undefined, "A page with no sign-in fields names none");
+    assert.deepEqual(observed.signIn.open, control(observed, "Sign in").index);
+    assert.match(observed.signIn.next, /If the person asked to sign in, or a step they asked for needs it, click it, then pause on the sign-in page's fields with request_human_input/u);
+    // The link the result names is free, so Octo reaches the sign-in page.
+    observed = await ok("POST", "/v1/click", { index: observed.signIn.open, snapshotId: observed.snapshotId });
+    assert.equal(prompts.length, 1, "Opening the sign-in page asked nothing");
     assert.equal(observed.url, `${origin}/login`);
     // The sign-in page's result names its fields and says to pause on them.
     assert.ok(observed.signIn, `The sign-in page names its fields: ${JSON.stringify(observed)}`);
@@ -285,6 +290,7 @@ export async function runSharedBrowserSignInFixture() {
     assert.deepEqual(fieldLabels, ["Username or email address", "Password"]);
     assert.match(observed.signIn.next, /call request_human_input with this snapshotId and these fields' indices, then end the turn/u);
     assert.match(observed.signIn.next, /choose Let Octo continue/u);
+    assert.match(observed.signIn.next, /Otherwise never sign in: use what the page shows without it and go on with the task/u);
     // Octo still cannot type into them, before any prompt.
     const typed = await runTool("POST", "/v1/type", { ...control(observed, "Username or email address"), text: "someone" });
     assert.equal(typed.code, 1, "Typing into the sign-in fields is refused");
@@ -336,9 +342,9 @@ export async function runSharedBrowserSignInFixture() {
 
     const result = {
       status: "passed",
-      fixtureVersion: 1,
+      fixtureVersion: 2,
       checks: [
-        "a page with no sign-in fields names none",
+        "a signed-out page with no sign-in fields names its Sign in link, which opens the sign-in page without a prompt",
         "the sign-in page's result names its username and password fields and says to pause there with request_human_input",
         "typing into those fields is refused before any prompt",
         "the pause highlights exactly those fields, asks the run's person and ends the turn, with nothing sent",
@@ -363,7 +369,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 1 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 2 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });
