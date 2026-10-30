@@ -14,15 +14,13 @@ Goal: use the browser capability exposed for this turn safely and report only re
 
 ## Browser terms
 
-Use these terms consistently:
-
 - `page` = a tab/page inside the current shared Chromium session
 - `isolated session` = a separate browser context inside the same runtime, used only when cookie/login isolation is required
 - `runtime-backed session` = a separate browser runtime / visible browser surface
 - `Personal Browser` = the private Chromium view embedded in the Instafy desktop app and controlled through its project-scoped local RPC broker
 - `owner-local browser` = a fresh headless Chromium process for credential-free, read-only public-page observation on an opted-in self-hosted runtime
 
-For interactive Personal or Shared Browser work, default to `page` first. Do not escalate from `page` to `isolated session` or `runtime-backed session` unless the user explicitly asks for isolation or the task clearly requires incompatible account state. Owner-local observation always uses a fresh one-URL context.
+For interactive Personal or Shared Browser work, default to `page` first. Do not escalate from `page` to `isolated session` or `runtime-backed session` unless the user explicitly asks for isolation or the task clearly requires incompatible account state.
 
 ## What Instafy's browser can reach
 
