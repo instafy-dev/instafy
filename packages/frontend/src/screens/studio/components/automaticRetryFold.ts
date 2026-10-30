@@ -1,14 +1,20 @@
-// A turn Instafy sent again by itself (useRunFailureAutoRetry) reads as one
-// turn: the resent prompt repeats the person's own words, so the chat leaves
-// it out, and the failed attempt moves into the Details of the turn that
-// replaced it. Only an automatic resend folds; one the person asked for with
-// "Try again" stays as they sent it. The mark is the sender's word, so the
-// chat leaves a prompt out only when it can see the failed turn and the
-// prompt repeats, from the same person, the words that turn answered.
+// A turn sent again reads as one turn, whether Instafy resent it by itself
+// (useRunFailureAutoRetry) or the person pressed "Try again": the resent
+// prompt repeats the person's own words, so the chat leaves it out, and the
+// failed attempt moves into the Details of the turn that replaced it. A resend
+// names the failure it retries (`retryOfMessageId`); only Instafy's own is
+// also marked `retryAutomatic`, which billing reads, so the person's resend is
+// still their turn and charged as one. The mark is the sender's word, so the
+// chat leaves a prompt out only when it can see the failed turn, the prompt
+// repeats, from the same person, the words that turn answered, and no other
+// turn came between them: "Try again" on an older failure, or a resend that
+// waited behind a busy turn, stays as sent, so its answer never sits under
+// an unrelated message. A retry that fails and is tried again folds too, so
+// the turn that answers carries every try before it.
 
 import {
   hasFailedRunMetadata,
-  readAutomaticRunFailureRetryOf,
+  readRunFailureRetryOf,
   resolveRunFailureRetrySource,
 } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
@@ -51,7 +57,7 @@ function isFailureMessage(message: ChatMessage): boolean {
 export type EarlierAttempt = { jobId: string | null; failureId: string };
 
 export type AutomaticRetryFold = {
-  /** Prompts Instafy resent by itself. */
+  /** Prompts sent again, by Instafy or by the person's "Try again". */
   hiddenPromptIds: ReadonlySet<string>;
   /** The retry's job id, to the attempt it replaces. */
   earlierAttemptByJobId: ReadonlyMap<string, EarlierAttempt>;
@@ -60,9 +66,9 @@ export type AutomaticRetryFold = {
 };
 
 /**
- * Links each automatic resend to the failed attempt it retries and to the job
- * it started: the resent prompt names the failure (`retryOfMessageId` with
- * `retryAutomatic`), and its stored row names the run its job reports under.
+ * Links each resend to the failed attempt it retries and to the job it
+ * started: the resent prompt names the failure (`retryOfMessageId`), and its
+ * stored row names the run its job reports under.
  */
 export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): AutomaticRetryFold {
   const hiddenPromptIds = new Set<string>();
@@ -72,20 +78,22 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
   const jobByRunId = new Map<string, string>();
   // Runs that failed before any job ran them (the controller refused them).
   const failedRunsWithoutJob = new Set<string>();
-  const resends: Array<{ prompt: ChatMessage; failureId: string }> = [];
-  for (const message of messages) {
-    const failureId = readAutomaticRunFailureRetryOf(message);
+  const resends: Array<{ prompt: ChatMessage; failureId: string; index: number }> = [];
+  const failureIndex = new Map<string, number>();
+  messages.forEach((message, index) => {
+    const failureId = message.role === "user" ? readRunFailureRetryOf(message) : null;
     if (failureId) {
-      resends.push({ prompt: message, failureId });
-      continue;
+      resends.push({ prompt: message, failureId, index });
+      return;
     }
     if (message.role !== "assistant") {
-      continue;
+      return;
     }
     const jobId = jobIdOf(message);
     const runId = runIdOf(message);
     if (isFailureMessage(message)) {
       failures.set(message.id, message);
+      failureIndex.set(message.id, index);
       if (!jobId && runId) {
         failedRunsWithoutJob.add(runId);
       }
@@ -93,16 +101,20 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
     if (jobId && runId && !jobByRunId.has(runId)) {
       jobByRunId.set(runId, jobId);
     }
-  }
-  for (const { prompt, failureId } of resends) {
+  });
+  for (const { prompt, failureId, index } of resends) {
     const failure = failures.get(failureId);
-    if (!failure || !repeatsFailedPrompt(messages, prompt, failure)) {
+    const retryRunId = runIdOf(prompt);
+    const retryJobId = retryRunId ? jobByRunId.get(retryRunId) : undefined;
+    if (
+      !failure ||
+      !repeatsFailedPrompt(messages, prompt, failure) ||
+      anotherTurnBetween(messages, failureIndex.get(failureId) ?? index, index, [jobIdOf(failure), retryJobId ?? ""])
+    ) {
       continue;
     }
     hiddenPromptIds.add(prompt.id);
     const failedJobId = jobIdOf(failure) || null;
-    const retryRunId = runIdOf(prompt);
-    const retryJobId = retryRunId ? jobByRunId.get(retryRunId) : undefined;
     if (retryJobId && retryJobId !== failedJobId) {
       earlierAttemptByJobId.set(retryJobId, { jobId: failedJobId, failureId });
     } else if (retryRunId && failedJobId && !failedRunsWithoutJob.has(retryRunId)) {
@@ -115,8 +127,27 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
 }
 
 /**
+ * True when another turn sits between the failure and its resend: anyone's
+ * prompt, or a message of a job that is neither the failed try nor its retry.
+ */
+function anotherTurnBetween(
+  messages: readonly ChatMessage[],
+  failureIndex: number,
+  resendIndex: number,
+  ownJobIds: readonly string[],
+): boolean {
+  return messages.slice(failureIndex + 1, resendIndex).some((message) => {
+    if (message.role === "user") {
+      return true;
+    }
+    const jobId = jobIdOf(message);
+    return jobId !== "" && !ownJobIds.includes(jobId);
+  });
+}
+
+/**
  * True when `prompt` repeats, from the same person, the prompt the failed turn
- * answered: the words the automatic retry sends again.
+ * answered: the words a retry sends again.
  */
 function repeatsFailedPrompt(messages: readonly ChatMessage[], prompt: ChatMessage, failure: ChatMessage): boolean {
   const source = resolveRunFailureRetrySource({ conversationMessages: [...messages], failureMessage: failure });
@@ -137,7 +168,7 @@ export function readEarlierAttempts(message: ChatMessage): ChatMessage[][] {
   return attempts.filter((attempt): attempt is ChatMessage[] => Array.isArray(attempt) && attempt.length > 0);
 }
 
-/** True for a failed turn whose automatic resend went out and has not shown anything yet. */
+/** True for a failed turn whose resend went out and has not shown anything yet. */
 export function isAutomaticRetryPending(message: ChatMessage): boolean {
   return metadataOf(message)?.autoRetryPending === true;
 }

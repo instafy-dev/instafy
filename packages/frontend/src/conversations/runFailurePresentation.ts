@@ -739,13 +739,17 @@ export function classifyRunFailureText(rawText: string): Exclude<RunFailureKind,
   return null;
 }
 
+// The address Codex adds to a proxy diagnostic (", url: http://proxy:8789/v1/responses"):
+// the Instafy proxy's own address inside the machine, which tells the person nothing.
+const PROXY_DIAGNOSTIC_ADDRESS = /,\s*url:\s*[^\s,]+/giu;
+
 /**
  * A run the AI service refused or never answered: the Instafy proxy's
  * "unexpected status …" diagnostic, read by proxyError. On Instafy AI the
  * person has nothing to fix, so it names no sign-in or account. On their own
  * AI it says what to do, in plain words, with "Manage AI" when settings can
- * fix it. Every proxy failure keeps "Try again" and its raw text behind
- * Details.
+ * fix it. Every proxy failure keeps "Try again", and its Details keep the
+ * status and what the service said, without the proxy's address.
  */
 function aiUnavailablePresentation(
   rawText: string,
@@ -755,13 +759,14 @@ function aiUnavailablePresentation(
   if (!guidance) {
     return null;
   }
+  const details = rawText.replace(PROXY_DIAGNOSTIC_ADDRESS, "").trim() || rawText;
   if (normalizedStringField(metadata, "aiAccessMode") === "managed") {
-    return { kind: "ai_unavailable", friendlyText: RUN_FAILURE_FRIENDLY_TEXT.ai_unavailable, rawText };
+    return { kind: "ai_unavailable", friendlyText: RUN_FAILURE_FRIENDLY_TEXT.ai_unavailable, rawText: details };
   }
   return {
     kind: "ai_unavailable",
     friendlyText: guidance.summary,
-    rawText,
+    rawText: details,
     manageAi: guidance.actionKind === "open_ai_settings",
   };
 }
@@ -1038,9 +1043,9 @@ export const RUN_FAILURE_RETRY_OF_METADATA_KEY = "retryOfMessageId";
 
 /**
  * Metadata key on a resend Instafy made by itself (the automatic retry), not
- * one the person asked for with "Try again". Such a prompt repeats the
- * person's own words, so the chat does not show it again, and the turn it
- * starts carries the failed attempt in its Details.
+ * one the person asked for with "Try again". Billing reads it (as checked by
+ * the controller): such a turn costs nothing unless it leaves the person
+ * something. The chat folds every resend alike (automaticRetryFold).
  */
 export const RUN_FAILURE_RETRY_AUTOMATIC_METADATA_KEY = "retryAutomatic";
 
@@ -1051,22 +1056,6 @@ export function buildRunFailureRetryMetadata(
   return automatic
     ? { [RUN_FAILURE_RETRY_OF_METADATA_KEY]: failureMessage.id, [RUN_FAILURE_RETRY_AUTOMATIC_METADATA_KEY]: true }
     : { [RUN_FAILURE_RETRY_OF_METADATA_KEY]: failureMessage.id };
-}
-
-/**
- * The failure an automatic resend retries, or null for any other message: a
- * person's own prompt, or a resend they asked for with "Try again".
- */
-export function readAutomaticRunFailureRetryOf(
-  message: Pick<ChatMessage, "role" | "metadata">,
-): string | null {
-  if (message.role !== "user") {
-    return null;
-  }
-  const automatic = promptMetadataRecords(message.metadata).some(
-    (record) => record[RUN_FAILURE_RETRY_AUTOMATIC_METADATA_KEY] === true,
-  );
-  return automatic ? readRunFailureRetryOf(message) : null;
 }
 
 /** The id of the failed message a prompt was sent to retry, or null. */

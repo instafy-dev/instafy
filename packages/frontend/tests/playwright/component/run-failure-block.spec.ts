@@ -144,7 +144,10 @@ for (const dark of [false, true]) {
       await page.keyboard.press("Enter");
       await expect(details).toHaveAttribute("aria-expanded", "true");
       await expect(details).toHaveAccessibleName("Hide details");
-      await expect(page.getByTestId("run-failure-details")).toHaveText(REFRESH_424);
+      // The status and the service's words, without the proxy's own address.
+      await expect(page.getByTestId("run-failure-details")).toHaveText(
+        "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed.",
+      );
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({ path: testInfo.outputPath(`own-ai-details-${width}-${dark ? "dark" : "light"}.png`) });
       await page.keyboard.press("Space");
