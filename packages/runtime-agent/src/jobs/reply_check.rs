@@ -8,17 +8,25 @@
 //! that reads the finished reply can catch what the reply claims.
 //!
 //! So such a turn gets one more model call on its own thread, right after its answer: the
-//! [`REPLY_CHECK_PROMPT`], with no tool use. It runs with the turn's own instructions and tools,
-//! so the provider serves the whole thread from its cache and only the short prompt and the reply
-//! are new (about one credit on a long browser turn at the managed rates). Its reply replaces the
-//! turn's words only; the turn's files, cards and suggestions stay as they were. A turn that read
-//! nothing is never checked, and a check that cannot resume the turn's thread, fails, uses a tool
-//! or answers with nothing usable leaves the reply as it was.
+//! [`REPLY_CHECK_PROMPT`]. It runs with the turn's own instructions and tools, so the provider
+//! serves the whole thread from its cache and only the short prompt and the reply are new (about
+//! one credit on a long browser turn at the managed rates). It answers in words only
+//! ([`AnswerOnly`]): a response that calls a tool runs nothing and leaves the reply, and the check
+//! is one request, never replayed. It has its own time limit and its own cancel signal, which the
+//! job's Stop or lost lease cancels too, so its time limit never ends the job. Its words replace
+//! the turn's words only, finished as the turn's own reply was; the turn's files, cards and
+//! suggestions stay as they were. A turn that read nothing is never checked, and a check that
+//! cannot resume the turn's thread, fails, runs out of time, calls a tool or answers with nothing
+//! usable leaves the reply as it was.
+
+use std::time::Duration;
 
 use serde_json::{Value as JsonValue, json};
 
 use super::{JobMessage, activity_labels, provider_state_bool, provider_state_string};
+use crate::answer_only::AnswerOnly;
 use crate::codex::CodexRunOptions;
+use crate::job_cancel::JobCancelSignal;
 use crate::task_usage::UsageCall;
 
 /// The check, sent as one more message on the turn's thread.
@@ -33,6 +41,10 @@ changed only where these rules need it.";
 
 /// The longest a reply the check is given back as an artifact, for diagnosis.
 const MAX_ARTIFACT_REPLY_CHARS: usize = 4_000;
+
+/// The longest the check may take, the turn's own limit when that is shorter: one request on a
+/// cached thread answers well within it, and the person is waiting for the reply.
+pub(super) const REPLY_CHECK_TIME_LIMIT: Duration = Duration::from_secs(90);
 
 /// Whether the turn's steps read a page or looked something up
 /// ([`activity_labels::step_brings_in_outside_facts`]).
@@ -51,8 +63,10 @@ pub(super) fn turn_read_outside_facts<'a>(
 /// The options of the check: the run's own, so its instructions, tools and output form match
 /// the requests the provider just cached, on the thread `thread` names. Nothing the turn sent
 /// already goes again (images), it must not be required to run a tool, it takes no steer and no
-/// wrap-up note, and the turn's continuation note stays the turn's. `None` when that thread
-/// cannot be resumed on this runtime: a fresh thread would hold nothing to check against.
+/// wrap-up note, and the turn's continuation note stays the turn's. It answers in words only, on
+/// a cancel signal of its own ([`follow_stop`] joins it to the job's), within
+/// [`REPLY_CHECK_TIME_LIMIT`]. `None` when that thread cannot be resumed on this runtime: a fresh
+/// thread would hold nothing to check against.
 pub(super) fn check_run_options(
     run: &CodexRunOptions,
     thread: Option<&JsonValue>,
@@ -67,7 +81,74 @@ pub(super) fn check_run_options(
     options.active_turn_input = None;
     options.turn_wrap_up = None;
     options.turn_continue_note = None;
+    options.answer_only = Some(AnswerOnly::new());
+    // A browser run's time limit cancels its signal; the job's must stay the job's.
+    options.cancel_signal = Some(JobCancelSignal::new());
+    options.run_timeout = Some(run.hard_limit().min(REPLY_CHECK_TIME_LIMIT));
     options.resumes_provider_thread().then_some(options)
+}
+
+/// Cancels the check when the job is: a Stop or a lost lease stops it as it would stop the turn.
+/// Dropping the guard ends the watch.
+pub(super) struct StopFollower(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for StopFollower {
+    fn drop(&mut self) {
+        if let Some(watch) = self.0.take() {
+            watch.abort();
+        }
+    }
+}
+
+pub(super) fn follow_stop(job: Option<&JobCancelSignal>, check: &JobCancelSignal) -> StopFollower {
+    let Some(job) = job.cloned() else {
+        return StopFollower(None);
+    };
+    if job.is_canceled() {
+        check.cancel();
+        return StopFollower(None);
+    }
+    let check = check.clone();
+    StopFollower(Some(tokio::spawn(async move {
+        job.cancelled().await;
+        check.cancel();
+    })))
+}
+
+/// A browser turn's check runs the turn's browser tools on its own signal. When they could not
+/// be confirmed gone, the job's signal says so too, so the browser stays Octo's and the runtime
+/// is recycled when the turn ends, as after any browser run whose tools outlived it.
+pub(super) fn keep_unconfirmed_browser_shutdown(
+    check: &JobCancelSignal,
+    job: Option<&JobCancelSignal>,
+) {
+    if check.shared_browser_shutdown_is_confirmed() {
+        return;
+    }
+    if let Some(job) = job {
+        job.reset_shared_browser_shutdown_confirmation();
+        job.note_shared_browser_shutdown_failure(
+            check
+                .shared_browser_shutdown_failure()
+                .unwrap_or("run_ended_before_shutdown"),
+        );
+    }
+}
+
+/// Whether a run ended with an answer: a finished message that is not a progress note
+/// (`commentary`). A plain-text run would otherwise take a progress note for its reply.
+pub(super) fn answered(events: &[JsonValue]) -> bool {
+    events.iter().any(|event| {
+        event.get("type").and_then(JsonValue::as_str) == Some("item.completed")
+            && event.get("item").is_some_and(|item| {
+                item.get("type").and_then(JsonValue::as_str) == Some("agent_message")
+                    && item.get("phase").and_then(JsonValue::as_str) != Some("commentary")
+                    && item
+                        .get("text")
+                        .and_then(JsonValue::as_str)
+                        .is_some_and(|text| !text.trim().is_empty())
+            })
+    })
 }
 
 /// Whether the check ran on the turn's own thread: the same thread, resumed, not a new one.
@@ -100,25 +181,6 @@ pub(super) fn resumed_the_turns_thread(
         && !provider_state_bool(check, failed_key).unwrap_or(false)
         && provider_state_string(check, source_key)
             .is_some_and(|source| matches!(source.as_str(), "rollout" | "memory"))
-}
-
-/// Whether a run started anything but its own words: a command, a file change, a tool call or a
-/// web search. The check is told to use none; one that did is not the reply's check.
-pub(super) fn run_used_a_tool(events: &[JsonValue]) -> bool {
-    events.iter().any(|event| {
-        let started = event
-            .get("type")
-            .and_then(JsonValue::as_str)
-            .is_some_and(|kind| kind == "item.started" || kind == "item.completed");
-        started
-            && event
-                .get("item")
-                .and_then(|item| item.get("type"))
-                .and_then(JsonValue::as_str)
-                .is_some_and(|kind| {
-                    !matches!(kind, "agent_message" | "reasoning" | "todo_list" | "error")
-                })
-    })
 }
 
 /// What became of a check, for the turn's artifacts.
@@ -189,6 +251,7 @@ mod tests {
             "defaultThreadId": "019a0000-0000-7000-8000-000000000001",
             "defaultRolloutPath": rollout.display().to_string(),
         });
+        let job = JobCancelSignal::new();
         let run = CodexRunOptions {
             shared_browser: true,
             expect_mcp_tools: true,
@@ -197,14 +260,14 @@ mod tests {
             persist_conversation_thread: true,
             input_images: vec![home.path().join("photo.png")],
             run_timeout: Some(std::time::Duration::from_secs(600)),
+            cancel_signal: Some(job.clone()),
             ..Default::default()
         };
         let check = check_run_options(&run, Some(&thread), None).expect("resumable");
         assert_eq!(check.provider_conversation_state.as_ref(), Some(&thread));
         assert!(check.persist_conversation_thread);
-        // The turn's tools and limits: the cached requests had them.
+        // The turn's tools: the cached requests had them.
         assert!(check.shared_browser && check.expect_mcp_tools && check.disable_shell_tool);
-        assert_eq!(check.run_timeout, run.run_timeout);
         assert!(!check.require_first_tool_call);
         assert!(check.input_images.is_empty());
         // A thread this runtime cannot resume holds nothing to check against.
@@ -214,6 +277,114 @@ mod tests {
             "defaultRolloutPath": home.path().join("missing.jsonl").display().to_string(),
         });
         assert!(check_run_options(&run, Some(&elsewhere), None).is_none());
+    }
+
+    // The check kept the turn's own limit (ten minutes) and the job's own cancel signal, which a
+    // browser run's time limit cancels: a check that ran out of time on a browser turn would have
+    // ended the finished turn as if its lease was lost, and its reply would never have posted.
+    #[test]
+    fn the_check_answers_in_words_within_its_own_time_on_its_own_signal() {
+        let home = tempfile::tempdir().expect("tmp");
+        let rollout = home.path().join("rollout.jsonl");
+        std::fs::write(&rollout, "{}\n").expect("rollout");
+        let thread = json!({
+            "browserThreadId": "019a0000-0000-7000-8000-000000000001",
+            "browserRolloutPath": rollout.display().to_string(),
+        });
+        let job = JobCancelSignal::new();
+        let run = CodexRunOptions {
+            shared_browser: true,
+            expect_browser_session: true,
+            persist_conversation_thread: true,
+            run_timeout: Some(std::time::Duration::from_secs(600)),
+            cancel_signal: Some(job.clone()),
+            ..Default::default()
+        };
+        let check = check_run_options(&run, Some(&thread), None).expect("resumable");
+        assert!(
+            check
+                .answer_only
+                .as_ref()
+                .is_some_and(|gate| !gate.tried_a_tool())
+        );
+        assert_eq!(check.run_timeout, Some(REPLY_CHECK_TIME_LIMIT));
+        let short = CodexRunOptions {
+            run_timeout: Some(std::time::Duration::from_secs(30)),
+            ..run.clone()
+        };
+        assert_eq!(
+            check_run_options(&short, Some(&thread), None).and_then(|check| check.run_timeout),
+            Some(std::time::Duration::from_secs(30))
+        );
+        // What ends the check, its time limit included, leaves the job running.
+        check
+            .cancel_signal
+            .as_ref()
+            .expect("its own signal")
+            .cancel();
+        assert!(!job.is_canceled());
+    }
+
+    #[tokio::test]
+    async fn a_stop_of_the_job_stops_the_check() {
+        let (job, check) = (JobCancelSignal::new(), JobCancelSignal::new());
+        let follower = follow_stop(Some(&job), &check);
+        job.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), check.cancelled())
+            .await
+            .expect("the check stops with the job");
+        drop(follower);
+        // A job stopped before its check starts stops the check at once.
+        let (job, check) = (JobCancelSignal::new(), JobCancelSignal::new());
+        job.cancel();
+        let _follower = follow_stop(Some(&job), &check);
+        assert!(check.is_canceled());
+        // Once the check is over, a later Stop is the job's alone.
+        let (job, check) = (JobCancelSignal::new(), JobCancelSignal::new());
+        drop(follow_stop(Some(&job), &check));
+        job.cancel();
+        tokio::task::yield_now().await;
+        assert!(!check.is_canceled());
+    }
+
+    #[test]
+    fn a_browser_check_whose_tools_outlived_it_keeps_the_browser_octos() {
+        let (job, check) = (JobCancelSignal::new(), JobCancelSignal::new());
+        job.confirm_shared_browser_shutdown();
+        check.confirm_shared_browser_shutdown();
+        keep_unconfirmed_browser_shutdown(&check, Some(&job));
+        assert!(job.shared_browser_shutdown_is_confirmed());
+
+        let check = JobCancelSignal::new();
+        check.note_shared_browser_shutdown_failure("mcp_processes_not_gone");
+        keep_unconfirmed_browser_shutdown(&check, Some(&job));
+        assert!(!job.shared_browser_shutdown_is_confirmed());
+        assert_eq!(
+            job.shared_browser_shutdown_failure(),
+            Some("mcp_processes_not_gone")
+        );
+    }
+
+    #[test]
+    fn only_an_answer_counts_as_the_checks_words() {
+        let message = |phase: Option<&str>, text: &str| {
+            let mut item = json!({"id": "m", "type": "agent_message", "text": text});
+            if let Some(phase) = phase {
+                item["phase"] = json!(phase);
+            }
+            json!({"type": "item.completed", "item": item})
+        };
+        assert!(answered(&[message(Some("final_answer"), "Not checked.")]));
+        assert!(answered(&[message(None, "Not checked.")]));
+        // A progress note alone is no answer, and neither is reasoning.
+        assert!(!answered(&[message(
+            Some("commentary"),
+            "Checking the reply."
+        )]));
+        assert!(!answered(&[message(Some("final_answer"), "  ")]));
+        assert!(!answered(&[
+            json!({"type": "item.completed", "item": {"id": "r", "type": "reasoning", "text": "x"}})
+        ]));
     }
 
     #[test]
@@ -245,31 +416,6 @@ mod tests {
             false
         ));
         assert!(!resumed_the_turns_thread(None, Some(&resumed), true));
-    }
-
-    #[test]
-    fn a_check_that_ran_a_tool_is_not_the_replys_check() {
-        let said = |kind: &str| json!({"type": "item.completed", "item": {"id": "i", "type": kind, "text": "x"}});
-        assert!(!run_used_a_tool(&[
-            json!({"type": "turn.started"}),
-            said("reasoning"),
-            said("agent_message"),
-            json!({"type": "turn.completed", "usage": {}}),
-        ]));
-        for kind in [
-            "command_execution",
-            "mcp_tool_call",
-            "file_change",
-            "web_search",
-        ] {
-            assert!(
-                run_used_a_tool(&[
-                    json!({"type": "item.started", "item": {"id": "t", "type": kind}}),
-                    said("agent_message"),
-                ]),
-                "{kind}"
-            );
-        }
     }
 
     #[test]

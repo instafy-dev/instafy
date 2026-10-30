@@ -190,15 +190,20 @@ mod tests {
         let usage = TurnStartTokenUsage::default();
         let gate = RequiredExecutionGate::default();
         assert!(
-            codex_extension_registry(&usage, &gate, None)
+            codex_extension_registry(&usage, &gate, None, None)
                 .context_contributors()
                 .is_empty()
         );
         let workspace = tempfile::tempdir().unwrap();
         assert_eq!(
-            codex_extension_registry(&usage, &gate, Some((Uuid::new_v4(), workspace.path())))
-                .context_contributors()
-                .len(),
+            codex_extension_registry(
+                &usage,
+                &gate,
+                None,
+                Some((Uuid::new_v4(), workspace.path()))
+            )
+            .context_contributors()
+            .len(),
             1
         );
     }

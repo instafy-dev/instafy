@@ -7016,6 +7016,7 @@ impl JobProcessor {
             // A team's turn ends by the team's deadline (`turn_continuation`).
             run_timeout: Some(turn_files.limit()),
             granted,
+            answer_only: None,
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -7528,20 +7529,18 @@ impl JobProcessor {
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
         // it also drives the UI thread preview expectations.
-        if matches!(
+        let names_instafy_md = matches!(
             learn_request,
             Some(learn::LearnRequest {
                 mode: learn::LearnMode::Apply,
                 ..
             })
-        ) && !outcome.summary.contains(learn::INSTAFY_FILENAME)
+        );
+        if names_instafy_md
             && !is_retryable_codex_upstream_summary(&outcome.summary)
             && codex_fallback_summary_kind.is_none()
         {
-            let trimmed = outcome.summary.trim();
-            let base = trimmed.trim_end_matches(['.', '!', '?']);
-            let base = if base.is_empty() { trimmed } else { base };
-            outcome.summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
+            mention_instafy_md(&mut outcome.summary);
         }
         let mut artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
         if let Some(receipt) = &worker_reply_receipt {
@@ -8683,6 +8682,7 @@ impl JobProcessor {
                     &retry_check_options,
                     retry_provider_conversation_state.as_ref(),
                     browser_mode,
+                    false,
                     task_usage,
                     &mut retry_outcome,
                     &mut retry_artifacts,
@@ -8835,6 +8835,7 @@ impl JobProcessor {
                 &codex_run_options,
                 output_provider_conversation_state.as_ref(),
                 browser_mode,
+                names_instafy_md,
                 task_usage,
                 &mut outcome,
                 &mut artifacts,
@@ -14578,10 +14579,12 @@ fn reply_check_due<'a>(
 }
 
 /// Runs the reply check on the thread `thread` names, which the run with `run_options` just
-/// answered on, and puts the checked words in `outcome.summary`. Returns the thread state to save
-/// when the check ran on that thread. A check that fails, cannot resume the thread, uses a tool
-/// or answers with nothing usable leaves the reply as it was; a Stop or a lost lease during it
-/// ends the turn as it would during the turn.
+/// answered on, and puts the checked words in `outcome.summary`, finished as the turn's reply was
+/// ([`finish_checked_reply`]). Returns the thread state to save when the check ran on that
+/// thread. The check answers in words only, once, within its own time limit and on its own cancel
+/// signal (`reply_check::check_run_options`). One that fails, runs out of time, cannot resume the
+/// thread, calls a tool or answers with nothing usable leaves the reply as it was. A Stop or a
+/// lost lease during it ends the turn as during the turn, with the turn's artifacts.
 #[allow(clippy::too_many_arguments)]
 async fn check_reply_against_reads(
     codex: &CodexClient,
@@ -14589,6 +14592,7 @@ async fn check_reply_against_reads(
     run_options: &CodexRunOptions,
     thread: Option<&JsonValue>,
     browser_mode: bool,
+    names_instafy_md: bool,
     task_usage: &TaskUsage,
     outcome: &mut CodexOutcome,
     artifacts: &mut Vec<JsonValue>,
@@ -14605,21 +14609,31 @@ async fn check_reply_against_reads(
         ));
         return Ok(None);
     };
-    let cancel_signal = options.cancel_signal.clone();
+    let words_only = options.answer_only.clone().unwrap_or_default();
+    let check_signal = options.cancel_signal.clone().unwrap_or_default();
+    let job_signal = run_options.cancel_signal.as_ref();
     let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
     let _client_timezone_guard = ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
-    let result = codex
-        .execute_with_options(reply_check::REPLY_CHECK_PROMPT, None, options)
-        .await;
+    let result = {
+        let _stop = reply_check::follow_stop(job_signal, &check_signal);
+        codex
+            .execute_with_options(reply_check::REPLY_CHECK_PROMPT, None, options)
+            .await
+    };
     drop(codex_guard);
+    if run_options.shared_browser {
+        reply_check::keep_unconfirmed_browser_shutdown(&check_signal, job_signal);
+    }
     let output = match result {
         Ok(output) => output,
         Err(error) => {
-            if cancel_signal
-                .as_ref()
-                .is_some_and(JobCancelSignal::is_canceled)
-            {
-                return Err(error);
+            if job_signal.is_some_and(JobCancelSignal::is_canceled) {
+                // As a Stop during the turn: the turn's run log and steps stay with it.
+                let message = format!("{error}");
+                return Err(error.context(JobFailureWithArtifacts {
+                    message,
+                    artifacts: artifacts.clone(),
+                }));
             }
             warn!(job_id = %job.id, error = %format!("{error:#}"), "reply check failed; keeping the reply");
             artifacts.push(reply_check::artifact(
@@ -14641,8 +14655,10 @@ async fn check_reply_against_reads(
         ));
         return Ok(None);
     }
-    let checked = if reply_check::run_used_a_tool(&output.events) {
-        Err("used_a_tool")
+    let checked = if words_only.tried_a_tool() {
+        Err("tried_a_tool")
+    } else if !reply_check::answered(&output.events) {
+        Err("no_reply")
     } else {
         extract_codex_outcome(&output.final_json)
             .ok()
@@ -14651,6 +14667,10 @@ async fn check_reply_against_reads(
                 !summary.trim().is_empty()
                     && summary != DEFAULT_CODEX_OUTCOME_SUMMARY
                     && classify_internal_codex_fallback_summary(summary).is_none()
+            })
+            .map(|summary| {
+                let summary = browser_hand_back::keep_findings(job, summary, &before);
+                finish_checked_reply(summary, &outcome.actions, names_instafy_md)
             })
             .ok_or("no_reply")
     };
@@ -14664,6 +14684,32 @@ async fn check_reply_against_reads(
     };
     artifacts.push(reply_check::artifact(result, &before));
     Ok(state)
+}
+
+/// The reply check's words as the person reads them, finished as the turn's own reply was: the
+/// runtime's no-change line ([`NO_FILE_CHANGES_MARKER`]) leaves them, the integration card's
+/// retry phrase comes back ([`augment_summary_for_onboarding_actions`]), and a learning turn's
+/// reply names `INSTAFY.md` ([`mention_instafy_md`]). The check sees the model's words on its
+/// thread, never what the runtime made of them.
+fn finish_checked_reply(words: String, actions: &[CodexAction], names_instafy_md: bool) -> String {
+    let mut reply = take_no_file_changes_marker(&words).unwrap_or(words);
+    augment_summary_for_onboarding_actions(&mut reply, actions);
+    if names_instafy_md && !is_retryable_codex_upstream_summary(&reply) {
+        mention_instafy_md(&mut reply);
+    }
+    reply
+}
+
+/// A learning turn's reply ends by naming `INSTAFY.md` when it does not already: the person is
+/// shown where its notes went, whatever the model wrote.
+fn mention_instafy_md(summary: &mut String) {
+    if summary.contains(learn::INSTAFY_FILENAME) {
+        return;
+    }
+    let trimmed = summary.trim();
+    let base = trimmed.trim_end_matches(['.', '!', '?']);
+    let base = if base.is_empty() { trimmed } else { base };
+    *summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
 }
 
 /// How many attached images a run's turn input carried as image input.

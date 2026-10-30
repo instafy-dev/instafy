@@ -94,7 +94,11 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes,
   reasoning titles and plan updates. A status the runtime writes itself ("Trying again…", "Saving
   your changes") is not a step and stays out, and so does a note that is only data (a browser
-  card's request, the findings a browser turn hands back, which the hand-back keeps). A browser
+  card's request, the findings a browser turn hands back, which the hand-back keeps). The model's
+  answer, which streams as a note while the turn runs, leaves Details once the turn's reply is in,
+  also when the reply no longer reads the same: the runtime may change it after the answer (the
+  reply check of a turn that read pages, an integration card's retry phrase, a line about what
+  wasn't saved), and the reply is what stands. A browser
   row shows its site, or "Looked at the tabs" for a look at the tab list, never the tool's name.
   A row's label comes from its first command that is
   not quiet, so `uw geocode Baixa; uw stay …` reads "Found places to stay". A finished row reads

@@ -679,8 +679,19 @@ and tools, so the provider serves the thread from its cache. It marks a fact no
 page read for the turn states "not checked" or takes it out, never says a place,
 stop, route or time doesn't exist unless a page says so, and takes out a step
 the reply says is under way that the turn didn't start. Only the reply's words
-change. A turn that read nothing makes no such request, and a check that fails
-or uses a tool leaves the reply as it was (runtime-agent `jobs/reply_check.rs`).
+change, and they are finished as the turn's own were (the runtime's no-change
+line removed, an integration card's retry phrase added). The check answers in
+words only: the runtime reads each of its responses whole before Codex does, and
+one that calls a tool reaches Codex empty, so nothing runs, nothing is asked
+again, and the reply stays as it was (runtime-agent `answer_only.rs`). It is one
+request, never replayed, within 90 seconds (less when the turn's own limit is
+shorter), on a cancel signal of its own that a Stop or a lost lease cancels too:
+its time limit never ends the turn, and a Stop during it ends the turn as a Stop
+during the turn does. A check on a browser turn whose browser tools could not be
+confirmed gone keeps the browser Octo's and recycles the runtime at the end of
+the turn, as after any browser run. A turn that read nothing makes no such
+request, and a check that fails, runs out of time or calls a tool leaves the
+reply as it was (runtime-agent `jobs/reply_check.rs`).
 
 ### Octo's own tabs
 

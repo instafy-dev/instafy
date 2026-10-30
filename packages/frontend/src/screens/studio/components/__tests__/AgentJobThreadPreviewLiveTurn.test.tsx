@@ -450,6 +450,48 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     },
   );
 
+  it("lists no draft of the reply in Details once the reply is in, also when the reply changed after it", async () => {
+    // A map turn's answer streamed as a note while the turn ran ("I'm sending
+    // Instafy's browser…"), and the check at the end of the turn took that
+    // step out of the reply. Only a reply that matched the note word for word
+    // folded it away, so the step it took out stayed readable in Details.
+    const statusNote = (id: string, text: string, timestamp: number, phase: string) =>
+      agentUpdate(id, "status", text, timestamp, {
+        kind: "agent_message",
+        event: { type: "item.completed", item: { id: `msg-${id}`, type: "agent_message", text, phase } },
+      });
+    const progress = statusNote("progress-note", "Reading the city's page", base + 3_000, "commentary");
+    const draft = statusNote(
+      "answer-draft",
+      "I planned two days. I'm sending Instafy's browser to find more sights.",
+      base + 3_500,
+      "final_answer",
+    );
+    live.inFlight = false;
+    await renderTurn([
+      ...earlierSteps(),
+      progress,
+      draft,
+      reply("reply", "I planned two days. More sights for the third day are a next step.", base + 4_000),
+    ]);
+
+    await act(async () => {
+      activityLine()?.click();
+    });
+    const rows = Array.from(container.querySelectorAll('[data-testid="agent-thread-inline-update-row"]')).map(
+      (row) => row.textContent,
+    );
+    expect(rows).toEqual([
+      expect.stringContaining("Reading the request"),
+      expect.stringContaining("Analyzing output schema"),
+      "Reading the city's page",
+    ]);
+    expect(container.textContent).not.toContain("I'm sending Instafy's browser");
+    expect(container.querySelector('[data-testid="message-content"]')?.textContent).toBe(
+      "I planned two days. More sights for the third day are a next step.",
+    );
+  });
+
   it("never turns a long reasoning title into the running line", async () => {
     const title =
       "Comparing the output schema of the export endpoint with the fields the importer expects";
