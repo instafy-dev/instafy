@@ -1121,6 +1121,100 @@ async fn run_every_chain(harness: &mut Harness) {
     let mut t2 = Spec::new(ct, Lane::PlainFinal, t1);
     t2.api_key = true;
     harness.run("T2", t2).await;
+
+    // O and Q: threads started before run instructions were a section of their own, by a
+    // workspace task while that lane's heading was still the renamed one (O) and by an ordinary
+    // turn (Q). The first turn's rollout is made into such a thread's, and the chat goes on.
+    for (labels, older_text) in [
+        (["O1", "O2", "O3"], OLDER_WRITE_TEXT),
+        (["Q1", "Q2", "Q3"], OLDER_STRUCTURED_TEXT),
+    ] {
+        let chat = Uuid::new_v4();
+        let first = harness
+            .run(labels[0], Spec::new(chat, Lane::Default, None))
+            .await;
+        let rollout = first
+            .as_ref()
+            .and_then(|state| state["defaultRolloutPath"].as_str())
+            .map(PathBuf::from)
+            .expect("the first turn's rollout");
+        make_older_thread(&rollout, older_text).expect("an older thread");
+        let second = harness
+            .run(labels[1], Spec::new(chat, Lane::Default, first))
+            .await;
+        harness
+            .run(labels[2], Spec::new(chat, Lane::Default, second))
+            .await;
+    }
+}
+
+/// A workspace task's run text as it began until that lane's heading was renamed, and an
+/// ordinary turn's, each with a line of its own to find it by.
+const OLDER_WRITE_TEXT: &str = "Instafy Studio workspace-change run:\n- Make the requested file changes directly with `apply_patch` (or write the files).\n- OLDER-THREAD-WRITE-WITNESS";
+const OLDER_STRUCTURED_TEXT: &str = "Instafy Studio structured execution run:\n- Treat this as a background automation job, not an interactive chat turn.\n- OLDER-THREAD-STRUCTURED-WITNESS";
+
+/// Makes a thread's rollout into the rollout of a thread started before run instructions were a
+/// section of their own: its run's text untagged where its block was, in the first developer
+/// message, as the config's developer instructions, and no comparison state for either section.
+fn make_older_thread(rollout: &Path, older_text: &str) -> Result<()> {
+    let mut blocks = 0;
+    let mut lines = Vec::new();
+    for line in fs::read_to_string(rollout)?.lines() {
+        let mut value: Value = serde_json::from_str(line)?;
+        let kind = value["type"].as_str().unwrap_or_default().to_string();
+        let Some(payload) = value.get_mut("payload") else {
+            lines.push(value.to_string());
+            continue;
+        };
+        if kind == "response_item" && payload["role"] == "developer" {
+            let mut rewritten = Vec::new();
+            for (index, part) in payload
+                .get_mut("content")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                if part["text"]
+                    .as_str()
+                    .is_some_and(|text| text.trim_start().starts_with(RUN_OPEN))
+                {
+                    part["text"] = json!(older_text);
+                    rewritten.push(index);
+                }
+            }
+            // Each part's kind, as Codex records it beside the message.
+            if let Some(kinds) = payload
+                .get_mut("internal_chat_message_metadata_passthrough")
+                .and_then(|metadata| metadata.get_mut("content_item_kinds"))
+                .and_then(Value::as_array_mut)
+            {
+                for index in &rewritten {
+                    if let Some(kind) = kinds.get_mut(*index) {
+                        *kind = json!("generic.developer_instructions");
+                    }
+                }
+            }
+            blocks += rewritten.len();
+        } else if kind == "world_state"
+            && let Some(state) = payload.get_mut("state").and_then(Value::as_object_mut)
+        {
+            state.remove("instafy_run_instructions");
+            state.remove("instafy_turn_notes");
+        }
+        lines.push(value.to_string());
+    }
+    let kept: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("instafy_run_instructions"))
+        .collect();
+    ensure!(
+        blocks == 1 && kept.is_empty(),
+        "{} kept run instructions of its own ({blocks} block(s) rewritten): {kept:?}",
+        rollout.display()
+    );
+    fs::write(rollout, lines.join("\n") + "\n")?;
+    Ok(())
 }
 
 fn item_text(item: &Value) -> String {
@@ -1221,7 +1315,7 @@ fn check(harness: &Harness) -> Result<()> {
     // Turns that must complete do. R5 fails before the model answers.
     for label in [
         "A1", "A4", "U1", "U2", "C2", "D1", "E1", "E3", "P1", "P3", "K1", "K2", "K3", "K5", "R1",
-        "R6", "T1", "T2",
+        "R6", "T1", "T2", "O1", "O2", "O3", "Q1", "Q2", "Q3",
     ] {
         let turn = harness.turn(label);
         ensure!(turn.outcome.is_ok(), "{label} failed: {:?}", turn.outcome);
@@ -1331,6 +1425,12 @@ fn check(harness: &Harness) -> Result<()> {
         ("R6", 2),
         ("T1", 1),
         ("T2", 2),
+        ("O1", 1),
+        ("O2", 1),
+        ("O3", 1),
+        ("Q1", 1),
+        ("Q2", 1),
+        ("Q3", 1),
     ] {
         let blocks = run_blocks(first_sampling_request(harness.turn(label)));
         ensure!(
@@ -1405,6 +1505,34 @@ fn check(harness: &Harness) -> Result<()> {
         ) == 1,
         "R6 reads the focused lane's text other than once"
     );
+    // A thread started before run instructions were a section of their own keeps its first
+    // run's text, untagged, in its history. Its next turn is given that turn's own text once,
+    // saying that it replaces the earlier text, and the turn after it adds nothing.
+    for (labels, older_text) in [
+        (["Q1", "Q2", "Q3"], OLDER_STRUCTURED_TEXT),
+        (["O1", "O2", "O3"], OLDER_WRITE_TEXT),
+    ] {
+        let witness = older_text.lines().last().unwrap_or_default();
+        let resumed = first_sampling_request(harness.turn(labels[1]));
+        ensure!(
+            instructions_text(resumed).matches(witness).count() == 1,
+            "{}: the older thread's run text is not in its history once",
+            labels[1]
+        );
+        let blocks = run_blocks(resumed);
+        ensure!(
+            blocks.len() == 1 && blocks[0].starts_with(REPLACE) && !blocks[0].contains(witness),
+            "{}: the first turn on a thread started before run instructions were a section of their own does not replace that thread's run text: {blocks:?}",
+            labels[1]
+        );
+        let last = harness.turn(labels[1]).requests.last().expect("a request");
+        ensure!(
+            instructions_text(first_sampling_request(harness.turn(labels[2])))
+                == instructions_text(last),
+            "{} changed the instructions of a thread whose run text it shares",
+            labels[2]
+        );
+    }
 
     // (v) A note holds for its turn only.
     for turn in &harness.turns {

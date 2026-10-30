@@ -418,11 +418,12 @@ mod tests {
         assert!(!run_section.matches_legacy_fragment("developer", "Other developer text."));
     }
 
-    /// Old threads carry these exact lines, so none may change or go.
+    /// Old threads carry these exact lines, so none may change or go: every heading a lane's
+    /// text has started with, a renamed one included.
     #[test]
     fn legacy_lane_headings_are_frozen() {
         assert_eq!(
-            LEGACY_LANE_HEADINGS[..6],
+            LEGACY_LANE_HEADINGS,
             [
                 "Instafy Studio structured execution run:",
                 "Instafy Studio focused execution run:",
@@ -430,8 +431,21 @@ mod tests {
                 "Browser/UI execution run:",
                 "MCP-focused run:",
                 "Granted device turn:",
+                "Instafy Studio workspace-change run:",
             ]
         );
+    }
+
+    /// A workspace task's text opened with "Instafy Studio workspace-change run:" until that
+    /// lane's heading was renamed, so a thread such a turn started is an older thread too: the
+    /// next turn is told that its text replaces that one.
+    #[test]
+    fn a_thread_a_renamed_lane_heading_started_is_recognized() {
+        const RENAMED_WRITE_TEXT: &str = "Instafy Studio workspace-change run:\n- Treat this as a background automation job, not an interactive chat turn.\n- Make the requested file changes directly with `apply_patch` (or write the files).";
+        let [run_section, note_section] = sections(&run(POLICY, None));
+        assert!(run_section.matches_legacy_fragment("developer", RENAMED_WRITE_TEXT));
+        assert!(!run_section.matches_legacy_fragment("user", RENAMED_WRITE_TEXT));
+        assert!(!note_section.matches_legacy_fragment("developer", RENAMED_WRITE_TEXT));
     }
 
     #[test]
