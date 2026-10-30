@@ -66,7 +66,7 @@ function BrowserCodeFallback({
               <Button variant="ghost" size="sm" onPress={() => window.location.reload()}>Reload app</Button>
             </div>
           </>
-        ) : <LoadingStatus>Loading shared browser…</LoadingStatus>}
+        ) : <LoadingStatus>Opening Instafy's browser…</LoadingStatus>}
       </div>
     </section>
   );

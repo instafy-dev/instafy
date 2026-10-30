@@ -429,6 +429,7 @@ import {
   browserAutoStartHeldByDraft,
   browserAutoStartHeldByOther,
   browserAutoStartPlan,
+  browserPressRuntime,
   conversationBrowserHostId,
   markBrowserAutoStartDeclined,
   type SharedBrowserPresence,
@@ -4886,7 +4887,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       // This request selects a session, not a new device-wide preference.
       setBrowserTransport(transport);
       if (transport === "shared") setSharedBrowserActivated(true);
-      openBrowserSession(transport === "shared" ? resolvedBrowserRuntimeId : null);
+      // A press opens this conversation's own machine by name, so it never
+      // asks which machine (browserPressRuntime).
+      const press = browserPressRuntime({
+        transport,
+        hostRuntimeId: conversationBrowserHostRuntimeId,
+        exactRuntimeId: exactBrowserRuntimeId,
+        resolvedRuntimeId: resolvedBrowserRuntimeId,
+      });
+      if ("resume" in press) resumeBrowserSession(press.resume);
+      else openBrowserSession(press.open);
       setBrowserSubtab("browser");
     },
     // A card's turn in Instafy's browser runs in this chat's own tab: the

@@ -209,7 +209,17 @@ describe("production Shared modal resume selection", () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
     await render(secondId);
     expect(onResolved).not.toHaveBeenCalled(); expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("requested Shared session is not available");
+    // The browser asked for is gone and the open named no other: Browser
+    // options opens by itself, with the running one and Start new session.
+    const options = () => document.querySelector('[role="dialog"][aria-label="Browser options"]');
+    expect(options()).not.toBeNull();
+    expect(options()?.textContent).toContain("Start new session");
+    // Try again asks for the same browser, so it offers that choice again
+    // instead of the same sentence.
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close browser options"]')!.click());
+    expect(options()).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]')!.click());
+    expect(options()).not.toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="Resume Shared session ${firstId}"]`)!.click());
     expect(onResolved).toHaveBeenCalledWith(firstId); expect(mocks.ensure).not.toHaveBeenCalled();
   });
@@ -258,12 +268,14 @@ describe("production Shared modal resume selection", () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId), entry(secondId)] });
     await render(null);
     expect(onResolved).not.toHaveBeenCalled(); expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("Several Shared sessions");
     expect(document.querySelector('[data-testid="browser-session-status"]')?.textContent).toBe("Choose session");
+    // The open named no browser, so the choice is on screen at once: the
+    // pill alone, hidden in compact chrome, would leave no way on.
+    expect(document.querySelector('[role="dialog"][aria-label="Browser options"]')).not.toBeNull();
+    expect(document.body.textContent?.match(/Several Shared sessions/g)).toHaveLength(1);
     expect(document.querySelector('[data-testid="browser-session-state-card"]')).toBeNull();
     expect(document.querySelector('[data-testid="browser-session-error-notice"]')).toBeNull();
     expect(document.querySelector('[role="alert"]')).toBeNull();
-    expect(document.body.textContent?.match(/Several Shared sessions/g)).toHaveLength(1);
     await act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="Resume Shared session ${secondId}"]`)!.click());
     expect(onResolved).toHaveBeenCalledWith(secondId);
   });
@@ -276,7 +288,8 @@ describe("production Shared modal resume selection", () => {
   it("does not turn failed discovery into a new allocation", async () => {
     mocks.fetchStatus.mockRejectedValue(new Error("offline"));
     await render(null); expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("no new browser was started");
+    expect(document.querySelector('[data-testid="shared-browser-session-control"]')).toBeNull();
+    expect(document.body.textContent).toContain("Instafy's browser did not open. Try again.");
   });
 
   it("explains missing browser setup and keeps the original failure for runtime debug", async () => {
