@@ -381,6 +381,26 @@ describe("useBrowserSessionPages", () => {
     expect(fronts).toEqual(["other-chat", "this-chat", "this-chat", "this-chat"]);
   });
 
+  it("lets the browser say which tab is in front again once a focus has not answered for five seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const page = (id: string, isActive: boolean) => ({
+        id, url: `https://${id}.example/`, host: `${id}.example`, label: id, title: id, isActive, canGoBack: false, canGoForward: false,
+      });
+      fetchPagesMock.mockResolvedValue([page("other-chat", true), page("this-chat", false)]);
+      await renderHook();
+      focusPageMock.mockReturnValueOnce(new Promise<boolean>(() => {}));
+      await act(async () => { void latestResult!.focusPage("this-chat"); await Promise.resolve(); });
+      await act(async () => { await latestResult!.refresh(); });
+      expect(latestResult?.pages.find((entry) => entry.isActive)?.id).toBe("this-chat");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      await act(async () => { await latestResult!.refresh(); });
+      expect(latestResult?.pages.find((entry) => entry.isActive)?.id).toBe("other-chat");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores a capability response from the previous project scope", async () => {
     let resolveOldCapabilities: ((value: unknown) => void) | null = null;
     fetchCapabilitiesMock
