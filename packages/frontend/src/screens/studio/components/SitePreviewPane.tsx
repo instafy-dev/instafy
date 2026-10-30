@@ -145,6 +145,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   const [frameKey, setFrameKey] = useState(0);
   /** The frame the site's page last loaded in (its key and address); until then the pane says "Loading…". */
   const [loadedFrame, setLoadedFrame] = useState<string | null>(null);
+  /** The site's page loaded in this pane once: until then the pane says it is opening the site, from the press on. */
+  const [pageLoadedOnce, setPageLoadedOnce] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [openingTab, setOpeningTab] = useState(false);
   /** The record says how to start the site again (`instafy preview open` recorded it); null until a record says. */
@@ -449,6 +451,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   const frameLoading = frameShown && frameIdentity !== null && loadedFrame !== frameIdentity;
   const onFrameLoad = () => {
     setLoadedFrame(frameIdentity);
+    setPageLoadedOnce(true);
     host.onFrameLoad();
   };
   // A card that started the site says "Starting…" until a pane shows its
@@ -529,7 +532,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
         {shown === "opening" || shown === "starting" || frameLoading ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400" data-testid="site-preview-progress">
             <Spinner aria-hidden="true" tone="slate" size="sm" />{" "}
-            {shown === "starting" ? `Starting ${title}…` : shown === "opening" ? `Opening ${title}…` : "Loading…"}
+            {/* One line from the press to the site's first page, never a blank pane in between. */}
+            {shown === "starting" ? `Starting ${title}…` : shown === "opening" || !pageLoadedOnce ? `Opening ${title}…` : "Loading…"}
           </div>
         ) : null}
         {problemShown ? (

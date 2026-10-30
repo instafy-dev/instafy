@@ -8,10 +8,19 @@ import type { BrowserSessionPage } from "../browserSessionPages";
 import {
   CHAT_BROWSER_TAB_COPY,
   CHAT_BROWSER_VIEW_START,
+  CHAT_VIEW_TURN_TABS_START,
+  chatBrowserHandoffPage,
   chatBrowserTab,
+  chatBrowserTarget,
+  chatPageOnScreen,
+  chatViewPageIds,
+  chatViewStepTab,
+  nextChatViewTurnTabs,
+  useChatViewTabs,
   forgetChatBrowserTabsForTests,
   lastChatBrowserTab,
   browserTurnUnderWay,
+  newChatBrowserTabId,
   nextChatBrowserViewStep,
   unusedBlankBrowserTab,
   useChatBrowserTab,
@@ -151,6 +160,26 @@ describe("useChatBrowserTab", () => {
     await act(async () => { target = await latest!.resolveForTurn(); });
     expect(props.openPage).toHaveBeenCalledOnce();
     expect(target).toMatchObject({ id: "PAGE-NEW", url: "about:blank" });
+  });
+
+  // A chat with nothing sent yet: its Browser view shows a tab of its own,
+  // kept under its local id, never the page another chat left in front. Its
+  // first message gives it an id, and the page the person reached there stays
+  // the chat's tab.
+  it("keeps a new chat's own tab once its first message gives it an id", async () => {
+    const newChat = newChatBrowserTabId("local-chat-1");
+    const props = await render({ scope: { ...scope(VACUUM_CHAT), conversationId: newChat }, newChatId: newChat });
+    expect(latest!.tab).toBeNull();
+    await act(async () => { await latest!.resolveForTurn(); });
+    expect(props.openPage).toHaveBeenCalledOnce();
+    const browsed = page("PAGE-NEW", "https://www.roborock.com/");
+    await render({ ...props, pages: [LISBON, browsed] });
+    expect(latest!.tab?.id).toBe("PAGE-NEW");
+    await render({ ...props, scope: scope(VACUUM_CHAT), pages: [LISBON, browsed] });
+    expect(latest!.tab?.id).toBe("PAGE-NEW");
+    // It is no other chat's.
+    await render({ ...props, scope: scope(MAP_CHAT), newChatId: null, pages: [LISBON, browsed] });
+    expect(latest!.tab?.id).toBe(LISBON.id);
   });
 
   it("keeps a chat's later turns in the tab its last turn used", async () => {
@@ -318,6 +347,47 @@ describe("the page a browser turn leaves its chat", () => {
   });
 });
 
+// Local test, Oct 30: the composer aimed a message, and named the Browser
+// tab, after the tab in front, which was another chat's page; when the
+// browser named none in front, after its first tab.
+describe("where a chat's messages go in Instafy's browser", () => {
+  const otherChat = page("PAGE-PICO", "https://www.raspberrypi.com/products/raspberry-pi-pico-2/", { isActive: true });
+  const own = page("PAGE-GITHUB", "https://github.com/");
+  const blank = page("PAGE-BLANK", "about:blank");
+
+  it("is the chat's own tab, never the tab another chat left in front", () => {
+    expect(chatBrowserTarget({ tab: own, pages: [otherChat, own], resolved: true, canOpenPage: true }))
+      .toEqual({ page: own, bindingPage: own, tabAvailable: true });
+    // A chat with no tab yet names no page; a turn sent now gets a tab of its own.
+    expect(chatBrowserTarget({ tab: null, pages: [otherChat, own], resolved: true, canOpenPage: true }))
+      .toEqual({ page: null, bindingPage: null, tabAvailable: true });
+    expect(chatBrowserTarget({ tab: null, pages: [otherChat], resolved: true, canOpenPage: null }))
+      .toEqual({ page: null, bindingPage: null, tabAvailable: true });
+    // Nor the browser's first tab when the browser names none in front.
+    expect(chatBrowserTarget({ tab: null, pages: [{ ...otherChat, isActive: false }, own], resolved: true, canOpenPage: true }).page)
+      .toBeNull();
+  });
+
+  it("binds a turn to the chat's blank tab without naming it", () => {
+    expect(chatBrowserTarget({ tab: blank, pages: [otherChat, blank], resolved: true, canOpenPage: true }))
+      .toEqual({ page: null, bindingPage: blank, tabAvailable: true });
+  });
+
+  it("keeps the tab in front only for an older browser that cannot open a tab", () => {
+    expect(chatBrowserTarget({ tab: null, pages: [otherChat], resolved: true, canOpenPage: false }))
+      .toEqual({ page: otherChat, bindingPage: otherChat, tabAvailable: true });
+    expect(chatBrowserTarget({ tab: own, pages: [otherChat, own], resolved: true, canOpenPage: false }).page).toBe(own);
+    expect(chatBrowserTarget({ tab: null, pages: [{ ...otherChat, isActive: false }], resolved: true, canOpenPage: false }))
+      .toEqual({ page: null, bindingPage: null, tabAvailable: false });
+  });
+
+  it("offers nothing until the tabs are read, or while they are stale", () => {
+    expect(chatBrowserTarget({ tab: own, pages: [own], resolved: false, canOpenPage: true }))
+      .toEqual({ page: null, bindingPage: null, tabAvailable: false });
+    expect(chatBrowserTarget({ tab: null, pages: [], resolved: true, canOpenPage: true }).tabAvailable).toBe(false);
+  });
+});
+
 describe("the chat's Browser view", () => {
   const view = (overrides: Partial<Parameters<typeof nextChatBrowserViewStep>[0]>) => nextChatBrowserViewStep({
     onScreen: true, free: true, chatId: MAP_CHAT, tab: null, canOpenTab: true, chatTurnUnderWay: false,
@@ -332,6 +402,17 @@ describe("the chat's Browser view", () => {
     expect(view({ state: first.state }).step).toBe("none");
     expect(view({ canOpenTab: false }).step).toBe("none");
     expect(view({ chatId: null }).step).toBe("none");
+  });
+
+  // The browser started again (Clear data, or its machine came back) under
+  // new tab ids: the chat's tab is gone. Its view shows only the chat's own
+  // tab, so it gets a blank one again instead of a stage left blank.
+  it("gives a chat a blank tab again once the tab it had is gone", () => {
+    const first = view({});
+    expect(first.step).toBe("open-blank-tab");
+    const given = view({ tab: { id: "PAGE-BLANK", isActive: true }, state: first.state });
+    expect(given.step).toBe("none");
+    expect(view({ state: given.state }).step).toBe("open-blank-tab");
   });
 
   // Octo's turn held the browser while the view was on screen. Once it is
@@ -399,5 +480,170 @@ describe("the chat's Browser view", () => {
     expect(browserTurnUnderWay([running, MAP_RUN], on(MAP_CHAT), "any")).toBe(true);
     expect(browserTurnUnderWay([{ ...running, status: "queued" }], on("chat-tram"), "any")).toBe(false);
     expect(browserTurnUnderWay([running], { conversationId: "chat-tram", runtimeId: "runtime-2" }, "any")).toBe(false);
+  });
+});
+
+// Take over pressed in the first seconds of a chat's browser turn, while the
+// page another chat's turn left is still in front behind the chat's blank
+// stage, made that page this chat's tab: the chat showed it, its next browser
+// turn ran there, and the other chat lost it. And Let Octo continue went on in
+// the tab in front, or the browser's first tab when none was named in front.
+describe("the page Take over and Let Octo continue act on", () => {
+  const PICO = "https://www.raspberrypi.com/products/raspberry-pi-pico-2/";
+  const own = page("PAGE-PORTO", "https://www.visitporto.travel/");
+  const otherChat = page("PAGE-PICO", PICO, { isActive: true });
+  const octo = page("PAGE-OCTO", "https://www.metrodoporto.pt/", { openedBy: "agent", agentTabNumber: 2 });
+
+  it("is the tab in front only while the chat's view shows it", () => {
+    expect(chatPageOnScreen([own, otherChat], [own.id])).toBeNull();
+    expect(chatPageOnScreen([{ ...own, isActive: true }, { ...otherChat, isActive: false }], [own.id])?.id).toBe(own.id);
+    // Octo's own tab of the chat's turn.
+    expect(chatPageOnScreen([own, { ...octo, isActive: true }], [own.id, octo.id])?.id).toBe(octo.id);
+    // No tab named in front: never the browser's first tab.
+    expect(chatPageOnScreen([{ ...otherChat, isActive: false }, own], [own.id])).toBeNull();
+    // A view that is not a chat's own (an older browser) acts on the tab in front.
+    expect(chatPageOnScreen([own, otherChat], null)).toBe(otherChat);
+    expect(chatPageOnScreen([own, { ...otherChat, isActive: false }], null)).toBeNull();
+  });
+
+  it("goes on in the chat's own tab while another chat's page, or none, is in front", () => {
+    expect(chatBrowserHandoffPage({ pages: [own, otherChat], chatPageIds: [own.id], chatTab: own })).toBe(own);
+    expect(chatBrowserHandoffPage({ pages: [{ ...otherChat, isActive: false }, own], chatPageIds: [own.id], chatTab: own }))
+      .toBe(own);
+    const octoInFront = { ...octo, isActive: true };
+    expect(chatBrowserHandoffPage({ pages: [own, octoInFront], chatPageIds: [own.id, octo.id], chatTab: own }))
+      .toBe(octoInFront);
+    // A chat with no tab of its own sends nothing, never to the page in front.
+    expect(chatBrowserHandoffPage({ pages: [otherChat], chatPageIds: [], chatTab: null })).toBeNull();
+    // An older browser: the tab in front, else the chat's own tab (where
+    // Take over finds the chat's turn), never the browser's first tab.
+    expect(chatBrowserHandoffPage({ pages: [own, otherChat], chatPageIds: null, chatTab: own })).toBe(otherChat);
+    expect(chatBrowserHandoffPage({ pages: [{ ...otherChat, isActive: false }, own], chatPageIds: null, chatTab: own }))
+      .toBe(own);
+    expect(chatBrowserHandoffPage({ pages: [{ ...otherChat, isActive: false }], chatPageIds: null, chatTab: null }))
+      .toBeNull();
+  });
+
+  it("leaves each chat its own tab when the person takes over over a blank stage", () => {
+    forgetChatBrowserTabsForTests();
+    const porto = browserRun("run-porto", "chat-porto", own.id, "2026-10-30T11:01:56Z", { status: "in_progress" });
+    const pico = browserRun("run-pico", "chat-pico", otherChat.id, "2026-10-30T10:55:14Z");
+    const runs = [pico, porto];
+    const pages = [own, otherChat];
+    const portoTab = chatBrowserTab({ scope: scope("chat-porto"), runs, pages });
+    const portoView = chatViewPageIds(portoTab?.id ?? null, CHAT_VIEW_TURN_TABS_START);
+    // What ChatPanel makes the chat's tab once the take-over is acknowledged.
+    expect(chatPageOnScreen(pages, portoView)).toBeNull();
+    expect(chatBrowserTab({ scope: scope("chat-porto"), runs, pages })?.id).toBe(own.id);
+    expect(chatBrowserTab({ scope: scope("chat-pico"), runs, pages })?.id).toBe(otherChat.id);
+    expect(chatBrowserHandoffPage({ pages, chatPageIds: portoView, chatTab: portoTab })?.id).toBe(own.id);
+  });
+});
+
+// What a chat's Browser view shows of Octo's tabs. Octo's tabs of the chat's
+// turn are the chat's while the turn runs. When it ends, the tab Octo read in
+// last stays as the chat's page, but the view knew that only from the next
+// read of the tab list: meanwhile its stage went blank, and it brought the
+// chat's older page forward, then the kept tab again. And a list read before
+// another chat's turn ended still named that turn's tab as Octo's when this
+// chat's turn started, so the view showed it.
+describe("the tabs a chat's Browser view shows", () => {
+  const chat = JSON.stringify(["user-1", "project-1", "chat-porto", RUNTIME]);
+  const own = page("PAGE-PORTO", "https://www.visitporto.travel/");
+  const octo = (isActive = false) => page("PAGE-METRO", "https://www.metrodoporto.pt/", { openedBy: "agent", agentTabNumber: 2, isActive });
+  const otherTurns = page("PAGE-PICO", "https://www.raspberrypi.com/products/raspberry-pi-pico-2/", { openedBy: "agent", agentTabNumber: 1, isActive: true });
+
+  it("shows Octo's tabs of the chat's turn, never another chat's turn's that a list read earlier names", () => {
+    const idle = nextChatViewTurnTabs(CHAT_VIEW_TURN_TABS_START, { chatKey: chat, pages: [own, otherTurns], chatTurnUnderWay: false });
+    expect(chatViewPageIds(own.id, idle)).toEqual([own.id]);
+    // The chat's turn starts while the list still names the other turn's tab.
+    const starting = nextChatViewTurnTabs(idle, { chatKey: chat, pages: [own, otherTurns], chatTurnUnderWay: true });
+    expect(chatViewPageIds(own.id, starting)).toEqual([own.id]);
+    // Octo opens a tab of its own for this turn.
+    const reading = nextChatViewTurnTabs(starting, { chatKey: chat, pages: [own, { ...otherTurns, isActive: false }, octo(true)], chatTurnUnderWay: true });
+    expect(chatViewPageIds(own.id, reading)).toEqual([own.id, "PAGE-METRO"]);
+  });
+
+  /** The chat's turn started on its own tab, then read in a tab of Octo's. */
+  function readingTurn() {
+    const started = nextChatViewTurnTabs(
+      { ...CHAT_VIEW_TURN_TABS_START, chatKey: chat },
+      { chatKey: chat, pages: [{ ...own, isActive: true }], chatTurnUnderWay: true },
+    );
+    return nextChatViewTurnTabs(started, { chatKey: chat, pages: [own, octo(true)], chatTurnUnderWay: true });
+  }
+
+  it("keeps the tab the chat's turn read in last until the list names it the chat's page", () => {
+    const reading = readingTurn();
+    // The turn has ended; the list read during the turn still names Octo's tab.
+    const ended = nextChatViewTurnTabs(reading, { chatKey: chat, pages: [own, octo(true)], chatTurnUnderWay: false });
+    expect(chatViewPageIds(own.id, ended)).toEqual([own.id, "PAGE-METRO"]);
+    // The view does not bring the chat's older page forward over it.
+    expect(chatViewStepTab({ chatTab: { id: own.id, isActive: false }, pages: [own, octo(true)], turnTabs: ended }))
+      .toEqual({ id: "PAGE-METRO", isActive: true });
+    // The next list: an ordinary tab, the page the turn left the chat.
+    const kept = page("PAGE-METRO", "https://www.metrodoporto.pt/", { isActive: true, leftByRun: "run-metro" });
+    const read = nextChatViewTurnTabs(ended, { chatKey: chat, pages: [own, kept], chatTurnUnderWay: false });
+    expect(read.tabs).toEqual([]);
+    expect(chatViewPageIds(kept.id, read)).toEqual([kept.id]);
+    expect(chatViewStepTab({ chatTab: { id: kept.id, isActive: true }, pages: [own, kept], turnTabs: read }))
+      .toEqual({ id: kept.id, isActive: true });
+    // Had Octo gone back to the chat's page, its tab closes, and that page comes forward.
+    const closed = nextChatViewTurnTabs(ended, { chatKey: chat, pages: [{ ...own, isActive: true }], chatTurnUnderWay: false });
+    expect(chatViewPageIds(own.id, closed)).toEqual([own.id]);
+    // A tab of Octo's that does not close is left over: no chat's.
+    const leftover = nextChatViewTurnTabs(ended, { chatKey: chat, pages: [own, { ...octo(true), leftover: true }], chatTurnUnderWay: false });
+    expect(chatViewPageIds(own.id, leftover)).toEqual([own.id]);
+  });
+
+  it("shows another chat's own turn's tabs only in that chat", () => {
+    const reading = readingTurn();
+    // The person opens another chat whose turn is under way: Octo's tab of
+    // the chat before is not its.
+    const other = JSON.stringify(["user-1", "project-1", "chat-pico", RUNTIME]);
+    const switched = nextChatViewTurnTabs(reading, { chatKey: other, pages: [own, octo(true)], chatTurnUnderWay: true });
+    expect(chatViewPageIds(null, switched)).toEqual([]);
+    // Seen from the middle of its turn, with no chat before it: Octo's tabs are that turn's.
+    const fresh = nextChatViewTurnTabs(CHAT_VIEW_TURN_TABS_START, { chatKey: other, pages: [own, octo(true)], chatTurnUnderWay: true });
+    expect(chatViewPageIds(null, fresh)).toEqual(["PAGE-METRO"]);
+  });
+});
+
+describe("useChatViewTabs", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let latest: ReturnType<typeof useChatViewTabs> | null;
+  function Harness(props: Parameters<typeof useChatViewTabs>[0]) {
+    latest = useChatViewTabs(props);
+    return null;
+  }
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    latest = null;
+  });
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("follows the chat's turn into Octo's tab, and stays there after it until the list is read again", async () => {
+    const own = page("PAGE-PORTO", "https://www.visitporto.travel/");
+    const octo = page("PAGE-METRO", "https://www.metrodoporto.pt/", { openedBy: "agent", agentTabNumber: 2, isActive: true });
+    const props = { chatKey: "chat-porto", enabled: true, chatTab: own, pages: [own], chatTurnUnderWay: false };
+    await act(async () => root.render(<Harness {...props} />));
+    expect(latest!.pageIds).toEqual([own.id]);
+    await act(async () => root.render(<Harness {...props} chatTurnUnderWay />));
+    await act(async () => root.render(<Harness {...props} pages={[own, octo]} chatTurnUnderWay />));
+    expect(latest!.pageIds).toEqual([own.id, octo.id]);
+    await act(async () => root.render(<Harness {...props} pages={[own, octo]} />));
+    expect(latest!.pageIds).toEqual([own.id, octo.id]);
+    expect(latest!.stepTab).toEqual({ id: octo.id, isActive: true });
+    // An older browser that cannot give a chat a tab: the view shows the tab in front.
+    await act(async () => root.render(<Harness {...props} enabled={false} />));
+    expect(latest!.pageIds).toBeNull();
   });
 });

@@ -1,12 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ChatMessage } from "../types";
+import { useCallback, useEffect, useState } from "react";
 import type { StatusIntent } from "../../../status/useStatus";
-import {
-  browserSessionPageIsPlaceholder,
-  resolveBrowserSessionPages,
-  resolvePreferredBrowserSessionPage,
-  type BrowserSessionPage,
-} from "./browserSessionPages";
 import { useBrowserSessionPages } from "./useBrowserSessionPages";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
 
@@ -19,7 +12,6 @@ type UseChatComposerBrowserTargetingOptions = {
   browserTransport: BrowserTransport;
   focusInput: (options?: { force?: boolean }) => void;
   hasHiddenBrowserSession: boolean;
-  messages: ChatMessage[];
   onHiddenBrowserSessionUnavailable: () => void;
   openBrowserSession: (runtimeId: string | null) => void;
   preferredBrowserRuntimeId: string | null;
@@ -46,7 +38,6 @@ export function useChatComposerBrowserTargeting({
   browserTransport,
   focusInput,
   hasHiddenBrowserSession,
-  messages,
   onHiddenBrowserSessionUnavailable,
   openBrowserSession,
   preferredBrowserRuntimeId,
@@ -58,7 +49,6 @@ export function useChatComposerBrowserTargeting({
   sharedBrowserSurfaceVisible = true,
 }: UseChatComposerBrowserTargetingOptions) {
   const sharedBrowserTargetingEnabled = browserTransport === "shared";
-  const inferredBrowserSessionPages = useMemo(() => resolveBrowserSessionPages(messages), [messages]);
   const [pendingBrowserLaunchMode, setPendingBrowserLaunchMode] = useState<"new_page" | null>(null);
   const effectivePendingBrowserLaunchMode = sharedBrowserTargetingEnabled
     ? pendingBrowserLaunchMode
@@ -96,47 +86,6 @@ export function useChatComposerBrowserTargeting({
     pollFast: sharedBrowserPagesPollFast,
     surfaceVisible: sharedBrowserSurfaceVisible,
   });
-  const targetableLiveBrowserSessionPages = useMemo(
-    () => liveBrowserSessionPages.filter((page) => !browserSessionPageIsPlaceholder(page)),
-    [liveBrowserSessionPages],
-  );
-  const browserSessionPages =
-    sharedBrowserTargetingEnabled && liveBrowserSessionPagesResolved
-      ? targetableLiveBrowserSessionPages
-      : [];
-  const preferredBrowserPage = useMemo<BrowserSessionPage | null>(
-    () =>
-      sharedBrowserTargetingEnabled
-          ? resolvePreferredBrowserSessionPage(
-            liveBrowserSessionPagesResolved
-              ? targetableLiveBrowserSessionPages
-              : inferredBrowserSessionPages,
-          )
-        : null,
-    [
-      inferredBrowserSessionPages,
-      liveBrowserSessionPagesResolved,
-      sharedBrowserTargetingEnabled,
-      targetableLiveBrowserSessionPages,
-    ],
-  );
-  // The live tab a browser task runs in, blank or not. A browser that just
-  // started (or came back with its machine) shows only a blank tab. The agent
-  // can still drive it, so a task binds to it, while only a real page
-  // (preferredBrowserPage) is ever named in the message.
-  const sharedBrowserBindingPage = useMemo<BrowserSessionPage | null>(
-    () =>
-      preferredBrowserPage ??
-      (sharedBrowserTargetingEnabled && liveBrowserSessionPagesResolved
-        ? resolvePreferredBrowserSessionPage(liveBrowserSessionPages)
-        : null),
-    [
-      liveBrowserSessionPages,
-      liveBrowserSessionPagesResolved,
-      preferredBrowserPage,
-      sharedBrowserTargetingEnabled,
-    ],
-  );
   // The person picks a tab: whether it is the tab on screen now (a browser
   // someone else drives refuses the pick, and says so).
   const handleSelectBrowserSessionPage = useCallback(
@@ -232,15 +181,12 @@ export function useChatComposerBrowserTargeting({
   );
 
   return {
-    browserSessionPages,
     clearPendingBrowserLaunchMode,
     handleClearPendingNewBrowserSession,
     handleOpenBrowserFromLauncher,
     handlePrepareNewBrowserSession,
     handleSelectBrowserSessionPage,
     pendingBrowserLaunchMode: effectivePendingBrowserLaunchMode,
-    preferredBrowserPage,
-    sharedBrowserBindingPage,
     sharedBrowserCapabilities,
     sharedBrowserCapabilitiesResolved,
     sharedBrowserCapabilitiesUnsupported,
