@@ -46,7 +46,8 @@ const NOTE_WITHDRAW: &str = "Earlier turn notes in this conversation no longer a
 /// How each lane's developer text began on threads started before run instructions were a
 /// section of their own: untagged, at the start of a thread's first developer message. Such a
 /// thread is given its run's text once more, saying that it replaces the earlier text. Frozen:
-/// a lane whose heading changes adds its new heading and keeps the old one here.
+/// it holds every heading a lane's text has had, and a lane whose heading changes adds its new
+/// heading and keeps the old one here.
 pub(super) const LEGACY_LANE_HEADINGS: &[&str] = &[
     "Instafy Studio structured execution run:",
     "Instafy Studio focused execution run:",
@@ -54,6 +55,8 @@ pub(super) const LEGACY_LANE_HEADINGS: &[&str] = &[
     "Browser/UI execution run:",
     "MCP-focused run:",
     "Granted device turn:",
+    // The workspace task's heading before it was renamed.
+    "Instafy Studio workspace-change run:",
 ];
 
 /// What one run tells the model beyond its base instructions.
