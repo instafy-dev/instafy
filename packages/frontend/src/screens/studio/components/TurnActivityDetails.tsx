@@ -206,12 +206,13 @@ function OtherStepRow({ step, times = 1 }: { step: TurnStep; times?: number }) {
         <span className="flex-1" />
       )}
       {times > 1 ? (
+        // A label on a plain span is not read: the sign is hidden and its words are text.
         <span
           className="flex-none text-xxs tabular-nums text-slate-500 dark:text-slate-400"
-          aria-label={`${times} times`}
           data-testid="turn-activity-step-times"
         >
-          ×{times}
+          <span aria-hidden="true">×{times}</span>
+          <span className="sr-only">{times} times</span>
         </span>
       ) : null}
       <StepStateGlyph state={step.state} />

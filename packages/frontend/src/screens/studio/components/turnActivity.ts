@@ -427,12 +427,14 @@ const NEUTRAL_LABELS: Record<StepKind, { live: string; done: string }> = {
   edit: { live: "Editing files", done: "edited files" },
 };
 
-// Steps that leave a site open or stopped. The preview card already says the
-// site opened, so the line names one only when no other step finished: then
-// it is the last of them that succeeded, and a site it stopped and opened
-// again is open, never "stopped the preview".
+// Steps that leave a site open or stopped; the turn's result is the last of
+// them that succeeded, so a site it stopped and opened again is open, never
+// "stopped the preview". The preview card already says the site opened, so the
+// line names that only when no other step finished. No card says a site
+// stopped, so that leads whenever the turn made nothing else.
+const PREVIEW_OPENED = "opened a preview";
 const PREVIEW_RESULTS = new Map<string, string>([
-  ["instafy/preview-open", "opened a preview"],
+  ["instafy/preview-open", PREVIEW_OPENED],
   ["instafy/preview-close", "stopped the preview"],
 ]);
 
@@ -549,8 +551,8 @@ function groupWords(group: Group, previousHost: string | null): string {
  * changed (a step's newest message), as the turn's stored steps are. A step
  * that failed counts for nothing it would have done: when nothing else is left
  * to say, the line says what was tried ("Tried searching the web"). A preview
- * the turn opened or stopped, and a look at the page the turn started on, are
- * named only when the turn did nothing else.
+ * the turn opened, and a look at the page the turn started on, are named only
+ * when the turn did nothing else; a preview it stopped, when it made nothing.
  */
 function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: string | null } {
   const groups = new Map<string, Group>();
@@ -660,7 +662,8 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
     .sort((a, b) => b.last - a.last)
     .slice(0, 1);
   const shown = [...outcome, ...content];
-  const phrases: string[] = shown.length === 0 && result ? [result] : [];
+  const namesResult = result === PREVIEW_OPENED ? shown.length === 0 : outcome.length === 0;
+  const phrases: string[] = result && namesResult ? [result] : [];
   let previousHost: string | null = null;
   for (const group of shown) {
     phrases.push(groupWords(group, previousHost));

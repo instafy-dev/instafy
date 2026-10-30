@@ -29,6 +29,13 @@ function commandItem(index: number): DetailItem {
   };
 }
 
+/** A row's text as it shows, without what only a screen reader hears. */
+function shownText(row: Element): string {
+  const copy = row.cloneNode(true) as Element;
+  copy.querySelectorAll(".sr-only").forEach((hidden) => hidden.remove());
+  return copy.textContent ?? "";
+}
+
 function toolItem(index: number, server: string, tool: string, activity: Record<string, unknown> | null): DetailItem {
   const message: ChatMessage = {
     id: `tool-${index}`,
@@ -164,7 +171,7 @@ describe("TurnActivityDetails", () => {
       root.render(<TurnActivityDetails id="details" items={items} renderUpdate={() => null} />);
     });
 
-    const rows = [...container.querySelectorAll('[data-testid="turn-activity-tool"]')].map((row) => row.textContent);
+    const rows = [...container.querySelectorAll('[data-testid="turn-activity-tool"]')].map(shownText);
     expect(rows).toEqual([
       "Looked at the tabs×2",
       "Used the browser",
@@ -207,7 +214,7 @@ describe("TurnActivityDetails", () => {
       root.render(<TurnActivityDetails id="details" items={items} renderUpdate={() => null} />);
     });
 
-    const rows = [...container.querySelectorAll('[role="listitem"]')].map((row) => row.textContent);
+    const rows = [...container.querySelectorAll('[role="listitem"]')].map(shownText);
     expect(rows).toEqual([
       "Browsed httpbin.org×9",
       "Tried browsing httpbin.org",
@@ -218,8 +225,11 @@ describe("TurnActivityDetails", () => {
       "Step 14uw add-point 14",
       "Step 14uw add-point 14",
     ]);
-    expect(container.querySelector('[data-testid="turn-activity-step-times"]')?.getAttribute("aria-label")).toBe(
-      "9 times",
-    );
+    // A screen reader hears "9 times", never "multiplication sign 9": a label
+    // on a plain span is not read, so the count is hidden and its words are text.
+    const times = container.querySelector('[data-testid="turn-activity-step-times"]');
+    expect(times?.getAttribute("aria-label")).toBeNull();
+    expect(times?.querySelector('[aria-hidden="true"]')?.textContent).toBe("×9");
+    expect(times?.querySelector(".sr-only")?.textContent).toBe("9 times");
   });
 });

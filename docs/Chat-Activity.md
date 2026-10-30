@@ -25,10 +25,10 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives. A step still running from before the turn's save never names the line again; after a retry, it does |
 | The model is working with no step running, after the turn's first step | `Thinking…` (never its reasoning titles or notes), once there has been no step for 3 seconds; until then the line keeps the step before it |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
-| Done | what it made leads (the latest outcome), then the step that answered (the last "what it did" group) and the biggest other one (the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. The steps are read in the order they last changed (a step that started before another and ended after it is the later one), as the chat's thread holds them and as the controller stores them with the reply, so the line reads the same when the reply lands. Then, after ` · `, what the person answered to the turn's browser prompts. The preview card already says a preview opened, so a preview is named only when no other step of the turn finished, and then the later of the two: `Opened a preview`, `Stopped the preview`, and a site stopped and opened again reads `Opened a preview`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
+| Done | what it made leads (the latest outcome), then the step that answered (the last "what it did" group) and the biggest other one (the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. The steps are read in the order they last changed (a step that started before another and ended after it is the later one), as the chat's thread holds them and as the controller stores them with the reply, so the line reads the same when the reply lands. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that opened or stopped a preview names the later of the two, and a site stopped and opened again reads `Opened a preview`. The preview card already says a preview opened, so `Opened a preview` shows only when no other step of the turn finished; no card says a site stopped, so a turn that made nothing else leads with it: `Stopped the preview, edited a file`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files`; a look around the workspace (`pwd`, `ls`, `cat`, `rg --files`) is not counted, so a turn that only looked and answered, or only posted a card, has no line |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
-| Done, nothing of its own after an automatic retry | `Took two tries`, so Details opens on the first try |
+| Done, nothing of its own after a retry | `Took two tries` (`Took three tries`, …), so Details opens on the first try |
 | Stopped by the person | `Stopped · looked up 9 places`, or `Stopped` |
 | No news for 45 seconds while not in flight | `Status unavailable` |
 
@@ -90,10 +90,16 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   the person's own words, and the failed attempt moves into the Details of the turn that replaced
   it, under "First try" (`automaticRetryFold.ts`); a resend the person asked for is still their
   turn, and charged as one. The mark is the sender's
-  word, so the chat leaves a prompt out only when the failed turn is in view and the prompt
-  repeats, from the same person, the words that turn answered. If that retry succeeds, the turn
-  reads as a normal success; only if it fails too does the failure block show. A resend the
-  controller refused before any job ran it ends "Trying again…", and both failures show.
+  word, so the chat leaves a prompt out only when the failed turn is in view, the prompt
+  repeats, from the same person, the words that turn answered, and no other turn (anyone's
+  prompt, or another run's messages) came between the failure and the resend: "Try again" on an
+  older failure, or a resend that waited behind a busy turn, stays as sent, with the failed turn
+  where it was, so its answer never reads as a reply to a later message. If that retry succeeds,
+  the turn reads as a normal success; only if it fails too does the failure block show, and a
+  "Try again" there folds the same way: the turn that answers lists every try before it, oldest
+  first ("First try", "Second try", …). A resend the controller refused before any job ran it ends
+  "Trying again…", and both failures show. Focus on the failed turn (after "Try again", or Cancel
+  on a countdown) moves to its "Trying again…" line, and then to the turn that replaced it.
 - Details (`TurnActivityDetails.tsx`) lists the turn in order: each command with its label, the
   command without its shell wrapper (the full line is its title), its state and its output behind
   a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes,
@@ -144,8 +150,8 @@ from trusted data only, in this order:
    is "Searching the web" (the step itself keeps only the query and the number of results);
    `instafy preview open` and `instafy preview check` are quiet (the preview card already says it),
    with a past form for Details ("opened a preview", "checked the page"); `instafy preview close`
-   is "stopped the preview" once it exits 0 (Studio names a preview opened or stopped only when
-   no other step of the turn finished, and then the later of the two); `instafy bind init|serve`,
+   is "stopped the preview" once it exits 0 (Studio names the later of the two: a preview opened
+   only when no other step of the turn finished, one stopped when the turn made nothing else); `instafy bind init|serve`,
    `instafy tunnel start` and `instafy conversation search|grep|show` have their own words;
    `instafy secrets …` and `instafy agents context …` are quiet.
 3. **A few common tools**: package installs (`pnpm`/`npm`/`yarn` `install|i|add`), test runners

@@ -5,8 +5,12 @@
 // names the failure it retries (`retryOfMessageId`); only Instafy's own is
 // also marked `retryAutomatic`, which billing reads, so the person's resend is
 // still their turn and charged as one. The mark is the sender's word, so the
-// chat leaves a prompt out only when it can see the failed turn and the
-// prompt repeats, from the same person, the words that turn answered.
+// chat leaves a prompt out only when it can see the failed turn, the prompt
+// repeats, from the same person, the words that turn answered, and no other
+// turn came between them: "Try again" on an older failure, or a resend that
+// waited behind a busy turn, stays as sent, so its answer never sits under
+// an unrelated message. A retry that fails and is tried again folds too, so
+// the turn that answers carries every try before it.
 
 import {
   hasFailedRunMetadata,
@@ -74,20 +78,22 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
   const jobByRunId = new Map<string, string>();
   // Runs that failed before any job ran them (the controller refused them).
   const failedRunsWithoutJob = new Set<string>();
-  const resends: Array<{ prompt: ChatMessage; failureId: string }> = [];
-  for (const message of messages) {
+  const resends: Array<{ prompt: ChatMessage; failureId: string; index: number }> = [];
+  const failureIndex = new Map<string, number>();
+  messages.forEach((message, index) => {
     const failureId = message.role === "user" ? readRunFailureRetryOf(message) : null;
     if (failureId) {
-      resends.push({ prompt: message, failureId });
-      continue;
+      resends.push({ prompt: message, failureId, index });
+      return;
     }
     if (message.role !== "assistant") {
-      continue;
+      return;
     }
     const jobId = jobIdOf(message);
     const runId = runIdOf(message);
     if (isFailureMessage(message)) {
       failures.set(message.id, message);
+      failureIndex.set(message.id, index);
       if (!jobId && runId) {
         failedRunsWithoutJob.add(runId);
       }
@@ -95,16 +101,20 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
     if (jobId && runId && !jobByRunId.has(runId)) {
       jobByRunId.set(runId, jobId);
     }
-  }
-  for (const { prompt, failureId } of resends) {
+  });
+  for (const { prompt, failureId, index } of resends) {
     const failure = failures.get(failureId);
-    if (!failure || !repeatsFailedPrompt(messages, prompt, failure)) {
+    const retryRunId = runIdOf(prompt);
+    const retryJobId = retryRunId ? jobByRunId.get(retryRunId) : undefined;
+    if (
+      !failure ||
+      !repeatsFailedPrompt(messages, prompt, failure) ||
+      anotherTurnBetween(messages, failureIndex.get(failureId) ?? index, index, [jobIdOf(failure), retryJobId ?? ""])
+    ) {
       continue;
     }
     hiddenPromptIds.add(prompt.id);
     const failedJobId = jobIdOf(failure) || null;
-    const retryRunId = runIdOf(prompt);
-    const retryJobId = retryRunId ? jobByRunId.get(retryRunId) : undefined;
     if (retryJobId && retryJobId !== failedJobId) {
       earlierAttemptByJobId.set(retryJobId, { jobId: failedJobId, failureId });
     } else if (retryRunId && failedJobId && !failedRunsWithoutJob.has(retryRunId)) {
@@ -114,6 +124,25 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
     }
   }
   return { hiddenPromptIds, earlierAttemptByJobId, pendingJobIds };
+}
+
+/**
+ * True when another turn sits between the failure and its resend: anyone's
+ * prompt, or a message of a job that is neither the failed try nor its retry.
+ */
+function anotherTurnBetween(
+  messages: readonly ChatMessage[],
+  failureIndex: number,
+  resendIndex: number,
+  ownJobIds: readonly string[],
+): boolean {
+  return messages.slice(failureIndex + 1, resendIndex).some((message) => {
+    if (message.role === "user") {
+      return true;
+    }
+    const jobId = jobIdOf(message);
+    return jobId !== "" && !ownJobIds.includes(jobId);
+  });
 }
 
 /**

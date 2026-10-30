@@ -10653,8 +10653,13 @@ fn normalize_codex_outcome_summary_text(summary: &str) -> String {
 /// The replies a reply offers on its own last line, each in quotes and joined by ` · `
 /// (`“Add another option” · “Make it shorter”`), as the runtime's plain-text
 /// instructions ask: the reply without that line, and the replies. None when the last line is
-/// anything else, or is all the reply says.
+/// anything else, or is all the reply says. The runtime's [`NO_FILE_CHANGES_MARKER`] line after
+/// them stays last, for the caller that reads it.
 fn trailing_suggested_replies(summary: &str) -> Option<(String, Vec<String>)> {
+    if let Some(unmarked) = take_no_file_changes_marker(summary) {
+        let (reply, offered) = trailing_suggested_replies(&unmarked)?;
+        return Some((format!("{reply}\n{NO_FILE_CHANGES_MARKER}"), offered));
+    }
     let trimmed = summary.trim_end();
     let (reply, last_line) = trimmed.rsplit_once('\n')?;
     let reply = reply.trim_end();
@@ -18651,7 +18656,11 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             if text.is_empty() || !should_surface_agent_text(text) {
                                 continue;
                             }
-                            // The note repeats the reply, without the runtime's marker.
+                            // The note repeats the reply as the person reads it: without the
+                            // replies offered on its last line (buttons) and without the
+                            // runtime's marker, in the order the reply loses them.
+                            let offered = trailing_suggested_replies(text).map(|(reply, _)| reply);
+                            let text = offered.as_deref().unwrap_or(text);
                             let unmarked = take_no_file_changes_marker(text);
                             let text = unmarked.as_deref().unwrap_or(text);
                             let key = format!("agent_message::{text}");
@@ -26480,6 +26489,37 @@ mod tests {
                 .expect("extract outcome");
             assert_eq!(outcome.summary, summary, "{summary}");
             assert!(outcome.suggested_replies.is_empty(), "{summary}");
+        }
+    }
+
+    // The note that repeats a plain-text reply among the turn's steps reads as the reply does:
+    // Studio leaves it out of Details only when the two match, so replies moved to buttons
+    // leave the note too, also when the runtime's no-change line follows them.
+    #[test]
+    fn the_note_that_repeats_the_reply_loses_its_offered_replies_too() {
+        let reply = "Built the page.";
+        for text in [
+            format!("{reply}\n\n“Find independent reviews” · “Show prices in euros”"),
+            format!(
+                "{reply}\n“Find independent reviews” · “Show prices in euros”\nNO_FILE_CHANGES"
+            ),
+        ] {
+            let messages = extract_codex_messages(&[json!({
+                "type": "item.completed",
+                "item": { "type": "agent_message", "text": text },
+            })]);
+            assert_eq!(messages.len(), 1, "{text}");
+            let outcome = extract_codex_outcome(&json!({ "summary": text, "files": [] }))
+                .expect("extract outcome");
+            let summary = take_no_file_changes_marker(&outcome.summary)
+                .unwrap_or_else(|| outcome.summary.clone());
+            assert_eq!(summary, reply, "{text}");
+            assert_eq!(messages[0].content, summary, "{text}");
+            assert_eq!(
+                outcome.suggested_replies,
+                vec!["Find independent reviews", "Show prices in euros"],
+                "{text}"
+            );
         }
     }
 

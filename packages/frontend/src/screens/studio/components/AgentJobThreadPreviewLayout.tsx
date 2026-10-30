@@ -1,4 +1,4 @@
-import { useId, useMemo } from "react";
+import { useId, useLayoutEffect, useMemo } from "react";
 import type { CSSProperties, ComponentType, MouseEvent, MutableRefObject } from "react";
 import {
   Activity,
@@ -41,7 +41,7 @@ import {
 } from "../../../conversations/runFailurePresentation";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { agentJobThreadAcknowledgementIds, shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
-import { RunFailureMessageBody, useRunFailureAutoRetryActive } from "./RunFailureNotice";
+import { RunFailureMessageBody, takeFoldedRetryFocus, useRunFailureAutoRetryActive } from "./RunFailureNotice";
 import { isCompactionStatusText } from "./assistantStatusHeuristics";
 import type { AgentThreadBranchParticipant, AgentThreadBranchRow } from "./agentThreadBranchRows";
 import {
@@ -64,8 +64,19 @@ import { TurnBrowserApprovalRow, type TurnBrowserApproval } from "./turnBrowserA
 
 const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
 const NO_EARLIER_ATTEMPTS: EarlierAttemptDetails[] = [];
-/** The line of a turn that ran no step itself after Instafy tried it again. */
-const RETRIED_TURN_LINE = "Took two tries";
+const TRY_ORDINALS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth", "Ninth", "Tenth"];
+const TRY_COUNTS = ["two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+
+/** "First try", "Second try": the label of the try at `index` in a retried turn's Details. */
+function tryLabel(index: number): string {
+  const ordinal = TRY_ORDINALS[index];
+  return ordinal ? `${ordinal} try` : `Try ${index + 1}`;
+}
+
+/** The line of a turn that ran no step itself after it was tried again: "Took two tries". */
+function retriedTurnLine(tries: number): string {
+  return `Took ${TRY_COUNTS[tries - 2] ?? tries} tries`;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -222,9 +233,11 @@ export type MessageContentProps = {
   projectId?: string | null;
 };
 
-/** A failed attempt Instafy tried again by itself, as the retry's Details list it. */
+/** A failed try that was tried again, as the retry's Details list it. */
 export type EarlierAttemptDetails = {
   id: string;
+  /** The message that said the try failed, when it is in the transcript. */
+  failureId: string | null;
   details: DetailItem[];
   /** The attempt's raw failure reason, shown only in Details. */
   failureText: string | null;
@@ -257,7 +270,7 @@ export type AgentJobThreadPreviewLayoutProps = {
   runStatusShownInEntryHeader?: boolean;
   /** The turn's plain-language line and the steps behind its Details (turnActivity). */
   activity: TurnActivity;
-  /** The failed attempt this turn replaced, when Instafy tried it again by itself. */
+  /** The failed tries this turn replaced, oldest first, when it was tried again. */
   earlierAttempts?: EarlierAttemptDetails[];
   /** This failed turn's automatic resend went out, and the retry has shown nothing yet. */
   autoRetryPending?: boolean;
@@ -465,13 +478,29 @@ export function AgentJobThreadPreviewLayout({
     activity.live ??
     activity.summary ??
     (activityLineOpensDetails ? detailsOnlySummary(detailItems, branchThreads.length) : null) ??
-    (activityLineOpensDetails && earlierAttempts.length > 0 ? RETRIED_TURN_LINE : null) ??
+    (activityLineOpensDetails && earlierAttempts.length > 0 ? retriedTurnLine(earlierAttempts.length + 1) : null) ??
     "";
   // While the turn runs, a label holds until the next one has lasted: a step
   // that ends at once, a short pause between steps, or the last step before
   // the done line (or the failure block), never flashes past.
   const lineLive = activity.live !== null;
   const lineText = useSteadyActivityLabel(activityText, lineLive);
+  // A retry that replaced a failed turn holding focus takes it, in the same
+  // commit: its line, or its own failure block's first control.
+  useLayoutEffect(() => {
+    if (earlierAttempts.length === 0 || !takeFoldedRetryFocus(earlierAttempts.map((attempt) => attempt.failureId))) {
+      return;
+    }
+    const active = document.activeElement;
+    if (active && active !== document.body) {
+      return;
+    }
+    threadPreviewRootRef.current
+      ?.querySelector<HTMLElement>(
+        'button[data-testid="turn-activity-line"], [data-testid="run-failure-auto-retrying"], [data-testid="run-failure-retry"], [data-testid="run-failure-details-toggle"]',
+      )
+      ?.focus({ preventScroll: true });
+  }, [earlierAttempts, threadPreviewRootRef]);
   // The turn ended and its last running label is still having its moment.
   const holdingLastLabel = !lineLive && lineText !== activityText;
   // A failed turn's one line is its failure block: a summary of its steps
@@ -749,7 +778,7 @@ export function AgentJobThreadPreviewLayout({
             className="min-w-0"
           >
             <Text as="p" id={`${detailsId}-attempt-${index}-label`} variant="caption" tone="muted">
-              First try
+              {tryLabel(index)}
             </Text>
             <TurnActivityDetails
               id={`${detailsId}-attempt-${index}`}
@@ -766,7 +795,7 @@ export function AgentJobThreadPreviewLayout({
         {detailItems.length > 0 || branchThreads.length > 0 ? (
           <section aria-labelledby={`${detailsId}-latest-label`} className="min-w-0">
             <Text as="p" id={`${detailsId}-latest-label`} variant="caption" tone="muted">
-              Second try
+              {tryLabel(earlierAttempts.length)}
             </Text>
             {latestSteps}
           </section>

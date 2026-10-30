@@ -348,6 +348,31 @@ describe("RunFailureMessageBody", () => {
     expect(document.activeElement).toBe(query("run-failure-retried"));
   });
 
+  // The chat folds the person's resend like Instafy's own: once it went out,
+  // the turn is the quiet "Trying again…" line, with no Details or Retried to
+  // take focus. Focus must not drop to the page.
+  it("moves focus from a pressed Try again to the Trying again line when the resend goes out", async () => {
+    const requestRetry = vi.fn();
+    await render(contextValue({ requestRetry }));
+    const retry = query("run-failure-retry");
+    retry?.focus();
+    await act(async () => {
+      retry?.click();
+    });
+    await render(contextValue({ requestRetry, pendingRetryKey: "failure-1" }));
+    await act(async () => {
+      root.render(
+        <RunFailureRetryProvider value={contextValue({ requestRetry, isRetrySuperseded: () => true })}>
+          <RunFailureMessageBody message={FAILURE} presentation={presentationFor(FAILURE)} autoRetryPending />
+        </RunFailureRetryProvider>,
+      );
+    });
+
+    expect(query("run-failure-retry")).toBeNull();
+    expect(query("run-failure-auto-retrying")?.textContent).toContain("Trying again…");
+    expect(document.activeElement).toBe(query("run-failure-auto-retrying"));
+  });
+
   it("never moves focus later when the press left Try again in place", async () => {
     // The resend was refused, so Try again stayed. Minutes later another
     // update retires the card while focus sits on the page: nothing here was

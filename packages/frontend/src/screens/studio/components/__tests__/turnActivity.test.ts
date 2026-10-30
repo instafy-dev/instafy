@@ -354,6 +354,15 @@ describe("summarizeTurnActivity", () => {
       command(PREVIEW_CLOSE, { command: "bash -lc 'instafy preview close 9b5fcdfb'" }),
     ];
     expect(summarize(messages).summary).toBe("Stopped the preview");
+    // No card says a site stopped, so it leads whatever else the turn did,
+    // unless the turn made something.
+    const edit = step(
+      "file_change",
+      { v: 1, key: "builtin/edit", role: "content", live: "Editing files", done: { one: "edited a file", other: "edited {n} files", some: "edited files" }, count: 1, also: [] },
+      { paths: ["hello-page/index.html"] },
+    );
+    expect(summarize([edit, command(PREVIEW_CLOSE)]).summary).toBe("Stopped the preview, edited a file");
+    expect(summarize([command(ADD_POINT), command(PREVIEW_CLOSE)]).summary).toBe("Stopped the preview, looked up a place");
   });
 
   // "Restart the preview": a turn that stopped the site and opened it again
