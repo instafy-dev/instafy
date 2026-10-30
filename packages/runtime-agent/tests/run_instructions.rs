@@ -557,6 +557,9 @@ struct Harness {
     chatgpt_proxy: String,
     api_key_proxy: String,
     turns: Vec<Turn>,
+    /// Whether each older thread's rollout could be made (`make_older_thread`), by its first
+    /// turn: checked after every turn's own instructions, so a failure there comes first.
+    older_threads: Vec<(&'static str, std::result::Result<(), String>)>,
 }
 
 fn rollout_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -999,6 +1002,7 @@ async fn run_chains() -> Result<()> {
         chatgpt_proxy,
         api_key_proxy,
         turns: Vec::new(),
+        older_threads: Vec::new(),
     };
     run_every_chain(&mut harness).await;
 
@@ -1133,12 +1137,13 @@ async fn run_every_chain(harness: &mut Harness) {
         let first = harness
             .run(labels[0], Spec::new(chat, Lane::Default, None))
             .await;
-        let rollout = first
+        let made = first
             .as_ref()
             .and_then(|state| state["defaultRolloutPath"].as_str())
-            .map(PathBuf::from)
-            .expect("the first turn's rollout");
-        make_older_thread(&rollout, older_text).expect("an older thread");
+            .context("the first turn saved no rollout")
+            .and_then(|rollout| make_older_thread(Path::new(rollout), older_text))
+            .map_err(|error| format!("{error:#}"));
+        harness.older_threads.push((labels[0], made));
         let second = harness
             .run(labels[1], Spec::new(chat, Lane::Default, first))
             .await;
@@ -1512,6 +1517,16 @@ fn check(harness: &Harness) -> Result<()> {
         (["Q1", "Q2", "Q3"], OLDER_STRUCTURED_TEXT),
         (["O1", "O2", "O3"], OLDER_WRITE_TEXT),
     ] {
+        let made = harness
+            .older_threads
+            .iter()
+            .find(|(label, _)| *label == labels[0])
+            .map(|(_, made)| made.clone());
+        ensure!(
+            made == Some(Ok(())),
+            "{}'s thread was not made a thread started before run instructions were a section of their own: {made:?}",
+            labels[0]
+        );
         let witness = older_text.lines().last().unwrap_or_default();
         let resumed = first_sampling_request(harness.turn(labels[1]));
         ensure!(
