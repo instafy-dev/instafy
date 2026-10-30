@@ -172,35 +172,49 @@
   // "allow" or "accept" phrase, even "Allow necessary only": those words
   // add risk wherever they appear.
   const CONSENT_REJECT_EXACT = /^(?:reject(?:\s+all)?(?:\s+cookies)?|decline(?:\s+all)?(?:\s+cookies)?|refuse(?:\s+all)?|deny(?:\s+all)?|only\s+(?:necessary|essential|required)(?:\s+cookies)?|(?:necessary|essential|required)(?:\s+cookies)?\s+only|use\s+(?:only\s+)?(?:necessary|essential)(?:\s+cookies)?(?:\s+only)?|continue\s+without\s+accepting|alle\s+ablehnen|ablehnen|nur\s+(?:notwendige|erforderliche|essenzielle|technisch\s+notwendige)(?:\s+cookies)?|tout\s+refuser|refuser(?:\s+tout)?|continuer\s+sans\s+accepter|rechazar(?:\s+todo|\s+todas)?|rifiuta(?:\s+tutto|\s+tutti)?|rejeitar(?:\s+tudo|\s+todos|\s+todas)?|recusar(?:\s+tudo|\s+todos|\s+todas)?|apenas\s+(?:necess[aá]rios|essenciais)|alles\s+weigeren|weigeren)$/iu;
-  // Words that accept, agree, allow or consent in a consent banner, in the
-  // same languages: "Accept all", "I agree", "Allow all cookies",
-  // "Alle akzeptieren", "Einwilligen", "Alle Cookies zulassen",
-  // "Tout accepter", "Autoriser", "Consentir", "Accetta", "Acconsento",
-  // "aceitar e continuar", "Akkoord", "Toestemming geven". Only these words:
-  // a banner's "Disagree" toggles, its cookie policy link and its settings
-  // stay ordinary steps.
+  // Words that accept, agree or consent in a consent banner, in the same
+  // languages: "Accept all", "I agree", "Alle akzeptieren", "Einwilligen",
+  // "Tout accepter", "Consentir", "Accetta", "Acconsento", "aceitar e
+  // continuar", "Akkoord", "Toestemming geven". Only these words: a banner's
+  // "Disagree" toggles, its cookie policy link and its settings stay
+  // ordinary steps.
   const CONSENT_ACCEPT_SOURCE = [
-    "accept", "agree", "allow",
+    "accept", "agree",
     "akzeptieren", "akzeptiere", "zustimmen", "stimme\\s+zu", "einverstanden", "annehmen",
-    "einwilligen", "willige\\s+ein", "zulassen", "erlauben",
-    "accepter", "accepte", "d['’]accord", "autoriser", "consentir", "consens",
-    "aceptar", "acepto", "acepta", "de\\s+acuerdo", "permitir", "consiento",
-    "accetta", "accetto", "accettare", "acconsento", "acconsenti", "d['’]accordo", "consenti",
+    "einwilligen", "willige\\s+ein",
+    "accepter", "accepte", "d['’]accord", "consentir", "consens",
+    "aceptar", "acepto", "acepta", "de\\s+acuerdo", "consiento",
+    "accetta", "accetto", "accettare", "acconsento", "acconsenti", "d['’]accordo",
     "aceitar", "aceito", "aceite", "aceita", "concordo", "de\\s+acordo", "consinto",
-    "accepteren", "accepteer", "akkoord", "toestaan", "toestemming\\s+geven",
+    "accepteren", "accepteer", "akkoord", "toestemming\\s+geven",
   ].join("|");
   const CONSENT_ACCEPT = new RegExp(`${START}(?:${CONSENT_ACCEPT_SOURCE})${END}`, "iu");
+  // Words that allow. A privacy setting allows too ("Allow people to find
+  // me"), so a name accepts with them only in a banner button's shape: the
+  // verb with nothing but "all" and "cookies" beside it ("Allow", "Allow all
+  // cookies", "Tout autoriser", "Autoriser tous les cookies", "Alle Cookies
+  // zulassen", "Permitir todas", "Consenti tutti i cookie", "Alle cookies
+  // toestaan").
+  const CONSENT_ALLOW_SOURCE = "allow|zulassen|erlauben|autoriser|permitir|consenti|toestaan";
+  const CONSENT_ALLOW = new RegExp(`${START}(?:${CONSENT_ALLOW_SOURCE})${END}`, "iu");
+  const ALL_SOURCE = "all|every|everything|alle|alles|tout|tous|toutes|todo|todos|todas|tutto|tutti|tutte|tudo";
+  const COOKIES_SOURCE = "(?:(?:the|les|las|los|os|as|i|gli|die|de)\\s+)?cookies?";
+  const CONSENT_ALLOW_NAME = new RegExp(
+    `^(?:(?:${ALL_SOURCE})\\s+)?(?:${COOKIES_SOURCE}\\s+)?(?:${CONSENT_ALLOW_SOURCE})(?:\\s+(?:${ALL_SOURCE}))?` +
+      `(?:\\s+${COOKIES_SOURCE})?(?:\\s*(?:and|&|et|und|y|e|en)\\s+\\p{L}+)?$`,
+    "iu",
+  );
   // English "consent" is also the noun of "Manage consent" and "Consent
   // preferences", so it consents only as the verb a name starts with:
   // "Consent", "I consent", "Consent to all", "Consent and close". A section
   // of the settings named "Consent" opens like a menu, and only opens.
   const CONSENT_VERB_NAME = /^(?:yes[,!]?\s+)?(?:i\s+)?consent(?:\s+(?:to|and|&|all)(?![\p{L}\p{N}]).*)?$/iu;
-  // An accept word with a "not", "no" or "without" up to two words before it
-  // refuses ("Do not accept", "No estoy de acuerdo", "Non sono d'accordo",
-  // "Je n'accepte pas", "Continuer sans accepter →", "Keine Cookies
-  // zulassen", "Geen toestemming geven").
+  // An accept or allow word with a "not", "no" or "without" up to two words
+  // before it refuses ("Do not accept", "No estoy de acuerdo", "Non sono
+  // d'accordo", "Je n'accepte pas", "Continuer sans accepter →", "Keine
+  // Cookies zulassen", "Geen toestemming geven").
   const CONSENT_NOT_ACCEPT = new RegExp(
-    `${START}(?:(?:no|not|don['’]t|never|without|ne|pas|sans|não|nao|sem|nicht|kein(?:e|en)?|ohne|sin|senza|non|niet|geen|zonder(?:\\s+te)?)(?:\\s+[\\p{L}'’]+){0,2}\\s+|n['’])(?:${CONSENT_ACCEPT_SOURCE})${END}`,
+    `${START}(?:(?:no|not|don['’]t|never|without|ne|pas|sans|não|nao|sem|nicht|kein(?:e|en)?|ohne|sin|senza|non|niet|geen|zonder(?:\\s+te)?)(?:\\s+[\\p{L}'’]+){0,2}\\s+|n['’])(?:${CONSENT_ACCEPT_SOURCE}|${CONSENT_ALLOW_SOURCE})${END}`,
     "giu",
   );
   // An accept limited to the necessary cookies or to a selection, or the
@@ -223,10 +237,7 @@
     "selezione", "selezionat[iea]", "sele[çc][ãa]o", "selecionad[ao]s?", "selectie", "geselecteerde?", "keuzes?",
     "save", "speichern", "enregistrer", "guardar", "salva(?:re)?", "salvar", "opslaan",
   ]);
-  const CONSENT_ALL = words([
-    "all", "every", "everything", "alle", "alles", "tout", "tous", "toutes", "todo", "todos", "todas",
-    "tutto", "tutti", "tutte", "tudo",
-  ]);
+  const CONSENT_ALL = new RegExp(`${START}(?:${ALL_SOURCE})${END}`, "iu");
   // The marks a banner puts after a name's words ("Consent →").
   const TRAILING_MARKS = /[\s.!→›»>]+$/u;
   const DISMISS_EXACT = /^(?:reject\s+all|decline\s+all|only\s+necessary|necessary\s+only|use\s+necessary\s+only|essential\s+only|only\s+essential|close|dismiss|alle\s+ablehnen|nur\s+notwendige|nur\s+notwendige\s+cookies|nur\s+erforderliche|nur\s+essenzielle|schließen|×|✕)$/iu;
@@ -541,10 +552,14 @@
       .map((name) => cleanText(name).replace(TRAILING_MARKS, ""))
       .filter(Boolean);
     const opener = target.menuOpener === true || lower(target.tag) === "summary";
-    const accepts = CONSENT_ACCEPT.test(label.replace(CONSENT_NOT_ACCEPT, " ")) ||
+    const plain = label.replace(CONSENT_NOT_ACCEPT, " ");
+    const limited = CONSENT_LIMITED.test(label) && !CONSENT_ALL.test(label);
+    const accepts = CONSENT_ACCEPT.test(plain) ||
+      names.some((name) => CONSENT_ALLOW_NAME.test(name)) ||
+      (limited && CONSENT_ALLOW.test(plain)) ||
       (!opener && names.some((name) => CONSENT_VERB_NAME.test(name)));
     if (!accepts) return null;
-    return CONSENT_LIMITED.test(label) && !CONSENT_ALL.test(label) ? "limited" : "accept";
+    return limited ? "limited" : "accept";
   }
 
   function riskyLabel(label) {

@@ -32,7 +32,8 @@ load `redaction.js` first.
   "Stornobuchung") stays navigation.
   In a cookie or consent banner (the describer's `consentContext`), a
   refusal's button ("Reject all") is free with `consentRejection: true`, and a
-  control or link whose words accept, agree, allow or consent is refused
+  control or link whose words accept, agree or consent, or only allow
+  ("Allow all cookies"), is refused
   (`step_refused_consent`): accepting is the person's step. An accept limited
   to the necessary cookies or to a selection ("Accept only necessary",
   "Accept selection") saves a refusal, so it asks with `commit: true` instead.

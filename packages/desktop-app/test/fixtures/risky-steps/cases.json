@@ -94,6 +94,7 @@
     { "name": "EN cookie banner Consent preferences link stays navigation", "op": "click", "target": { "tag": "a", "text": "Consent preferences", "href": "http://127.0.0.1:8765/consent", "linkSelf": true, "consentContext": true }, "verdict": "allow", "category": "navigation" },
     { "name": "EN cookie banner Consent tab is not refused", "op": "click", "target": { "tag": "button", "role": "tab", "text": "Consent", "consentContext": true }, "verdict": "allow", "category": "disclosure" },
     { "name": "EN cookie banner settings section Consent opens", "op": "click", "target": { "tag": "button", "type": "button", "text": "Consent", "menuOpener": true, "consentContext": true }, "verdict": "allow", "category": "disclosure" },
+    { "name": "EN privacy setting that allows is not refused as a banner accept", "op": "click", "target": { "tag": "button", "role": "switch", "text": "Allow people to find me by email", "consentContext": true }, "verdict": "ask", "category": "permission" },
     { "name": "EN Accept outside a banner is not refused", "op": "click", "target": { "tag": "button", "type": "button", "text": "Accept invitation" }, "verdict": "ask", "category": "change", "commit": true },
 
     { "name": "Plain link is free", "op": "click", "target": { "tag": "a", "text": "Documentation", "href": "http://127.0.0.1:8765/docs.html", "linkSelf": true, "areas": "nav" }, "verdict": "allow", "category": "navigation" },

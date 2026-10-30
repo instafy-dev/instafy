@@ -421,10 +421,11 @@ Two steps never ask, in Ask too:
   tab, not even to the page's own site. The same words outside a banner (a
   document editor's "Reject all") still ask.
 - **A cookie banner's accept is refused.** In the same banner, a control or a
-  link whose words accept, agree, allow or consent ("Accept all", "I agree",
-  "Agree and close", "Allow all cookies", "Consent", "Alle akzeptieren",
-  "Einwilligen", "Autoriser", "aceitar e continuar", "Toestemming geven", …,
-  in the refusal's languages) is refused in every mode before any prompt
+  link whose words accept, agree or consent ("Accept all", "I agree", "Agree
+  and close", "Consent", "Alle akzeptieren", "Einwilligen", "aceitar e
+  continuar", "Toestemming geven", …, in the refusal's languages), or that
+  only allows ("Allow", "Allow all cookies", "Autoriser", "Alle Cookies
+  zulassen"), is refused in every mode before any prompt
   (`step_refused_consent`): accepting is the person's step, and Octo reads on
   under the banner. A link is refused too, which plain-link navigation would
   otherwise take. Only these words count: a banner's "Disagree" toggles, its
