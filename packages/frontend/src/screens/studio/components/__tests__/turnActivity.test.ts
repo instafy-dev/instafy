@@ -322,18 +322,23 @@ describe("summarizeTurnActivity", () => {
     expect(summarize([failedSearch], "cancelled").summary).toBe("Stopped · tried searching the web");
   });
 
-  // A local test: the map turn read "Looked up transit, found places to stay" and
-  // the hello turn "Edited a file": neither said what the turn made.
-  it("leads with a preview that opened when nothing else the turn made is named", () => {
+  // A local test: a map turn read "Opened a preview, planned the days,
+  // looked up 3 places", and its preview card, in the same turn, already said so.
+  it("names a preview the turn opened only when no other step finished", () => {
     const rows = (overrides: Record<string, unknown> = {}) => [
       command(null, { command: "bash -lc 'rg -n preview AGENTS.md'" }),
       step("file_change", { v: 1, key: "builtin/edit", role: "content", live: "Editing files", done: { one: "edited a file", other: "edited {n} files", some: "edited files" }, count: 1, also: [] }, { paths: ["hello-page/index.html"] }),
       command(PREVIEW_OPEN, { command: "bash -lc 'instafy preview open --port 4178'", ...overrides }),
       command(PREVIEW_CHECK, { command: "bash -lc 'instafy preview check --port 4178'" }),
     ];
-    expect(summarize(rows()).summary).toBe("Opened a preview, edited a file");
+    expect(summarize(rows()).summary).toBe("Edited a file");
+    expect(summarize([command(PREVIEW_OPEN), command(PREVIEW_CHECK)]).summary).toBe("Opened a preview");
     // An older runtime's quiet preview step says the same.
     expect(summarize([command(PREVIEW_OPEN_OLDER)]).summary).toBe("Opened a preview");
+    // A step that failed did not finish, so the preview is still what the turn did.
+    expect(summarize([command(ADD_POINT, { status: "failed", exitCode: 2 }), command(PREVIEW_OPEN)]).summary).toBe(
+      "Opened a preview",
+    );
     // A preview that did not open is no result.
     expect(summarize(rows({ status: "failed", exitCode: 1 })).summary).toBe("Edited a file");
     // What the turn made itself outranks the preview it opened.
@@ -395,9 +400,9 @@ describe("summarizeTurnActivity", () => {
       command(activity(SETUP("host"))),
       command(PREVIEW_OPEN),
     ];
-    // No `uw validate` ran, so nothing says the map was built: the preview it
-    // opened leads, then the last thing it did and the biggest other.
-    expect(summarize(messages).summary).toBe("Opened a preview, looked up a place, found places to stay");
+    // No `uw validate` ran, so nothing says the map was built: the last thing
+    // it did leads, then the biggest other. Its card says the preview opened.
+    expect(summarize(messages).summary).toBe("Looked up a place, found places to stay");
   });
 
   // A local test: "uw geocode Baixa; uw stay …" read "Working on the map".
@@ -965,6 +970,41 @@ describe("a finished turn's stored steps", () => {
       command(VALIDATE),
     ];
     expect(summarize(live).summary).toBe(summarize(steps!).summary);
+  });
+
+  // A local test: a map turn's line read "…looked up 3 places, read 3
+  // sources" when the turn ended and "…planned the days, looked up 3 places"
+  // 0.4 s later, when its reply landed with the stored steps. A lookup that
+  // started before `uw plan` and ended after it came after the plan in the
+  // chat's thread (a command sits where its newest message is) and before it
+  // in the stored steps.
+  it("read the steps in the order they last changed, as the stored steps are", () => {
+    const PLAN_STEP = { ...PLAN };
+    const lookupStarted = command(ADD_POINT, { status: "in_progress", exitCode: null });
+    const lookupItem = (lookupStarted.metadata as { details: { itemId: string } }).details.itemId;
+    const planDone = command(PLAN_STEP);
+    const lookupDone = command(ADD_POINT);
+    (lookupDone.metadata as { details: { itemId: string } }).details.itemId = lookupItem;
+    // As the thread holds them (each command once, at its newest message), and
+    // as every message arrived.
+    const thread = summarize([planDone, lookupDone]).summary;
+    expect(thread).toBe("Looked up a place, planned the days");
+    expect(summarize([lookupStarted, planDone, lookupDone]).summary).toBe(thread);
+    // The controller stores the steps in that order too.
+    const stored = readTurnStepsRecord(
+      reply({
+        turnSteps: {
+          v: 1,
+          activities: [PLAN_STEP, ADD_POINT],
+          steps: [
+            { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+            { type: "command_execution", status: "completed", exitCode: 0, activity: 1 },
+          ],
+        },
+      }),
+      JOB,
+    );
+    expect(summarize(stored!).summary).toBe(thread);
   });
 
   it("are read only from the agent's reply for this turn, and only as checked labels", () => {

@@ -1320,12 +1320,15 @@ describe("AgentJobThreadPreviewLayout", () => {
       await act(async () => retry?.click());
       expect(requestRetry).toHaveBeenCalledTimes(1);
 
-      // The raw diagnostic sits behind Details only.
+      // The diagnostic sits behind Details only, with its status and without
+      // the proxy's own address.
       expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
       await act(async () => {
         container.querySelector<HTMLButtonElement>('[data-testid="run-failure-details-toggle"]')?.click();
       });
-      expect(container.querySelector('[data-testid="run-failure-details"]')?.textContent).toBe(REFRESH_424);
+      expect(container.querySelector('[data-testid="run-failure-details"]')?.textContent).toBe(
+        "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed.",
+      );
     });
 
     it.each(["byoc", null])("asks the person to sign in again on their own AI (%s)", async (aiAccessMode) => {

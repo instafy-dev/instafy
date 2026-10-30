@@ -109,13 +109,37 @@ describe("Home's durable notifications", () => {
   it("uses read events for Recent and excludes archived events without clearing independent legacy unread", () => {
     const read = notification("read", { readAt: new Date(NOW).toISOString() });
     const archived = notification("archived", { archivedAt: new Date(NOW).toISOString() });
-    const model = build({ notifications: [read, archived] });
+    const local = { localId: "device-conversation", controllerId: CONVERSATION, title: "Release investigation", messages: [] } as unknown as ConversationState;
+    const model = build({ notifications: [read, archived], conversations: [local] });
     expect(model.needs).toEqual([]);
     expect(model.activity.flatMap((day) => day.events)).toMatchObject([
-      { kind: "reply", dismissible: false, notifications: [{ id: "read" }] },
+      { kind: "reply", title: "Release investigation", dismissible: false, notifications: [{ id: "read" }] },
     ]);
     expect(build({ notifications: [archived] }).isEmpty).toBe(true);
     expect(build({ notifications: [read], attentionEntries: [inbox()] }).needs).toHaveLength(1);
+  });
+
+  // A local test: "Run failed · All teams · Run failed" and "New
+  // conversation reply · All teams · 4 chats" sat under Earlier activity, days
+  // old, about chats Home could not name.
+  it("never lists a read notification about a chat it cannot name, on its own", () => {
+    const read = (id: string, overrides: Partial<ProductNotification> = {}) =>
+      notification(id, { readAt: new Date(NOW).toISOString(), ...overrides });
+    const failure = read("failure", { eventName: "run.failed", category: "runs", resourceType: "run", resourceId: RUN });
+    const unnamed = build({ projects: [], notifications: [read("reply"), failure] });
+    expect(unnamed.isEmpty).toBe(true);
+    // A chat named "New chat" names nothing either.
+    const untitled = { localId: "device-conversation", controllerId: CONVERSATION, title: "New chat", messages: [] } as unknown as ConversationState;
+    expect(build({ conversations: [untitled], notifications: [read("reply")] }).isEmpty).toBe(true);
+    // The chat's own row still carries it.
+    const withLedger = build({ activity: [activity()], notifications: [read("reply")] });
+    expect(withLedger.activity.flatMap((day) => day.events)).toMatchObject([
+      { title: "Release investigation", notifications: [{ id: "reply" }] },
+    ]);
+    // An unread one stays: it is the only sign of the new reply.
+    expect(build({ projects: [], notifications: [notification("unread")] }).needs).toMatchObject([
+      { kind: "reply", title: "New conversation reply" },
+    ]);
   });
 
   it("groups support by report and keeps it account-wide, including on a Personal filter", () => {
@@ -243,11 +267,15 @@ describe("Home's durable notifications", () => {
     });
     const readReply = notification("reply", { readAt: new Date(NOW).toISOString(), occurredAt: new Date(NOW - 1000).toISOString() });
     const ledger = [activity({ kind: "run.failed", run: { id: RUN, status: "failed", promptId: null } })];
-    // Home reads the ledger too; the rail's badge is the same feed without it.
-    for (const model of [build({ activity: ledger, notifications: [failure, readReply] }), build({ notifications: [failure, readReply] })]) {
+    // Home reads the ledger too; the rail's badge is the same feed without it,
+    // where the chat has no name and so no row of its own.
+    const home = build({ activity: ledger, notifications: [failure, readReply] });
+    const rail = build({ notifications: [failure, readReply] });
+    for (const model of [home, rail]) {
       expect(model.needs).toEqual([]);
-      expect(model.activity.flatMap((day) => day.events)).toMatchObject([{ kind: "run_failed" }]);
     }
+    expect(home.activity.flatMap((day) => day.events)).toMatchObject([{ kind: "run_failed" }]);
+    expect(rail.activity).toEqual([]);
     // While the chat itself is unread, its row is under Unread and says the run failed.
     const unread = build({ attentionEntries: [inbox()], activity: ledger, notifications: [failure] });
     expect(unread.needs).toMatchObject([{ kind: "run_failed", statusLabel: "Run failed", notifications: [{ id: "failure" }] }]);

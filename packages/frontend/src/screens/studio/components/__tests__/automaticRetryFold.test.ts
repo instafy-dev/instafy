@@ -206,21 +206,51 @@ describe("an automatic retry reads as one turn", () => {
     expect(isAutomaticRetryPending(rows[1])).toBe(false);
   });
 
-  it("keeps a resend the person asked for with Try again as they sent it", () => {
+});
+
+// A local test: a turn failed (the AI didn't answer), the person
+// pressed Try again, and the chat showed their message twice. Their resend now
+// folds as Instafy's own does; it is still their turn (billing reads only
+// `retryAutomatic`, which it does not carry).
+describe("a resend the person asked for with Try again reads as one turn", () => {
+  it("leaves out the repeated prompt and moves the failed attempt into the retry's Details", () => {
+    const personResend = resend({ automatic: false, runId: RETRY_RUN });
+    expect(JSON.stringify(personResend.metadata)).not.toContain("retryAutomatic");
     const rows = transcript([
       prompt,
       ...failedAttempt,
-      resend({ automatic: false, runId: RETRY_RUN }),
+      personResend,
       step("retry-pwd", RETRY_JOB, RETRY_RUN, 6),
       retryReply,
     ]);
 
-    expect(rows.map((row) => row.id)).toEqual([
-      "prompt",
-      `agent-job-thread:${FAILED_JOB}`,
-      "resend",
-      `agent-job-thread:${RETRY_JOB}`,
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${RETRY_JOB}`]);
+    expect(readEarlierAttempts(rows[1]).map((attempt) => attempt.map((entry) => entry.id))).toEqual([
+      ["retry-status", "failed-pwd", "failure"],
     ]);
-    expect(readEarlierAttempts(rows[3])).toEqual([]);
+  });
+
+  it("marks the failed turn as trying again until the retry shows something", () => {
+    const rows = transcript([prompt, ...failedAttempt, resend({ automatic: false, runId: RETRY_RUN })]);
+
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${FAILED_JOB}`]);
+    expect(isAutomaticRetryPending(rows[1])).toBe(true);
+  });
+
+  it("shows a resend with other words, or from someone else, as sent", () => {
+    for (const other of [
+      resend({ automatic: false, runId: RETRY_RUN, content: "Try roborock.de instead." }),
+      { ...resend({ automatic: false, runId: RETRY_RUN }), authorId: "someone-else" },
+    ]) {
+      const rows = transcript([prompt, ...failedAttempt, other, step("retry-pwd", RETRY_JOB, RETRY_RUN, 6), retryReply]);
+
+      expect(rows.map((row) => row.id)).toEqual([
+        "prompt",
+        `agent-job-thread:${FAILED_JOB}`,
+        "resend",
+        `agent-job-thread:${RETRY_JOB}`,
+      ]);
+      expect(readEarlierAttempts(rows[3])).toEqual([]);
+    }
   });
 });

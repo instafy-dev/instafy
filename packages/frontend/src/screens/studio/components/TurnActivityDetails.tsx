@@ -173,7 +173,17 @@ function stepDescription(step: TurnStep): { detail: string | null; mono: boolean
   }
 }
 
-function OtherStepRow({ step }: { step: TurnStep }) {
+/** Rows that read the same and hold nothing behind them: one row, with how many times. */
+function sameRow(a: TurnStep, b: TurnStep): boolean {
+  if (a.kind === "command" || a.kind !== b.kind || a.state !== b.state || a.label !== b.label) {
+    return false;
+  }
+  const first = stepDescription(a);
+  const second = stepDescription(b);
+  return first.detail === second.detail && first.mono === second.mono;
+}
+
+function OtherStepRow({ step, times = 1 }: { step: TurnStep; times?: number }) {
   const { detail, mono } = stepDescription(step);
   const icon =
     step.kind === "edit" ? (
@@ -195,6 +205,15 @@ function OtherStepRow({ step }: { step: TurnStep }) {
       ) : (
         <span className="flex-1" />
       )}
+      {times > 1 ? (
+        <span
+          className="flex-none text-xxs tabular-nums text-slate-500 dark:text-slate-400"
+          aria-label={`${times} times`}
+          data-testid="turn-activity-step-times"
+        >
+          ×{times}
+        </span>
+      ) : null}
       <StepStateGlyph state={step.state} />
     </div>
   );
@@ -240,7 +259,19 @@ export function TurnActivityDetails({ id, items, renderUpdate, footer }: TurnAct
       firstRowRef.current?.focus();
     }
   }, [showAll]);
-  const rows = visible.flatMap((item) => {
+  // Steps in a row that read the same ("Browsed httpbin.org" nine times) are
+  // one row that says how many: "Browsed httpbin.org ×9". A command keeps its
+  // own row, since its output is behind it.
+  const runs: Array<{ item: DetailItem; times: number }> = [];
+  for (const item of visible) {
+    const last = runs.at(-1);
+    if (last && last.item.kind === "step" && item.kind === "step" && sameRow(last.item.step, item.step)) {
+      last.times += 1;
+    } else {
+      runs.push({ item, times: 1 });
+    }
+  }
+  const rows = runs.flatMap(({ item, times }) => {
     const content =
       item.kind === "update" ? (
         renderUpdate(item.message)
@@ -249,7 +280,7 @@ export function TurnActivityDetails({ id, items, renderUpdate, footer }: TurnAct
       ) : item.step.kind === "command" ? (
         <CommandStepRow step={item.step} />
       ) : (
-        <OtherStepRow step={item.step} />
+        <OtherStepRow step={item.step} times={times} />
       );
     return content === null || content === undefined || content === false ? [] : [{ id: item.id, content }];
   });

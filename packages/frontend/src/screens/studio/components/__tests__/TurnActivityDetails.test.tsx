@@ -166,13 +166,60 @@ describe("TurnActivityDetails", () => {
 
     const rows = [...container.querySelectorAll('[data-testid="turn-activity-tool"]')].map((row) => row.textContent);
     expect(rows).toEqual([
-      "Looked at the tabs",
-      "Looked at the tabs",
+      "Looked at the tabs×2",
       "Used the browser",
       "Opened visitlisboa.com",
       "Used the browser",
       "Used a toolgithub/create_issue",
     ]);
     expect(container.textContent).not.toContain("instafy_shared_browser");
+  });
+
+  // A local test: Details listed "Browsed httpbin.org" nine times in a
+  // row, and "Opened raspberrypi.com" six.
+  it("shows steps in a row that read the same as one row with how many times", async () => {
+    const browsed = (index: number, status = "completed") => {
+      const item = toolItem(index, "instafy_shared_browser", "click", {
+        key: "browser/browse", role: "quiet", live: "Browsing {host}", done: "browsed {host}", host: "httpbin.org", step: "click",
+      });
+      if (status !== "completed" && item.kind === "step") {
+        return { ...item, step: { ...item.step, state: "failed" as const, label: "Tried browsing httpbin.org" } };
+      }
+      return item;
+    };
+    const opened = (index: number, host: string) =>
+      toolItem(index, "instafy_shared_browser", "navigate", {
+        key: "browser/open", role: "content", live: "Opening {host}",
+        done: { one: "opened {host}", other: "opened {n} pages on {host}", some: "opened pages on {host}" },
+        host, pageKey: `${index}`.padStart(16, "a"), step: "navigate", when: "success",
+      });
+    const items: DetailItem[] = [
+      ...Array.from({ length: 9 }, (_, index) => browsed(index)),
+      browsed(9, "failed"),
+      browsed(10),
+      opened(11, "raspberrypi.com"),
+      opened(12, "raspberrypi.com"),
+      opened(13, "raspberrypi.org"),
+      commandItem(14),
+      { ...commandItem(14), id: "command:item-14-again" },
+    ];
+    await act(async () => {
+      root.render(<TurnActivityDetails id="details" items={items} renderUpdate={() => null} />);
+    });
+
+    const rows = [...container.querySelectorAll('[role="listitem"]')].map((row) => row.textContent);
+    expect(rows).toEqual([
+      "Browsed httpbin.org×9",
+      "Tried browsing httpbin.org",
+      "Browsed httpbin.org",
+      "Opened raspberrypi.com×2",
+      "Opened raspberrypi.org",
+      // A command keeps its own row: its output is behind it.
+      "Step 14uw add-point 14",
+      "Step 14uw add-point 14",
+    ]);
+    expect(container.querySelector('[data-testid="turn-activity-step-times"]')?.getAttribute("aria-label")).toBe(
+      "9 times",
+    );
   });
 });

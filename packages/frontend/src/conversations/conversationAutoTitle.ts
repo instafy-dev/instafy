@@ -25,6 +25,9 @@ const REMOVED = "\uE001";
 const CLAUSE_BOUNDARY_PATTERN = /([\uE000\uE001])/;
 const FENCED_CODE_PATTERN = /```[\s\S]*?(?:```|$)/g;
 const URL_PATTERN = /\b(?:https?:\/\/|www\.)\S+/gi;
+// A site's address written without "https://" or "www." ("httpbin.org/forms/post"): a link,
+// not a file path, so it leaves its site's name as a link does.
+const BARE_SITE_LINK_PATTERN = /(?<=^|\s)(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,24}\/\S*/gi;
 const EMAIL_PATTERN = /[^\s@]+@[^\s@]+\.[^\s@]+/g;
 const MENTION_PATTERN = /(^|\s)@[\w.-]+/g;
 const PATH_PATTERN = /(^|\s)(?:~?\.{0,2}\/(?=\S)|[^\s/]+\/[^\s/]+\/)\S*/g;
@@ -333,7 +336,7 @@ function isTitleHost(word: string): boolean {
 /** The site a link names ("https://www.visitlisboa.com/en" names "visitlisboa.com"), or null. */
 function titleHostOfLink(link: string): string | null {
   try {
-    const url = new URL(/^www\./i.test(link) ? `https://${link}` : link);
+    const url = new URL(/^https?:\/\//i.test(link) ? link : `https://${link}`);
     if (!/^https?:$/.test(url.protocol) || url.username || url.password) {
       return null;
     }
@@ -370,7 +373,8 @@ function isPlainWord(word: string): boolean {
  * its structured title; any other slash command gets none.
  *
  * Links, addresses, mentions, paths and code are taken out first; a link
- * inside a sentence leaves only the name of its site ("visitlisboa.com"). The
+ * inside a sentence leaves only the name of its site ("visitlisboa.com"), also
+ * one written without "https://" ("httpbin.org/forms/post"). The
  * title is then the first clause that says something, cut to about 40
  * characters at a word, with "…" where it was cut. It is made of plain words:
  * letters in any script, with apostrophes and hyphens inside a word and
@@ -393,6 +397,7 @@ export function getFallbackConversationTitle(message: string): string | null {
   const marked = trimmed
     .replace(FENCED_CODE_PATTERN, ` ${REMOVED} `)
     .replace(URL_PATTERN, markLink)
+    .replace(BARE_SITE_LINK_PATTERN, markLink)
     .replace(EMAIL_PATTERN, ` ${REMOVED} `)
     .replace(MENTION_PATTERN, `$1${REMOVED} `)
     .replace(PATH_PATTERN, `$1${REMOVED} `)

@@ -9809,7 +9809,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - Avoid exploratory commands (especially `--help` output dumps). Only run commands that are needed to complete the task or to resolve a concrete error. When an Instafy capability you need seems missing, `instafy <group> --help` counts as needed.\n\
             - When the user asks about metadata the prompt doesn’t include (e.g. token usage), do not guess; retrieve it via the Instafy CLI (`instafy history ...` first, `instafy api get` as advanced fallback), not raw HTTP (curl/wget).\n\
             - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n\
-            - If you propose next steps, include up to three concise strings in `suggestions` (e.g. module ideas, integrations, deployment follow-ups). Each suggestion should be a short user message that can be sent as-is when clicked. Omit the field if you have nothing meaningful to suggest.\n\
+            - If you propose next steps, include up to three concise strings in `suggestions` (e.g. module ideas, integrations, deployment follow-ups), never in `summary`: Studio shows them as buttons. Each suggestion should be a short user message that can be sent as-is when clicked. Omit the field if you have nothing meaningful to suggest.\n\
             - For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n\
             - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n",
         );
@@ -10582,7 +10582,23 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
         }
     }
 
-    let suggested_replies = parse_codex_suggestions(value);
+    let mut suggested_replies = parse_codex_suggestions(value);
+    // Replies offered on the reply's last line (a plain-text reply has no `suggestions`) become
+    // buttons, and the line leaves the reply.
+    if let Some((reply, offered)) = trailing_suggested_replies(&summary) {
+        summary = reply;
+        for offer in offered {
+            if suggested_replies.len() >= MAX_UI_SUGGESTED_REPLIES {
+                break;
+            }
+            if !suggested_replies
+                .iter()
+                .any(|known| known.to_lowercase() == offer.to_lowercase())
+            {
+                suggested_replies.push(offer);
+            }
+        }
+    }
     let mut actions = parse_codex_actions(value);
     if let Some(request) = user_input_request::parse_action(value)? {
         if summary.trim().is_empty() || summary == DEFAULT_CODEX_OUTCOME_SUMMARY {
@@ -10632,6 +10648,39 @@ fn normalize_codex_outcome_summary_text(summary: &str) -> String {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| summary.to_string())
+}
+
+/// The replies a reply offers on its own last line, each in quotes and joined by ` · `
+/// (`“Add another option” · “Make it shorter”`), as the runtime's plain-text
+/// instructions ask: the reply without that line, and the replies. None when the last line is
+/// anything else, or is all the reply says.
+fn trailing_suggested_replies(summary: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = summary.trim_end();
+    let (reply, last_line) = trimmed.rsplit_once('\n')?;
+    let reply = reply.trim_end();
+    let parts: Vec<&str> = last_line.split('·').map(str::trim).collect();
+    if reply.is_empty() || parts.len() < 2 || parts.len() > MAX_UI_SUGGESTED_REPLIES {
+        return None;
+    }
+    let mut offered = Vec::with_capacity(parts.len());
+    for part in parts {
+        let quoted = part
+            .strip_prefix('“')
+            .and_then(|rest| rest.strip_suffix('”'))
+            .or_else(|| {
+                part.strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+            })?
+            .trim();
+        if quoted.is_empty()
+            || quoted.chars().count() > MAX_UI_SUGGESTED_REPLY_CHARS
+            || quoted.contains(['“', '”', '"', '\n'])
+        {
+            return None;
+        }
+        offered.push(quoted.to_string());
+    }
+    Some((reply.to_string(), offered))
 }
 
 fn parse_codex_suggestions(value: &JsonValue) -> Vec<String> {
@@ -26380,6 +26429,58 @@ mod tests {
             outcome.summary,
             "Option 2 is safer because it avoids adding a second symbol to decode."
         );
+    }
+
+    // A local test: a build turn's plain-text reply ended with three quoted replies joined by
+    // " · ", which showed as text instead of buttons.
+    #[test]
+    fn replies_offered_on_the_last_line_become_buttons() {
+        let reply = "Built and opened a comparison page.\n\nAssumed: boards means the newest ones.";
+        let outcome = extract_codex_outcome(&json!({
+            "summary": format!(
+                "{reply}\n\n“Include the keyboard model too” · “Find independent reviews” · \"Show prices in euros\"\n"
+            ),
+            "files": []
+        }))
+        .expect("extract outcome");
+        assert_eq!(outcome.summary, reply);
+        assert_eq!(
+            outcome.suggested_replies,
+            vec![
+                "Include the keyboard model too",
+                "Find independent reviews",
+                "Show prices in euros"
+            ]
+        );
+        // With the `suggestions` field too, each reply once and at most three.
+        let outcome = extract_codex_outcome(&json!({
+            "summary": format!("{reply}\n“Find independent reviews” · “Show prices in euros”"),
+            "suggestions": ["Find independent reviews", "Add a fourth board", "Make it shorter"]
+        }))
+        .expect("extract outcome");
+        assert_eq!(outcome.summary, reply);
+        assert_eq!(
+            outcome.suggested_replies,
+            vec![
+                "Find independent reviews",
+                "Add a fourth board",
+                "Make it shorter"
+            ]
+        );
+        // Any other last line stays the reply's own words.
+        for summary in [
+            "Done.\n“Find independent reviews”",
+            "Done.\nTry “Find independent reviews” · “Show prices in euros”",
+            "Done.\n“A” · “B” · “C” · “D”",
+            "Done.\n“” · “B”",
+            "“Find independent reviews” · “Show prices in euros”",
+            "Done. “Find independent reviews” · “Show prices in euros”",
+        ] {
+            let outcome = extract_codex_outcome(&json!({ "summary": summary, "files": [] }))
+                .expect("extract outcome");
+            assert_eq!(outcome.summary, summary, "{summary}");
+            assert!(outcome.suggested_replies.is_empty(), "{summary}");
+        }
     }
 
     #[test]

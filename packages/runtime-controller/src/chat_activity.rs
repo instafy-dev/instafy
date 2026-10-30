@@ -71,9 +71,12 @@ fn step_string<'a>(
 
 /// The steps of a turn as Studio counts them for its done line ("Built the map, looked up 4
 /// places"), from the metadata of the step messages its runtime posted, oldest first: each
-/// step once (its newest message), with its type, status, exit code, its `activity` (checked
-/// again) and, for a file edit, the files it named. The activities are listed once and the
-/// steps point at them.
+/// step once, where its newest message is and as that message has it, with its type, status,
+/// exit code, its `activity` (checked again) and, for a file edit, the files it named. Studio's
+/// thread keeps a command where its newest message is too, so a step that started before
+/// another and ended after it is the later one in both, and the line reads the same when the
+/// reply lands as it did a moment before. The activities are listed once and the steps point
+/// at them.
 ///
 /// Stored with the turn's reply when the turn ends, so the line reads the same after a reload:
 /// a page of history ends where it ends, and a long turn's first steps are often on the page
@@ -149,9 +152,10 @@ pub(crate) fn turn_steps_record(step_metadata: &[JsonValue]) -> Option<JsonValue
                 step.insert("paths".into(), JsonValue::Array(paths));
             }
         }
-        if !newest.contains_key(&key) {
-            order.push(key.clone());
+        if newest.contains_key(&key) {
+            order.retain(|known| *known != key);
         }
+        order.push(key.clone());
         newest.insert(key, step);
     }
     if order.is_empty() || order.len() > MAX_TURN_STEPS {
@@ -288,8 +292,8 @@ mod tests {
         assert_eq!(
             record["steps"],
             json!([
-                { "type": "command_execution", "status": "completed", "exitCode": 0, "activity": 0 },
                 { "type": "command_execution", "status": "failed", "exitCode": 1 },
+                { "type": "command_execution", "status": "completed", "exitCode": 0, "activity": 0 },
                 { "type": "file_change", "status": "completed",
                     "paths": ["map/index.html", "map/data.json"] },
                 { "type": "command_execution", "status": "completed" },
@@ -299,6 +303,35 @@ mod tests {
         assert!(
             !text.contains("172.19") && !text.contains("uw add-point") && !text.contains("evil")
         );
+    }
+
+    // A local test: a map turn's line read "Opened a preview, looked up 3 places, read 3
+    // sources" when the turn ended and, 0.4 s later when its reply landed, "Opened a preview,
+    // planned the days, looked up 3 places". A lookup that started before `uw plan` and ended
+    // after it came after the plan in Studio's thread, which keeps a command where its newest
+    // message is, and before it in the stored steps.
+    #[test]
+    fn a_step_sits_where_it_last_changed_as_in_studios_thread() {
+        // Told apart by their files.
+        let edit = |item: &str, status: &str, path: &str| {
+            let mut edit = step("file_change", item, status, None);
+            edit["details"]["paths"] = json!([path]);
+            edit
+        };
+        let record = turn_steps_record(&[
+            edit("lookup", "in_progress", "lookup.json"),
+            edit("plan", "in_progress", "plan.json"),
+            edit("plan", "completed", "plan.json"),
+            edit("lookup", "completed", "lookup.json"),
+        ])
+        .expect("record");
+        let paths: Vec<_> = record["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .map(|step| step["paths"][0].clone())
+            .collect();
+        assert_eq!(paths, vec![json!("plan.json"), json!("lookup.json")]);
     }
 
     // A read cut short at its cap is not the whole turn: a tool call that

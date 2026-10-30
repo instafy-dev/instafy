@@ -427,9 +427,10 @@ const NEUTRAL_LABELS: Record<StepKind, { live: string; done: string }> = {
   edit: { live: "Editing files", done: "edited files" },
 };
 
-// Steps that leave a site open or stopped. When no step made something itself,
-// the turn's result is the last of them that succeeded: a site it stopped and
-// opened again is open, never "stopped the preview".
+// Steps that leave a site open or stopped. The preview card already says the
+// site opened, so the line names one only when no other step finished: then
+// it is the last of them that succeeded, and a site it stopped and opened
+// again is open, never "stopped the preview".
 const PREVIEW_RESULTS = new Map<string, string>([
   ["instafy/preview-open", "opened a preview"],
   ["instafy/preview-close", "stopped the preview"],
@@ -544,10 +545,12 @@ function groupWords(group: Group, previousHost: string | null): string {
  *
  * What the turn made leads ("Built the map, read 6 pages, looked up 14
  * places"), then the step that answered and the biggest other thing it did.
- * Only a step that ended counts. A step that failed counts for nothing it
- * would have done: when nothing else is left to say, the line says what was
- * tried ("Tried searching the web"). A look at the page the turn started on
- * never leads: it is named only when the turn did nothing else.
+ * Only a step that ended counts, and the steps are in the order they last
+ * changed (a step's newest message), as the turn's stored steps are. A step
+ * that failed counts for nothing it would have done: when nothing else is left
+ * to say, the line says what was tried ("Tried searching the web"). A preview
+ * the turn opened or stopped, and a look at the page the turn started on, are
+ * named only when the turn did nothing else.
  */
 function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: string | null } {
   const groups = new Map<string, Group>();
@@ -657,7 +660,7 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
     .sort((a, b) => b.last - a.last)
     .slice(0, 1);
   const shown = [...outcome, ...content];
-  const phrases: string[] = outcome.length === 0 && result ? [result] : [];
+  const phrases: string[] = shown.length === 0 && result ? [result] : [];
   let previousHost: string | null = null;
   for (const group of shown) {
     phrases.push(groupWords(group, previousHost));
@@ -1167,7 +1170,13 @@ export function summarizeTurnActivity(
       live = THINKING_LINE;
     }
   } else {
-    const groups = summarizeGroups(steps);
+    // In the order the steps last changed: a step that started before another
+    // and ended after it is the later one. Studio's thread keeps a command
+    // where its newest message is, and the turn's stored steps are in the same
+    // order, so the line reads the same before and after its reply lands.
+    const groups = summarizeGroups(
+      [...steps.keys()].sort((a, b) => stepMessageIndex[a] - stepMessageIndex[b]).map((index) => steps[index]),
+    );
     const clause = approvalsClause(answered, groups.firstHost);
     const done = [groups.text ?? neutralCounts(steps), clause].filter((part): part is string => Boolean(part)).join(" · ");
     if (phase === "cancelled") {
