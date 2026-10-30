@@ -447,6 +447,14 @@ same for every lane of a thread (the same base instructions, tools and output fo
 lane's rules later in the request), or giving each lane its own thread, would remove it; both
 change what every turn is told, so they are left to a change of their own.
 
+A run's developer instructions (its lane's rules and browser policy) are sent when a thread starts
+and again, once, at a turn whose run differs from the one the thread last read: a browser turn
+after an ordinary one adds about 1.8k tokens of Shared Browser policy, and the ordinary turn after
+it its own rules again (about 370 tokens). They stay in the thread's history until it is
+compacted; a turn whose run is the same as the last one adds nothing. The proxy sends every
+developer message at the start of a request, so a turn that adds them pays its first request
+uncached from there, which at a change of lane is already the case.
+
 ### Measuring root-call usage
 
 The runtime also emits a content-free `ai/task-usage` artifact (`version: 1`) for

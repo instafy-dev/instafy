@@ -629,13 +629,14 @@ earlier behaviour: the turn is bound to the tab on screen. Until the browser has
 said whether it can, Studio asks it to open one, and when it does not, nothing
 is sent. For an older browser runtime-agent remembers, per page,
 which conversation's run held it last (in memory, the newest 32 pages). When a
-run starts on a page a run of another conversation held last, its browser
-policy gets one more line: the page was left by a task in another chat, it is
-not this task's earlier work, so Octo does not describe it as resuming there.
-When the person's message is about that page, Octo uses it as it is; otherwise
-it starts this task's own step (`navigate` that page, or a tab of its own). The
+run starts on a page a run of another conversation held last, the turn gets a
+note for that turn only, next to its browser policy: the page was left by a
+task in another chat, it is not this task's earlier work, so Octo does not
+describe it as resuming there. When the person's message is about that page,
+Octo uses it as it is; otherwise it starts this task's own step (`navigate`
+that page, or a tab of its own). The chat's next turn withdraws the note. The
 first run on a page, a later run of the same chat, and a runtime that restarted
-say nothing.
+get none.
 
 ### How Octo finds a page
 
@@ -1196,8 +1197,9 @@ page that shows only a sign-in (one read for research) ends there, not the task.
 Neither hint says a page ends, so a readable page with a "Sign in" link stays
 readable. The Shared and Personal Browser policies, the browser skill and the
 turn that writes a card's task state the same rule. A run on a resumed provider
-thread keeps the policy that thread began with, so there the hint is what says
-it. The turn's reply after a pause says "Sign in or fill in the highlighted
+thread is given its own policy as well (once, when it differs from the one the
+thread last read), and the hint says the rule again where it applies. The
+turn's reply after a pause says "Sign in or fill in the highlighted
 fields on the page in Instafy's browser, then choose Let Octo continue. I don't
 ask for those details in chat."
 

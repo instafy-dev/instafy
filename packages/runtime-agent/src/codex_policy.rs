@@ -46,6 +46,7 @@ const DESTRUCTIVE_ACTIONS_TITLE: &str = "Destructive Actions";
 ///   Instafy has its own connectors and skills.
 /// - `# Using skills`: runtime-agent does not use Codex's native skill loading.
 ///   Its extension registry (`codex::codex_extension_registry`) holds only the
+///   run's instructions and project preferences (World State sections), the
 ///   turn-usage recorder and the required-execution gate. It never installs
 ///   `codex_skills_extension`, which at rust-v0.159.2 is what renders the
 ///   "## Skills" / "### Available skills" catalog this section refers to and
@@ -187,6 +188,12 @@ pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded: bool) -> 
     if let Some(instructions) = config.base_instructions.as_mut() {
         append_destructive_actions(instructions);
     }
+
+    // A run's developer text reaches the model only through the run's own World State section
+    // (`codex::run_instructions`), which a resumed thread is given again whenever it changes.
+    // Codex sends a config's `developer_instructions` only when a thread starts, so text a
+    // config file set there would stay with the thread whatever a later run says.
+    config.developer_instructions = None;
 
     // Model traffic uses only the configured provider route (the Instafy proxy).
     config.respect_system_proxy = false;
