@@ -187,7 +187,8 @@ first. Conversation replies share a row with the existing conversation summary;
 support updates group by report and automation outcomes by automation identity.
 A failed run's notification does not keep its chat unread by itself: the chat is
 shown with its failure, so it is read with the chat, and a failed run in no chat
-is not listed. The Octo badge counts unread destinations using the same grouping. Unknown and
+is not listed. Nor is a read update about a chat Home cannot name ("New conversation
+reply", "Run failed"), unless it shares that chat's row. The Octo badge counts unread destinations using the same grouping. Unknown and
 account-wide support updates appear under All, not an inferred organization.
 Older unread support reports remain visible even when they predate the ledger.
 

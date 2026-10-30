@@ -297,8 +297,23 @@ describe("the AI not answering", () => {
       expect(presentation, content).toEqual({
         kind: "ai_unavailable",
         friendlyText: "Instafy AI isn't answering right now.",
-        rawText: content,
+        rawText: content.replace(", url: http://proxy:8789/v1/responses", ""),
       });
+    }
+  });
+
+  // A local test: Details read "…, url: http://proxy:8789/v1/responses",
+  // the proxy's address inside the machine.
+  it("keeps the status in Details, never the proxy's address", () => {
+    for (const aiAccessMode of ["managed", "byoc"]) {
+      const presentation = resolveRunFailurePresentation({
+        metadata: { ...FAILED, aiAccessMode },
+        content: `${DROPPED_502}, cf-ray: 8f00aa11`,
+      });
+      expect(presentation?.rawText).toBe(
+        "unexpected status 502 Bad Gateway: The upstream request failed., cf-ray: 8f00aa11",
+      );
+      expect(presentation?.rawText).not.toMatch(/proxy:8789|url:/);
     }
   });
 
@@ -308,7 +323,7 @@ describe("the AI not answering", () => {
       expect(resolveRunFailurePresentation({ metadata, content: REFRESH_424 })).toEqual({
         kind: "ai_unavailable",
         friendlyText: "Your AI connection needs you to sign in again.",
-        rawText: REFRESH_424,
+        rawText: "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed.",
         manageAi: true,
       });
       expect(resolveRunFailurePresentation({ metadata, content: REFUSED_403 })).toMatchObject({
@@ -328,7 +343,9 @@ describe("the AI not answering", () => {
       content: "Agent job finished with status failed",
     });
     expect(presentation?.kind).toBe("ai_unavailable");
-    expect(presentation?.rawText).toBe(REFRESH_424);
+    expect(presentation?.rawText).toBe(
+      "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed.",
+    );
     expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentation! })).toBeNull();
     const usageLimit = `unexpected status 429 Too Many Requests: ${JSON.stringify({
       error: { type: "usage_limit_reached", code: "upstream_usage_limit_reached", message: "Limit." },

@@ -3297,9 +3297,17 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// Studio starts a `request_browser` card by itself only in the tab whose
 /// prompt asked for it, once that turn is finished, for an address the person
 /// could have seen and where nothing else is stopped or taken over; anywhere
-/// else the card is a button. Opening it changes no approval in the browser. The reply says where the browser goes in either case, and never
-/// that a page was opened before a browser tool saw it, so it stays true when
-/// the card is only a button.
+/// else the card is a button. Opening it changes no approval in the browser.
+/// The card itself says where the browser goes. The reply never says that a
+/// page was opened before a browser tool saw it, so it stays true when the
+/// card is only a button.
+///
+/// A sign-in the person asked for, or one a step they asked for needs, is
+/// opened and paused on (`request_human_input`), so the task can go on after
+/// it instead of the turn ending with "sign in yourself". Any other sign-in,
+/// such as a page read for research, ends that page, not the task: the Shared
+/// and Personal Browser policies, the browser skill and the Shared Browser's
+/// `signIn` hint all state this one rule.
 ///
 /// It supersedes the consent-first wording older provider threads carry in
 /// their history, so it says so.
@@ -3317,10 +3325,10 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
 - `continueBuilding: true` only when you build something from what it finds (a page, a map); for a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
-- In `summary`, say in one sentence where the browser goes and why; never say a page opened, or what it shows, before a browser tool saw it.\n\
+- In `summary`, never say a page opened, or what it shows, before a browser tool saw it.\n\
 - Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
-- The person does their own sign-ins, codes and consent screens; never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
+- The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
 
 /// A turn nobody is watching as it happens: a scheduled automation or a
 /// space review. The controller stamps `automation` on every automation run
@@ -9809,7 +9817,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - Avoid exploratory commands (especially `--help` output dumps). Only run commands that are needed to complete the task or to resolve a concrete error. When an Instafy capability you need seems missing, `instafy <group> --help` counts as needed.\n\
             - When the user asks about metadata the prompt doesn’t include (e.g. token usage), do not guess; retrieve it via the Instafy CLI (`instafy history ...` first, `instafy api get` as advanced fallback), not raw HTTP (curl/wget).\n\
             - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n\
-            - If you propose next steps, include up to three concise strings in `suggestions` (e.g. module ideas, integrations, deployment follow-ups). Each suggestion should be a short user message that can be sent as-is when clicked. Omit the field if you have nothing meaningful to suggest.\n\
+            - If you propose next steps, include up to three concise strings in `suggestions` (e.g. module ideas, integrations, deployment follow-ups), never in `summary`: Studio shows them as buttons. Each suggestion should be a short user message that can be sent as-is when clicked. Omit the field if you have nothing meaningful to suggest.\n\
             - For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n\
             - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n",
         );
@@ -10582,7 +10590,23 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
         }
     }
 
-    let suggested_replies = parse_codex_suggestions(value);
+    let mut suggested_replies = parse_codex_suggestions(value);
+    // Replies offered on the reply's last line (a plain-text reply has no `suggestions`) become
+    // buttons, and the line leaves the reply.
+    if let Some((reply, offered)) = trailing_suggested_replies(&summary) {
+        summary = reply;
+        for offer in offered {
+            if suggested_replies.len() >= MAX_UI_SUGGESTED_REPLIES {
+                break;
+            }
+            if !suggested_replies
+                .iter()
+                .any(|known| known.to_lowercase() == offer.to_lowercase())
+            {
+                suggested_replies.push(offer);
+            }
+        }
+    }
     let mut actions = parse_codex_actions(value);
     if let Some(request) = user_input_request::parse_action(value)? {
         if summary.trim().is_empty() || summary == DEFAULT_CODEX_OUTCOME_SUMMARY {
@@ -10632,6 +10656,44 @@ fn normalize_codex_outcome_summary_text(summary: &str) -> String {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| summary.to_string())
+}
+
+/// The replies a reply offers on its own last line, each in quotes and joined by ` · `
+/// (`“Add another option” · “Make it shorter”`), as the runtime's plain-text
+/// instructions ask: the reply without that line, and the replies. None when the last line is
+/// anything else, or is all the reply says. The runtime's [`NO_FILE_CHANGES_MARKER`] line after
+/// them stays last, for the caller that reads it.
+fn trailing_suggested_replies(summary: &str) -> Option<(String, Vec<String>)> {
+    if let Some(unmarked) = take_no_file_changes_marker(summary) {
+        let (reply, offered) = trailing_suggested_replies(&unmarked)?;
+        return Some((format!("{reply}\n{NO_FILE_CHANGES_MARKER}"), offered));
+    }
+    let trimmed = summary.trim_end();
+    let (reply, last_line) = trimmed.rsplit_once('\n')?;
+    let reply = reply.trim_end();
+    let parts: Vec<&str> = last_line.split('·').map(str::trim).collect();
+    if reply.is_empty() || parts.len() < 2 || parts.len() > MAX_UI_SUGGESTED_REPLIES {
+        return None;
+    }
+    let mut offered = Vec::with_capacity(parts.len());
+    for part in parts {
+        let quoted = part
+            .strip_prefix('“')
+            .and_then(|rest| rest.strip_suffix('”'))
+            .or_else(|| {
+                part.strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+            })?
+            .trim();
+        if quoted.is_empty()
+            || quoted.chars().count() > MAX_UI_SUGGESTED_REPLY_CHARS
+            || quoted.contains(['“', '”', '"', '\n'])
+        {
+            return None;
+        }
+        offered.push(quoted.to_string());
+    }
+    Some((reply.to_string(), offered))
 }
 
 fn parse_codex_suggestions(value: &JsonValue) -> Vec<String> {
@@ -14061,7 +14123,7 @@ fn apply_terminal_shared_browser_summary(
 fn terminal_shared_browser_summary(code: &str) -> &'static str {
     match code {
         "human_input_required" => {
-            "Your input is needed in Browser. After control returns to you, fill the highlighted fields directly and choose Done, continue. Your field values are not requested in chat."
+            "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue. I don't ask for those details in chat."
         }
         "approval_timeout" => {
             "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
@@ -14086,7 +14148,12 @@ fn manual_browser_handoff_is_not_retried_or_reported_as_a_generic_failure() {
         &mut fallback,
         Some("human_input_required"),
     );
-    assert!(summary.contains("Done, continue"));
+    // The button the person presses, as Studio names it.
+    assert_eq!(
+        summary,
+        "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue. I don't ask for those details in chat."
+    );
+    assert!(!summary.contains("Done, continue"));
     assert!(!summary.contains("consent ended"));
     assert!(fallback.is_none());
     assert!(!should_retry_codex_once(Some("human_input_required"), true));
@@ -18602,7 +18669,11 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             if text.is_empty() || !should_surface_agent_text(text) {
                                 continue;
                             }
-                            // The note repeats the reply, without the runtime's marker.
+                            // The note repeats the reply as the person reads it: without the
+                            // replies offered on its last line (buttons) and without the
+                            // runtime's marker, in the order the reply loses them.
+                            let offered = trailing_suggested_replies(text).map(|(reply, _)| reply);
+                            let text = offered.as_deref().unwrap_or(text);
                             let unmarked = take_no_file_changes_marker(text);
                             let text = unmarked.as_deref().unwrap_or(text);
                             let key = format!("agent_message::{text}");
@@ -26380,6 +26451,89 @@ mod tests {
             outcome.summary,
             "Option 2 is safer because it avoids adding a second symbol to decode."
         );
+    }
+
+    // A local test: a build turn's plain-text reply ended with three quoted replies joined by
+    // " · ", which showed as text instead of buttons.
+    #[test]
+    fn replies_offered_on_the_last_line_become_buttons() {
+        let reply = "Built and opened a comparison page.\n\nAssumed: boards means the newest ones.";
+        let outcome = extract_codex_outcome(&json!({
+            "summary": format!(
+                "{reply}\n\n“Include the keyboard model too” · “Find independent reviews” · \"Show prices in euros\"\n"
+            ),
+            "files": []
+        }))
+        .expect("extract outcome");
+        assert_eq!(outcome.summary, reply);
+        assert_eq!(
+            outcome.suggested_replies,
+            vec![
+                "Include the keyboard model too",
+                "Find independent reviews",
+                "Show prices in euros"
+            ]
+        );
+        // With the `suggestions` field too, each reply once and at most three.
+        let outcome = extract_codex_outcome(&json!({
+            "summary": format!("{reply}\n“Find independent reviews” · “Show prices in euros”"),
+            "suggestions": ["Find independent reviews", "Add a fourth board", "Make it shorter"]
+        }))
+        .expect("extract outcome");
+        assert_eq!(outcome.summary, reply);
+        assert_eq!(
+            outcome.suggested_replies,
+            vec![
+                "Find independent reviews",
+                "Add a fourth board",
+                "Make it shorter"
+            ]
+        );
+        // Any other last line stays the reply's own words.
+        for summary in [
+            "Done.\n“Find independent reviews”",
+            "Done.\nTry “Find independent reviews” · “Show prices in euros”",
+            "Done.\n“A” · “B” · “C” · “D”",
+            "Done.\n“” · “B”",
+            "“Find independent reviews” · “Show prices in euros”",
+            "Done. “Find independent reviews” · “Show prices in euros”",
+        ] {
+            let outcome = extract_codex_outcome(&json!({ "summary": summary, "files": [] }))
+                .expect("extract outcome");
+            assert_eq!(outcome.summary, summary, "{summary}");
+            assert!(outcome.suggested_replies.is_empty(), "{summary}");
+        }
+    }
+
+    // The note that repeats a plain-text reply among the turn's steps reads as the reply does:
+    // Studio leaves it out of Details only when the two match, so replies moved to buttons
+    // leave the note too, also when the runtime's no-change line follows them.
+    #[test]
+    fn the_note_that_repeats_the_reply_loses_its_offered_replies_too() {
+        let reply = "Built the page.";
+        for text in [
+            format!("{reply}\n\n“Find independent reviews” · “Show prices in euros”"),
+            format!(
+                "{reply}\n“Find independent reviews” · “Show prices in euros”\nNO_FILE_CHANGES"
+            ),
+        ] {
+            let messages = extract_codex_messages(&[json!({
+                "type": "item.completed",
+                "item": { "type": "agent_message", "text": text },
+            })]);
+            assert_eq!(messages.len(), 1, "{text}");
+            let outcome = extract_codex_outcome(&json!({ "summary": text, "files": [] }))
+                .expect("extract outcome");
+            let summary = take_no_file_changes_marker(&outcome.summary)
+                .unwrap_or_else(|| outcome.summary.clone());
+            assert_eq!(summary, reply, "{text}");
+            assert_eq!(messages[0].content, summary, "{text}");
+            assert_eq!(
+                outcome.suggested_replies,
+                vec!["Find independent reviews", "Show prices in euros"],
+                "{text}"
+            );
+        }
     }
 
     #[test]

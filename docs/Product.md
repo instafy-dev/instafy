@@ -650,7 +650,8 @@ Home separates **Unread** conversations from **Recent activity**, using flat row
 shared panel surface. Failed runs retain a warning icon and a concise failure label while
 remaining markable as read. A completion or failure retires the matching running entry. A failed
 run is read with its chat: its notification names the row's status but never keeps the chat under
-**Unread** once the chat itself is read, and a failed run in no chat is not listed. A row from a
+**Unread** once the chat itself is read, and a failed run in no chat is not listed. Nor is a read
+update about a chat Home cannot name, unless it shares that chat's row. A row from a
 space other than the open one names its space.
 
 Home lists each chat once. An unread chat is under **Unread** only, so **Continue working** does

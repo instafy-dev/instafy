@@ -627,6 +627,11 @@ export function buildHomeFeed({
     "automation.completed": { kind: "automation_completed", title: "Automation completed" },
     "automation.failed": { kind: "automation_failed", title: "Automation failed" },
   };
+  // A read notification about a chat Home cannot name ("New conversation reply ·
+  // All teams", "Run failed · All teams") tells the person nothing they can
+  // recognise: it still marks the chat's own row, but on its own it is not
+  // listed. An unread one stays, since it is the only sign of the new reply.
+  const unnamedNotificationKeys = new Set<string>();
   const notificationEvents: HomeFeedEvent[] = [...notificationGroups.entries()].filter(([, items]) => {
     const reportId = getHomeNotificationTarget(items[0])?.supportReportId;
     return !reportId || !legacySupport.has(reportId);
@@ -638,12 +643,14 @@ export function buildHomeFeed({
     if (project) rememberTeam(project.orgId, project.orgName);
     const teamKey = project ? resolveTeamKey(project.orgId) : HOME_TEAM_FILTER_ALL;
     const unread = items.some(homeNotificationMakesUnread);
+    const chatName = target.kind === "conversation" ? chatTitle(target.conversationId, null) : null;
+    if (target.kind === "conversation" && !chatName) unnamedNotificationKeys.add(`notification:${key}`);
     return {
       key: `notification:${key}`,
       lane: unread ? "needs" : "activity",
       ...notificationKinds[item.eventName],
       title: (target.supportReportId ? supportById.get(target.supportReportId)?.title.trim() : null) ||
-        (target.kind === "conversation" ? chatTitle(target.conversationId, null) : null) ||
+        chatName ||
         notificationKinds[item.eventName].title,
       preview: item.body || null,
       statusLabel: homeFailureStatusLabel(item.eventName),
@@ -680,7 +687,8 @@ export function buildHomeFeed({
       source: { type: "support", report },
     };
   });
-  const merged = mergeHomeNotificationEvents([...needsAll, ...recentEvents, ...serverRecent, ...supportEvents], notificationEvents, canonicalKey);
+  const merged = mergeHomeNotificationEvents([...needsAll, ...recentEvents, ...serverRecent, ...supportEvents], notificationEvents, canonicalKey)
+    .filter((event) => !(event.source.type === "notification" && event.lane === "activity" && unnamedNotificationKeys.has(event.key)));
   needsAll = merged.filter((event) => event.lane === "needs").sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   const needsKeys = new Set([...needsAll, ...liveAll].map(canonicalKey));
   const activityAll: HomeFeedEvent[] = merged.filter((event) => event.lane === "activity")
