@@ -586,6 +586,48 @@ fn the_browser_skill_reads_a_cards_pages_on_the_chats_own_page() {
     }
 }
 
+/// A page that reads with no text and no controls answers that it is still busy (the browser's `snapshot`), and
+/// "Finding a page" says what comes next: one more snapshot, then the place's own site, never "no readable content".
+/// Reviews come from a search or from a reviewer's home page and its links, never from addresses guessed for
+/// publishers "you know review this kind of item". Unedited earlier copies of both skills are upgraded.
+#[test]
+fn a_busy_page_gets_one_more_read_and_reviews_are_never_guessed_addresses() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    let busy = "- A page that reads as busy: take one more snapshot in a moment; still nothing, go to the place's own site.";
+    assert!(flat(&BROWSER_SKILL[start..end]).contains(busy));
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(busy));
+
+    let research = flat(RESEARCH_SKILL);
+    assert!(!research.contains("reviews from publishers you know review"));
+    assert!(research.contains(
+        "at most 2 guessed official domains, each confirmed by reading it (the page names the business); for reviews, a reviewer's home page, then its links. An address that does not answer"
+    ));
+
+    assert!(!include_str!("legacy/browser-automation-v14.md").contains("reads as busy"));
+    assert!(include_str!("legacy/web-research-v10.md").contains("publishers you know review"));
+    for (relative, previous, current) in [
+        (
+            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+            include_str!("legacy/browser-automation-v14.md"),
+            BROWSER_SKILL,
+        ),
+        (
+            learn::WEB_RESEARCH_RELATIVE_PATH,
+            include_str!("legacy/web-research-v10.md"),
+            RESEARCH_SKILL,
+        ),
+    ] {
+        let tmp = scaffolded_space();
+        let skill = tmp.path().join(relative);
+        fs::write(&skill, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
+    }
+}
+
 /// A snapshot carries the browser skill's first `PROJECT_MEMORY_MAX_FILE_BYTES` bytes, and a browser turn
 /// cannot read the rest: the sign-in and secret rules end inside them, counted in bytes, so none is cut off
 /// mid-sentence.
@@ -872,7 +914,7 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
 
 /// No search key never ends the task (28 Oct drive: the comparison asked for a key and the browser at once, tried a bare
 /// domain that did not answer three times and built nothing): the turn reads without a search (official sites from
-/// reference search, guessed official domains, a review publisher's own pages), tries an address that does not answer
+/// reference search, guessed official domains), tries an address that does not answer
 /// once with `www.` added or removed, builds with what it read, and offers the key card at most once, never waiting for
 /// it. Stops are listed in plain words. An unedited earlier copy is upgraded.
 #[test]
@@ -881,7 +923,6 @@ fn the_research_skill_keeps_going_without_a_search_key() {
     let research = flat(RESEARCH_SKILL);
     for needle in [
         "5. Pages read without a search (`instafy web read`): official sites from step 3; at most 2 guessed official domains, each confirmed by reading it",
-        "reviews from publishers you know review this kind of item.",
         "An address that does not answer: once more with `www.` added or removed, as its `tell` says.",
         "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5.",
         "may go in your reply once; never ask for a key in chat or wait for it.",

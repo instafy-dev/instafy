@@ -33,7 +33,8 @@ End your reply with one finding per page, each one JSON object on its own line: 
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only\"}` for one that ended at a sign-in, \
 a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site (never retry such a page another way). \
 Report only what the pages showed and copy no long listing text; Instafy adds when and in which browser each page was read. \
-If you stopped before finishing (a manual step, a refused or challenge page), say so in your first line.";
+The building turn finishes the work, so your reply says what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". \
+If a page stopped you (a manual step, a refused or challenge page), say so in your first line.";
 
 fn metadata_string<'a>(metadata: &'a JsonValue, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
@@ -306,6 +307,12 @@ mod tests {
                 "{section}"
             );
             assert!(section.contains("say so in your first line"));
+            // The building turn finishes the page: the browser turn says what it read, and never
+            // that it couldn't finish what the next turn does.
+            assert!(section.contains(
+                r#"your reply says what you read ("Read 6 pages on <site>"), never "I couldn't finish""#
+            ));
+            assert!(!section.contains("If you stopped before finishing"));
         }
         // A card for a question: the browser turn's reply is the answer, and
         // nothing goes back. A browser turn the person started themselves, or

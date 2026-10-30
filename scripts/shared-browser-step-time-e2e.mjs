@@ -85,6 +85,13 @@ const OPENS_WINDOW = `document.getElementById("open").addEventListener("click", 
   const end = Date.now() + ${WINDOW_BUSY_MS}; while (Date.now() < end) {}
   try { opened.location = "/popup?later=1"; } catch (_) {}
 });`;
+// A page that has loaded but shows nothing yet: its content stays hidden, as a
+// page's does while its script still builds it.
+const HIDDEN = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>Opening hours</title><style>body { visibility: hidden; }</style></head>
+<body><h1>Opening hours</h1><p>Open daily from 9 to 17.</p><a href="/places/tower">The tower</a></body></html>`;
+const BUSY_MESSAGE = "The page is still busy, so it could not be read yet. Take a snapshot in a moment.";
 // A form whose script does heavy work once one of its fields is highlighted.
 const FORM = `<form><label>Your name <input name="name"></label><label>Your city <input name="city"></label></form>`;
 const BUSY_ON_HIGHLIGHT = `let busy = false;
@@ -116,6 +123,7 @@ export async function runSharedBrowserStepTimeFixture() {
       const body = {
         "/": [page("Places", SEARCH)], "/results": [page("Results", RESULTS, BUSY)], "/places/tower": [page("The tower", "<p>Open daily.</p>")],
         "/window": [page("Details", WINDOW, OPENS_WINDOW)], "/popup": [page("Popup", "<p>Another window.</p>")], "/form": [page("Your details", FORM, BUSY_ON_HIGHLIGHT)],
+        "/hidden": [HIDDEN],
       }[url.pathname];
       if (!body) {
         response.writeHead(404).end();
@@ -253,6 +261,20 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.ok(slow.payload.interactiveElements.some((element) => element.label === "Search places"), "The search box is observed");
     const actions = () => fs.readFileSync(actionsPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 
+    // 1b. A page that has loaded but shows no text and no controls yet: a read
+    // of it says the page is still busy, never that the page is empty, and its
+    // line says no page was read.
+    const opened = await ok("POST", "/v1/navigate", { url: `${origin}/hidden` });
+    const hidden = await ok("GET", "/v1/snapshot");
+    for (const read of [opened.payload, hidden.payload]) {
+      assert.equal(read.url, `${origin}/hidden`);
+      assert.equal(read.message, BUSY_MESSAGE);
+      assert.equal(read.visibleText, "");
+      assert.equal(read.title, "", "A page that read as nothing gives no title to answer from");
+      assert.deepEqual(read.interactiveElements, []);
+    }
+    assert.deepEqual(hidden.payload.activity, { step: "status", url: `${origin}/hidden` });
+
     // 2. A click that opens another window and then keeps the page busy: the
     // step's time runs out, and it still ends as a step does. The window is
     // closed before it loads anything and the step says so, and once the page
@@ -300,7 +322,11 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.ok(searched.wallMs < STEP_TIME_MS + LATE_READ_MS + 10_000, `It did not wait for the busy page (${Math.round(searched.wallMs)} ms)`);
     assert.equal(searched.payload.stepTimedOut, true);
     assert.equal(searched.payload.url, `${origin}/results?q=tower`, "The page as it is: the results");
-    assert.match(searched.payload.message, /This step was still running after 20 seconds, so it stopped where it was\. This is the page as it is now: check what the step did before you act again\./);
+    // Nothing could be read, so it is not "the page as it is now": the page is still busy.
+    assert.equal(
+      searched.payload.message,
+      `${BUSY_MESSAGE} This step was still running after 20 seconds, so it stopped where it was. Check what the step did before you act again.`,
+    );
     // A page too busy to be read lists no controls, so no action can use it.
     assert.deepEqual(searched.payload.interactiveElements, []);
     assert.equal(searched.payload.visibleText, "");
@@ -314,9 +340,10 @@ export async function runSharedBrowserStepTimeFixture() {
       fixtureVersion: 1,
       checks: [
         "a prompt answered after more than a step's time is waited for, and the step then reads the page as usual",
+        "a loaded page that shows no text and no controls reads as still busy, not as an empty page, and its line says no page was read",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
-        "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note, never waiting out the page; its line says no page was read",
+        "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
       ],
       timings: { slowAnswerMs: Math.round(slow.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs) },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],

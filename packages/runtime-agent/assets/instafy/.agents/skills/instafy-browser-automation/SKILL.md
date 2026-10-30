@@ -22,7 +22,7 @@ Use these terms consistently:
 - `Personal Browser` = the private Chromium view embedded in the Instafy desktop app and controlled through its project-scoped local RPC broker
 - `owner-local browser` = a fresh headless Chromium process for credential-free, read-only public-page observation on an opted-in self-hosted runtime
 
-For interactive Personal or Shared Browser work, default to `page` first. Do not escalate from `page` to `isolated session` or `runtime-backed session` unless the user explicitly asks for isolation or the task clearly requires incompatible account state. Owner-local observation always uses a fresh one-URL context.
+For interactive Personal or Shared Browser work, default to `page` first. Do not escalate from `page` to `isolated session` or `runtime-backed session` unless the user explicitly asks for isolation or the task clearly requires incompatible account state.
 
 ## What Instafy's browser can reach
 
@@ -53,7 +53,6 @@ Studio knows device availability and saved sessions that may be absent from your
 context; let it choose those defaults. Use `device` or `workspace` only for that
 explicit location choice. An unavailable chosen browser is a blocker, not
 permission to change profiles.
-No website-specific routing or keyword matching is needed.
 
 For a continuation, recover the relevant task from conversation context. Include
 the site or useful entry route, what was already done, and what remains. Preserve
@@ -94,6 +93,8 @@ For every reader, browser or not:
   search engine or a guessed path.
 - A page that says it is missing ("not found", "are you lost?"): use that
   site's own search box or menu.
+- A page that reads as busy: take one more snapshot in a moment; still nothing,
+  go to the place's own site.
 - Two failed pages on one site: find another source with `instafy web search`
   (no key: `--chain reference-search`), then read its best result; with only
   browser tools, open the home page of another official source (the operator,
