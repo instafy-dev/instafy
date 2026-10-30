@@ -12,15 +12,14 @@ type BrowserHumanInputPresentation = {
   // A compact toolbar can place actions in a popover without unmounting the
   // takeover dialog that also opens from a click on the browser surface.
   renderControls?: (controls: ReactNode) => ReactNode;
-  /**
-   * What a pause on the person's fields says stays behind once they sign in:
-   * Instafy's browser is the space's, so a sign-in there reaches its other
-   * chats (and members). Null for a browser only this person uses.
-   */
-  signInNote?: string | null;
 };
 
-/** What a pause on the person's fields in the space's browser says stays behind. */
+/**
+ * What a pause on the person's fields in the space's browser says stays
+ * behind once they sign in: Instafy's browser is the space's, so a sign-in
+ * there reaches its other chats (and members). The Browser view shows it in
+ * a row of its own under the toolbar while the pause waits, at every width.
+ */
 export function sharedBrowserSignInNote(spaceHasTeammates: boolean): string {
   return spaceHasTeammates
     ? "This space's browser keeps you signed in for its chats and members until you clear it."
@@ -62,9 +61,6 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
         </IconButton>
       ) : null}
       {state.active ? <span className="sr-only" role="status">{props.humanControlConfirmed ? manualGuidance : waitingGuidance}</span> : null}
-      {state.request && props.signInNote ? (
-        <Text as="p" variant="caption" tone="muted" className="basis-full" data-testid="browser-human-input-sign-in-note">{props.signInNote}</Text>
-      ) : null}
       {state.error ? <InlineNotice tone="danger" appearance="inline" role="alert" className="basis-full">{state.error}</InlineNotice> : null}
     </div>
   );

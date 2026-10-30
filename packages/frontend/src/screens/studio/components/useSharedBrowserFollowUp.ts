@@ -12,7 +12,7 @@ import { sharedBrowserFollowUp, type SharedBrowserFollowUp } from "./browserHand
  * That holds until a newer browser turn ends. `followUp` clears by itself
  * once the window ends, and `resolve` reads the same at send time.
  */
-export function useSharedBrowserFollowUp<Page extends { id: string }>(input: {
+export function useSharedBrowserFollowUp<Page extends { id: string; leftByRun?: string }>(input: {
   /** Instafy's browser is open or hidden in this conversation. */
   enabled: boolean;
   runs: readonly RunRecord[];

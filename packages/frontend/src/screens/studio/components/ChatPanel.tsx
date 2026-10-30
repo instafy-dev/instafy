@@ -204,6 +204,7 @@ import { useChatBrowserSessionState } from "./useChatBrowserSessionState";
 import { useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeting";
 import {
   CHAT_BROWSER_VIEW_START,
+  browserTurnUnderWay,
   nextChatBrowserViewStep,
   useChatBrowserTab,
   type ChatBrowserViewState,
@@ -837,11 +838,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // Octo paused on the person's fields: the page where they sign in comes
   // forward, as the Browser tab would.
   const showBrowserForHumanInput = useCallback(() => handleBrowserSubtabChange("browser"), [handleBrowserSubtabChange]);
-  useShowBrowserOnHumanInput(
-    JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
+  const runRecords = useMemo(() => Object.values(runs ?? {}), [runs]);
+  useShowBrowserOnHumanInput({
+    identity: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
+    userId: currentUserId,
     messages,
-    showBrowserForHumanInput,
-  );
+    runs: runRecords,
+    show: showBrowserForHumanInput,
+  });
   useEffect(() => {
     if (conversationWorkspace && !jobThread && surfaces.activeId === "browser" && hasHiddenBrowserSession && !browserSessionOpen) {
       handleToggleBrowserSession();
@@ -1867,7 +1871,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   // This chat's own tab in Instafy's browser (chatBrowserTab.ts): its browser
   // turns go there, never to a page another chat left on screen.
-  const projectRuns = useMemo(() => Object.values(runs ?? {}), [runs]);
+  const projectRuns = runRecords;
   const chatBrowserTab = useChatBrowserTab({
     scope: {
       userId: currentUserId,
@@ -1888,6 +1892,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const chatBrowserTabActive = chatBrowserTab.tab?.isActive === true;
   const sharedBrowserPresenceKnown = sharedBrowserPresence?.status === "known";
   const sharedBrowserRemoteController = sharedBrowserPresence?.remoteController === true;
+  const chatBrowserTurnUnderWay = browserTurnUnderWay(
+    projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "chat");
+  const anyBrowserTurnUnderWay = browserTurnUnderWay(
+    projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "any");
   useEffect(() => {
     const { state, step } = nextChatBrowserViewStep({
       onScreen: browserVisible && browserTransport === "shared",
@@ -1895,6 +1903,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       chatId: activeConversationControllerId,
       tab: chatBrowserTabId ? { id: chatBrowserTabId, isActive: chatBrowserTabActive } : null,
       canOpenTab: canWriteProject && sharedBrowserChromeResolved && sharedBrowserCanOpenPage !== null,
+      chatTurnUnderWay: chatBrowserTurnUnderWay,
+      anyTurnUnderWay: anyBrowserTurnUnderWay,
       state: chatBrowserViewRef.current,
     });
     chatBrowserViewRef.current = state;
@@ -1902,10 +1912,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     else if (step === "focus" && chatBrowserTabId) void focusSharedBrowserPageQuietly(chatBrowserTabId).catch(() => false);
   }, [
     activeConversationControllerId,
+    anyBrowserTurnUnderWay,
     browserTransport,
     browserVisible,
     canWriteProject,
     chatBrowserTabActive,
+    chatBrowserTurnUnderWay,
     chatBrowserTabId,
     focusSharedBrowserPageQuietly,
     resolveChatBrowserTab,

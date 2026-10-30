@@ -99,12 +99,15 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // controller script) and `kept-tabs.json` the ones the person kept (written by
 // the origin). The guard reads both when the run ends, to close the rest.
 //
-// `leftover-tabs.json` is the one file that outlives a run: Octo's tabs from
-// an earlier run that could not be closed yet (that run ended without a
-// confirmed shutdown, or the browser did not answer). It grants nothing; the
-// origin badges those tabs as Octo's, and the next confirmed shutdown or
-// browser start closes them (see `close_agent_tabs_at`).
-const APPROVAL_FIXED_FILES: [&str; 7] = [
+// `leftover-tabs.json` and `chat-tabs.json` are the files that outlive a run.
+// The leftover record names Octo's tabs from an earlier run that could not be
+// closed yet (that run ended without a confirmed shutdown, or the browser did
+// not answer): the origin badges those tabs as Octo's, and the next confirmed
+// shutdown or browser start closes them (see `close_agent_tabs_at`). The chat
+// tab record names the tab each run left open as its chat's page (see
+// `tab_kept_for_the_chat`), so every viewer of the chat finds that page, after
+// a reload or on another device too. Neither grants anything.
+const APPROVAL_FIXED_FILES: [&str; 8] = [
     "request.json",
     "decision.json",
     "state.json",
@@ -112,10 +115,17 @@ const APPROVAL_FIXED_FILES: [&str; 7] = [
     AGENT_TABS_FILE,
     KEPT_AGENT_TABS_FILE,
     LEFTOVER_AGENT_TABS_FILE,
+    CHAT_TABS_FILE,
 ];
 const AGENT_TABS_FILE: &str = "tabs.json";
 const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
 const LEFTOVER_AGENT_TABS_FILE: &str = "leftover-tabs.json";
+const CHAT_TABS_FILE: &str = "chat-tabs.json";
+/// The most tabs the chat tab record names, newest last: well over the tabs
+/// Studio lists. The oldest go first. The origin holds the same bound.
+const MAX_CHAT_TABS: usize = 24;
+/// The chat tab record's size bound; the origin holds the same bound.
+const CHAT_TABS_FILE_MAX_BYTES: usize = 16 * 1024;
 /// The most leftover tabs the record holds: a few runs' worth of tabs that
 /// could not be closed. The oldest go first.
 const MAX_LEFTOVER_AGENT_TABS: usize = 4 * MAX_AGENT_TABS;
@@ -548,9 +558,10 @@ fn prepare_clean_approval_directory(path: &Path) -> Result<()> {
                 entry.path().display()
             );
         }
-        // Every run-scoped file is revoked. The leftover record names tabs
-        // that may still be open and grants nothing, so it stays.
-        if file_name == LEFTOVER_AGENT_TABS_FILE {
+        // Every run-scoped file is revoked. The leftover and chat tab
+        // records name tabs that may still be open and grant nothing, so
+        // they stay.
+        if file_name == LEFTOVER_AGENT_TABS_FILE || file_name == CHAT_TABS_FILE {
             continue;
         }
         std::fs::remove_file(entry.path()).with_context(|| {
@@ -1456,10 +1467,11 @@ impl SharedBrowserAgentControlGuard {
     /// page the person chose for the run (the chat's own tab) is still blank:
     /// Octo read in its own tabs, and closing them all would leave the person
     /// a blank tab, or another chat's page in front. It is kept the way a
-    /// Take over keeps a tab (`kept-tabs.json`): an ordinary tab no later run
-    /// can use, as Octo left it, with no reload. None when the person kept a
-    /// tab themselves, the run opened none, or the page is not known to be
-    /// blank.
+    /// Take over keeps a tab (`kept-tabs.json`): an ordinary tab that is no
+    /// longer Octo's, as Octo left it, with no reload. The chat tab record
+    /// (`chat-tabs.json`) names it with the run, so Studio shows it as the
+    /// chat's page. None when the person kept a tab themselves, the run
+    /// opened none, or the page is not known to be blank.
     fn tab_kept_for_the_chat(&self, run_tabs: &[String]) -> Option<String> {
         let binding = self.binding();
         if person_kept_a_tab(&self.approval_dir, &binding) {
@@ -1812,6 +1824,83 @@ fn write_leftover_agent_tabs(approval_dir: &Path, tabs: &[String]) -> Result<()>
     )
 }
 
+/// The chat tab record: the tab each run left open as its chat's page, with
+/// that run, newest last. One that cannot be read safely names no tab.
+fn read_chat_tabs(approval_dir: &Path) -> Vec<(String, Uuid)> {
+    let path = approval_dir.join(CHAT_TABS_FILE);
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return Vec::new();
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > CHAT_TABS_FILE_MAX_BYTES as u64
+    {
+        return Vec::new();
+    }
+    let Some(record) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<JsonValue>(&bytes).ok())
+    else {
+        return Vec::new();
+    };
+    if record.get("version").and_then(JsonValue::as_u64) != Some(1) {
+        return Vec::new();
+    }
+    let Some(tabs) = record.get("tabs").and_then(JsonValue::as_array) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, Uuid)> = Vec::new();
+    for tab in tabs.iter().take(MAX_CHAT_TABS) {
+        let tab_id = tab
+            .get("tabId")
+            .and_then(JsonValue::as_str)
+            .and_then(|id| validate_page_id(id).ok());
+        let run_id = tab
+            .get("runId")
+            .and_then(JsonValue::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok());
+        let (Some(tab_id), Some(run_id)) = (tab_id, run_id) else {
+            return Vec::new();
+        };
+        entries.retain(|(earlier, _)| earlier != &tab_id);
+        entries.push((tab_id, run_id));
+    }
+    entries
+}
+
+/// Names `tab_id` in the chat tab record as the page `run_id` left its chat,
+/// newest last and bounded, under the approval directory's lock.
+fn record_tab_left_for_chat(approval_dir: &Path, tab_id: &str, run_id: Uuid) -> Result<()> {
+    let tab_id = validate_page_id(tab_id)?;
+    let _lock = lock_approval_directory(approval_dir)?;
+    let mut entries = read_chat_tabs(approval_dir);
+    entries.retain(|(earlier, _)| earlier != &tab_id);
+    entries.push((tab_id, run_id));
+    loop {
+        let excess = entries.len().saturating_sub(MAX_CHAT_TABS);
+        entries.drain(..excess);
+        let payload = serde_json::to_vec(&json!({
+            "version": 1,
+            "tabs": entries
+                .iter()
+                .map(|(tab_id, run_id)| json!({ "tabId": tab_id, "runId": run_id.to_string() }))
+                .collect::<Vec<_>>(),
+        }))?;
+        if payload.len() > CHAT_TABS_FILE_MAX_BYTES && entries.len() > 1 {
+            entries.remove(0);
+            continue;
+        }
+        // The temporary name uses the prefix the approval directory cleanup
+        // accepts, so a write cut short is revoked with the rest.
+        return publish_private_file(
+            &approval_dir.join(format!(".instafy-approval-chat-tabs-{}", Uuid::new_v4())),
+            &approval_dir.join(CHAT_TABS_FILE),
+            &payload,
+            "Shared Browser chat tab record",
+        );
+    }
+}
+
 /// The DevTools HTTP endpoint the controller script connects to
 /// (`INSTAFY_PLAYWRIGHT_CDP_URL`, else port `INSTAFY_PLAYWRIGHT_CDP_PORT` or
 /// 9223 on 127.0.0.1), when it is a credential-free loopback HTTP address.
@@ -2062,6 +2151,16 @@ impl Drop for SharedBrowserAgentControlGuard {
             let mut run_tabs = self.agent_tabs_to_close();
             let kept_for_chat = self.tab_kept_for_the_chat(&run_tabs);
             run_tabs.retain(|tab_id| Some(tab_id) != kept_for_chat.as_ref());
+            if let Some(tab_id) = kept_for_chat.as_deref() {
+                if let Err(error) =
+                    record_tab_left_for_chat(&self.approval_dir, tab_id, self.run_id)
+                {
+                    tracing::warn!(
+                        ?error,
+                        "Shared Browser could not record the page Octo left the chat"
+                    );
+                }
+            }
             let closed_any = !run_tabs.is_empty();
             close_agent_tabs_and_settle_leftovers(
                 &self.approval_dir,

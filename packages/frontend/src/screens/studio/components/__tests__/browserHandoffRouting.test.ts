@@ -287,6 +287,23 @@ describe("sharedBrowserFollowUp", () => {
       .toEqual(expect.objectContaining({ runId: RUN_ID, page: { id: "page-1" } }));
   });
 
+  // The turn read in a tab of its own while its tab stayed blank, and the
+  // runtime kept that tab as the chat's page: the follow-up goes on there,
+  // on the page the person was left with, not in the blank tab.
+  it("goes on in the tab the turn left its chat", () => {
+    const left = { id: "page-left", leftByRun: RUN_ID };
+    expect(sharedBrowserFollowUp([browserTurn()], { ...scope, pages: [...pages, left] }))
+      .toEqual(expect.objectContaining({ runId: RUN_ID, page: left }));
+    // A tab another turn left is not this one's.
+    const other = { id: "page-other", leftByRun: "00000000-0000-4000-8000-000000000010" };
+    expect(sharedBrowserFollowUp([browserTurn()], { ...scope, pages: [...pages, other] }))
+      .toEqual(expect.objectContaining({ page: { id: "page-1" } }));
+    // Never one another chat took since.
+    expect(sharedBrowserFollowUp([browserTurn()], {
+      ...scope, pages: [...pages, left], takenByAnotherChat: (pageId) => pageId === left.id,
+    })).toBeNull();
+  });
+
   it("says until when the follow-up applies", () => {
     expect(sharedBrowserFollowUp([browserTurn()], scope)?.endsAtMs).toBe(ENDED_AT + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS);
   });

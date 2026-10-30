@@ -585,6 +585,25 @@ fn the_browser_skill_reads_a_cards_pages_on_the_chats_own_page() {
     }
 }
 
+/// A snapshot carries the browser skill's first `PROJECT_MEMORY_MAX_FILE_BYTES` bytes, and a browser turn
+/// cannot read the rest: the sign-in and secret rules end inside them, counted in bytes, so none is cut off
+/// mid-sentence.
+#[test]
+fn the_browser_skills_sign_in_and_secret_rules_end_inside_the_carried_bytes() {
+    for rule in [
+        "- Treat sign-in, one-time codes, consent and payment as the person's steps:",
+        "- Never type a password, one-time code, payment detail, government identifier, recovery secret,",
+        "- Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.",
+    ] {
+        let start = BROWSER_SKILL.find(rule).expect(rule);
+        let end = start + BROWSER_SKILL[start..].find('\n').expect("line end") + 1;
+        assert!(
+            end <= PROJECT_MEMORY_MAX_FILE_BYTES,
+            "{rule} ends at byte {end}"
+        );
+    }
+}
+
 /// The kinds of link-only site and guided mode: a `no-agents` site is never read or opened and the person is
 /// guided to it with a filled link (`instafy web link`) and Send page to Octo; a `no-reuse` site is read but its
 /// content is summarized, cited and linked, never copied or published. An unedited earlier copy is upgraded.

@@ -3393,7 +3393,7 @@ export function BrowserSessionModal({
   );
 
   const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
-    ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} signInNote={signInNote} /> : null;
+    ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (
     <div aria-hidden="true" className="pointer-events-none h-px w-px overflow-hidden opacity-0">
       <div ref={setContainerElement} className="h-full w-full overflow-hidden" />
@@ -3469,7 +3469,7 @@ export function BrowserSessionModal({
           toolbarActions={(compactNavigation) => (
             <>
               {humanInputIdentityKey ? (
-                <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} signInNote={signInNote}
+                <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState}
                   renderControls={collaborationControlsShown ? renderCollaborationControls : undefined} />
               ) : collaborationControlsShown ? renderCollaborationControls(null) : null}
               {renderSessionControls(sharedBrowserChrome.compact ? <>
@@ -3502,6 +3502,15 @@ export function BrowserSessionModal({
           error={humanInputIdentityKey ? null : browserHumanInputState.error}
           onTakeOver={() => void browserHumanInputState.takeOver()}
         />
+      ) : null}
+      {!shouldCollapseDocked && humanInputIdentityKey && browserHumanInputState.request ? (
+        // Outside the toolbar, which a narrow view folds into a menu: the
+        // person reads it before they sign in.
+        <Text as="p" variant="caption" tone="muted" role="status"
+          className="shrink-0 border-b border-slate-200 px-3 py-1 dark:border-slate-800"
+          data-browser-session-safe-zone="true" data-testid="browser-human-input-sign-in-note">
+          {signInNote}
+        </Text>
       ) : null}
       <div
         key="shared-browser-viewport"

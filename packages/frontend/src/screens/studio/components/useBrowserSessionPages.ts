@@ -69,6 +69,7 @@ function toBrowserSessionPage(
     ...(page.kept ? { kept: true } : {}),
     ...(page.agentTabNumber ? { agentTabNumber: page.agentTabNumber } : {}),
     ...(page.leftover ? { leftover: true } : {}),
+    ...(page.leftByRun ? { leftByRun: page.leftByRun } : {}),
   };
 }
 

@@ -2,7 +2,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BrowserHumanInputControls, sharedBrowserSignInNote } from "../BrowserHumanInputControls";
+import { BrowserHumanInputControls } from "../BrowserHumanInputControls";
 import { SharedBrowserCollaborationControls } from "../SharedBrowserCollaborationControls";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
@@ -35,28 +35,6 @@ describe("BrowserHumanInputControls", () => {
     </SharedBrowserCollaborationControls>
   );
   const finishFocusRestoration = async () => act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
-
-  // Instafy's browser is the space's: a sign-in the person finishes there
-  // stays for its other chats, and for its members in a team space. The pause
-  // on their fields is the one place that says so.
-  it("says what a sign-in leaves in the space's browser while it waits on the person's fields", async () => {
-    const note = () => container.querySelector('[data-testid="browser-human-input-sign-in-note"]');
-    props.signInNote = sharedBrowserSignInNote(false);
-    await render();
-    expect(note()).toBeNull();
-    props.request = { version: 1, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Username" }, { label: "Password" }] };
-    props.humanControlConfirmed = true;
-    await render();
-    expect(note()?.textContent).toBe("This space's browser keeps you signed in for its chats until you clear it.");
-    expect(container.textContent).toContain("Let Octo continue");
-    props.signInNote = sharedBrowserSignInNote(true);
-    await render();
-    expect(note()?.textContent).toBe("This space's browser keeps you signed in for its chats and members until you clear it.");
-    // A browser only this person uses says nothing of the kind.
-    props.signInNote = null;
-    await render();
-    expect(note()).toBeNull();
-  });
 
   it("names Octo in the take-over dialog", async () => {
     await render();

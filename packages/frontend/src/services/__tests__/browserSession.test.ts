@@ -110,6 +110,25 @@ describe("mapRuntimeBrowserSessionPagesPayload", () => {
     ]);
   });
 
+  it("keeps which run left an ordinary tab open as its chat's page", () => {
+    const run = "7a1f6f0e-2c4b-4c1e-9a43-0d6c2b1e5f10";
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { id: "page-1", url: "https://trams.example/", host: "trams.example", label: "Planner", leftByRun: run },
+        // Never on one of Octo's tabs, and only a run id.
+        { id: "tab-1", url: "https://docs.example/", host: "docs.example", label: "Docs", openedBy: "agent", leftByRun: run },
+        { id: "page-2", url: "https://example.com/", host: "example.com", label: "Example", leftByRun: "run-1" },
+        { id: "page-3", url: "https://example.com/", host: "example.com", label: "Example", leftByRun: run.toUpperCase() },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.leftByRun ?? null])).toEqual([
+      ["page-1", run],
+      ["tab-1", null],
+      ["page-2", null],
+      ["page-3", null],
+    ]);
+  });
+
   it("maps valid runtime browser pages and drops malformed entries", () => {
     expect(
       mapRuntimeBrowserSessionPagesPayload({

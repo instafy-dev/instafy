@@ -105,9 +105,11 @@ export type SharedBrowserFollowUp<Page> = { runId: string; page: Page; endsAtMs:
  * otherwise: the message is an ordinary chat turn. Also null once another
  * chat took that tab after the turn started (`takenByAnotherChat`, from
  * chatBrowserTab.ts): a follow-up is a browser turn, and a browser turn uses
- * only its own chat's tab.
+ * only its own chat's tab. When the turn left its chat another tab (Octo read
+ * in a tab of its own while the turn's tab stayed blank, `leftByRun`), the
+ * follow-up goes on there, on the page the person was left with.
  */
-export function sharedBrowserFollowUp<Page extends { id: string }>(
+export function sharedBrowserFollowUp<Page extends { id: string; leftByRun?: string }>(
   runs: readonly RunRecord[],
   scope: {
     conversationId: string | null;
@@ -137,7 +139,9 @@ export function sharedBrowserFollowUp<Page extends { id: string }>(
   const endedAt = runTimestamp(newest);
   const endsAtMs = endedAt + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS;
   if (!endedAt || (scope.nowMs ?? Date.now()) > endsAtMs) return null;
-  const page = scope.pages.find((candidate) => candidate.id === metadata.browserPageId);
+  const runId = newest.id;
+  const page = scope.pages.find((candidate) => candidate.leftByRun === runId) ??
+    scope.pages.find((candidate) => candidate.id === metadata.browserPageId);
   if (!page || scope.takenByAnotherChat?.(page.id, runStartedAt(newest))) return null;
   return { runId: newest.id, page, endsAtMs };
 }

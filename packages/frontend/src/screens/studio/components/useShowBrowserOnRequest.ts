@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
+import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 
@@ -17,18 +18,32 @@ export function useShowBrowserOnRequest(open: boolean, requestToken: number, sho
   }, [open, requestToken, show]);
 }
 
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 /**
- * Octo's pauses on the person's fields in a chat (its `request_human_input`
- * step), as message ids with the time each came in.
+ * Octo's pauses on `userId`'s fields in a chat (its `request_human_input`
+ * step in a turn that person started), as message ids with the time each
+ * came in. A pause in someone else's turn is theirs to act on.
  */
-function humanInputPauses(messages: readonly ChatMessage[]): Array<{ id: string; at: number }> {
+function humanInputPauses(
+  messages: readonly ChatMessage[],
+  runs: readonly RunRecord[],
+  userId: string | null,
+): Array<{ id: string; at: number }> {
   const pauses: Array<{ id: string; at: number }> = [];
+  if (!userId) return pauses;
   for (const message of messages) {
     if (message.role !== "assistant" || getMessageType(message) !== "mcp_tool_call") continue;
     const details = extractMessageDetails(message.metadata);
-    if (details?.tool === "request_human_input" && details.status === "completed") {
-      pauses.push({ id: message.id, at: message.timestamp });
-    }
+    if (details?.tool !== "request_human_input" || details.status !== "completed") continue;
+    const runId = stringValue(message.metadata?.runId);
+    const jobId = stringValue(message.metadata?.jobId);
+    const run = runs.find((entry) => (runId !== null && entry.id === runId) ||
+      (jobId !== null && stringValue(entry.metadata?.jobId) === jobId));
+    if (!run || stringValue(run.metadata?.initiatingUserId) !== userId) continue;
+    pauses.push({ id: message.id, at: message.timestamp });
   }
   return pauses;
 }
@@ -37,10 +52,17 @@ function humanInputPauses(messages: readonly ChatMessage[]): Array<{ id: string;
  * Switches to the Browser view once for each pause on the person's fields
  * that comes in while the chat is open: it is the one moment they must act
  * there (a sign-in, a code), and the highlighted fields are on that page.
- * Pauses from before the chat was opened here (history, a reload) switch
- * nothing.
+ * Only for the person whose turn paused; pauses from before the chat was
+ * opened here (history, a reload) switch nothing.
  */
-export function useShowBrowserOnHumanInput(identity: string, messages: readonly ChatMessage[], show: () => void): void {
+export function useShowBrowserOnHumanInput(input: {
+  identity: string;
+  userId: string | null;
+  messages: readonly ChatMessage[];
+  runs: readonly RunRecord[];
+  show: () => void;
+}): void {
+  const { identity, userId, messages, runs, show } = input;
   const openedAt = useRef(Date.now());
   const previousIdentity = useRef(identity);
   const shown = useRef(new Set<string>());
@@ -51,11 +73,11 @@ export function useShowBrowserOnHumanInput(identity: string, messages: readonly 
   }
   useEffect(() => {
     let fresh = false;
-    for (const pause of humanInputPauses(messages)) {
+    for (const pause of humanInputPauses(messages, runs, userId)) {
       if (shown.current.has(pause.id) || pause.at < openedAt.current - 1_000) continue;
       shown.current.add(pause.id);
       fresh = true;
     }
     if (fresh) show();
-  }, [identity, messages, show]);
+  }, [identity, messages, runs, show, userId]);
 }

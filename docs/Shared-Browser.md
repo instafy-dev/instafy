@@ -596,22 +596,24 @@ read, so that page would go into this chat's reply and Details):
 - **The chat's Browser view shows that tab**, never a tab another chat left in
   front. When the view comes on screen for a chat, and when the chat gets a new
   tab, Studio brings the chat's tab to the front. While someone else (Octo
-  included) controls the browser the view shows what they do, and the chat's
-  tab comes forward once they are done. A chat with no tab yet gets its own
-  blank one (as for its first browser turn), once while the view is on screen,
-  and "Octo is starting…" shows over it while a turn of the chat is on its way.
-  It never undoes the person's own pick.
+  included) controls the browser the view shows what they do. When that was
+  another chat's turn or another person, the chat's tab comes forward once
+  they are done and no browser turn is under way; the chat's own turn leaves
+  the browser where it ends (its page, or a tab the person took over). A chat
+  with no tab yet gets its own blank one (as for its first browser turn), once
+  while the view is on screen, and "Octo is starting…" shows over it while a
+  turn of the chat is on its way. It never undoes the person's own pick.
 - **The page a browser turn leaves the chat.** A turn works on the chat's tab
   (see Octo's own tabs). When it ends with that tab still blank, because Octo
   read in tabs of its own, the tab Octo worked in last stays open (see Closed
-  at the end, unless kept). Studio saw that tab as Octo's while the chat's turn
-  held the browser (only while that turn was the one under way on the
-  machine), so once the turn has ended and the tab is no longer Octo's, it is
-  the chat's tab: the page the person is left with is the one Octo read. A tab
-  the person kept by taking over there counts the same way. A reload forgets
-  it, like a pick.
-- A follow-up stays in the tab of the turn it continues, while no other chat
-  took that tab since the turn started; otherwise the message is an ordinary
+  at the end, unless kept), and `GET /browser/pages` names that turn on it
+  (`leftByRun: <run id>`, from runtime-agent's `chat-tabs.json`). Once the turn
+  has ended, that tab is the chat's tab: the page the person is left with is
+  the one Octo read, after a reload, on another device and for other members
+  too.
+- A follow-up stays in the tab of the turn it continues (the tab that turn
+  left the chat, when it left one), while no other chat took that tab since
+  the turn started; otherwise the message is an ordinary
   chat turn. Let Octo continue stays in the tab the person worked in. A message aimed at a page goes out in the
   person's own words: the page reaches the turn only as its bound tab, never as
   a sentence naming it, and a card's continuation sends the card's task alone.
@@ -767,7 +769,10 @@ Browser has tabs of its own (see Personal-Browser.md).
   (the chat's own tab) is still blank (`GET /json/list` says `about:blank` or a
   new-tab page), the tab Octo worked in last (`currentTabId`, else its newest)
   is kept the same way, as the chat's page, with no reload: it stays as Octo
-  left it, a refused cookie banner included. Then that tab, or else the run's
+  left it, a refused cookie banner included. runtime-agent names it with the
+  run in `chat-tabs.json`, the newest 24 such tabs, a record that outlives the
+  run like the leftover record and grants nothing; the page list reports it
+  as `leftByRun` on that tab while the tab is not one of Octo's. Then that tab, or else the run's
   page once any of Octo's tabs closed, comes to the front
   (`GET /json/activate/<id>`): Chromium would otherwise show a neighbouring
   tab, which may be another chat's page. A tab the person kept stays where they
@@ -777,8 +782,8 @@ Browser has tabs of its own (see Personal-Browser.md).
 - **No orphan tabs.** A tab of Octo's that is still open when its run's
   records are revoked (the run ended without a confirmed shutdown, so the
   runtime restarted, or the browser did not answer the close) is carried into
-  `leftover-tabs.json`, the one file in the approval directory that outlives a
-  run. It grants nothing and Octo cannot use those tabs. The origin keeps
+  `leftover-tabs.json`, which outlives a run like `chat-tabs.json` (above);
+  these two are the only files in the approval directory that do. It grants nothing and Octo cannot use those tabs. The origin keeps
   badging them `openedBy: "agent"` with `leftover: true` and no number, since
   the next run numbers its own tabs from 1 again: Studio calls each one
   "Octo's earlier tab", and the Reading row and the count of the tabs Octo
@@ -1212,12 +1217,14 @@ Canceling leaves control unchanged; confirming starts the existing handoff.
 **Let Octo continue** then appears in the existing toolbar. Reduced-motion
 preferences use a static edge glow. Agent-requested handoff
 uses `request_human_input` with one to eight indices from a fresh snapshot. When
-it comes in while the chat is open, Studio switches to the Browser view, where
-the highlighted fields are (once per pause; history and a reload switch
-nothing). While it waits on the person's fields, the Shared Browser's controls
-add one line: "This space's browser keeps you signed in for its chats until you
-clear it.", or "…for its chats and members…" when other people can open the
-space (see Sign-ins on a browser host). The
+it comes in while the chat is open, Studio switches the person whose turn it is
+(the run's `initiatingUserId`) to the Browser view, where the highlighted fields
+are (once per pause; history, a reload and other members' pauses switch
+nothing). While it waits on the person's fields, a row of its own under the
+toolbar, at every width (a narrow toolbar folds its controls into a menu), says:
+"This space's browser keeps you signed in for its chats until you clear it.",
+or "…for its chats and members…" when other people can open the space (see
+Sign-ins on a browser host). The
 trusted helper highlights those exact editable elements with fixed amber outlines
 and emits bounded, page/initiator-bound guidance through the existing action feed.
 The guidance contains generic labels, not field values or page text. Highlights

@@ -1134,6 +1134,7 @@ async fn octos_tabs_are_read_only_from_the_running_turns_own_record() {
             kept: Vec::new(),
             numbers: vec![("TAB-A".to_string(), 1), ("TAB-B".to_string(), 2)],
             leftover: Vec::new(),
+            left_by_run: Vec::new(),
         }
     );
 
@@ -1277,6 +1278,7 @@ async fn tabs_an_earlier_run_left_open_stay_badged_as_earlier_tabs() {
             kept: Vec::new(),
             numbers: Vec::new(),
             leftover: vec!["EARLIER-A".to_string(), "EARLIER-B".to_string()],
+            left_by_run: Vec::new(),
         }
     );
 
@@ -1313,6 +1315,65 @@ async fn tabs_an_earlier_run_left_open_stay_badged_as_earlier_tabs() {
     write_leftover_tabs(&fixture, json!([{ "tabId": "EARLIER-A" }]));
     set_mode(&fixture.approval_dir.join(LEFTOVER_AGENT_TABS_FILE), 0o644);
     assert_eq!(fixture.bridge.agent_tabs().await.tab_ids, vec!["TAB-A"]);
+}
+
+/// runtime-agent names the tab a run left open as its chat's page, with the
+/// run, in a record that outlives the run: the page list names that run on
+/// the tab for every viewer, after a reload or on another device too.
+#[tokio::test]
+async fn a_tab_a_run_left_its_chat_names_that_run_whether_or_not_a_run_holds_the_browser() {
+    const FIRST: &str = "7a1f6f0e-2c4b-4c1e-9a43-0d6c2b1e5f10";
+    const SECOND: &str = "0b9e4c4e-58c1-4d5a-9a0e-3f1c7d2a6b44";
+    let fixture = ApprovalFixture::origin();
+    let record = fixture.approval_dir.join(CHAT_TABS_FILE);
+    fs::remove_file(&fixture.marker_path).expect("the run is gone");
+    write_private_json(
+        &record,
+        &json!({ "version": 1, "tabs": [
+            { "tabId": "TAB-PLANNER", "runId": FIRST },
+            { "tabId": "TAB-MAP", "runId": SECOND }
+        ] }),
+    );
+    let tabs = fixture.bridge.agent_tabs().await;
+    assert_eq!(tabs.left_by_run("TAB-PLANNER"), Some(FIRST));
+    assert_eq!(tabs.left_by_run("TAB-MAP"), Some(SECOND));
+    assert_eq!(tabs.left_by_run("PAGE-CHAT"), None);
+    assert!(tabs.tab_ids.is_empty());
+
+    // While a run holds the browser the record still counts, but a tab that
+    // is one of Octo's now is never a chat's page.
+    write_private_json(&fixture.marker_path, &fixture.marker);
+    write_agent_tabs(&fixture, &["TAB-MAP"]);
+    let tabs = fixture.bridge.agent_tabs().await;
+    assert_eq!(tabs.left_by_run("TAB-PLANNER"), Some(FIRST));
+    assert_eq!(tabs.left_by_run("TAB-MAP"), None);
+
+    // A record that cannot be read safely names no tab.
+    for bad in [
+        json!({ "version": 2, "tabs": [{ "tabId": "TAB-PLANNER", "runId": FIRST }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "../tabs.json", "runId": FIRST }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-PLANNER", "runId": "run-1" }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-PLANNER", "runId": FIRST.to_uppercase() }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-PLANNER", "runId": FIRST }, { "tabId": "TAB-PLANNER", "runId": SECOND }] }),
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-PLANNER", "runId": FIRST, "approvedOrigins": [] }] }),
+        json!({ "version": 1, "tabs": (0..25).map(|index| json!({ "tabId": format!("T{index}"), "runId": FIRST })).collect::<Vec<_>>() }),
+    ] {
+        write_private_json(&record, &bad);
+        assert_eq!(
+            fixture.bridge.agent_tabs().await.left_by_run("TAB-PLANNER"),
+            None,
+            "{bad}"
+        );
+    }
+    write_private_json(
+        &record,
+        &json!({ "version": 1, "tabs": [{ "tabId": "TAB-PLANNER", "runId": FIRST }] }),
+    );
+    set_mode(&record, 0o644);
+    assert_eq!(
+        fixture.bridge.agent_tabs().await.left_by_run("TAB-PLANNER"),
+        None
+    );
 }
 
 #[tokio::test]

@@ -63,6 +63,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     // Octo's tabs from an earlier run that could not be closed yet. runtime-
     // agent writes it; it gives this run nothing, and this script never reads it.
     "leftover-tabs.json",
+    // The tab each earlier run left open as its chat's page. runtime-agent
+    // writes it; it gives this run nothing, and this script never reads it.
+    "chat-tabs.json",
   ]);
   // Every writer of the approval directory publishes through a temporary
   // file with this prefix (runtime-agent's cleanup accepts the same prefix).
