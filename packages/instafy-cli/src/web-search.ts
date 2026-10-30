@@ -1004,7 +1004,7 @@ function keyless(chain: string): string {
       ? "find official sites with `instafy web search \"<name>\" --chain reference-search` (no key) and read them"
       : "read the official sites you know of";
   return (
-    `Go on without it: ${find}, and the pages of publishers you know cover this, with \`instafy web read\`. Then answer ` +
+    `Go on without it: ${find}, and for reviews a reviewer's home page and the pages it links, with \`instafy web read\`. Then answer ` +
     "or build the page with what you read, each missing fact marked unknown with why. The person may send more pages " +
     "with Send page to Octo."
   );

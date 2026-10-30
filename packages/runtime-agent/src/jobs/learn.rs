@@ -102,6 +102,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     include_str!("legacy/agents-doc-v2.md"),
     // From before it named inside words a reply leaves out ("the shared browser", "placeholder rows").
     include_str!("legacy/agents-doc-v3.md"),
+    // From before a fact no page stated said "not checked", a reply named only steps its turn
+    // started, and "I can't search the whole web here" replaced "search key" and the like.
+    include_str!("legacy/agents-doc-v4.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -360,6 +363,8 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before a sign-in the person asked for was opened and paused on, and the reply said
     // where the browser goes.
     include_str!("legacy/browser-automation-v14.md"),
+    // From before a page that reads as busy got one more snapshot, then the place's own site.
+    include_str!("legacy/browser-automation-v15.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -395,6 +400,8 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // From before it pointed to the browser skill's "Finding a page" instead of keeping its own copy
     // of "not checked", the independent source after two failures and the rows a comparison lists.
     include_str!("legacy/web-research-v9.md"),
+    // From before reviews came from a reviewer's home page and its links, never a guessed address.
+    include_str!("legacy/web-research-v10.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2118,6 +2125,35 @@ mod tests {
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
         let previous = include_str!("legacy/agents-doc-v3.md");
         assert!(!previous.contains("the shared browser"));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+    }
+
+    /// A reply states only what a page read in its turn says, else "not checked"; it never says a place, stop,
+    /// route or time doesn't exist unless a page says so; it names only steps its turn started ("I'm sending
+    /// Instafy's browser…" with no browser card is a promise nobody keeps); and it says "I can't search the whole
+    /// web here", not "this turn is read-only", "web-search capability", "search key" or "alternate search".
+    /// `AGENTS.md` is what web turns carry; a browser turn's reply is also checked at the end of the turn
+    /// (`reply_check`). The copy from before is upgraded.
+    #[test]
+    fn agents_doc_says_unread_facts_are_not_checked_and_names_only_steps_the_turn_started() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        for needle in [
+            "A fact no page you read this turn states says \"not checked\", or stays out.",
+            "Never say a place, stop, route or time doesn't exist unless a page you read says so.",
+            "Say only steps this turn did or started.",
+            "offer it as a next step instead",
+            "\"I can't search the whole web here\", not \"this turn is read-only\", \"web-search capability\", \"search key\" or \"alternate search\"",
+        ] {
+            assert!(doc.contains(needle), "{needle}");
+        }
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        let previous = include_str!("legacy/agents-doc-v4.md");
+        assert!(!previous.contains("not checked\", or stays out"));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
         fs::write(&path, previous).unwrap();

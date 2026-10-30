@@ -171,7 +171,7 @@ describe("reference search (Wikipedia, Wikivoyage, Wikidata)", () => {
     const report = await reference("Belém Tower", turnEnv(caseNo + 1), none.transport);
     expect(report).toMatchObject({ status: "unavailable", code: "provider_error" });
     // Never the end of the task, and never back to this same search: official sites read directly, then the answer.
-    expect(report.tell).toMatch(/Go on without it: read the official sites you know of, and the pages of publishers you know cover this, with `instafy web read`\. Then answer or build the page with what you read/);
+    expect(report.tell).toMatch(/Go on without it: read the official sites you know of, and for reviews a reviewer's home page and the pages it links, with `instafy web read`\. Then answer or build the page with what you read/);
     expect(report.tell).not.toMatch(/--chain reference-search/);
   });
 

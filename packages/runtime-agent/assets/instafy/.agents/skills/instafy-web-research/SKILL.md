@@ -58,7 +58,7 @@ When the task needs a `no-agents` site (hotel prices on Booking.com):
 2. Sources an installed skill names for this need.
 3. Open data and open APIs: `instafy web search "<words>" --chain reference-search --json` for Wikipedia and Wikivoyage articles and the official websites Wikidata records (no key needed); OpenStreetMap or a national open-data portal through a skill or a reader above.
 4. A search: `instafy web search "<words from the person's request>" --json` (Searching, below).
-5. Pages read without a search (`instafy web read`): official sites from step 3; at most 2 guessed official domains, each confirmed by reading it (the page names the business); reviews from publishers you know review this kind of item. An address that does not answer: once more with `www.` added or removed, as its `tell` says. Never put a guessed address in a `request_browser` task.
+5. Pages read without a search (`instafy web read`): official sites from step 3; at most 2 guessed official domains, each confirmed by reading it (the page names the business); for reviews, a reviewer's home page, then its links. An address that does not answer: once more with `www.` added or removed, as its `tell` says. Never put a guessed address in a `request_browser` task.
 6. Ask the person to search in their own browser and press **Send page to Octo** on the pages they pick.
 
 ## Searching

@@ -50,6 +50,7 @@ pub(crate) use chat_attachments::TurnAttachments;
 mod conversation_context;
 mod git_sync;
 mod known_safe_command;
+mod reply_check;
 mod routing_evidence;
 mod routing_recovery;
 mod save_report;
@@ -7023,6 +7024,7 @@ impl JobProcessor {
             // A team's turn ends by the team's deadline (`turn_continuation`).
             run_timeout: Some(turn_files.limit()),
             granted,
+            answer_only: None,
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -7535,20 +7537,18 @@ impl JobProcessor {
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
         // it also drives the UI thread preview expectations.
-        if matches!(
+        let names_instafy_md = matches!(
             learn_request,
             Some(learn::LearnRequest {
                 mode: learn::LearnMode::Apply,
                 ..
             })
-        ) && !outcome.summary.contains(learn::INSTAFY_FILENAME)
+        );
+        if names_instafy_md
             && !is_retryable_codex_upstream_summary(&outcome.summary)
             && codex_fallback_summary_kind.is_none()
         {
-            let trimmed = outcome.summary.trim();
-            let base = trimmed.trim_end_matches(['.', '!', '?']);
-            let base = if base.is_empty() { trimmed } else { base };
-            outcome.summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
+            mention_instafy_md(&mut outcome.summary);
         }
         let mut artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
         if let Some(receipt) = &worker_reply_receipt {
@@ -7995,6 +7995,8 @@ impl JobProcessor {
                 retry_codex_run_options.usage_observer =
                     Some(task_usage.call(UsagePhase::Recovery));
             }
+            // The reply check runs with the options the retry answered with.
+            let retry_check_options = retry_codex_run_options.clone();
 
             // Brief jittered backoff before the recovery retry: re-hitting the
             // same degraded upstream milliseconds after a failed turn mostly
@@ -8059,7 +8061,7 @@ impl JobProcessor {
                     retry_output.native_image_inputs,
                 );
             }
-            let retry_provider_conversation_state = provider_conversation_state_to_save(
+            let mut retry_provider_conversation_state = provider_conversation_state_to_save(
                 &retry_output,
                 &retry_prompt,
                 &prompt,
@@ -8341,6 +8343,8 @@ impl JobProcessor {
                 }),
             );
 
+            // A reply the tool-free finalization pass wrote is not on the retry's thread.
+            let mut retry_reply_from_finalization = false;
             if retry_shared_browser_terminal_consent_failure.is_none()
                 && should_run_missing_final_finalization_pass(
                     retry_codex_fallback_summary_kind,
@@ -8444,6 +8448,7 @@ impl JobProcessor {
                     retry_outcome.files = retry_files;
                     retry_outcome.read_files = retry_read_files;
                     retry_codex_fallback_summary_kind = None;
+                    retry_reply_from_finalization = true;
                     retry_artifacts.push(build_codex_run_log_artifact(
                         &finalization_output.events,
                         Some(json!({
@@ -8666,6 +8671,34 @@ impl JobProcessor {
                 streaming_active,
                 retry_final_messages,
             );
+
+            // The reply check, as for a turn that needed no retry, when the
+            // posted reply is the one the retry's thread ends with.
+            if !kept_first_attempt_answer
+                && !retry_reply_from_finalization
+                && reply_check_due(
+                    job,
+                    run_once,
+                    retry_shared_browser_terminal_consent_failure.is_some(),
+                    retry_codex_fallback_summary_kind,
+                    &retry_outcome,
+                    interim_messages.iter().chain(&retry_messages),
+                )
+                && let Some(state) = check_reply_against_reads(
+                    &codex,
+                    job,
+                    &retry_check_options,
+                    retry_provider_conversation_state.as_ref(),
+                    browser_mode,
+                    false,
+                    task_usage,
+                    &mut retry_outcome,
+                    &mut retry_artifacts,
+                )
+                .await?
+            {
+                retry_provider_conversation_state = Some(state);
+            }
             let mut retry_not_saved = pre_turn_refresh
                 .as_ref()
                 .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
@@ -8792,6 +8825,33 @@ impl JobProcessor {
         // turn-end save.
         let final_messages =
             stream_settled_cards(progress_sender.as_ref(), streaming_active, final_messages);
+
+        // A turn that read pages or looked something up checks its reply
+        // against what it read once, before the reply posts.
+        let mut output_provider_conversation_state = output_provider_conversation_state;
+        if reply_check_due(
+            job,
+            run_once,
+            first_shared_browser_terminal_consent_failure.is_some(),
+            codex_fallback_summary_kind,
+            &outcome,
+            &interim_messages,
+        ) && !clean_ambient_decline
+            && let Some(state) = check_reply_against_reads(
+                &codex,
+                job,
+                &codex_run_options,
+                output_provider_conversation_state.as_ref(),
+                browser_mode,
+                names_instafy_md,
+                task_usage,
+                &mut outcome,
+                &mut artifacts,
+            )
+            .await?
+        {
+            output_provider_conversation_state = Some(state);
+        }
 
         // Deterministic /learn optimizer: enforce budgets + prune/compact learned memory so it
         // doesn't balloon future prompts. This runs only after we know we're not retrying.
@@ -14556,6 +14616,167 @@ fn finalization_codex_run_options(first_attempt: &CodexRunOptions) -> CodexRunOp
     // the note is the turn's own: a finalization run neither clears it nor hands the turn off
     options.turn_continue_note = None;
     options
+}
+
+/// Whether a finished turn's reply gets the reply check (`reply_check`): the turn read a page or
+/// looked something up, its reply is the model's own words (not a runtime's after a consent stop,
+/// a missing answer or a declined ambient turn), and the turn is not a team lane's, a run-once
+/// turn's or one that ended on a pause for the person.
+fn reply_check_due<'a>(
+    job: &LeaseJob,
+    run_once: bool,
+    ended_by_consent: bool,
+    fallback: Option<CodexFallbackSummaryKind>,
+    outcome: &CodexOutcome,
+    messages: impl IntoIterator<Item = &'a JobMessage>,
+) -> bool {
+    !run_once
+        && !ended_by_consent
+        && fallback.is_none()
+        && !outcome.summary.trim().is_empty()
+        && outcome.summary != DEFAULT_CODEX_OUTCOME_SUMMARY
+        && !is_multi_agent_worker_job(job)
+        && !is_multi_agent_lead_continuation_job(job)
+        && !is_explicit_team_planning_job(job)
+        && !outcome
+            .actions
+            .iter()
+            .any(|action| matches!(action, CodexAction::RequestUserInput(_)))
+        && reply_check::turn_read_outside_facts(messages)
+}
+
+/// Runs the reply check on the thread `thread` names, which the run with `run_options` just
+/// answered on, and puts the checked words in `outcome.summary`, finished as the turn's reply was
+/// ([`finish_checked_reply`]). Returns the thread state to save when the check ran on that
+/// thread. The check answers in words only, once, within its own time limit and on its own cancel
+/// signal (`reply_check::check_run_options`). One that fails, runs out of time, cannot resume the
+/// thread, calls a tool or answers with nothing usable leaves the reply as it was. A Stop or a
+/// lost lease during it ends the turn as during the turn, with the turn's artifacts.
+#[allow(clippy::too_many_arguments)]
+async fn check_reply_against_reads(
+    codex: &CodexClient,
+    job: &LeaseJob,
+    run_options: &CodexRunOptions,
+    thread: Option<&JsonValue>,
+    browser_mode: bool,
+    names_instafy_md: bool,
+    task_usage: &TaskUsage,
+    outcome: &mut CodexOutcome,
+    artifacts: &mut Vec<JsonValue>,
+) -> Result<Option<JsonValue>> {
+    let before = outcome.summary.clone();
+    let Some(options) = reply_check::check_run_options(
+        run_options,
+        thread,
+        Some(task_usage.call(UsagePhase::Finalization)),
+    ) else {
+        artifacts.push(reply_check::artifact(
+            reply_check::Outcome::Kept("thread_not_resumable"),
+            &before,
+        ));
+        return Ok(None);
+    };
+    let words_only = options.answer_only.clone().unwrap_or_default();
+    let check_signal = options.cancel_signal.clone().unwrap_or_default();
+    let job_signal = run_options.cancel_signal.as_ref();
+    let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+    let _client_timezone_guard = ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
+    let result = {
+        let _stop = reply_check::follow_stop(job_signal, &check_signal);
+        codex
+            .execute_with_options(reply_check::REPLY_CHECK_PROMPT, None, options)
+            .await
+    };
+    drop(codex_guard);
+    if run_options.shared_browser {
+        reply_check::keep_unconfirmed_browser_shutdown(&check_signal, job_signal);
+    }
+    let output = match result {
+        Ok(output) => output,
+        Err(error) => {
+            if job_signal.is_some_and(JobCancelSignal::is_canceled) {
+                // As a Stop during the turn: the turn's run log and steps stay with it.
+                let message = format!("{error}");
+                return Err(error.context(JobFailureWithArtifacts {
+                    message,
+                    artifacts: artifacts.clone(),
+                }));
+            }
+            warn!(job_id = %job.id, error = %format!("{error:#}"), "reply check failed; keeping the reply");
+            artifacts.push(reply_check::artifact(
+                reply_check::Outcome::Kept("check_failed"),
+                &before,
+            ));
+            return Ok(None);
+        }
+    };
+    artifacts.push(build_codex_run_log_artifact(
+        &output.events,
+        Some(json!({ "purpose": "reply-check" })),
+    ));
+    let state = output.provider_conversation_state;
+    if !reply_check::resumed_the_turns_thread(thread, state.as_ref(), browser_mode) {
+        artifacts.push(reply_check::artifact(
+            reply_check::Outcome::Kept("thread_not_resumed"),
+            &before,
+        ));
+        return Ok(None);
+    }
+    let checked = if words_only.tried_a_tool() {
+        Err("tried_a_tool")
+    } else if !reply_check::answered(&output.events) {
+        Err("no_reply")
+    } else {
+        extract_codex_outcome(&output.final_json)
+            .ok()
+            .map(|checked| checked.summary)
+            .filter(|summary| {
+                !summary.trim().is_empty()
+                    && summary != DEFAULT_CODEX_OUTCOME_SUMMARY
+                    && classify_internal_codex_fallback_summary(summary).is_none()
+            })
+            .map(|summary| {
+                let summary = browser_hand_back::keep_findings(job, summary, &before);
+                finish_checked_reply(summary, &outcome.actions, names_instafy_md)
+            })
+            .ok_or("no_reply")
+    };
+    let result = match checked {
+        Ok(summary) if summary == before => reply_check::Outcome::Unchanged,
+        Ok(summary) => {
+            outcome.summary = summary;
+            reply_check::Outcome::Changed
+        }
+        Err(reason) => reply_check::Outcome::Kept(reason),
+    };
+    artifacts.push(reply_check::artifact(result, &before));
+    Ok(state)
+}
+
+/// The reply check's words as the person reads them, finished as the turn's own reply was: the
+/// runtime's no-change line ([`NO_FILE_CHANGES_MARKER`]) leaves them, the integration card's
+/// retry phrase comes back ([`augment_summary_for_onboarding_actions`]), and a learning turn's
+/// reply names `INSTAFY.md` ([`mention_instafy_md`]). The check sees the model's words on its
+/// thread, never what the runtime made of them.
+fn finish_checked_reply(words: String, actions: &[CodexAction], names_instafy_md: bool) -> String {
+    let mut reply = take_no_file_changes_marker(&words).unwrap_or(words);
+    augment_summary_for_onboarding_actions(&mut reply, actions);
+    if names_instafy_md && !is_retryable_codex_upstream_summary(&reply) {
+        mention_instafy_md(&mut reply);
+    }
+    reply
+}
+
+/// A learning turn's reply ends by naming `INSTAFY.md` when it does not already: the person is
+/// shown where its notes went, whatever the model wrote.
+fn mention_instafy_md(summary: &mut String) {
+    if summary.contains(learn::INSTAFY_FILENAME) {
+        return;
+    }
+    let trimmed = summary.trim();
+    let base = trimmed.trim_end_matches(['.', '!', '?']);
+    let base = if base.is_empty() { trimmed } else { base };
+    *summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
 }
 
 /// How many attached images a run's turn input carried as image input.

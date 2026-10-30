@@ -93,6 +93,8 @@ For every reader, browser or not:
   search engine or a guessed path.
 - A page that says it is missing ("not found", "are you lost?"): use that
   site's own search box or menu.
+- A page that reads as busy: take one more snapshot in a moment; still nothing,
+  go to the place's own site.
 - Two failed pages on one site: find another source with `instafy web search`
   (no key: `--chain reference-search`), then read its best result; with only
   browser tools, open the home page of another official source (the operator,
@@ -128,7 +130,7 @@ the request, or end the turn and ask.
 
 - Prefer concrete action over narration. If the target and first cue are already known, keep pre-action commentary to one short line at most.
 - Use the browser capability actually exposed for this turn. Personal and Shared Browser are visible interactive transports; the owner-local browser is a separate read-only headless observer. Never fall through from an unavailable transport to a different one.
-- For Personal or Shared Browser, default to one browser-capable runtime per conversation. Owner-local observation instead opens one fresh process per tool call and accepts one URL per call.
+- For Personal or Shared Browser, default to one browser-capable runtime per conversation.
 - Start with the exposed browser tool itself, not install checks (`node -v`, `npx playwright --version`, `npm i`), env or repo searches (`env | rg PLAYWRIGHT`, `command -v playwright`) or runtime introspection (`instafy runtime status`, `instafy --help`); report the tool's concrete error if provisioning failed.
 - For requests like “open this page”, “read the title”, “click this button”, or “continue the current browser session”, the first executable step must target the page directly.
 - Do not reopen `INSTAFY.md`, `AGENTS.md`, or `.agents/skills/**` via shell before the first page action. Project memory and loaded learned blocks are already in context for this run.
