@@ -238,8 +238,8 @@
     "save", "speichern", "enregistrer", "guardar", "salva(?:re)?", "salvar", "opslaan",
   ]);
   const CONSENT_ALL = new RegExp(`${START}(?:${ALL_SOURCE})${END}`, "iu");
-  // The marks a banner puts after a name's words ("Consent →").
-  const TRAILING_MARKS = /[\s.!→›»>]+$/u;
+  // A mark a banner puts after a name's words ("Consent →").
+  const TRAILING_MARK = /[\s.!→›»>]/u;
   const DISMISS_EXACT = /^(?:reject\s+all|decline\s+all|only\s+necessary|necessary\s+only|use\s+necessary\s+only|essential\s+only|only\s+essential|close|dismiss|alle\s+ablehnen|nur\s+notwendige|nur\s+notwendige\s+cookies|nur\s+erforderliche|nur\s+essenzielle|schließen|×|✕)$/iu;
   const PAGE_LABEL = /^(?:\d{1,4}|next|next\s+page|previous|previous\s+page|prev|first|last|older|newer|weiter|zurück|vor|nächste|nächste\s+seite|vorherige|vorherige\s+seite|erste|letzte|seite\s+\d{1,4}|page\s+\d{1,4}|[‹›«»<>…]|\.\.\.)$/iu;
   // Whole names of controls that only open or close part of the page: a side
@@ -542,6 +542,14 @@
     return null;
   }
 
+  // The name without the marks after its words, one character at a time:
+  // a pattern anchored at the end would retry from every mark.
+  function withoutTrailingMarks(name) {
+    let end = name.length;
+    while (end > 0 && TRAILING_MARK.test(name[end - 1])) end -= 1;
+    return name.slice(0, end);
+  }
+
   // What a control's words do in a consent banner: "accept" for an accept
   // word that no "not" or "without" turns into a refusal, "limited" for one
   // limited to the necessary cookies or to a selection, and null for none
@@ -549,7 +557,7 @@
   function consentStep(target, label) {
     if (!label || CONSENT_REJECT_EXACT.test(label)) return null;
     const names = [target.ariaLabel, target.text, target.title, target.value]
-      .map((name) => cleanText(name).replace(TRAILING_MARKS, ""))
+      .map((name) => withoutTrailingMarks(cleanText(name)))
       .filter(Boolean);
     const opener = target.menuOpener === true || lower(target.tag) === "summary";
     const plain = label.replace(CONSENT_NOT_ACCEPT, " ");
