@@ -400,7 +400,7 @@ export function synthesizeAgentJobThreadMessages(
     }
   });
 
-  // A turn Instafy sent again by itself folds into the turn that replaced it.
+  // A turn sent again folds into the turn that replaced it.
   const retryFold = resolveAutomaticRetryFold(collapsedAll);
   const visible =
     retryFold.hiddenPromptIds.size > 0
@@ -550,12 +550,24 @@ export function synthesizeAgentJobThreadMessages(
       return Math.min(minTimestamp, candidate.timestamp);
     }, message.timestamp);
 
-    const earlier = retryFold.earlierAttemptByJobId.get(jobId);
-    const earlierMessages = earlier
-      ? earlier.jobId
+    // Every try this turn replaced, oldest first: a retry that failed and was
+    // tried again carries the tries before it too.
+    const earlierAttempts: ChatMessage[][] = [];
+    const walked = new Set<string>([jobId]);
+    for (let earlier = retryFold.earlierAttemptByJobId.get(jobId); earlier; ) {
+      const failureId = earlier.failureId;
+      const attempt = earlier.jobId
         ? (threadMessagesByJobId.get(earlier.jobId) ?? [])
-        : collapsedAll.filter((candidate) => candidate.id === earlier.failureId)
-      : [];
+        : collapsedAll.filter((candidate) => candidate.id === failureId);
+      if (attempt.length > 0) {
+        earlierAttempts.unshift(attempt);
+      }
+      if (!earlier.jobId || walked.has(earlier.jobId)) {
+        break;
+      }
+      walked.add(earlier.jobId);
+      earlier = retryFold.earlierAttemptByJobId.get(earlier.jobId);
+    }
     output.push({
       id: `agent-job-thread:${jobId}`,
       role: "assistant",
@@ -566,7 +578,7 @@ export function synthesizeAgentJobThreadMessages(
         messageType: "agent_job_thread",
         jobId,
         threadMessages,
-        ...(earlierMessages.length > 0 ? { earlierAttempts: [earlierMessages] } : {}),
+        ...(earlierAttempts.length > 0 ? { earlierAttempts } : {}),
         ...(pendingJobIds.has(jobId) ? { autoRetryPending: true } : {}),
       },
     });

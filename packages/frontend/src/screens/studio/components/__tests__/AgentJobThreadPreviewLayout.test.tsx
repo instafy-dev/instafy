@@ -728,6 +728,44 @@ describe("AgentJobThreadPreviewLayout", () => {
       expect(container.textContent).not.toContain("Second try");
     });
 
+    // Try again pressed on a retry that failed too: three tries, each named.
+    it("names every try when a retry failed and was tried again", async () => {
+      const now = Date.now();
+      const secondTry = failedAttempt(now).map((entry) => ({
+        ...entry,
+        id: `second-${entry.id}`,
+        metadata: { ...(entry.metadata as Record<string, unknown>), jobId: "second-job" },
+      }));
+      const base = createMessage();
+      const turn = (threadMessages: ChatMessage[]) =>
+        createMessage({
+          metadata: { ...base.metadata, threadMessages, earlierAttempts: [failedAttempt(now), secondTry] },
+        });
+
+      await act(async () => {
+        root.render(<LiveAgentJobThreadPreview message={turn([reply(now)])} />);
+      });
+      const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
+      expect(line?.textContent).toBe("Took three tries" + "Details");
+      await act(async () => {
+        line?.click();
+      });
+      expect(
+        [...container.querySelectorAll('[data-testid="turn-activity-earlier-attempt"] > p:first-child')].map(
+          (label) => label.textContent,
+        ),
+      ).toEqual(["First try", "Second try"]);
+
+      await act(async () => {
+        root.render(
+          <LiveAgentJobThreadPreview
+            message={turn([commandStep("retry-pwd", null, { timestamp: now - 2_000 }), reply(now)])}
+          />,
+        );
+      });
+      expect(container.querySelector('[data-testid="turn-activity-attempts"]')?.textContent).toContain("Third try");
+    });
+
     it("shows the failure block only when the retry fails too, with both tries behind its Details", async () => {
       const now = Date.now();
       const message = retriedTurn(
@@ -796,6 +834,57 @@ describe("AgentJobThreadPreviewLayout", () => {
       // No failure styling: no red rule beside the line.
       expect(container.querySelector(".border-rose-200")).toBeNull();
       expect(container.textContent).not.toMatch(/Run failed|didn't finish|codex|workspace/i);
+    });
+
+    // The failed turn folds away once its retry shows something. A keyboard or
+    // screen reader user resting on it (after Try again or Cancel) lands on
+    // the turn that replaced it, never on the page.
+    it("hands focus from the folded failed turn to the turn that replaced it", async () => {
+      const now = Date.now();
+      const base = createMessage();
+      const failedTurn = createMessage({
+        id: "agent-job-thread:failed",
+        metadata: { ...base.metadata, jobId: "failed-job", threadMessages: failedAttempt(now), autoRetryPending: true },
+      });
+      const retryTurn = createMessage({
+        id: "agent-job-thread:retry",
+        metadata: {
+          ...base.metadata,
+          threadMessages: [commandStep("retry-pwd", null, { timestamp: now - 2_000 }), reply(now)],
+          earlierAttempts: [failedAttempt(now)],
+        },
+      });
+      const transcript = (rows: ChatMessage[]) => (
+        <RunFailureRetryProvider value={{ pendingRetryKey: null, requestRetry: vi.fn(), autoRetryingKey: null }}>
+          {rows.map((row) => (
+            <LiveAgentJobThreadPreview key={row.id} message={row} />
+          ))}
+        </RunFailureRetryProvider>
+      );
+
+      for (const focused of [true, false]) {
+        await act(async () => {
+          root.render(transcript([failedTurn]));
+        });
+        const quietLine = container.querySelector<HTMLElement>('[data-testid="run-failure-auto-retrying"]');
+        expect(quietLine).not.toBeNull();
+        if (focused) {
+          quietLine?.focus();
+          expect(document.activeElement).toBe(quietLine);
+        }
+        await act(async () => {
+          root.render(transcript([retryTurn]));
+        });
+
+        const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
+        expect(line?.textContent).toBe("Ran a command" + "Details");
+        // Only focus that was on the failed turn moves.
+        expect(document.activeElement).toBe(focused ? line : document.body);
+        line?.blur();
+        await act(async () => {
+          root.render(transcript([]));
+        });
+      }
     });
   });
 
@@ -1320,12 +1409,15 @@ describe("AgentJobThreadPreviewLayout", () => {
       await act(async () => retry?.click());
       expect(requestRetry).toHaveBeenCalledTimes(1);
 
-      // The raw diagnostic sits behind Details only.
+      // The diagnostic sits behind Details only, with its status and without
+      // the proxy's own address.
       expect(container.querySelector('[data-testid="run-failure-details"]')).toBeNull();
       await act(async () => {
         container.querySelector<HTMLButtonElement>('[data-testid="run-failure-details-toggle"]')?.click();
       });
-      expect(container.querySelector('[data-testid="run-failure-details"]')?.textContent).toBe(REFRESH_424);
+      expect(container.querySelector('[data-testid="run-failure-details"]')?.textContent).toBe(
+        "unexpected status 424 Failed Dependency: Upstream credentials could not be refreshed.",
+      );
     });
 
     it.each(["byoc", null])("asks the person to sign in again on their own AI (%s)", async (aiAccessMode) => {
