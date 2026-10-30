@@ -7055,18 +7055,23 @@ async fn the_end_of_a_run_closes_octos_tabs_apart_from_those_the_person_kept() {
 /// (`/json/list`) shows the run's page at `run_page_url`; every other request
 /// succeeds. It records the request line of every connection.
 fn devtools_listing_run_page(run_page_url: &str) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+    devtools_listing(json!([
+        { "id": "TAB-OTHER-CHAT", "type": "page", "url": "https://roborock.example/" },
+        { "id": "page-target", "type": "page", "url": run_page_url },
+        { "id": "TAB-A", "type": "page", "url": "https://metro.example/maps" },
+        { "id": "TAB-B", "type": "page", "url": "https://trams.example/planner" }
+    ]))
+}
+
+/// A loopback DevTools endpoint that lists these tabs, and records each
+/// request it answers.
+fn devtools_listing(list: JsonValue) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
     use std::io::{BufRead, BufReader};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("fake devtools");
     let port = listener.local_addr().expect("fake devtools address").port();
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = Arc::clone(&requests);
-    let list = json!([
-        { "id": "TAB-OTHER-CHAT", "type": "page", "url": "https://roborock.example/" },
-        { "id": "page-target", "type": "page", "url": run_page_url },
-        { "id": "TAB-A", "type": "page", "url": "https://metro.example/maps" },
-        { "id": "TAB-B", "type": "page", "url": "https://trams.example/planner" }
-    ])
-    .to_string();
+    let list = list.to_string();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
@@ -7189,12 +7194,12 @@ async fn a_run_that_read_only_in_its_own_tabs_leaves_the_last_one_as_the_chats_p
         chat_tabs(),
         json!({ "version": 1, "tabs": [{ "tabId": "TAB-B", "runId": second.to_string() }] })
     );
-    // The chat's page shows a page of its own: every tab of Octo's closes, and
-    // that page comes to the front, never the neighbour Chromium would show.
-    // Nothing is added to the record.
+    // The chat's page shows a page of its own, and Octo went back to it at
+    // the end: every tab of Octo's closes, and that page comes to the front,
+    // never the neighbour Chromium would show. Nothing is added to the record.
     let (seen, _) = end_run(
         "https://www.visitlisboa.example/en/places/belem",
-        json!("TAB-B"),
+        JsonValue::Null,
     );
     assert_eq!(
         seen,
@@ -7208,6 +7213,338 @@ async fn a_run_that_read_only_in_its_own_tabs_leaves_the_last_one_as_the_chats_p
     assert_eq!(
         chat_tabs(),
         json!({ "version": 1, "tabs": [{ "tabId": "TAB-B", "runId": second.to_string() }] })
+    );
+}
+
+/// A browser turn that read the chat's own page, then went on in a tab of
+/// its own and read there last (local test, Oct 30: Visit Porto's search in
+/// the chat's tab, then Metro do Porto in Octo's tab 2). The page the person
+/// is left with is the one Octo read last: that tab stays as the chat's page
+/// and comes to the front, although the chat's own tab shows a page. Before,
+/// it closed, and the chat went back to the older page.
+#[tokio::test]
+async fn a_run_that_read_last_in_its_own_tab_leaves_that_tab_as_the_chats_page() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    let (port, requests) =
+        devtools_listing_run_page("https://www.visitporto.example/en-GB/search?q=lello");
+    let cancel_signal = JobCancelSignal::new();
+    let run_id = Uuid::new_v4();
+    let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        directory.path().join("agent-control.json"),
+        approval_dir.clone(),
+        ApprovalStart::Routine,
+        run_id,
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire run");
+    guard.cdp_base = Some(("127.0.0.1".to_string(), port));
+    write_run_record(
+        &approval_dir,
+        "tabs.json",
+        &guard,
+        json!({
+            "currentTabId": "TAB-A",
+            "tabs": [
+                { "tabId": "TAB-A", "approvedOrigins": [] },
+                { "tabId": "TAB-B", "approvedOrigins": [] }
+            ]
+        }),
+    );
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+    assert_eq!(
+        *requests.lock().expect("requests"),
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-B HTTP/1.1",
+            "GET /json/activate/TAB-A HTTP/1.1",
+        ])
+    );
+    let chat_tabs: JsonValue = serde_json::from_slice(
+        &std::fs::read(approval_dir.join("chat-tabs.json")).expect("chat tabs"),
+    )
+    .expect("chat tabs JSON");
+    assert_eq!(
+        chat_tabs,
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-A", "runId": run_id.to_string() }] })
+    );
+}
+
+/// Ends a run on page `page-target` whose tab record names Octo's tabs A and
+/// B (with the sites approved in each) and the tab it acts on at the end,
+/// against a loopback DevTools endpoint that lists `list`. The requests that
+/// endpoint answered, and the run.
+fn end_run_listing(
+    approval_dir: &Path,
+    marker_path: &Path,
+    list: JsonValue,
+    current: JsonValue,
+    tab_origins: [&[&str]; 2],
+) -> (Vec<String>, Uuid) {
+    let (port, requests) = devtools_listing(list);
+    let cancel_signal = JobCancelSignal::new();
+    let run_id = Uuid::new_v4();
+    let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        marker_path.to_path_buf(),
+        approval_dir.to_path_buf(),
+        ApprovalStart::Routine,
+        run_id,
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire run");
+    guard.cdp_base = Some(("127.0.0.1".to_string(), port));
+    write_run_record(
+        approval_dir,
+        "tabs.json",
+        &guard,
+        json!({
+            "currentTabId": current,
+            "tabs": [
+                { "tabId": "TAB-A", "approvedOrigins": tab_origins[0] },
+                { "tabId": "TAB-B", "approvedOrigins": tab_origins[1] }
+            ]
+        }),
+    );
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+    let seen = requests.lock().expect("requests").clone();
+    (seen, run_id)
+}
+
+/// A turn whose last step opened a tab of Octo's that never loaded (local
+/// test, Oct 30: "Tried opening google.com") left that tab, blank or the
+/// browser's error page, as the chat's page, and the page Octo had read in the
+/// chat's own tab stopped being the chat's. A tab that shows no page is not
+/// kept: Octo's tabs close, and the chat's own page comes to the front.
+#[tokio::test]
+async fn a_tab_of_octos_whose_page_never_loaded_is_not_left_as_the_chats_page() {
+    for failed in ["chrome-error://chromewebdata/", "about:blank"] {
+        let directory = tempfile::tempdir().expect("marker tempdir");
+        let approval_dir = directory.path().join("approvals");
+        let (seen, _) = end_run_listing(
+            &approval_dir,
+            &directory.path().join("agent-control.json"),
+            json!([
+                { "id": "TAB-B", "type": "page", "url": failed },
+                { "id": "page-target", "type": "page", "url": "https://www.visitporto.example/en-GB/search?q=lello" },
+                { "id": "TAB-A", "type": "page", "url": "https://metro.example/maps" }
+            ]),
+            json!("TAB-B"),
+            [&[], &[]],
+        );
+        assert_eq!(
+            seen,
+            strings(&[
+                "GET /json/list HTTP/1.1",
+                "GET /json/close/TAB-A HTTP/1.1",
+                "GET /json/close/TAB-B HTTP/1.1",
+                "GET /json/activate/page-target HTTP/1.1",
+            ]),
+            "{failed}"
+        );
+        assert!(!approval_dir.join("chat-tabs.json").exists(), "{failed}");
+    }
+    // While the chat's own page is still blank, the newest of Octo's tabs
+    // that shows a page stays instead.
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    let (seen, run_id) = end_run_listing(
+        &approval_dir,
+        &directory.path().join("agent-control.json"),
+        json!([
+            { "id": "TAB-B", "type": "page", "url": "chrome-error://chromewebdata/" },
+            { "id": "page-target", "type": "page", "url": "about:blank" },
+            { "id": "TAB-A", "type": "page", "url": "https://metro.example/maps" }
+        ]),
+        json!("TAB-B"),
+        [&[], &[]],
+    );
+    assert_eq!(
+        seen,
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-B HTTP/1.1",
+            "GET /json/activate/TAB-A HTTP/1.1",
+        ])
+    );
+    let chat_tabs: JsonValue = serde_json::from_slice(
+        &std::fs::read(approval_dir.join("chat-tabs.json")).expect("chat tabs"),
+    )
+    .expect("chat tabs JSON");
+    assert_eq!(
+        chat_tabs,
+        json!({ "version": 1, "tabs": [{ "tabId": "TAB-A", "runId": run_id.to_string() }] })
+    );
+}
+
+/// A follow-up goes on in the tab the turn left the chat (Studio's
+/// `leftByRun`, naming the run it continues). The run's approvals were tied
+/// to the run's own page, so the follow-up in the kept tab lost them: it
+/// asked again for every site, and off an attested host lost routine
+/// browsing too. It now carries routine browsing and the sites approved in
+/// that tab, never those approved on the chat's earlier page.
+#[tokio::test]
+async fn a_follow_up_in_the_tab_a_turn_left_its_chat_keeps_that_tabs_approvals() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    let marker_path = directory.path().join("agent-control.json");
+    let person = Uuid::new_v4();
+    let (port, _) =
+        devtools_listing_run_page("https://www.visitporto.example/en-GB/search?q=lello");
+    let acquire = |run_id: Uuid, page: &str, continues: Option<Uuid>| {
+        let cancel_signal = JobCancelSignal::new();
+        let mut guard = SharedBrowserAgentControlGuard::acquire_continuing(
+            marker_path.clone(),
+            approval_dir.clone(),
+            ApprovalStart::Ask,
+            run_id,
+            person,
+            page,
+            "Octo",
+            continues,
+            &[],
+            cancel_signal.clone(),
+            Duration::from_secs(60),
+        )
+        .expect("acquire run");
+        guard.cdp_base = Some(("127.0.0.1".to_string(), port));
+        (guard, cancel_signal)
+    };
+    let end = |(guard, cancel_signal): (SharedBrowserAgentControlGuard, JobCancelSignal)| {
+        cancel_signal.confirm_shared_browser_shutdown();
+        drop(guard);
+    };
+    let state = || -> Option<JsonValue> {
+        std::fs::read(approval_dir.join("state.json"))
+            .ok()
+            .map(|bytes| serde_json::from_slice(&bytes).expect("state JSON"))
+    };
+
+    // The turn: a site approved on the chat's page, routine browsing allowed,
+    // and the metro site approved in Octo's tab A, where it read last.
+    let first = Uuid::new_v4();
+    let run = acquire(first, "page-target", None);
+    write_run_state(
+        &marker_path,
+        &approval_dir,
+        &["https://www.visitporto.example"],
+        true,
+    );
+    write_run_record(
+        &approval_dir,
+        "tabs.json",
+        &run.0,
+        json!({
+            "currentTabId": "TAB-A",
+            "tabs": [
+                { "tabId": "TAB-A", "approvedOrigins": ["https://metro.example"] },
+                { "tabId": "TAB-B", "approvedOrigins": [] }
+            ]
+        }),
+    );
+    end(run);
+
+    // The follow-up, in tab A.
+    let run = acquire(Uuid::new_v4(), "TAB-A", Some(first));
+    let carried = state().expect("carried state");
+    assert_eq!(carried["approvedOrigins"], json!(["https://metro.example"]));
+    assert_eq!(carried["routineBrowsingAllowed"], true);
+    assert_eq!(carried["browserPageId"], "TAB-A");
+    end(run);
+
+    // Only in that tab: a run in another tab of the turn carries nothing.
+    let second = Uuid::new_v4();
+    let run = acquire(second, "page-target", None);
+    write_run_state(
+        &marker_path,
+        &approval_dir,
+        &["https://www.visitporto.example"],
+        true,
+    );
+    write_run_record(
+        &approval_dir,
+        "tabs.json",
+        &run.0,
+        json!({
+            "currentTabId": "TAB-A",
+            "tabs": [
+                { "tabId": "TAB-A", "approvedOrigins": ["https://metro.example"] },
+                { "tabId": "TAB-B", "approvedOrigins": [] }
+            ]
+        }),
+    );
+    end(run);
+    let run = acquire(Uuid::new_v4(), "TAB-B", Some(second));
+    assert!(state().is_none());
+    end(run);
+}
+
+/// Each turn that ends in a tab of Octo's keeps it as the chat's page, one
+/// more tab of the person's. As when Studio opens a tab for a chat, past 24
+/// tabs the one used least recently closes: never the kept tab, the chat's
+/// earlier page, the tab used last, or one of Octo's.
+#[tokio::test]
+async fn a_tab_kept_as_the_chats_page_makes_room_past_twenty_four_tabs() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let approval_dir = directory.path().join("approvals");
+    let page = |id: &str, url: &str| json!({ "id": id, "type": "page", "url": url });
+    let mut list = vec![
+        page("TAB-A", "https://metro.example/maps"),
+        page(
+            "page-target",
+            "https://www.visitporto.example/en-GB/search?q=lello",
+        ),
+        page("TAB-B", "https://trams.example/planner"),
+    ];
+    for index in 1..=23 {
+        list.push(page(
+            &format!("OLD-{index}"),
+            &format!("https://site-{index}.example/"),
+        ));
+    }
+    let (seen, _) = end_run_listing(
+        &approval_dir,
+        &directory.path().join("agent-control.json"),
+        JsonValue::Array(list.clone()),
+        json!("TAB-A"),
+        [&[], &[]],
+    );
+    // 25 tabs once B closes: the one used least recently makes room.
+    assert_eq!(
+        seen,
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-B HTTP/1.1",
+            "GET /json/activate/TAB-A HTTP/1.1",
+            "GET /json/close/OLD-23 HTTP/1.1",
+        ])
+    );
+    // At 24 tabs, none closes.
+    list.pop();
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let (seen, _) = end_run_listing(
+        &directory.path().join("approvals"),
+        &directory.path().join("agent-control.json"),
+        JsonValue::Array(list),
+        json!("TAB-A"),
+        [&[], &[]],
+    );
+    assert_eq!(
+        seen,
+        strings(&[
+            "GET /json/list HTTP/1.1",
+            "GET /json/close/TAB-B HTTP/1.1",
+            "GET /json/activate/TAB-A HTTP/1.1",
+        ])
     );
 }
 

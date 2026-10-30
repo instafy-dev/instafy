@@ -167,14 +167,16 @@ describe("SitePreviewPane", () => {
   });
 
   // A local test: a restarted site's pane was blank for 16 to 26 s, and the
-  // map's for 5 to 18 s, with nothing said.
-  it("says Loading… over a frame whose page has not loaded, and tells the cards once it has", async () => {
+  // map's for 5 to 18 s, with nothing said. Local test, Oct 30: after a
+  // press the pane said "Opening …", then "Loading…", then went blank: the
+  // line it opened with now stays until the site's first page.
+  it("says it is opening the site until its first page loads, Loading… after that, and tells the cards once it has", async () => {
     const shown = vi.fn();
     const stop = waitForSitePreviewPage(PREVIEW_ID, shown);
     await render();
     expect(pane().dataset.state).toBe("live");
     expect(frame()).not.toBeNull();
-    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Loading…");
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Opening Docs site…");
     await act(async () => frame()!.dispatchEvent(new Event("load")));
     expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
     expect(shown).toHaveBeenCalledOnce();

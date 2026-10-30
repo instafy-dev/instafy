@@ -488,6 +488,8 @@ export function BrowserSessionModal({
   spaceBusy = false,
   runApproval = null,
   conversationId = null,
+  chatPageIds = null,
+  anotherChatTurn = false,
   agentArrival = null,
   spaceHasTeammates = false,
 }: {
@@ -586,6 +588,21 @@ export function BrowserSessionModal({
    */
   conversationId?: string | null;
   /**
+   * The tabs this chat's view shows (chatBrowserTab.ts's `useChatViewTabs`):
+   * the chat's own tab and Octo's tabs of its turns while the browser lists
+   * them as Octo's. The stage draws a picture, and the address bar an
+   * address, only while one of them is in front; any other tab (another
+   * chat's page, or none named in front) leaves the stage blank. Null for a
+   * view that is not a chat's own (an older browser that cannot give a chat
+   * a tab): it shows the tab in front.
+   */
+  chatPageIds?: readonly string[] | null;
+  /**
+   * A browser turn of another chat holds the browser: the view shows none of
+   * it, only that Octo is working in another chat.
+   */
+  anotherChatTurn?: boolean;
+  /**
    * A browser turn of this chat on its way, with the site its card named:
    * over a blank tab the stage says where Octo is going until its first page.
    */
@@ -607,11 +624,25 @@ export function BrowserSessionModal({
   const [collaborationConnectionKey, setCollaborationConnectionKey] =
     useState<string | null>(null);
   const sharedBrowserViewportOnly = sharedBrowserChrome !== null;
+  // The tab in front, when the browser names one; never its first tab in its
+  // place, which is whichever chat's page opened first.
   const sharedBrowserActivePage =
-    sharedBrowserChrome?.pages.find((page) => page.isActive) ??
-    sharedBrowserChrome?.pages[0] ??
-    null;
+    sharedBrowserChrome?.pages.find((page) => page.isActive) ?? null;
   const sharedBrowserPageId = sharedBrowserActivePage?.id ?? null;
+  // A chat's view shows only that chat's own tabs (`chatPageIds`), and none
+  // during another chat's turn: otherwise its stage is blank, with no
+  // address above it, and says what Octo is doing in one line.
+  const chatPageInFront = !sharedBrowserViewportOnly || chatPageIds === null ||
+    (sharedBrowserActivePage !== null && chatPageIds.includes(sharedBrowserActivePage.id));
+  const stageShowsPage = chatPageInFront && !anotherChatTurn;
+  // Over a blank stage the address bar shows no address, and its history,
+  // reload and Send page have no page to act on.
+  const shownChromePages = useMemo(
+    () => sharedBrowserChrome && !stageShowsPage
+      ? sharedBrowserChrome.pages.map((page) => (page.isActive ? { ...page, isActive: false } : page))
+      : sharedBrowserChrome?.pages ?? [],
+    [sharedBrowserChrome, stageShowsPage],
+  );
   // Where the page on screen is now. A still picture of it is kept only
   // while it stays there: a picture of another address, such as the page an
   // earlier turn left, is never shown under this one.
@@ -652,14 +683,18 @@ export function BrowserSessionModal({
     (participant) => participant.id !== collaboration.client.participantId,
   ));
   const remoteControllerPresent = remoteController !== null;
+  const selfControls = collaborationSelfOwnsControl(collaboration.client);
   useEffect(() => {
-    onPresenceChange?.({ status: presenceStatus, othersPresent, remoteController: remoteControllerPresent });
-  }, [onPresenceChange, othersPresent, presenceStatus, remoteControllerPresent]);
+    onPresenceChange?.({ status: presenceStatus, othersPresent, remoteController: remoteControllerPresent, selfControls });
+  }, [onPresenceChange, othersPresent, presenceStatus, remoteControllerPresent, selfControls]);
   useEffect(() => () => onPresenceChange?.(null), [onPresenceChange]);
   const humanOwnsBrowserControl =
     canControlBrowser && collaborationSelfOwnsControl(collaboration.client) && controlOwner.kind === "human";
   const humanInputEnabled =
     humanOwnsBrowserControl && sharedBrowserHumanInputEnabled({ controlOwner, transportActive });
+  // Input reaches the page only while the stage shows it: never a tab that is
+  // not this chat's, under a blank stage.
+  const stageInputEnabled = humanInputEnabled && stageShowsPage;
   const inputAuthorityKey = effectiveAgentControlOwner
     ? `agent:${effectiveAgentControlOwner.displayName}`
     : collaboration.client.state?.controlOwner?.kind === "human"
@@ -734,7 +769,7 @@ export function BrowserSessionModal({
   const webRtcConnectionRef = useRef<WebRtcBrowserConnection | null>(null);
   const webRtcProjectIdRef = useRef<string | null>(null);
   const preferRuntimeIdRef = useRef(preferRuntimeId);
-  const humanInputEnabledRef = useRef(humanInputEnabled);
+  const stageInputEnabledRef = useRef(stageInputEnabled);
   const ensureSpaceMachineRef = useRef(ensureSpaceMachine);
   const conversationRuntimeIdRef = useRef(conversationRuntimeId);
   const attachOnlyRef = useRef(attachOnly);
@@ -754,7 +789,7 @@ export function BrowserSessionModal({
   attachOnlyRef.current = attachOnly;
   openedByPersonRef.current = openedByPerson;
   preferRuntimeIdRef.current = preferRuntimeId;
-  humanInputEnabledRef.current = humanInputEnabled;
+  stageInputEnabledRef.current = stageInputEnabled;
   webRtcConnectionRef.current = webRtcConnection;
   browserOriginConnectionRef.current = browserOriginConnection;
   const [viewerOverride, setViewerOverride] =
@@ -1009,6 +1044,23 @@ export function BrowserSessionModal({
     activeSharedBrowserViewerKind === "rfb" && rfbViewOnlyAvailable && !humanInputEnabled;
   const rfbViewOnlyLaneRef = useRef(rfbViewOnlyLane);
   rfbViewOnlyLaneRef.current = rfbViewOnlyLane;
+  // RFB draws whatever tab is in front, with no page of its own, so someone
+  // else in control (another person, or this person's other window) can
+  // bring another tab forward before the tab list is read again. Their view
+  // says which tab it shows: while that is none of the chat's tabs, or it
+  // names none, the stage draws no picture, and none is kept as the chat's.
+  const collaborationOwner = collaboration.client.connectionStatus === "connected"
+    ? collaboration.client.state?.controlOwner ?? null
+    : null;
+  const remoteHumanPageId = collaborationOwner?.kind === "human" && collaboration.client.participantId &&
+    collaborationOwner.participantId !== collaboration.client.participantId
+    ? collaboration.client.state?.participants.find((participant) => participant.id === collaborationOwner.participantId)?.pageId ?? null
+    : undefined;
+  const rfbShowsAnotherTab = activeSharedBrowserViewerKind === "rfb" && sharedBrowserViewportOnly &&
+    chatPageIds !== null && remoteHumanPageId !== undefined &&
+    (remoteHumanPageId === null || !chatPageIds.includes(remoteHumanPageId));
+  const rfbShowsAnotherTabRef = useRef(rfbShowsAnotherTab);
+  rfbShowsAnotherTabRef.current = rfbShowsAnotherTab;
   const sharedBrowserConnectionPageId =
     activeSharedBrowserViewerKind === "rfb" ? null : sharedBrowserPageId;
   // URL resolution follows renderer selection in an effect. Never mount the
@@ -2787,11 +2839,13 @@ export function BrowserSessionModal({
         disposeFrameObserver = observeBrowserRfbFrames(rfb, () => {
           if (cancelled || !retainFrameRef.current || browserDataClearInFlightRef.current) return;
           painted = true;
-          paintedFrameScopeRef.current = frameScopeRef.current;
+          // A picture of a tab someone else brought forward is never kept as
+          // the chat's page (rfbShowsAnotherTab).
+          paintedFrameScopeRef.current = rfbShowsAnotherTabRef.current ? null : frameScopeRef.current;
           paintedFrameSurfaceRef.current = rfb?._canvas ?? null;
           markFrameConnected();
         }, () => `${framePaintEpochRef.current}:${frameScopeRef.current}`);
-        applySharedBrowserRfbHumanInput(rfb, humanInputEnabledRef.current);
+        applySharedBrowserRfbHumanInput(rfb, stageInputEnabledRef.current);
         const scaledResizeInstalled = installBrowserRfbScaledResize(rfb, {
           renderScale: rfbRenderScale,
           maxFramebufferPixels: rfbMaxFramebufferPixels,
@@ -2934,8 +2988,8 @@ export function BrowserSessionModal({
   ]);
 
   useLayoutEffect(() => {
-    applySharedBrowserRfbHumanInput(rfbRef.current, humanInputEnabled);
-    if (!humanInputEnabled) {
+    applySharedBrowserRfbHumanInput(rfbRef.current, stageInputEnabled);
+    if (!stageInputEnabled) {
       const activeElement = document.activeElement;
       if (
         activeElement instanceof HTMLElement &&
@@ -2944,7 +2998,7 @@ export function BrowserSessionModal({
         activeElement.blur();
       }
     }
-  }, [containerNode, humanInputEnabled]);
+  }, [containerNode, stageInputEnabled]);
 
   useEffect(() => {
     if (!isOpen || !transportActive || !sharedBrowserPageId || !containerNode) {
@@ -3230,18 +3284,28 @@ export function BrowserSessionModal({
     [fail, fallBackFromViewer],
   );
 
+  // While the view reconnects, its surface keeps what it last drew. That is
+  // kept on screen only when it was drawn with the chat's page in front as it
+  // is now (`paintedFrameScopeRef`); a picture of another tab, such as
+  // another chat's page shown before, is dropped, and only a still of the
+  // page in front (frozenFrameUrl, kept for that page alone) stands in.
+  const heldPictureIsChats = paintedFrameScopeRef.current === frameScope;
+  const liveSurfaceShown = stageShowsPage && !rfbShowsAnotherTab &&
+    (heldPictureIsChats || !(status === "connecting" && displayStatus === "connected"));
   // While Octo drives, the stage shows the page it is on: the live picture
   // (a viewer that may watch, such as RFB's view-only lane), else a still
   // of that same page, else one plain line saying where Octo is. Never an
   // empty black stage.
-  const agentPictureShown = Boolean(frozenFrameUrl) ||
-    (activeSharedBrowserViewerKind !== null && displayStatus === "connected");
+  const agentPictureShown = (stageShowsPage && Boolean(frozenFrameUrl)) ||
+    (liveSurfaceShown && activeSharedBrowserViewerKind !== null && displayStatus === "connected");
   const agentPage = effectiveAgentControlOwner
     ? agentReadingPages.find((page) => page.id === sharedBrowserPageId) ?? agentReadingPages[0] ?? null
     : null;
-  // Over a blank tab a turn of this chat is on its way to: where Octo is going.
+  // Over a blank stage, or the blank tab a turn of this chat is on its way
+  // to: where Octo is going, or that it is working in another chat.
   const agentArrivalNote = viewLive
-    ? browserArrivalNote(agentArrival, sharedBrowserActivePage, effectiveAgentControlOwner?.displayName ?? "Octo")
+    ? browserArrivalNote(agentArrival, stageShowsPage ? sharedBrowserActivePage : null,
+      effectiveAgentControlOwner?.displayName ?? "Octo", { anotherChatTurn })
     : null;
   const agentWhereabouts = effectiveAgentControlOwner && viewLive && !agentPictureShown && !agentArrivalNote
     ? agentPage
@@ -3257,7 +3321,7 @@ export function BrowserSessionModal({
       : "bg-slate-100 dark:bg-slate-950";
   // The row of pages Octo reads, with its one Take over, above the stage.
   const readingRowShown = !shouldCollapseDocked && fillContainer && sharedBrowserChrome !== null &&
-    viewLive && effectiveAgentControlOwner !== null && agentReadingPages.length > 0;
+    viewLive && !anotherChatTurn && effectiveAgentControlOwner !== null && agentReadingPages.length > 0;
   const readingRowCanTakeOver = browserHumanInputOptions.canTakeOver &&
     (!browserHumanInputState.active || browserHumanInputState.busy === "takeover");
   const recoveryRuntimeLimit = error && limitReached ? {
@@ -3462,6 +3526,7 @@ export function BrowserSessionModal({
       {!shouldCollapseDocked && fillContainer && sharedBrowserChrome ? (
         <SharedBrowserChrome
           {...sharedBrowserChrome}
+          pages={shownChromePages}
           // Outside live the address field is empty and disabled: the card
           // says why.
           resolved={viewLive && sharedBrowserChrome.resolved}
@@ -3580,7 +3645,7 @@ export function BrowserSessionModal({
               <Text variant="body" tone="muted">{agentWhereabouts}</Text>
             </div>
           ) : null}
-          {frozenFrameUrl ? (
+          {frozenFrameUrl && stageShowsPage ? (
             <img
               alt=""
               aria-hidden="true"
@@ -3599,6 +3664,9 @@ export function BrowserSessionModal({
                   ? "absolute inset-0 overflow-auto touch-pan-x touch-pan-y touch-pinch-zoom"
                   : "absolute inset-0 overflow-hidden",
               frozenFrameUrl ? "opacity-0" : "",
+              // Kept connected, so the chat's page shows at once when it is
+              // in front again.
+              liveSurfaceShown ? "" : "invisible",
             ].join(" ")}
           >
             {resolvedSharedBrowserViewerKind === "webrtc" && webRtcConnection ? (
@@ -3619,7 +3687,7 @@ export function BrowserSessionModal({
                   )
                 }
                 inputEnabled={
-                  humanInputEnabled &&
+                  stageInputEnabled &&
                   webRtcInputTargetsActivePage(
                     webRtcConnection.pageId,
                     sharedBrowserConnectionPageId,
@@ -3638,14 +3706,14 @@ export function BrowserSessionModal({
                 inputAuthorityKey={inputAuthorityKey}
                 connectionGeneration={connectAttempt}
                 active={transportActive}
-                inputEnabled={humanInputEnabled}
+                inputEnabled={stageInputEnabled}
                 onConnected={handleCdpScreencastConnected}
                 onDisconnected={handleCdpScreencastDisconnected}
                 onTransportError={handleCdpScreencastError}
               />
             ) : null}
           </div>
-          {!shouldCollapseDocked && displayStatus === "connected" ? (
+          {!shouldCollapseDocked && displayStatus === "connected" && stageShowsPage ? (
             <>
               {remoteController && transportActive ? (
                 <div
@@ -3673,7 +3741,7 @@ export function BrowserSessionModal({
               {effectiveAgentControlOwner ? <ActionTicker actions={agentTurnActions} /> : null}
               <RemoteBrowserMobileKeyboard
                 enabled={
-                  humanInputEnabled && activeSharedBrowserViewerKind !== "rfb"
+                  stageInputEnabled && activeSharedBrowserViewerKind !== "rfb"
                 }
                 onMessage={dispatchMobileBrowserInput}
                 onOccupiedHeightChange={setMobileKeyboardOccupiedHeight}

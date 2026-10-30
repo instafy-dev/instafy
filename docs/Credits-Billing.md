@@ -414,7 +414,9 @@ A turn is billed once, from the tokens of its first attempt: the `turn.completed
 of its first Codex run log (`extract_turn_usage_from_artifacts`). When the runtime tries again
 inside the same turn (a recovery retry, which Studio shows as "Trying again…", or a final wrap-up
 pass after a missing answer), that attempt is not billed, and neither is the routing check the
-runtime makes with the model before a building turn. An automatic retry that Studio sends is a turn
+runtime makes with the model before a building turn, nor the reply check a turn that read pages
+makes on its own thread before its reply posts (one request, served from the thread's cache: about
+one credit at the managed rates after a long browser turn). An automatic retry that Studio sends is a turn
 of its own (above).
 
 ### Why a short follow-up can cost as much as a long turn
@@ -459,7 +461,8 @@ uncached from there, which at a change of lane is already the case.
 
 The runtime also emits a content-free `ai/task-usage` artifact (`version: 1`) for
 instrumented root Codex invocations. Its calls distinguish `routing`, `main`,
-`recovery` and `finalization`, and identify each root invocation and internal
+`recovery` and `finalization` (a wrap-up pass after a missing answer, or the reply check of a turn
+that read pages), and identify each root invocation and internal
 attempt separately. This is diagnostic measurement: it does not change customer
 credit deductions, prompt counting or participation, and adds no conversation messages.
 The existing credit reconciliation still uses the primary run log's usage.

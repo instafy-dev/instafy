@@ -4,10 +4,10 @@
 // from the fixtures; Wikimedia's answers come from a test transport), and its page is the compare starter with the
 // turn's data.json. The maker's official website as Wikidata records it is its bare domain, which does not answer: the
 // read's tell names the "www." address, which does. It passes every check with a search key and without one (then the
-// reviews come from a publisher's own page), and each way of breaking a rule (an invented price, a sibling model's
+// reviews come from a reviewer's home page), and each way of breaking a rule (an invented price, a sibling model's
 // review counted, a filter that lets an unknown price through, a dash for a value, the 28 Oct drive's turn that asked
 // for a key and the browser and built nothing) fails exactly the checks for that rule. When the maker's site never
-// answers (the third 28 Oct drive), the turn reads a review publisher's own page and lists every model it names, each
+// answers (the third 28 Oct drive), the turn reads a reviewer's home page and lists every model it names, each
 // price unknown and never within the limit; the drive's turn (the maker's site only, then a page with no rows) fails.
 // When no review can be read either, the turn searches, tries every review the search found, and lists the models the
 // search results name, each "not checked" (its row names the result's site in "found"); placeholder rows ("candidate
@@ -175,7 +175,7 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
     }
   }
   if (!key) {
-    // No key: the reviews a publisher's own page for robot vacuums links to, of each exact model.
+    // No key: the reviews a reviewer's home page links to, of each exact model (never a guessed review address).
     const hub = (await read([CASE.hubs[0]!.url], CASE.items.map((i) => `"${i.name}"`).join(" "))).pages[0]!;
     expect(hub.status).toBe("read");
     for (const item of CASE.items) {
@@ -203,7 +203,7 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
 
 /**
  * The maker's site never answers (the third 28 Oct drive): its address from reference search and the www. one, each
- * tried once; the search, which has no key; then an independent source, a review publisher's own page, which names the
+ * tried once; the search, which has no key; then an independent source, a reviewer's home page, which names the
  * three latest models and links a review of each; those reviews; a guided link per price; and the page built with the
  * compare starter: a row per model, each price unknown.
  */
@@ -354,7 +354,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     }
   });
 
-  it("the maker's site never answers: the turn reads a review publisher's pages and lists every model, prices unknown; the drive's turn fails", async () => {
+  it("the maker's site never answers: the turn reads a reviewer's home page and its reviews and lists every model, prices unknown; the drive's turn fails", async () => {
     const reference = await officialDownTurn();
     // both of the maker's addresses failed, then an independent source and the reviews it links were read
     expect(reference.reads.slice(0, 2)).toEqual([
@@ -415,7 +415,7 @@ describe("the shopping comparison eval (fixtures)", () => {
       "each fact not read marked unknown with why.",
       "and an item's name as its official page gives it",
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5.",
-      "reviews from publishers you know review this kind of item.",
+      "for reviews, a reviewer's home page, then its links.",
       "An address that does not answer: once more with `www.` added or removed, as its `tell` says.",
       "Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.",
       "A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.",

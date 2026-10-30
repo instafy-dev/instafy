@@ -135,8 +135,10 @@ export function SharedBrowserChrome({
   interactionEnabled,
   controls = { navigate: true, history: true, reload: true, focusPage: true },
 }: SharedBrowserChromeProps) {
+  // The tab in front, when the browser names one: never the first tab in its
+  // place, whose address may be another chat's page.
   const activePage = useMemo(
-    () => pages.find((page) => page.isActive) ?? pages[0] ?? null,
+    () => pages.find((page) => page.isActive) ?? null,
     [pages],
   );
   const agentName = controlOwner.kind === "agent" ? controlOwner.displayName : null;

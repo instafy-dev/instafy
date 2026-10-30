@@ -1240,6 +1240,37 @@ pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
     check_activity(&JsonValue::Object(activity))
 }
 
+/// Whether a step's `activity` brought in what a page or a lookup says: the browser opening,
+/// reading or searching a page, a web read or web search, or a content step of a skill pack
+/// installed with the runtime (its lookups: "looked up places", "read a source"). Tried counts
+/// as well as done: a turn whose reads failed may still answer from memory. Workspace steps
+/// (edits, builds, previews, tests) and a pack's quiet and outcome steps bring in nothing.
+pub fn step_brings_in_outside_facts(activity: &JsonValue) -> bool {
+    const READS: [&str; 6] = [
+        BROWSER_OPEN.key,
+        BROWSER_READ.key,
+        BROWSER_SEARCH.key,
+        WEB_READ.key,
+        WEB_SEARCH.key,
+        WEB_SEARCH_COMMAND.key,
+    ];
+    let reads = |entry: &JsonValue| {
+        let key = entry
+            .get("key")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        READS.contains(&key)
+            || (key.starts_with("pack/")
+                && entry.get("role").and_then(JsonValue::as_str)
+                    == Some(ActivityRole::Content.as_str()))
+    };
+    reads(activity)
+        || activity
+            .get("also")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|also| also.iter().any(reads))
+}
+
 /// A status message the runtime writes itself (never one the model wrote): saving the turn's
 /// changes and retrying a request.
 pub fn runtime_status_activity(kind: &str) -> Option<JsonValue> {
@@ -1938,5 +1969,56 @@ mod tests {
                 label.key
             );
         }
+    }
+
+    // A reply is checked against what its turn read: a browser turn that read only a transit
+    // operator's cookie page once said, from memory, that a station on its network was not one of
+    // its stops. The turns that read are the ones with a page or lookup step, tried or done; a turn
+    // that only built, edited or posted a card read nothing and is never checked.
+    #[test]
+    fn only_page_and_lookup_steps_bring_in_outside_facts() {
+        let root = tempfile::tempdir().expect("tmp");
+        let packs = map_packs(root.path());
+        let reads = |activity: Option<JsonValue>| {
+            step_brings_in_outside_facts(&activity.expect("labelled"))
+        };
+        for kind in ["navigate", "open_tab", "snapshot", "search"] {
+            let facts = json!({"step": kind, "host": "transit.example", "approval": "denied"});
+            assert!(reads(browser_step_activity(&facts)), "{kind}");
+        }
+        for kind in ["click", "type", "scroll", "tabs", "status"] {
+            let facts = json!({"step": kind, "host": "transit.example"});
+            assert!(!reads(browser_step_activity(&facts)), "{kind}");
+        }
+        assert!(!reads(browser_step_activity(&json!({"step": "navigate"}))));
+        assert!(reads(label(
+            &[],
+            "instafy web read https://transit.example/lines"
+        )));
+        assert!(reads(label(
+            &[],
+            "instafy web search 'station metro line' --json"
+        )));
+        assert!(reads(web_search_activity()));
+        assert!(reads(label(
+            &packs,
+            "uw cite https://en.wikipedia.org/wiki/Example"
+        )));
+        assert!(reads(label(&packs, "uw add-point 'Old Tower'")));
+        // A lookup after a quiet step of the same command is still found.
+        assert!(reads(label(&packs, "uw fit && uw cite https://a.example/")));
+        for script in [
+            "uw validate --signal",
+            "uw new sites/city",
+            "instafy preview open --title Map --start --json",
+            "instafy bind init sites/compare --starter compare",
+            "npm install",
+            "cat notes.md",
+        ] {
+            assert!(!reads(label(&packs, script)), "{script}");
+        }
+        assert!(!reads(file_change_activity(2)));
+        assert!(!reads(mcp_tool_activity("github")));
+        assert!(!reads(runtime_status_activity("codex_retry")));
     }
 }

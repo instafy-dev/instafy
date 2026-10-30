@@ -205,8 +205,13 @@ import { useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeti
 import {
   CHAT_BROWSER_VIEW_START,
   browserTurnUnderWay,
+  chatBrowserHandoffPage,
+  chatBrowserTarget,
+  chatPageOnScreen,
+  newChatBrowserTabId,
   nextChatBrowserViewStep,
   useChatBrowserTab,
+  useChatViewTabs,
   type ChatBrowserViewState,
 } from "./chatBrowserTab";
 import { useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
@@ -1827,8 +1832,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     handlePrepareNewBrowserSession,
     handleSelectBrowserSessionPage,
     pendingBrowserLaunchMode,
-    preferredBrowserPage,
-    sharedBrowserBindingPage,
     sharedBrowserCapabilities,
     sharedBrowserCapabilitiesResolved,
     sharedBrowserCapabilitiesUnsupported,
@@ -1856,7 +1859,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     browserTransport,
     focusInput,
     hasHiddenBrowserSession,
-    messages,
     onHiddenBrowserSessionUnavailable: handleHiddenBrowserSessionUnavailable,
     openBrowserSession,
     preferredBrowserRuntimeId,
@@ -1873,36 +1875,76 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // This chat's own tab in Instafy's browser (chatBrowserTab.ts): its browser
   // turns go there, never to a page another chat left on screen.
   const projectRuns = runRecords;
+  // A chat with nothing sent yet has no id: its tab is kept under its local
+  // one until then, so its Browser view shows a tab of its own too.
+  const newChatBrowserId = activeConversationId ? newChatBrowserTabId(activeConversationId) : null;
+  const chatBrowserScopeId = activeConversationControllerId ?? newChatBrowserId;
   const chatBrowserTab = useChatBrowserTab({
     scope: {
       userId: currentUserId,
       projectId: activeProjectId ?? null,
-      conversationId: activeConversationControllerId,
+      conversationId: chatBrowserScopeId,
       runtimeId: resolvedBrowserRuntimeId,
     },
     runs: projectRuns,
     pages: sharedBrowserChromePages,
     canOpenPage: sharedBrowserCanOpenPage,
     openPage: openSharedBrowserPage,
+    newChatId: newChatBrowserId,
   });
   const chooseChatBrowserTab = chatBrowserTab.choose;
   const resolveChatBrowserTab = chatBrowserTab.resolveForTurn;
+  // A message aimed at the browser goes to this chat's own tab, and the
+  // Browser tab is named after it: never the tab another chat left in front.
+  const chatBrowserMessageTarget = useMemo(
+    () => browserTransport === "shared"
+      ? chatBrowserTarget({
+        tab: chatBrowserTab.tab,
+        pages: sharedBrowserChromePages,
+        resolved: sharedBrowserChromeResolved,
+        canOpenPage: sharedBrowserCanOpenPage,
+      })
+      : null,
+    [browserTransport, chatBrowserTab.tab, sharedBrowserCanOpenPage, sharedBrowserChromePages, sharedBrowserChromeResolved],
+  );
+  const preferredBrowserPage = chatBrowserMessageTarget?.page ?? null;
+  const sharedBrowserBindingPage = chatBrowserMessageTarget?.bindingPage ?? null;
   // The chat's Browser view shows the chat's own tab (nextChatBrowserViewStep).
   const chatBrowserViewRef = useRef<ChatBrowserViewState>(CHAT_BROWSER_VIEW_START);
-  const chatBrowserTabId = chatBrowserTab.tab?.id ?? null;
-  const chatBrowserTabActive = chatBrowserTab.tab?.isActive === true;
   const sharedBrowserPresenceKnown = sharedBrowserPresence?.status === "known";
   const sharedBrowserRemoteController = sharedBrowserPresence?.remoteController === true;
+  // Only the person who holds the browser's control may bring a tab to the
+  // front: until they do (nobody holds it, as after Release), the view waits,
+  // and brings the chat's tab forward once they take control.
+  const sharedBrowserSelfControls = sharedBrowserPresence?.selfControls !== false;
   const chatBrowserTurnUnderWay = browserTurnUnderWay(
     projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "chat");
   const anyBrowserTurnUnderWay = browserTurnUnderWay(
     projectRuns, { conversationId: activeConversationControllerId, runtimeId: resolvedBrowserRuntimeId }, "any");
+  // The tabs this chat's Browser view shows (BrowserSessionModal): the chat's
+  // own tab and the tabs Octo opened in the chat's turns, while the browser
+  // lists them as Octo's: during the turn, and after it until the list names
+  // the one Octo read in last as the chat's page. Never another chat's page:
+  // any other tab in front leaves a blank stage. Null for an older browser
+  // that cannot give a chat a tab of its own: its view shows the tab in
+  // front, as before.
+  const chatView = useChatViewTabs({
+    chatKey: JSON.stringify([currentUserId, activeProjectId ?? null, chatBrowserScopeId, resolvedBrowserRuntimeId]),
+    enabled: browserTransport === "shared" && sharedBrowserCanOpenPage !== false,
+    chatTab: chatBrowserTab.tab,
+    pages: sharedBrowserChromePages,
+    chatTurnUnderWay: chatBrowserTurnUnderWay,
+  });
+  const chatViewPageIds = chatView.pageIds;
+  const chatViewStepTabId = chatView.stepTab?.id ?? null;
+  const chatViewStepTabActive = chatView.stepTab?.isActive === true;
+  const anotherChatBrowserTurn = anyBrowserTurnUnderWay && !chatBrowserTurnUnderWay;
   useEffect(() => {
     const { state, step } = nextChatBrowserViewStep({
       onScreen: browserVisible && browserTransport === "shared",
-      free: sharedBrowserPresenceKnown && !sharedBrowserRemoteController,
-      chatId: activeConversationControllerId,
-      tab: chatBrowserTabId ? { id: chatBrowserTabId, isActive: chatBrowserTabActive } : null,
+      free: sharedBrowserPresenceKnown && !sharedBrowserRemoteController && sharedBrowserSelfControls,
+      chatId: chatBrowserScopeId,
+      tab: chatViewStepTabId ? { id: chatViewStepTabId, isActive: chatViewStepTabActive } : null,
       canOpenTab: canWriteProject && sharedBrowserChromeResolved && sharedBrowserCanOpenPage !== null,
       chatTurnUnderWay: chatBrowserTurnUnderWay,
       anyTurnUnderWay: anyBrowserTurnUnderWay,
@@ -1910,22 +1952,23 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     });
     chatBrowserViewRef.current = state;
     if (step === "open-blank-tab") void resolveChatBrowserTab().catch(() => null);
-    else if (step === "focus" && chatBrowserTabId) void focusSharedBrowserPageQuietly(chatBrowserTabId).catch(() => false);
+    else if (step === "focus" && chatViewStepTabId) void focusSharedBrowserPageQuietly(chatViewStepTabId).catch(() => false);
   }, [
-    activeConversationControllerId,
     anyBrowserTurnUnderWay,
     browserTransport,
     browserVisible,
     canWriteProject,
-    chatBrowserTabActive,
+    chatBrowserScopeId,
     chatBrowserTurnUnderWay,
-    chatBrowserTabId,
+    chatViewStepTabActive,
+    chatViewStepTabId,
     focusSharedBrowserPageQuietly,
     resolveChatBrowserTab,
     sharedBrowserCanOpenPage,
     sharedBrowserChromeResolved,
     sharedBrowserPresenceKnown,
     sharedBrowserRemoteController,
+    sharedBrowserSelfControls,
   ]);
   const browserModeActive = browserSessionOpen && browserVisible;
   // A skill setup's composer answers the setup: its replies stay chat turns
@@ -3295,8 +3338,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       (run.status === "in_progress" || run.status === "queued"));
   const browserAgentName =
     sharedBrowserControlOwner.kind === "agent" ? sharedBrowserControlOwner.displayName : BROWSER_AGENT_DEFAULT_NAME;
-  // The page a message goes to, the browser's active tab, as the pane's own
-  // tab picker names it.
+  // The page a message goes to, this chat's own tab, as the pane's own tab
+  // picker names it.
   const browserActivePageTitle = preferredBrowserPage
     ? preferredBrowserPage.title?.trim() || preferredBrowserPage.label.trim() || preferredBrowserPage.host
     : null;
@@ -4658,7 +4701,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   submitMessageRef.current = submitMessage;
 
-  const browserHandoffPage = sharedBrowserChrome?.pages.find((page) => page.isActive) ?? sharedBrowserChrome?.pages[0] ?? null;
+  // The page Take over and Let Octo continue act on: the tab the chat's view
+  // shows, else the chat's own tab. Never another chat's page in front, nor
+  // the browser's first tab when it names none in front.
+  const browserHandoffPage = sharedBrowserChrome
+    ? chatBrowserHandoffPage({ pages: sharedBrowserChrome.pages, chatPageIds: chatViewPageIds, chatTab: chatBrowserTab.tab })
+    : null;
   const browserHumanInputRunIds = useMemo(() => sharedBrowserConversationRunIds(Object.values(runs ?? {}), {
     projectId: activeProjectId ?? null,
     conversationId: activeConversationEntry?.controllerId ?? null,
@@ -5004,10 +5052,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const declineBrowserAutoStart = useCallback(() => {
     markBrowserAutoStartDeclined(browserRequestIdentity);
   }, [browserRequestIdentity]);
-  const takeOverSharedBrowser = useCallback((options?: { agentHoldsBrowser?: boolean }) => {
+  const takeOverSharedBrowser = useCallback(async (options?: { agentHoldsBrowser?: boolean }) => {
     declineBrowserAutoStart();
-    return browserHandoff.takeOverShared(options);
-  }, [browserHandoff, declineBrowserAutoStart]);
+    // The tab the person takes over is this chat's from then on, when it is
+    // one the chat's view shows: its Browser view goes on showing it once
+    // Octo's turn has ended. Take over pressed over a blank stage (another
+    // chat's page still in front as the turn starts) leaves the chat its own
+    // tab, and that page the other chat's.
+    const taken = chatPageOnScreen(sharedBrowserChromePages, chatViewPageIds);
+    const tookOver = await browserHandoff.takeOverShared(options);
+    if (tookOver && taken) chooseChatBrowserTab(taken.id);
+    return tookOver;
+  }, [browserHandoff, chatViewPageIds, chooseChatBrowserTab, declineBrowserAutoStart, sharedBrowserChromePages]);
 
   const handleStashDraft = useCallback(async (): Promise<boolean> => {
     if (!ensureProjectWriteAccess()) {
@@ -5801,9 +5857,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
 
   // A send from the browser's own composer that the submit flow would refuse
-  // (no browser runtime yet, or no tab at all) disables Send and says why
-  // instead of "Enter sends the message." A restored stash carries its own
-  // runtime and page, so it is left to the submit flow.
+  // (no browser runtime yet, or no tab the chat has or can get) disables Send
+  // and says why instead of "Enter sends the message." A restored stash
+  // carries its own runtime and page, so it is left to the submit flow.
   const sharedBrowserSendBlocker = useMemo(
     () =>
       resolveSharedBrowserSendBlocker({
@@ -5813,20 +5869,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           pendingBrowserLaunchMode !== "new_page" &&
           !restoredMessageStash,
         messageRequiresAi: inputRequiresAi && !deferAiGatesForAmbientParticipation,
-        pageAvailable: Boolean(sharedBrowserBindingPage),
+        pageAvailable: chatBrowserMessageTarget?.tabAvailable === true,
         resolvedRuntimeId: resolvedBrowserRuntimeId,
         terminalRequest: parseTerminalCommandRequest(inputValue),
       }),
     [
       browserComposerActive,
       browserTransport,
+      chatBrowserMessageTarget,
       deferAiGatesForAmbientParticipation,
       inputRequiresAi,
       inputValue,
       pendingBrowserLaunchMode,
       resolvedBrowserRuntimeId,
       restoredMessageStash,
-      sharedBrowserBindingPage,
     ],
   );
   const {
@@ -6648,6 +6704,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     spaceBusy={spaceRunActive}
                     runApproval={browserRunApproval}
                     conversationId={activeConversationId ?? null}
+                    chatPageIds={chatViewPageIds}
+                    anotherChatTurn={anotherChatBrowserTurn}
                     agentArrival={browserArrival}
                     spaceHasTeammates={spaceHasTeammates}
                   />

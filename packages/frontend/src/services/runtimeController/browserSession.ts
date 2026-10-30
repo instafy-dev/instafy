@@ -27,8 +27,8 @@ export type RuntimeBrowserSessionPage = {
    */
   leftover?: boolean;
   /**
-   * The run that left this ordinary tab open as its chat's page: Octo worked
-   * in it last while the run's own page was still blank.
+   * The run that left this ordinary tab open as its chat's page: the tab of
+   * its own Octo read in last.
    */
   leftByRun?: string;
 };

@@ -192,7 +192,7 @@ mod tests {
         let run = RunInstructions::default();
         // The run's own instructions are always there; preferences only with a project.
         assert_eq!(
-            codex_extension_registry(&usage, &gate, &run, None)
+            codex_extension_registry(&usage, &gate, None, &run, None)
                 .context_contributors()
                 .len(),
             1
@@ -202,6 +202,7 @@ mod tests {
             codex_extension_registry(
                 &usage,
                 &gate,
+                None,
                 &run,
                 Some((Uuid::new_v4(), workspace.path()))
             )

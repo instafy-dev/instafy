@@ -86,6 +86,26 @@ function listIntermediateUpdates(threadMessages: readonly ChatMessage[], exclude
   });
 }
 
+/**
+ * The model's answer as it streamed during the turn: a status note of kind
+ * `agent_message` whose item is the final answer, not a progress note.
+ */
+function isAnswerDraft(message: ChatMessage): boolean {
+  if (messageType(message) !== "status") {
+    return false;
+  }
+  const details = isRecord(message.metadata) && isRecord(message.metadata.details) ? message.metadata.details : null;
+  const event = details && isRecord(details.event) ? details.event : null;
+  const item = event && isRecord(event.item) ? event.item : null;
+  return details?.kind === "agent_message" && item?.phase === "final_answer";
+}
+
+/** A reply the turn ended with: not a failure, a stop or a status. */
+function isSucceededReply(message: ChatMessage): boolean {
+  const outcome = isRecord(message.metadata) ? message.metadata.outcome : null;
+  return typeof outcome === "string" && ["succeeded", "success"].includes(outcome.trim().toLowerCase());
+}
+
 function jobIdOf(message: ChatMessage): string | null {
   const jobId = isRecord(message.metadata) ? message.metadata.jobId : null;
   return typeof jobId === "string" && jobId.trim() ? jobId.trim() : null;
@@ -477,8 +497,18 @@ export function useAgentJobThreadPreviewState({
     if (latestFileMessage?.id) {
       excludedIds.add(latestFileMessage.id);
     }
+    // The reply stands for the model's answer: the draft of it that streamed
+    // while the turn ran is no note of its own, also when the runtime changed
+    // the reply after it (the reply check, a retry phrase, what wasn't saved).
+    if (finalSummaryMessage && finalSummaryMessage !== terminalProxyErrorMessage && isSucceededReply(finalSummaryMessage)) {
+      for (const candidate of threadMessages) {
+        if (isAnswerDraft(candidate)) {
+          excludedIds.add(candidate.id);
+        }
+      }
+    }
     return listIntermediateUpdates(threadMessages, excludedIds);
-  }, [finalSummaryMessage?.id, latestFileMessage?.id, threadMessages]);
+  }, [finalSummaryMessage, latestFileMessage?.id, terminalProxyErrorMessage, threadMessages]);
   // The failed attempt Instafy tried again by itself, listed in this turn's Details.
   const earlierAttempts = useMemo(
     () => readEarlierAttempts(message).map((attempt, index) => earlierAttemptDetails(attempt, index)),
