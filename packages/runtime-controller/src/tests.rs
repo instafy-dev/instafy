@@ -12778,6 +12778,12 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
         anyhow::ensure!(body["jobs"][0]["payload"]["conversation_history"]
             .to_string()
             .contains("private-lease-history-marker"));
+        // Every lease of a conversation's job says which browser turns its
+        // building thread has not read yet: none here.
+        anyhow::ensure!(
+            body["jobs"][0]["payload"]["browser_turns_since"] == json!([]),
+            "{body}"
+        );
         let row = pool
             .get()
             .await?
@@ -28611,6 +28617,7 @@ async fn load_skill_setup_openers_finds_openers_behind_the_history_window() -> a
                 id uuid PRIMARY KEY,
                 conversation_id uuid not null,
                 prompt_id uuid,
+                run_id uuid,
                 role text not null,
                 content text not null,
                 metadata jsonb,
@@ -28790,10 +28797,18 @@ async fn load_conversation_history_for_agent_limit_skips_progress_rows() -> anyh
                 id uuid PRIMARY KEY,
                 conversation_id uuid not null,
                 prompt_id uuid,
+                run_id uuid,
                 role text not null,
                 content text not null,
                 metadata jsonb,
                 created_at timestamptz not null default now()
+            );
+            -- The history marks a browser turn's rows by its job's transport.
+            CREATE TEMP TABLE agent_jobs (
+                id uuid PRIMARY KEY,
+                run_id uuid,
+                conversation_id uuid,
+                payload jsonb NOT NULL DEFAULT '{}'::jsonb
             );",
         )
         .await?;
@@ -28906,10 +28921,18 @@ async fn load_conversation_history_for_agent_drops_dispatch_alerts_and_labels_fa
                 id uuid PRIMARY KEY,
                 conversation_id uuid not null,
                 prompt_id uuid,
+                run_id uuid,
                 role text not null,
                 content text not null,
                 metadata jsonb,
                 created_at timestamptz not null default now()
+            );
+            -- The history marks a browser turn's rows by its job's transport.
+            CREATE TEMP TABLE agent_jobs (
+                id uuid PRIMARY KEY,
+                run_id uuid,
+                conversation_id uuid,
+                payload jsonb NOT NULL DEFAULT '{}'::jsonb
             );",
         )
         .await?;

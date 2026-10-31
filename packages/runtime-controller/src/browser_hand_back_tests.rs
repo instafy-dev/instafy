@@ -13,7 +13,7 @@ use super::*;
 use crate::browser_hand_back::{
     HAND_BACK_CLAIM_KEY, HAND_BACK_KEY, HAND_BACK_NOTHING_READ_CODE, HAND_BACK_NOT_BUILDING_CODE,
     HAND_BACK_PAUSED_CODE, HAND_BACK_SECOND_HOP_CODE, HAND_BACK_SUPERSEDED_CODE,
-    HAND_BACK_USED_CODE,
+    HAND_BACK_USED_CODE, LET_OCTO_CONTINUE_LINE, LET_OCTO_CONTINUE_PROMPT,
 };
 
 fn fixtures() -> serde_json::Value {
@@ -47,6 +47,18 @@ impl Chain {
         prompt: &str,
         metadata: serde_json::Value,
     ) -> Result<dispatch::DispatchPromptResponse, (StatusCode, axum::Json<ApiError>)> {
+        self.send_to(&self.conversation_id, user, prompt, metadata)
+            .await
+    }
+
+    /// The same, in `conversation`.
+    async fn send_to(
+        &self,
+        conversation: &Uuid,
+        user: &Uuid,
+        prompt: &str,
+        metadata: serde_json::Value,
+    ) -> Result<dispatch::DispatchPromptResponse, (StatusCode, axum::Json<ApiError>)> {
         let mut metadata = metadata;
         metadata["clientMessageId"] = json!(Uuid::new_v4().to_string());
         metadata["agentSelection"] = json!({ "active": ["octo"], "mentions": ["octo"] });
@@ -66,12 +78,43 @@ impl Chain {
             priority: None,
             runtime_type: None,
             idle_ttl_seconds: None,
-            conversation_id: Some(self.conversation_id.to_string()),
+            conversation_id: Some(conversation.to_string()),
             runtime_id: None,
             runtime_display_name: None,
             prefer_runtime: None,
         })?;
         dispatch::process_dispatch_prompt(&self.state, &self.context(user), request).await
+    }
+
+    /// The provider state a building turn's runtime saves with its
+    /// completion: the job then names the building thread's last turn.
+    async fn save_provider_state(&self, job_id: &Uuid) -> anyhow::Result<()> {
+        self.pool
+            .get()
+            .await?
+            .execute(
+                "update agent_jobs
+                    set proxy_metadata = coalesce(proxy_metadata, '{}'::jsonb)
+                        || jsonb_build_object('conversation',
+                             jsonb_build_object('defaultThreadId', id::text))
+                  where id = $1",
+                &[job_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// A browser turn the person sends themselves (a follow-up, or Let Octo
+    /// continue), finished on `reply`.
+    async fn browser_turn(&self, prompt: &str, reply: &str) -> anyhow::Result<Uuid> {
+        let turn = self
+            .send(&self.owner, prompt, json!({}))
+            .await
+            .map_err(|error| controller_error("browser turn", error))?;
+        let job = self.job_of(&turn).await?;
+        self.make_browser_turn(&job).await?;
+        self.finish(&job, Some(reply), "succeeded").await?;
+        Ok(job)
     }
 
     async fn job_of(&self, response: &dispatch::DispatchPromptResponse) -> anyhow::Result<Uuid> {
@@ -488,6 +531,8 @@ async fn a_browser_turn_hands_its_findings_back_to_one_building_turn() -> anyhow
             let mut expected = fixtures["stampedRecord"].clone();
             expected["browserJobId"] = json!(browser_job.to_string());
             expected["cardJobId"] = json!(card_job.to_string());
+            expected["request"] =
+                json!("Continue this browser task using the browser attached to this turn.");
             let read_at = record["readAt"].as_str().context("readAt")?.to_string();
             expected["readAt"] = json!(read_at);
             for finding in expected["findings"].as_array_mut().unwrap() {
@@ -1154,6 +1199,229 @@ async fn a_card_browser_turn_is_stamped_only_for_the_cards_own_task() -> anyhow:
                 )
                 .await?;
             assert!(verdict(chain.owner, words, claim).await?.is_none());
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A history entry of a browser turn says so, and which run it belongs to:
+/// a building turn's replay quotes such a turn only as page data, and a
+/// browser thread's replay reads only those (runtime-agent
+/// `conversation_context.rs`). A request the controller recorded without a
+/// run is a browser turn's when its own prompt metadata says so.
+#[tokio::test]
+async fn history_entries_carry_the_browser_lane() -> anyhow::Result<()> {
+    with_chain("history-browser-lane", |chain| {
+        Box::pin(async move {
+            let (card_job, browser_job) = chain.card_and_browser_turn("Read 2 pages.").await?;
+            let browser_run: Uuid = chain
+                .pool
+                .get()
+                .await?
+                .query_one("select run_id from agent_jobs where id = $1", &[&browser_job])
+                .await?
+                .get(0);
+            chain
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "insert into conversation_messages
+                         (id, conversation_id, project_id, role, content, metadata, created_by)
+                     values ($1, $2, $3, 'user', 'Open the form site.',
+                             '{\"prompt_metadata\": {\"browserTransport\": \"shared\"}}'::jsonb, $4)",
+                    &[&Uuid::new_v4(), &chain.conversation_id, &chain.project_id, &chain.owner],
+                )
+                .await?;
+            let mut client = chain.pool.get().await?;
+            let transaction = client.transaction().await?;
+            let history = crate::agent::load_conversation_history_for_agent(
+                &transaction,
+                &chain.conversation_id,
+                None,
+                None,
+                None,
+                80,
+            )
+            .await
+            .map_err(|error| controller_error("history", error))?;
+            transaction.commit().await?;
+            let entry = |content: &str| {
+                history
+                    .iter()
+                    .find(|entry| entry["content"] == content)
+                    .unwrap_or_else(|| panic!("no entry {content}: {history:?}"))
+                    .clone()
+            };
+            for building in ["Plan a day on the coast.", "Continue this task in Instafy's browser."] {
+                let entry = entry(building);
+                assert!(entry.get("lane").is_none(), "{entry}");
+            }
+            let card_run = entry("Plan a day on the coast.")["runId"].clone();
+            assert!(card_run.is_string());
+            assert_ne!(card_run, json!(browser_run.to_string()));
+            for browser in [
+                "Continue this browser task using the browser attached to this turn.",
+                "Read 2 pages.",
+            ] {
+                let entry = entry(browser);
+                assert_eq!(entry["lane"], "browser", "{entry}");
+                assert_eq!(entry["runId"], json!(browser_run.to_string()), "{entry}");
+            }
+            let recorded = entry("Open the form site.");
+            assert_eq!(recorded["lane"], "browser", "{recorded}");
+            assert!(recorded.get("runId").is_none(), "{recorded}");
+            let _ = card_job;
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A building job's lease lists the conversation's browser turns since the
+/// building thread's last turn (the newest other building job that saved a
+/// provider state): finished ones only, oldest first, each with what it was
+/// asked and its reply with the findings put back, as page data. Never one
+/// before that turn, one still running, another conversation's, or the one
+/// a checked hand-back already carries; a browser job's lease lists none.
+#[tokio::test]
+async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_turn(
+) -> anyhow::Result<()> {
+    with_chain("browser-turns-since", |chain| {
+        Box::pin(async move {
+            // A browser turn before the building thread's last turn.
+            let (early_card, early_browser) = chain.card_and_browser_turn("Read the old page.").await?;
+            chain.save_provider_state(&early_card).await?;
+            let built = chain
+                .send(&chain.owner, "Add the hours to the page.", json!({}))
+                .await
+                .map_err(|error| controller_error("building turn", error))?;
+            let built = chain.job_of(&built).await?;
+            chain.finish(&built, Some("Added them."), "succeeded").await?;
+            chain.save_provider_state(&built).await?;
+
+            // After it: a card's browser turn whose findings went to a Details note,
+            // then Let Octo continue.
+            let (card, browser) = chain.card_and_running_browser_turn().await?;
+            chain.save_provider_state(&card).await?;
+            let lines = r#"{"url": "https://rail.example.org/timetable", "title": "Coastal line timetable", "facts": ["The 08:05 express arrives at 10:16."]}"#;
+            chain
+                .post(
+                    &browser,
+                    &format!("Read 1 page.\n\n{lines}"),
+                    "status",
+                    json!({ "kind": "agent_message", "browserFindings": { "pages": 1, "pagesRead": 1 } }),
+                )
+                .await?;
+            chain
+                .finish(&browser, Some("Finished in the browser."), "succeeded")
+                .await?;
+            let continued = chain
+                .browser_turn(LET_OCTO_CONTINUE_PROMPT, "The sign-in page is still open.")
+                .await?;
+
+            // Still running: not listed.
+            let running = chain
+                .send(&chain.owner, "Keep going.", json!({}))
+                .await
+                .map_err(|error| controller_error("running browser turn", error))?;
+            let running = chain.job_of(&running).await?;
+            chain.make_browser_turn(&running).await?;
+
+            // Another conversation's browser turn: not listed.
+            let elsewhere = chain
+                .send_to(&Uuid::new_v4(), &chain.owner, "Elsewhere.", json!({}))
+                .await
+                .map_err(|error| controller_error("another chat", error))?;
+            let elsewhere = chain.job_of(&elsewhere).await?;
+            chain.make_browser_turn(&elsewhere).await?;
+            chain.finish(&elsewhere, Some("Another chat's page."), "succeeded").await?;
+
+            let next = chain
+                .send(&chain.owner, "Build the page from it.", json!({}))
+                .await
+                .map_err(|error| controller_error("next building turn", error))?;
+            let next = chain.job_of(&next).await?;
+            let row = chain
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select payload, credential_id from agent_jobs where id = $1",
+                    &[&next],
+                )
+                .await?;
+            let payload: serde_json::Value = row.get::<_, PgJson<serde_json::Value>>(0).0;
+            let credential: Option<Uuid> = row.get(1);
+            let agent = payload["metadata"]["agent"].clone();
+            let agent_id = agent["id"].as_str().and_then(|id| Uuid::parse_str(id).ok());
+            let agent_handle = agent["handle"].as_str().map(str::to_string);
+            let list = |payload: serde_json::Value| {
+                let pool = chain.pool.clone();
+                let agent_handle = agent_handle.clone();
+                async move {
+                    let mut client = pool.get().await?;
+                    let transaction = client.transaction().await?;
+                    let turns = crate::browser_hand_back::browser_turns_since(
+                        &transaction,
+                        &chain.conversation_id,
+                        &next,
+                        &payload,
+                        credential.as_ref(),
+                        agent_id.as_ref(),
+                        agent_handle.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| controller_error("browser turns since", error))?;
+                    transaction.commit().await?;
+                    anyhow::Ok(turns)
+                }
+            };
+
+            let turns = list(payload.clone()).await?;
+            let ids: Vec<&str> = turns
+                .iter()
+                .map(|turn| turn["browserJobId"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                ids,
+                vec![browser.to_string().as_str(), continued.to_string().as_str()],
+                "{turns:?}"
+            );
+            for left_out in [early_browser, running, elsewhere] {
+                assert!(!ids.contains(&left_out.to_string().as_str()), "{left_out}");
+            }
+            let first = &turns[0];
+            assert_eq!(
+                first["request"],
+                "Continue this browser task using the browser attached to this turn."
+            );
+            let reply = first["reply"].as_str().unwrap();
+            assert!(reply.starts_with("Finished in the browser."), "{reply}");
+            assert!(reply.contains("https://rail.example.org/timetable"), "{reply}");
+            assert_eq!(
+                first["findings"][0]["url"],
+                "https://rail.example.org/timetable"
+            );
+            assert_eq!(first["viewer"], "Instafy's browser in the workspace");
+            assert_eq!(first["outcome"], "succeeded");
+            assert!(first["readAt"].is_string());
+            assert_eq!(turns[1]["request"], LET_OCTO_CONTINUE_LINE);
+            assert_eq!(turns[1]["reply"], "The sign-in page is still open.");
+
+            // The hand-back's own browser turn is in its record, not the list.
+            let mut handed_back = payload.clone();
+            handed_back["metadata"][HAND_BACK_KEY] =
+                json!({ "verified": true, "browserJobId": browser.to_string() });
+            let turns = list(handed_back).await?;
+            assert_eq!(turns.len(), 1);
+            assert_eq!(turns[0]["browserJobId"], json!(continued.to_string()));
+
+            // A browser job's own lease lists none.
+            let mut browser_payload = payload.clone();
+            browser_payload["metadata"]["browserTransport"] = json!("shared");
+            assert!(list(browser_payload).await?.is_empty());
             Ok(())
         })
     })

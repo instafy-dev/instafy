@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::codex::{
-    CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema, CodexRunOptions, CodexRunOutput,
-    ScopedWorkerExecution, classify_internal_codex_fallback_summary,
+    BUILDING_THREAD_KEYS, CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema,
+    CodexRunOptions, CodexRunOutput, RETIRED_BROWSER_THREAD_KEYS, ScopedWorkerExecution,
+    ThreadLane, classify_internal_codex_fallback_summary, lane_history_replay_required,
     provider_thread_restorable_on_this_runtime,
 };
 use crate::config::Config;
@@ -463,51 +464,103 @@ fn should_persist_codex_conversation_thread_with_structured_persistence(
 
 fn restored_provider_thread_available(
     provider_state: Option<&JsonValue>,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> bool {
-    let history_replay_required =
-        provider_state_bool(provider_state, "historyReplayRequired").unwrap_or(false);
-    if history_replay_required {
+    if lane_history_replay_required(provider_state, lane) {
         return false;
     }
+    lane.thread_id_keys()
+        .iter()
+        .any(|key| provider_state_string(provider_state, key).is_some())
+}
 
-    let thread_key = if browser_mode {
-        "browserThreadId"
+/// The lane a job's turn runs in: a Shared Browser turn's own thread, or the chat's building
+/// thread (`ThreadLane`).
+fn thread_lane_for_job(job: &LeaseJob) -> ThreadLane {
+    if crate::shared_browser::payload_requests_shared_browser(&job.payload) {
+        ThreadLane::SharedBrowser
     } else {
-        "defaultThreadId"
-    };
+        ThreadLane::Building
+    }
+}
 
-    provider_state_string(provider_state, thread_key)
-        .or_else(|| provider_state_string(provider_state, "threadId"))
-        .is_some()
+/// A chat's turns used to share one provider thread: a Shared Browser turn found no browser
+/// thread of its own, resumed the default thread through the legacy keys and saved that
+/// thread's id and rollout as `browserThreadId` and `browserRolloutPath`. Such a thread holds
+/// the pages its browser turns read, so neither lane resumes it: when the old browser keys name
+/// the building thread, its keys go too, and each lane starts a thread of its own once, with its
+/// lane's history replayed. The old browser keys go in any case; nothing reads them any more.
+/// The run saves its state as a merge of this one, so neither lane finds the old thread again.
+/// The second value says whether a thread both lanes wrote was retired.
+fn split_shared_thread_state(state: Option<JsonValue>) -> (Option<JsonValue>, bool) {
+    let Some(JsonValue::Object(mut map)) = state else {
+        return (state, false);
+    };
+    let mut retired = false;
+    if let Some(JsonValue::Object(nested)) = map.remove("codex") {
+        let (nested, nested_retired) = split_shared_thread_state(Some(JsonValue::Object(nested)));
+        if let Some(nested) = nested {
+            map.insert("codex".to_string(), nested);
+        }
+        retired |= nested_retired;
+    }
+    let value = |map: &JsonMap<String, JsonValue>, key: &str| {
+        map.get(key)
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    };
+    let old_browser: Vec<String> = ["browserThreadId", "browserRolloutPath"]
+        .iter()
+        .filter_map(|key| value(&map, key))
+        .collect();
+    let shared = [
+        "defaultThreadId",
+        "threadId",
+        "defaultRolloutPath",
+        "rolloutPath",
+    ]
+    .iter()
+    .filter_map(|key| value(&map, key))
+    .any(|building| old_browser.contains(&building));
+    for key in RETIRED_BROWSER_THREAD_KEYS {
+        map.remove(key);
+    }
+    if shared {
+        for key in BUILDING_THREAD_KEYS {
+            map.remove(key);
+        }
+        map.remove("historyReplayRequired");
+        retired = true;
+    }
+    (Some(JsonValue::Object(map)), retired)
 }
 
 /// The controller attaches the previous run's provider state when it enqueues a job, whichever
 /// runtime later leases it. After a restart, or on a fresh runtime, the thread that state names
-/// is often not restorable here, and Codex then quietly starts an empty thread. The prompt lane
-/// and the contextual-instruction suppression are both chosen from this state before Codex
-/// tries, so a state that still claims a restored thread would send the compact reminder to a
-/// model with no history, no workspace memory snapshot and no skills catalog. Such a state is
-/// marked for history replay so the turn gets the full lane. The second value says whether the
-/// state was marked.
+/// for the turn's lane is often not restorable here, and Codex then quietly starts an empty
+/// thread. The prompt lane and the contextual-instruction suppression are both chosen from this
+/// state before Codex tries, so a state that still claims a restored thread would send the
+/// compact reminder to a model with no history, no workspace memory snapshot and no skills
+/// catalog. Such a state is marked for the lane's history replay so the turn gets the full lane.
+/// The second value says whether the state was marked.
 fn provider_conversation_state_for_this_runtime(
     state: Option<JsonValue>,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> (Option<JsonValue>, bool) {
     let Some(mut state) = state else {
         return (None, false);
     };
-    let claims_restored_thread = provider_state_claims_restored_thread(Some(&state))
-        || restored_provider_thread_available(Some(&state), browser_mode);
-    if !claims_restored_thread
-        || provider_thread_restorable_on_this_runtime(Some(&state), browser_mode)
-    {
+    let claims_restored_thread = provider_state_claims_restored_thread(Some(&state), lane)
+        || restored_provider_thread_available(Some(&state), lane);
+    if !claims_restored_thread || provider_thread_restorable_on_this_runtime(Some(&state), lane) {
         return (Some(state), false);
     }
     let Some(map) = state.as_object_mut() else {
         return (Some(state), false);
     };
-    map.insert("historyReplayRequired".to_string(), JsonValue::Bool(true));
+    map.insert(lane.history_replay_key().to_string(), JsonValue::Bool(true));
     (Some(state), true)
 }
 
@@ -522,42 +575,46 @@ fn prompt_context_replayed_history(prompt_context: &JsonValue) -> bool {
             .is_some_and(|turns| turns > 0)
 }
 
-/// Codex keeps `historyReplayRequired` set after a run that could not restore its thread,
+/// Codex keeps the lane's replay flag set after a run that could not restore its thread,
 /// because that run's prompt was normally built before the loss was known and carried no
-/// history. When this run's prompt did replay the history, as it does once
+/// history. When this run's prompt did replay the lane's history, as it does once
 /// `provider_conversation_state_for_this_runtime` has spotted a lost thread, the fresh thread
-/// already holds it. Keeping the flag would make the next turn, whose new rollout resumes,
-/// send the history, workspace snapshot and skills catalog into that thread a second time.
-/// The flag is shared by the default and browser threads, so it stays set while the other
-/// thread still lacks the history.
+/// already holds it. Keeping the flag would make the next turn in this lane, whose new rollout
+/// resumes, send the history, workspace snapshot and skills catalog into that thread a second
+/// time. Only this lane's restore and replay flags are cleared; the other lane's stay as they
+/// are, and the flag both lanes shared before follows the other lane's.
 ///
-/// Codex recomputes the flag from both modes' `*ThreadRestoreFailed` fields on every run it
-/// saves, so this mode's field is cleared too. Left set, the next run in the other mode would
-/// raise the flag again for a thread that already holds the history. The
-/// `*ThreadRestoreSource` and `lastThreadRestoreSource` fields still record the failed restore.
+/// The lane's `*ThreadRestoreSource` and `lastThreadRestoreSource` fields still record the
+/// failed restore.
 fn provider_conversation_state_after_history_replay(
     state: Option<JsonValue>,
     prompt_replayed_history: bool,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> Option<JsonValue> {
     let mut state = state?;
-    let (restore_failed_key, other_restore_failed_key) = if browser_mode {
-        ("browserThreadRestoreFailed", "defaultThreadRestoreFailed")
-    } else {
-        ("defaultThreadRestoreFailed", "browserThreadRestoreFailed")
-    };
     let started_fresh_thread =
-        provider_state_bool(Some(&state), restore_failed_key).unwrap_or(false);
+        provider_state_bool(Some(&state), lane.restore_failed_key()).unwrap_or(false);
     if !prompt_replayed_history || !started_fresh_thread {
         return Some(state);
     }
-    let other_thread_lacks_history =
-        provider_state_bool(Some(&state), other_restore_failed_key).unwrap_or(false);
+    let other = match lane {
+        ThreadLane::Building => ThreadLane::SharedBrowser,
+        ThreadLane::SharedBrowser => ThreadLane::Building,
+    };
+    let other_lacks_history =
+        provider_state_bool(Some(&state), other.history_replay_key()).unwrap_or(false);
     if let Some(map) = state.as_object_mut() {
-        map.insert(restore_failed_key.to_string(), JsonValue::Bool(false));
+        map.insert(
+            lane.restore_failed_key().to_string(),
+            JsonValue::Bool(false),
+        );
+        map.insert(
+            lane.history_replay_key().to_string(),
+            JsonValue::Bool(false),
+        );
         map.insert(
             "historyReplayRequired".to_string(),
-            JsonValue::Bool(other_thread_lacks_history),
+            JsonValue::Bool(other_lacks_history),
         );
     }
     Some(state)
@@ -576,12 +633,12 @@ fn provider_conversation_state_to_save(
     run_prompt: &str,
     prompt: &str,
     prompt_context: &JsonValue,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> Option<JsonValue> {
     provider_conversation_state_after_history_replay(
         output.provider_conversation_state.clone(),
         run_prompt.starts_with(prompt) && prompt_context_replayed_history(prompt_context),
-        browser_mode,
+        lane,
     )
 }
 
@@ -590,7 +647,7 @@ fn broad_contextual_instruction_suppression_reason(
     _prompt_text: &str,
     scoped_worker_has_precollected_observations: bool,
     provider_conversation_state_for_run: Option<&JsonValue>,
-    runtime_is_browser_session: bool,
+    thread_lane: ThreadLane,
     expects_direct_workspace_file_changes: bool,
 ) -> Option<&'static str> {
     if scoped_worker_has_precollected_observations {
@@ -611,10 +668,7 @@ fn broad_contextual_instruction_suppression_reason(
     {
         return Some("focused_cross_chat_context_lookup");
     }
-    if restored_provider_thread_available(
-        provider_conversation_state_for_run,
-        runtime_is_browser_session,
-    ) {
+    if restored_provider_thread_available(provider_conversation_state_for_run, thread_lane) {
         return Some("stateful_provider_thread_restored");
     }
     if expects_direct_workspace_file_changes {
@@ -3529,6 +3583,7 @@ fn granted_turn_prompt(
     let mut conversation = build_prompt_conversation_context(
         job.payload.get("conversation_history"),
         provider_conversation_state,
+        ThreadLane::Building,
     );
     let mut sections = JsonMap::new();
     let mut prompt = String::new();
@@ -3802,7 +3857,7 @@ fn ensure_ambient_participation_context(
     if context.metrics["totalTurns"].as_u64().unwrap_or(0) > 0 {
         // Compare rendered sections, not raw content substrings: a short prior
         // turn such as NO_RESPONSE can also occur in the policy/latest request.
-        let ordinary = build_prompt_conversation_context(history, None);
+        let ordinary = build_prompt_conversation_context(history, None, thread_lane_for_job(job));
         let ordinary_section = format!("\n{}:\n{}", ordinary.section_label, ordinary.section_text);
         let section = format!(
             "\nConversation evidence for the ambient participation decision:\n{}\n",
@@ -6953,17 +7008,30 @@ impl JobProcessor {
                 expects_generic_mcp_tool_execution,
                 explicit_personal_browser_execution,
             ) && !job_requests_cross_chat_context_lookup(job);
+        // A Shared Browser turn resumes the chat's browser thread, every other turn the
+        // building thread (`ThreadLane`).
+        let thread_lane = thread_lane_for_job(job);
+        let (stored_provider_conversation_state, retired_shared_thread) = split_shared_thread_state(
+            persist_codex_conversation_thread
+                .then(|| job.payload.get("provider_conversation_state").cloned())
+                .flatten(),
+        );
+        if retired_shared_thread {
+            tracing::info!(
+                job_id = %job.id,
+                lane = thread_lane.name(),
+                "retired a thread both lanes wrote; each lane starts a thread of its own"
+            );
+        }
         let (provider_conversation_state_for_run, provider_thread_not_restorable) =
             provider_conversation_state_for_this_runtime(
-                persist_codex_conversation_thread
-                    .then(|| job.payload.get("provider_conversation_state").cloned())
-                    .flatten(),
-                browser_mode,
+                stored_provider_conversation_state,
+                thread_lane,
             );
         if provider_thread_not_restorable {
             tracing::info!(
                 job_id = %job.id,
-                browser_mode,
+                lane = thread_lane.name(),
                 "stored provider thread cannot be resumed on this runtime; replaying conversation history"
             );
         }
@@ -6972,7 +7040,7 @@ impl JobProcessor {
             prompt_text,
             scoped_worker_has_precollected_observations,
             provider_conversation_state_for_run.as_ref(),
-            browser_mode,
+            thread_lane,
             direct_write_broad_context_suppression_eligible(runtime_expectations, browser_mode),
         );
         // A skill kickoff's carried SKILL.md text names terms the person never
@@ -7019,6 +7087,7 @@ impl JobProcessor {
             // Browser-mode is a runtime capability (VNC + headed Chromium via CDP), not inferred
             // from prompt heuristics. This keeps behavior deterministic and model-driven.
             expect_browser_session: browser_mode,
+            thread_lane,
             personal_browser: explicit_personal_browser_execution,
             shared_browser: explicit_shared_browser_execution,
             shared_browser_page_id,
@@ -7381,7 +7450,7 @@ impl JobProcessor {
             &prompt,
             &prompt,
             &prompt_context,
-            browser_mode,
+            thread_lane,
         );
 
         let mut raw_interim_messages = with_runtime_metadata_vec(
@@ -7603,7 +7672,7 @@ impl JobProcessor {
         artifacts.push(build_codex_thread_state_artifact(
             output.provider_conversation_state.as_ref(),
             output_provider_conversation_state.as_ref(),
-            browser_mode,
+            thread_lane,
         ));
         if let Some(message) = safety_check_downgrade_warning.as_deref() {
             artifacts.push(json!({
@@ -8094,7 +8163,7 @@ impl JobProcessor {
                 &retry_prompt,
                 &prompt,
                 &retry_prompt_context,
-                browser_mode,
+                thread_lane,
             );
 
             let retry_raw_messages = with_runtime_metadata_vec(
@@ -8324,7 +8393,7 @@ impl JobProcessor {
             retry_artifacts.push(build_codex_thread_state_artifact(
                 retry_output.provider_conversation_state.as_ref(),
                 retry_provider_conversation_state.as_ref(),
-                browser_mode,
+                thread_lane,
             ));
             if let Some(message) = retry_safety_check_downgrade_warning.as_deref() {
                 retry_artifacts.push(json!({
@@ -9245,8 +9314,11 @@ impl JobProcessor {
         } else {
             job.payload.get("conversation_history")
         };
-        let mut conversation_context =
-            build_prompt_conversation_context(conversation_history, provider_conversation_state);
+        let mut conversation_context = build_prompt_conversation_context(
+            conversation_history,
+            provider_conversation_state,
+            thread_lane_for_job(job),
+        );
         let stateful_thread_restored =
             prompt_metric_bool(&conversation_context.metrics, "statefulThreadRestored");
         let mut prompt_section_metrics = JsonMap::new();
@@ -10146,17 +10218,21 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
-        let mut conversation_section = String::new();
-        conversation_section.push('\n');
-        conversation_section.push_str(conversation_context.section_label);
-        conversation_section.push_str(":\n");
-        conversation_section.push_str(&conversation_context.section_text);
-        append_prompt_section(
-            &mut prompt,
-            &mut prompt_section_metrics,
-            "conversationContext",
-            &conversation_section,
-        );
+        // A browser thread's first turn in a chat has no earlier browser turn to read: no
+        // section (`build_prompt_conversation_context`).
+        if !conversation_context.section_text.is_empty() {
+            let mut conversation_section = String::new();
+            conversation_section.push('\n');
+            conversation_section.push_str(conversation_context.section_label);
+            conversation_section.push_str(":\n");
+            conversation_section.push_str(&conversation_context.section_text);
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "conversationContext",
+                &conversation_section,
+            );
+        }
 
         if let Some(section) =
             format_undo_target_context_section(job.payload.get("metadata"), conversation_history)
@@ -10176,6 +10252,24 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "siteIntentContext",
+                &section,
+            );
+        }
+
+        // What the chat's browser turns found since this building thread's last turn: the one
+        // way a page's text reaches building work besides the hand-back below.
+        if !lead_continuation_checkpoint
+            && !multi_agent_planning_turn
+            && !multi_agent_worker
+            && let Some(section) = browser_hand_back::format_browser_turns_since_section(
+                &job.payload,
+                stateful_thread_restored,
+            )
+        {
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "browserTurnsSince",
                 &section,
             );
         }
@@ -17131,43 +17225,30 @@ fn infer_codex_files_from_git_status_delta(
 fn build_codex_thread_state_artifact(
     provider_state: Option<&JsonValue>,
     saved_state: Option<&JsonValue>,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> JsonValue {
-    let thread_key = if browser_mode {
-        "browserThreadId"
-    } else {
-        "defaultThreadId"
+    let first = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| provider_state_string(provider_state, key))
     };
-    let rollout_key = if browser_mode {
-        "browserRolloutPath"
-    } else {
-        "defaultRolloutPath"
-    };
-    let restore_failed_key = if browser_mode {
-        "browserThreadRestoreFailed"
-    } else {
-        "defaultThreadRestoreFailed"
-    };
-    let restore_source_key = if browser_mode {
-        "browserThreadRestoreSource"
-    } else {
-        "defaultThreadRestoreSource"
-    };
-
-    let thread_id = provider_state_string(provider_state, thread_key)
-        .or_else(|| provider_state_string(provider_state, "threadId"));
-    let rollout_path = provider_state_string(provider_state, rollout_key)
-        .or_else(|| provider_state_string(provider_state, "rolloutPath"));
-    let restore_failed = provider_state_bool(provider_state, restore_failed_key).unwrap_or(false);
-    let restore_source = provider_state_string(provider_state, restore_source_key)
-        .or_else(|| provider_state_string(provider_state, "lastThreadRestoreSource"));
-    let history_replay_required =
-        provider_state_bool(saved_state, "historyReplayRequired").unwrap_or(false);
+    let thread_id = first(lane.thread_id_keys());
+    let rollout_path = first(lane.rollout_path_keys());
+    let restore_failed =
+        provider_state_bool(provider_state, lane.restore_failed_key()).unwrap_or(false);
+    let restore_source = provider_state_string(
+        provider_state,
+        match lane {
+            ThreadLane::Building => "defaultThreadRestoreSource",
+            ThreadLane::SharedBrowser => "sharedBrowserThreadRestoreSource",
+        },
+    )
+    .or_else(|| provider_state_string(provider_state, "lastThreadRestoreSource"));
+    let history_replay_required = lane_history_replay_required(saved_state, lane);
 
     json!({
         "kind": "codex/thread-state",
         "metadata": {
-            "mode": if browser_mode { "browser" } else { "default" },
+            "mode": lane.name(),
             "threadId": thread_id,
             "rolloutPath": rollout_path,
             "restoreFailed": restore_failed,
@@ -21476,8 +21557,8 @@ mod tests {
                 "Use multiple AI agents to review https://github.com/dao-xyz/borsh-ts.",
                 false,
                 None,
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             Some("focused_team_planning_skill_snapshot")
         );
@@ -21493,8 +21574,8 @@ mod tests {
                 "Continue from the previous answer.",
                 false,
                 Some(&provider_state),
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             Some("stateful_provider_thread_restored")
         );
@@ -21509,8 +21590,8 @@ mod tests {
                 "Continue from the previous answer.",
                 false,
                 Some(&replay_required),
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             None
         );
@@ -21523,8 +21604,8 @@ mod tests {
                 "Create hello.txt with the exact contents below.",
                 false,
                 None,
-                false,
-                true,
+                ThreadLane::Building,
+                true
             ),
             Some("focused_direct_workspace_write")
         );
@@ -22367,7 +22448,8 @@ mod tests {
                 "defaultRolloutPath": rollout_path.display().to_string(),
                 "historyReplayRequired": false,
             });
-            let (state, marked) = provider_conversation_state_for_this_runtime(Some(stored), false);
+            let (state, marked) =
+                provider_conversation_state_for_this_runtime(Some(stored), ThreadLane::Building);
             let (prompt, _, metrics) = processor
                 .build_prompt_with_text(
                     &project_id,
@@ -22386,7 +22468,7 @@ mod tests {
                 request,
                 false,
                 state.as_ref(),
-                false,
+                ThreadLane::Building,
                 false,
             );
             if restorable {
@@ -22437,7 +22519,7 @@ mod tests {
         let thread_id = Uuid::new_v4().to_string();
 
         assert_eq!(
-            provider_conversation_state_for_this_runtime(None, false),
+            provider_conversation_state_for_this_runtime(None, ThreadLane::Building),
             (None, false)
         );
         for untouched in [
@@ -22446,40 +22528,56 @@ mod tests {
             json!({"defaultThreadId": thread_id, "defaultRolloutPath": rollout.display().to_string()}),
         ] {
             assert_eq!(
-                provider_conversation_state_for_this_runtime(Some(untouched.clone()), false),
+                provider_conversation_state_for_this_runtime(
+                    Some(untouched.clone()),
+                    ThreadLane::Building
+                ),
                 (Some(untouched.clone()), false),
                 "{untouched}"
             );
         }
-        for (lost, browser_mode) in [
+        for (lost, lane) in [
             // A thread id with no rollout to resume from.
-            (json!({"defaultThreadId": thread_id}), false),
+            (json!({"defaultThreadId": thread_id}), ThreadLane::Building),
             // An id Codex cannot parse starts a new thread even with a rollout.
             (
                 json!({"threadId": "restored-thread", "rolloutPath": rollout.display().to_string()}),
-                false,
+                ThreadLane::Building,
             ),
             // A browser run resumes the browser thread, whose rollout is gone.
             (
                 json!({
                     "defaultThreadId": thread_id,
                     "defaultRolloutPath": rollout.display().to_string(),
-                    "browserThreadId": Uuid::new_v4().to_string(),
-                    "browserRolloutPath": tmp.path().join("gone.jsonl").display().to_string(),
+                    "sharedBrowserThreadId": Uuid::new_v4().to_string(),
+                    "sharedBrowserRolloutPath": tmp.path().join("gone.jsonl").display().to_string(),
                 }),
-                true,
+                ThreadLane::SharedBrowser,
             ),
         ] {
             let (state, marked) =
-                provider_conversation_state_for_this_runtime(Some(lost.clone()), browser_mode);
+                provider_conversation_state_for_this_runtime(Some(lost.clone()), lane);
             let state = state.expect("state is kept");
             assert!(marked, "{lost}");
-            assert_eq!(state["historyReplayRequired"], true, "{lost}");
+            assert_eq!(state[lane.history_replay_key()], true, "{lost}");
             // Codex still receives the ids it would have tried, unchanged.
-            for key in ["defaultThreadId", "threadId", "browserThreadId"] {
+            for key in ["defaultThreadId", "threadId", "sharedBrowserThreadId"] {
                 assert_eq!(state.get(key), lost.get(key), "{lost} {key}");
             }
         }
+        // A chat's first browser turn finds only the building thread: its own lane names no
+        // thread, so there is nothing to mark, and the building thread is not its to resume.
+        let building_only = json!({
+            "defaultThreadId": thread_id,
+            "defaultRolloutPath": tmp.path().join("gone.jsonl").display().to_string(),
+        });
+        assert_eq!(
+            provider_conversation_state_for_this_runtime(
+                Some(building_only.clone()),
+                ThreadLane::SharedBrowser
+            ),
+            (Some(building_only), false)
+        );
     }
 
     /// A Codex run that saved `state`, so tests can hand it to
@@ -22532,7 +22630,7 @@ mod tests {
             "historyReplayRequired": false,
         });
         let (first_state, marked) =
-            provider_conversation_state_for_this_runtime(Some(stored), false);
+            provider_conversation_state_for_this_runtime(Some(stored), ThreadLane::Building);
         assert!(marked);
         let (first_prompt, _, first_metrics) = build(
             &skill_setup_test_job(SKILL_SETUP_TEST_OPENER),
@@ -22552,7 +22650,7 @@ mod tests {
         fs::write(&fresh_rollout, "").expect("write fresh rollout");
         let codex_state = crate::codex::provider_state_after_fresh_thread(
             first_state.as_ref(),
-            false,
+            ThreadLane::Building,
             &fresh_rollout,
         );
         assert_eq!(codex_state["historyReplayRequired"], true);
@@ -22562,7 +22660,7 @@ mod tests {
             &first_prompt,
             &first_prompt,
             &first_metrics,
-            false,
+            ThreadLane::Building,
         )
         .expect("saved state");
         assert_eq!(saved["historyReplayRequired"], false);
@@ -22576,14 +22674,25 @@ mod tests {
             codex_fields.len()
         );
         for (key, value) in codex_fields {
-            if key != "historyReplayRequired" && key != "defaultThreadRestoreFailed" {
+            if ![
+                "historyReplayRequired",
+                "defaultHistoryReplayRequired",
+                "defaultThreadRestoreFailed",
+            ]
+            .contains(&key.as_str())
+            {
                 assert_eq!(&saved[key], value, "{key}");
             }
         }
+        assert_eq!(saved["defaultHistoryReplayRequired"], false);
         assert_eq!(saved["defaultThreadRestoreSource"], "failed_new");
         assert_eq!(saved["lastThreadRestoreSource"], "failed_new");
         // This turn's thread-state artifact still reports the failed restore.
-        let artifact = build_codex_thread_state_artifact(Some(&codex_state), Some(&saved), false);
+        let artifact = build_codex_thread_state_artifact(
+            Some(&codex_state),
+            Some(&saved),
+            ThreadLane::Building,
+        );
         assert_eq!(artifact["metadata"]["restoreFailed"], true);
         assert_eq!(artifact["metadata"]["restoreSource"], "failed_new");
         assert_eq!(artifact["metadata"]["historyReplayRequired"], false);
@@ -22605,7 +22714,7 @@ mod tests {
             }
         ]));
         let (second_state, marked) =
-            provider_conversation_state_for_this_runtime(Some(saved), false);
+            provider_conversation_state_for_this_runtime(Some(saved), ThreadLane::Building);
         assert!(!marked);
         let (second_prompt, _, second_metrics) =
             build(&second_job, second_request, second_state.as_ref());
@@ -22621,29 +22730,54 @@ mod tests {
                 second_request,
                 false,
                 second_state.as_ref(),
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             Some("stateful_provider_thread_restored")
         );
     }
 
-    /// Codex derives `historyReplayRequired` from both modes' restore flags on every run it
-    /// saves. If a replay that seeded a fresh thread left that mode's flag set, the next run
-    /// in the other mode would raise the request again, and the turn after it would replay
-    /// the history into a thread that already holds it.
+    /// Each lane keeps its own thread and its own replay flag. When one lane's thread is lost,
+    /// that lane replays its history into a fresh thread, while the other lane, whose thread is
+    /// still on this disk, resumes it without a replay. Once replayed, neither lane asks for the
+    /// history again.
     #[test]
-    fn a_thread_seeded_by_a_replay_stays_seeded_across_a_turn_in_the_other_mode() {
+    fn a_lost_thread_replays_only_into_its_own_lane() {
         let tmp = tempdir().expect("temp dir");
         let processor = test_job_processor(tmp.path());
         let project_id = Uuid::new_v4();
-        let job = skill_setup_test_job(SKILL_SETUP_TEST_OPENER);
+        let history = json!([
+            {"role": "user", "content": SKILL_SETUP_TEST_OPENER},
+            {
+                "role": "assistant",
+                "content": SKILL_SETUP_TEST_QUESTION,
+                "metadata": {"source": "agent", "provider": "codex-embedded"}
+            },
+            {"role": "user", "content": "Look up the setup guide's sign-in page.", "lane": "browser"},
+            {"role": "assistant", "content": "The guide's sign-in page asks for a workspace name.", "lane": "browser"},
+        ]);
+        let building_job = skill_setup_history_job(history.clone());
+        let browser_job = test_lease_job(
+            Some("feature"),
+            json!({
+                "conversation_history": history,
+                "metadata": {
+                    "browserTransport": "shared",
+                    "browserPageId": "page-one",
+                    "browserConsentVersion": 1,
+                },
+            }),
+        );
         let request = "What's next in the setup?";
-        let build = |state: Option<&JsonValue>| {
+        let build = |lane: ThreadLane, state: Option<&JsonValue>| {
+            let job = match lane {
+                ThreadLane::Building => &building_job,
+                ThreadLane::SharedBrowser => &browser_job,
+            };
             processor
                 .build_prompt_with_text(
                     &project_id,
-                    &job,
+                    job,
                     tmp.path(),
                     request,
                     true,
@@ -22659,89 +22793,272 @@ mod tests {
             .join("from-the-old-runtime.jsonl")
             .display()
             .to_string();
-        let kept_rollout = tmp.path().join("default-thread.jsonl");
-        fs::write(&kept_rollout, "").expect("write default rollout");
+        let kept_rollout = tmp.path().join("kept-thread.jsonl");
+        fs::write(&kept_rollout, "").expect("write kept rollout");
         let kept_rollout = kept_rollout.display().to_string();
-        let default_thread = Uuid::new_v4().to_string();
+        let building_thread = Uuid::new_v4().to_string();
+        let browser_thread = Uuid::new_v4().to_string();
 
-        for (label, lost_browser, stored) in [
-            // The default thread is lost, and the browser turn resumes the fresh one through
-            // the legacy thread keys.
+        for (lost, other, building_rollout, browser_rollout) in [
             (
-                "default_lost",
-                false,
-                json!({
-                    "provider": "codex-embedded",
-                    "defaultThreadId": default_thread,
-                    "defaultRolloutPath": lost_rollout,
-                    "threadId": default_thread,
-                    "rolloutPath": lost_rollout,
-                    "historyReplayRequired": false,
-                }),
+                ThreadLane::Building,
+                ThreadLane::SharedBrowser,
+                &lost_rollout,
+                &kept_rollout,
             ),
-            // The browser thread is lost while the default thread is still on this disk.
             (
-                "browser_lost",
-                true,
-                json!({
-                    "provider": "codex-embedded",
-                    "defaultThreadId": default_thread,
-                    "defaultRolloutPath": kept_rollout,
-                    "threadId": default_thread,
-                    "rolloutPath": kept_rollout,
-                    "browserThreadId": Uuid::new_v4().to_string(),
-                    "browserRolloutPath": lost_rollout,
-                    "historyReplayRequired": false,
-                }),
+                ThreadLane::SharedBrowser,
+                ThreadLane::Building,
+                &kept_rollout,
+                &lost_rollout,
             ),
         ] {
-            // Turn N replays the history into a fresh thread in the mode that lost it.
+            let label = lost.name();
+            let stored = json!({
+                "provider": "codex-embedded",
+                "defaultThreadId": building_thread,
+                "defaultRolloutPath": building_rollout,
+                "threadId": building_thread,
+                "rolloutPath": building_rollout,
+                "sharedBrowserThreadId": browser_thread,
+                "sharedBrowserRolloutPath": browser_rollout,
+                "defaultHistoryReplayRequired": false,
+                "sharedBrowserHistoryReplayRequired": false,
+                "historyReplayRequired": false,
+            });
+            // The other lane's thread is on this disk: it resumes without a replay.
             let (state, marked) =
-                provider_conversation_state_for_this_runtime(Some(stored), lost_browser);
+                provider_conversation_state_for_this_runtime(Some(stored.clone()), other);
+            assert!(!marked, "{label}");
+            let (_, _, metrics) = build(other, state.as_ref());
+            assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
+
+            // Turn N replays the lane's history into a fresh thread in the lane that lost it.
+            let (state, marked) = provider_conversation_state_for_this_runtime(Some(stored), lost);
             assert!(marked, "{label}");
-            let (prompt, _, metrics) = build(state.as_ref());
+            let (prompt, _, metrics) = build(lost, state.as_ref());
             assert_eq!(metrics["promptMode"], "full", "{label}");
+            assert!(prompt_context_replayed_history(&metrics), "{label}");
             let fresh_rollout = tmp.path().join(format!("{label}-fresh.jsonl"));
             fs::write(&fresh_rollout, "").expect("write fresh rollout");
             let saved = provider_conversation_state_to_save(
                 &codex_run_output(crate::codex::provider_state_after_fresh_thread(
                     state.as_ref(),
-                    lost_browser,
+                    lost,
                     &fresh_rollout,
                 )),
                 &prompt,
                 &prompt,
                 &metrics,
-                lost_browser,
-            );
+                lost,
+            )
+            .expect("saved state");
+            for key in [
+                "defaultHistoryReplayRequired",
+                "sharedBrowserHistoryReplayRequired",
+                "historyReplayRequired",
+            ] {
+                assert_eq!(saved[key], false, "{label} {key}");
+            }
 
-            // Turn N+1 runs in the other mode and resumes a thread that holds the history.
-            let (state, marked) =
-                provider_conversation_state_for_this_runtime(saved, !lost_browser);
+            // Turn N+1 runs in the other lane and resumes its own thread.
+            let (state, marked) = provider_conversation_state_for_this_runtime(Some(saved), other);
             assert!(!marked, "{label}");
-            let (prompt, _, metrics) = build(state.as_ref());
+            let (prompt, _, metrics) = build(other, state.as_ref());
             assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
             let saved = provider_conversation_state_to_save(
                 &codex_run_output(crate::codex::provider_state_after_thread_resumed(
                     state.as_ref().expect("state"),
-                    !lost_browser,
+                    other,
                 )),
                 &prompt,
                 &prompt,
                 &metrics,
-                !lost_browser,
+                other,
             )
             .expect("saved state");
             assert_eq!(saved["historyReplayRequired"], false, "{label}");
 
-            // Turn N+2 is back in the first mode, whose thread already holds the history.
-            let (state, marked) =
-                provider_conversation_state_for_this_runtime(Some(saved), lost_browser);
+            // Turn N+2 is back in the first lane, whose fresh thread already holds its history.
+            let (state, marked) = provider_conversation_state_for_this_runtime(Some(saved), lost);
             assert!(!marked, "{label}");
-            let (_, _, metrics) = build(state.as_ref());
+            let (_, _, metrics) = build(lost, state.as_ref());
             assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
             assert_eq!(metrics["includedTurns"], 0, "{label}");
         }
+    }
+
+    /// A chat's turns used to share one thread: a browser turn resumed the building thread and
+    /// saved its id as `browserThreadId`. That thread holds the pages its browser turns read, so
+    /// it is retired for both lanes: each starts a thread of its own once, and the state the
+    /// turn saves names neither the old thread nor the old browser keys. Old browser keys that
+    /// name another thread are dropped too; no lane reads them.
+    #[test]
+    fn a_thread_both_lanes_wrote_is_retired_for_both() {
+        let tmp = tempdir().expect("temp dir");
+        let shared_rollout = tmp.path().join("shared.jsonl");
+        fs::write(&shared_rollout, "").expect("write shared rollout");
+        let shared_rollout = shared_rollout.display().to_string();
+        let shared = Uuid::new_v4().to_string();
+        let both_lanes_wrote = json!({
+            "provider": "codex-embedded",
+            "defaultThreadId": shared,
+            "threadId": shared,
+            "defaultRolloutPath": shared_rollout,
+            "rolloutPath": shared_rollout,
+            "defaultThreadRestoreFailed": false,
+            "browserThreadId": shared,
+            "browserRolloutPath": shared_rollout,
+            "browserThreadRestoreFailed": false,
+            "historyReplayRequired": false,
+        });
+        let (state, retired) = split_shared_thread_state(Some(both_lanes_wrote));
+        assert!(retired);
+        let state = state.expect("state");
+        assert_eq!(state["provider"], "codex-embedded");
+        for key in [
+            "defaultThreadId",
+            "threadId",
+            "defaultRolloutPath",
+            "rolloutPath",
+            "browserThreadId",
+            "browserRolloutPath",
+            "browserThreadRestoreFailed",
+            "historyReplayRequired",
+        ] {
+            assert!(state.get(key).is_none(), "{key}: {state}");
+        }
+        for lane in [ThreadLane::Building, ThreadLane::SharedBrowser] {
+            // Nothing claims a thread, so the turn's prompt replays its lane's history into a
+            // new thread, and the state that turn saves holds that thread alone.
+            let (for_run, marked) =
+                provider_conversation_state_for_this_runtime(Some(state.clone()), lane);
+            assert!(!marked);
+            assert!(!provider_state_claims_restored_thread(
+                for_run.as_ref(),
+                lane
+            ));
+            assert!(!crate::codex::provider_thread_restorable_on_this_runtime(
+                for_run.as_ref(),
+                lane
+            ));
+            let fresh = tmp.path().join(format!("{}.jsonl", lane.name()));
+            fs::write(&fresh, "").expect("write fresh rollout");
+            let saved =
+                crate::codex::provider_state_after_fresh_thread(for_run.as_ref(), lane, &fresh);
+            assert!(!saved.to_string().contains(&shared), "{saved}");
+            assert!(saved.get("browserThreadId").is_none());
+        }
+
+        // An old browser thread of its own: dropped, and the building thread is kept.
+        let building = Uuid::new_v4().to_string();
+        let (state, retired) = split_shared_thread_state(Some(json!({
+            "defaultThreadId": building,
+            "threadId": building,
+            "defaultRolloutPath": shared_rollout,
+            "rolloutPath": shared_rollout,
+            "browserThreadId": Uuid::new_v4().to_string(),
+            "browserRolloutPath": tmp.path().join("older-browser.jsonl").display().to_string(),
+        })));
+        assert!(!retired);
+        let state = state.expect("state");
+        assert_eq!(state["defaultThreadId"], building);
+        assert_eq!(state["rolloutPath"], shared_rollout);
+        assert!(state.get("browserThreadId").is_none());
+        assert!(state.get("browserRolloutPath").is_none());
+
+        // A state written since keeps both lanes' threads.
+        let browser = Uuid::new_v4().to_string();
+        let current = json!({
+            "defaultThreadId": building,
+            "threadId": building,
+            "sharedBrowserThreadId": browser,
+        });
+        assert_eq!(
+            split_shared_thread_state(Some(current.clone())),
+            (Some(current), false)
+        );
+        assert_eq!(split_shared_thread_state(None), (None, false));
+    }
+
+    /// A Shared Browser turn runs on its chat's browser thread; every other turn that keeps a
+    /// thread runs on the building thread, also an ordinary turn on a runtime whose browser
+    /// starts with it (`INSTAFY_ENABLE_BROWSER_SESSION`), which has shell tools, and a Personal
+    /// Browser turn, whose thread is its own and never saved.
+    #[test]
+    fn a_boot_time_browser_ordinary_turn_uses_the_building_lane() {
+        for (metadata, lane) in [
+            (json!({}), ThreadLane::Building),
+            (
+                json!({"browserTransport": "desktop-personal"}),
+                ThreadLane::Building,
+            ),
+            (
+                json!({"browserTransport": "shared", "browserPageId": "page-one"}),
+                ThreadLane::SharedBrowser,
+            ),
+        ] {
+            let job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+            assert_eq!(thread_lane_for_job(&job), lane, "{metadata}");
+        }
+    }
+
+    /// A building turn on a restored thread reads what the chat's browser turns found since its
+    /// last turn; on a new or lost thread its replay quotes them instead, and a browser turn
+    /// never reads them.
+    #[test]
+    fn a_restored_building_prompt_carries_the_browser_turns_since() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let since = json!([{
+            "request": "Find the opening hours.",
+            "reply": "Open daily, 09:00 to 19:30.",
+            "readAt": "2026-01-05T10:00:00Z",
+            "viewer": "Instafy's browser in the workspace",
+            "outcome": "succeeded",
+        }]);
+        let rollout = tmp.path().join("building.jsonl");
+        fs::write(&rollout, "").expect("write rollout");
+        let restored = json!({
+            "defaultThreadId": Uuid::new_v4().to_string(),
+            "defaultRolloutPath": rollout.display().to_string(),
+            "sharedBrowserThreadId": Uuid::new_v4().to_string(),
+            "historyReplayRequired": false,
+        });
+        let sections = |metadata: JsonValue, state: Option<&JsonValue>| {
+            let job = test_lease_job(
+                Some("feature"),
+                json!({ "metadata": metadata, "browser_turns_since": since.clone() }),
+            );
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Add the hours to the page.",
+                    true,
+                    state,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+            (prompt, metrics["promptSections"].clone())
+        };
+        let (prompt, sections_of) = sections(json!({}), Some(&restored));
+        assert!(
+            sections_of.get("browserTurnsSince").is_some(),
+            "{sections_of}"
+        );
+        assert!(prompt.contains("Open daily, 09:00 to 19:30."));
+        let (_, fresh) = sections(json!({}), None);
+        assert!(fresh.get("browserTurnsSince").is_none(), "{fresh}");
+        let (_, browser) = sections(
+            json!({"browserTransport": "shared", "browserPageId": "page-one", "browserConsentVersion": 1}),
+            Some(&restored),
+        );
+        assert!(browser.get("browserTurnsSince").is_none(), "{browser}");
     }
 
     /// A retry reuses the first prompt's metrics, but the missing-final recoveries rebuild
@@ -22777,7 +23094,7 @@ mod tests {
                 "defaultRolloutPath": tmp.path().join("from-the-old-runtime.jsonl").display().to_string(),
                 "historyReplayRequired": false,
             })),
-            false,
+            ThreadLane::Building,
         );
         assert!(marked);
         let (prompt, _, metrics) = build(state.as_ref());
@@ -22787,8 +23104,11 @@ mod tests {
         // prompt.
         let retry_rollout = tmp.path().join("retry-thread.jsonl");
         fs::write(&retry_rollout, "").expect("write retry rollout");
-        let codex_state =
-            crate::codex::provider_state_after_fresh_thread(state.as_ref(), false, &retry_rollout);
+        let codex_state = crate::codex::provider_state_after_fresh_thread(
+            state.as_ref(),
+            ThreadLane::Building,
+            &retry_rollout,
+        );
         let retry_output = codex_run_output(codex_state.clone());
 
         for (label, retry_prompt) in [
@@ -22822,7 +23142,7 @@ mod tests {
                     &retry_prompt,
                     &prompt,
                     &metrics,
-                    false
+                    ThreadLane::Building
                 )
                 .as_ref(),
                 Some(&codex_state),
@@ -22857,7 +23177,7 @@ mod tests {
                 &retry_prompt,
                 &prompt,
                 &metrics,
-                false,
+                ThreadLane::Building,
             )
             .expect("saved state");
             assert_eq!(saved["historyReplayRequired"], false, "{label}");
@@ -22870,9 +23190,9 @@ mod tests {
             &codex_missing_final_recovery_prompt(request, tmp.path(), &[], false),
             &prompt,
             &metrics,
-            false,
+            ThreadLane::Building,
         );
-        let (state, _) = provider_conversation_state_for_this_runtime(saved, false);
+        let (state, _) = provider_conversation_state_for_this_runtime(saved, ThreadLane::Building);
         let (next_prompt, _, next_metrics) = build(state.as_ref());
         assert_eq!(next_metrics["promptMode"], "full");
         assert_eq!(next_metrics["includedTurns"], 2);
@@ -22909,7 +23229,9 @@ mod tests {
             let rollout = tmp.path().join(format!("{name}.jsonl"));
             fs::write(&rollout, "").expect("write fresh rollout");
             let output = codex_run_output(crate::codex::provider_state_after_fresh_thread(
-                state, false, &rollout,
+                state,
+                ThreadLane::Building,
+                &rollout,
             ));
             assert_eq!(
                 output.provider_conversation_state.as_ref().expect("state")["historyReplayRequired"],
@@ -22927,15 +23249,20 @@ mod tests {
                 "defaultRolloutPath": tmp.path().join("from-the-old-runtime.jsonl").display().to_string(),
                 "historyReplayRequired": false,
             })),
-            false,
+            ThreadLane::Building,
         );
         assert!(marked);
         let (prompt, _, metrics) = build(lost.as_ref());
         assert_eq!(metrics["includedTurns"], 2);
         let output = fresh_thread_output(lost.as_ref(), "first-attempt");
-        let first_attempt =
-            provider_conversation_state_to_save(&output, &prompt, &prompt, &metrics, false)
-                .expect("saved state");
+        let first_attempt = provider_conversation_state_to_save(
+            &output,
+            &prompt,
+            &prompt,
+            &metrics,
+            ThreadLane::Building,
+        )
+        .expect("saved state");
         assert_eq!(first_attempt["historyReplayRequired"], false);
         assert_eq!(first_attempt["defaultThreadRestoreFailed"], false);
 
@@ -22945,16 +23272,27 @@ mod tests {
             &prompt,
             CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson,
         );
-        let resent_retry =
-            provider_conversation_state_to_save(&retry_output, &resent, &prompt, &metrics, false)
-                .expect("saved state");
+        let resent_retry = provider_conversation_state_to_save(
+            &retry_output,
+            &resent,
+            &prompt,
+            &metrics,
+            ThreadLane::Building,
+        )
+        .expect("saved state");
         assert_eq!(resent_retry["historyReplayRequired"], false);
 
         // A missing-final recovery rebuilt the retry prompt from the latest request alone, so
         // its fresh thread lacks the history although the reused metrics say it was replayed.
         let recovery = codex_missing_final_recovery_prompt(request, tmp.path(), &[], false);
         assert_eq!(
-            provider_conversation_state_to_save(&retry_output, &recovery, &prompt, &metrics, false),
+            provider_conversation_state_to_save(
+                &retry_output,
+                &recovery,
+                &prompt,
+                &metrics,
+                ThreadLane::Building
+            ),
             retry_output.provider_conversation_state
         );
 
@@ -22969,14 +23307,20 @@ mod tests {
                 "defaultRolloutPath": rollout.display().to_string(),
                 "historyReplayRequired": false,
             })),
-            false,
+            ThreadLane::Building,
         );
         assert!(!marked);
         let (prompt, _, metrics) = build(restorable.as_ref());
         assert_eq!(metrics["includedTurns"], 0);
         let output = fresh_thread_output(restorable.as_ref(), "unloadable-rollout");
         assert_eq!(
-            provider_conversation_state_to_save(&output, &prompt, &prompt, &metrics, false),
+            provider_conversation_state_to_save(
+                &output,
+                &prompt,
+                &prompt,
+                &metrics,
+                ThreadLane::Building
+            ),
             output.provider_conversation_state
         );
     }
@@ -23004,7 +23348,7 @@ mod tests {
         }
 
         assert_eq!(
-            provider_conversation_state_after_history_replay(None, true, false),
+            provider_conversation_state_after_history_replay(None, true, ThreadLane::Building),
             None
         );
         for (label, prompt_replayed_history, state) in [
@@ -23023,7 +23367,8 @@ mod tests {
                 true,
                 json!({
                     "defaultThreadRestoreFailed": false,
-                    "browserThreadRestoreFailed": true,
+                    "sharedBrowserThreadRestoreFailed": true,
+                    "sharedBrowserHistoryReplayRequired": true,
                     "historyReplayRequired": true,
                 }),
             ),
@@ -23032,7 +23377,7 @@ mod tests {
                 provider_conversation_state_after_history_replay(
                     Some(state.clone()),
                     prompt_replayed_history,
-                    false
+                    ThreadLane::Building
                 ),
                 Some(state),
                 "{label}"
@@ -23040,36 +23385,43 @@ mod tests {
         }
 
         // The browser thread lost its history on an earlier turn and has not had a replay
-        // since, so the next browser turn still needs one. The default thread is seeded.
+        // since, so the next browser turn still needs one. The building thread is seeded.
         let default_seeded = provider_conversation_state_after_history_replay(
             Some(json!({
                 "defaultThreadRestoreFailed": true,
-                "browserThreadRestoreFailed": true,
+                "sharedBrowserThreadRestoreFailed": true,
+                "defaultHistoryReplayRequired": true,
+                "sharedBrowserHistoryReplayRequired": true,
                 "historyReplayRequired": true,
             })),
             true,
-            false,
+            ThreadLane::Building,
         )
         .expect("state");
+        assert_eq!(default_seeded["defaultHistoryReplayRequired"], false);
+        assert_eq!(default_seeded["sharedBrowserHistoryReplayRequired"], true);
         assert_eq!(default_seeded["historyReplayRequired"], true);
         assert_eq!(default_seeded["defaultThreadRestoreFailed"], false);
-        assert_eq!(default_seeded["browserThreadRestoreFailed"], true);
+        assert_eq!(default_seeded["sharedBrowserThreadRestoreFailed"], true);
 
-        // A browser turn replayed into its fresh thread while the default thread is fine.
+        // A browser turn replayed into its fresh thread while the building thread is fine.
         let browser = provider_conversation_state_after_history_replay(
             Some(json!({
                 "defaultThreadRestoreFailed": false,
-                "browserThreadRestoreFailed": true,
-                "browserThreadRestoreSource": "failed_new",
+                "sharedBrowserThreadRestoreFailed": true,
+                "sharedBrowserThreadRestoreSource": "failed_new",
+                "defaultHistoryReplayRequired": false,
+                "sharedBrowserHistoryReplayRequired": true,
                 "historyReplayRequired": true,
             })),
             true,
-            true,
+            ThreadLane::SharedBrowser,
         )
         .expect("state");
         assert_eq!(browser["historyReplayRequired"], false);
-        assert_eq!(browser["browserThreadRestoreFailed"], false);
-        assert_eq!(browser["browserThreadRestoreSource"], "failed_new");
+        assert_eq!(browser["sharedBrowserHistoryReplayRequired"], false);
+        assert_eq!(browser["sharedBrowserThreadRestoreFailed"], false);
+        assert_eq!(browser["sharedBrowserThreadRestoreSource"], "failed_new");
     }
 
     #[test]
@@ -24711,8 +25063,11 @@ mod tests {
         let tmp = tempdir().expect("temp dir");
         let processor = test_job_processor(tmp.path());
         let project_id = Uuid::new_v4();
-        let provider_state =
-            json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
+        let provider_state = json!({
+            "defaultThreadId": "existing-thread",
+            "sharedBrowserThreadId": "existing-browser-thread",
+            "historyReplayRequired": false,
+        });
         let reminder = |metadata: JsonValue| {
             let job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
             let (prompt, _, _) = processor
@@ -26916,9 +27271,9 @@ mod tests {
                 "Review the prepared source path.",
                 false,
                 None,
-                false,
+                ThreadLane::Building,
                 // Write-scoped worker lanes still report the worker-lane reason.
-                true,
+                true
             ),
             Some("focused_multi_agent_worker_lane")
         );
@@ -26942,8 +27297,8 @@ mod tests {
                 "Review sibling outcomes.",
                 false,
                 None,
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             Some("focused_multi_agent_lead_continuation")
         );

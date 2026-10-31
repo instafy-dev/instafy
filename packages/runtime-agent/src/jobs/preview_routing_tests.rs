@@ -113,8 +113,11 @@ fn restored_prompt(
     let project_id = Uuid::new_v4();
     let mut job = test_lease_job(Some("feature"), payload);
     job.project_id = Some(project_id);
-    let provider_state =
-        json!({"defaultThreadId": "existing-thread", "historyReplayRequired": false});
+    let provider_state = json!({
+        "defaultThreadId": "existing-thread",
+        "sharedBrowserThreadId": "existing-browser-thread",
+        "historyReplayRequired": false,
+    });
     let (prompt, _, metrics) = processor
         .build_prompt_with_text(
             &project_id,
