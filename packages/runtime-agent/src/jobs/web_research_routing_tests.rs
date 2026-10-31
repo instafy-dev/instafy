@@ -1142,7 +1142,7 @@ fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
         "- The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential."
     ));
     assert!(BROWSER_CHOICE_CONTRACT.contains(
-        "- In `summary`, never say a page opened, or what it shows, before a browser tool saw it.\n"
+        "- In `summary`, never say a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy: that step asks the person first.\n"
     ));
     assert!(!BROWSER_CHOICE_CONTRACT.contains("where the browser goes"));
 
@@ -1286,8 +1286,77 @@ fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
     )
     .unwrap();
     assert!(
-        !restored(json!({ "browserTransport": "shared" })).contains("this thread may predate it")
+        !restored(json!({ "browserTransport": "shared" }))
+            .contains("From `instafy-browser-automation`")
     );
+}
+
+/// The space's `AGENTS.md` is a turn's instructions only while the turn has the workspace: Codex tells a browser turn
+/// that resumes its chat's thread "The previously provided AGENTS.md instructions no longer apply". So a browser
+/// turn's replies read "this turn is read-only", "504 Gateway Time-out" and "listed in the findings below", which
+/// the replies guide rules out by name. A browser turn on a restored thread is given `AGENTS.md`'s "Replies" again,
+/// from the space's own copy, and only that section. An ordinary restored turn keeps `AGENTS.md` and is not, and a
+/// space's copy without the section gives nothing.
+#[test]
+fn a_browser_turn_on_a_restored_thread_is_given_the_replies_guide() {
+    let tmp = scaffolded_space();
+    let restored = |metadata: JsonValue| {
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+        job.project_id = Some(project_id);
+        let state = json!({"defaultThreadId": "existing-thread", "threadId": "existing-thread", "historyReplayRequired": false});
+        let (prompt, _, metrics) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                "Please keep going and find the opening hours.",
+                true,
+                Some(&state),
+                &[],
+                None,
+                None,
+            )
+            .expect("prompt should build");
+        assert_eq!(metrics["promptMode"], "stateful_compact");
+        (prompt, metrics)
+    };
+    let agents_doc = fs::read_to_string(tmp.path().join(learn::AGENTS_DOC_FILENAME)).unwrap();
+    let start = agents_doc.find("## Replies").expect("section");
+    let replies = agents_doc[start..].trim_end();
+    assert!(replies.contains("\"this turn is read-only\""), "{replies}");
+    for transport in ["shared", "desktop-personal"] {
+        let (prompt, metrics) = restored(json!({ "browserTransport": transport }));
+        assert!(prompt.contains(replies), "{transport}");
+        assert!(
+            prompt.contains("From `AGENTS.md` (this thread may predate it):\n## Replies\n"),
+            "{transport}"
+        );
+        assert!(
+            !prompt.contains("## Responsiveness"),
+            "{transport}: only the section"
+        );
+        assert!(
+            metrics["promptSections"]["pinnedRepliesSection"]["chars"]
+                .as_u64()
+                .is_some_and(|chars| chars > 0),
+            "{transport}"
+        );
+    }
+    let (ordinary, _) = restored(json!({}));
+    assert!(!ordinary.contains("## Replies"));
+
+    let doc = tmp.path().join(learn::AGENTS_DOC_FILENAME);
+    fs::write(
+        &doc,
+        agents_doc.replace("## Replies", "## How replies read"),
+    )
+    .unwrap();
+    let (prompt, _) = restored(json!({ "browserTransport": "shared" }));
+    assert!(!prompt.contains("From `AGENTS.md`"));
+    // The browser skill's own section still comes.
+    assert!(prompt.contains("From `instafy-browser-automation`"));
 }
 
 /// A research turn often loads the research skill without the browser skill (the router gives a turn at most three

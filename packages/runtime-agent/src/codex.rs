@@ -925,10 +925,6 @@ pub struct CodexRunOptions {
     /// A granted turn: its one MCP server is its grants' broker (`provider_mcp`), and it has no
     /// workspace, shell, web search, apps or memory.
     pub granted: Option<crate::provider_mcp::GrantedTurn>,
-    /// A run that answers in words only: a response of its thread that calls a tool reaches
-    /// Codex with nothing in it, so no tool runs, and the run is one request, never replayed
-    /// (`answer_only`). Its tools stay listed, so its requests match the ones before it.
-    pub answer_only: Option<crate::answer_only::AnswerOnly>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1070,7 +1066,7 @@ impl CodexRunOptions {
     }
 
     /// The run's hard limit: its own (a team's turn ends by the team's deadline), else the usual.
-    pub(crate) fn hard_limit(&self) -> Duration {
+    fn hard_limit(&self) -> Duration {
         self.run_timeout.unwrap_or_else(resolve_codex_run_timeout)
     }
 }
@@ -2096,7 +2092,6 @@ impl CodexClient {
                 codex_extension_registry(
                     &turn_start_token_usage,
                     &required_execution,
-                    options.answer_only.as_ref(),
                     &run_instructions,
                     options.project_id.map(|id| (id, self.workspace_dir())),
                 ),
@@ -2351,12 +2346,6 @@ impl CodexClient {
                 .as_ref()
                 .context("a turn that must execute a tool has no Codex thread id")?;
             required_execution.arm(&thread_id.to_string());
-        }
-        if let Some(answer_only) = options.answer_only.as_ref() {
-            let thread_id = active_thread_id
-                .as_ref()
-                .context("a run that answers in words only has no Codex thread id")?;
-            answer_only.arm(&thread_id.to_string());
         }
 
         let request = TurnInputRequest::user_input(items)
@@ -4243,21 +4232,6 @@ fn run_lane(
     }
 }
 
-/// A run's instructions as its options ask for them, on a runtime that has the browsers they
-/// ask for.
-#[cfg(test)]
-pub(crate) fn run_instructions_for_options(options: &CodexRunOptions) -> RunInstructions {
-    run_instructions_for_turn(
-        run_lane(
-            options,
-            options.shared_browser,
-            options.personal_browser,
-            false,
-        ),
-        |_| None,
-    )
-}
-
 /// A run's developer text: its lane's contract (granted, then generic MCP, then browser, then
 /// the ordinary write, focused or structured lane; `env` reads each lane's operator override),
 /// then its browser policies. A note that holds for this turn only goes apart from it, so the
@@ -4659,11 +4633,10 @@ impl TurnLifecycleContributor for TurnStartTokenUsageRecorder {
 /// The extension registry a run hands Codex. It gives every turn on the run's threads the
 /// run's own instructions (`run_instructions`), records each turn's baseline into
 /// `turn_start_token_usage`, which the run's `CodexEventStreamAdapter` reads, and enforces
-/// `required_execution`, and a words-only run's `answer_only`, on the threads the run arms.
+/// `required_execution` on the threads the run arms.
 fn codex_extension_registry(
     turn_start_token_usage: &TurnStartTokenUsage,
     required_execution: &RequiredExecutionGate,
-    answer_only: Option<&crate::answer_only::AnswerOnly>,
     run_instructions: &RunInstructions,
     project_context: Option<(uuid::Uuid, &Path)>,
 ) -> Arc<ExtensionRegistry<Config>> {
@@ -4686,9 +4659,6 @@ fn codex_extension_registry(
     extensions.model_request_contributor(gate.clone());
     extensions.tool_lifecycle_contributor(gate.clone());
     extensions.turn_lifecycle_contributor(gate);
-    if let Some(answer_only) = answer_only {
-        extensions.model_request_contributor(Arc::new(answer_only.clone()));
-    }
     Arc::new(extensions.build())
 }
 
@@ -4716,7 +4686,6 @@ pub(crate) async fn start_test_turn(
     let registry = codex_extension_registry(
         turn_start_token_usage,
         &RequiredExecutionGate::default(),
-        None,
         &RunInstructions::default(),
         None,
     );
@@ -5811,14 +5780,9 @@ pub(crate) fn resolve_codex_run_timeout() -> Duration {
 /// How many times a failed run is replayed from the start. An isolated tool worker, and a run
 /// behind the proxy, recover within the same session, which keeps completed tool receipts; a
 /// replay would reset that budget and could repeat side effects. A run-once run is never
-/// replayed, whatever the proxy setting: a replay would repeat what it already did. Nor is a
-/// words-only run (the reply check): it is one request, and a failed one leaves the reply.
+/// replayed, whatever the proxy setting: a replay would repeat what it already did.
 fn max_run_replays(options: &CodexRunOptions) -> usize {
-    if options.isolated_tool_worker
-        || options.run_once()
-        || options.answer_only.is_some()
-        || uses_bounded_proxy_retries(options)
-    {
+    if options.isolated_tool_worker || options.run_once() || uses_bounded_proxy_retries(options) {
         0
     } else {
         resolve_codex_max_run_retries()
@@ -7457,7 +7421,6 @@ mod tests {
         let registry = codex_extension_registry(
             &TurnStartTokenUsage::default(),
             &gate,
-            None,
             &RunInstructions::default(),
             None,
         );
@@ -9109,38 +9072,6 @@ mod tests {
         unsafe { std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:8789/v1") };
         assert_eq!(max_run_replays(&CodexRunOptions::default()), 0);
         assert_eq!(max_run_replays(&granted), 0);
-        for (key, previous) in [
-            ("OPENAI_BASE_URL", previous_base_url),
-            ("CODEX_MAX_RUN_RETRIES", previous_retries),
-        ] {
-            match previous {
-                Some(value) => unsafe { std::env::set_var(key, value) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
-    }
-
-    // A browser turn's reply check is a browser run, which is replayed after a failure or its
-    // time limit; the check is one request, and a failed one leaves the reply as it was.
-    #[test]
-    fn a_words_only_run_is_never_replayed() {
-        let _env_lock = env_lock();
-        let previous_base_url = std::env::var_os("OPENAI_BASE_URL");
-        let previous_retries = std::env::var_os("CODEX_MAX_RUN_RETRIES");
-        unsafe { std::env::set_var("CODEX_MAX_RUN_RETRIES", "2") };
-        unsafe { std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:8789/v1") };
-        let browser = CodexRunOptions {
-            shared_browser: true,
-            ..Default::default()
-        };
-        assert_eq!(max_run_replays(&browser), 2);
-        let check = CodexRunOptions {
-            answer_only: Some(crate::answer_only::AnswerOnly::new()),
-            ..browser
-        };
-        assert_eq!(max_run_replays(&check), 0);
-        unsafe { std::env::remove_var("OPENAI_BASE_URL") };
-        assert_eq!(max_run_replays(&check), 0);
         for (key, previous) in [
             ("OPENAI_BASE_URL", previous_base_url),
             ("CODEX_MAX_RUN_RETRIES", previous_retries),
@@ -11068,7 +10999,6 @@ required = true
         let registry = codex_extension_registry(
             &TurnStartTokenUsage::default(),
             &RequiredExecutionGate::default(),
-            None,
             &RunInstructions::default(),
             None,
         );

@@ -499,7 +499,7 @@ export function useAgentJobThreadPreviewState({
     }
     // The reply stands for the model's answer: the draft of it that streamed
     // while the turn ran is no note of its own, also when the runtime changed
-    // the reply after it (the reply check, a retry phrase, what wasn't saved).
+    // the reply after it (a retry phrase, what wasn't saved).
     if (finalSummaryMessage && finalSummaryMessage !== terminalProxyErrorMessage && isSucceededReply(finalSummaryMessage)) {
       for (const candidate of threadMessages) {
         if (isAnswerDraft(candidate)) {

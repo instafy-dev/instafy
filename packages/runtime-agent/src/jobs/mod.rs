@@ -50,7 +50,6 @@ pub(crate) use chat_attachments::TurnAttachments;
 mod conversation_context;
 mod git_sync;
 mod known_safe_command;
-mod reply_check;
 mod routing_evidence;
 mod routing_recovery;
 mod save_report;
@@ -1913,6 +1912,11 @@ const BROWSER_TURN_SKILL: PinnedSkill = PinnedSkill {
     section: "## Finding a page",
 };
 
+/// `AGENTS.md`'s replies guide. Codex withdraws the space's `AGENTS.md` from a turn without the
+/// workspace ("The previously provided AGENTS.md instructions no longer apply"), so a browser
+/// turn on a restored thread is given this section with the browser skill's.
+const BROWSER_TURN_REPLIES_SECTION: &str = "## Replies";
+
 /// A Personal or Shared Browser turn carries the browser skill whatever its
 /// words. The router weighs words, and a browser turn's request often has none
 /// of the skill's ("Now find how to get there by tram", or a task that names an
@@ -1929,26 +1933,44 @@ fn pinned_skill_for_turn(job: &LeaseJob) -> Option<&'static PinnedSkill> {
 /// chat's thread), and a browser turn has no tool to read the file. None when
 /// the space's copy has no such section.
 fn pinned_skill_section(workspace_dir: &Path, pinned: &PinnedSkill) -> Option<String> {
+    let section = workspace_file_section(workspace_dir, pinned.relative_path, pinned.section)?;
+    Some(format!(
+        "\nFrom `{}` (`{}`; this thread may predate it):\n{section}\n",
+        pinned.id, pinned.relative_path,
+    ))
+}
+
+/// `AGENTS.md`'s replies guide ([`BROWSER_TURN_REPLIES_SECTION`]), from the space's own copy,
+/// for a browser turn on a restored thread. None when the space's copy has no such section.
+fn pinned_replies_section(workspace_dir: &Path) -> Option<String> {
+    let section = workspace_file_section(
+        workspace_dir,
+        learn::AGENTS_DOC_FILENAME,
+        BROWSER_TURN_REPLIES_SECTION,
+    )?;
+    Some(format!(
+        "\nFrom `{}` (this thread may predate it):\n{section}\n",
+        learn::AGENTS_DOC_FILENAME
+    ))
+}
+
+/// The section of a file in the space under `heading`, a line of its own, up to the next
+/// `## ` heading. None when the file has no such section.
+fn workspace_file_section(
+    workspace_dir: &Path,
+    relative_path: &str,
+    heading: &str,
+) -> Option<String> {
     let (text, _) = read_text_file_lossy_truncated(
-        &workspace_dir.join(pinned.relative_path),
+        &workspace_dir.join(relative_path),
         PROJECT_MEMORY_MAX_FILE_BYTES,
     )?;
-    let start = text
-        .match_indices(pinned.section)
-        .map(|(at, _)| at)
-        .find(|&at| {
-            (at == 0 || text[..at].ends_with('\n'))
-                && text[at + pinned.section.len()..].starts_with('\n')
-        })?;
-    let body = &text[start + pinned.section.len()..];
+    let start = text.match_indices(heading).map(|(at, _)| at).find(|&at| {
+        (at == 0 || text[..at].ends_with('\n')) && text[at + heading.len()..].starts_with('\n')
+    })?;
+    let body = &text[start + heading.len()..];
     let end = body.find("\n## ").unwrap_or(body.len());
-    Some(format!(
-        "\nFrom `{}` (`{}`; this thread may predate it):\n{}{}\n",
-        pinned.id,
-        pinned.relative_path,
-        pinned.section,
-        body[..end].trim_end()
-    ))
+    Some(format!("{heading}{}", body[..end].trim_end()))
 }
 
 fn format_project_memory_snapshot_with_preferences(
@@ -3301,7 +3323,8 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// else the card is a button. Opening it changes no approval in the browser.
 /// The card itself says where the browser goes. The reply never says that a
 /// page was opened before a browser tool saw it, so it stays true when the
-/// card is only a button.
+/// card is only a button, nor what the browser will submit, send or buy: that
+/// step asks the person first, and they may say no.
 ///
 /// A sign-in the person asked for, or one a step they asked for needs, is
 /// opened and paused on (`request_human_input`), so the task can go on after
@@ -3326,7 +3349,7 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
 - `continueBuilding: true` only when you build something from what it finds (a page, a map); for a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
-- In `summary`, never say a page opened, or what it shows, before a browser tool saw it.\n\
+- In `summary`, never say a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy: that step asks the person first.\n\
 - Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
 - The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
@@ -7024,7 +7047,6 @@ impl JobProcessor {
             // A team's turn ends by the team's deadline (`turn_continuation`).
             run_timeout: Some(turn_files.limit()),
             granted,
-            answer_only: None,
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -7537,18 +7559,20 @@ impl JobProcessor {
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
         // it also drives the UI thread preview expectations.
-        let names_instafy_md = matches!(
+        if matches!(
             learn_request,
             Some(learn::LearnRequest {
                 mode: learn::LearnMode::Apply,
                 ..
             })
-        );
-        if names_instafy_md
+        ) && !outcome.summary.contains(learn::INSTAFY_FILENAME)
             && !is_retryable_codex_upstream_summary(&outcome.summary)
             && codex_fallback_summary_kind.is_none()
         {
-            mention_instafy_md(&mut outcome.summary);
+            let trimmed = outcome.summary.trim();
+            let base = trimmed.trim_end_matches(['.', '!', '?']);
+            let base = if base.is_empty() { trimmed } else { base };
+            outcome.summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
         }
         let mut artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
         if let Some(receipt) = &worker_reply_receipt {
@@ -7995,8 +8019,6 @@ impl JobProcessor {
                 retry_codex_run_options.usage_observer =
                     Some(task_usage.call(UsagePhase::Recovery));
             }
-            // The reply check runs with the options the retry answered with.
-            let retry_check_options = retry_codex_run_options.clone();
 
             // Brief jittered backoff before the recovery retry: re-hitting the
             // same degraded upstream milliseconds after a failed turn mostly
@@ -8061,7 +8083,7 @@ impl JobProcessor {
                     retry_output.native_image_inputs,
                 );
             }
-            let mut retry_provider_conversation_state = provider_conversation_state_to_save(
+            let retry_provider_conversation_state = provider_conversation_state_to_save(
                 &retry_output,
                 &retry_prompt,
                 &prompt,
@@ -8343,8 +8365,6 @@ impl JobProcessor {
                 }),
             );
 
-            // A reply the tool-free finalization pass wrote is not on the retry's thread.
-            let mut retry_reply_from_finalization = false;
             if retry_shared_browser_terminal_consent_failure.is_none()
                 && should_run_missing_final_finalization_pass(
                     retry_codex_fallback_summary_kind,
@@ -8448,7 +8468,6 @@ impl JobProcessor {
                     retry_outcome.files = retry_files;
                     retry_outcome.read_files = retry_read_files;
                     retry_codex_fallback_summary_kind = None;
-                    retry_reply_from_finalization = true;
                     retry_artifacts.push(build_codex_run_log_artifact(
                         &finalization_output.events,
                         Some(json!({
@@ -8671,34 +8690,6 @@ impl JobProcessor {
                 streaming_active,
                 retry_final_messages,
             );
-
-            // The reply check, as for a turn that needed no retry, when the
-            // posted reply is the one the retry's thread ends with.
-            if !kept_first_attempt_answer
-                && !retry_reply_from_finalization
-                && reply_check_due(
-                    job,
-                    run_once,
-                    retry_shared_browser_terminal_consent_failure.is_some(),
-                    retry_codex_fallback_summary_kind,
-                    &retry_outcome,
-                    interim_messages.iter().chain(&retry_messages),
-                )
-                && let Some(state) = check_reply_against_reads(
-                    &codex,
-                    job,
-                    &retry_check_options,
-                    retry_provider_conversation_state.as_ref(),
-                    browser_mode,
-                    false,
-                    task_usage,
-                    &mut retry_outcome,
-                    &mut retry_artifacts,
-                )
-                .await?
-            {
-                retry_provider_conversation_state = Some(state);
-            }
             let mut retry_not_saved = pre_turn_refresh
                 .as_ref()
                 .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
@@ -8825,33 +8816,6 @@ impl JobProcessor {
         // turn-end save.
         let final_messages =
             stream_settled_cards(progress_sender.as_ref(), streaming_active, final_messages);
-
-        // A turn that read pages or looked something up checks its reply
-        // against what it read once, before the reply posts.
-        let mut output_provider_conversation_state = output_provider_conversation_state;
-        if reply_check_due(
-            job,
-            run_once,
-            first_shared_browser_terminal_consent_failure.is_some(),
-            codex_fallback_summary_kind,
-            &outcome,
-            &interim_messages,
-        ) && !clean_ambient_decline
-            && let Some(state) = check_reply_against_reads(
-                &codex,
-                job,
-                &codex_run_options,
-                output_provider_conversation_state.as_ref(),
-                browser_mode,
-                names_instafy_md,
-                task_usage,
-                &mut outcome,
-                &mut artifacts,
-            )
-            .await?
-        {
-            output_provider_conversation_state = Some(state);
-        }
 
         // Deterministic /learn optimizer: enforce budgets + prune/compact learned memory so it
         // doesn't balloon future prompts. This runs only after we know we're not retrying.
@@ -9505,16 +9469,28 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 );
                 skill_hints = Some(("restoredSkillHints", hints.skills));
             }
-            if include_workspace_memory
-                && let Some(section) = pinned_skill_for_turn(job)
-                    .and_then(|pinned| pinned_skill_section(workspace_dir, pinned))
-            {
-                append_prompt_section(
-                    &mut prompt,
-                    &mut prompt_section_metrics,
-                    "pinnedSkillSection",
-                    &section,
-                );
+            // A browser turn is given the browser skill's "Finding a page" and
+            // `AGENTS.md`'s "Replies" again.
+            if include_workspace_memory && let Some(pinned) = pinned_skill_for_turn(job) {
+                for (name, section) in [
+                    (
+                        "pinnedSkillSection",
+                        pinned_skill_section(workspace_dir, pinned),
+                    ),
+                    (
+                        "pinnedRepliesSection",
+                        pinned_replies_section(workspace_dir),
+                    ),
+                ] {
+                    if let Some(section) = section {
+                        append_prompt_section(
+                            &mut prompt,
+                            &mut prompt_section_metrics,
+                            name,
+                            &section,
+                        );
+                    }
+                }
             }
         } else {
             append_prompt_section(
@@ -14618,167 +14594,6 @@ fn finalization_codex_run_options(first_attempt: &CodexRunOptions) -> CodexRunOp
     // the note is the turn's own: a finalization run neither clears it nor hands the turn off
     options.turn_continue_note = None;
     options
-}
-
-/// Whether a finished turn's reply gets the reply check (`reply_check`): the turn read a page or
-/// looked something up, its reply is the model's own words (not a runtime's after a consent stop,
-/// a missing answer or a declined ambient turn), and the turn is not a team lane's, a run-once
-/// turn's or one that ended on a pause for the person.
-fn reply_check_due<'a>(
-    job: &LeaseJob,
-    run_once: bool,
-    ended_by_consent: bool,
-    fallback: Option<CodexFallbackSummaryKind>,
-    outcome: &CodexOutcome,
-    messages: impl IntoIterator<Item = &'a JobMessage>,
-) -> bool {
-    !run_once
-        && !ended_by_consent
-        && fallback.is_none()
-        && !outcome.summary.trim().is_empty()
-        && outcome.summary != DEFAULT_CODEX_OUTCOME_SUMMARY
-        && !is_multi_agent_worker_job(job)
-        && !is_multi_agent_lead_continuation_job(job)
-        && !is_explicit_team_planning_job(job)
-        && !outcome
-            .actions
-            .iter()
-            .any(|action| matches!(action, CodexAction::RequestUserInput(_)))
-        && reply_check::turn_read_outside_facts(messages)
-}
-
-/// Runs the reply check on the thread `thread` names, which the run with `run_options` just
-/// answered on, and puts the checked words in `outcome.summary`, finished as the turn's reply was
-/// ([`finish_checked_reply`]). Returns the thread state to save when the check ran on that
-/// thread. The check answers in words only, once, within its own time limit and on its own cancel
-/// signal (`reply_check::check_run_options`). One that fails, runs out of time, cannot resume the
-/// thread, calls a tool or answers with nothing usable leaves the reply as it was. A Stop or a
-/// lost lease during it ends the turn as during the turn, with the turn's artifacts.
-#[allow(clippy::too_many_arguments)]
-async fn check_reply_against_reads(
-    codex: &CodexClient,
-    job: &LeaseJob,
-    run_options: &CodexRunOptions,
-    thread: Option<&JsonValue>,
-    browser_mode: bool,
-    names_instafy_md: bool,
-    task_usage: &TaskUsage,
-    outcome: &mut CodexOutcome,
-    artifacts: &mut Vec<JsonValue>,
-) -> Result<Option<JsonValue>> {
-    let before = outcome.summary.clone();
-    let Some(options) = reply_check::check_run_options(
-        run_options,
-        thread,
-        Some(task_usage.call(UsagePhase::Finalization)),
-    ) else {
-        artifacts.push(reply_check::artifact(
-            reply_check::Outcome::Kept("thread_not_resumable"),
-            &before,
-        ));
-        return Ok(None);
-    };
-    let words_only = options.answer_only.clone().unwrap_or_default();
-    let check_signal = options.cancel_signal.clone().unwrap_or_default();
-    let job_signal = run_options.cancel_signal.as_ref();
-    let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
-    let _client_timezone_guard = ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
-    let result = {
-        let _stop = reply_check::follow_stop(job_signal, &check_signal);
-        codex
-            .execute_with_options(reply_check::REPLY_CHECK_PROMPT, None, options)
-            .await
-    };
-    drop(codex_guard);
-    if run_options.shared_browser {
-        reply_check::keep_unconfirmed_browser_shutdown(&check_signal, job_signal);
-    }
-    let output = match result {
-        Ok(output) => output,
-        Err(error) => {
-            if job_signal.is_some_and(JobCancelSignal::is_canceled) {
-                // As a Stop during the turn: the turn's run log and steps stay with it.
-                let message = format!("{error}");
-                return Err(error.context(JobFailureWithArtifacts {
-                    message,
-                    artifacts: artifacts.clone(),
-                }));
-            }
-            warn!(job_id = %job.id, error = %format!("{error:#}"), "reply check failed; keeping the reply");
-            artifacts.push(reply_check::artifact(
-                reply_check::Outcome::Kept("check_failed"),
-                &before,
-            ));
-            return Ok(None);
-        }
-    };
-    artifacts.push(build_codex_run_log_artifact(
-        &output.events,
-        Some(json!({ "purpose": "reply-check" })),
-    ));
-    let state = output.provider_conversation_state;
-    if !reply_check::resumed_the_turns_thread(thread, state.as_ref(), browser_mode) {
-        artifacts.push(reply_check::artifact(
-            reply_check::Outcome::Kept("thread_not_resumed"),
-            &before,
-        ));
-        return Ok(None);
-    }
-    let checked = if words_only.tried_a_tool() {
-        Err("tried_a_tool")
-    } else if !reply_check::answered(&output.events) {
-        Err("no_reply")
-    } else {
-        extract_codex_outcome(&output.final_json)
-            .ok()
-            .map(|checked| checked.summary)
-            .filter(|summary| {
-                !summary.trim().is_empty()
-                    && summary != DEFAULT_CODEX_OUTCOME_SUMMARY
-                    && classify_internal_codex_fallback_summary(summary).is_none()
-            })
-            .map(|summary| {
-                let summary = browser_hand_back::keep_findings(job, summary, &before);
-                finish_checked_reply(summary, &outcome.actions, names_instafy_md)
-            })
-            .ok_or("no_reply")
-    };
-    let result = match checked {
-        Ok(summary) if summary == before => reply_check::Outcome::Unchanged,
-        Ok(summary) => {
-            outcome.summary = summary;
-            reply_check::Outcome::Changed
-        }
-        Err(reason) => reply_check::Outcome::Kept(reason),
-    };
-    artifacts.push(reply_check::artifact(result, &before));
-    Ok(state)
-}
-
-/// The reply check's words as the person reads them, finished as the turn's own reply was: the
-/// runtime's no-change line ([`NO_FILE_CHANGES_MARKER`]) leaves them, the integration card's
-/// retry phrase comes back ([`augment_summary_for_onboarding_actions`]), and a learning turn's
-/// reply names `INSTAFY.md` ([`mention_instafy_md`]). The check sees the model's words on its
-/// thread, never what the runtime made of them.
-fn finish_checked_reply(words: String, actions: &[CodexAction], names_instafy_md: bool) -> String {
-    let mut reply = take_no_file_changes_marker(&words).unwrap_or(words);
-    augment_summary_for_onboarding_actions(&mut reply, actions);
-    if names_instafy_md && !is_retryable_codex_upstream_summary(&reply) {
-        mention_instafy_md(&mut reply);
-    }
-    reply
-}
-
-/// A learning turn's reply ends by naming `INSTAFY.md` when it does not already: the person is
-/// shown where its notes went, whatever the model wrote.
-fn mention_instafy_md(summary: &mut String) {
-    if summary.contains(learn::INSTAFY_FILENAME) {
-        return;
-    }
-    let trimmed = summary.trim();
-    let base = trimmed.trim_end_matches(['.', '!', '?']);
-    let base = if base.is_empty() { trimmed } else { base };
-    *summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
 }
 
 /// How many attached images a run's turn input carried as image input.
@@ -23723,9 +23538,11 @@ mod tests {
         // opens public addresses only and a site in the space is a preview card.
         // Since Oct 28 it says which card continues building (`continueBuilding`).
         // Since Oct 29 it says never to ask the person to enable the browser.
+        // Since Oct 31 it says a reply never says what the browser will submit,
+        // send or buy, which asks the person first.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 510,
+            browser_choice <= 530,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
@@ -24580,6 +24397,17 @@ mod tests {
             assert!(!BROWSER_CHOICE_CONTRACT.contains(phrase), "{phrase}");
         }
         assert!(!BROWSER_CHOICE_CONTRACT.contains('\u{2014}'));
+    }
+
+    /// A reply with only a card says what the card does, and never what the
+    /// browser will submit, send or buy (a card's reply once said it would "use
+    /// made-up details and submit the form as requested"): that step asks the
+    /// person first, and they may say no.
+    #[test]
+    fn a_card_reply_never_says_what_the_browser_will_submit_send_or_buy() {
+        assert!(BROWSER_CHOICE_CONTRACT.contains(
+            "or what the browser will submit, send or buy: that step asks the person first."
+        ));
     }
 
     /// A turn without browser tools that needs a page ends with its card, and
