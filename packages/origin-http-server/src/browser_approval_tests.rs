@@ -505,8 +505,18 @@ async fn a_run_that_declined_a_site_still_shows_and_takes_its_next_prompt() {
 }
 
 #[test]
-fn non_activating_type_and_press_key_require_exact_target_payload_and_no_destination() {
-    for operation in [ApprovalOperation::Type, ApprovalOperation::PressKey] {
+fn non_activating_type_choose_and_press_key_require_exact_target_payload_and_no_destination() {
+    // Choosing an option of a list sets a value and sends nothing, like typing.
+    assert_eq!(
+        serde_json::from_value::<ApprovalOperation>(serde_json::json!("choose")).unwrap(),
+        ApprovalOperation::Choose
+    );
+    assert_eq!(ApprovalOperation::Choose.to_string(), "choose");
+    for operation in [
+        ApprovalOperation::Type,
+        ApprovalOperation::Choose,
+        ApprovalOperation::PressKey,
+    ] {
         let mut valid = ApprovalFixture::action();
         valid.request.operation = operation;
         valid.request.request_fingerprint =
