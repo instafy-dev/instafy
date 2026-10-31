@@ -2142,8 +2142,8 @@ mod tests {
     /// route or time doesn't exist unless a page says so; it names only steps its turn started ("I'm sending
     /// Instafy's browser…" with no browser card is a promise nobody keeps); and it says "I can't search the whole
     /// web here", not "this turn is read-only", "web-search capability", "search key" or "alternate search".
-    /// `AGENTS.md` is what web turns carry; a browser turn's reply is also checked at the end of the turn
-    /// (`reply_check`). The copy from before is upgraded.
+    /// `AGENTS.md` is what web turns carry, and a browser turn is given its "Replies" too. The copy from before
+    /// is upgraded.
     #[test]
     fn agents_doc_says_unread_facts_are_not_checked_and_names_only_steps_the_turn_started() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");

@@ -704,7 +704,11 @@ first of the turn's skills, so the snapshot's budget never runs out before it.
 Most browser turns resume their chat's thread instead (a card's turn follows the
 turn that posted the card), which loads no snapshot, and a browser turn cannot
 read a skill file, so such a turn is given the skill's "Finding a page" section
-again, from the space's own copy. That section, which the
+again, from the space's own copy. Codex withdraws the space's `AGENTS.md` from a
+turn without the workspace, so it is given that file's "Replies" too (how a reply
+reads: plain words, no error codes, file paths or inside words, "not checked" on
+a fact no page read this turn states, and only steps the turn started). The
+"Finding a page" section, which the
 `instafy-web-research` skill points to (a research turn without the browser
 skill prints just that section with one command), says how every reader finds a
 page: an address the person, a skill or a search result gave, a link on a page
@@ -728,28 +732,6 @@ masked address alone, no title, and "The page is still busy, so it could not be
 read yet. Take a snapshot in a moment." It is never handed back as an empty
 page, which a turn would report as "no readable content", and its line reads
 like `status`, not as a page read.
-
-A turn that read pages or looked something up (the browser, `instafy web read`
-or `instafy web search`, a skill pack's lookups) checks its reply once before it
-posts: one more request on the turn's own thread, with the turn's instructions
-and tools, so the provider serves the thread from its cache. It marks a fact no
-page read for the turn states "not checked" or takes it out, never says a place,
-stop, route or time doesn't exist unless a page says so, and takes out a step
-the reply says is under way that the turn didn't start. Only the reply's words
-change, and they are finished as the turn's own were (the runtime's no-change
-line removed, an integration card's retry phrase added); a browser turn's finding
-lines for the building turn stay as the turn wrote them. The check answers in
-words only: the runtime reads each of its responses whole before Codex does, and
-one that calls a tool reaches Codex empty, so nothing runs, nothing is asked
-again, and the reply stays as it was (runtime-agent `answer_only.rs`). It is one
-request, never replayed, within 90 seconds (less when the turn's own limit is
-shorter), on a cancel signal of its own that a Stop or a lost lease cancels too:
-its time limit never ends the turn, and a Stop during it ends the turn as a Stop
-during the turn does. A check on a browser turn whose browser tools could not be
-confirmed gone keeps the browser Octo's and recycles the runtime at the end of
-the turn, as after any browser run. A turn that read nothing makes no such
-request, and a check that fails, runs out of time or calls a tool leaves the
-reply as it was (runtime-agent `jobs/reply_check.rs`).
 
 ### Octo's own tabs
 
