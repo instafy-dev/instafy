@@ -112,8 +112,6 @@ const PROMPT_REFERENCED_FILE_MAX_BYTES: usize = 24_000;
 const PROMPT_REFERENCED_FILE_MAX_TOTAL_BYTES: usize = 48_000;
 const WORKSPACE_PROJECT_ROOT_MAX_DIRS: usize = 8;
 const WORKSPACE_PROJECT_ROOT_MAX_ENTRIES: usize = 8;
-const MAX_UI_SUGGESTED_REPLIES: usize = 3;
-const MAX_UI_SUGGESTED_REPLY_CHARS: usize = 160;
 const TERMINAL_OUTPUT_MAX_CHARS: usize = 120_000;
 const TERMINAL_SESSION_OUTPUT_MAX_CHARS: usize = 400_000;
 const TERMINAL_STREAM_POLL_MILLIS: u64 = 120;
@@ -3322,10 +3320,14 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// prompt asked for it, once that turn is finished, for an address the person
 /// could have seen and where nothing else is stopped or taken over; anywhere
 /// else the card is a button. Opening it changes no approval in the browser.
-/// The card itself says where the browser goes. The reply never says that a
-/// page was opened before a browser tool saw it, so it stays true when the
-/// card is only a button, nor what the browser will submit, send or buy: that
-/// step asks the person first, and they may say no.
+/// The card itself says where the browser goes. A turn whose only action is
+/// the card posts the card alone ([`post_only_the_card`]), so the contract
+/// says that such a turn's `summary` may not show: what the person needs goes
+/// in `task`, or in a reply without the card. A reply that does show beside a
+/// card (with another card or a file, in a skill setup, on an evaluated turn)
+/// never says that a page was opened before a browser tool saw it, so it stays
+/// true when the card is only a button, nor what the browser will submit, send
+/// or buy: that step asks the person first, and they may say no.
 ///
 /// A sign-in the person asked for, or one a step they asked for needs, is
 /// opened and paused on (`request_human_input`), so the task can go on after
@@ -3350,7 +3352,7 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
 - `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
-- In `summary`, never say a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy: that step asks the person first.\n\
+- A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n\
 - Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
 - The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
@@ -7472,9 +7474,9 @@ impl JobProcessor {
             &mut outcome.summary,
             &mut codex_fallback_summary_kind,
             first_shared_browser_terminal_consent_failure,
+            last_reply_was_a_pause(job),
         );
         augment_summary_for_onboarding_actions(&mut outcome.summary, &outcome.actions);
-        ensure_onboarding_suggestions(&mut outcome.suggested_replies, &outcome.actions);
         let expects_workspace_file_changes_after_actions =
             workspace_file_changes_still_required(expects_workspace_file_changes, &outcome);
         let final_messages = with_runtime_metadata_vec(
@@ -8115,10 +8117,6 @@ impl JobProcessor {
                 &mut retry_outcome.summary,
                 &retry_outcome.actions,
             );
-            ensure_onboarding_suggestions(
-                &mut retry_outcome.suggested_replies,
-                &retry_outcome.actions,
-            );
             let mut retry_expects_workspace_file_changes_after_actions =
                 workspace_file_changes_still_required(
                     expects_workspace_file_changes,
@@ -8224,6 +8222,7 @@ impl JobProcessor {
                 &mut retry_outcome.summary,
                 &mut retry_codex_fallback_summary_kind,
                 retry_shared_browser_terminal_consent_failure,
+                last_reply_was_a_pause(job),
             );
             // A retry that returned actions or wrote files did work of its
             // own that the first answer does not describe, so it keeps its own.
@@ -8247,7 +8246,6 @@ impl JobProcessor {
                 // turn's history ends with the retry's empty reply while the
                 // person saw this answer.
                 retry_outcome.summary = outcome.summary.clone();
-                retry_outcome.suggested_replies = outcome.suggested_replies.clone();
                 retry_outcome.snippet = outcome.snippet.clone();
                 retry_outcome.actions = outcome.actions.clone();
                 retry_outcome.read_files = outcome.read_files.clone();
@@ -8460,10 +8458,6 @@ impl JobProcessor {
                 if finalization_fallback_kind.is_none() {
                     augment_summary_for_onboarding_actions(
                         &mut finalization_outcome.summary,
-                        &finalization_outcome.actions,
-                    );
-                    ensure_onboarding_suggestions(
-                        &mut finalization_outcome.suggested_replies,
                         &finalization_outcome.actions,
                     );
                     // The tool-free pass only recovers prose; keep the file
@@ -8816,11 +8810,12 @@ impl JobProcessor {
                 streaming_active,
                 retry_messages,
             );
+            post_only_the_card(job, &mut retry_outcome);
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
             user_input_request::append_outcome_artifact(&mut retry_artifacts, &retry_outcome);
             return Ok(JobExecution {
                 summary: retry_outcome.summary,
-                suggested_replies: retry_outcome.suggested_replies,
+                suggested_replies: Vec::new(),
                 provider: "codex-embedded".to_string(),
                 artifacts: retry_artifacts,
                 credit_snapshot: None,
@@ -9025,11 +9020,12 @@ impl JobProcessor {
             streaming_active,
             interim_messages,
         );
+        post_only_the_card(job, &mut outcome);
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
             summary: outcome.summary,
-            suggested_replies: outcome.suggested_replies,
+            suggested_replies: Vec::new(),
             provider: "codex-embedded".to_string(),
             artifacts,
             credit_snapshot: None,
@@ -9064,7 +9060,7 @@ impl JobProcessor {
 
         let mut prompt = String::from(
             "You are the Instafy MCP assistant. This run is MCP-tool focused.\n\
-            Return a single JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }.\n\
+            Return a single JSON object: { \"summary\": string, \"files\": [], optional \"actions\": [] }.\n\
             Do not use Markdown or code fences.\n\
             Do not use the final assistant message for progress or status updates. Complete the requested MCP work first, then return the final JSON object.\n\
             \n\
@@ -9706,7 +9702,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt_section_metrics,
                 "responseContract",
                 "\nLead checkpoint response contract:\n\
-                - Return one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. No Markdown fences.\n\
+                - Return one JSON object: { \"summary\": string, \"files\": [], optional \"actions\": [] }. No Markdown fences.\n\
                 - Put the final user-facing answer in `summary`, following the supplied collaboration skill and any explicit user-requested format.\n\
                 - Use sibling outcomes in the latest request as primary evidence.\n\
                 - If tools are needed, run bounded commands at declared handoff or exact sibling paths; do not add an extra `bash -lc` wrapper or rediscover the workspace.\n\
@@ -9759,7 +9755,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "responseContract",
                 &[
                     "\nResponse contract reminder:\n\
-                - Return one JSON object only: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }.\n\
+                - Return one JSON object only: { \"summary\": string, \"files\": [], optional \"actions\": [] }.\n\
                 - Put the natural-language answer in `summary`; do not wrap the JSON in Markdown.\n\
                 - Populate `files` only for real workspace changes.\n",
                     // A turn that may not ask for the browser is not offered its card: a browser
@@ -9800,7 +9796,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "responseContract",
                 &[
                     "\nCross-chat context recovery response contract:\n\
-                - Return exactly one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown.\n\
+                - Return exactly one JSON object: { \"summary\": string, \"files\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown.\n\
                 - Put the user-facing answer in `summary`; keep it concise and cite the recovered conversation/thread, focused agent/lane, or context card when available.\n\
                 - If relevant context cards are already included, answer from them only when they are sufficient. Otherwise run the bounded Instafy CLI lookup described above before the final response.\n\
                 - Do not create a `multi_agent_plan` for a narrow recovery question. Do not edit files.\n\
@@ -9827,7 +9823,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 metadata_requests_write_scoped_workspace(job.payload.get("metadata"));
             let mut worker_response_contract = String::from(
                 "\nScoped worker response contract:\n\
-                - Return exactly one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [] }.\n\
+                - Return exactly one JSON object: { \"summary\": string, \"files\": [] }.\n\
                 - Put the worker report in `summary`; do not wrap JSON in Markdown.\n\
                 - Keep `files` empty unless the worker is explicitly write-scoped. For read-only workers, do not create, edit, move, delete, or return workspace file changes.\n",
             );
@@ -9899,7 +9895,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             let response_contract_start = prompt.len();
             prompt.push_str(
             "\nPlease follow these constraints:\n\
-            - Respond with a single JSON object shaped as { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. Do not wrap the JSON in Markdown or code fences.\n\
+            - Respond with a single JSON object shaped as { \"summary\": string, \"files\": [], optional \"actions\": [] }. Do not wrap the JSON in Markdown or code fences.\n\
             - Do not use the final assistant message for progress or status updates. If you need to inspect or execute something, do the tool work first, then return the final JSON object only after the task is complete.\n\
             - When runtime metadata marks command execution or concrete workspace/runtime observation as required, call the available runtime command tool (`exec_command` or `shell`) before returning the final JSON. Do not only reason about commands. If no command tool is callable, return a JSON `summary` that states that concrete blocker. This does not block file-only create/edit/delete requests that can be satisfied with inline `files[]` content.\n\
             - If the user requests a different output format, still return the JSON object; satisfy the request inside `summary` as closely as possible.\n\
@@ -9909,7 +9905,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - Avoid exploratory commands (especially `--help` output dumps). Only run commands that are needed to complete the task or to resolve a concrete error. When an Instafy capability you need seems missing, `instafy <group> --help` counts as needed.\n\
             - When the user asks about metadata the prompt doesn’t include (e.g. token usage), do not guess; retrieve it via the Instafy CLI (`instafy history ...` first, `instafy api get` as advanced fallback), not raw HTTP (curl/wget).\n\
             - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n\
-            - If you propose next steps, include up to three concise strings in `suggestions` (e.g. module ideas, integrations, deployment follow-ups), never in `summary`: Studio shows them as buttons. Each suggestion should be a short user message that can be sent as-is when clicked. Omit the field if you have nothing meaningful to suggest.\n\
             - For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n\
             - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n",
         );
@@ -9954,7 +9949,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - If you emit `request_location`, keep `summary` focused on why location is needed and whether approximate or precise location is enough. Do not mention action cards, UI steps, or retry phrases for location; the app handles that.\n\
             - Use `request_location` when the user wants nearby/current-location recommendations or routes and they have not already provided a place/city. Prefer `approximate` unless exact turn-by-turn or meter-level precision is clearly necessary.\n\
               - When a retry phrase applies (`request_integration`), provide exactly one. Do not include any other retry/confirmation phrase anywhere in `summary` (avoid extra lines like \"Then reply …\").\n\
-              - If you include `suggestions` alongside onboarding actions, it must contain exactly one string and it must equal the retry phrase; otherwise omit `suggestions`. Omit `suggestions` entirely for `request_secret`.\n\
             - For integration onboarding, state what you will do immediately after the retry phrase (for example: verify connection status, then continue the requested task).\n\
             - When requesting secrets, always include concrete env var names. Prefer names grounded in tool output, a skill, upstream docs, or an explicit error.\n\
             - Keep action-card copy terse. Treat action `description` fields as one-line labels/hints, not documentation.\n\
@@ -10397,7 +10391,6 @@ enum LocationPrecision {
 #[derive(Debug, Clone)]
 struct CodexOutcome {
     summary: String,
-    suggested_replies: Vec<String>,
     files: Vec<CodexFileDescriptor>,
     // Display references never enter materialization, write evidence or origin sync.
     read_files: Vec<CodexFileDescriptor>,
@@ -10688,22 +10681,8 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
         }
     }
 
-    let mut suggested_replies = parse_codex_suggestions(value);
-    // Replies offered on the reply's last line (a plain-text reply has no `suggestions`) become
-    // buttons, and the line leaves the reply.
-    if let Some((reply, offered)) = trailing_suggested_replies(&summary) {
+    if let Some(reply) = without_offered_replies_line(&summary) {
         summary = reply;
-        for offer in offered {
-            if suggested_replies.len() >= MAX_UI_SUGGESTED_REPLIES {
-                break;
-            }
-            if !suggested_replies
-                .iter()
-                .any(|known| known.to_lowercase() == offer.to_lowercase())
-            {
-                suggested_replies.push(offer);
-            }
-        }
     }
     let mut actions = parse_codex_actions(value);
     if let Some(request) = user_input_request::parse_action(value)? {
@@ -10715,12 +10694,53 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
 
     Ok(CodexOutcome {
         summary,
-        suggested_replies,
         files,
         read_files,
         snippet,
         actions,
     })
+}
+
+/// The most replies one line of offered replies held, and the longest of them.
+const OFFERED_REPLIES_LINE_MAX: usize = 3;
+const OFFERED_REPLY_MAX_CHARS: usize = 160;
+
+/// A reply without the line of replies it offers last, each in quotes and joined by ` · `
+/// (`“Add another option” · “Make it shorter”`). Octo is no longer asked for them, but a thread
+/// started before that still holds the plain-text lanes' instruction to end a reply with them
+/// ("Studio shows them as buttons"), and a later turn there keeps doing it. Studio never shows
+/// them, so the line leaves the reply and is kept nowhere. None when the last line is anything
+/// else, or is all the reply says. The runtime's [`NO_FILE_CHANGES_MARKER`] line after it stays
+/// last, for the caller that reads it.
+fn without_offered_replies_line(summary: &str) -> Option<String> {
+    if let Some(unmarked) = take_no_file_changes_marker(summary) {
+        let reply = without_offered_replies_line(&unmarked)?;
+        return Some(format!("{reply}\n{NO_FILE_CHANGES_MARKER}"));
+    }
+    let (reply, last_line) = summary.trim_end().rsplit_once('\n')?;
+    let reply = reply.trim_end();
+    let parts: Vec<&str> = last_line.split('·').map(str::trim).collect();
+    if reply.is_empty() || parts.len() < 2 || parts.len() > OFFERED_REPLIES_LINE_MAX {
+        return None;
+    }
+    let offered = |part: &str| {
+        part.strip_prefix('“')
+            .and_then(|rest| rest.strip_suffix('”'))
+            .or_else(|| {
+                part.strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+            })
+            .map(str::trim)
+            .is_some_and(|quoted| {
+                !quoted.is_empty()
+                    && quoted.chars().count() <= OFFERED_REPLY_MAX_CHARS
+                    && !quoted.contains(['“', '”', '"', '\n'])
+            })
+    };
+    parts
+        .iter()
+        .all(|part| offered(part))
+        .then(|| reply.to_string())
 }
 
 fn normalize_codex_outcome_summary_text(summary: &str) -> String {
@@ -10754,94 +10774,6 @@ fn normalize_codex_outcome_summary_text(summary: &str) -> String {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| summary.to_string())
-}
-
-/// The replies a reply offers on its own last line, each in quotes and joined by ` · `
-/// (`“Add another option” · “Make it shorter”`), as the runtime's plain-text
-/// instructions ask: the reply without that line, and the replies. None when the last line is
-/// anything else, or is all the reply says. The runtime's [`NO_FILE_CHANGES_MARKER`] line after
-/// them stays last, for the caller that reads it.
-fn trailing_suggested_replies(summary: &str) -> Option<(String, Vec<String>)> {
-    if let Some(unmarked) = take_no_file_changes_marker(summary) {
-        let (reply, offered) = trailing_suggested_replies(&unmarked)?;
-        return Some((format!("{reply}\n{NO_FILE_CHANGES_MARKER}"), offered));
-    }
-    let trimmed = summary.trim_end();
-    let (reply, last_line) = trimmed.rsplit_once('\n')?;
-    let reply = reply.trim_end();
-    let parts: Vec<&str> = last_line.split('·').map(str::trim).collect();
-    if reply.is_empty() || parts.len() < 2 || parts.len() > MAX_UI_SUGGESTED_REPLIES {
-        return None;
-    }
-    let mut offered = Vec::with_capacity(parts.len());
-    for part in parts {
-        let quoted = part
-            .strip_prefix('“')
-            .and_then(|rest| rest.strip_suffix('”'))
-            .or_else(|| {
-                part.strip_prefix('"')
-                    .and_then(|rest| rest.strip_suffix('"'))
-            })?
-            .trim();
-        if quoted.is_empty()
-            || quoted.chars().count() > MAX_UI_SUGGESTED_REPLY_CHARS
-            || quoted.contains(['“', '”', '"', '\n'])
-        {
-            return None;
-        }
-        offered.push(quoted.to_string());
-    }
-    Some((reply.to_string(), offered))
-}
-
-fn parse_codex_suggestions(value: &JsonValue) -> Vec<String> {
-    let mut suggestions = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let Some(entries) = value.get("suggestions").and_then(JsonValue::as_array) else {
-        return suggestions;
-    };
-
-    for entry in entries {
-        let Some(raw_text) = parse_codex_suggestion_entry(entry) else {
-            continue;
-        };
-        let trimmed = raw_text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let candidate = if trimmed.chars().count() > MAX_UI_SUGGESTED_REPLY_CHARS {
-            trimmed
-                .chars()
-                .take(MAX_UI_SUGGESTED_REPLY_CHARS)
-                .collect::<String>()
-        } else {
-            trimmed.to_string()
-        };
-        let dedupe_key = candidate.to_lowercase();
-        if !seen.insert(dedupe_key) {
-            continue;
-        }
-        suggestions.push(candidate);
-        if suggestions.len() >= MAX_UI_SUGGESTED_REPLIES {
-            break;
-        }
-    }
-
-    suggestions
-}
-
-fn parse_codex_suggestion_entry(value: &JsonValue) -> Option<String> {
-    if let Some(text) = value.as_str() {
-        return Some(text.to_string());
-    }
-
-    let map = value.as_object()?;
-    for key in ["text", "prompt", "reply", "label"] {
-        if let Some(text) = map.get(key).and_then(JsonValue::as_str) {
-            return Some(text.to_string());
-        }
-    }
-    None
 }
 
 fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
@@ -12002,70 +11934,6 @@ fn provider_display_name(provider: &str) -> String {
     }
 }
 
-fn push_onboarding_suggestion(
-    suggestions: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    suggestion: String,
-) {
-    if suggestions.len() >= MAX_UI_SUGGESTED_REPLIES {
-        return;
-    }
-    let trimmed = suggestion.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let candidate = if trimmed.chars().count() > MAX_UI_SUGGESTED_REPLY_CHARS {
-        trimmed
-            .chars()
-            .take(MAX_UI_SUGGESTED_REPLY_CHARS)
-            .collect::<String>()
-    } else {
-        trimmed.to_string()
-    };
-    let dedupe_key = candidate.to_ascii_lowercase();
-    if !seen.insert(dedupe_key) {
-        return;
-    }
-    suggestions.push(candidate);
-}
-
-fn ensure_onboarding_suggestions(suggested_replies: &mut Vec<String>, actions: &[CodexAction]) {
-    if actions.is_empty() {
-        return;
-    }
-    let mut seen: HashSet<String> = suggested_replies
-        .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .collect();
-
-    for action in actions {
-        if suggested_replies.len() >= MAX_UI_SUGGESTED_REPLIES {
-            break;
-        }
-        match action {
-            CodexAction::MultiAgentPlan { .. } => {}
-            CodexAction::GoalUpdate { .. } => {}
-            CodexAction::CoordinationRequired { .. } => {}
-            CodexAction::RequestIntegration { provider, .. } => {
-                let label = provider_display_name(provider);
-                push_onboarding_suggestion(
-                    suggested_replies,
-                    &mut seen,
-                    format!("I connected {label}. Retry now."),
-                );
-            }
-            // No suggestion for a secret: the card in the message saves the
-            // value and continues the run from its own button. A chip here
-            // would be a second path, worded differently from the card's,
-            // which is what made the card read as two competing routes.
-            CodexAction::RequestSecret { .. } => {}
-            CodexAction::RequestLocation { .. } => {}
-            CodexAction::RequestBrowser(_) => {}
-            CodexAction::RequestUserInput(_) => {}
-        }
-    }
-}
-
 fn augment_summary_for_onboarding_actions(summary: &mut String, actions: &[CodexAction]) {
     if actions.is_empty() {
         return;
@@ -12345,6 +12213,42 @@ fn stream_settled_cards(
         }
     }
     remaining.collect()
+}
+
+/// A turn whose only action is a `request_browser` card, and that reports no
+/// file, posts the card and no reply of its own: the card says where the
+/// browser goes, and the browser turn says what it found. The words a model
+/// wrote beside the card promised what the browser had not done, a submit
+/// the person then refused among them ("The browser will handle the form and
+/// submission."), however the contract put it. So the runtime decides what
+/// the person reads here, as it does with a hand-back's "Finished in the
+/// browser." and a pause's fixed reply. An empty reply is no reply: the
+/// controller and Studio show none, and nothing notifies. The browser rule
+/// ([`BROWSER_CHOICE_CONTRACT`]) tells the model so, and that what the person
+/// needs goes in the card's `task` or in a reply without the card.
+///
+/// A skill setup keeps its words: its replies carry the setup's walk and its
+/// next question beside the card ([`SKILL_SETUP_CONTINUATION`]). So does a
+/// turn the controller dispatched for Octo to decide whether to answer at all
+/// (`groupParticipation.decision: "agent_evaluation"`): there the controller
+/// reads an empty reply as no answer, not as none to show.
+fn post_only_the_card(job: &LeaseJob, outcome: &mut CodexOutcome) {
+    let only_a_card = !outcome.actions.is_empty()
+        && outcome
+            .actions
+            .iter()
+            .all(|action| matches!(action, CodexAction::RequestBrowser(_)));
+    let participation = &job.payload["metadata"]["groupParticipation"];
+    let evaluated = participation["decision"].as_str() == Some("agent_evaluation")
+        && participation["enforcedBy"].as_str() == Some("runtime-controller");
+    if only_a_card
+        && outcome.files.is_empty()
+        && outcome.read_files.is_empty()
+        && !evaluated
+        && !conversation_began_with_skill_setup(job)
+    {
+        outcome.summary.clear();
+    }
 }
 
 /// The chat messages an assistant turn's actions become.
@@ -13438,7 +13342,7 @@ fn codex_missing_final_recovery_prompt(
         - If the user forbids repo inspection, do not read repo files; use only allowed runtime or Instafy CLI observations.\n\
         - If the snapshot and allowed observations are insufficient, say exactly what is missing in `summary`.\n\
         - Do not mention internal retry, recovery, or protocol mechanics in the user-facing `summary`.\n\
-        - Return exactly one final assistant message as a JSON object shaped as {{ \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }}. Do not end with reasoning only.\n\
+        - Return exactly one final assistant message as a JSON object shaped as {{ \"summary\": string, \"files\": [], optional \"actions\": [] }}. Do not end with reasoning only.\n\
         - Supported action for goals: {{ \"type\": \"goal_update\", \"status\": \"active\" | \"completed\" | \"blocked\" | \"paused\" | \"canceled\", optional \"objective\": string, optional \"progressSummary\": string, optional \"doneWhen\": string, optional \"stopWhen\": string }}.\n\
         - If the latest request asks to create, set, start, or update a goal, include exactly one `goal_update`: use `completed` when this retry fully satisfies it, `blocked` only when required evidence, permissions, runtime access, or user input cannot be obtained with the available safe tools, and `active` only when meaningful work remains.\n\
         - If the latest request explicitly requires separate assistant turns, do the next useful step in `summary` and use `goal_update` status `active` while more steps remain; do not block just because this response is one final JSON object.\n\
@@ -13476,7 +13380,7 @@ fn codex_missing_final_json_finalization_prompt(prompt_text: &str, retry_summary
          Retry observation:\n{}\n\
          \n\
          Return exactly one JSON object with this shape:\n\
-         {{ \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }}\n\
+         {{ \"summary\": string, \"files\": [], optional \"actions\": [] }}\n\
          \n\
          Rules:\n\
          - Do not wrap the JSON in Markdown or code fences.\n\
@@ -14218,15 +14122,50 @@ fn should_retry_codex_once(
     shared_browser_terminal_consent_failure.is_none() && recovery_retry_required
 }
 
+/// What the person reads when a Shared Browser turn paused on the page for
+/// their input (`human_input_required`).
+const HUMAN_INPUT_PAUSE_REPLY: &str = "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue. I don't ask for those details in chat.";
+
+/// What it reads when Octo's last reply in the chat was such a pause already:
+/// the browser is still waiting for the person. The same words again read as
+/// if Let Octo continue had done nothing (pressed without signing in, a local
+/// test on Oct 31). The runtime knows only that the last reply was a pause,
+/// not which page this one is on: a one-time code, a consent screen or a card
+/// form pauses too, right after a sign-in the person did finish. So the words
+/// hold on any page, as the first pause's do, and keep saying that those
+/// details stay out of chat.
+const HUMAN_INPUT_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting for you. Sign in or fill in the highlighted fields on the page, then choose Let Octo continue. I don't ask for those details in chat.";
+
+/// Whether Octo's last reply in the chat before this turn was a pause for the
+/// person's input, in the history the controller leased the turn with.
+fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
+    parse_conversation_history(job.payload.get("conversation_history"))
+        .iter()
+        .rev()
+        .find(|turn| turn.role.eq_ignore_ascii_case("assistant"))
+        .is_some_and(|turn| {
+            let reply = turn.content.trim();
+            reply == HUMAN_INPUT_PAUSE_REPLY || reply == HUMAN_INPUT_PAUSE_AGAIN_REPLY
+        })
+}
+
+/// `paused_already`: Octo's last reply in the chat was a pause for the
+/// person's input ([`last_reply_was_a_pause`]).
 fn apply_terminal_shared_browser_summary(
     summary: &mut String,
     fallback_kind: &mut Option<CodexFallbackSummaryKind>,
     terminal_consent_failure: Option<&str>,
+    paused_already: bool,
 ) {
     let Some(code) = terminal_consent_failure else {
         return;
     };
-    *summary = terminal_shared_browser_summary(code).to_string();
+    *summary = if code == "human_input_required" && paused_already {
+        HUMAN_INPUT_PAUSE_AGAIN_REPLY
+    } else {
+        terminal_shared_browser_summary(code)
+    }
+    .to_string();
     *fallback_kind = None;
 }
 
@@ -14238,9 +14177,7 @@ fn apply_terminal_shared_browser_summary(
 /// about that step and never about the whole turn.
 fn terminal_shared_browser_summary(code: &str) -> &'static str {
     match code {
-        "human_input_required" => {
-            "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue. I don't ask for those details in chat."
-        }
+        "human_input_required" => HUMAN_INPUT_PAUSE_REPLY,
         "approval_timeout" => {
             "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
         }
@@ -14271,6 +14208,7 @@ fn manual_browser_handoff_is_not_retried_or_reported_as_a_generic_failure() {
         &mut summary,
         &mut fallback,
         Some("human_input_required"),
+        false,
     );
     // The button the person presses, as Studio names it.
     assert_eq!(
@@ -18831,9 +18769,9 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                                 continue;
                             }
                             // The note repeats the reply as the person reads it: without the
-                            // replies offered on its last line (buttons) and without the
+                            // line of replies an older thread still offers and without the
                             // runtime's marker, in the order the reply loses them.
-                            let offered = trailing_suggested_replies(text).map(|(reply, _)| reply);
+                            let offered = without_offered_replies_line(text);
                             let text = offered.as_deref().unwrap_or(text);
                             let unmarked = take_no_file_changes_marker(text);
                             let text = unmarked.as_deref().unwrap_or(text);
@@ -23762,12 +23700,13 @@ mod tests {
         // opens public addresses only and a site in the space is a preview card.
         // Since Oct 28 it says which card continues building (`continueBuilding`).
         // Since Oct 29 it says never to ask the person to enable the browser.
-        // Since Oct 31 it says a reply never says what the browser will submit,
-        // send or buy, which asks the person first, and that a card which
-        // continues building asks only what to find or check.
+        // Since Oct 31 it says that a card which continues building asks only
+        // what to find or check, and that a turn with only the card may not
+        // show its reply, while a reply beside a card still never promises a
+        // page or a submit.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 540,
+            browser_choice <= 560,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
@@ -24638,15 +24577,97 @@ mod tests {
         assert!(!BROWSER_CHOICE_CONTRACT.contains('\u{2014}'));
     }
 
-    /// A reply with only a card says what the card does, and never what the
-    /// browser will submit, send or buy (a card's reply once said it would "use
-    /// made-up details and submit the form as requested"): that step asks the
-    /// person first, and they may say no.
+    /// A turn whose only action is a browser card posts the card alone. What a
+    /// model wrote beside it promised what the browser had not done, the
+    /// submit the person then said no to among them, although the contract
+    /// told it not to. A turn that also asks for something else, or reports a
+    /// file, keeps its reply, and so does a turn with no card.
     #[test]
-    fn a_card_reply_never_says_what_the_browser_will_submit_send_or_buy() {
+    fn a_turn_with_only_a_card_posts_the_card_and_no_reply_of_its_own() {
+        let card = json!({
+            "type": "request_browser",
+            "task": "Open httpbin.org/forms/post, fill in a test pizza order using made-up details, and submit it."
+        });
+        let said = "I've sent the test pizza order task to Instafy's browser. The browser will handle the form and submission.";
+        let ordinary = test_lease_job(Some("feature"), json!({}));
+        let posted_in = |job: &LeaseJob, raw: JsonValue| {
+            let mut outcome = extract_codex_outcome(&raw).expect("extract outcome");
+            post_only_the_card(job, &mut outcome);
+            let messages = build_final_messages_from_outcome(&outcome, None);
+            (outcome.summary, messages)
+        };
+        let posted = |raw: JsonValue| posted_in(&ordinary, raw);
+
+        let (reply, messages) = posted(json!({ "summary": said, "files": [], "actions": [card] }));
+        assert_eq!(reply, "");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_type.as_deref(), Some("action_request"));
+        // Two cards in one turn are still one card, and its reply still none.
+        let (reply, messages) = posted(json!({ "summary": said, "actions": [card, card] }));
+        assert_eq!(reply, "");
+        assert_eq!(messages.len(), 1);
+
+        let secret = json!({ "type": "request_secret", "name": "EXAMPLE_TOKEN" });
+        let file = json!({ "path": "sites/order/index.html", "content": "<p>Order</p>" });
+        for raw in [
+            json!({ "summary": said, "files": [], "actions": [secret, card] }),
+            json!({ "summary": said, "files": [file], "actions": [card] }),
+            json!({ "summary": said, "files": [], "actions": [] }),
+        ] {
+            assert_eq!(posted(raw.clone()).0, said, "{raw}");
+        }
+        // A turn the controller asks to decide whether to answer at all keeps
+        // its words: an empty reply there reads as no answer.
+        let evaluated = test_lease_job(
+            Some("feature"),
+            json!({ "metadata": { "groupParticipation": {
+                "decision": "agent_evaluation",
+                "reason": "skill_mode_ambient",
+                "enforcedBy": "runtime-controller"
+            } } }),
+        );
+        assert_eq!(
+            posted_in(&evaluated, json!({ "summary": said, "actions": [card] })).0,
+            said
+        );
+        // A skill setup's reply carries its walk and its next question.
+        let setup = skill_setup_test_job(SKILL_SETUP_TEST_OPENER);
+        let walk = "Instafy's browser opens the provider's sign-in page. Which workspace should the token belong to?";
+        let (reply, messages) = posted_in(
+            &setup,
+            json!({ "summary": walk, "files": [], "actions": [card] }),
+        );
+        assert_eq!(reply, walk);
+        assert_eq!(messages.len(), 1);
+    }
+
+    /// The turns that still post a reply beside a card (a card with another
+    /// action or a reported file, a skill setup, an evaluated turn) carry the
+    /// browser rule, and the rule still says what such a reply never says: the
+    /// submit the person later refused ("The browser will handle the form and
+    /// submission.") came from a turn like these. It also tells the model that
+    /// a turn with only the card may show no reply, so nothing the person
+    /// needs is written where it is dropped.
+    #[test]
+    fn a_reply_beside_a_card_never_promises_and_a_lone_card_may_show_none() {
         assert!(BROWSER_CHOICE_CONTRACT.contains(
-            "or what the browser will submit, send or buy: that step asks the person first."
+            "- A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n"
         ));
+        let evaluated = test_lease_job(
+            Some("feature"),
+            json!({ "metadata": { "groupParticipation": {
+                "decision": "agent_evaluation",
+                "reason": "skill_mode_ambient",
+                "enforcedBy": "runtime-controller"
+            } } }),
+        );
+        for job in [
+            test_lease_job(Some("feature"), json!({})),
+            evaluated,
+            skill_setup_test_job(SKILL_SETUP_TEST_OPENER),
+        ] {
+            assert!(browser_choice_applies(&job, false, false, false, false));
+        }
     }
 
     /// A card that continues building asks the browser only what to find or
@@ -24844,7 +24865,6 @@ mod tests {
         };
         let outcome_with_card = || CodexOutcome {
             summary: "Instafy's browser will open the pricing page.".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -25251,7 +25271,6 @@ mod tests {
     fn conditional_write_no_change_is_valid_but_required_edits_remain_required() {
         let outcome = CodexOutcome {
             summary: "Reviewed the implementation and ran the tests; no warranted changes.".into(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -25388,7 +25407,6 @@ mod tests {
         );
         let outcome = CodexOutcome {
             summary: "Refined the implementation.".into(),
-            suggested_replies: Vec::new(),
             files,
             read_files: Vec::new(),
             snippet: None,
@@ -26128,14 +26146,19 @@ mod tests {
             };
             let mut summary = "internal no-final fallback".to_string();
             let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
-            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal, false);
             assert_eq!(summary, expected);
             assert!(!summary.contains(code), "the person never reads {code}");
             assert_eq!(fallback, None);
 
             let mut false_success = "Done — the requested browser action succeeded.".to_string();
             let mut no_fallback = None;
-            apply_terminal_shared_browser_summary(&mut false_success, &mut no_fallback, terminal);
+            apply_terminal_shared_browser_summary(
+                &mut false_success,
+                &mut no_fallback,
+                terminal,
+                false,
+            );
             assert_eq!(
                 false_success, expected,
                 "terminal consent must never preserve a false success summary"
@@ -26155,7 +26178,7 @@ mod tests {
         ] {
             let mut summary = "Done.".to_string();
             let mut fallback = None;
-            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, Some(code));
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, Some(code), true);
             assert_eq!(
                 summary,
                 "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again."
@@ -26201,12 +26224,84 @@ mod tests {
         ));
         let mut summary = "Still working on it.".to_string();
         let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
-        apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
+        apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal, false);
         assert_eq!(
             summary,
             "Instafy's browser closed or stopped responding, so I stopped there. Open the browser again and send a message to continue."
         );
         assert_eq!(fallback, None);
+    }
+
+    /// A turn that pauses for the person's input right after Octo's last reply
+    /// was such a pause says that the browser is still waiting. Let Octo
+    /// continue pressed without signing in got the first pause's reply word for
+    /// word, so the press looked as if it did nothing. The words hold on any
+    /// page that pauses: a pause for a one-time code, a consent screen or a
+    /// card form follows a sign-in the person did complete, with the same
+    /// history, so they never claim the page is a sign-in page, and they keep
+    /// saying that those details stay out of chat. A pause after any other
+    /// reply, or in a chat with no history, reads as the first one does.
+    #[test]
+    fn a_pause_right_after_a_pause_says_the_browser_is_still_waiting() {
+        let continue_prompt = "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
+        let job = |history: JsonValue| {
+            test_lease_job(Some("feature"), json!({ "conversation_history": history }))
+        };
+        let row = |role: &str, content: &str| json!({ "role": role, "content": content });
+        let after_a_pause = job(json!([
+            row(
+                "user",
+                "Open github.com, sign me in, then star the repository."
+            ),
+            row(
+                "assistant",
+                "Tool call completed: instafy_shared_browser/request_human_input"
+            ),
+            row("assistant", HUMAN_INPUT_PAUSE_REPLY),
+            row("user", continue_prompt),
+        ]));
+        assert!(last_reply_was_a_pause(&after_a_pause));
+        let mut summary = "The fresh snapshot still shows the sign-in page.".to_string();
+        let mut fallback = None;
+        apply_terminal_shared_browser_summary(
+            &mut summary,
+            &mut fallback,
+            Some("human_input_required"),
+            last_reply_was_a_pause(&after_a_pause),
+        );
+        assert_eq!(
+            summary,
+            "Instafy's browser is still waiting for you. Sign in or fill in the highlighted fields on the page, then choose Let Octo continue. I don't ask for those details in chat."
+        );
+        assert_ne!(summary, HUMAN_INPUT_PAUSE_REPLY);
+        for claim in ["sign-in page", "Sign in there"] {
+            assert!(!summary.contains(claim), "{claim}");
+        }
+        // A third press reads the same: the last reply was a pause too.
+        let after_two = job(json!([
+            row("assistant", HUMAN_INPUT_PAUSE_AGAIN_REPLY),
+            row("user", continue_prompt),
+        ]));
+        assert!(last_reply_was_a_pause(&after_two));
+
+        for first in [
+            job(json!([row("user", "Open github.com and sign me in.")])),
+            job(json!([
+                row("assistant", "The shop is open daily from 09:00 to 19:30."),
+                row("user", "Now sign me in to the shop."),
+            ])),
+            test_lease_job(Some("feature"), json!({})),
+        ] {
+            assert!(!last_reply_was_a_pause(&first));
+            let mut summary = String::new();
+            apply_terminal_shared_browser_summary(
+                &mut summary,
+                &mut None,
+                Some("human_input_required"),
+                last_reply_was_a_pause(&first),
+            );
+            assert_eq!(summary, HUMAN_INPUT_PAUSE_REPLY);
+        }
     }
 
     /// Under routine browsing a turn opens pages and clicks before the step
@@ -26259,7 +26354,7 @@ mod tests {
 
             let mut summary = "Opened the invoice and saved it.".to_string();
             let mut fallback = None;
-            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal, false);
             let lowered = summary.to_lowercase();
             for whole_turn in ["nothing was", "nothing has", "no changes"] {
                 assert!(
@@ -26869,7 +26964,6 @@ mod tests {
         );
         let mut outcome = CodexOutcome {
             summary: "worker tried to spawn a nested plan".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -26900,86 +26994,56 @@ mod tests {
         );
     }
 
-    // A local test: a build turn's plain-text reply ended with three quoted replies joined by
-    // " · ", which showed as text instead of buttons.
+    // Studio showed no reply a turn offered (a local test, Oct 31: three replies carried four, and
+    // none was on screen), and Enter in an empty composer sent the first of them, so Octo is no
+    // longer asked for any. A thread started before that still holds the plain-text lanes' old
+    // instruction to end a reply with them on its own line (`"A" · "B"`, said to show as buttons),
+    // and a later turn there keeps doing it: that line leaves the reply and goes nowhere, as it did
+    // when it became buttons, and the note that repeats the reply among the turn's steps reads the
+    // same. Any other last line is the reply's own words, and nothing is kept as an offer.
     #[test]
-    fn replies_offered_on_the_last_line_become_buttons() {
+    fn a_reply_leaves_out_the_line_of_replies_an_older_thread_still_offers() {
         let reply = "Built and opened a comparison page.\n\nAssumed: boards means the newest ones.";
-        let outcome = extract_codex_outcome(&json!({
-            "summary": format!(
-                "{reply}\n\n“Include the keyboard model too” · “Find independent reviews” · \"Show prices in euros\"\n"
-            ),
-            "files": []
-        }))
-        .expect("extract outcome");
-        assert_eq!(outcome.summary, reply);
-        assert_eq!(
-            outcome.suggested_replies,
-            vec![
-                "Include the keyboard model too",
-                "Find independent reviews",
-                "Show prices in euros"
-            ]
-        );
-        // With the `suggestions` field too, each reply once and at most three.
-        let outcome = extract_codex_outcome(&json!({
-            "summary": format!("{reply}\n“Find independent reviews” · “Show prices in euros”"),
-            "suggestions": ["Find independent reviews", "Add a fourth board", "Make it shorter"]
-        }))
-        .expect("extract outcome");
-        assert_eq!(outcome.summary, reply);
-        assert_eq!(
-            outcome.suggested_replies,
-            vec![
-                "Find independent reviews",
-                "Add a fourth board",
-                "Make it shorter"
-            ]
-        );
+        for offered in [
+            "\u{201c}Include the keyboard model too\u{201d} \u{b7} \u{201c}Find independent reviews\u{201d}",
+            "\"Check current prices and weights\" \u{b7} \"Find two independent reviews per model\"",
+        ] {
+            let text = format!("{reply}\n\n{offered}\n");
+            let outcome = extract_codex_outcome(&json!({
+                "summary": text,
+                "files": [],
+                "suggestions": ["Find independent reviews", "Add a fourth board"]
+            }))
+            .expect("extract outcome");
+            assert_eq!(outcome.summary, reply, "{offered}");
+
+            let marked = format!("{reply}\n{offered}\nNO_FILE_CHANGES");
+            let messages = extract_codex_messages(&[json!({
+                "type": "item.completed",
+                "item": { "type": "agent_message", "text": marked },
+            })]);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].content, reply, "{offered}");
+            let outcome = extract_codex_outcome(&json!({ "summary": marked, "files": [] }))
+                .expect("extract outcome");
+            assert_eq!(
+                take_no_file_changes_marker(&outcome.summary).as_deref(),
+                Some(reply),
+                "{offered}"
+            );
+        }
         // Any other last line stays the reply's own words.
         for summary in [
-            "Done.\n“Find independent reviews”",
-            "Done.\nTry “Find independent reviews” · “Show prices in euros”",
-            "Done.\n“A” · “B” · “C” · “D”",
-            "Done.\n“” · “B”",
-            "“Find independent reviews” · “Show prices in euros”",
-            "Done. “Find independent reviews” · “Show prices in euros”",
+            "Done.\n\u{201c}Find independent reviews\u{201d}",
+            "Done.\nTry \u{201c}Find independent reviews\u{201d} \u{b7} \u{201c}Show prices in euros\u{201d}",
+            "Done.\n\u{201c}A\u{201d} \u{b7} \u{201c}B\u{201d} \u{b7} \u{201c}C\u{201d} \u{b7} \u{201c}D\u{201d}",
+            "Done.\n\u{201c}\u{201d} \u{b7} \u{201c}B\u{201d}",
+            "\u{201c}Find independent reviews\u{201d} \u{b7} \u{201c}Show prices in euros\u{201d}",
+            "Done. \u{201c}Find independent reviews\u{201d} \u{b7} \u{201c}Show prices in euros\u{201d}",
         ] {
             let outcome = extract_codex_outcome(&json!({ "summary": summary, "files": [] }))
                 .expect("extract outcome");
             assert_eq!(outcome.summary, summary, "{summary}");
-            assert!(outcome.suggested_replies.is_empty(), "{summary}");
-        }
-    }
-
-    // The note that repeats a plain-text reply among the turn's steps reads as the reply does:
-    // Studio leaves it out of Details only when the two match, so replies moved to buttons
-    // leave the note too, also when the runtime's no-change line follows them.
-    #[test]
-    fn the_note_that_repeats_the_reply_loses_its_offered_replies_too() {
-        let reply = "Built the page.";
-        for text in [
-            format!("{reply}\n\n“Find independent reviews” · “Show prices in euros”"),
-            format!(
-                "{reply}\n“Find independent reviews” · “Show prices in euros”\nNO_FILE_CHANGES"
-            ),
-        ] {
-            let messages = extract_codex_messages(&[json!({
-                "type": "item.completed",
-                "item": { "type": "agent_message", "text": text },
-            })]);
-            assert_eq!(messages.len(), 1, "{text}");
-            let outcome = extract_codex_outcome(&json!({ "summary": text, "files": [] }))
-                .expect("extract outcome");
-            let summary = take_no_file_changes_marker(&outcome.summary)
-                .unwrap_or_else(|| outcome.summary.clone());
-            assert_eq!(summary, reply, "{text}");
-            assert_eq!(messages[0].content, summary, "{text}");
-            assert_eq!(
-                outcome.suggested_replies,
-                vec!["Find independent reviews", "Show prices in euros"],
-                "{text}"
-            );
         }
     }
 
@@ -29518,7 +29582,7 @@ mod tests {
         assert!(prompt.contains("Do not substitute shell searches over raw runtime/session"));
         assert!(prompt.contains("Do not answer from raw runtime/session logs"));
         assert!(prompt.contains(
-            "{ \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown."
+            "{ \"summary\": string, \"files\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown."
         ));
         assert_prompt_carries_secret_rejection_contract(&prompt);
         let sections = metrics
@@ -30236,7 +30300,6 @@ mod tests {
         };
         let outcome = CodexOutcome {
             summary: "ok".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -32691,7 +32754,6 @@ mod tests {
     fn coordination_required_action_defers_workspace_file_expectation_without_team_card() {
         let outcome = CodexOutcome {
             summary: "This needs a single owner before editing.".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -32709,7 +32771,6 @@ mod tests {
     fn coordination_required_summary_alone_does_not_defer_workspace_file_expectation() {
         let outcome = CodexOutcome {
             summary: "This has overlapping write-scope ownership, so coordination is required before editing.".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -32846,7 +32907,6 @@ mod tests {
     fn multi_agent_plan_action_defers_workspace_file_expectation() {
         let outcome = CodexOutcome {
             summary: "planned".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -32863,7 +32923,6 @@ mod tests {
 
         let plain_outcome = CodexOutcome {
             summary: "no action".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -33051,50 +33110,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_onboarding_suggestions_adds_retry_prompts() {
-        let mut suggestions = vec!["Existing hint".to_string()];
-        let actions = vec![
-            CodexAction::RequestIntegration {
-                provider: "example".to_string(),
-                description: None,
-                required_scopes: Vec::new(),
-                capabilities: Vec::new(),
-                auth_methods: Vec::new(),
-                suggested_secret_names: Vec::new(),
-                suggested_secrets: Vec::new(),
-                agent_handles: vec!["octo".to_string()],
-            },
-            CodexAction::RequestSecret {
-                name: "EXAMPLE_TOKEN".to_string(),
-                description: None,
-                value_label: None,
-                where_to_get: None,
-                skill: None,
-                sensitive: Some(true),
-                agent_handles: vec!["octo".to_string()],
-                refused_class: None,
-            },
-        ];
-
-        ensure_onboarding_suggestions(&mut suggestions, &actions);
-
-        assert!(
-            suggestions
-                .iter()
-                .any(|item| item == "I connected Example. Retry now.")
-        );
-        // A secret gets no chip: its card saves the value and continues the
-        // run itself, and a second phrasing of the same step is what made the
-        // card read as two competing paths.
-        assert!(
-            !suggestions
-                .iter()
-                .any(|item| item.contains("EXAMPLE_TOKEN"))
-        );
-        assert!(suggestions.len() <= MAX_UI_SUGGESTED_REPLIES);
-    }
-
-    #[test]
     fn augment_summary_for_onboarding_actions_says_nothing_extra_about_a_secret() {
         // The card is a few pixels below this sentence and its caption already
         // says where the value is kept. A line here made one ask arrive three
@@ -33209,7 +33224,6 @@ mod tests {
         );
         let mut outcome = CodexOutcome {
             summary: String::new(),
-            suggested_replies: vec![],
             files: vec![],
             read_files: vec![],
             snippet: None,

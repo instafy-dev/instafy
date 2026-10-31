@@ -237,6 +237,17 @@ export function shouldDisplayChatMessage(message: ChatMessage): boolean {
   if (message.role === "assistant" && isGenericProgressLabel(message.content)) {
     return false;
   }
+  // A reply with nothing in it shows nothing: a turn whose only output is a
+  // browser card posts the card and an empty reply (runtime-agent
+  // `post_only_the_card`), which the controller counts as no reply too.
+  if (
+    message.role === "assistant" &&
+    !messageType &&
+    !message.content.trim() &&
+    !(Array.isArray(message.files) && message.files.length > 0)
+  ) {
+    return false;
+  }
   if (
     !messageType &&
     message.role === "assistant" &&

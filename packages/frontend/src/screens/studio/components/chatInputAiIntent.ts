@@ -16,41 +16,21 @@ type AmbientPromptAgentSelectionLike = PromptAgentSelectionLike & {
   usesDefaultAssistantOnly: boolean;
 };
 
-function resolveEffectiveChatInputText({
-  inputValue,
-  hasImageAttachments,
-  fallbackSuggestion,
-}: {
-  inputValue: string;
-  hasImageAttachments: boolean;
-  fallbackSuggestion: string | null | undefined;
-}): string {
-  const trimmed = inputValue.trim();
-  const fallback = !trimmed && !hasImageAttachments ? (fallbackSuggestion ?? "").trim() : "";
-  return trimmed || fallback;
-}
-
 export function resolveChatInputRequiresAi({
   activeConversationMessages,
   inputValue,
   hasImageAttachments,
-  fallbackSuggestion,
   resolvePromptAgentTargets,
 }: {
   activeConversationMessages: ChatMessage[];
   inputValue: string;
   hasImageAttachments: boolean;
-  fallbackSuggestion: string | null | undefined;
   resolvePromptAgentTargets: (
     prompt: string,
     options: { useSticky: boolean },
   ) => PromptAgentSelectionLike;
 }): boolean {
-  const effectiveText = resolveEffectiveChatInputText({
-    inputValue,
-    hasImageAttachments,
-    fallbackSuggestion,
-  });
+  const effectiveText = inputValue.trim();
   if (!effectiveText && !hasImageAttachments) {
     return false;
   }
@@ -83,26 +63,18 @@ export function resolveChatInputRequiresAi({
 
 export function resolveChatInputHasBrowserTask({
   inputValue,
-  hasImageAttachments,
-  fallbackSuggestion,
   personalBrowserActive,
   sharedBrowserModeActive,
   pendingNewBrowser,
   sharedBrowserPageTargetAvailable,
 }: {
   inputValue: string;
-  hasImageAttachments: boolean;
-  fallbackSuggestion: string | null | undefined;
   personalBrowserActive: boolean;
   sharedBrowserModeActive: boolean;
   pendingNewBrowser: boolean;
   sharedBrowserPageTargetAvailable: boolean;
 }): boolean {
-  const effectiveText = resolveEffectiveChatInputText({
-    inputValue,
-    hasImageAttachments,
-    fallbackSuggestion,
-  });
+  const effectiveText = inputValue.trim();
   return (
     personalBrowserActive ||
     sharedBrowserModeActive ||
@@ -120,7 +92,6 @@ export function resolveChatInputHasBrowserTask({
 export function resolveChatInputCanRunAmbientParticipationPreflight({
   inputValue,
   hasImageAttachments,
-  fallbackSuggestion,
   activeConversationControllerId,
   conversationHasHumanPeer,
   assistantEnabled,
@@ -133,7 +104,6 @@ export function resolveChatInputCanRunAmbientParticipationPreflight({
 }: {
   inputValue: string;
   hasImageAttachments: boolean;
-  fallbackSuggestion: string | null | undefined;
   activeConversationControllerId: string | null;
   conversationHasHumanPeer: boolean;
   assistantEnabled: boolean;
@@ -154,11 +124,7 @@ export function resolveChatInputCanRunAmbientParticipationPreflight({
   ) {
     return false;
   }
-  const effectiveText = resolveEffectiveChatInputText({
-    inputValue,
-    hasImageAttachments,
-    fallbackSuggestion,
-  });
+  const effectiveText = inputValue.trim();
   if (
     !effectiveText ||
     effectiveText.trimStart().startsWith("/") ||
