@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { act, useMemo, useState } from "react";
+import { act, Profiler, useMemo } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../../../types";
@@ -22,8 +22,6 @@ const mocks = vi.hoisted(() => ({
   requestAccessToken: vi.fn(),
   /** The prompt waiting at the origin: one per person, bound to its run's tab. */
   waiting: null as Prompt | null,
-  /** An origin that answers a read of any tab with that prompt. */
-  anyTab: false,
   /** The tabs whose prompt was read, in order. */
   reads: [] as string[],
   decisions: [] as Array<{ approvalId: string; decision: string }>,
@@ -37,11 +35,11 @@ vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
     fetchHost: vi.fn(), startHost: vi.fn(), isUnavailableError: () => false, isHostRefusedError: () => false,
     // The origin keeps a prompt for the person who started the run and the
     // tab it is bound to, and gives it to a read of that tab from any of
-    // their chats.
+    // their chats; a read of another tab gets none.
     fetchPendingApproval: async ({ browserPageId }: { browserPageId: string }) => {
       mocks.reads.push(browserPageId);
       const waiting = mocks.waiting;
-      return waiting && (mocks.anyTab || waiting.request.browserPageId === browserPageId) ? waiting : null;
+      return waiting && waiting.request.browserPageId === browserPageId ? waiting : null;
     },
     decideApproval: async ({ pending, decision }: { pending: Prompt; decision: string }) => {
       if (mocks.waiting?.request.approvalId !== pending.request.approvalId) return false;
@@ -77,7 +75,7 @@ vi.mock("@novnc/novnc/lib/rfb", () => ({ default: class {
 } }));
 import { BrowserApprovalRow } from "../BrowserApprovalRow";
 import { BrowserSessionModal } from "../BrowserSessionModal";
-import { useChatSharedBrowserApproval } from "../useChatSharedBrowserApproval";
+import { useChatSharedBrowserApproval, useChatViewApprovalPending } from "../useChatSharedBrowserApproval";
 
 const projectId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const runtimeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -147,7 +145,8 @@ type StudioProps = {
  */
 function Studio({ chat, front, anotherChatTurn, runs, browserShown = true, phone = false }: StudioProps) {
   const chatBrowserApproval = useChatSharedBrowserApproval({ enabled: true, projectId, userId, runs, browserSessionId });
-  const [sharedBrowserApprovalPending, setSharedBrowserApprovalPending] = useState(false);
+  const chatViewApproval = useChatViewApprovalPending(chat);
+  const sharedBrowserApprovalPending = chatViewApproval.pending;
   const chatBrowserApprovalTarget = chatBrowserApproval.target;
   const chatBrowserApprovalAsking = chatBrowserApproval.approval.pending !== null;
   const browserRunApproval = useMemo(
@@ -167,7 +166,7 @@ function Studio({ chat, front, anotherChatTurn, runs, browserShown = true, phone
         sharedBrowserCapabilitiesResolved sharedBrowserCapabilitiesAvailable
         sharedBrowserViewerKind="rfb" sharedBrowserAvailableViewerKinds={["rfb"]}
         sharedBrowserRfbCapabilities={{ renderScale: 1, maxFramebufferPixels: 8_294_400 }}
-        onApprovalPendingChange={setSharedBrowserApprovalPending}
+        onApprovalPendingChange={chatViewApproval.onApprovalPendingChange}
         runApproval={browserRunApproval}
         conversationId={chat}
         chatPageIds={[TABS[chat].id]}
@@ -181,11 +180,13 @@ function Studio({ chat, front, anotherChatTurn, runs, browserShown = true, phone
 describe("a chat's Browser view and another chat's prompt", () => {
   let root: Root;
   let container: HTMLDivElement;
+  /** What each commit put on the page, whichever part of Studio drew it. */
+  let drawn: Array<{ prompt: boolean; approve: boolean }> = [];
   beforeEach(() => {
     vi.useFakeTimers();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
-    mocks.waiting = null; mocks.anyTab = false; mocks.reads = []; mocks.decisions = []; mocks.instances.length = 0;
+    mocks.waiting = null; mocks.reads = []; mocks.decisions = []; mocks.instances.length = 0; drawn = [];
     mocks.fetchStatus.mockReset().mockResolvedValue({ runtimes: [session] });
     mocks.requestAccessToken.mockReset().mockResolvedValue({ token: "origin-token", endpoint: "https://origin.test", expiresIn: 300 });
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
@@ -206,13 +207,16 @@ describe("a chat's Browser view and another chat's prompt", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(Math.min(50, ms - elapsed)); await vi.dynamicImportSettled(); });
     }
   }
-  async function show(props: StudioProps) {
-    await act(async () => root.render(<Studio {...props} />));
-    await advance(3_000);
-  }
   const viewPrompt = () => document.querySelector('[data-testid="shared-browser-approval-prompt"]');
   const row = () => document.querySelector('[data-testid="browser-approval-row"]');
   const tab = () => document.querySelector('[data-testid="browser-tab"]')!.textContent;
+  const recordDraw = () => {
+    drawn.push({ prompt: viewPrompt() !== null || row() !== null, approve: tab()?.includes("Approve") === true });
+  };
+  async function show(props: StudioProps) {
+    await act(async () => root.render(<Profiler id="studio" onRender={recordDraw}><Studio {...props} /></Profiler>));
+    await advance(3_000);
+  }
   const note = () => document.querySelector('[data-testid="browser-session-agent-arrival"]')?.textContent ?? null;
   /** Escape, as the person presses it in the view: it denies the prompt that has focus. */
   async function pressEscape() {
@@ -259,17 +263,29 @@ describe("a chat's Browser view and another chat's prompt", () => {
     expect(tab()).toBe("Browser");
   });
 
-  it("answers no prompt of another tab, even one the origin gave for this chat's own tab", async () => {
+  // The view says it shows a prompt only after it draws, and ChatPanel keeps
+  // one view for every chat: the chat the person goes to never draws the
+  // prompt, or Approve, of the chat they left, not even once.
+  it.each([
+    { asks: "in its own view, before its run's lane is up", runs: () => [] },
+    { asks: "in its row and its view, from its run's lane", runs: () => [formRun()] },
+  ])("leaves the asking chat's prompt and Approve behind when the person goes to another chat ($asks)", async ({ runs }) => {
     mocks.waiting = sitePrompt();
-    mocks.anyTab = true;
-    // The Lello chat's own tab is in front and no other chat's turn holds
-    // the browser, so its view reads the prompt of its tab.
-    await show({ chat: "lello", front: "lello", anotherChatTurn: false, runs: [] });
-    expect(mocks.reads).toContain(TABS.lello.id);
-    expect(viewPrompt()).toBeNull();
-    expect(tab()).toBe("Browser");
+    await show({ chat: "form", front: "form", anotherChatTurn: false, runs: runs() });
+    expect(viewPrompt()?.textContent).toContain("Octo wants to open httpbin.org/forms/post.");
+    expect(tab()).toBe("BrowserApprove");
+    // The person goes to the Lello chat while the step still asks.
+    drawn = [];
+    await show({ chat: "lello", front: "form", anotherChatTurn: true, runs: [] });
+    expect(drawn.length).toBeGreaterThan(0);
+    expect(drawn.filter((draw) => draw.prompt || draw.approve)).toEqual([]);
+    expect(note()).toBe("Octo is working in another chat");
     await pressEscape();
     expect(mocks.decisions).toEqual([]);
+    // Back in the form chat, it asks again.
+    await show({ chat: "form", front: "form", anotherChatTurn: false, runs: runs() });
+    expect(viewPrompt()?.textContent).toContain("Octo wants to open httpbin.org/forms/post.");
+    expect(tab()).toBe("BrowserApprove");
   });
 
   it("still asks in the chat's own view before its run's own lane is up", async () => {
@@ -294,12 +310,17 @@ describe("ChatPanel's Browser tab and view prompts", () => {
   const componentsDir = path.dirname(fileURLToPath(import.meta.url)) + "/..";
   const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
 
-  it("lights Approve only from the chat's own lane and its view", () => {
+  it("lights Approve only from the chat's own lane and its view, kept with the chat it was for", () => {
+    expect(chatPanel).toContain("const surfaceScope = conversationSurfaceScope(currentUserId, activeProjectId ?? null, activeConversationId);");
+    expect(chatPanel).toContain("const chatViewApproval = useChatViewApprovalPending(surfaceScope);");
+    expect(chatPanel).toContain("const sharedBrowserApprovalPending = chatViewApproval.pending;");
     expect(chatPanel).toContain("const chatBrowserApprovalAsking = chatBrowserApproval.approval.pending !== null;");
     expect(chatPanel).toContain("const browserApprovalAttention = sharedBrowserApprovalPending || chatBrowserApprovalAsking;");
     expect(chatPanel).toContain("attention: browserApprovalAttention,");
     expect(chatPanel).toContain("attention: browserApprovalAttention ? <span");
-    expect(chatPanel).toContain("onApprovalPendingChange={setSharedBrowserApprovalPending}");
+    expect(chatPanel).toContain("onApprovalPendingChange={chatViewApproval.onApprovalPendingChange}");
+    // Nothing else sets whether the view shows a prompt.
+    expect(chatPanel).not.toContain("setSharedBrowserApprovalPending");
   });
 
   it("gives the view the chat's own lane, tabs and other chats' turns", () => {
