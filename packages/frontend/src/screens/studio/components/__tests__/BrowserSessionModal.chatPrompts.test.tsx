@@ -211,7 +211,8 @@ describe("a chat's Browser view and another chat's prompt", () => {
   const row = () => document.querySelector('[data-testid="browser-approval-row"]');
   const tab = () => document.querySelector('[data-testid="browser-tab"]')!.textContent;
   const recordDraw = () => {
-    drawn.push({ prompt: viewPrompt() !== null || row() !== null, approve: tab()?.includes("Approve") === true });
+    const approve = document.querySelector('[data-testid="browser-tab"]')?.textContent?.includes("Approve") === true;
+    drawn.push({ prompt: viewPrompt() !== null || row() !== null, approve });
   };
   async function show(props: StudioProps) {
     await act(async () => root.render(<Profiler id="studio" onRender={recordDraw}><Studio {...props} /></Profiler>));
@@ -267,9 +268,11 @@ describe("a chat's Browser view and another chat's prompt", () => {
   // one view for every chat: the chat the person goes to never draws the
   // prompt, or Approve, of the chat they left, not even once.
   it.each([
-    { asks: "in its own view, before its run's lane is up", runs: () => [] },
-    { asks: "in its row and its view, from its run's lane", runs: () => [formRun()] },
-  ])("leaves the asking chat's prompt and Approve behind when the person goes to another chat ($asks)", async ({ runs }) => {
+    // Its view's own poll, before its run's lane is up.
+    { asks: "in its view", runs: () => [] },
+    // Its run's lane, which feeds its row and its view.
+    { asks: "in its row and view", runs: () => [formRun()] },
+  ])("leaves the asking chat's prompt and Approve behind when the person goes to another chat, asking $asks", async ({ runs }) => {
     mocks.waiting = sitePrompt();
     await show({ chat: "form", front: "form", anotherChatTurn: false, runs: runs() });
     expect(viewPrompt()?.textContent).toContain("Octo wants to open httpbin.org/forms/post.");
