@@ -45,8 +45,12 @@ import type { SharedBrowserHostRefresh } from "./useSharedBrowserHostSnapshot";
 
 /** How a continuation is shown and recorded. */
 export type BrowserTaskExtras = {
-  /** What the chat shows in place of the task: a one-line notice. */
-  display: string;
+  /**
+   * What the chat shows in place of the task: a one-line notice. None for a
+   * message Octo sent straight to the browser that Studio opened by itself:
+   * the chat folds that continuation away (routedBrowserFold.ts).
+   */
+  display?: string;
   /** Prompt metadata naming the card, and whether Studio sent it by itself. */
   metadata: Record<string, unknown>;
   /**
@@ -493,7 +497,12 @@ export function useChatBrowserRequest(options: Options) {
           const sending = latest.current;
           const destinations = browserRequestDestinations(request.task);
           const sent = await sending.continueTask(transport, browserRequestContinuation(request), {
-            display: browserRequestNotice(sending.agentName ?? "Octo", request.task, { automatic: autoStarted }),
+            // A message Octo sent straight to the browser, opened by itself,
+            // leaves no notice: the person's own message is right above, and
+            // the turn reads as one (routedBrowserFold.ts).
+            ...(request.routed && autoStarted
+              ? {}
+              : { display: browserRequestNotice(sending.agentName ?? "Octo", request.task, { automatic: autoStarted }) }),
             metadata: {
               ...(extraMetadata ?? {}),
               [BROWSER_REQUEST_OF_METADATA_KEY]: key,

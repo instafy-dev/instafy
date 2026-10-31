@@ -71,6 +71,10 @@ const FINDING_URL_MAX_CHARS: usize = 2_048;
 pub(crate) const HAND_BACK_WINDOW_MINUTES: i64 = 30;
 /// How much of what a browser turn was asked reaches the building turn.
 pub(crate) const REQUEST_MAX_CHARS: usize = 2_000;
+/// How much of a routed message's words the hand-back gives the building turn
+/// as the person's request: all of a card's task (runtime-agent
+/// `ROUTED_BROWSER_TASK_MAX_UTF16_UNITS`).
+pub(crate) const PERSON_REQUEST_MAX_CHARS: usize = 8_000;
 /// The payload key a lease stamps with [`browser_turns_since`].
 pub(crate) const TURNS_SINCE_KEY: &str = "browser_turns_since";
 /// The browser turns a building turn reads at most: the browser skill's six
@@ -440,19 +444,22 @@ fn labelled_findings(reply: &str, viewer: &str, read_at: &str) -> Vec<JsonValue>
 
 /// The checked record a building turn carries as `metadata.browserHandBack`.
 /// `request` is what the browser turn was asked: the building thread may never
-/// have seen it.
+/// have seen it. `person_request` is the words of a message the routing step
+/// sent straight to the browser, from that message's own job: the person's
+/// request, which the building thread never saw.
 pub(crate) fn hand_back_record(
     browser_job_id: &Uuid,
     card_job_id: &Uuid,
     viewer: &str,
     read_at: DateTime<Utc>,
     request: &str,
+    person_request: Option<&str>,
     reply: &str,
 ) -> JsonValue {
     let read_at = read_at.to_rfc3339_opts(SecondsFormat::Secs, true);
     let (reply, truncated) = bounded_reply(reply);
     let findings = labelled_findings(&reply, viewer, &read_at);
-    json!({
+    let mut record = json!({
         "version": HAND_BACK_VERSION,
         "verified": true,
         "browserJobId": browser_job_id.to_string(),
@@ -463,7 +470,21 @@ pub(crate) fn hand_back_record(
         "findings": findings,
         "reply": reply,
         "replyTruncated": truncated,
-    })
+    });
+    let person_request = person_request
+        .map(|words| words.replace('\0', ""))
+        .map(|words| {
+            words
+                .trim()
+                .chars()
+                .take(PERSON_REQUEST_MAX_CHARS)
+                .collect::<String>()
+        })
+        .filter(|words| !words.is_empty());
+    if let Some(words) = person_request {
+        record["personRequest"] = json!(words);
+    }
+    record
 }
 
 /// The copy the stored message keeps: which browser turn it continues, not
@@ -638,9 +659,8 @@ pub(crate) async fn require_hand_back(
             "Only the person whose request sent the card can hand the browser's findings back to it.",
         ));
     }
-    let card_metadata = card_job
-        .get::<_, PgJson<JsonValue>>("payload")
-        .0
+    let card_payload = card_job.get::<_, PgJson<JsonValue>>("payload").0;
+    let card_metadata = card_payload
         .get("metadata")
         .cloned()
         .unwrap_or(JsonValue::Null);
@@ -739,12 +759,23 @@ pub(crate) async fn require_hand_back(
         .get("prompt_text")
         .and_then(JsonValue::as_str)
         .unwrap_or_default();
+    // A card the routing step posted for the person's own message: the
+    // building thread never saw that message (its job ran no model turn), so
+    // the record gives the build its words, from the message's own job, as the
+    // person's request.
+    let person_request =
+        if job_posted_routed_browser_card(transaction, conversation_id, &card_job_id).await? {
+            card_payload.get("prompt_text").and_then(JsonValue::as_str)
+        } else {
+            None
+        };
     let record = hand_back_record(
         &browser_job_id,
         &card_job_id,
         viewer,
         completed_at,
         request,
+        person_request,
         &reply_with_finding_lines(&reply, finding_lines.as_deref()),
     );
     // A browser turn that read no page leaves the building turn nothing to
@@ -785,6 +816,34 @@ async fn card_continues_building(
         .await
         .map(|row| row.get::<_, bool>(0))
         .map_err(|error| internal_error(format!("failed to read the browser card: {error}")))
+}
+
+/// Whether a job posted the card of a message the runtime sent straight to
+/// Instafy's browser (`browserRequest.routed`): the runtime's own
+/// `action_request` message for that job.
+pub(crate) async fn job_posted_routed_browser_card(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    job_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select exists (
+                 select 1 from conversation_messages
+                  where conversation_id = $1
+                    and role = 'assistant'
+                    and created_by is null
+                    and metadata #>> '{jobId}' = $2
+                    and lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', ''))
+                        = 'action_request'
+                    and (metadata #> '{details,browserRequest,routed}' = 'true'::jsonb
+                         or metadata #> '{details,details,browserRequest,routed}' = 'true'::jsonb)
+             )",
+            &[conversation_id, &job_id.to_string()],
+        )
+        .await
+        .map(|row| row.get::<_, bool>(0))
+        .map_err(|error| internal_error(format!("failed to read the routed card: {error}")))
 }
 
 /// The finding lines the runtime moved out of the browser turn's reply into
@@ -998,7 +1057,8 @@ pub(crate) async fn browser_turns_since(
         .map(|row| row.get::<_, DateTime<Utc>>("created_at"));
     let rows = transaction
         .query(
-            "select j.id, j.run_id, j.outcome, j.summary, j.payload, j.completed_at
+            "select j.id, j.run_id, j.outcome, j.summary, j.payload, j.completed_at,
+                    r.created_at as run_created_at
                from runs r
                join agent_jobs j on j.run_id = r.id
                  and j.project_id = r.project_id
@@ -1038,10 +1098,76 @@ pub(crate) async fn browser_turns_since(
                 "failed to list the browser turns since the building thread's last turn: {error}"
             ))
         })?;
-    let earlier_left_out = rows.len() > TURNS_SINCE_MAX as usize;
-    let mut turns = Vec::with_capacity(rows.len());
-    // The newest, read oldest first.
-    for row in rows.into_iter().take(TURNS_SINCE_MAX as usize).rev() {
+    // A message the runtime sent straight to the browser whose card no
+    // browser turn carried on: the building thread never saw it, and the
+    // person may now ask for it without the browser.
+    let unopened = transaction
+        .query(
+            "select j.id, j.payload, r.created_at
+               from runs r
+               join agent_jobs j on j.run_id = r.id
+                 and j.project_id = r.project_id
+                 and j.conversation_id = r.conversation_id
+              where r.conversation_id = $1
+                and j.id <> $2
+                and j.status = 'completed'
+                and ($3::timestamptz is null or r.created_at > $3)
+                and exists (
+                    select 1 from conversation_messages card
+                     where card.conversation_id = $1
+                       and card.role = 'assistant'
+                       and card.created_by is null
+                       and card.metadata #>> '{jobId}' = j.id::text
+                       and (card.metadata #> '{details,browserRequest,routed}' = 'true'::jsonb
+                            or card.metadata #> '{details,details,browserRequest,routed}' = 'true'::jsonb))
+                and not exists (
+                    select 1 from agent_jobs browser_job
+                     where browser_job.conversation_id = $1
+                       and browser_job.payload #>> '{metadata,browserRequestOf}' = 'job:' || j.id::text)
+                and case
+                    when $4::uuid is not null and r.metadata #>> '{agent,id}' is not null
+                        then r.metadata #>> '{agent,id}' = $4::text
+                    when $5::text is not null
+                        then lower(ltrim(btrim(r.metadata #>> '{agent,handle}'), '@')) = $5
+                    else $4::uuid is null
+                end
+              order by r.created_at desc, r.id desc, j.id desc
+              limit $6",
+            &[
+                conversation_id,
+                job_id,
+                &anchor,
+                &agent_id,
+                &agent_handle,
+                // One more than are kept, to know whether any were left out.
+                &(TURNS_SINCE_MAX + 1),
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to list the messages sent straight to the browser: {error}"
+            ))
+        })?;
+    let mut listed: Vec<(DateTime<Utc>, JsonValue)> = unopened
+        .into_iter()
+        .map(|row| {
+            let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
+            let request = payload
+                .get("prompt_text")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            (
+                row.get::<_, DateTime<Utc>>("created_at"),
+                json!({
+                    "routedJobId": row.get::<_, Uuid>("id").to_string(),
+                    "request": browser_request_for_building(request),
+                    "routedNotOpened": true,
+                }),
+            )
+        })
+        .collect();
+    for row in rows.into_iter().rev() {
         let browser_job_id: Uuid = row.get("id");
         let run_id: Option<Uuid> = row.get("run_id");
         let browser_payload = row.get::<_, PgJson<JsonValue>>("payload").0;
@@ -1074,20 +1200,31 @@ pub(crate) async fn browser_turns_since(
             .get("prompt_text")
             .and_then(JsonValue::as_str)
             .unwrap_or_default();
-        turns.push(json!({
-            "browserJobId": browser_job_id.to_string(),
-            "request": browser_request_for_building(request),
-            "reply": reply,
-            "replyTruncated": truncated,
-            "findings": labelled_findings(&reply, viewer, &read_at),
-            "readAt": read_at,
-            "viewer": viewer,
-            "outcome": row.get::<_, Option<String>>("outcome"),
-        }));
+        listed.push((
+            row.get::<_, DateTime<Utc>>("run_created_at"),
+            json!({
+                "browserJobId": browser_job_id.to_string(),
+                "request": browser_request_for_building(request),
+                "reply": reply,
+                "replyTruncated": truncated,
+                "findings": labelled_findings(&reply, viewer, &read_at),
+                "readAt": read_at,
+                "viewer": viewer,
+                "outcome": row.get::<_, Option<String>>("outcome"),
+            }),
+        ));
     }
+    // Oldest first, the newest TURNS_SINCE_MAX of both kinds. Each query
+    // read one more than are kept, so a longer list means some were left out.
+    listed.sort_by_key(|(created_at, _)| *created_at);
+    let keep_from = listed.len().saturating_sub(TURNS_SINCE_MAX as usize);
     Ok(BrowserTurnsSince {
-        turns,
-        earlier_left_out,
+        turns: listed
+            .into_iter()
+            .skip(keep_from)
+            .map(|(_, turn)| turn)
+            .collect(),
+        earlier_left_out: keep_from > 0,
     })
 }
 
@@ -1233,6 +1370,7 @@ https://three.example.com\n\
             viewer_for_transport("shared").unwrap(),
             read_at,
             fixtures["browserRequest"].as_str().unwrap(),
+            None,
             fixtures["browserReply"].as_str().unwrap(),
         );
         assert_eq!(&record, expected);
@@ -1244,7 +1382,14 @@ https://three.example.com\n\
             viewer_for_transport("desktop_personal").unwrap(),
             read_at,
             &"y".repeat(REQUEST_MAX_CHARS + 10),
+            Some(&format!("{}\0", "z".repeat(PERSON_REQUEST_MAX_CHARS + 10))),
             &long,
+        );
+        // A routed message's words reach the build whole, as a card's task is
+        // bounded.
+        assert_eq!(
+            record["personRequest"].as_str().unwrap(),
+            "z".repeat(PERSON_REQUEST_MAX_CHARS)
         );
         assert_eq!(
             record["request"].as_str().unwrap().chars().count(),
@@ -1306,7 +1451,7 @@ https://three.example.com\n\
             "{\"url\": \"https://www.example.com/\", \"stopped\": \"blocked\"}",
             "{\"url\": \"https://a.example.com/\", \"stopped\": \"captcha\"}\n{\"url\": \"http://127.0.0.1/\", \"title\": \"Local\"}",
         ] {
-            let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at, "", reply);
+            let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at, "", None, reply);
             assert!(!record_read_a_page(&record), "{reply}");
         }
     }

@@ -729,6 +729,51 @@ fn the_browser_skills_sign_in_and_secret_rules_end_inside_the_carried_bytes() {
     }
 }
 
+/// The routing step reads the browser skill's "Routing preflight" section from the space's copy: it is
+/// the skill's last section, after the bytes a snapshot carries, so a browser turn's own snapshot is
+/// unchanged, and the routing step reads all of it within its budget.
+#[test]
+fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_budget() {
+    let start = BROWSER_SKILL
+        .find("\n## Routing preflight\n")
+        .expect("routing section")
+        + 1;
+    assert!(
+        start >= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "starts at byte {start}"
+    );
+    assert!(
+        !BROWSER_SKILL[start + 1..].contains("\n## "),
+        "the routing section is the skill's last"
+    );
+    let section = BROWSER_SKILL[start..].trim_end();
+    assert!(
+        section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS,
+        "{} chars",
+        section.chars().count()
+    );
+    // A browser turn sees only the person's words and this chat's browser turns, so a message
+    // that names the browser still stays direct when the browser part needs anything else.
+    for words in [
+        "`browser`",
+        "`browser_then_build`",
+        "sees only those words and this chat's earlier browser turns",
+        "Stay `direct`, even when the message names Instafy's browser",
+        "what only this space or another chat holds",
+        "the site runs in this space",
+        "says not to use the browser",
+        "attachments",
+    ] {
+        assert!(section.contains(words), "{words}");
+    }
+    assert!(!section.contains("always one of these two"), "{section}");
+    let tmp = tempdir().expect("temp dir");
+    learn::ensure_project_memory_scaffold(tmp.path());
+    let snapshot = format_browser_routing_preflight_snapshot(tmp.path()).expect("snapshot");
+    assert!(snapshot.contains(section), "{snapshot}");
+    assert!(!snapshot.contains("(truncated)"), "{snapshot}");
+}
+
 /// The kinds of link-only site and guided mode: a `no-agents` site is never read or opened and the person is
 /// guided to it with a filled link (`instafy web link`) and Send page to Octo; a `no-reuse` site is read but its
 /// content is summarized, cited and linked, never copied or published. An unedited earlier copy is upgraded.

@@ -3701,6 +3701,21 @@ pub(crate) async fn agent_complete(
         );
         let should_swallow_evaluation_decline = explicit_successful_decline
             && !run_has_visible_assistant_message(&transaction, &project_id, run_id).await?;
+        // A message the runtime sent straight to Instafy's browser ends with
+        // its card alone: the card is the turn's answer, and Studio opens it
+        // by itself. Such a turn posts no reply of its own, not even a blank
+        // one (runtime-agent `routed_browser_execution`).
+        let card_is_the_reply = outcome_lower == "succeeded"
+            && error_message.is_none()
+            && summary
+                .as_deref()
+                .is_none_or(|summary| summary.trim().is_empty())
+            && crate::browser_hand_back::job_posted_routed_browser_card(
+                &transaction,
+                &conversation_uuid,
+                &job_uuid,
+            )
+            .await?;
         // Both messages below land in this conversation: whether it is an
         // internal review anchor is read once for the two.
         let internal_conversation = if should_swallow_evaluation_decline {
@@ -3771,6 +3786,8 @@ pub(crate) async fn agent_complete(
         // answer streamed earlier) records the decline and posts nothing.
         if should_swallow_evaluation_decline {
             record_agent_evaluation_decline(&transaction, &project_id, &job_uuid, run_id).await?;
+        } else if card_is_the_reply {
+            // Its card is already in the conversation.
         } else {
             let authenticated_evaluation =
                 crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)

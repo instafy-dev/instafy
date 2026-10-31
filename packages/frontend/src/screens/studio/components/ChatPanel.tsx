@@ -431,6 +431,7 @@ import {
   pressedBrowserCardSites,
   type BrowserRequestHost,
 } from "./browserRequest";
+import { routedBrowserWaitingKeys } from "./routedBrowserFold";
 import {
   BROWSER_AUTO_START_COPY,
   browserAutoStartHeldByDraft,
@@ -5018,6 +5019,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [messages, browserRequestState.cardStates],
   );
   const newestBrowserRequest = useMemo(() => newestBrowserRequestKey(messages), [messages]);
+  // Cards for a message Octo sent straight to the browser that Studio opened
+  // by itself and that are still opening (routedBrowserFold.ts).
+  const routedBrowserWaiting = useMemo(() => routedBrowserWaitingKeys(messages), [messages]);
   const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
     transport: browserTransport,
     personalAvailable: personalBrowser.available,
@@ -5025,9 +5029,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalTurnsAllowed,
     cardStates: browserRequestState.cardStates,
     continuedKeys: browserRequestContinued,
+    routedWaitingKeys: routedBrowserWaiting,
     newestCardKey: newestBrowserRequest,
   }), [
     browserRequestContinued,
+    routedBrowserWaiting,
     newestBrowserRequest,
     browserRequestState.cardStates,
     browserTransport,

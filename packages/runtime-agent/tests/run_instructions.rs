@@ -253,11 +253,17 @@ fn remove_env(key: &str) {
     unsafe { std::env::remove_var(key) };
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Step {
-    Final { total_tokens: u64 },
+    Final {
+        total_tokens: u64,
+    },
     Fail502,
-    ExecCommand { total_tokens: u64 },
+    ExecCommand {
+        total_tokens: u64,
+    },
+    /// The routing step's answer: one JSON object, as the routing schema asks.
+    Routing(Value),
 }
 
 struct Provider {
@@ -370,7 +376,33 @@ async fn provider_request(
             total_tokens,
             false,
         ),
+        Step::Routing(answer) => fixture_response(
+            streams,
+            json!({
+                "id":format!("msg_{}",Uuid::new_v4()),"type":"message","role":"assistant",
+                "status":"completed","phase":"final_answer",
+                "content":[{"type":"output_text","text":answer.to_string()}]
+            }),
+            80,
+            false,
+        ),
     }
+}
+
+/// The routing step's answer that sends the message straight to Instafy's browser.
+fn browser_route(continue_building: bool) -> Value {
+    json!({
+        "summary": "The person names Instafy's browser.",
+        "route": if continue_building { "browser_then_build" } else { "browser" },
+        "reason": "The message names Instafy's browser.",
+        "selectedSkills": ["instafy-browser-automation"],
+        "confidence": 90,
+        "requiresContextLookup": false,
+        "requiresCommandExecution": false,
+        "workspaceFileChangeRequirement": "none",
+        "observationCommands": [],
+        "workerQuestionReply": null
+    })
 }
 
 /// The Personal Browser's desktop broker, as the proxy_integration Personal Browser probe
@@ -541,6 +573,9 @@ struct Spec {
     /// Metadata the job carries next to its lane's own, as Studio and the controller would
     /// have set it (a card's continuation, a checked hand-back).
     metadata: Value,
+    /// The routing step runs first and sends the message straight to Instafy's browser, with
+    /// `continueBuilding` when set: the job ends with its routed card.
+    routed: Option<bool>,
 }
 
 impl Spec {
@@ -556,7 +591,15 @@ impl Spec {
             script: Vec::new(),
             prompt: None,
             metadata: json!({}),
+            routed: None,
         }
+    }
+
+    /// A message the routing step sends straight to Instafy's browser.
+    fn routed(mut self, continue_building: bool) -> Self {
+        self.routed = Some(continue_building);
+        self.script = vec![Step::Routing(browser_route(continue_building))];
+        self
     }
 
     fn asking(mut self, prompt: &'static str) -> Self {
@@ -599,6 +642,11 @@ struct Turn {
     requests: Vec<Value>,
     /// Whether the stub answered each request (`Provider::requests`).
     answered: Vec<bool>,
+    /// The routing step sent the message straight to Instafy's browser: the job's only request
+    /// was the routing call, and it ended with its card (`routed_messages`).
+    routed: bool,
+    /// The messages the job ended with, as the runtime posts them.
+    final_messages: Vec<Value>,
     /// The provider state the job saved, or why it failed.
     outcome: std::result::Result<Option<Value>, String>,
 }
@@ -670,6 +718,13 @@ impl Harness {
         for (key, value) in spec.metadata.as_object().into_iter().flatten() {
             metadata[key] = value.clone();
         }
+        // A message whose route is not decided yet goes through the routing step.
+        if spec.routed.is_some() {
+            if let Some(map) = metadata.as_object_mut() {
+                map.remove("agentRoutingPreflight");
+                map.remove("runtimeExpectations");
+            }
+        }
         let prompt = spec
             .prompt
             .unwrap_or("Find the opening hours of the city museum and report them.");
@@ -738,7 +793,7 @@ impl Harness {
             .scripts
             .lock()
             .unwrap()
-            .insert(label.to_string(), spec.script.iter().copied().collect());
+            .insert(label.to_string(), spec.script.iter().cloned().collect());
         if spec.browser_session_runtime {
             set_env("INSTAFY_ENABLE_BROWSER_SESSION", "true");
         } else {
@@ -814,8 +869,24 @@ impl Harness {
         let started_thread = created
             .into_iter()
             .find(|path| fs::read_to_string(path).is_ok_and(|text| text.contains(&tag)));
+        let mut final_messages = Vec::new();
         let outcome = match result {
-            Ok(Ok(execution)) => Ok(execution.provider_conversation_state),
+            Ok(Ok(execution)) => {
+                final_messages = execution
+                    .final_messages
+                    .iter()
+                    .map(|message| {
+                        json!({
+                            "content": message.content,
+                            "messageType": message.message_type,
+                            "metadata": message.metadata,
+                            "summary": execution.summary,
+                            "artifacts": execution.artifacts,
+                        })
+                    })
+                    .collect();
+                Ok(execution.provider_conversation_state)
+            }
             Ok(Err(error)) => Err(format!("{error:#}").chars().take(400).collect()),
             Err(_) => Err("the job timed out".to_string()),
         };
@@ -835,6 +906,8 @@ impl Harness {
             }
         );
         match spec.lane {
+            // A routed message saves no thread: the building thread's last turn stays where it was.
+            _ if spec.routed.is_some() => {}
             Lane::Shared(_) => {
                 let prompt = spec
                     .prompt
@@ -870,6 +943,8 @@ impl Harness {
             expected: spec.expected_markers(),
             requests,
             answered,
+            routed: spec.routed.is_some(),
+            final_messages,
             outcome,
         });
         next_state
@@ -1341,13 +1416,15 @@ fn checked_hand_back(
     })
 }
 
-/// B, H, G and F: four browser flows as a person meets them. A message that asks for the
-/// browser is an ordinary turn whose answer is a `request_browser` card, and Studio then opens
-/// the card by itself: a Shared Browser turn that asks the card's task. B builds a comparison
-/// page: its card continues building, so its browser turn hands back to a write turn; then the
-/// person asks for more in the browser, and it hands back again. H looks something up and keeps
-/// going in the browser over three follow-ups. G pauses on a sign-in page, and the person lets
-/// Octo continue. F fills in a form. Each chain uses a page of its own.
+/// B, H, G and F: four browser flows as a person meets them. A message that names Instafy's
+/// browser goes straight to it: the routing step ends its job with a routed card, and Studio
+/// opens the card by itself, a Shared Browser turn that asks the person's own words. A message
+/// that is research is an ordinary turn whose answer is a `request_browser` card, which Studio
+/// opens the same way with the card's task. B builds a comparison page: its first card
+/// continues building, so its browser turn hands back to a write turn; then the person asks for
+/// more in the browser, which goes straight to it and hands back again. H looks something up in
+/// the browser and keeps going there over three follow-ups. G pauses on a sign-in page, and the
+/// person lets Octo continue. F fills in a form. Each chain uses a page of its own.
 async fn run_browser_flows(harness: &mut Harness) {
     let cb = Uuid::new_v4();
     let b1 = harness
@@ -1386,16 +1463,18 @@ async fn run_browser_flows(harness: &mut Harness) {
                 )),
         )
         .await;
+    const B4_WORDS: &str = "In your browser, find each laptop's weight and price on the maker's own pages and two independent reviews for each on the reviewers' own sites, add them to the page, and show me the page.";
+    // A routed message saves no thread, so the chat's state stays B3's.
     let b4 = harness
         .run(
             "B4",
-            Spec::new(cb, Lane::Default, b3).asking(
-                "In your browser, find each laptop's weight and price on the maker's own pages and two independent reviews for each on the reviewers' own sites, add them to the page, and show me the page.",
-            ),
+            Spec::new(cb, Lane::Default, b3)
+                .asking(B4_WORDS)
+                .routed(true),
         )
         .await;
     let card = harness.turn("B4").job_id;
-    const B5_TASK: &str = "Find each laptop's weight and price on the maker's own pages and two independent reviews for each on the reviewers' own sites.";
+    const B5_TASK: &str = B4_WORDS;
     let b5 = harness
         .run(
             "B5",
@@ -1405,42 +1484,49 @@ async fn run_browser_flows(harness: &mut Harness) {
         )
         .await;
     let browser = harness.turn("B5").job_id;
+    let mut b6 = checked_hand_back(
+        browser,
+        card,
+        &format!("[[B5]] {B5_TASK}"),
+        &[
+            (
+                "https://laptops.example/twelve",
+                "Twelve",
+                "1.3 kg, from 789 EUR",
+            ),
+            (
+                "https://laptops.example/thirteen",
+                "Thirteen",
+                "1.4 kg, from 1,799 EUR",
+            ),
+            (
+                "https://reviews.example/thirteen",
+                "Thirteen review",
+                "Battery lasts a working day",
+            ),
+        ],
+    );
+    // The card the routing step posted: the controller's record gives the build the message's
+    // own words as the person's request, since the building thread never saw B4.
+    b6["browserHandBack"]["personRequest"] = json!(format!("[[B4]] {B4_WORDS}"));
     harness
         .run(
             "B6",
             Spec::new(cb, Lane::PlainWrite, b5)
                 .asking(HAND_BACK)
-                .with_metadata(checked_hand_back(
-                    browser,
-                    card,
-                    &format!("[[B5]] {B5_TASK}"),
-                    &[
-                        (
-                            "https://laptops.example/twelve",
-                            "Twelve",
-                            "1.3 kg, from 789 EUR",
-                        ),
-                        (
-                            "https://laptops.example/thirteen",
-                            "Thirteen",
-                            "1.4 kg, from 1,799 EUR",
-                        ),
-                        (
-                            "https://reviews.example/thirteen",
-                            "Thirteen review",
-                            "Battery lasts a working day",
-                        ),
-                    ],
-                )),
+                .with_metadata(b6),
         )
         .await;
 
     let ch = Uuid::new_v4();
+    const H1_WORDS: &str =
+        "Open the city's tourism site in your browser and find the old bookshop's opening hours.";
     let h1 = harness
         .run(
             "H1",
             Spec::new(ch, Lane::Default, None)
-                .asking("Find the opening hours of the old bookshop on the city's tourism site."),
+                .asking(H1_WORDS)
+                .routed(false),
         )
         .await;
     let card = harness.turn("H1").job_id;
@@ -1448,7 +1534,7 @@ async fn run_browser_flows(harness: &mut Harness) {
         .run(
             "H2",
             Spec::new(ch, Lane::Shared("page-h"), h1)
-                .asking("Look up the old bookshop's opening hours on the city's tourism site.")
+                .asking(H1_WORDS)
                 .with_metadata(card_continuation(card, false)),
         )
         .await;
@@ -1475,12 +1561,14 @@ async fn run_browser_flows(harness: &mut Harness) {
         .await;
 
     let cg = Uuid::new_v4();
+    const G1_WORDS: &str =
+        "Open the code host in your browser, sign me in, then star its example project.";
     let g1 = harness
         .run(
             "G1",
-            Spec::new(cg, Lane::Default, None).asking(
-                "Open the code host in your browser, sign me in, then star its example project.",
-            ),
+            Spec::new(cg, Lane::Default, None)
+                .asking(G1_WORDS)
+                .routed(false),
         )
         .await;
     let card = harness.turn("G1").job_id;
@@ -1488,7 +1576,7 @@ async fn run_browser_flows(harness: &mut Harness) {
         .run(
             "G2",
             Spec::new(cg, Lane::Shared("page-g"), g1)
-                .asking("Open the code host's sign-in page so the person can sign in there, then star its example project.")
+                .asking(G1_WORDS)
                 .with_metadata(card_continuation(card, false)),
         )
         .await;
@@ -1503,12 +1591,13 @@ async fn run_browser_flows(harness: &mut Harness) {
         .await;
 
     let cf = Uuid::new_v4();
+    const F1_WORDS: &str = "Open the test form site in your browser and fill in a test order with made-up details, then submit it.";
     let f1 = harness
         .run(
             "F1",
-            Spec::new(cf, Lane::Default, None).asking(
-                "Open the test form site in your browser and fill in a test order with made-up details, then submit it.",
-            ),
+            Spec::new(cf, Lane::Default, None)
+                .asking(F1_WORDS)
+                .routed(false),
         )
         .await;
     let card = harness.turn("F1").job_id;
@@ -1516,7 +1605,7 @@ async fn run_browser_flows(harness: &mut Harness) {
         .run(
             "F2",
             Spec::new(cf, Lane::Shared("page-f"), f1)
-                .asking("Open forms.example/order and fill in a test order with made-up details.")
+                .asking(F1_WORDS)
                 .with_metadata(card_continuation(card, false)),
         )
         .await;
@@ -1690,6 +1779,82 @@ fn first_sampling_request(turn: &Turn) -> &Value {
         .unwrap_or_else(|| panic!("{} made no sampling request", turn.label))
 }
 
+/// The turns that ran on a thread: all but the messages the routing step sent straight to the
+/// browser, whose only request was the routing call (`check_routed_messages`).
+fn thread_turns(harness: &Harness) -> impl Iterator<Item = &Turn> {
+    harness.turns.iter().filter(|turn| !turn.routed)
+}
+
+/// A message the routing step sent straight to Instafy's browser ends its job with the routed
+/// card alone: the routing call was its one request, it saved no thread, and it has no reply and
+/// no run log. The card's task is the person's own words, and it says whether Octo builds after.
+fn check_routed_messages(harness: &Harness) -> Result<()> {
+    let routed: Vec<&Turn> = harness.turns.iter().filter(|turn| turn.routed).collect();
+    ensure!(
+        !routed.is_empty(),
+        "no message went straight to the browser"
+    );
+    for turn in routed {
+        let label = turn.label;
+        ensure!(
+            turn.requests.len() == 1,
+            "{label} made {} requests, not only the routing call",
+            turn.requests.len()
+        );
+        ensure!(
+            matches!(turn.outcome, Ok(None)),
+            "{label} did not end without a thread: {:?}",
+            turn.outcome
+        );
+        ensure!(
+            turn.final_messages.len() == 1,
+            "{label} posted {} messages",
+            turn.final_messages.len()
+        );
+        let card = &turn.final_messages[0];
+        ensure!(card["messageType"] == "action_request", "{label}: {card}");
+        ensure!(card["summary"] == "", "{label} has a reply: {card}");
+        let kinds: Vec<&str> = card["artifacts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|artifact| artifact["kind"].as_str())
+            .collect();
+        // The routing decision, and the content-free usage receipt every job leaves; no run log.
+        ensure!(
+            kinds.contains(&"agent/routing-preflight")
+                && kinds
+                    .iter()
+                    .all(|kind| ["agent/routing-preflight", "ai/task-usage"].contains(kind)),
+            "{label} left {kinds:?}"
+        );
+        let request = &card["metadata"]["details"]["browserRequest"];
+        let words = first_sampling_request(turn)
+            .to_string()
+            .contains(&format!("[[{label}]]"));
+        ensure!(words, "{label}'s routing call did not read its message");
+        ensure!(
+            request["routed"] == true
+                && request["location"] == "auto"
+                && request["task"]
+                    .as_str()
+                    .is_some_and(|task| task.starts_with(&format!("[[{label}]] "))),
+            "{label}'s card: {request}"
+        );
+    }
+    let building = &harness.turn("B4").final_messages[0]["metadata"]["details"]["browserRequest"];
+    ensure!(
+        building["continueBuilding"] == true,
+        "B4's card: {building}"
+    );
+    let question = &harness.turn("F1").final_messages[0]["metadata"]["details"]["browserRequest"];
+    ensure!(
+        question.get("continueBuilding").is_none(),
+        "F1's card: {question}"
+    );
+    Ok(())
+}
+
 fn check(harness: &Harness) -> Result<()> {
     for turn in &harness.turns {
         ensure!(
@@ -1714,7 +1879,7 @@ fn check(harness: &Harness) -> Result<()> {
     );
 
     // Phase 1: every request reads its own run's text.
-    for turn in &harness.turns {
+    for turn in thread_turns(harness) {
         for (index, request) in sampling_requests(turn) {
             let text = instructions_text(request);
             let missing: Vec<String> = turn
@@ -1734,7 +1899,7 @@ fn check(harness: &Harness) -> Result<()> {
     }
 
     // Phase 2: how the text is delivered.
-    for turn in &harness.turns {
+    for turn in thread_turns(harness) {
         for (index, request) in turn.requests.iter().enumerate() {
             // (i) Only inside input[0] or as a developer message: Codex sent them as developer
             // messages, and the proxy keeps nothing else in either.
@@ -1950,7 +2115,7 @@ fn check(harness: &Harness) -> Result<()> {
 
     // (v) A note holds for its turn only. A4's building thread never read A3's, so it has
     // nothing to withdraw.
-    for turn in &harness.turns {
+    for turn in thread_turns(harness) {
         let expected = match turn.label {
             "X1" | "A3" => 1,
             "X2" | "A5" => 2,
@@ -1985,6 +2150,8 @@ fn check(harness: &Harness) -> Result<()> {
     check_cached_starts(harness)?;
     // (vii) Each lane's thread.
     check_lanes(harness, &costs)?;
+    // (viii) A message sent straight to the browser.
+    check_routed_messages(harness)?;
     println!("every turn read its own run instructions");
     Ok(())
 }
@@ -2107,6 +2274,28 @@ fn print_costs(harness: &Harness) -> Vec<(String, f64)> {
     for turn in &harness.turns {
         let first = position;
         position += turn.requests.len();
+        let chain: String = turn
+            .label
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect();
+        if turn.routed {
+            // No model turn of its own, and the routing call is not billed: it costs the reserve
+            // a person's turn takes at dispatch.
+            println!(
+                "cost {} ({:?}, sent straight to the browser): no model turn of its own; its reserve, 1 credit",
+                turn.label, turn.lane
+            );
+            match chains.iter_mut().find(|(name, ..)| *name == chain) {
+                Some((_, _, exact, charged, turns)) => {
+                    *exact += 1.0;
+                    *charged += 1;
+                    *turns += 1;
+                }
+                None => chains.push((chain, Usage::default(), 1.0, 1, 1)),
+            }
+            continue;
+        }
         let mut usage = Usage::default();
         let mut first_share = None;
         for (index, request) in turn.requests.iter().enumerate() {
@@ -2149,11 +2338,6 @@ fn print_costs(harness: &Harness) -> Vec<(String, f64)> {
             usage.exact_credits(),
             usage.charge(),
         );
-        let chain: String = turn
-            .label
-            .chars()
-            .take_while(char::is_ascii_alphabetic)
-            .collect();
         match chains.iter_mut().find(|(name, ..)| *name == chain) {
             Some((_, total, exact, charged, turns)) => {
                 total.input += usage.input;
@@ -2211,9 +2395,7 @@ fn input_bytes(items: &[Value]) -> usize {
 /// Left out: a thread whose history a compaction rewrote in between, and a thread this test
 /// rewrote after its first turn ran (O and Q).
 fn check_cached_starts(harness: &Harness) -> Result<()> {
-    let requests: Vec<(&Turn, usize, &Value)> = harness
-        .turns
-        .iter()
+    let requests: Vec<(&Turn, usize, &Value)> = thread_turns(harness)
         .flat_map(|turn| {
             turn.requests
                 .iter()
@@ -2399,7 +2581,7 @@ fn check_lanes(harness: &Harness, costs: &[(String, f64)]) -> Result<()> {
     // The browser flows: every turn whose lane's previous turn in its chat had the same
     // instructions, tools and output format starts with that turn's request. A build after a
     // question changes its start inside the building lane, which is not a lane switch.
-    for turn in &harness.turns {
+    for turn in thread_turns(harness) {
         if !["B", "H", "G", "F", "A"]
             .iter()
             .any(|chain| turn.label.starts_with(chain))
@@ -2411,7 +2593,9 @@ fn check_lanes(harness: &Harness, costs: &[(String, f64)]) -> Result<()> {
             .iter()
             .take_while(|earlier| !std::ptr::eq(*earlier, turn))
             .filter(|earlier| {
-                earlier.conversation == turn.conversation && is_browser(earlier) == is_browser(turn)
+                !earlier.routed
+                    && earlier.conversation == turn.conversation
+                    && is_browser(earlier) == is_browser(turn)
             })
             .last()
         else {
@@ -2435,12 +2619,12 @@ fn check_lanes(harness: &Harness, costs: &[(String, f64)]) -> Result<()> {
     }
 
     // Neither thread holds the other lane's turns.
-    for turn in &harness.turns {
+    for turn in thread_turns(harness) {
         let earlier_in_chat: Vec<&Turn> = harness
             .turns
             .iter()
             .take_while(|earlier| !std::ptr::eq(*earlier, turn))
-            .filter(|earlier| earlier.conversation == turn.conversation)
+            .filter(|earlier| !earlier.routed && earlier.conversation == turn.conversation)
             .collect();
         for (index, request) in turn.requests.iter().enumerate() {
             let text = input_text(request);
