@@ -1279,10 +1279,10 @@ so a take-over or a new run still ends the step there, and the step stays on
 its tab and its site. A control that changed is not used: the step fails
 without ending the run, and Octo takes a fresh snapshot and, if the step still
 fits, does it again, which asks the person again. The run ends
-(`approval_stale`) at the second such yes left unused, so a page that keeps
-changing beside a control (a countdown in its form) never turns into a chain of
-prompts, and when the page left its site after the yes; one that left it while
-nobody was asked only fails the step. A failed step the person allowed still
+(`approval_stale`) when the page left its site after the yes, and at the second
+yes in the run left unused this way, so a page that keeps changing beside a
+control (a countdown in its form) never turns into a chain of prompts. A page
+that left its site while nobody was asked only fails the step. A failed step the person allowed still
 says so (`approval: "once"` beside its kind on the controller's stdout, and
 `changedAfterYes` when its yes went unused, which runtime-agent counts), so
 Details list that yes. `scripts/shared-browser-allowed-step-e2e.mjs` plays each
