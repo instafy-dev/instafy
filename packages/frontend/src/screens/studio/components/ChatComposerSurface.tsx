@@ -93,13 +93,6 @@ type ChatComposerSurfaceProps = {
    * that cancels the request. Null when no new tab is pending.
    */
   pendingNewTab?: { onCancel: () => void } | null;
-  /**
-   * The next message goes on in Instafy's browser, continuing the person's
-   * browser turn (useSharedBrowserFollowUp): a token in the context row that
-   * keeps it in the chat instead. Null when the message is an ordinary chat
-   * turn.
-   */
-  browserFollowUp?: { onCancel: () => void } | null;
   /** Compact conversation views stay in the measured overlay above the input. */
   viewNavigation?: ReactNode;
   /**
@@ -275,9 +268,8 @@ export const COMPOSER_EDITOR_WRAPPER_CLASS = `flex ${CHAT_INPUT_CONTROL_HEIGHT_C
 
 /**
  * Where the next message goes, as one removable token in the composer's
- * context row, like a reply recipient: a new browser tab, or the browser turn
- * it continues. The browser pane's own tab picker chooses every other tab a
- * message refers to.
+ * context row, like a reply recipient: a new browser tab. The browser pane's
+ * own tab picker chooses every other tab a message refers to.
  */
 function ComposerContextToken({ label, cancelLabel, onCancel, testId }: {
   label: string;
@@ -314,7 +306,6 @@ export function ChatComposerSurface({
   aboveComposer,
   replyContext,
   pendingNewTab = null,
-  browserFollowUp = null,
   viewNavigation,
   touchLikeInput = false,
   compactBrowserViewport,
@@ -1162,13 +1153,6 @@ export function ChatComposerSurface({
       cancelLabel="Cancel new tab"
       onCancel={pendingNewTab.onCancel}
       testId="composer-new-tab"
-    />
-  ) : browserFollowUp ? (
-    <ComposerContextToken
-      label="Goes to Instafy's browser"
-      cancelLabel="Don't send it to the browser"
-      onCancel={browserFollowUp.onCancel}
-      testId="composer-browser-follow-up"
     />
   ) : null;
 

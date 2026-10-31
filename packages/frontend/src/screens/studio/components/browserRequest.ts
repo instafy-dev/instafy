@@ -198,6 +198,12 @@ const MAX_BROWSER_CARD_SITES = 8;
  * `browser_hand_back.rs`), and only such a turn is handed back.
  */
 export const BROWSER_HANDS_BACK_METADATA_KEY = "browserHandsBack";
+/**
+ * Prompt metadata naming the browser run a continuation goes on from, so the
+ * runtime can carry that run's approvals over (it checks the run, the person
+ * and the page itself).
+ */
+export const BROWSER_CONTINUES_RUN_METADATA_KEY = "browserContinuesRunId";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

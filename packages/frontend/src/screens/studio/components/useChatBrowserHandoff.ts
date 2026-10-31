@@ -5,7 +5,7 @@ import type { RunRecord } from "../../../types";
 import { continuedSharedBrowserRunId, sharedBrowserTakeoverJob } from "./browserHandoffRouting";
 import type { BrowserSessionPage, BrowserSessionPageTarget } from "./browserSessionPages";
 import { buildSharedBrowserSubmitMetadata, withPersonalBrowserRuntimeExpectations } from "./sharedBrowserSubmitRouting";
-import { BROWSER_AUTO_STARTED_METADATA_KEY } from "./browserRequest";
+import { BROWSER_AUTO_STARTED_METADATA_KEY, BROWSER_CONTINUES_RUN_METADATA_KEY } from "./browserRequest";
 import { LET_OCTO_CONTINUE } from "./useBrowserHumanInput";
 import {
   personalBrowserKnownHosts,
@@ -28,7 +28,7 @@ export type BrowserContinuationExtras = {
 };
 
 /** The metadata key naming the browser run a continuation continues. */
-export const BROWSER_CONTINUES_RUN_METADATA_KEY = "browserContinuesRunId";
+export { BROWSER_CONTINUES_RUN_METADATA_KEY };
 
 function displayOptions(message: string, extras: BrowserContinuationExtras | null | undefined) {
   const display = extras?.display?.trim();
