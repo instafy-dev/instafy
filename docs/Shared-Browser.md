@@ -104,7 +104,8 @@ right. Open the avatars to see the participant list, where a cursor icon marks t
 current controller. **Request control** appears below the list; this
 asks the current driver to hand over input, rather than sending a chat message.
 Pending requests show a badge for the current driver. A compact page-count picker
-beside the address switches browser tabs. **Browser options** contains history
+beside the address switches browser tabs; in a chat's Browser view it lists only
+that chat's tabs (see One tab per chat). **Browser options** contains history
 navigation, reload, **Expand browser** and where the browser runs, so the toolbar
 stays on one row. AI
 takeover is in the same participant controls; clicking the shared page can still
@@ -652,7 +653,16 @@ read, so that page would go into this chat's reply and Details):
   in its place), leaves the stage blank, with no address, and the person's
   input does not reach the page. While a browser turn of another chat holds
   the browser, the view shows none of it, only "Octo is working in another
-  chat": in a team space that page may be another person's, signed in. Once
+  chat": in a team space that page may be another person's, signed in. While
+  the stage is blank, for either reason, the view asks for no picture at all:
+  its viewer (screencast, WebRTC or RFB) is not connected, so no frame of
+  another chat's page reaches the person's device, not even under the blank
+  stage. The view counts as open meanwhile, also when it opens during such a
+  turn, and its picture connects again once a tab of the chat is in front.
+  Behind the Chat tab, a view whose chat's tab is in front keeps its picture,
+  so it shows the page at once when it comes on screen. The address bar's tab
+  list names only the chat's tabs, never another chat's page by its title,
+  and with one tab there is no list. Once
   that turn or another person is done and no browser turn is under way, the
   chat's tab comes forward again; the chat's own turn leaves the browser where
   it ends (its page, or a tab the person took over, which is the chat's tab

@@ -643,14 +643,16 @@ export function BrowserSessionModal({
   const chatPageInFront = !sharedBrowserViewportOnly || chatPageIds === null ||
     (sharedBrowserActivePage !== null && chatPageIds.includes(sharedBrowserActivePage.id));
   const stageShowsPage = chatPageInFront && !anotherChatTurn;
-  // Over a blank stage the address bar shows no address, and its history,
-  // reload and Send page have no page to act on.
-  const shownChromePages = useMemo(
-    () => sharedBrowserChrome && !stageShowsPage
-      ? sharedBrowserChrome.pages.map((page) => (page.isActive ? { ...page, isActive: false } : page))
-      : sharedBrowserChrome?.pages ?? [],
-    [sharedBrowserChrome, stageShowsPage],
-  );
+  // The address bar's tab list names only the chat's own tabs: another
+  // chat's page (in a team space, maybe another person's) is never listed,
+  // not even by its title, so with one tab there is no list. Over a blank
+  // stage the address bar shows no address, and its history, reload and Send
+  // page have no page to act on.
+  const shownChromePages = useMemo(() => {
+    const pages = sharedBrowserChrome?.pages ?? [];
+    const chatPages = chatPageIds === null ? pages : pages.filter((page) => chatPageIds.includes(page.id));
+    return stageShowsPage ? chatPages : chatPages.map((page) => (page.isActive ? { ...page, isActive: false } : page));
+  }, [chatPageIds, sharedBrowserChrome, stageShowsPage]);
   // Where the page on screen is now. A still picture of it is kept only
   // while it stays there: a picture of another address, such as the page an
   // earlier turn left, is never shown under this one.
@@ -1069,6 +1071,12 @@ export function BrowserSessionModal({
     (remoteHumanPageId === null || !chatPageIds.includes(remoteHumanPageId));
   const rfbShowsAnotherTabRef = useRef(rfbShowsAnotherTab);
   rfbShowsAnotherTabRef.current = rfbShowsAnotherTab;
+  // The view asks for a picture only while its stage draws the chat's page.
+  // Otherwise (another chat's turn, a tab that is none of the chat's in
+  // front, or with RFB someone else in control showing another tab) no
+  // viewer is connected, so no frame of another chat's page reaches this
+  // view, not even under a hidden surface.
+  const stageDrawsChatPage = stageShowsPage && !rfbShowsAnotherTab;
   const sharedBrowserConnectionPageId =
     activeSharedBrowserViewerKind === "rfb" ? null : sharedBrowserPageId;
   // URL resolution follows renderer selection in an effect. Never mount the
@@ -2277,7 +2285,10 @@ export function BrowserSessionModal({
       !isOpen ||
       browserDataClearInFlight ||
       !connection ||
-      !activeSharedBrowserViewerKind
+      !activeSharedBrowserViewerKind ||
+      // No picture while the stage draws no page of the chat: the viewer
+      // closes, and connects again once the chat's page is in front.
+      !stageDrawsChatPage
     ) {
       setResolvedViewerUrl(null);
       setBrowserInputWsUrl(null);
@@ -2378,7 +2389,19 @@ export function BrowserSessionModal({
     isOpen,
     rfbViewOnlyLane,
     sharedBrowserConnectionPageId,
+    stageDrawsChatPage,
   ]);
+  // Without a page of the chat to draw, the view asks for no picture: once it
+  // has its connection it is open, with a blank stage or "Octo is working in
+  // another chat", never "Opening Instafy's browser…" for a picture it does
+  // not want. The chat's page then comes back as a reconnect.
+  const pictureWithheld = isOpen && !browserDataClearInFlight && browserOriginConnection !== null &&
+    activeSharedBrowserViewerKind !== null && !stageDrawsChatPage;
+  useEffect(() => {
+    if (!pictureWithheld || status !== "connecting") return;
+    setHasConnectedOnce(true);
+    setStatus("connected");
+  }, [pictureWithheld, status]);
 
   // The grant refresh does not run while the view shows an error (each
   // error drops the connection anyway).
@@ -3305,7 +3328,7 @@ export function BrowserSessionModal({
   // another chat's page shown before, is dropped, and only a still of the
   // page in front (frozenFrameUrl, kept for that page alone) stands in.
   const heldPictureIsChats = paintedFrameScopeRef.current === frameScope;
-  const liveSurfaceShown = stageShowsPage && !rfbShowsAnotherTab &&
+  const liveSurfaceShown = stageDrawsChatPage &&
     (heldPictureIsChats || !(status === "connecting" && displayStatus === "connected"));
   // While Octo drives, the stage shows the page it is on: the live picture
   // (a viewer that may watch, such as RFB's view-only lane), else a still
@@ -3693,8 +3716,9 @@ export function BrowserSessionModal({
                   ? "absolute inset-0 overflow-auto touch-pan-x touch-pan-y touch-pinch-zoom"
                   : "absolute inset-0 overflow-hidden",
               frozenFrameUrl ? "opacity-0" : "",
-              // Kept connected, so the chat's page shows at once when it is
-              // in front again.
+              // Its viewer is connected only while the stage draws the chat's
+              // page (stageDrawsChatPage); it stays hidden while it holds no
+              // picture of that page yet.
               liveSurfaceShown ? "" : "invisible",
             ].join(" ")}
           >
@@ -3710,6 +3734,7 @@ export function BrowserSessionModal({
                 renderScale={rfbRenderScale}
                 active={
                   transportActive &&
+                  liveSurfaceShown &&
                   webRtcInputTargetsActivePage(
                     webRtcConnection.pageId,
                     sharedBrowserConnectionPageId,
@@ -3734,7 +3759,7 @@ export function BrowserSessionModal({
                 inputAvailable={canControlBrowser}
                 inputAuthorityKey={inputAuthorityKey}
                 connectionGeneration={connectAttempt}
-                active={transportActive}
+                active={transportActive && liveSurfaceShown}
                 inputEnabled={stageInputEnabled}
                 onConnected={handleCdpScreencastConnected}
                 onDisconnected={handleCdpScreencastDisconnected}
