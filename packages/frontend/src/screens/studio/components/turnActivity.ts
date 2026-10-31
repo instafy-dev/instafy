@@ -549,10 +549,11 @@ function groupWords(group: Group, previousHost: string | null): string {
  * places"), then the step that answered and the biggest other thing it did.
  * Only a step that ended counts, and the steps are in the order they last
  * changed (a step's newest message), as the turn's stored steps are. A step
- * that failed counts for nothing it would have done: when nothing else is left
- * to say, the line says what was tried ("Tried searching the web"). A preview
- * the turn opened, and a look at the page the turn started on, are named only
- * when the turn did nothing else; a preview it stopped, when it made nothing.
+ * that failed counts for nothing it would have done. A preview the turn opened,
+ * and a look at the page the turn started on, are named only when the turn did
+ * nothing else; a preview it stopped, when it made nothing. When nothing else
+ * is left to say, the line names that look, which worked, and otherwise what
+ * was tried ("Tried searching the web").
  */
 function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: string | null } {
   const groups = new Map<string, Group>();
@@ -669,16 +670,17 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
     phrases.push(groupWords(group, previousHost));
     previousHost = group.entry.host ?? null;
   }
-  if (phrases.length === 0 && tried?.live) {
-    return { text: triedWords(tried.live, tried.host), firstHost: tried.host ?? null };
-  }
   if (phrases.length === 0 && startPage.size > 0) {
-    // The turn only looked at the page it started on: that is what it did.
+    // The turn only looked at the page it started on: that is what it did,
+    // before any step it tried that did not work.
     const looks = [...startPage.values()].sort((a, b) => a.first - b.first);
     return {
       text: looks.map((group) => groupWords(group, null)).join(", "),
       firstHost: looks[0].entry.host ?? null,
     };
+  }
+  if (phrases.length === 0 && tried?.live) {
+    return { text: triedWords(tried.live, tried.host), firstHost: tried.host ?? null };
   }
   return {
     text: phrases.length > 0 ? phrases.join(", ") : null,

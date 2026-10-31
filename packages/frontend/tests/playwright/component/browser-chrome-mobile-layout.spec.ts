@@ -61,6 +61,7 @@ async function mountCompactBrowserChrome(
       const [optionsOpen, setOptionsOpen] = React.useState(false);
       const [expanded, setExpanded] = React.useState(false);
       const [keyboardHeight, setKeyboardHeight] = React.useState(0);
+      const [keyboardSlot, setKeyboardSlot] = React.useState(null);
       const compact = shouldUseCompactBrowserChrome({
         containerWidth: window.innerWidth,
         compactViewport: window.innerWidth < 640,
@@ -118,7 +119,8 @@ async function mountCompactBrowserChrome(
             state: "ready",
             testId: "browser-session-status",
           }),
-          toolbarActions: (compactNavigation) => h(React.Fragment, null, collaboration, h(SharedBrowserSessionControl, {
+          toolbarActions: (compactNavigation) => h(React.Fragment, null, collaboration,
+            h("span", { ref: setKeyboardSlot, className: "contents" }), h(SharedBrowserSessionControl, {
             runtimeId: "fixture-runtime", resumeUrl: null, open: optionsOpen, onOpenChange: setOptionsOpen,
             busy: false, candidates: [], error: null, canStart: false, onChoose: () => {}, onStart: () => {}, onRefresh: () => {},
             location,
@@ -130,8 +132,11 @@ async function mountCompactBrowserChrome(
         }),
         h("div", { "data-testid": "keyboard-layout-stage", style: { position: "relative", height: 240 } },
           h("div", { "data-testid": "keyboard-layout-viewer", style: { position: "absolute", inset: 0, bottom: keyboardHeight } }),
+          // The touch keyboard is there while the person controls the page;
+          // its icon goes in the toolbar, as in the browser view.
           h(RemoteBrowserMobileKeyboard, {
-            enabled: true,
+            enabled: ${interactive},
+            triggerPortalTarget: keyboardSlot,
             onOccupiedHeightChange: setKeyboardHeight,
             onMessage: (message) => window.__remoteKeyboardMessages.push(message),
           }),
@@ -384,6 +389,62 @@ for (const counts of [{ participantCount: 4, pageCount: 3 }, { participantCount:
   });
 }
 
+// A local test: a floating "Keyboard" button sat over the page on a phone. The icon fits the toolbar at its
+// narrowest, with many people and tabs too.
+const KEYBOARD_TOOLBARS = [
+  { width: 320, counts: { participantCount: 4, pageCount: 3 } },
+  { width: 390, counts: { participantCount: 4, pageCount: 3 } },
+  { width: 320, counts: { participantCount: 32, pageCount: 24 } },
+] as const;
+for (const { width, counts } of KEYBOARD_TOOLBARS) {
+  test(`puts the touch keyboard's icon in the ${width}px toolbar with ${counts.participantCount} participants, never over the page`, async ({ browser, baseURL }) => {
+    const context = await browser.newContext({ baseURL, hasTouch: true, viewport: { width, height: 800 } });
+    try {
+      const page = await context.newPage();
+      await mountCompactBrowserChrome(page, true, counts);
+      const chrome = page.getByTestId("shared-browser-chrome");
+      const stage = page.getByTestId("keyboard-layout-stage");
+      const trigger = chrome.getByTestId("shared-browser-mobile-keyboard-open");
+      await expect(trigger).toBeVisible();
+      await expect(trigger).toHaveAccessibleName("Open remote keyboard");
+      await expect(trigger).toHaveText("");
+      await expect(stage.getByRole("button")).toHaveCount(0);
+
+      const geometry = await browserChromeGeometry(page);
+      const icon = await trigger.boundingBox();
+      expect(geometry.coarse).toBe(true);
+      expect(geometry.chromeFits).toBe(true);
+      expect(geometry.documentWidth).toBeLessThanOrEqual(width);
+      expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
+      // Between the people in the browser and its options, as in a shared tab.
+      expect(icon!.x - geometry.collaboration!.right).toBeCloseTo(8, 1);
+      expect(geometry.options!.left - (icon!.x + icon!.width)).toBeCloseTo(8, 1);
+      expect(Math.min(icon!.width, icon!.height)).toBeGreaterThanOrEqual(44);
+      expect(icon!.y - geometry.chrome!.top).toBeGreaterThanOrEqual(4);
+      expect(geometry.chrome!.bottom - (icon!.y + icon!.height)).toBeGreaterThanOrEqual(4);
+
+      // Its bar opens over the bottom of the page, and the page makes room.
+      await trigger.tap();
+      const input = page.getByTestId("shared-browser-mobile-keyboard-input");
+      await expect(input).toBeFocused();
+      await expect(chrome.getByTestId("shared-browser-mobile-keyboard-open")).toHaveCount(0);
+      const bar = await page.getByTestId("shared-browser-mobile-keyboard").boundingBox();
+      const stageBox = await stage.boundingBox();
+      expect(bar!.y).toBeGreaterThanOrEqual(stageBox!.y);
+      expect(bar!.y + bar!.height).toBeLessThanOrEqual(stageBox!.y + stageBox!.height);
+      await expect.poll(async () => {
+        const viewer = await page.getByTestId("keyboard-layout-viewer").boundingBox();
+        return Boolean(viewer && viewer.y + viewer.height <= bar!.y);
+      }).toBe(true);
+      await page.getByTestId("shared-browser-mobile-keyboard-close").tap();
+      await expect(trigger).toBeVisible();
+      await expect.poll(async () => (await page.getByTestId("keyboard-layout-viewer").boundingBox())?.height).toBe(240);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
 test("edits the phone address in one full-screen surface with cancel, history and navigation", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => {
@@ -465,48 +526,51 @@ test("keeps the unified browser address usable at tablet portrait width", async 
   expect(geometry.addressWidth).toBeGreaterThanOrEqual(96);
 });
 
-test("uses one real Chromium action per mobile keyboard control key", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await mountCompactBrowserChrome(page);
+test("uses one real Chromium action per mobile keyboard control key", async ({ browser, baseURL }) => {
+  // A touch utility: a coarse pointer shows its icon, and then its bar.
+  const context = await browser.newContext({ baseURL, hasTouch: true, viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  try {
+    await mountCompactBrowserChrome(page, true);
 
-  const keyboard = page.getByTestId("shared-browser-mobile-keyboard");
-  await keyboard.evaluate((element) => {
-    element.style.setProperty("display", "flex", "important");
-  });
-  await page.getByTestId("shared-browser-mobile-keyboard-open").click();
-  const input = page.getByTestId("shared-browser-mobile-keyboard-input");
-  await expect(input).toBeFocused();
-  await expect(input).toHaveAttribute("autocapitalize", "none");
-  await expect(input).toHaveAttribute("autocorrect", "off");
-  await expect(input).toHaveAttribute("spellcheck", "false");
-  // The app input reserves its measured footer; it does not cover the remote
-  // surface. This fixture substitutes the transport, not the keyboard control.
-  await expect.poll(async () => {
-    const viewer = await page.getByTestId("keyboard-layout-viewer").boundingBox();
-    const bar = await keyboard.boundingBox();
-    return Boolean(viewer && bar && viewer.height > 100 && viewer.y + viewer.height <= bar.y);
-  }).toBe(true);
+    const keyboard = page.getByTestId("shared-browser-mobile-keyboard");
+    await page.getByTestId("shared-browser-mobile-keyboard-open").click();
+    const input = page.getByTestId("shared-browser-mobile-keyboard-input");
+    await expect(input).toBeFocused();
+    await expect(input).toHaveAttribute("autocapitalize", "none");
+    await expect(input).toHaveAttribute("autocorrect", "off");
+    await expect(input).toHaveAttribute("spellcheck", "false");
+    // The app input reserves its measured footer; it does not cover the remote
+    // surface. This fixture substitutes the transport, not the keyboard control.
+    await expect.poll(async () => {
+      const viewer = await page.getByTestId("keyboard-layout-viewer").boundingBox();
+      const bar = await keyboard.boundingBox();
+      return Boolean(viewer && bar && viewer.height > 100 && viewer.y + viewer.height <= bar.y);
+    }).toBe(true);
 
-  await input.press("Backspace");
-  await input.press("Enter");
-  await input.pressSequentially("a");
+    await input.press("Backspace");
+    await input.press("Enter");
+    await input.pressSequentially("a");
 
-  const messages = await page.evaluate(
-    () =>
-      (window as Window & { __remoteKeyboardMessages?: Record<string, unknown>[] })
-        .__remoteKeyboardMessages ?? [],
-  );
-  expect(messages.filter((message) => message.type === "key")).toEqual([
-    expect.objectContaining({ kind: "rawKeyDown", key: "Backspace" }),
-    expect.objectContaining({ kind: "keyUp", key: "Backspace" }),
-    expect.objectContaining({ kind: "keyDown", key: "Enter", text: "\r" }),
-    expect.objectContaining({ kind: "keyUp", key: "Enter", text: "" }),
-  ]);
-  expect(messages.filter((message) => message.type === "text")).toEqual([
-    { type: "text", text: "a" },
-  ]);
-  await page.getByTestId("shared-browser-mobile-keyboard-close").click();
-  await expect.poll(async () => (await page.getByTestId("keyboard-layout-viewer").boundingBox())?.height).toBe(240);
+    const messages = await page.evaluate(
+      () =>
+        (window as Window & { __remoteKeyboardMessages?: Record<string, unknown>[] })
+          .__remoteKeyboardMessages ?? [],
+    );
+    expect(messages.filter((message) => message.type === "key")).toEqual([
+      expect.objectContaining({ kind: "rawKeyDown", key: "Backspace" }),
+      expect.objectContaining({ kind: "keyUp", key: "Backspace" }),
+      expect.objectContaining({ kind: "keyDown", key: "Enter", text: "\r" }),
+      expect.objectContaining({ kind: "keyUp", key: "Enter", text: "" }),
+    ]);
+    expect(messages.filter((message) => message.type === "text")).toEqual([
+      { type: "text", text: "a" },
+    ]);
+    await page.getByTestId("shared-browser-mobile-keyboard-close").click();
+    await expect.poll(async () => (await page.getByTestId("keyboard-layout-viewer").boundingBox())?.height).toBe(240);
+  } finally {
+    await context.close();
+  }
 });
 
 test("keeps Unicode remote input out of a previously focused local editor", async ({ page }) => {

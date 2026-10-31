@@ -6,9 +6,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { InputField, Xmark } from "iconoir-react";
-import { Button, IconButton } from "../../../components/Button";
+import { IconButton } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Surface } from "../../../components/Surface";
 
@@ -83,14 +83,25 @@ function virtualKeyMessages(
   ];
 }
 
+/**
+ * The keyboard a touch device types into a remote page with: an icon in the
+ * browser's toolbar opens a bar of its own at the bottom of the page. Its
+ * trigger sits in place in a toolbar (`inlineTrigger`, the bar then floats at
+ * the bottom of the closest section), or this component sits over the page
+ * and puts its trigger in a toolbar's slot (`triggerPortalTarget`). It never
+ * floats a trigger over the page.
+ */
 export function RemoteBrowserMobileKeyboard({
   enabled,
   inlineTrigger = false,
+  triggerPortalTarget = null,
   onMessage,
   onOccupiedHeightChange,
 }: {
   enabled: boolean;
   inlineTrigger?: boolean;
+  /** The toolbar slot the closed keyboard's icon goes in, when this sits over the page. */
+  triggerPortalTarget?: HTMLElement | null;
   onMessage: (message: RemoteBrowserVirtualInputMessage) => void;
   onOccupiedHeightChange?: (height: number) => void;
 }) {
@@ -318,6 +329,32 @@ export function RemoteBrowserMobileKeyboard({
     inputRef.current?.focus({ preventScroll: true });
   };
 
+  const trigger = (
+    <IconButton
+      aria-label="Open remote keyboard"
+      className="pointer-events-auto"
+      variant="ghost"
+      data-testid="shared-browser-mobile-keyboard-open"
+      onPress={handleOpen}
+    >
+      <InputField aria-hidden="true" className="h-4 w-4" />
+    </IconButton>
+  );
+  if (!open && !inlineTrigger) {
+    return triggerPortalTarget
+      ? createPortal(
+        <div
+          className="hidden shrink-0 [@media(pointer:coarse)]:flex"
+          data-browser-session-safe-zone="true"
+          data-testid="shared-browser-mobile-keyboard"
+        >
+          {trigger}
+        </div>,
+        triggerPortalTarget,
+      )
+      : null;
+  }
+
   return (
     <div
       ref={barRef}
@@ -359,29 +396,7 @@ export function RemoteBrowserMobileKeyboard({
             <Xmark aria-hidden="true" className="h-5 w-5" />
           </IconButton>
         </Surface>
-      ) : inlineTrigger ? (
-        <IconButton
-          aria-label="Open remote keyboard"
-          className="pointer-events-auto"
-          variant="ghost"
-          data-testid="shared-browser-mobile-keyboard-open"
-          onPress={handleOpen}
-        >
-          <InputField aria-hidden="true" className="h-4 w-4" />
-        </IconButton>
-      ) : (
-        <Button
-          aria-label="Open remote keyboard"
-          className="pointer-events-auto"
-          preset="inline"
-          variant="outline"
-          data-testid="shared-browser-mobile-keyboard-open"
-          onPress={handleOpen}
-        >
-          <InputField aria-hidden="true" className="h-4 w-4" />
-          <span>Keyboard</span>
-        </Button>
-      )}
+      ) : trigger}
     </div>
   );
 }

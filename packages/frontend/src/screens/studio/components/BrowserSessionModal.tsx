@@ -618,6 +618,9 @@ export function BrowserSessionModal({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
   const [mobileKeyboardOccupiedHeight, setMobileKeyboardOccupiedHeight] = useState(0);
+  // The toolbar's place for the touch keyboard's icon: its bar opens over the
+  // bottom of the page, and nothing floats over the page while it is closed.
+  const [mobileKeyboardTriggerSlot, setMobileKeyboardTriggerSlot] = useState<HTMLElement | null>(null);
   const dockedRootRef = useRef<HTMLElement | null>(null);
   const rfbRef = useRef<BrowserSessionRfbLike | null>(null);
   const generatedBrowserSessionId = useMemo(() => generateUUID(), []);
@@ -3519,6 +3522,7 @@ export function BrowserSessionModal({
           </div>
           <div className="flex flex-none items-center gap-2">
             {humanInputControls}
+            <span ref={setMobileKeyboardTriggerSlot} className="contents" />
             {renderSessionControls()}
             {!forceViewportFullscreenDocked ? (
               <BrowserExpandButton
@@ -3558,6 +3562,7 @@ export function BrowserSessionModal({
                   continueInRow={humanInputRowShown}
                   renderControls={collaborationControlsShown ? renderCollaborationControls : undefined} />
               ) : collaborationControlsShown ? renderCollaborationControls(null) : null}
+              <span ref={setMobileKeyboardTriggerSlot} className="contents" />
               {renderSessionControls(sharedBrowserChrome.compact ? <>
                 {compactNavigation}
                 {!forceViewportFullscreenDocked ? <BrowserExpandButton expanded={fullscreen} showLabel
@@ -3767,6 +3772,7 @@ export function BrowserSessionModal({
                 enabled={
                   stageInputEnabled && activeSharedBrowserViewerKind !== "rfb"
                 }
+                triggerPortalTarget={mobileKeyboardTriggerSlot}
                 onMessage={dispatchMobileBrowserInput}
                 onOccupiedHeightChange={setMobileKeyboardOccupiedHeight}
               />

@@ -1,5 +1,7 @@
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::SeekFrom;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -9,6 +11,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use futures_util::{SinkExt, StreamExt};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
@@ -716,6 +719,10 @@ async fn handle_browser_capabilities(headers: HeaderMap) -> Response {
         .into_response()
 }
 
+/// A page's title, or None when it names nothing: a bare media type, or a
+/// blank tab's address. While a blank tab loads its first page, DevTools
+/// lists the new address with the blank tab's title ("about:blank") until
+/// the page arrives, so the tab is named by the site it is opening.
 fn normalize_browser_page_title(raw: &str) -> Option<String> {
     let normalized = raw.trim().replace('\n', " ");
     let collapsed = normalized
@@ -725,10 +732,42 @@ fn normalize_browser_page_title(raw: &str) -> Option<String> {
         .trim()
         .trim_matches('.')
         .to_string();
-    if collapsed.is_empty() || is_bare_media_type(&collapsed) {
+    if collapsed.is_empty() || is_bare_media_type(&collapsed) || is_blank_page_address(&collapsed) {
         return None;
     }
     Some(collapsed)
+}
+
+/// A title as the page set it. DevTools' `/json/list` writes each title
+/// escaped for HTML (`&` as `&amp;`, and `<`, `>`, `"` and `'` likewise), and
+/// a title is shown as text, never as markup, so the escapes are read back
+/// once: "Laptops &amp; PCs" is "Laptops & PCs".
+fn devtools_list_title(raw: &str) -> String {
+    const ESCAPES: [(&str, char); 5] = [
+        ("&amp;", '&'),
+        ("&lt;", '<'),
+        ("&gt;", '>'),
+        ("&quot;", '"'),
+        ("&#39;", '\''),
+    ];
+    let mut title = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(at) = rest.find('&') {
+        title.push_str(&rest[..at]);
+        rest = &rest[at..];
+        match ESCAPES.iter().find(|(escape, _)| rest.starts_with(escape)) {
+            Some((escape, character)) => {
+                title.push(*character);
+                rest = &rest[escape.len()..];
+            }
+            None => {
+                title.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    title.push_str(rest);
+    title
 }
 
 /// A title that is only a media type ("image/svg+xml"), as an image or svg
@@ -807,15 +846,16 @@ fn derive_browser_page_label(title: Option<&str>, host: &str, url: &str) -> Stri
     normalized_url.to_string()
 }
 
-fn browser_target_is_placeholder(target: &BrowserCdpTargetDescriptor) -> bool {
-    let normalized_url = target.url.trim().to_ascii_lowercase();
-    if normalized_url.is_empty() || normalized_url == "about:blank" {
-        return true;
-    }
+/// The address of a tab that shows no page yet: a blank or new tab.
+fn is_blank_page_address(address: &str) -> bool {
     matches!(
-        normalized_url.as_str(),
-        "chrome://newtab/" | "chrome://new-tab-page/" | "edge://newtab/"
+        address.trim().to_ascii_lowercase().as_str(),
+        "" | "about:blank" | "chrome://newtab/" | "chrome://new-tab-page/" | "edge://newtab/"
     )
+}
+
+fn browser_target_is_placeholder(target: &BrowserCdpTargetDescriptor) -> bool {
+    is_blank_page_address(&target.url)
 }
 
 fn filter_browser_page_targets(
@@ -845,7 +885,10 @@ fn normalize_browser_cdp_targets(
         .filter(|target| target.target_type == "page")
         .take(BROWSER_CDP_TARGET_MAX_COUNT)
         .map(|mut target| {
-            target.title = truncate_utf8_bytes(&target.title, BROWSER_CDP_TARGET_TITLE_MAX_BYTES);
+            target.title = truncate_utf8_bytes(
+                &devtools_list_title(&target.title),
+                BROWSER_CDP_TARGET_TITLE_MAX_BYTES,
+            );
             target.url = truncate_utf8_bytes(&target.url, BROWSER_CDP_TARGET_URL_MAX_BYTES);
             target
         })
@@ -1018,6 +1061,93 @@ fn browser_navigation_state(history: &BrowserNavigationHistory) -> BrowserNaviga
     }
 }
 
+/// The address a tab shows now: its history's current entry. While a tab
+/// loads another address, DevTools lists that one already, with the title of
+/// the page the tab still shows.
+async fn fetch_browser_shown_address(websocket_url: String) -> Option<String> {
+    let result = send_browser_cdp_command(
+        &websocket_url,
+        "Page.getNavigationHistory",
+        serde_json::json!({}),
+    )
+    .await
+    .ok()?;
+    let current = usize::try_from(result.get("currentIndex")?.as_i64()?).ok()?;
+    result
+        .get("entries")?
+        .as_array()?
+        .get(current)?
+        .get("url")?
+        .as_str()
+        .map(|url| url.trim().to_string())
+}
+
+/// What the tab list last said of a page, and whether its title was the
+/// listed address's own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ListedTitle {
+    url: String,
+    title: String,
+    own: bool,
+}
+
+/// What `/browser/pages` last listed, by page id (see [`pages_still_loading`]).
+static LISTED_TITLES: Lazy<Mutex<HashMap<String, ListedTitle>>> = Lazy::new(Default::default);
+
+/// The pages whose listed title is the page they are leaving. While a tab
+/// loads another address, DevTools lists that address with the title of the
+/// page the tab last showed (Chromium keeps a tab's title until the new page
+/// arrives): "metrodoporto.pt" next to the bookshop's title, for as long as
+/// the slow page takes. A page is still loading while its listed address is
+/// not the one it shows (`shown_address`, its history's current entry).
+///
+/// A page's history is read only when its address or title changed since the
+/// last list, or while it is still loading, so a steady list opens no socket.
+/// A page whose history cannot be read keeps its title.
+async fn pages_still_loading<F, Fut>(
+    targets: &[BrowserCdpTargetDescriptor],
+    listed: &Mutex<HashMap<String, ListedTitle>>,
+    shown_address: F,
+) -> HashSet<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
+    let known = listed.lock().map(|known| known.clone()).unwrap_or_default();
+    let mut seen = HashMap::new();
+    let mut loading = HashSet::new();
+    for target in targets {
+        let url = target.url.trim().to_string();
+        let title = target.title.clone();
+        let unchanged = known
+            .get(&target.id)
+            .is_some_and(|known| known.own && known.url == url && known.title == title);
+        let websocket_url = target
+            .websocket_debugger_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|websocket_url| !websocket_url.is_empty());
+        // A page with no title of its own to show has nothing to hide.
+        let own = if unchanged || normalize_browser_page_title(&title).is_none() {
+            true
+        } else if let Some(websocket_url) = websocket_url {
+            shown_address(websocket_url.to_string())
+                .await
+                .is_none_or(|shown| shown == url)
+        } else {
+            true
+        };
+        if !own {
+            loading.insert(target.id.clone());
+        }
+        seen.insert(target.id.clone(), ListedTitle { url, title, own });
+    }
+    if let Ok(mut known) = listed.lock() {
+        *known = seen;
+    }
+    loading
+}
+
 async fn fetch_browser_navigation_history(
     websocket_url: &str,
 ) -> Result<BrowserNavigationHistory, OriginError> {
@@ -1123,10 +1253,22 @@ async fn handle_browser_pages(
         .approval_bridge()
         .agent_tabs()
         .await;
+    // A page still loading another address is named by the site it opens:
+    // its listed title is the page it is leaving. Bounded like the focus scan.
+    let still_loading = timeout(
+        BROWSER_CDP_COMMAND_TIMEOUT,
+        pages_still_loading(&targets, &LISTED_TITLES, fetch_browser_shown_address),
+    )
+    .await
+    .unwrap_or_default();
     let pages = targets
         .into_iter()
         .map(|target| {
-            let title = normalize_browser_page_title(&target.title);
+            let title = if still_loading.contains(&target.id) {
+                None
+            } else {
+                normalize_browser_page_title(&target.title)
+            };
             let host = normalize_browser_page_host(&target.url);
             let has_history_state = history_target_id.as_deref() == Some(target.id.as_str());
             BrowserPageResponse {
@@ -2598,6 +2740,178 @@ mod tests {
                 "{title}"
             );
         }
+    }
+
+    // A local test: a tab's title read "Modular Laptops &amp; PCs". DevTools'
+    // tab list escapes every title for HTML.
+    #[test]
+    fn a_title_from_the_tab_list_reads_as_the_page_set_it() {
+        let listed = |title: &str| BrowserCdpTargetDescriptor {
+            id: "page".to_string(),
+            target_type: "page".to_string(),
+            title: title.to_string(),
+            url: "https://frame.example/".to_string(),
+            websocket_debugger_url: None,
+        };
+        let normalized = normalize_browser_cdp_targets(vec![
+            listed("Modular Laptops &amp; PCs"),
+            listed("&lt;b&gt; &quot;Fish&quot; &amp; &#39;Chips&#39;"),
+            // A page whose own title says "&amp;" is listed as "&amp;amp;".
+            listed("AT&amp;amp;T"),
+            // Only the listing's own escapes are read back.
+            listed("Q&A &nbsp; &amp"),
+        ]);
+        let titles: Vec<_> = normalized
+            .iter()
+            .map(|target| target.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "Modular Laptops & PCs",
+                "<b> \"Fish\" & 'Chips'",
+                "AT&amp;T",
+                "Q&A &nbsp; &amp",
+            ]
+        );
+        let title = normalize_browser_page_title(&normalized[0].title);
+        assert_eq!(title.as_deref(), Some("Modular Laptops & PCs"));
+        assert_eq!(
+            derive_browser_page_label(title.as_deref(), "frame.example", "https://frame.example/"),
+            "Modular Laptops & PCs"
+        );
+    }
+
+    // Checked against Chromium 149 with a local page that answers after 6 s:
+    // while a tab on one page loads another, DevTools lists the new address
+    // with the title of the page it is leaving ("metrodoporto.pt" next to the
+    // bookshop's title), and the tab's history still shows the page it is
+    // leaving, until the new page arrives.
+    #[tokio::test]
+    async fn a_page_still_loading_another_address_has_no_title_of_its_own() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const LELLO: &str = "https://www.livrarialello.pt/";
+        const METRO: &str = "https://www.metrodoporto.pt/";
+        const METRO_LINES: &str = "https://www.metrodoporto.pt/lines";
+        let listed = Mutex::new(HashMap::new());
+        let reads = AtomicUsize::new(0);
+        let shown_now = Mutex::new(Some(LELLO.to_string()));
+        let shown = |_websocket_url: String| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            let shown = shown_now.lock().unwrap().clone();
+            async move { shown }
+        };
+        let page = |url: &str, title: &str| {
+            vec![BrowserCdpTargetDescriptor {
+                id: "page".to_string(),
+                target_type: "page".to_string(),
+                title: title.to_string(),
+                url: url.to_string(),
+                websocket_debugger_url: Some("ws://127.0.0.1:9/devtools/page/page".to_string()),
+            }]
+        };
+        let loading = |targets: Vec<BrowserCdpTargetDescriptor>| {
+            let listed = &listed;
+            let shown = &shown;
+            async move {
+                pages_still_loading(&targets, listed, shown)
+                    .await
+                    .contains("page")
+            }
+        };
+
+        // On the bookshop's page: its own title. A steady list reads nothing.
+        assert!(!loading(page(LELLO, "Livraria Lello & Co")).await);
+        assert!(!loading(page(LELLO, "Livraria Lello & Co")).await);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        // Loading the metro's page: the title is the bookshop's, read again
+        // until the page arrives.
+        assert!(loading(page(METRO, "Livraria Lello & Co")).await);
+        assert!(loading(page(METRO, "Livraria Lello & Co")).await);
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+        *shown_now.lock().unwrap() = Some(METRO.to_string());
+        assert!(!loading(page(METRO, "Metro do Porto")).await);
+
+        // Another page of the same site with the same title: hidden while it
+        // loads, its own once it arrives.
+        assert!(loading(page(METRO_LINES, "Metro do Porto")).await);
+        *shown_now.lock().unwrap() = Some(METRO_LINES.to_string());
+        assert!(!loading(page(METRO_LINES, "Metro do Porto")).await);
+
+        // A page whose history cannot be read keeps its title; one with no
+        // title of its own is not read at all.
+        *shown_now.lock().unwrap() = None;
+        assert!(!loading(page(LELLO, "Livraria Lello & Co")).await);
+        let before = reads.load(Ordering::SeqCst);
+        assert!(!loading(page(METRO, "about:blank")).await);
+        assert!(!loading(page(METRO, "")).await);
+        assert_eq!(reads.load(Ordering::SeqCst), before);
+    }
+
+    // The tabs a list no longer has are forgotten, and each page is judged on
+    // its own.
+    #[tokio::test]
+    async fn each_page_of_the_list_is_judged_on_its_own() {
+        let listed = Mutex::new(HashMap::new());
+        let target = |id: &str, url: &str| BrowserCdpTargetDescriptor {
+            id: id.to_string(),
+            target_type: "page".to_string(),
+            title: "Visit Porto".to_string(),
+            url: url.to_string(),
+            websocket_debugger_url: Some(format!("ws://127.0.0.1:9/devtools/page/{id}")),
+        };
+        let shown = |websocket_url: String| async move {
+            // Tab "a" shows its address; tab "b" still shows the page it left.
+            Some(if websocket_url.ends_with("/a") {
+                "https://visitporto.travel/a".to_string()
+            } else {
+                "https://visitporto.travel/".to_string()
+            })
+        };
+        let loading = pages_still_loading(
+            &[
+                target("a", "https://visitporto.travel/a"),
+                target("b", "https://visitporto.travel/b"),
+            ],
+            &listed,
+            shown,
+        )
+        .await;
+        assert_eq!(loading, HashSet::from(["b".to_string()]));
+        pages_still_loading(
+            &[target("a", "https://visitporto.travel/a")],
+            &listed,
+            shown,
+        )
+        .await;
+        assert_eq!(
+            listed.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
+            vec!["a".to_string()]
+        );
+    }
+
+    // A local test: while a blank tab loaded a slow site, its title read
+    // "about:blank" next to the site's address for 27 s.
+    #[test]
+    fn a_blank_tabs_address_is_no_page_title() {
+        for title in ["about:blank", " About:Blank ", "chrome://newtab/"] {
+            assert_eq!(normalize_browser_page_title(title), None, "{title}");
+        }
+        // The tab is named by the site it is opening.
+        let title = normalize_browser_page_title("about:blank");
+        assert_eq!(
+            derive_browser_page_label(
+                title.as_deref(),
+                "visitporto.travel",
+                "https://www.visitporto.travel/"
+            ),
+            "visitporto.travel"
+        );
+        assert_eq!(
+            normalize_browser_page_title("About blank pages").as_deref(),
+            Some("About blank pages")
+        );
     }
 
     #[test]

@@ -105,6 +105,16 @@ describe("reading labels", () => {
     expect(shownBrowserPageTitle("Audio/Video")).toBe("Audio/Video");
     expect(shownBrowserPageTitle("Model/Year")).toBe("Model/Year");
   });
+
+  // While a blank tab loads its first page, the browser reports the new
+  // address with the blank tab's title.
+  it("never shows a blank tab's address as a title", () => {
+    for (const title of ["about:blank", " About:Blank ", "chrome://newtab/"]) {
+      expect(shownBrowserPageTitle(title)).toBeNull();
+      expect(browserReadingTitle({ title })).toBeNull();
+    }
+    expect(shownBrowserPageTitle("About blank pages")).toBe("About blank pages");
+  });
 });
 
 describe("personalBrowserTabPages", () => {

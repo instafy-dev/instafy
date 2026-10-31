@@ -98,4 +98,19 @@ describe("BrowserReadingRow", () => {
     expect(item.title).toBe("gamma title\nhttps://www.gamma.example/path");
     expect(container.textContent).not.toContain("tab 3");
   });
+
+  // A local test: the row read "visitporto.travel · about:blank" for 27 s
+  // while a blank tab loaded a slow site. Until the page arrives, the browser
+  // reports the new address with the blank tab's title.
+  it("names the address being opened, never a blank tab's title", async () => {
+    const opening = page("visitporto", {
+      url: "https://www.visitporto.travel/",
+      host: "visitporto.travel",
+      title: "about:blank",
+    });
+    await act(async () => root.render(<BrowserReadingRow pages={[opening]} canTakeOver onTakeOver={vi.fn()} />));
+    const item = container.querySelector<HTMLElement>('[data-testid="browser-reading-page"]')!;
+    expect(item.textContent).toBe("visitporto.travel");
+    expect(item.title).toBe("https://www.visitporto.travel/");
+  });
 });

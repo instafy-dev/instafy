@@ -24,7 +24,6 @@ export const BROWSER_APPROVAL_ROW_COPY = {
   deny: "Deny",
   allow: "Allow",
   allowSite: "Allow site",
-  saving: "Saving…",
   expiresSoon: "Expires in under a minute",
   announcement: (agent: string, sentence: string) => `${agent} needs your answer: ${sentence}`,
 } as const;
@@ -145,6 +144,8 @@ export function BrowserApprovalRow({
     void approval.decide(decision, shownRequest.approvalId);
   };
   const copy = BROWSER_APPROVAL_ROW_COPY;
+  // While the answer is sent, the pressed button keeps its word under a
+  // spinner: Deny never reads "Saving…".
   const denyPending = submitting && pressed === "deny";
   const allowPending = submitting && pressed !== null && pressed !== "deny";
 
@@ -177,7 +178,7 @@ export function BrowserApprovalRow({
           isPending={denyPending}
           data-testid="browser-approval-deny"
         >
-          {denyPending ? copy.saving : copy.deny}
+          {copy.deny}
         </Button>
         <Button
           variant="primary"
@@ -188,7 +189,7 @@ export function BrowserApprovalRow({
           isPending={allowPending}
           data-testid="browser-approval-allow"
         >
-          {allowPending ? copy.saving : shownRequest.kind === "origin" ? copy.allowSite : copy.allow}
+          {shownRequest.kind === "origin" ? copy.allowSite : copy.allow}
         </Button>
       </span>
       {remainingMs <= BROWSER_APPROVAL_EXPIRY_NOTICE_MS ? (

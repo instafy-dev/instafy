@@ -123,7 +123,12 @@ bound to (`browserPageId`) and every tab the page list reports with
 kept, and an absent value is the person's tab. A compact **Octo is reading**
 row under the toolbar lists those tabs as host and title text (page titles are
 shown as text only, never followed; never a tab's number such as "Octo's tab 1",
-the label Octo's own prompts use) with one **Take over** button. A tab an
+the label Octo's own prompts use) with one **Take over** button. A tab still
+loading another address is named by the site it opens, with no title until that
+page arrives: DevTools' tab list gives the new address with the title of the page
+the tab is leaving (a blank tab's "about:blank"), so `GET /browser/pages` drops a
+title while the tab's history does not yet show the listed address, and reads each
+title back from the list's HTML escapes ("Laptops & PCs", not "Laptops &amp; PCs"). A tab an
 earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
 earlier tab" in the tab picker. Take over
 is the same action as the toolbar's take-over, without a confirmation: it
@@ -1346,7 +1351,7 @@ background still fills the screen; ordinary web browsers with zero insets
 retain the full viewport. Insets update when a device rotates.
 
 The expanded portal also follows the visual viewport when a mobile keyboard
-shrinks only the visible area. The app's open Keyboard input bar reserves its
+shrinks only the visible area. The app's open keyboard input bar reserves its
 own space above that keyboard, so it does not cover the remote page. These
 layout changes keep the same session, control lease, and focused app input;
 they do not automatically expand or reopen a browser.
@@ -1467,8 +1472,10 @@ locally requested socket size cannot override the aspect ratio of shared pixels.
 
 On coarse-pointer clients a tap becomes one remote click, while a one-finger
 drag becomes bounded remote wheel scrolling without an accidental click. CDP
-and WebRTC drivers also get an explicit **Keyboard** control. It opens a local
-16px text field so iOS/Android can summon their software keyboard, then sends
+and WebRTC drivers also get an explicit keyboard control: an icon in the
+browser's toolbar, beside its options, while the person controls the page,
+never a button floating over the page. It opens a local 16px text field at the
+bottom of the page so iOS/Android can summon their software keyboard, then sends
 bounded text, paste, IME composition, Backspace/Delete, Enter, Tab, Escape, and
 arrow keys through the same origin-authorized input socket. The control
 uses neutral capitalization with autocorrection and spellcheck disabled because

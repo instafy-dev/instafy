@@ -248,9 +248,11 @@ The phone editor retains `MobileFocusDialog`, so its keyboard-aware scroll area 
 short-viewport footer behavior remain consistent with other focused forms.
 
 Space-switcher utilities and shared local-tab controls use the same quiet utility-button
-shape and 8px spacing as other toolbars. The remote keyboard's inline trigger is a
-toolbar utility; its standalone floating trigger retains its separate shape. Navigation
-rows retain their intentional 48px targets, and identity avatars retain their own shapes.
+shape and 8px spacing as other toolbars. The remote keyboard's trigger is a toolbar
+utility in both browsers, in place in a shared tab's toolbar and in a slot of the Shared
+Browser toolbar, whose input bar opens over the page; no trigger floats over the page.
+Navigation rows retain their intentional 48px targets, and identity avatars retain their
+own shapes.
 In a shared browser pane narrower than 360px, Release moves into More so the current
 view mode stays readable. This uses the pane width, including panes inside wide screens.
 

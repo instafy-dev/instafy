@@ -147,6 +147,35 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(onDecision).toHaveBeenCalledWith("deny");
   });
 
+  // A local test: Deny read "Saving…" while it sent the no, and it read so
+  // too after a press of Allow.
+  it.each([
+    ["deny", "Deny", "allow"],
+    ["allow", "Allow", "deny"],
+  ] as const)("keeps the pressed button's word under a spinner while the answer is sent (%s)", async (button, word, other) => {
+    const request = { ...originRequest, kind: "action" as const, operation: "click", display: { label: "Submit order", destinationOrigin: null } };
+    const sheet = (submitting: boolean) => (
+      <SharedBrowserApprovalPrompt onDecision={vi.fn()} request={request} submitting={submitting} />
+    );
+    const byTestId = (id: string) => container.querySelector<HTMLButtonElement>(`[data-testid="shared-browser-approval-${id}"]`)!;
+    await act(async () => root.render(sheet(false)));
+    await act(async () => byTestId(button).click());
+    await act(async () => root.render(sheet(true)));
+    // On screen, the shared look of a pressed button with no icon: the spinner
+    // over its own word, which keeps its place (and the button's name) faded
+    // out, so nothing moves and nothing reads "Saving…".
+    expect(byTestId(button).textContent).toBe(word);
+    expect(byTestId(button).hasAttribute("data-pending")).toBe(true);
+    expect(byTestId(button).querySelector('[role="progressbar"]')).not.toBeNull();
+    expect(byTestId(button).querySelector(".opacity-0")?.textContent).toBe(word);
+    expect(container.textContent).not.toContain("Saving");
+    // The other button keeps its word in view and waits.
+    expect(byTestId(other).textContent).toBe(other === "deny" ? "Deny" : "Allow");
+    expect(byTestId(other).querySelector(".opacity-0")).toBeNull();
+    expect(byTestId(other).disabled).toBe(true);
+    expect(byTestId(other).hasAttribute("data-pending")).toBe(false);
+  });
+
   it("asks in the name of the agent that holds the browser", async () => {
     await act(async () => root.render(
       <SharedBrowserApprovalPrompt agentName="Ada" onDecision={vi.fn()} request={originRequest} submitting={false} />,

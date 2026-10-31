@@ -60,9 +60,19 @@ export function SharedBrowserApprovalPrompt({
   onDecision: (decision: SharedBrowserApprovalDecision) => void;
 }) {
   const denyButtonRef = useRef<HTMLButtonElement | null>(null);
+  const pressedRef = useRef<{ approvalId: string; decision: SharedBrowserApprovalDecision } | null>(null);
   const isOriginApproval = request.kind === "origin";
   const sentence = browserApprovalSentence(agentName.trim() || "Octo", request);
   const goesTo = browserApprovalGoesTo(request);
+  const decide = (decision: SharedBrowserApprovalDecision) => {
+    pressedRef.current = { approvalId: request.approvalId, decision };
+    onDecision(decision);
+  };
+  // While the answer is sent, the pressed button keeps its word under a
+  // spinner and the other waits: Deny never reads "Saving…".
+  const pressed = pressedRef.current?.approvalId === request.approvalId ? pressedRef.current.decision : null;
+  const denyPending = submitting && pressed === "deny";
+  const allowPending = submitting && pressed !== null && pressed !== "deny";
 
   useEffect(() => {
     if (active) {
@@ -79,7 +89,7 @@ export function SharedBrowserApprovalPrompt({
         if (event.key === "Escape" && !submitting) {
           event.preventDefault();
           event.stopPropagation();
-          onDecision("deny");
+          decide("deny");
         } else if (event.key === "Tab") {
           const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
             "button:not([disabled]), input:not([disabled])",
@@ -143,19 +153,21 @@ export function SharedBrowserApprovalPrompt({
               ref={denyButtonRef}
               data-testid="shared-browser-approval-deny"
               fullWidth
-              isDisabled={submitting}
-              onPress={() => onDecision("deny")}
+              isDisabled={submitting && !denyPending}
+              isPending={denyPending}
+              onPress={() => decide("deny")}
               preset="form"
               variant="secondary"
               className="min-[420px]:w-auto"
             >
-              {submitting ? "Saving…" : "Deny"}
+              Deny
             </Button>
             <Button
               data-testid="shared-browser-approval-allow"
               fullWidth
-              isDisabled={submitting}
-              onPress={() => onDecision(sharedBrowserApprovalAllowDecision(request.kind))}
+              isDisabled={submitting && !allowPending}
+              isPending={allowPending}
+              onPress={() => decide(sharedBrowserApprovalAllowDecision(request.kind))}
               preset="form"
               variant="primary"
               className="min-[420px]:w-auto"

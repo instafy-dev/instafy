@@ -852,12 +852,25 @@ describe("the page a browser turn starts on", () => {
       browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
     ];
     expect(summarize(messages).summary).toBe("Read a page on visitlisboa.com");
-    // A failed step there says what was tried, not the page it started on.
-    const failed = [
-      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
-      browserStep(BROWSER_OPEN, { host: "roborock.com", step: "navigate" }, "failed"),
-    ];
+    // With no look at it, a step that did not work says what was tried.
+    const failed = [browserStep(BROWSER_OPEN, { host: "roborock.com", step: "navigate" }, "failed")];
     expect(summarize(failed).summary).toBe("Tried opening roborock.com");
+  });
+
+  // A local test: a metro turn read "Tried opening google.com", a step the
+  // browser refused, over the page the turn read (its slow load of that page
+  // came back as a look at it).
+  it("is named before a step the turn tried that did not work", () => {
+    const messages = [
+      browserStep(BROWSER_READ, { host: "metrodoporto.pt", pageKey: PAGE_A, step: "snapshot" }),
+      browserStep(BROWSER_OPEN, { host: "google.com", step: "navigate" }, "failed"),
+    ];
+    expect(summarize(messages).summary).toBe("Read a page on metrodoporto.pt");
+    // Details keeps the step it tried.
+    expect(summarize(messages).details.map((item) => item.kind === "step" && item.step.label)).toEqual([
+      "Read a page on metrodoporto.pt",
+      "Tried opening google.com",
+    ]);
   });
 });
 
