@@ -2954,7 +2954,7 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("choose"),
             Cow::Borrowed(
-                "Choose one option of a select from a fresh snapshot by the option's label, as the open list shows it. Use it instead of clicking the list. Choosing sends nothing by itself; the form's own button sends it. When no option has that label, the error lists the options.",
+                "Choose one option of a select from a fresh snapshot by the option's label, as the open list shows it. Use it instead of clicking the list. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it. When no option has that label, the error lists the options.",
             ),
             schema(json!({
                 "type": "object",

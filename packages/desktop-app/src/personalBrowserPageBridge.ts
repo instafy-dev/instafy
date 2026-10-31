@@ -257,9 +257,12 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
     }
     // What a control draws: its rendered text, or, when that is empty (an
     // icon-only control), its text less what never draws, such as an svg's
-    // metadata ("image/svg+xml") or title.
+    // metadata ("image/svg+xml") or title. A list (a select or a listbox)
+    // draws the option it holds, never every option its rendered text lists.
     const shownTextOf = (element) => {
-      const rendered = clean(element.innerText || "", 2_000);
+      const list = element.tagName === "SELECT" ||
+        String(element.getAttribute("role") || "").trim().toLowerCase().split(/\\s+/)[0] === "listbox";
+      const rendered = list ? "" : clean(element.innerText || "", 2_000);
       if (rendered) return rendered;
       try {
         return nameRules ? clean(nameRules.shownTextOf(element), 2_000) : "";
@@ -554,15 +557,42 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
           )
         : "";
       const read = (name) => clean(element.getAttribute(name));
+      // A label's own words, as a person reads them beside the control: never
+      // the text inside a control it holds, such as a list's options, a
+      // field's text or a button's name, which are values or names of their
+      // own. The Shared Browser reads labels the same way.
+      const notLabelWords = new Set([
+        "INPUT", "SELECT", "TEXTAREA", "BUTTON", "OPTION", "OPTGROUP", "DATALIST", "OUTPUT",
+        "SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT",
+      ]);
+      const ownWords = (node) => {
+        let words = "";
+        const visit = (current, depth) => {
+          if (depth > 32 || words.length > 4_000) return;
+          for (let child = current.firstChild; child; child = child.nextSibling) {
+            if (child.nodeType === 3) {
+              words += child.nodeValue || "";
+            } else if (child.nodeType === 1 && !notLabelWords.has(String(child.tagName).toUpperCase())) {
+              visit(child, depth + 1);
+            }
+          }
+        };
+        try {
+          visit(node, 0);
+        } catch {
+          return "";
+        }
+        return words;
+      };
       const labelledBy = read("aria-labelledby")
         .split(/\\s+/)
         .map((id) => document.getElementById(id))
         .filter(Boolean)
-        .map((label) => clean(label.textContent))
+        .map((label) => clean(ownWords(label)))
         .filter(Boolean)
         .join(" ");
       const associatedLabels = "labels" in element && element.labels
-        ? Array.from(element.labels).map((label) => clean(label.textContent)).filter(Boolean).join(" ")
+        ? Array.from(element.labels).map((label) => clean(ownWords(label))).filter(Boolean).join(" ")
         : "";
       const accessibleLabel = read("aria-label") || labelledBy || associatedLabels;
       const structure = describeStructure(element, link);

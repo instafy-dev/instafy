@@ -21,8 +21,9 @@ load `redaction.js` first.
   `{ verdict, category, reason, code?, commit? }` for a navigation, click,
   typing step, choice of an option in a list (`choose`, with `ctx.option`),
   submission or key press. A choice is judged like a click on a radio button
-  named by the list's own label and that option; the list's other options
-  never count. Free verdicts come only from structure;
+  named by the list's own label and that option, so signing in with another
+  account ("Sign in with GitHub") is refused; the list's other options never
+  count. Free verdicts come only from structure;
   label words and the icons of icon-only controls only add risk. The
   exceptions are short whole-name lists that also need the right structure:
   cookie dismissals, page numbers and menu or section toggles ("Menü

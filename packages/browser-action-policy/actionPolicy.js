@@ -25,8 +25,9 @@
  *
  * A "choose" step picks one option of a list by its label. It is judged like
  * a click on a radio button named by the list's own label and that option:
- * their risk words ask in their category, and nothing else asks more than an
- * ordinary change. The list's other options never count.
+ * signing in with another account is refused, their risk words ask in their
+ * category, and nothing else asks more than an ordinary change. The list's
+ * other options never count.
  *
  * A free ("allow") verdict only ever comes from structure: tag, role, link
  * shape, form method, page area. Label words and icon names only add risk.
@@ -1112,16 +1113,23 @@
   }
 
   // Choosing `ctx.option` in a list: like a click on a radio button named by
-  // the list's own label and that option. Their risk words ask in their
-  // category ("Payment method", "Delete selected"), in a credential context it
-  // may show a secret, and in a cookie banner an option that accepts is
-  // refused. Nothing else asks more than an ordinary change, and never as a
-  // commit: "Start", "Next week" and "Yes" name values. The list's other
-  // options never count. The host checks that the target is a list.
+  // the list's own label and that option. Signing in with another account
+  // ("Sign in with GitHub") is the person's step, as a click on the same words
+  // is. Their risk words ask in their category ("Payment method", "Delete
+  // selected"), in a credential context it may show a secret, and in a cookie
+  // banner an option that accepts is refused. Nothing else asks more than an
+  // ordinary change, and never as a commit: "Start", "Next week" and "Yes"
+  // name values. The list's other options never count. The host checks that
+  // the target is a list.
   function classifyChoice(target, ctx) {
     if (ctx && ctx.sensitive === true) return refuse("sensitive", "sensitive field");
     const option = cleanText(ctx && ctx.option);
     const label = cleanText([target.ariaLabel, target.title, option].filter(Boolean).join(" "));
+    // The option, or the list's own name followed by it ("Sign in with" and
+    // "GitHub").
+    if ([target.ariaLabel, target.title].some((name) => FEDERATED_SIGN_IN.test(cleanText(`${cleanText(name)} ${option}`)))) {
+      return refuse("sign_in", "sign-in with another account");
+    }
     if (target.consentContext === true) {
       const consent = consentStep({ text: option }, option);
       if (consent === "accept") return refuse("consent", "accepting option in a consent banner");

@@ -642,8 +642,9 @@ fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
 }
 
 /// A journey planner's station list was clicked and asked as a commit, and no step could pick a station. The Shared
-/// Browser section says to set a list with `choose` and its option's label, never by clicking it, within the part a
-/// snapshot carries and without pushing the sign-in rules out of it. An unedited earlier copy is upgraded.
+/// Browser section says to set a list with `choose` and its option's label, never by clicking it, and that choosing
+/// does not send the form though some pages send it when a list changes, within the part a snapshot carries and
+/// without pushing the sign-in rules out of it. An unedited earlier copy is upgraded.
 #[test]
 fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -652,7 +653,7 @@ fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
         .expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let line = "Set a list (a select) with `choose` and its option's label, never by clicking it. Choosing sends nothing: the form's own button sends it, and asks.";
+    let line = "Set a list (a select) with `choose` and its option's label, never by clicking it. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it, and asks.";
     assert!(section.contains(line), "{section}");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));

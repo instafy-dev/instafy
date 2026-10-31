@@ -119,7 +119,8 @@ the same visible page focused. The controller accepts only these high-level
 operations and never exposes arbitrary JavaScript execution.
 
 Set a list (a select) with `choose` and its option's label, never by clicking
-it. Choosing sends nothing: the form's own button sends it, and asks.
+it. Choosing does not send the form, though some pages send it when a list
+changes; the form's own button sends it, and asks.
 
 Find pages as "Finding a page" says. A site asks once per run; its pages then
 open without asking. A declined site stays closed: take another route that fits

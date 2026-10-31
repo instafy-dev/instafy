@@ -79,24 +79,37 @@ const formEntriesFor = (arg) => ({
   ],
   own: 0,
 });
+// A select's options, as the page's select-options helper reports them for
+// the option a step names (`arg.wanted`): the options whose label reads the
+// same, as written or with case, accents and spacing aside, and the list.
+const listOptions = () => mode === "bulk-actions"
+  ? BULK_ACTIONS
+  : mode === "line-list" ? LINES : mode.startsWith("station-list") ? STATIONS : null;
+const selectOptionsFor = (arg) => {
+  const options = listOptions();
+  if (!options) {
+    return { kind: "select-options", select: false, multiple: false, matches: [], options: [], count: 0, enabled: 0 };
+  }
+  const entries = options.map((label, index) => ({
+    index,
+    label,
+    disabled: mode === "station-list-turned-off" && label === "Campanh\u00e3",
+  }));
+  const key = (value) => String(value || "").normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
+  const wanted = String(arg.wanted || "").replace(/\s+/g, " ").trim();
+  const exact = entries.filter((entry) => entry.label === wanted);
+  return {
+    kind: "select-options",
+    select: true,
+    multiple: false,
+    matches: exact.length ? exact : entries.filter((entry) => key(entry.label) === key(wanted)),
+    options: entries,
+    count: entries.length,
+    enabled: entries.filter((entry) => !entry.disabled).length,
+  };
+};
 // The fields a form step sends something from, by name, as the page's
 // sent-fields helper reports them.
-// A select's options, as the page's select-options helper reports them.
-const selectOptionsFor = () => {
-  const options = mode === "bulk-actions" ? BULK_ACTIONS : mode.startsWith("station-list") ? STATIONS : null;
-  return options
-    ? {
-        kind: "select-options",
-        select: true,
-        options: options.map((label, index) => ({
-          index,
-          label,
-          disabled: mode === "station-list-turned-off" && label === "Campanh\u00e3",
-          chosen: index === (options === STATIONS ? STATIONS.length - 1 : 0),
-        })),
-      }
-    : { kind: "select-options", select: false, options: [] };
-};
 const sentFieldsFor = (arg) => mode === "submit-order"
   ? ["Customer name", "Telephone", "E-mail address", "Pizza Size", "Delivery instructions"]
   : mode === "submit-order-many"
@@ -106,7 +119,9 @@ const sentFieldsFor = (arg) => mode === "submit-order"
 // describer reports a select: its text is every option run together, and it
 // shows the option it holds.
 const STATIONS = ["24 Agosto", "Aeroporto", "Aliados", "Campanh\u00e3", "S\u00e3o Bento", "Trindade"];
+const MOVED_STATIONS = ["24 Agosto", "Aeroporto", "Aliados", "Campanh\u00e3", "Trindade", "S\u00e3o Bento"];
 const BULK_ACTIONS = ["Select all", "Delete selected"];
+const LINES = ["All lines", "Line A", "Line D"];
 const list = (label, options, shownText) => ({
   description: control(options.join(""), { tag: "select", inputType: "", labels: label, shownText }),
 });
@@ -117,7 +132,11 @@ const special = {
   // Campanhã is an option the page turned off.
   "station-list-turned-off": list("Start", STATIONS, "Trindade"),
   "station-list-secret-screen": list("Start", STATIONS, "Trindade"),
+  // The page moves São Bento and Trindade while a step chooses.
+  "station-list-moving": list("Start", STATIONS, "Trindade"),
   "bulk-actions": list("Bulk actions", BULK_ACTIONS, "Select all"),
+  // A list with no label of its own, which a snapshot names by the option it holds.
+  "line-list": list("", LINES, "All lines"),
   "invite-button": { description: control("Invite member") },
   "generate-key": { description: control("Generate API key") },
   "plain-button": { description: control("Show details") },
@@ -739,7 +758,7 @@ const makePage = (targetId, opened = null) => {
       : arg && arg.kind === "sent-fields"
         ? sentFieldsFor(arg)
         : arg && arg.kind === "select-options"
-          ? selectOptionsFor()
+          ? selectOptionsFor(arg)
         : arg && arg.kind === "around-text"
           // The control's card: "around-changed-after-allow" shows another
           // product beside the same control once the person said yes.
@@ -750,8 +769,17 @@ const makePage = (targetId, opened = null) => {
       if (clickLogPath) fs.appendFileSync(clickLogPath, `${ordinal}\n`);
       return handle.click();
     },
-    // The option a choose step picked, by its place in the list.
+    // The option a choose step picked. Like Playwright, an option named by its
+    // label as well as its place is set only when the label at that place
+    // reads so, and otherwise times out; "station-list-moving" moves São Bento
+    // and Trindade after the step looked at the list.
     selectOption: async (value) => {
+      const current = mode === "station-list-moving" ? MOVED_STATIONS : listOptions() || [];
+      if (typeof value.label === "string" && current[value.index] !== value.label) {
+        const timeout = new Error("Timeout 2000ms exceeded.\n  - did not find some options");
+        timeout.name = "TimeoutError";
+        throw timeout;
+      }
       if (clickLogPath) fs.appendFileSync(clickLogPath, `choose ${ordinal} ${JSON.stringify(value)}\n`);
       return [];
     },
@@ -5956,7 +5984,10 @@ fn a_routine_start_chooses_a_station_by_its_label_without_a_prompt() {
         chosen["activity"],
         json!({"step": "choose", "url": "https://example.test/", "approval": "routine"})
     );
-    assert_eq!(chosen_options(&fixture), ["choose 0 {\"index\":4}"]);
+    assert_eq!(
+        chosen_options(&fixture),
+        ["choose 0 {\"index\":4,\"label\":\"S\u{e3}o Bento\"}"]
+    );
     assert!(
         fixture
             .action_log()
@@ -6041,7 +6072,10 @@ fn a_risky_choice_asks_naming_the_option_and_the_list() {
     let chosen = payload_of(&output);
     assert_eq!(requests.len(), 1);
     assert_eq!(chosen["activity"]["approval"], "once");
-    assert_eq!(chosen_options(&fixture), ["choose 0 {\"index\":1}"]);
+    assert_eq!(
+        chosen_options(&fixture),
+        ["choose 0 {\"index\":1,\"label\":\"Delete selected\"}"]
+    );
 
     // Selecting every row is an ordinary choice.
     let snapshot = fixture.routine_snapshot("bulk-actions");
@@ -6100,6 +6134,89 @@ fn ask_mode_asks_for_each_choice_and_names_a_clicked_list_by_its_label() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["operation"], "click");
     assert_eq!(requests[0]["display"]["label"], "Change something: Start");
+
+    // A list with no label of its own: the prompt names the option alone, never the option the
+    // list holds as if it were the list's name ("Line D" in "All lines").
+    let snapshot_id = fixture.snapshot_id("line-list");
+    let body = json!({"index": 0, "snapshotId": snapshot_id, "option": "Line D"}).to_string();
+    let (output, requests) = fixture.run_with_decisions(
+        "line-list",
+        "page-target",
+        "POST",
+        "/v1/choose",
+        Some(&body),
+        &["https://example.test"],
+        &["deny"],
+    );
+    assert!(!output.status.success());
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["operation"], "choose");
+    assert_eq!(requests[0]["display"]["label"], "Change something: Line D");
+}
+
+/// A list with no label of its own is named in a choice's step line by neither the option it
+/// holds nor its options: the line names the option chosen alone.
+#[test]
+fn a_choice_in_a_list_with_no_label_names_the_option_alone() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("line-list");
+    assert_eq!(snapshot["interactiveElements"][0]["label"], "All lines");
+    let body =
+        json!({"index": 0, "snapshotId": snapshot["snapshotId"], "option": "Line D"}).to_string();
+    let output = fixture
+        .command_for_with_timeout(
+            "line-list",
+            "page-target",
+            "POST",
+            "/v1/choose",
+            Some(&body),
+            "100",
+        )
+        .output()
+        .expect("routine choose");
+    payload_of(&output);
+    let log = fixture.action_log();
+    assert!(
+        log.contains(r#""type":"click","label":"Choose \"Line D\"","url""#),
+        "{log}"
+    );
+    assert!(!log.contains("in \\\"All lines"), "{log}");
+}
+
+/// The option a choice was judged on, and the person was asked about, is the one set: the
+/// selection is bound to the option's label as well as its place, so a page that moves its
+/// options after the step's last look chooses nothing rather than the option now in that place.
+#[test]
+fn a_choice_is_bound_to_the_option_it_was_judged_on() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("station-list-moving");
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"], "option": "São Bento"})
+        .to_string();
+    let output = fixture
+        .command_for_with_timeout(
+            "station-list-moving",
+            "page-target",
+            "POST",
+            "/v1/choose",
+            Some(&body),
+            "100",
+        )
+        .output()
+        .expect("choose on a list that moves");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "chose Trindade in São Bento's place"
+    );
+    assert!(
+        stderr.contains("The page changed before this step ran"),
+        "{stderr}"
+    );
+    assert!(
+        chosen_options(&fixture).is_empty(),
+        "{:?}",
+        chosen_options(&fixture)
+    );
 }
 
 /// `choose` sets a select and nothing else; an option the list does not have, or one the page
@@ -6168,6 +6285,31 @@ fn choose_refuses_what_is_no_list_and_options_a_list_does_not_offer() {
     assert_eq!(snapshot["secretScreen"], true);
     assert_eq!(snapshot["interactiveElements"][0]["tag"], "select");
     assert_eq!(snapshot["interactiveElements"][0].get("chosen"), None);
+    // There, an option the list does not have chooses nothing, and the answer names none of the
+    // list's options, which are the page's text.
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"], "option": "Sao Bentoo"})
+        .to_string();
+    let output = fixture
+        .command_for_with_timeout(
+            "station-list-secret-screen",
+            "page-target",
+            "POST",
+            "/v1/choose",
+            Some(&body),
+            "100",
+        )
+        .output()
+        .expect("choose on a secret screen");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No option in \"Start\" is called \"Sao Bentoo\", so nothing was chosen. This page may show a secret, so its options are not listed"),
+        "{stderr}"
+    );
+    for station in ["24 Agosto", "Aeroporto", "Aliados", "Trindade"] {
+        assert!(!stderr.contains(station), "{station}: {stderr}");
+    }
+    assert!(chosen_options(&fixture).is_empty());
 }
 
 /// In a dogfood run a bookkeeping app's hamburger ("Menü ein-/ausklappen")

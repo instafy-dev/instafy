@@ -568,22 +568,30 @@ shared in-page rules (`controlNameRulesInPage` in
 
 A list (a select, a combobox or a listbox) is named by its own label ("Start"),
 or by the option it shows when it has none, never by its options run together:
-the shared rules read what a select draws as the option it holds. Octo sets a
-select with `choose` and an option's label as the open list shows it (case,
-accents and spacing aside), never by clicking it. An option the list does not
-have, or one the page turned off, chooses nothing, and the answer lists the
-options. A choice is judged like a click on a radio button named by the list's
-own label and that option (`classifyStep("choose", target, { option })`):
-their risk words ask in their category ("Delete selected" in "Bulk actions"),
-in a credential context it may show a secret, an option that accepts in a
-cookie banner is refused, and a list for authentication, payment or identity
-details is refused, as typing them is. Nothing else asks under routine
-browsing: choosing sends nothing by itself, the form's own button sends it and
-asks, and the list's other options never count. While the option changes, the
-page may post a form to its own site, as it may while text is typed (an older
-site that reloads a list when it changes); a post anywhere else is stopped. In
-Ask mode the prompt names the option and the list: "Octo wants to choose “São
-Bento” in “Start” on transit.example." The Desktop Personal Browser's tools are
+the shared rules read what a select draws as the option it holds, and a label
+that holds the list is read without the list's options. Octo sets a select
+with `choose` and an option's label as the open list shows it (case, accents
+and spacing aside), never by clicking it; a list that holds several options at
+once is left to the person. An option the list does not have, or one the page
+turned off, chooses nothing, and the answer lists the options, except on a
+page that may show a secret. The option is chosen by its label and its place
+together, so a list that moves its options meanwhile chooses nothing. A choice
+is judged like a click on a radio button named by the list's own label and that
+option (`classifyStep("choose", target, { option })`): signing in with another
+account ("Sign in with GitHub") is refused, as a click on those words is, their
+risk words ask in their category ("Delete selected" in "Bulk actions"), in a
+credential context it may show a secret, an option that accepts in a cookie
+banner is refused, and a list whose own names, or whose form, name
+authentication, payment or identity details is refused, as typing there is.
+The list's other options never count. Nothing else asks under routine
+browsing: choosing does not send the form, and the form's own button sends it
+and asks. While the option changes, the page may post a form to its own site,
+as it may while text is typed (an older site that reloads a list when it
+changes), whether routine browsing took the choice or the person allowed it;
+a post anywhere else is stopped, as is any post from one of Octo's own tabs,
+which are for reading. The prompt names the option and the list by its own
+label: "Octo wants to choose “São Bento” in “Start” on transit.example.", or
+the option alone for a list with none. The Desktop Personal Browser's tools are
 its own list, which has no `choose`.
 
 A control with no accessible name or visible text is named from its own
