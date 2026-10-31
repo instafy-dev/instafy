@@ -132,7 +132,10 @@ title while the tab's history does not yet show the listed address. It reads the
 histories of the tabs whose address or title changed together, each for at most
 2 s, and a tab whose history does not answer in that time (often the busy one,
 still loading) has no title until a later list confirms it, rather than the title
-of the page it is leaving. It reads each
+of the page it is leaving. A tab whose page arrives between the list and the read
+of its history is listed with the title it is leaving while its history already
+shows the new address, so once a read confirms a title the tabs are listed again,
+and the title counts only when its tab still lists the same address and title. It reads each
 title back from the list's HTML escapes ("Laptops & PCs", not "Laptops &amp; PCs"). A tab an
 earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
 earlier tab" in the tab picker. Take over
