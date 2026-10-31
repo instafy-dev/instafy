@@ -15734,8 +15734,10 @@ fn build_agent_routing_preflight_prompt_with_browser_routes(
     } else {
         ""
     };
+    // A `direct` request that needs the browser first still ends with its card: routed as a
+    // change that must write files, it would run in the lane that cannot ask for the browser.
     let browser_change_line = if browser_routes.is_some() {
-        "With `browser` or `browser_then_build`, set `workspaceFileChangeRequirement: none`: the browser changes no file, and a build after it is its own turn.\n"
+        "A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`: with `browser` or `browser_then_build` the browser changes no file and a build after it is its own turn, and with `direct` its card hands back to a build.\n"
     } else {
         "A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`: its card hands back to a build.\n"
     };
@@ -24894,10 +24896,20 @@ mod tests {
         assert!(
             prompt.contains("- `browser_then_build`: the same, then a build from what it found.")
         );
+        // Whatever the route, a request that needs the browser before a change writes no file in
+        // its own turn. A direct one runs where it can post its card, which hands back to a
+        // build: routed as a change that must write files, it would run in the lane that cannot
+        // ask for the browser.
         assert!(prompt.contains(
-            "With `browser` or `browser_then_build`, set `workspaceFileChangeRequirement: none`"
+            "A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`"
         ));
-        assert!(!prompt.contains("its card hands back to a build"));
+        assert!(prompt.contains(
+            "with `browser` or `browser_then_build` the browser changes no file and a build after it is its own turn"
+        ));
+        assert!(
+            prompt.contains("with `direct` its card hands back to a build"),
+            "{prompt}"
+        );
         assert!(prompt.contains(&routes));
 
         let without = build_agent_routing_preflight_prompt(tmp.path(), request, None, None);
