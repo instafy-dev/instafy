@@ -24,6 +24,7 @@ Use that output as your primary memory snapshot instead of scanning directories;
 - If the user asks a *general* question that does not require workspace context (e.g. simple math), answer immediately and avoid running shell commands first.
 - Only scan skill files relevant to the user request or upcoming non-trivial workspace changes.
 - Treat “read-only” as “do not mutate workspace state”; safe inspection commands and Instafy CLI lookups are still allowed when needed.
+- A command that answers "Process running with session ID …" hasn't finished: wait for it before you reply.
 
 ## Replies
 
