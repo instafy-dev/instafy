@@ -167,6 +167,15 @@ type PreviewStateEntry = {
   // site answered: `instafy preview close` stops that site too, but only while that pid still runs that command line.
   startedPid?: number;
   startedCommand?: string;
+  // The site's folder in the workspace (`.` for the workspace itself), as the process serving it runs from, when that
+  // was read; and when the site was last pictured for the card (ms since the epoch, as its page load began): when the
+  // picture on the card was taken, or a later try that could not take one. The runtime reads both when a turn ends: a
+  // turn that changed a file in that folder after that checks the site again (`instafy preview check`), which takes a
+  // new picture. A preview with no recorded folder is left as it is.
+  siteDir?: string;
+  pictureAt?: number;
+  // Opened with `--no-thumbnail`: no picture of the site goes on its card, from a check or at a turn's end either.
+  noThumbnail?: boolean;
 };
 
 type PreviewStateFile = {
@@ -373,10 +382,10 @@ function lockHolderIsGone(lockFile: string): boolean {
  * turns at once) never both start a client for the same preview or overwrite each other's state. A lock whose holder
  * died is taken over.
  */
-async function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
+async function withStateLock<T>(fn: () => Promise<T>, waitMs = STATE_LOCK_WAIT_MS): Promise<T> {
   const lockFile = previewStateLockFile();
   fs.mkdirSync(instafyDir(), { recursive: true });
-  const deadline = Date.now() + STATE_LOCK_WAIT_MS;
+  const deadline = Date.now() + waitMs;
   for (;;) {
     try {
       const fd = fs.openSync(lockFile, "wx", 0o600);
@@ -1379,6 +1388,10 @@ async function createAndStartClient(params: {
     ...(hostSuffix ? { hostSuffix } : {}),
     ...(studioOrigin ? { studioOrigin } : {}),
     ...siteRecord,
+    ...(serve ? { siteDir: serve.cwd } : {}),
+    // The same preview opened again keeps its picture until a new one is uploaded.
+    ...(current?.pictureAt ? { pictureAt: current.pictureAt } : {}),
+    ...(opts.thumbnail === false ? { noThumbnail: true } : {}),
   };
   upsertPreviewState(entry);
   return { grant, previewId, entry, current };
@@ -1507,6 +1520,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     thumbnail = { status: "skipped", reason: "the site is not live through the preview yet" };
   } else {
     if (!opts.thumbnailFile) log("Taking a picture of the site for its card…");
+    const takenAt = Date.now();
     const attempt: ThumbnailAttempt = opts.thumbnailFile
       ? readThumbnailFile(opts.thumbnailFile)
       : await captureSiteThumbnail({ port, path: sitePath, host: "127.0.0.1" });
@@ -1514,6 +1528,8 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
       "thumbnail" in attempt
         ? await uploadPreviewThumbnail({ controllerUrl, auth, projectId, previewId, thumbnail: attempt.thumbnail, retryCommand })
         : { status: attempt.status, reason: attempt.reason };
+    // A capture that took or sent no picture counts as tried: a check of the unchanged site would fail the same way.
+    if (thumbnail.status === "uploaded" || !opts.thumbnailFile) await recordPictured(previewId, takenAt);
   }
 
   return {
@@ -1573,14 +1589,47 @@ export async function uploadPreviewThumbnail(params: {
   }
 }
 
-/** The preview this machine has open on a port and path (`instafy preview open` recorded it), or null. */
+// How long recording a picture's time waits for another `instafy preview` command on this machine.
+const PICTURE_RECORD_LOCK_WAIT_MS = 5_000;
+
+/**
+ * Records when a preview's site was last pictured for its card (the picture now on it was taken, or a try could not
+ * take one), so a turn that changes the site after it is known to have left an older picture. Never throws, and waits
+ * for another preview command only briefly: an older time recorded only means the site is checked once more when a
+ * turn changes it.
+ */
+async function recordPictured(previewId: string, takenAt: number): Promise<void> {
+  try {
+    await withStateLock(async () => {
+      const state = readStateFile();
+      const entry = state.previews.find((preview) => preview.previewId === previewId);
+      if (!entry || (entry.pictureAt ?? 0) >= takenAt) return;
+      entry.pictureAt = takenAt;
+      writeStateFile(state);
+    }, PICTURE_RECORD_LOCK_WAIT_MS);
+  } catch {
+    // Another preview command holds the state.
+  }
+}
+
+/**
+ * The preview this machine has open on a port and path (`instafy preview open` recorded it) whose card takes a picture
+ * of the site, or null: none is open there, or it was opened with `--no-thumbnail`.
+ */
 function openPreviewFor(port: number, sitePath: string): PreviewStateEntry | null {
-  return readStateFile().previews.find((entry) => entry.localPort === port && entry.path === sitePath && entry.pid > 0) ?? null;
+  const entry = readStateFile().previews.find((preview) => preview.localPort === port && preview.path === sitePath && preview.pid > 0);
+  return entry && !entry.noThumbnail ? entry : null;
 }
 
 /** Whether `instafy preview check` should take a picture for a card: a preview is open on this port and path. */
 export function hasOpenPreviewFor(port: number, sitePath: string): boolean {
   return openPreviewFor(port, sitePath) !== null;
+}
+
+/** `instafy preview check` tried to picture the site of the preview open on its port and path, and could not. */
+export async function recordCheckPictureTried(input: { port: number; path: string; takenAt: number }): Promise<void> {
+  const entry = openPreviewFor(input.port, input.path);
+  if (entry) await recordPictured(entry.previewId, input.takenAt);
 }
 
 /**
@@ -1591,6 +1640,8 @@ export async function uploadCheckThumbnail(input: {
   path: string;
   image: Buffer;
   description: string | null;
+  // When the check began loading the page the picture is of (ms since the epoch).
+  takenAt?: number;
 }): Promise<ThumbnailOutcome | null> {
   const entry = openPreviewFor(input.port, input.path);
   if (!entry) return null;
@@ -1606,9 +1657,13 @@ export async function uploadCheckThumbnail(input: {
   if (cleanUrl(controllerUrl) !== cleanUrl(entry.controllerUrl)) {
     return { status: "skipped", reason: "the preview was opened on another server" };
   }
+  const takenAt = input.takenAt ?? Date.now();
   const facts = sniffImage(input.image);
-  if (!facts) return { status: "skipped", reason: "the picture is not a JPEG" };
-  return uploadPreviewThumbnail({
+  if (!facts) {
+    await recordPictured(entry.previewId, takenAt);
+    return { status: "skipped", reason: "the picture is not a JPEG" };
+  }
+  const outcome = await uploadPreviewThumbnail({
     controllerUrl,
     auth,
     projectId: entry.projectId,
@@ -1616,6 +1671,9 @@ export async function uploadCheckThumbnail(input: {
     thumbnail: { image: input.image, ...facts, source: "capture", description: input.description },
     retryCommand,
   });
+  // A picture the server would not take counts as tried too: the same site would only fail the same way again.
+  await recordPictured(entry.previewId, takenAt);
+  return outcome;
 }
 
 function toPreviewSummary(raw: unknown): PreviewSummary | null {

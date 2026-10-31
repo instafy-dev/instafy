@@ -709,6 +709,8 @@ export type SiteCheckOptions = {
   port: number;
   path?: string;
   phone?: boolean;
+  /** only the desktop size; with `phone` too, both */
+  desktop?: boolean;
   /** load the site inside a frame on another origin instead of as the page itself */
   framed?: boolean;
   outDir?: string;
@@ -1068,7 +1070,10 @@ export async function runSiteCheck(
   const port = parsePreviewPort(opts.port, env);
   const sitePath = parseCheckPath(opts.path);
   const timeoutMs = opts.timeoutMs ?? 30_000;
-  const viewports = VIEWPORTS.filter((v) => !opts.phone || v.name === "phone");
+  // `--phone` and `--desktop` each name a size to load; neither means both.
+  const viewports = VIEWPORTS.filter((v) =>
+    !opts.phone && !opts.desktop ? true : (opts.phone && v.name === "phone") || (opts.desktop && v.name === "desktop"),
+  );
   let outDir: string | null = null;
   if (opts.outDir !== undefined) {
     outDir = path.resolve(opts.outDir);
@@ -1176,6 +1181,7 @@ export type PreviewCheckCliOptions = {
   port?: string;
   path?: string;
   phone?: boolean;
+  desktop?: boolean;
   framed?: boolean;
   workspacePlaywright?: boolean;
   out?: string;
@@ -1193,6 +1199,8 @@ export type CheckThumbnailUploader = (input: {
   path: string;
   image: Buffer;
   description: string | null;
+  /** when the check began loading the page the picture is of (ms since the epoch) */
+  takenAt?: number;
 }) => Promise<{ status: "uploaded" | "skipped" | "failed"; reason?: string } | null>;
 
 export type PreviewCheckIo = {
@@ -1202,6 +1210,11 @@ export type PreviewCheckIo = {
   /** whether a preview is open on this port and path, so a picture is worth taking */
   hasOpenPreview?: (port: number, path: string) => boolean;
   uploadThumbnail?: CheckThumbnailUploader;
+  /**
+   * The check tried to picture the site of the preview open on that port and path and could not (a blank page, one
+   * that never loaded): when it began loading the page (ms since the epoch).
+   */
+  pictureTried?: (input: { port: number; path: string; takenAt: number }) => Promise<void>;
   /** test hook: see SiteCheckOptions.proxyServer */
   proxyServer?: string;
 };
@@ -1220,12 +1233,15 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
     const port = parsePreviewPort(opts.port, env);
     const sitePath = parseCheckPath(opts.path);
     const wantsThumbnail = Boolean(io.uploadThumbnail && io.hasOpenPreview?.(port, sitePath));
+    // The picture shows the site as it was when the check began loading it.
+    const takenAt = Date.now();
     const result = await runSiteCheck({
       port,
       path: opts.path,
       thumbnail: wantsThumbnail,
       proxyServer: io.proxyServer,
       phone: opts.phone,
+      desktop: opts.desktop,
       framed: opts.framed,
       workspacePlaywright: opts.workspacePlaywright,
       outDir: opts.out,
@@ -1241,11 +1257,13 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
     if (wantsThumbnail && result.thumbnail && io.uploadThumbnail) {
       // The picture never changes the check's exit code.
       const shot = result.thumbnail;
+      // A picture the check could not take counts as tried: another check of the unchanged site fails the same way.
+      if ("skipped" in shot) await io.pictureTried?.({ port, path: sitePath, takenAt }).catch(() => {});
       const outcome =
         "skipped" in shot
           ? { status: "skipped" as const, reason: shot.skipped }
           : await io
-              .uploadThumbnail({ port, path: sitePath, image: shot.image, description: shot.description })
+              .uploadThumbnail({ port, path: sitePath, image: shot.image, description: shot.description, takenAt })
               .catch((error: unknown) => ({ status: "failed" as const, reason: firstLine(error) }));
       if (outcome) {
         result.report.thumbnail = outcome.status;
@@ -1268,7 +1286,7 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
 /** `instafy preview check`, registered under the `preview` command group. */
 export function registerPreviewCheckCommand(
   preview: Command,
-  card: Pick<PreviewCheckIo, "hasOpenPreview" | "uploadThumbnail"> = {},
+  card: Pick<PreviewCheckIo, "hasOpenPreview" | "uploadThumbnail" | "pictureTried"> = {},
 ): Command {
   return preview
     .command("check")
@@ -1281,6 +1299,7 @@ export function registerPreviewCheckCommand(
     .option("--port <port>", "Local port the site listens on (1024-65535)")
     .option("--path <path>", "Path to load (default /); a ?query and #hash are fine")
     .option("--phone", "Only the phone size (390×844); default: desktop 1280×800 and phone")
+    .option("--desktop", "Only the desktop size (1280×800), the one the card's picture is taken from")
     .option("--framed", "Load the site inside a frame on another origin, and report a site that refuses to be framed")
     .option("--workspace-playwright", "Also look for Playwright in this project's node_modules (runs the project's own copy)")
     .option("--out <dir>", "Folder for desktop.png and phone.png (default: a new private folder under the temp folder each run; the report names it)")

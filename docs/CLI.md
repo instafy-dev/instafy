@@ -586,7 +586,7 @@ one; `check` waits for it too. Without a
 browser it uses the page's `og:image` when that is on the site itself. Each `open` replaces the card's
 picture, since a later site on the same port is the same preview. The JSON's `thumbnail` is `uploaded`,
 `skipped` or `failed`, with `thumbnailReason` when it is not uploaded; the exit code never changes. `--thumbnail <file>` uploads a picture you made instead (JPEG, PNG or WebP, at most
-512 KiB and 2000×2000) and `--no-thumbnail` uploads none. See
+512 KiB and 2000×2000) and `--no-thumbnail` uploads none (nor does a later `check` for that preview). See
 [Site previews](Previews.md#the-cards-picture-and-facts).
 
 `--start` with `--serve-cmd "<command>"` starts the site: the command (`{port}` replaced) as argv, never a shell,
@@ -661,7 +661,8 @@ Exit codes:
 for agents that build sites, and works for any site or framework. It calls no Instafy server and needs no login,
 except to refresh a card: when this machine has a preview open on that port and path (`open` recorded it), it
 uploads a 640×400 picture of the desktop page for the card, and the report says `thumbnail` (`uploaded`,
-`skipped` or `failed`). That never changes the exit code.
+`skipped` or `failed`). That never changes the exit code. When a turn changed the site's folder after the site was
+last pictured for its card, the runtime runs this check itself (`--desktop`) while the turn's changes are saved.
 
 ```bash
 instafy preview check --port 4173
@@ -673,7 +674,8 @@ It loads `http://127.0.0.1:<port><path>` in a headless Chromium (or `http://[::1
 failed requests and HTTP errors (the site's own are errors; other origins' are warnings) and a blank page (when the
 screenshot cannot be read, the report says the blank check is incomplete; on a page with no text that is an error). It writes
 `desktop.png` (1280×800) and `phone.png` (390×844) to `--out <dir>` (default: a new folder under the temp folder
-for each run, readable only by you; the report names the files).
+for each run, readable only by you; the report names the files). `--phone` loads only the phone size, `--desktop`
+only the desktop size, which the card's picture comes from.
 `--framed` loads the site inside a frame on another origin instead, and then also reports a site that refuses to be
 framed (`X-Frame-Options` or CSP `frame-ancestors`).
 
