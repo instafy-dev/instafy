@@ -76,6 +76,9 @@ pub(crate) const TURNS_SINCE_KEY: &str = "browser_turns_since";
 /// The browser turns a building turn reads at most: the browser skill's six
 /// reads per card, the newest ones.
 pub(crate) const TURNS_SINCE_MAX: i64 = 6;
+/// The payload key a lease stamps with whether [`browser_turns_since`] left
+/// older turns out to keep the newest [`TURNS_SINCE_MAX`].
+pub(crate) const TURNS_SINCE_LEFT_OUT_KEY: &str = "browser_turns_since_earlier_left_out";
 /// What Studio sends when the person presses Let Octo continue
 /// (`BROWSER_HUMAN_INPUT_CONTINUE_PROMPT`; the fixture pins it).
 pub(crate) const LET_OCTO_CONTINUE_PROMPT: &str = "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
@@ -889,6 +892,17 @@ async fn last_streamed_reply(
     Ok(row.map(|row| row.get::<_, String>("content")))
 }
 
+/// What a building job's lease lists ([`browser_turns_since`]).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct BrowserTurnsSince {
+    /// The browser turns, oldest first: the newest [`TURNS_SINCE_MAX`].
+    pub(crate) turns: Vec<JsonValue>,
+    /// Older browser turns since the building thread's last turn were left
+    /// out to keep the newest; the building turn is told so
+    /// ([`TURNS_SINCE_LEFT_OUT_KEY`]).
+    pub(crate) earlier_left_out: bool,
+}
+
 /// The browser turns of a conversation since its building thread's last
 /// turn, for a building job's lease: what each was asked, its reply with the
 /// findings its runtime moved into Details put back, bounded and labelled as
@@ -900,10 +914,10 @@ async fn last_streamed_reply(
 /// resumes from, so it names the thread the leased job resumes. The browser
 /// turns are the conversation's finished Shared and Personal Browser jobs of
 /// the same agent created after it (all of them when there is none), the
-/// newest [`TURNS_SINCE_MAX`]. Never another conversation's or agent's, never
-/// one still running, and never the browser turn this job's checked hand-back
-/// already carries. A browser job's own lease lists none: its thread holds
-/// its browser turns.
+/// newest [`TURNS_SINCE_MAX`], and whether older ones were left out. Never
+/// another conversation's or agent's, never one still running, and never the
+/// browser turn this job's checked hand-back already carries. A browser job's
+/// own lease lists none: its thread holds its browser turns.
 pub(crate) async fn browser_turns_since(
     transaction: &tokio_postgres::Transaction<'_>,
     conversation_id: &Uuid,
@@ -912,10 +926,10 @@ pub(crate) async fn browser_turns_since(
     credential_id: Option<&Uuid>,
     agent_id: Option<&Uuid>,
     agent_handle: Option<&str>,
-) -> Result<Vec<JsonValue>, (StatusCode, Json<ApiError>)> {
+) -> Result<BrowserTurnsSince, (StatusCode, Json<ApiError>)> {
     let metadata = payload.get("metadata").cloned().unwrap_or(JsonValue::Null);
     if browser_transport_of(&metadata).is_some() {
-        return Ok(Vec::new());
+        return Ok(BrowserTurnsSince::default());
     }
     let handed_back = metadata
         .get(HAND_BACK_KEY)
@@ -1014,7 +1028,8 @@ pub(crate) async fn browser_turns_since(
                 &handed_back,
                 &agent_id,
                 &agent_handle,
-                &TURNS_SINCE_MAX,
+                // One more than are kept, to know whether any were left out.
+                &(TURNS_SINCE_MAX + 1),
             ],
         )
         .await
@@ -1023,8 +1038,10 @@ pub(crate) async fn browser_turns_since(
                 "failed to list the browser turns since the building thread's last turn: {error}"
             ))
         })?;
+    let earlier_left_out = rows.len() > TURNS_SINCE_MAX as usize;
     let mut turns = Vec::with_capacity(rows.len());
-    for row in rows.into_iter().rev() {
+    // The newest, read oldest first.
+    for row in rows.into_iter().take(TURNS_SINCE_MAX as usize).rev() {
         let browser_job_id: Uuid = row.get("id");
         let run_id: Option<Uuid> = row.get("run_id");
         let browser_payload = row.get::<_, PgJson<JsonValue>>("payload").0;
@@ -1068,7 +1085,10 @@ pub(crate) async fn browser_turns_since(
             "outcome": row.get::<_, Option<String>>("outcome"),
         }));
     }
-    Ok(turns)
+    Ok(BrowserTurnsSince {
+        turns,
+        earlier_left_out,
+    })
 }
 
 #[cfg(test)]

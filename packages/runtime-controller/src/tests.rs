@@ -12784,6 +12784,10 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
             body["jobs"][0]["payload"]["browser_turns_since"] == json!([]),
             "{body}"
         );
+        anyhow::ensure!(
+            body["jobs"][0]["payload"]["browser_turns_since_earlier_left_out"] == json!(false),
+            "{body}"
+        );
         let row = pool
             .get()
             .await?

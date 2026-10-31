@@ -5190,12 +5190,17 @@ pub(crate) async fn lease_next_agent_job(
             )
             .await?
         } else {
-            Vec::new()
+            crate::browser_hand_back::BrowserTurnsSince::default()
         };
         if let JsonValue::Object(ref mut map) = payload {
             map.insert(
                 crate::browser_hand_back::TURNS_SINCE_KEY.to_string(),
-                JsonValue::Array(turns_since),
+                JsonValue::Array(turns_since.turns),
+            );
+            // Whether older browser turns were left out to keep the newest.
+            map.insert(
+                crate::browser_hand_back::TURNS_SINCE_LEFT_OUT_KEY.to_string(),
+                JsonValue::Bool(turns_since.earlier_left_out),
             );
         }
 
