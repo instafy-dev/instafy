@@ -495,7 +495,7 @@ const BROWSER_READ = "browser/read";
 // Browser steps that can take the tab to another page. A look at the page
 // before the first of them that worked is a look at the page the turn started
 // on, which another turn (or another chat) left there.
-const PAGE_MOVING_STEPS = new Set(["navigate", "open_tab", "click", "search", "submit", "press"]);
+const PAGE_MOVING_STEPS = new Set(["navigate", "open_tab", "click", "choose", "search", "submit", "press"]);
 
 function movesThePage(step: TurnStep): boolean {
   const entry = step.activity;
@@ -721,6 +721,8 @@ function stepAnsweredApproval(activity: StepActivity | null): AnsweredApproval |
       return { outcome, noun: { kind: "step", words: "a form" }, host };
     case "type":
       return { outcome, noun: { kind: "step", words: "typing" }, host };
+    case "choose":
+      return { outcome, noun: { kind: "step", words: "choosing an option" }, host };
     case "press":
       return { outcome, noun: { kind: "step", words: "a key press" }, host };
     default:
@@ -745,6 +747,8 @@ function sessionAnsweredApproval(approval: SessionBrowserApproval): AnsweredAppr
       return step("a click");
     case "type":
       return step("typing");
+    case "choose":
+      return step("choosing an option");
     case "form-submit":
       return step("a form");
     case "press-enter":

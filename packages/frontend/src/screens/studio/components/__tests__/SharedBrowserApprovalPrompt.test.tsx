@@ -211,6 +211,10 @@ describe("SharedBrowserApprovalPrompt", () => {
 
   it.each([
     ["type", "Search", "Octo wants to type into “Search” on example.test."],
+    // A choice names the option, then the list by its own label.
+    ["choose", "Change something: São Bento \u00b7 In: Start", "Octo wants to choose “São Bento” in “Start” on example.test."],
+    ["choose", "Delete, cancel or sign out: Delete selected \u00b7 In: Bulk actions", "Octo wants to choose “Delete selected” in “Bulk actions” on example.test. It may delete, cancel or sign out of something."],
+    ["choose", "Change something: Trindade", "Octo wants to choose “Trindade” on example.test."],
     ["form-submit", "Email", "Octo wants to send the form “Email” on example.test."],
     ["press-enter", "Continue", "Octo wants to press Enter on “Continue” on example.test."],
     ["press-space", "Remember me", "Octo wants to press Space on “Remember me” on example.test."],

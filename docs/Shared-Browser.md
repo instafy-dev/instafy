@@ -477,9 +477,9 @@ trust, a project-wide default, or permission inherited by the next turn (only a
 run that continues it with **Let Octo continue** keeps it, see "Manual input
 handoff"). A run on the space's own machine starts with it; the runtime still
 honours a decision of `allow_routine` on a site prompt from an older client. Under routine browsing,
-ordinary navigation, clicks, non-sensitive field filling and non-activation keys
-proceed without another site/action prompt, including an address typed for a
-site the run has not used yet. Steps in a named risk category (below), risky
+ordinary navigation, clicks, non-sensitive field filling, choosing an option in
+a list and non-activation keys proceed without another site/action prompt,
+including an address typed for a site the run has not used yet. Steps in a named risk category (below), risky
 addresses, form submissions, buttons whose label commits a change (such as
 Save, Speichern or Buchen, even when page script runs them without a form), and
 Enter/Space activation still require one-shot confirmation. The one form
@@ -522,7 +522,8 @@ search sends nothing a plain navigation to the same address could not, apart
 from the form's hidden values, which go back to the origin that wrote them; a
 site whose GET search has a side effect is the same accepted trade-off as a
 plain link under routine browsing (below). Menu items, tabs,
-tree items, disclosure and menu openers and navigation items are navigation: a
+tree items, disclosure and menu openers and navigation items are navigation, and
+lists (a select, combobox or listbox) and their options hold values: a
 commit word in their label (such as Neue Rechnung, Start or Neu) does not make
 them ask. A control of any kind whose label records, rebooks, files, issues,
 finalizes or pays (Festschreiben, Buchen, Umbuchen, Ausbuchen, Abbuchen,
@@ -571,6 +572,34 @@ never "Audio/Video"), is never a name or a tab title (`isPlaceholderName`). The 
 shared in-page rules (`controlNameRulesInPage` in
 `@instafy/browser-action-policy`), which the Desktop Personal Browser runs too.
 
+A list (a select, a combobox or a listbox) is named by its own label ("Start"),
+or by the option it shows when it has none, never by its options run together:
+the shared rules read what a select draws as the option it holds, and a label
+that holds the list is read without the list's options. Octo sets a select
+with `choose` and an option's label as the open list shows it (case, accents
+and spacing aside), never by clicking it; a list that holds several options at
+once is left to the person. An option the list does not have, or one the page
+turned off, chooses nothing, and the answer lists the options, except on a
+page that may show a secret. The option is chosen by its label and its place
+together, so a list that moves its options meanwhile chooses nothing. A choice
+is judged like a click on a radio button named by the list's own label and that
+option (`classifyStep("choose", target, { option })`): signing in with another
+account ("Sign in with GitHub") is refused, as a click on those words is, their
+risk words ask in their category ("Delete selected" in "Bulk actions"), in a
+credential context it may show a secret, an option that accepts in a cookie
+banner is refused, and a list whose own names, or whose form, name
+authentication, payment or identity details is refused, as typing there is.
+The list's other options never count. Nothing else asks under routine
+browsing: choosing does not send the form, and the form's own button sends it
+and asks. While the option changes, the page may post a form to its own site,
+as it may while text is typed (an older site that reloads a list when it
+changes), whether routine browsing took the choice or the person allowed it;
+a post anywhere else is stopped, as is any post from one of Octo's own tabs,
+which are for reading. The prompt names the option and the list by its own
+label: "Octo wants to choose “São Bento” in “Start” on transit.example.", or
+the option alone for a list with none. The Desktop Personal Browser's tools are
+its own list, which has no `choose`.
+
 A control with no accessible name or visible text is named from its own
 hints rather than its index: a tooltip attribute or described-by text, its
 image's alt text, svg title or an inner element's label or title, a generic
@@ -587,7 +616,7 @@ before it reaches a snapshot, a prompt or the action log.
 Every step's result carries `activity: {step, url, approval}` for the turn's plain-language
 activity line ([Chat activity line](Chat-Activity.md#browser-steps)): the step's kind
 (`navigate`, `open_tab`, `snapshot`, `search`, `submit` for typing that sends a form that is not
-a search, `click`, `type`, `press`, `scroll`, `tabs` or `status`), the masked address of the page
+a search, `click`, `type`, `choose`, `press`, `scroll`, `tabs` or `status`), the masked address of the page
 the step left the tab on, only on a site the run may read, and how it was allowed: `once` when
 the step waited on a prompt (its site's or its own) and the person allowed it, `routine` when
 routine browsing took an acting step without one, `free` for a site search, and nothing when the
@@ -1268,16 +1297,16 @@ The agent controls the page through one runtime-owned, required MCP server:
 ```text
 instafy_shared_browser.status
 instafy_shared_browser.snapshot
-instafy_shared_browser.navigate / click / type / press / scroll
+instafy_shared_browser.navigate / click / type / choose / press / scroll
 instafy_shared_browser.request_human_input
 ```
 
-It exposes only status, bounded snapshots, navigation, click, type, key press,
-and scroll operations. The runtime replaces every project-configured MCP server
+It exposes only status, bounded snapshots, navigation, click, type, choosing an
+option in a list, key press, and scroll operations. The runtime replaces every project-configured MCP server
 with this one bounded server for the turn, disables shell and patch tools, and
 connects to the runtime's loopback CDP endpoint internally. The model cannot
 author Playwright/CDP scripts or receive a raw debugger endpoint. Click, type,
-and every key press must carry both an index and the SHA-256 `snapshotId` from
+choose and every key press must carry both an index and the SHA-256 `snapshotId` from
 the observed page. The selected CDP target is part of that fingerprint, so even
 two tabs with identical URLs and DOM cannot replay each other's snapshots. The
 controller recomputes that fingerprint before it judges or asks about a step and
@@ -1338,7 +1367,8 @@ sits in (`header`, `nav`, `menu`, `dialog`, `tabs`, `search`, `footer` or
 `aside`), and a link on the page's own site is given as its path. `navigate`
 takes that path too and resolves it against the current page's site; a path
 that names another host is refused, and a blank page needs a full address. The
-text reads a closed select's chosen option as a word of its own. The control's
+text reads a closed select's chosen option as a word of its own, and the select
+says which option it holds in `chosen` (none on a secret screen). The control's
 box stays inside the controller for the visible cursor, and the MCP text result
 is compact JSON beside the same structured content.
 On the page the person chose, a page with sign-in fields (a password or
