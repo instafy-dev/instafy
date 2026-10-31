@@ -3413,7 +3413,7 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - Whenever a web page would help (to look something up, check a page, or walk the person through a provider's screens), open Instafy's browser yourself, without asking in chat first or waiting for them to mention a browser; this replaces any earlier instruction to offer it first.\n\
 - It opens public web addresses only; its safety policy blocks this space's own addresses (localhost, 127.0.0.1, private addresses, ports here). A site running in this space is shown to people with a private Studio preview card (`instafy preview open`), not this browser.\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
-- `continueBuilding: true` only when you build something from what it finds (a page, a map); for a question, its reply is the answer.\n\
+- `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
 - In `summary`, never say a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy: that step asks the person first.\n\
 - Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
@@ -14301,6 +14301,21 @@ fn has_successful_shared_browser_mcp_message(messages: &[JobMessage]) -> bool {
     )
 }
 
+/// A step the browser answered, also with an error: a `navigate`, `open_tab`, `click`, `type`
+/// or `press` call that ended (a site that did not answer, a page that changed, a step the
+/// policy refused). The turn has seen why it failed and said so; the browser retry would only
+/// send it back to the same address (a local test, Oct 31: a second 30-second wait on a site
+/// that was down, before the same answer). A call that could not reach the browser at all was
+/// answered by nothing, so its turn is still retried.
+fn has_answered_shared_browser_step(messages: &[JobMessage]) -> bool {
+    has_ended_bound_mcp_message(
+        messages,
+        "instafy_shared_browser",
+        &["navigate", "open_tab", "click", "type", "press"],
+        &["completed", "failed"],
+    )
+}
+
 fn shared_browser_execution_missing_after_attempt(
     explicit_shared_browser_execution: bool,
     messages: &[JobMessage],
@@ -14310,6 +14325,7 @@ fn shared_browser_execution_missing_after_attempt(
 ) -> bool {
     explicit_shared_browser_execution
         && terminal_consent_failure.is_none()
+        && !has_answered_shared_browser_step(messages)
         && (!has_successful_shared_browser_mcp_message(messages)
             || crate::shared_browser::execution_evidence_missing(
                 action_log_before,
@@ -14518,6 +14534,18 @@ fn has_successful_bound_mcp_message(
     expected_server: &str,
     accepted_tools: &[&str],
 ) -> bool {
+    has_ended_bound_mcp_message(messages, expected_server, accepted_tools, &["completed"])
+}
+
+/// Whether one of `accepted_tools` from `expected_server` ended with one of `statuses`. A call
+/// that could not reach its browser (`browserUnavailable`) ended without the browser's answer,
+/// so it counts for no status.
+fn has_ended_bound_mcp_message(
+    messages: &[JobMessage],
+    expected_server: &str,
+    accepted_tools: &[&str],
+    statuses: &[&str],
+) -> bool {
     messages.iter().any(|message| {
         if message
             .message_type
@@ -14533,10 +14561,14 @@ fn has_successful_bound_mcp_message(
             .get("server")
             .and_then(JsonValue::as_str)
             .is_some_and(|server| server.eq_ignore_ascii_case(expected_server));
-        let completed = metadata
+        let ended = metadata
             .get("status")
             .and_then(JsonValue::as_str)
-            .is_some_and(|status| status.eq_ignore_ascii_case("completed"));
+            .is_some_and(|status| {
+                statuses
+                    .iter()
+                    .any(|ended| status.eq_ignore_ascii_case(ended))
+            });
         let tool_matches = metadata
             .get("tool")
             .and_then(JsonValue::as_str)
@@ -14545,7 +14577,11 @@ fn has_successful_bound_mcp_message(
                     .iter()
                     .any(|accepted| tool.eq_ignore_ascii_case(accepted))
             });
-        server_matches && tool_matches && completed
+        let unreachable = metadata
+            .get("browserUnavailable")
+            .and_then(JsonValue::as_bool)
+            == Some(true);
+        server_matches && tool_matches && ended && !unreachable
     })
 }
 
@@ -18261,9 +18297,24 @@ fn resolve_exact_owned_write_scope_path(workspace_dir: &Path, raw: &str) -> Opti
     })
 }
 
-fn format_read_only_write_scope_guardrail_section() -> String {
-    "\nWrite-scope guardrail:\n- Mode: read_only\n- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n\n"
-        .to_string()
+/// What a read-only turn is told about files. A browser turn that hands back
+/// reads the pages its building turn needs, and that turn makes the page: told
+/// only that the job was read-only, under a card task that ended "then build a
+/// comparison page", a comparison's browser turn read one page and stopped
+/// "because this turn is read-only" (a local test, Oct 31).
+fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> &'static str {
+    if metadata.is_some_and(browser_hand_back::hands_back) {
+        "- This turn reads pages; the building turn after it makes the page.\n"
+    } else {
+        "- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n"
+    }
+}
+
+fn format_read_only_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> String {
+    format!(
+        "\nWrite-scope guardrail:\n- Mode: read_only\n{}\n",
+        read_only_write_scope_line(metadata)
+    )
 }
 
 fn format_team_planning_write_scope_guardrail_section(
@@ -18325,7 +18376,7 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
         && (mode == "read_only" || mode == "readonly")
         && !scope_value.is_object()
     {
-        return Some(format_read_only_write_scope_guardrail_section());
+        return Some(format_read_only_write_scope_guardrail_section(metadata));
     }
 
     let scope = scope_value.as_object()?;
@@ -18374,9 +18425,7 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
         let _ = writeln!(formatted, "- Rationale: {rationale}");
     }
     if mode.eq_ignore_ascii_case("read_only") || mode.eq_ignore_ascii_case("readonly") {
-        formatted.push_str(
-            "- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n",
-        );
+        formatted.push_str(read_only_write_scope_line(metadata));
     }
     if !owned_paths.is_empty() {
         let _ = writeln!(formatted, "- Owned paths: {}", owned_paths.join(", "));
@@ -19248,6 +19297,12 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             "terminalConsent": terminal_consent,
                             "event": event.clone(),
                         });
+                        // A call that could not reach Instafy's browser at all (the event
+                        // adapter keeps the browser's own mark): the browser answered no step.
+                        if item.get("browserUnavailable").and_then(JsonValue::as_bool) == Some(true)
+                        {
+                            metadata["browserUnavailable"] = JsonValue::Bool(true);
+                        }
                         // A Shared or Personal Browser step names its site from the browser's
                         // own result (`browserStep`, kept by the event adapter); any other tool
                         // call, or a browser step without those facts, is "Using the browser" /
@@ -24235,10 +24290,11 @@ mod tests {
         // Since Oct 28 it says which card continues building (`continueBuilding`).
         // Since Oct 29 it says never to ask the person to enable the browser.
         // Since Oct 31 it says a reply never says what the browser will submit,
-        // send or buy, which asks the person first.
+        // send or buy, which asks the person first, and that a card which
+        // continues building asks only what to find or check.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 530,
+            browser_choice <= 540,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
@@ -25269,6 +25325,17 @@ mod tests {
     fn a_card_reply_never_says_what_the_browser_will_submit_send_or_buy() {
         assert!(BROWSER_CHOICE_CONTRACT.contains(
             "or what the browser will submit, send or buy: that step asks the person first."
+        ));
+    }
+
+    /// A card that continues building asks the browser only what to find or
+    /// check; the building stays with `continueBuilding`. A task that ended
+    /// "then build a comparison page with sources" reached a browser turn that
+    /// cannot build, which read one page and stopped (a local test, Oct 31).
+    #[test]
+    fn a_card_that_continues_building_asks_only_what_to_find_or_check() {
+        assert!(BROWSER_CHOICE_CONTRACT.contains(
+            "- `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n"
         ));
     }
 
@@ -26541,6 +26608,92 @@ mod tests {
         ));
     }
 
+    /// A step the browser answered with an error is browser work: the turn has
+    /// seen why it failed and said so (a local test, Oct 31: a navigation whose
+    /// site did not answer was retried, and the retry loaded the same site for
+    /// another 30 seconds before the same answer). A read that failed, a call
+    /// that never ended, a call that could not reach the browser at all and
+    /// another server's step still get the retry.
+    #[test]
+    fn a_step_the_browser_answered_with_an_error_is_not_retried() {
+        let ended = |server: &str, tool: &str, status: &str| {
+            extract_codex_messages(&[json!({
+                "type": if status == "in_progress" { "item.started" } else { "item.completed" },
+                "item": {
+                    "id": format!("call-{server}-{tool}-{status}"),
+                    "type": "mcp_tool_call",
+                    "server": server,
+                    "tool": tool,
+                    "status": status,
+                }
+            })])
+        };
+        for tool in ["navigate", "open_tab", "click", "type", "press"] {
+            let messages = ended("instafy_shared_browser", tool, "failed");
+            assert!(
+                !has_successful_shared_browser_mcp_message(&messages),
+                "{tool}"
+            );
+            // A step the policy refused adds nothing to the action log; a load
+            // whose site did not answer added its navigation.
+            for after in [7, 9] {
+                assert!(
+                    !shared_browser_execution_missing_after_attempt(
+                        true,
+                        &messages,
+                        None,
+                        Some(7),
+                        after,
+                    ),
+                    "{tool} was retried"
+                );
+            }
+        }
+        for (server, tool, status) in [
+            ("instafy_shared_browser", "snapshot", "failed"),
+            ("instafy_shared_browser", "status", "failed"),
+            ("instafy_shared_browser", "navigate", "in_progress"),
+            ("another_server", "navigate", "failed"),
+        ] {
+            assert!(
+                shared_browser_execution_missing_after_attempt(
+                    true,
+                    &ended(server, tool, status),
+                    None,
+                    Some(7),
+                    9,
+                ),
+                "{server}/{tool} {status}"
+            );
+        }
+        // A step that could not reach the browser at all (one slow connect, a
+        // browser starting again) was answered by nothing: the turn still gets
+        // its retry, as before. A second one in a row ends the run instead.
+        for tool in ["navigate", "open_tab", "click", "type", "press"] {
+            let unreachable = extract_codex_messages(&[json!({
+                "type": "item.completed",
+                "item": {
+                    "id": format!("call-unreachable-{tool}"),
+                    "type": "mcp_tool_call",
+                    "server": "instafy_shared_browser",
+                    "tool": tool,
+                    "status": "failed",
+                    "browserUnavailable": true,
+                }
+            })]);
+            assert!(
+                shared_browser_execution_missing_after_attempt(
+                    true,
+                    &unreachable,
+                    None,
+                    Some(7),
+                    7,
+                ),
+                "{tool} that never reached the browser was not retried"
+            );
+        }
+    }
+
     #[test]
     fn shared_browser_retry_prompt_navigates_away_from_a_blank_page() {
         let retry = shared_browser_execution_retry_prompt("Open https://app.example.test");
@@ -26633,7 +26786,9 @@ mod tests {
                 ),
                 "{code} was misreported as missing Shared Browser execution"
             );
-            assert!(shared_browser_execution_missing_after_attempt(
+            // The browser answered the click (the person said no, or did not
+            // answer), so it is browser work even without its code.
+            assert!(!shared_browser_execution_missing_after_attempt(
                 true,
                 &messages,
                 None,
@@ -31744,6 +31899,49 @@ mod tests {
         assert!(section.contains("Mode: read_only"));
         assert!(section.contains("This job is read-only"));
         assert!(metadata_requests_read_only_workspace(Some(&metadata)));
+    }
+
+    /// A browser turn that hands back reads the pages its building turn needs.
+    /// Told only that the job was read-only, under a card task that ended "then
+    /// build a comparison page", a comparison's browser turn read one page and
+    /// stopped "because this turn is read-only" (a local test, Oct 31). It stays
+    /// read-only, and is told which turn makes the page. A question's browser
+    /// turn is told what any read-only job is told.
+    #[test]
+    fn a_browser_turn_that_hands_back_is_told_the_building_turn_makes_the_page() {
+        let browser_turn = |hands_back: bool, scope: &JsonValue| {
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserHandsBack": hands_back,
+                "writeScope": scope,
+            })
+        };
+        for scope in [
+            json!({"mode": "read_only", "rationale": "explicit write scope metadata"}),
+            json!("read_only"),
+        ] {
+            let metadata = browser_turn(true, &scope);
+            let section =
+                format_write_scope_guardrail_section(Some(&metadata)).expect("write scope section");
+            assert!(section.contains("- Mode: read_only\n"), "{section}");
+            assert!(
+                section.contains(
+                    "- This turn reads pages; the building turn after it makes the page.\n"
+                ),
+                "{section}"
+            );
+            assert!(!section.contains("This job is read-only"), "{section}");
+            assert!(metadata_requests_read_only_workspace(Some(&metadata)));
+
+            let question = browser_turn(false, &scope);
+            let section =
+                format_write_scope_guardrail_section(Some(&question)).expect("write scope section");
+            assert!(section.contains(
+                "- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n"
+            ), "{section}");
+            assert!(!section.contains("This turn reads pages"), "{section}");
+        }
     }
 
     #[test]

@@ -5065,6 +5065,24 @@ impl CodexEventStreamAdapter {
                 if let Some(terminal_consent) = terminal_consent {
                     item["terminalConsent"] = terminal_consent;
                 }
+                // A call that could not reach Instafy's browser at all: the browser answered
+                // none of its step (runtime-agent's retry of a turn without browser work).
+                if !tool_call.is_success()
+                    && tool_call
+                        .invocation
+                        .server
+                        .eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME)
+                    && tool_call
+                        .result
+                        .as_ref()
+                        .ok()
+                        .and_then(|result| result.structured_content.as_ref())
+                        .and_then(|payload| payload.get("browserUnavailable"))
+                        .and_then(JsonValue::as_bool)
+                        == Some(true)
+                {
+                    item["browserUnavailable"] = JsonValue::Bool(true);
+                }
                 vec![json!({
                     "type": "item.completed",
                     "item": item,
@@ -10084,6 +10102,59 @@ required = true
 
         let unrelated = adapter.collect(&event("untrusted_server"));
         assert!(unrelated[0]["item"].get("terminalConsent").is_none());
+    }
+
+    /// A Shared Browser call that could not reach the browser at all keeps the
+    /// browser server's mark, so the turn's retry still counts it as no browser
+    /// work; any other failed call, or another server's, carries none.
+    #[test]
+    fn codex_event_stream_marks_a_shared_browser_call_that_never_reached_the_browser() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let event = |server: &str, structured_content: Option<JsonValue>| Event {
+            id: "evt_mcp_end".to_string(),
+            msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                call_id: "call_unreachable".to_string(),
+                invocation: McpInvocation {
+                    server: server.to_string(),
+                    tool: "navigate".to_string(),
+                    arguments: None,
+                },
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                duration: Duration::from_millis(1),
+                result: Ok(CallToolResult {
+                    content: vec![json!({
+                        "type": "text",
+                        "text": "Shared Browser action failed",
+                    })],
+                    structured_content,
+                    is_error: Some(true),
+                    meta: None,
+                }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+
+        let unreachable = adapter.collect(&event(
+            "instafy_shared_browser",
+            Some(json!({ "browserUnavailable": true })),
+        ));
+        assert_eq!(unreachable[0]["item"]["status"], "failed");
+        assert_eq!(unreachable[0]["item"]["browserUnavailable"], true);
+
+        let answered = adapter.collect(&event("instafy_shared_browser", None));
+        assert!(answered[0]["item"].get("browserUnavailable").is_none());
+        let unrelated = adapter.collect(&event(
+            "untrusted_server",
+            Some(json!({ "browserUnavailable": true })),
+        ));
+        assert!(unrelated[0]["item"].get("browserUnavailable").is_none());
     }
 
     #[test]
