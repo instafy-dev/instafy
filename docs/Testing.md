@@ -1624,7 +1624,19 @@ label of a hidden submit button, a form that opens another window, a
 `<base href>` to another site, a keydown handler that moves the form after
 approval, submit buttons in a closed shadow tree or laid over a control, and
 controls nested inside a hostile submit button, and checks that no cross-site
-POST goes out without the prompts for that site. The Personal Browser lane runs
+POST goes out without the prompts for that site. Then a journey planner: under
+routine browsing it chooses a start and an end station by label with no prompt
+and nothing sent, the planner's own button asks once and the route is read; a
+list is named by its own label or the option it holds; a list the page posts
+when it changes reaches only the page's own site; and Ask mode asks for each
+choice, naming the option and the list, or the option alone for a list with no
+label. Last, other lists: one inside its own label is named by the label's own
+words, a car list with a "Swift" is no payment field, a list that holds several
+options is left to the person, an option past the first thousand is found, a
+risky choice the person allows and a choice in Octo's own tab send no form
+elsewhere, an option that signs in with another account is refused, an answer
+on a page that may show a secret names no option, and a list that moves its
+options while Octo chooses never gets another option. The Personal Browser lane runs
 the same table through the built page bridge in Electron, and a keydown handler
 that moves the form there too.
 

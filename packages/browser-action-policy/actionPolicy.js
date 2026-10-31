@@ -11,7 +11,8 @@
  *   commit   true on an ordinary "change" control whose label commits a
  *            change (Save, Speichern, Buchen), so a host that lets ordinary
  *            clicks run can still ask for it; never on menu items, tabs,
- *            tree items, disclosure or menu openers or navigation-area items
+ *            tree items, disclosure or menu openers, navigation-area items,
+ *            lists (a select, combobox or listbox) or their options
  *   consentRejection
  *            true on a cookie or consent banner's button that refuses
  *            consent ("Reject all", "Only necessary"): it shares nothing, so
@@ -21,6 +22,12 @@
  *            refused (`step_refused_consent`): accepting is the person's
  *            step. An accept limited to the necessary cookies or to a
  *            selection saves a refusal, so it asks with `commit` instead
+ *
+ * A "choose" step picks one option of a list by its label. It is judged like
+ * a click on a radio button named by the list's own label and that option:
+ * signing in with another account is refused, their risk words ask in their
+ * category, and nothing else asks more than an ordinary change. The list's
+ * other options never count.
  *
  * A free ("allow") verdict only ever comes from structure: tag, role, link
  * shape, form method, page area. Label words and icon names only add risk.
@@ -36,8 +43,10 @@
  *
  * controlNameRulesInPage() runs inside the page (a host sends its source):
  * the text a control shows, without what never draws (scripts, styles, an
- * svg's metadata, title or defs, hidden parts), and the short text right
- * beside an unnamed control. isPlaceholderName(text) is true for text that
+ * svg's metadata, title or defs, hidden parts), and for a list (a select or
+ * a listbox) its chosen option, never all of them; and the short text right
+ * beside an unnamed control. stepLabels names a list by its own label, or by
+ * that chosen option when it has none. isPlaceholderName(text) is true for text that
  * names nothing, such as a bare media type ("image/svg+xml") a page or an
  * svg's metadata leaves where a name would be.
  *
@@ -415,10 +424,16 @@
   /**
    * Visible text and accessible name, for dialogs that show both when they
    * differ. `shownText`, when the host reads it, is the text the control
-   * draws; `text` is every text inside it.
+   * draws; `text` is every text inside it. A list (a select, a combobox or a
+   * listbox) has one name: its own label ("Start"), or, with none, the option
+   * it shows. Its options are values, never its name.
    */
   function stepLabels(target) {
     const accessible = nameText(target.ariaLabel || "");
+    if (isList(target)) {
+      const name = accessible || nameText(target.shownText) || nameText(target.title);
+      return { accessible: name, visible: name, differ: false };
+    }
     const drawn = typeof target.shownText === "string" ? target.shownText : target.text;
     const visible = nameText(drawn) || nameText(target.value) || nameText(target.title);
     return { accessible, visible, differ: Boolean(accessible && visible && accessible !== visible) };
@@ -485,6 +500,12 @@
     const role = lower(target.role);
     const type = lower(target.type);
     return tag === "select" || VALUE_WIDGET_ROLES.has(role) || (tag === "input" && VALUE_INPUT_TYPES.has(type));
+  }
+
+  // A list a person picks an option from: a select, a combobox or a listbox.
+  function isList(target) {
+    const role = lower(target.role);
+    return lower(target.tag) === "select" || role === "combobox" || role === "listbox";
   }
 
   function siteOf(value) {
@@ -665,9 +686,26 @@
         return element.hasAttribute("hidden");
       }
     };
+    // What a list shows is the option it holds, never all of its options: a
+    // closed select draws only its chosen option, and a listbox's chosen
+    // options are the ones marked selected. Null for any other element.
+    const chosenTextOf = (element, max) => {
+      const role = String(element.getAttribute("role") || "").trim().toLowerCase().split(/\s+/)[0];
+      let chosen = null;
+      if (String(element.tagName).toUpperCase() === "SELECT") {
+        chosen = Array.from(element.selectedOptions || [], (option) => option.label || option.text || "");
+      } else if (role === "listbox") {
+        chosen = Array.from(element.querySelectorAll("[role='option'][aria-selected='true']"))
+          .slice(0, 8)
+          .map((option) => shownTextOf(option, max));
+      }
+      return chosen === null ? null : clean(chosen.filter((text) => clean(text, max)).join(", "), max);
+    };
     // The text `element` draws, in document order: what textContent holds,
     // less what never draws.
     const shownTextOf = (element, max = 2_000) => {
+      const chosen = isElement(element) ? chosenTextOf(element, max) : null;
+      if (chosen !== null) return chosen;
       let text = "";
       let visited = 0;
       const walk = (node, root) => {
@@ -1036,8 +1074,11 @@
     // it; its commit word is what marks it. Menu items, tabs, tree items,
     // disclosure and menu openers and navigation-area items are structure:
     // a commit word there ("Neue Rechnung", "Start", "Neu") only keeps them
-    // out of the free rules above, as it did before.
-    const structural = ["menuitem", "menuitemcheckbox", "menuitemradio", "treeitem", "tab"].includes(role) ||
+    // out of the free rules above, as it did before. So are lists and their
+    // options: a list labelled "Start" or an option named "Next week" holds a
+    // value, and its words name that value, not a step.
+    const structural = ["menuitem", "menuitemcheckbox", "menuitemradio", "treeitem", "tab", "option"].includes(role) ||
+      isList(target) ||
       tag === "summary" ||
       target.menuOpener === true ||
       areas.some((area) => NAVIGATION_AREAS.includes(area));
@@ -1069,6 +1110,35 @@
     const labels = cleanText(`${cleanText(target.formSubmitLabels)} ${cleanText(target.formActionText)}`);
     if ((target.contentEditable === true || tag === "textarea") && MESSAGE.test(labels)) return ask("message", "message field");
     return ask("change", "field");
+  }
+
+  // Choosing `ctx.option` in a list: like a click on a radio button named by
+  // the list's own label and that option. Signing in with another account
+  // ("Sign in with GitHub") is the person's step, as a click on the same words
+  // is. Their risk words ask in their category ("Payment method", "Delete
+  // selected"), in a credential context it may show a secret, and in a cookie
+  // banner an option that accepts is refused. Nothing else asks more than an
+  // ordinary change, and never as a commit: "Start", "Next week" and "Yes"
+  // name values. The list's other options never count. The host checks that
+  // the target is a list.
+  function classifyChoice(target, ctx) {
+    if (ctx && ctx.sensitive === true) return refuse("sensitive", "sensitive field");
+    const option = cleanText(ctx && ctx.option);
+    const label = cleanText([target.ariaLabel, target.title, option].filter(Boolean).join(" "));
+    // The option, or the list's own name followed by it ("Sign in with" and
+    // "GitHub").
+    if ([target.ariaLabel, target.title].some((name) => FEDERATED_SIGN_IN.test(cleanText(`${cleanText(name)} ${option}`)))) {
+      return refuse("sign_in", "sign-in with another account");
+    }
+    if (target.consentContext === true) {
+      const consent = consentStep({ text: option }, option);
+      if (consent === "accept") return refuse("consent", "accepting option in a consent banner");
+      if (consent === "limited") return { ...ask("change", "limited accept in a consent banner"), commit: true };
+    }
+    const named = categoryOfLabel(label);
+    if (named) return ask(named, "labelled list choice");
+    if (credentialish(target, label)) return ask("may_show_secret", "list in a credential context");
+    return ask("change", "choose an option");
   }
 
   // A field the person fills to sign in, which the agent never types into: a
@@ -1147,6 +1217,8 @@
         return classifyActivation(safeTarget, context);
       case "type":
         return classifyTyping(safeTarget, context);
+      case "choose":
+        return classifyChoice(safeTarget, context);
       case "submit":
         return classifySubmit(safeTarget, context);
       case "press":

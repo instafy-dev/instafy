@@ -5,6 +5,7 @@ export type RuntimeSharedBrowserApprovalOperation =
   | "navigate"
   | "click"
   | "type"
+  | "choose"
   | "form-submit"
   | "press-key"
   | "press-enter"
@@ -45,6 +46,7 @@ const APPROVAL_OPERATIONS = new Set<RuntimeSharedBrowserApprovalOperation>([
   "navigate",
   "click",
   "type",
+  "choose",
   "form-submit",
   "press-key",
   "press-enter",

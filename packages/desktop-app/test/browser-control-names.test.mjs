@@ -148,3 +148,40 @@ test("the Personal Browser reads an icon-only control's shown text without its s
   assert.equal(policy.stepLabels(descriptor).differ, false);
   assert.equal(policy.stepLabels(descriptor).accessible, "Pesquisa");
 });
+
+test("the Personal Browser names a list by its own label or the option it holds, never by its options", async () => {
+  const window = page(`
+    <label>Start <select name="start"><option>24 Agosto</option><option selected>Aliados</option><option>São Bento</option></select></label>
+    <select name="line"><option>All lines</option><option>Line A</option></select>`);
+  window.HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRect() {
+    return { x: 10, y: 10, width: 80, height: 30, top: 10, left: 10, right: 90, bottom: 40 };
+  };
+  window.document.elementFromPoint = () => window.document.body;
+  // Chromium's rendered text of a select lists every option, one per line.
+  Object.defineProperty(window.HTMLElement.prototype, "innerText", {
+    configurable: true,
+    get() {
+      return this.textContent;
+    },
+  });
+  if (typeof window.crypto?.getRandomValues !== "function") {
+    Object.defineProperty(window, "crypto", { configurable: true, value: webcrypto });
+  }
+  const webContents = {
+    async executeJavaScriptInIsolatedWorld(_worldId, scripts) {
+      return window.eval(scripts[0].code);
+    },
+  };
+  const snapshot = await bridge.snapshotPersonalBrowserPage(webContents);
+  const [start, line] = snapshot.interactive.map((entry) => entry.descriptor);
+  // A label that holds the list is read without the list's options.
+  assert.equal(start.ariaLabel, "Start");
+  assert.equal(start.shownText, "Aliados");
+  assert.equal(policy.stepLabels(start).accessible, "Start");
+  // A list with no label of its own is named by the option it holds.
+  assert.equal(line.ariaLabel, "");
+  assert.equal(line.shownText, "All lines");
+  assert.equal(policy.stepLabels(line).accessible, "All lines");
+  // Risk words still read every text inside a list.
+  assert.match(start.text, /São Bento/u);
+});

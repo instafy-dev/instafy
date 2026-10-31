@@ -85,6 +85,8 @@ const MAX_URL_CHARS: usize = 4_096;
 /// which the controller resolves it against, is known.
 const NAVIGATION_PATH_FORM_ORIGIN: &str = "https://path.invalid/";
 const MAX_TEXT_CHARS: usize = 16_384;
+/// The longest option label a `choose` step names (the controller's `MAX_OPTION_CHARS`).
+const MAX_OPTION_CHARS: usize = 500;
 const MAX_TARGET_INDEX: u64 = 199;
 const SNAPSHOT_ID_CHARS: usize = 64;
 const MAX_SCROLL_DELTA: f64 = 10_000.0;
@@ -2897,7 +2899,7 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("snapshot"),
             Cow::Borrowed(
-                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, and links on the page's own site are paths. With `tabId`, that tab becomes the one later tools act on first.",
+                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, a select's `chosen` is the option it holds, and links on the page's own site are paths. With `tabId`, that tab becomes the one later tools act on first.",
             ),
             schema(json!({
                 "type": "object",
@@ -2946,6 +2948,22 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
                     "submit": { "type": "boolean" }
                 },
                 "required": ["index", "snapshotId", "text"],
+                "additionalProperties": false
+            })),
+        ),
+        Tool::new(
+            Cow::Borrowed("choose"),
+            Cow::Borrowed(
+                "Choose one option of a select from a fresh snapshot by the option's label, as the open list shows it. Use it instead of clicking the list. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it. When no option has that label, the error lists the options.",
+            ),
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "index": target_properties["index"].clone(),
+                    "snapshotId": target_properties["snapshotId"].clone(),
+                    "option": { "type": "string", "minLength": 1, "maxLength": MAX_OPTION_CHARS }
+                },
+                "required": ["index", "snapshotId", "option"],
                 "additionalProperties": false
             })),
         ),
@@ -3041,6 +3059,7 @@ fn mcp_tool_request(name: &str, arguments: Option<JsonObject>) -> Result<SharedB
         "close_tab" => ("POST", "/v1/tabs/close", Some(JsonValue::Object(arguments))),
         "click" => ("POST", "/v1/click", Some(JsonValue::Object(arguments))),
         "type" => ("POST", "/v1/type", Some(JsonValue::Object(arguments))),
+        "choose" => ("POST", "/v1/choose", Some(JsonValue::Object(arguments))),
         "press" => ("POST", "/v1/press", Some(JsonValue::Object(arguments))),
         "scroll" => ("POST", "/v1/scroll", Some(JsonValue::Object(arguments))),
         "request_human_input" => (
@@ -3264,6 +3283,17 @@ fn validate_request_body(path: &str, body: &JsonValue) -> Result<()> {
                 bail!("Shared Browser type submit must be a boolean");
             }
         }
+        "/v1/choose" => {
+            require_only_keys(object, &["index", "snapshotId", "option"])?;
+            validate_target(object)?;
+            let option = object
+                .get("option")
+                .and_then(JsonValue::as_str)
+                .context("Shared Browser choose requires the option's label")?;
+            if option.trim().is_empty() || option.chars().count() > MAX_OPTION_CHARS {
+                bail!("Shared Browser choose requires the option's label");
+            }
+        }
         "/v1/press" => {
             require_only_keys(object, &["index", "snapshotId", "key"])?;
             validate_target(object)?;
@@ -3309,6 +3339,7 @@ fn normalize_allowed_path(method: &str, raw: &str) -> Result<String> {
                     | "/v1/navigate"
                     | "/v1/click"
                     | "/v1/type"
+                    | "/v1/choose"
                     | "/v1/press"
                     | "/v1/scroll"
                     | "/v1/request-human-input"
