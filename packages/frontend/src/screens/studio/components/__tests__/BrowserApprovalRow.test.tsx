@@ -219,9 +219,9 @@ describe("BrowserApprovalRow", () => {
 
   // A local test: Deny read "Saving…" while it sent the no.
   it.each([
-    ["deny", "Deny"],
-    ["allow", "Allow"],
-  ] as const)("keeps the pressed button's word under a spinner while the answer is sent (%s)", async (button, word) => {
+    ["deny", "Deny", "Allow"],
+    ["allow", "Allow", "Deny"],
+  ] as const)("keeps the pressed button's word under a spinner while the answer is sent (%s)", async (button, word, otherWord) => {
     const value = request();
     const state = withPending(value);
     await render(state);
@@ -229,10 +229,17 @@ describe("BrowserApprovalRow", () => {
     await render({ ...state, submitting: true });
     const pressed = byTestId(`browser-approval-${button}`)!;
     const other = byTestId(`browser-approval-${button === "deny" ? "allow" : "deny"}`)!;
+    // On screen, the shared look of a pressed button with no icon: the spinner
+    // over its own word, which keeps its place (and the button's name) faded
+    // out, so nothing moves and nothing reads "Saving…".
     expect(pressed.textContent).toBe(word);
     expect(pressed.hasAttribute("data-pending")).toBe(true);
     expect(pressed.querySelector('[role="progressbar"]')).not.toBeNull();
+    expect(pressed.querySelector(".opacity-0")?.textContent).toBe(word);
     expect(text()).not.toContain("Saving");
+    // The other button keeps its word in view and waits.
+    expect(other.textContent).toBe(otherWord);
+    expect(other.querySelector(".opacity-0")).toBeNull();
     expect(isDisabled(other)).toBe(true);
     expect(other.hasAttribute("data-pending")).toBe(false);
   });

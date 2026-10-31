@@ -123,7 +123,12 @@ bound to (`browserPageId`) and every tab the page list reports with
 kept, and an absent value is the person's tab. A compact **Octo is reading**
 row under the toolbar lists those tabs as host and title text (page titles are
 shown as text only, never followed; never a tab's number such as "Octo's tab 1",
-the label Octo's own prompts use) with one **Take over** button. A tab an
+the label Octo's own prompts use) with one **Take over** button. A tab still
+loading another address is named by the site it opens, with no title until that
+page arrives: DevTools' tab list gives the new address with the title of the page
+the tab is leaving (a blank tab's "about:blank"), so `GET /browser/pages` drops a
+title while the tab's history does not yet show the listed address, and reads each
+title back from the list's HTML escapes ("Laptops & PCs", not "Laptops &amp; PCs"). A tab an
 earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
 earlier tab" in the tab picker. Take over
 is the same action as the toolbar's take-over, without a confirmation: it

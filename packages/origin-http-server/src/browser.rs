@@ -1,5 +1,7 @@
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::SeekFrom;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -9,6 +11,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use futures_util::{SinkExt, StreamExt};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
@@ -1058,6 +1061,93 @@ fn browser_navigation_state(history: &BrowserNavigationHistory) -> BrowserNaviga
     }
 }
 
+/// The address a tab shows now: its history's current entry. While a tab
+/// loads another address, DevTools lists that one already, with the title of
+/// the page the tab still shows.
+async fn fetch_browser_shown_address(websocket_url: String) -> Option<String> {
+    let result = send_browser_cdp_command(
+        &websocket_url,
+        "Page.getNavigationHistory",
+        serde_json::json!({}),
+    )
+    .await
+    .ok()?;
+    let current = usize::try_from(result.get("currentIndex")?.as_i64()?).ok()?;
+    result
+        .get("entries")?
+        .as_array()?
+        .get(current)?
+        .get("url")?
+        .as_str()
+        .map(|url| url.trim().to_string())
+}
+
+/// What the tab list last said of a page, and whether its title was the
+/// listed address's own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ListedTitle {
+    url: String,
+    title: String,
+    own: bool,
+}
+
+/// What `/browser/pages` last listed, by page id (see [`pages_still_loading`]).
+static LISTED_TITLES: Lazy<Mutex<HashMap<String, ListedTitle>>> = Lazy::new(Default::default);
+
+/// The pages whose listed title is the page they are leaving. While a tab
+/// loads another address, DevTools lists that address with the title of the
+/// page the tab last showed (Chromium keeps a tab's title until the new page
+/// arrives): "metrodoporto.pt" next to the bookshop's title, for as long as
+/// the slow page takes. A page is still loading while its listed address is
+/// not the one it shows (`shown_address`, its history's current entry).
+///
+/// A page's history is read only when its address or title changed since the
+/// last list, or while it is still loading, so a steady list opens no socket.
+/// A page whose history cannot be read keeps its title.
+async fn pages_still_loading<F, Fut>(
+    targets: &[BrowserCdpTargetDescriptor],
+    listed: &Mutex<HashMap<String, ListedTitle>>,
+    shown_address: F,
+) -> HashSet<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
+    let known = listed.lock().map(|known| known.clone()).unwrap_or_default();
+    let mut seen = HashMap::new();
+    let mut loading = HashSet::new();
+    for target in targets {
+        let url = target.url.trim().to_string();
+        let title = target.title.clone();
+        let unchanged = known
+            .get(&target.id)
+            .is_some_and(|known| known.own && known.url == url && known.title == title);
+        let websocket_url = target
+            .websocket_debugger_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|websocket_url| !websocket_url.is_empty());
+        // A page with no title of its own to show has nothing to hide.
+        let own = if unchanged || normalize_browser_page_title(&title).is_none() {
+            true
+        } else if let Some(websocket_url) = websocket_url {
+            shown_address(websocket_url.to_string())
+                .await
+                .is_none_or(|shown| shown == url)
+        } else {
+            true
+        };
+        if !own {
+            loading.insert(target.id.clone());
+        }
+        seen.insert(target.id.clone(), ListedTitle { url, title, own });
+    }
+    if let Ok(mut known) = listed.lock() {
+        *known = seen;
+    }
+    loading
+}
+
 async fn fetch_browser_navigation_history(
     websocket_url: &str,
 ) -> Result<BrowserNavigationHistory, OriginError> {
@@ -1163,10 +1253,22 @@ async fn handle_browser_pages(
         .approval_bridge()
         .agent_tabs()
         .await;
+    // A page still loading another address is named by the site it opens:
+    // its listed title is the page it is leaving. Bounded like the focus scan.
+    let still_loading = timeout(
+        BROWSER_CDP_COMMAND_TIMEOUT,
+        pages_still_loading(&targets, &LISTED_TITLES, fetch_browser_shown_address),
+    )
+    .await
+    .unwrap_or_default();
     let pages = targets
         .into_iter()
         .map(|target| {
-            let title = normalize_browser_page_title(&target.title);
+            let title = if still_loading.contains(&target.id) {
+                None
+            } else {
+                normalize_browser_page_title(&target.title)
+            };
             let host = normalize_browser_page_host(&target.url);
             let has_history_state = history_target_id.as_deref() == Some(target.id.as_str());
             BrowserPageResponse {
@@ -2677,6 +2779,115 @@ mod tests {
         assert_eq!(
             derive_browser_page_label(title.as_deref(), "frame.example", "https://frame.example/"),
             "Modular Laptops & PCs"
+        );
+    }
+
+    // Checked against Chromium 149 with a local page that answers after 6 s:
+    // while a tab on one page loads another, DevTools lists the new address
+    // with the title of the page it is leaving ("metrodoporto.pt" next to the
+    // bookshop's title), and the tab's history still shows the page it is
+    // leaving, until the new page arrives.
+    #[tokio::test]
+    async fn a_page_still_loading_another_address_has_no_title_of_its_own() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const LELLO: &str = "https://www.livrarialello.pt/";
+        const METRO: &str = "https://www.metrodoporto.pt/";
+        const METRO_LINES: &str = "https://www.metrodoporto.pt/lines";
+        let listed = Mutex::new(HashMap::new());
+        let reads = AtomicUsize::new(0);
+        let shown_now = Mutex::new(Some(LELLO.to_string()));
+        let shown = |_websocket_url: String| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            let shown = shown_now.lock().unwrap().clone();
+            async move { shown }
+        };
+        let page = |url: &str, title: &str| {
+            vec![BrowserCdpTargetDescriptor {
+                id: "page".to_string(),
+                target_type: "page".to_string(),
+                title: title.to_string(),
+                url: url.to_string(),
+                websocket_debugger_url: Some("ws://127.0.0.1:9/devtools/page/page".to_string()),
+            }]
+        };
+        let loading = |targets: Vec<BrowserCdpTargetDescriptor>| {
+            let listed = &listed;
+            let shown = &shown;
+            async move {
+                pages_still_loading(&targets, listed, shown)
+                    .await
+                    .contains("page")
+            }
+        };
+
+        // On the bookshop's page: its own title. A steady list reads nothing.
+        assert!(!loading(page(LELLO, "Livraria Lello & Co")).await);
+        assert!(!loading(page(LELLO, "Livraria Lello & Co")).await);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        // Loading the metro's page: the title is the bookshop's, read again
+        // until the page arrives.
+        assert!(loading(page(METRO, "Livraria Lello & Co")).await);
+        assert!(loading(page(METRO, "Livraria Lello & Co")).await);
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+        *shown_now.lock().unwrap() = Some(METRO.to_string());
+        assert!(!loading(page(METRO, "Metro do Porto")).await);
+
+        // Another page of the same site with the same title: hidden while it
+        // loads, its own once it arrives.
+        assert!(loading(page(METRO_LINES, "Metro do Porto")).await);
+        *shown_now.lock().unwrap() = Some(METRO_LINES.to_string());
+        assert!(!loading(page(METRO_LINES, "Metro do Porto")).await);
+
+        // A page whose history cannot be read keeps its title; one with no
+        // title of its own is not read at all.
+        *shown_now.lock().unwrap() = None;
+        assert!(!loading(page(LELLO, "Livraria Lello & Co")).await);
+        let before = reads.load(Ordering::SeqCst);
+        assert!(!loading(page(METRO, "about:blank")).await);
+        assert!(!loading(page(METRO, "")).await);
+        assert_eq!(reads.load(Ordering::SeqCst), before);
+    }
+
+    // The tabs a list no longer has are forgotten, and each page is judged on
+    // its own.
+    #[tokio::test]
+    async fn each_page_of_the_list_is_judged_on_its_own() {
+        let listed = Mutex::new(HashMap::new());
+        let target = |id: &str, url: &str| BrowserCdpTargetDescriptor {
+            id: id.to_string(),
+            target_type: "page".to_string(),
+            title: "Visit Porto".to_string(),
+            url: url.to_string(),
+            websocket_debugger_url: Some(format!("ws://127.0.0.1:9/devtools/page/{id}")),
+        };
+        let shown = |websocket_url: String| async move {
+            // Tab "a" shows its address; tab "b" still shows the page it left.
+            Some(if websocket_url.ends_with("/a") {
+                "https://visitporto.travel/a".to_string()
+            } else {
+                "https://visitporto.travel/".to_string()
+            })
+        };
+        let loading = pages_still_loading(
+            &[
+                target("a", "https://visitporto.travel/a"),
+                target("b", "https://visitporto.travel/b"),
+            ],
+            &listed,
+            shown,
+        )
+        .await;
+        assert_eq!(loading, HashSet::from(["b".to_string()]));
+        pages_still_loading(
+            &[target("a", "https://visitporto.travel/a")],
+            &listed,
+            shown,
+        )
+        .await;
+        assert_eq!(
+            listed.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
+            vec!["a".to_string()]
         );
     }
 
