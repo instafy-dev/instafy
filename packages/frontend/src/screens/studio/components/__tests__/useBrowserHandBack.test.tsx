@@ -27,6 +27,7 @@ import {
   type BrowserHandBackInput,
 } from "../browserHandBack";
 import { useBrowserHandBack } from "../useBrowserHandBack";
+import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
 // The browser turn's reply and the hand-back's claim and prompt are the
 // controller's fixture: the same file its dispatch test and the runtime's
@@ -37,7 +38,7 @@ const fixtures = JSON.parse(readFileSync(
   resolve(repo, "packages/runtime-controller/src/browser_hand_back_fixtures.json"), "utf8",
 )) as {
   claimKey: string; recordKey: string; handBackPrompt: string; browserReply: string; postedReply: string;
-  findingLines: string[];
+  findingLines: string[]; letOctoContinuePrompt: string;
 };
 
 const CARD_JOB = "job-card";
@@ -101,6 +102,12 @@ describe("browser hand-back: when Studio sends one", () => {
     expect(BROWSER_HAND_BACK_CLAIM_KEY).toBe(fixtures.claimKey);
     expect(BROWSER_HAND_BACK_RECORD_KEY).toBe(fixtures.recordKey);
     expect(BROWSER_HAND_BACK_PROMPT).toBe(fixtures.handBackPrompt);
+  });
+
+  // A building turn reads a Let Octo continue press as one line; the
+  // controller and the runtime know the press by this same text.
+  it("sends the Let Octo continue words the controller and runtime know", () => {
+    expect(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT).toBe(fixtures.letOctoContinuePrompt);
   });
 
   it("hands back a finished browser turn that continued this page's card", () => {

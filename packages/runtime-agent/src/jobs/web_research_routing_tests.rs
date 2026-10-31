@@ -1265,8 +1265,8 @@ fn a_browser_turn_carries_the_browser_skill_whatever_its_words() {
     }
 }
 
-/// A fresh browser turn's prompt is rare: a card's browser turn resumes the thread of the chat whose turn posted the
-/// card. A turn on a restored thread loads no snapshot, and a browser turn gets no skill hints since it cannot read a
+/// A browser turn mostly resumes its chat's browser thread, so a fresh browser turn's prompt is rare. A turn on a
+/// restored thread loads no snapshot, and a browser turn gets no skill hints since it cannot read a
 /// file, so it is given the browser skill's "Finding a page" again, from the space's own copy, and only that section.
 /// An ordinary restored turn is not, and a space's copy without the section gives nothing.
 #[test]
@@ -1277,7 +1277,12 @@ fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
         let project_id = Uuid::new_v4();
         let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
         job.project_id = Some(project_id);
-        let state = json!({"defaultThreadId": "existing-thread", "threadId": "existing-thread", "historyReplayRequired": false});
+        let state = json!({
+            "defaultThreadId": "existing-thread",
+            "threadId": "existing-thread",
+            "sharedBrowserThreadId": "existing-browser-thread",
+            "historyReplayRequired": false,
+        });
         let request = "Now find how to get there by tram from Praça do Comércio.";
         let (prompt, _, metrics) = processor
             .build_prompt_with_text(
@@ -1346,7 +1351,12 @@ fn a_browser_turn_on_a_restored_thread_is_given_the_replies_guide() {
         let project_id = Uuid::new_v4();
         let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
         job.project_id = Some(project_id);
-        let state = json!({"defaultThreadId": "existing-thread", "threadId": "existing-thread", "historyReplayRequired": false});
+        let state = json!({
+            "defaultThreadId": "existing-thread",
+            "threadId": "existing-thread",
+            "sharedBrowserThreadId": "existing-browser-thread",
+            "historyReplayRequired": false,
+        });
         let (prompt, _, metrics) = processor
             .build_prompt_with_text(
                 &project_id,

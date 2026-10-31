@@ -265,6 +265,15 @@ const CODEX_STATE_DEFAULT_THREAD_RESTORE_SOURCE_KEY: &str = "defaultThreadRestor
 const CODEX_STATE_BROWSER_THREAD_RESTORE_SOURCE_KEY: &str = "browserThreadRestoreSource";
 const CODEX_STATE_LAST_RESTORE_SOURCE_KEY: &str = "lastThreadRestoreSource";
 const CODEX_STATE_HISTORY_REPLAY_REQUIRED_KEY: &str = "historyReplayRequired";
+const CODEX_STATE_DEFAULT_HISTORY_REPLAY_REQUIRED_KEY: &str = "defaultHistoryReplayRequired";
+const CODEX_STATE_SHARED_BROWSER_THREAD_ID_KEY: &str = "sharedBrowserThreadId";
+const CODEX_STATE_SHARED_BROWSER_ROLLOUT_PATH_KEY: &str = "sharedBrowserRolloutPath";
+const CODEX_STATE_SHARED_BROWSER_THREAD_RESTORE_FAILED_KEY: &str =
+    "sharedBrowserThreadRestoreFailed";
+const CODEX_STATE_SHARED_BROWSER_THREAD_RESTORE_SOURCE_KEY: &str =
+    "sharedBrowserThreadRestoreSource";
+const CODEX_STATE_SHARED_BROWSER_HISTORY_REPLAY_REQUIRED_KEY: &str =
+    "sharedBrowserHistoryReplayRequired";
 const CODEX_STATE_PROVIDER_KEY: &str = "provider";
 const CODEX_STATE_VERSION_KEY: &str = "version";
 const CODEX_REQUIRED_TOOL_METADATA_KEY: &str = "codex.required_tool";
@@ -882,6 +891,9 @@ pub struct CodexRunOptions {
     pub disable_final_output_json_schema: bool,
     pub final_output_schema: CodexFinalOutputSchema,
     pub expect_browser_session: bool,
+    /// Which of the chat's provider threads this run resumes and saves: a Shared Browser turn's
+    /// own, or the building thread every other turn shares.
+    pub thread_lane: ThreadLane,
     pub personal_browser: bool,
     pub shared_browser: bool,
     pub shared_browser_page_id: Option<String>,
@@ -1030,7 +1042,7 @@ impl CodexRunOptions {
         self.persist_conversation_thread
             && provider_thread_restorable_on_this_runtime(
                 self.provider_conversation_state.as_ref(),
-                self.expect_browser_session,
+                self.thread_lane,
             )
     }
 
@@ -1169,18 +1181,28 @@ impl<T> Drop for AbortTaskOnDrop<T> {
 pub(crate) struct RuntimeBaseInstructionsLane {
     pub(crate) mcp: bool,
     pub(crate) browser: bool,
+    /// A Shared Browser turn, which answers in the structured lane's JSON.
+    pub(crate) shared_browser: bool,
     pub(crate) plain_text_final: bool,
     pub(crate) plain_text_write: bool,
 }
 
 /// Ordinary lanes (and team plan workers) replace the model prompt with the
-/// runtime's own non-interactive automation contract; MCP and browser lanes keep
-/// the model's Codex prompt, minus its Codex-product sections. Either way the
-/// Codex policy appends Instafy's Destructive Actions section afterwards.
+/// runtime's own non-interactive automation contract, and so does a Shared
+/// Browser turn: its thread is its own, and it answers in the structured lane's
+/// JSON, as it did while it resumed the chat's ordinary thread and read that
+/// thread's base instructions. Other MCP and browser lanes keep the model's
+/// Codex prompt, minus its Codex-product sections. Either way the Codex policy
+/// appends Instafy's Destructive Actions section afterwards.
 pub(crate) fn runtime_base_instructions(
     lane: RuntimeBaseInstructionsLane,
     operator_override: Option<String>,
 ) -> Option<String> {
+    if lane.shared_browser {
+        return Some(
+            operator_override.unwrap_or_else(|| STRUCTURED_RUNTIME_BASE_INSTRUCTIONS.to_string()),
+        );
+    }
     if lane.mcp || lane.browser {
         return None;
     }
@@ -1715,6 +1737,7 @@ impl CodexClient {
             RuntimeBaseInstructionsLane {
                 mcp: mcp_mode,
                 browser: browser_mode,
+                shared_browser: shared_browser_mode,
                 plain_text_final: plain_text_final_mode,
                 plain_text_write: options.plain_text_write_mode,
             },
@@ -2106,14 +2129,15 @@ impl CodexClient {
             )),
         );
         attempt_threads.keep(&thread_manager);
-        let thread_mode_key = thread_mode_key(browser_mode);
+        let thread_lane = options.thread_lane;
+        let thread_mode_key = thread_lane.name();
         let mut active_thread_id = extract_thread_id_from_provider_state(
             options.provider_conversation_state.as_ref(),
-            thread_mode_key,
+            thread_lane,
         );
         let mut active_rollout_path = extract_rollout_path_from_provider_state(
             options.provider_conversation_state.as_ref(),
-            thread_mode_key,
+            thread_lane,
         );
         let mut thread_restore_failed = false;
         let mut thread_restore_source = if options.persist_conversation_thread {
@@ -2650,7 +2674,7 @@ impl CodexClient {
             active_thread_id.map(|thread_id| {
                 update_provider_conversation_state(
                     options.provider_conversation_state.as_ref(),
-                    thread_mode_key,
+                    thread_lane,
                     &thread_id,
                     active_rollout_path.as_deref(),
                     thread_restore_failed,
@@ -3013,30 +3037,124 @@ impl AttemptCodexThreads {
     }
 }
 
-fn thread_mode_key(browser_mode: bool) -> &'static str {
-    if browser_mode { "browser" } else { "default" }
+/// Which of a chat's two provider threads a turn resumes and saves. A Shared Browser turn runs
+/// on the chat's browser thread, every other turn that keeps a thread on its building thread.
+/// The two never share a thread: a building thread never holds a page a browser turn read, and
+/// a browser thread holds only its chat's browser turns, so a page's text reaches building work
+/// only as the browser's quoted findings (`jobs::browser_hand_back`). Each lane's requests then
+/// start the way its own earlier requests did (its instructions, tools and output format), so a
+/// switch between building and browsing no longer reads the other lane's turns again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThreadLane {
+    #[default]
+    Building,
+    SharedBrowser,
 }
+
+impl ThreadLane {
+    /// The lane's name in log lines and the thread-state artifact.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Building => "default",
+            Self::SharedBrowser => "shared_browser",
+        }
+    }
+
+    /// The state keys that name the lane's thread, in the order they are read. The building
+    /// lane also reads the legacy `threadId`, which every building save still writes.
+    pub(crate) fn thread_id_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Building => &[
+                CODEX_STATE_DEFAULT_THREAD_ID_KEY,
+                CODEX_STATE_LEGACY_THREAD_ID_KEY,
+            ],
+            Self::SharedBrowser => &[CODEX_STATE_SHARED_BROWSER_THREAD_ID_KEY],
+        }
+    }
+
+    pub(crate) fn rollout_path_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Building => &[
+                CODEX_STATE_DEFAULT_ROLLOUT_PATH_KEY,
+                CODEX_STATE_LEGACY_ROLLOUT_PATH_KEY,
+            ],
+            Self::SharedBrowser => &[CODEX_STATE_SHARED_BROWSER_ROLLOUT_PATH_KEY],
+        }
+    }
+
+    pub(crate) fn restore_failed_key(self) -> &'static str {
+        match self {
+            Self::Building => CODEX_STATE_DEFAULT_THREAD_RESTORE_FAILED_KEY,
+            Self::SharedBrowser => CODEX_STATE_SHARED_BROWSER_THREAD_RESTORE_FAILED_KEY,
+        }
+    }
+
+    fn restore_source_key(self) -> &'static str {
+        match self {
+            Self::Building => CODEX_STATE_DEFAULT_THREAD_RESTORE_SOURCE_KEY,
+            Self::SharedBrowser => CODEX_STATE_SHARED_BROWSER_THREAD_RESTORE_SOURCE_KEY,
+        }
+    }
+
+    /// The key that asks for this lane's history to be replayed into its thread.
+    pub(crate) fn history_replay_key(self) -> &'static str {
+        match self {
+            Self::Building => CODEX_STATE_DEFAULT_HISTORY_REPLAY_REQUIRED_KEY,
+            Self::SharedBrowser => CODEX_STATE_SHARED_BROWSER_HISTORY_REPLAY_REQUIRED_KEY,
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Self::Building => Self::SharedBrowser,
+            Self::SharedBrowser => Self::Building,
+        }
+    }
+}
+
+/// Whether a lane's thread needs the chat's history replayed into it: its own flag, or, in a
+/// state saved before each lane had one, the flag both lanes shared then.
+pub(crate) fn lane_history_replay_required(state: Option<&JsonValue>, lane: ThreadLane) -> bool {
+    let map = state.and_then(JsonValue::as_object);
+    let flag = |key: &str| {
+        map.and_then(|map| map.get(key))
+            .and_then(JsonValue::as_bool)
+    };
+    flag(lane.history_replay_key())
+        .or_else(|| flag(CODEX_STATE_HISTORY_REPLAY_REQUIRED_KEY))
+        .unwrap_or(false)
+}
+
+/// The state keys of the one thread both lanes of a chat used to share: a browser turn found no
+/// browser thread of its own, resumed the default thread through the legacy keys and saved that
+/// thread's id and rollout under these. No lane reads them any more
+/// (`jobs::split_shared_thread_state` retires such a thread).
+pub(crate) const RETIRED_BROWSER_THREAD_KEYS: [&str; 4] = [
+    CODEX_STATE_BROWSER_THREAD_ID_KEY,
+    CODEX_STATE_BROWSER_ROLLOUT_PATH_KEY,
+    CODEX_STATE_BROWSER_THREAD_RESTORE_FAILED_KEY,
+    CODEX_STATE_BROWSER_THREAD_RESTORE_SOURCE_KEY,
+];
+
+/// Every state key of the building lane's thread.
+pub(crate) const BUILDING_THREAD_KEYS: [&str; 7] = [
+    CODEX_STATE_DEFAULT_THREAD_ID_KEY,
+    CODEX_STATE_LEGACY_THREAD_ID_KEY,
+    CODEX_STATE_DEFAULT_ROLLOUT_PATH_KEY,
+    CODEX_STATE_LEGACY_ROLLOUT_PATH_KEY,
+    CODEX_STATE_DEFAULT_THREAD_RESTORE_FAILED_KEY,
+    CODEX_STATE_DEFAULT_THREAD_RESTORE_SOURCE_KEY,
+    CODEX_STATE_DEFAULT_HISTORY_REPLAY_REQUIRED_KEY,
+];
 
 fn extract_thread_id_from_provider_state(
     state: Option<&JsonValue>,
-    mode_key: &str,
+    lane: ThreadLane,
 ) -> Option<ThreadId> {
-    let candidates = if mode_key.eq_ignore_ascii_case("browser") {
-        [
-            CODEX_STATE_BROWSER_THREAD_ID_KEY,
-            CODEX_STATE_LEGACY_THREAD_ID_KEY,
-        ]
-    } else {
-        [
-            CODEX_STATE_DEFAULT_THREAD_ID_KEY,
-            CODEX_STATE_LEGACY_THREAD_ID_KEY,
-        ]
-    };
-
-    for key in candidates {
+    for key in lane.thread_id_keys() {
         if let Some(value) = state
             .and_then(JsonValue::as_object)
-            .and_then(|map| map.get(key))
+            .and_then(|map| map.get(*key))
             .and_then(JsonValue::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -3050,56 +3168,20 @@ fn extract_thread_id_from_provider_state(
         .and_then(JsonValue::as_object)
         .and_then(|map| map.get("codex"))
     {
-        return extract_thread_id_from_provider_state(Some(nested), mode_key);
+        return extract_thread_id_from_provider_state(Some(nested), lane);
     }
 
     None
 }
 
-fn rollout_path_state_key(mode_key: &str) -> &'static str {
-    if mode_key.eq_ignore_ascii_case("browser") {
-        CODEX_STATE_BROWSER_ROLLOUT_PATH_KEY
-    } else {
-        CODEX_STATE_DEFAULT_ROLLOUT_PATH_KEY
-    }
-}
-
-fn thread_restore_failed_state_key(mode_key: &str) -> &'static str {
-    if mode_key.eq_ignore_ascii_case("browser") {
-        CODEX_STATE_BROWSER_THREAD_RESTORE_FAILED_KEY
-    } else {
-        CODEX_STATE_DEFAULT_THREAD_RESTORE_FAILED_KEY
-    }
-}
-
-fn thread_restore_source_state_key(mode_key: &str) -> &'static str {
-    if mode_key.eq_ignore_ascii_case("browser") {
-        CODEX_STATE_BROWSER_THREAD_RESTORE_SOURCE_KEY
-    } else {
-        CODEX_STATE_DEFAULT_THREAD_RESTORE_SOURCE_KEY
-    }
-}
-
 fn extract_rollout_path_from_provider_state(
     state: Option<&JsonValue>,
-    mode_key: &str,
+    lane: ThreadLane,
 ) -> Option<PathBuf> {
-    let candidates = if mode_key.eq_ignore_ascii_case("browser") {
-        [
-            CODEX_STATE_BROWSER_ROLLOUT_PATH_KEY,
-            CODEX_STATE_LEGACY_ROLLOUT_PATH_KEY,
-        ]
-    } else {
-        [
-            CODEX_STATE_DEFAULT_ROLLOUT_PATH_KEY,
-            CODEX_STATE_LEGACY_ROLLOUT_PATH_KEY,
-        ]
-    };
-
-    for key in candidates {
+    for key in lane.rollout_path_keys() {
         if let Some(value) = state
             .and_then(JsonValue::as_object)
-            .and_then(|map| map.get(key))
+            .and_then(|map| map.get(*key))
             .and_then(JsonValue::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -3112,26 +3194,25 @@ fn extract_rollout_path_from_provider_state(
         .and_then(JsonValue::as_object)
         .and_then(|map| map.get("codex"))
     {
-        return extract_rollout_path_from_provider_state(Some(nested), mode_key);
+        return extract_rollout_path_from_provider_state(Some(nested), lane);
     }
 
     None
 }
 
-/// Whether a run on this runtime can resume the thread that a stored provider state names,
-/// using the same lookups as the restore in `execute_inner`. That restore first asks the
-/// thread manager, but the manager is built for each run, so a thread never stays in memory
-/// from one job to the next. What a later run can resume from is the rollout file, and only
-/// when it is on this runtime's disk. A runtime that restarted onto a fresh disk, or an id
+/// Whether a run on this runtime can resume the thread that a stored provider state names for
+/// the turn's lane, using the same lookups as the restore in `execute_inner`. That restore first
+/// asks the thread manager, but the manager is built for each run, so a thread never stays in
+/// memory from one job to the next. What a later run can resume from is the rollout file, and
+/// only when it is on this runtime's disk. A runtime that restarted onto a fresh disk, or an id
 /// Codex cannot parse, makes Codex start an empty thread instead. A rollout that exists but
 /// fails to load is still only discovered by the restore itself.
 pub(crate) fn provider_thread_restorable_on_this_runtime(
     state: Option<&JsonValue>,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> bool {
-    let mode_key = thread_mode_key(browser_mode);
-    extract_thread_id_from_provider_state(state, mode_key).is_some()
-        && extract_rollout_path_from_provider_state(state, mode_key)
+    extract_thread_id_from_provider_state(state, lane).is_some()
+        && extract_rollout_path_from_provider_state(state, lane)
             .is_some_and(|rollout_path| rollout_path.exists())
 }
 
@@ -3141,12 +3222,12 @@ pub(crate) fn provider_thread_restorable_on_this_runtime(
 #[cfg(test)]
 pub(crate) fn provider_state_after_fresh_thread(
     previous: Option<&JsonValue>,
-    browser_mode: bool,
+    lane: ThreadLane,
     rollout_path: &Path,
 ) -> JsonValue {
     update_provider_conversation_state(
         previous,
-        thread_mode_key(browser_mode),
+        lane,
         &ThreadId::new(),
         Some(rollout_path),
         true,
@@ -3155,22 +3236,20 @@ pub(crate) fn provider_state_after_fresh_thread(
 }
 
 /// The provider state `execute_inner` saves after resuming the thread the stored state names
-/// for this mode from its rollout, with the same lookups, including the browser mode's
-/// fallback to the legacy thread keys.
+/// for this lane from its rollout, with the same lookups.
 #[cfg(test)]
 pub(crate) fn provider_state_after_thread_resumed(
     previous: &JsonValue,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> JsonValue {
-    let mode_key = thread_mode_key(browser_mode);
-    let thread_id = extract_thread_id_from_provider_state(Some(previous), mode_key)
+    let thread_id = extract_thread_id_from_provider_state(Some(previous), lane)
         .expect("stored state names a thread");
-    let rollout_path = extract_rollout_path_from_provider_state(Some(previous), mode_key)
+    let rollout_path = extract_rollout_path_from_provider_state(Some(previous), lane)
         .expect("stored state names a rollout");
     assert!(rollout_path.exists(), "the resumed rollout is on this disk");
     update_provider_conversation_state(
         Some(previous),
-        mode_key,
+        lane,
         &thread_id,
         Some(&rollout_path),
         false,
@@ -3178,9 +3257,12 @@ pub(crate) fn provider_state_after_thread_resumed(
     )
 }
 
+/// The state a run saves: the previous state with this lane's thread, rollout and restore
+/// fields, so the other lane's ride along. Each lane's replay flag follows its own restore; the
+/// flag both lanes shared before is still written (either lane's) for runtimes that read only it.
 fn update_provider_conversation_state(
     previous: Option<&JsonValue>,
-    mode_key: &str,
+    lane: ThreadLane,
     thread_id: &ThreadId,
     rollout_path: Option<&Path>,
     thread_restore_failed: bool,
@@ -3200,43 +3282,23 @@ fn update_provider_conversation_state(
         JsonValue::Number(2_u64.into()),
     );
     let thread_id_value = JsonValue::String(thread_id.to_string());
-
-    if mode_key.eq_ignore_ascii_case("browser") {
-        map.insert(
-            CODEX_STATE_BROWSER_THREAD_ID_KEY.to_string(),
-            thread_id_value.clone(),
-        );
-    } else {
-        map.insert(
-            CODEX_STATE_DEFAULT_THREAD_ID_KEY.to_string(),
-            thread_id_value.clone(),
-        );
-        map.insert(
-            CODEX_STATE_LEGACY_THREAD_ID_KEY.to_string(),
-            thread_id_value,
-        );
+    for key in lane.thread_id_keys() {
+        map.insert((*key).to_string(), thread_id_value.clone());
     }
 
     if let Some(path) = rollout_path {
         let rollout_value = JsonValue::String(path.display().to_string());
-        map.insert(
-            rollout_path_state_key(mode_key).to_string(),
-            rollout_value.clone(),
-        );
-        if !mode_key.eq_ignore_ascii_case("browser") {
-            map.insert(
-                CODEX_STATE_LEGACY_ROLLOUT_PATH_KEY.to_string(),
-                rollout_value,
-            );
+        for key in lane.rollout_path_keys() {
+            map.insert((*key).to_string(), rollout_value.clone());
         }
     }
 
     map.insert(
-        thread_restore_failed_state_key(mode_key).to_string(),
+        lane.restore_failed_key().to_string(),
         JsonValue::Bool(thread_restore_failed),
     );
     map.insert(
-        thread_restore_source_state_key(mode_key).to_string(),
+        lane.restore_source_key().to_string(),
         JsonValue::String(thread_restore_source.to_string()),
     );
     map.insert(
@@ -3244,17 +3306,21 @@ fn update_provider_conversation_state(
         JsonValue::String(thread_restore_source.to_string()),
     );
 
-    let default_failed = map
-        .get(CODEX_STATE_DEFAULT_THREAD_RESTORE_FAILED_KEY)
-        .and_then(JsonValue::as_bool)
-        .unwrap_or(false);
-    let browser_failed = map
-        .get(CODEX_STATE_BROWSER_THREAD_RESTORE_FAILED_KEY)
-        .and_then(JsonValue::as_bool)
-        .unwrap_or(false);
+    let mut either_failed = false;
+    for each in [lane, lane.other()] {
+        let failed = map
+            .get(each.restore_failed_key())
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        map.insert(
+            each.history_replay_key().to_string(),
+            JsonValue::Bool(failed),
+        );
+        either_failed |= failed;
+    }
     map.insert(
         CODEX_STATE_HISTORY_REPLAY_REQUIRED_KEY.to_string(),
-        JsonValue::Bool(default_failed || browser_failed),
+        JsonValue::Bool(either_failed),
     );
 
     JsonValue::Object(map)
@@ -6868,6 +6934,44 @@ mod tests {
         assert!(PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS.contains("exec_command"));
     }
 
+    /// A Shared Browser turn runs on a thread of its own, and reads the structured lane's base
+    /// instructions there, as it did while it resumed the chat's ordinary thread: it answers in
+    /// that lane's JSON. Other browser and MCP turns keep the model's own prompt.
+    #[test]
+    fn a_shared_browser_turn_runs_on_the_structured_base_instructions() {
+        let shared = RuntimeBaseInstructionsLane {
+            mcp: true,
+            browser: true,
+            shared_browser: true,
+            ..RuntimeBaseInstructionsLane::default()
+        };
+        assert_eq!(
+            runtime_base_instructions(shared, None).as_deref(),
+            Some(STRUCTURED_RUNTIME_BASE_INSTRUCTIONS)
+        );
+        assert_eq!(
+            runtime_base_instructions(shared, Some("Operator's own.".to_string())).as_deref(),
+            Some("Operator's own.")
+        );
+        for other in [
+            RuntimeBaseInstructionsLane {
+                mcp: true,
+                browser: true,
+                ..RuntimeBaseInstructionsLane::default()
+            },
+            RuntimeBaseInstructionsLane {
+                browser: true,
+                ..RuntimeBaseInstructionsLane::default()
+            },
+            RuntimeBaseInstructionsLane {
+                mcp: true,
+                ..RuntimeBaseInstructionsLane::default()
+            },
+        ] {
+            assert_eq!(runtime_base_instructions(other, None), None, "{other:?}");
+        }
+    }
+
     #[test]
     fn plain_write_prompts_distinguish_conditional_review_from_required_edits() {
         let base = runtime_base_instructions(
@@ -9071,7 +9175,7 @@ mod tests {
                 input_images: images.clone(),
                 ..Default::default()
             })
-            // An ephemeral run, or a thread of the other mode, is a new thread too.
+            // An ephemeral run, or a thread of the other lane, is a new thread too.
             .chain([
                 CodexRunOptions {
                     provider_conversation_state: Some(thread.clone()),
@@ -9080,7 +9184,7 @@ mod tests {
                 },
                 CodexRunOptions {
                     persist_conversation_thread: true,
-                    expect_browser_session: true,
+                    thread_lane: ThreadLane::SharedBrowser,
                     provider_conversation_state: Some(thread.clone()),
                     input_images: images.clone(),
                     ..Default::default()
@@ -9440,20 +9544,20 @@ required = true
     }
 
     #[test]
-    fn extract_thread_id_from_provider_state_prefers_mode_specific_key() {
+    fn extract_thread_id_from_provider_state_reads_each_lanes_own_key() {
         let default_thread = ThreadId::new();
         let browser_thread = ThreadId::new();
         let state = json!({
             "defaultThreadId": default_thread.to_string(),
-            "browserThreadId": browser_thread.to_string(),
+            "sharedBrowserThreadId": browser_thread.to_string(),
             "threadId": default_thread.to_string(),
         });
 
         let resolved_browser =
-            extract_thread_id_from_provider_state(Some(&state), thread_mode_key(true))
+            extract_thread_id_from_provider_state(Some(&state), ThreadLane::SharedBrowser)
                 .expect("browser thread id should resolve");
         let resolved_default =
-            extract_thread_id_from_provider_state(Some(&state), thread_mode_key(false))
+            extract_thread_id_from_provider_state(Some(&state), ThreadLane::Building)
                 .expect("default thread id should resolve");
         assert_eq!(resolved_browser, browser_thread);
         assert_eq!(resolved_default, default_thread);
@@ -9465,23 +9569,66 @@ required = true
         let state = json!({
             "threadId": legacy_thread.to_string(),
         });
-        let resolved = extract_thread_id_from_provider_state(Some(&state), thread_mode_key(false))
+        let resolved = extract_thread_id_from_provider_state(Some(&state), ThreadLane::Building)
             .expect("legacy thread id should resolve");
         assert_eq!(resolved, legacy_thread);
     }
 
+    /// A browser turn used to find no browser thread of its own, resume the chat's default
+    /// thread through the legacy keys, and save that thread's id as `browserThreadId`. A
+    /// Shared Browser turn now reads only its own lane's keys: never the building thread,
+    /// and never a thread the old browser keys name.
     #[test]
-    fn extract_rollout_path_from_provider_state_prefers_mode_specific_key() {
+    fn a_browser_turn_never_resumes_the_building_thread() {
+        let default_thread = ThreadId::new().to_string();
+        let rollout = "/tmp/default-rollout.jsonl";
+        for state in [
+            json!({
+                "defaultThreadId": default_thread,
+                "threadId": default_thread,
+                "defaultRolloutPath": rollout,
+                "rolloutPath": rollout,
+            }),
+            json!({"threadId": default_thread, "rolloutPath": rollout}),
+            json!({
+                "defaultThreadId": default_thread,
+                "threadId": default_thread,
+                "defaultRolloutPath": rollout,
+                "rolloutPath": rollout,
+                "browserThreadId": default_thread,
+                "browserRolloutPath": rollout,
+            }),
+            json!({
+                "browserThreadId": ThreadId::new().to_string(),
+                "browserRolloutPath": "/tmp/browser-rollout.jsonl",
+            }),
+            json!({"codex": {"threadId": default_thread, "rolloutPath": rollout}}),
+        ] {
+            assert_eq!(
+                extract_thread_id_from_provider_state(Some(&state), ThreadLane::SharedBrowser),
+                None,
+                "{state}"
+            );
+            assert_eq!(
+                extract_rollout_path_from_provider_state(Some(&state), ThreadLane::SharedBrowser),
+                None,
+                "{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_rollout_path_from_provider_state_reads_each_lanes_own_key() {
         let state = json!({
             "defaultRolloutPath": "/tmp/default-rollout.jsonl",
-            "browserRolloutPath": "/tmp/browser-rollout.jsonl",
+            "sharedBrowserRolloutPath": "/tmp/browser-rollout.jsonl",
             "rolloutPath": "/tmp/legacy-rollout.jsonl",
         });
-        let browser = extract_rollout_path_from_provider_state(Some(&state), thread_mode_key(true))
-            .expect("browser rollout path should resolve");
-        let default =
-            extract_rollout_path_from_provider_state(Some(&state), thread_mode_key(false))
-                .expect("default rollout path should resolve");
+        let browser =
+            extract_rollout_path_from_provider_state(Some(&state), ThreadLane::SharedBrowser)
+                .expect("browser rollout path should resolve");
+        let default = extract_rollout_path_from_provider_state(Some(&state), ThreadLane::Building)
+            .expect("default rollout path should resolve");
         assert_eq!(browser, PathBuf::from("/tmp/browser-rollout.jsonl"));
         assert_eq!(default, PathBuf::from("/tmp/default-rollout.jsonl"));
     }
@@ -9497,32 +9644,46 @@ required = true
 
         assert!(provider_thread_restorable_on_this_runtime(
             Some(&state(&thread_id, &rollout)),
-            false
+            ThreadLane::Building
         ));
         assert!(!provider_thread_restorable_on_this_runtime(
             Some(&state(&thread_id, &missing)),
-            false
+            ThreadLane::Building
         ));
         // Codex cannot parse this id, so it starts a new thread even with a rollout.
         assert!(!provider_thread_restorable_on_this_runtime(
             Some(&state("restored-thread", &rollout)),
-            false
+            ThreadLane::Building
         ));
         assert!(!provider_thread_restorable_on_this_runtime(
             Some(&json!({"defaultThreadId": thread_id})),
-            false
+            ThreadLane::Building
         ));
         // A browser run resumes the browser thread, not the default one.
         assert!(!provider_thread_restorable_on_this_runtime(
             Some(&json!({
                 "defaultThreadId": thread_id,
                 "defaultRolloutPath": rollout.display().to_string(),
-                "browserThreadId": ThreadId::new().to_string(),
-                "browserRolloutPath": missing.display().to_string(),
+                "sharedBrowserThreadId": ThreadId::new().to_string(),
+                "sharedBrowserRolloutPath": missing.display().to_string(),
             })),
-            true
+            ThreadLane::SharedBrowser
         ));
-        assert!(!provider_thread_restorable_on_this_runtime(None, false));
+        assert!(!provider_thread_restorable_on_this_runtime(
+            Some(&state(&thread_id, &rollout)),
+            ThreadLane::SharedBrowser
+        ));
+        assert!(provider_thread_restorable_on_this_runtime(
+            Some(&json!({
+                "sharedBrowserThreadId": thread_id,
+                "sharedBrowserRolloutPath": rollout.display().to_string(),
+            })),
+            ThreadLane::SharedBrowser
+        ));
+        assert!(!provider_thread_restorable_on_this_runtime(
+            None,
+            ThreadLane::Building
+        ));
     }
 
     #[test]
@@ -9535,7 +9696,7 @@ required = true
         let thread_id = ThreadId::new();
         let updated = update_provider_conversation_state(
             Some(&existing),
-            thread_mode_key(false),
+            ThreadLane::Building,
             &thread_id,
             Some(Path::new("/tmp/default-rollout.jsonl")),
             false,
@@ -9552,7 +9713,88 @@ required = true
         assert_eq!(updated["defaultThreadRestoreFailed"], false);
         assert_eq!(updated["defaultThreadRestoreSource"], "memory");
         assert_eq!(updated["lastThreadRestoreSource"], "memory");
+        assert_eq!(updated["defaultHistoryReplayRequired"], false);
         assert_eq!(updated["historyReplayRequired"], false);
+    }
+
+    /// Each lane saves under its own keys and keeps the other lane's, and a lost thread asks
+    /// for a replay only in its own lane. The flag both lanes shared before is still written,
+    /// for a runtime that reads only it.
+    #[test]
+    fn a_lost_browser_thread_never_sets_the_building_replay() {
+        let building = ThreadId::new();
+        let browser = ThreadId::new();
+        let after_building = update_provider_conversation_state(
+            None,
+            ThreadLane::Building,
+            &building,
+            Some(Path::new("/tmp/building.jsonl")),
+            false,
+            "new",
+        );
+        let after_browser = update_provider_conversation_state(
+            Some(&after_building),
+            ThreadLane::SharedBrowser,
+            &browser,
+            Some(Path::new("/tmp/browser.jsonl")),
+            true,
+            "failed_new",
+        );
+        assert_eq!(after_browser["sharedBrowserThreadId"], browser.to_string());
+        assert_eq!(
+            after_browser["sharedBrowserRolloutPath"],
+            "/tmp/browser.jsonl"
+        );
+        assert_eq!(after_browser["sharedBrowserThreadRestoreFailed"], true);
+        assert_eq!(
+            after_browser["sharedBrowserThreadRestoreSource"],
+            "failed_new"
+        );
+        assert_eq!(after_browser["defaultThreadId"], building.to_string());
+        assert_eq!(after_browser["threadId"], building.to_string());
+        assert_eq!(after_browser["defaultRolloutPath"], "/tmp/building.jsonl");
+        assert!(after_browser.get("browserThreadId").is_none());
+        assert!(lane_history_replay_required(
+            Some(&after_browser),
+            ThreadLane::SharedBrowser
+        ));
+        assert!(!lane_history_replay_required(
+            Some(&after_browser),
+            ThreadLane::Building
+        ));
+        assert_eq!(after_browser["historyReplayRequired"], true);
+
+        // And the reverse: a lost building thread leaves the browser lane's flag alone.
+        let lost_building = update_provider_conversation_state(
+            Some(&json!({
+                "sharedBrowserThreadId": browser.to_string(),
+                "sharedBrowserThreadRestoreFailed": false,
+            })),
+            ThreadLane::Building,
+            &building,
+            Some(Path::new("/tmp/building.jsonl")),
+            true,
+            "failed_new",
+        );
+        assert!(lane_history_replay_required(
+            Some(&lost_building),
+            ThreadLane::Building
+        ));
+        assert!(!lane_history_replay_required(
+            Some(&lost_building),
+            ThreadLane::SharedBrowser
+        ));
+
+        // A state saved before each lane had its own flag still asks both.
+        let older = json!({"defaultThreadId": building.to_string(), "historyReplayRequired": true});
+        assert!(lane_history_replay_required(
+            Some(&older),
+            ThreadLane::Building
+        ));
+        assert!(lane_history_replay_required(
+            Some(&older),
+            ThreadLane::SharedBrowser
+        ));
     }
 
     #[test]

@@ -752,10 +752,13 @@ skill, whatever its words: the router loads a skill by the words of a request,
 and a browser turn's often has none of the skill's ("Now find how to get there
 by tram", or a task that names an address). On a fresh thread the skill loads
 first of the turn's skills, so the snapshot's budget never runs out before it.
-Most browser turns resume their chat's thread instead (a card's turn follows the
-turn that posted the card), which loads no snapshot, and a browser turn cannot
-read a skill file, so such a turn is given the skill's "Finding a page" section
-again, from the space's own copy. Codex withdraws the space's `AGENTS.md` from a
+Most browser turns resume their chat's browser thread instead, which loads no
+snapshot, and a browser turn cannot read a skill file, so such a turn is given
+the skill's "Finding a page" section again, from the space's own copy. A chat's
+browser thread holds only its browser turns: each starts from what it is asked
+(the person's words or a card's task), and a new or lost browser thread is
+given the chat's earlier browser turns, never Octo's building turns, files or
+command output. Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
 a fact no page read this turn states, and only steps the turn started). The
@@ -2081,8 +2084,9 @@ unless the policy is `"covered"`.
   stop for the person (`request_human_input`, or a step whose approval ended
   the turn), and no draft or manual browser step is pending. The controller
   checks the same chain under the conversation's dispatch fence and stamps
-  `browserHandBack` with the browser turn's final reply (at most 6,000
-  characters) and up to six labelled findings `{url, title, readAt, viewer}`
+  `browserHandBack` with what the browser turn was asked (at most 2,000
+  characters), its final reply (at most 6,000 characters) and up to six
+  labelled findings `{url, title, readAt, viewer}`
   (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
   `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
   counts as `blocked`): the address and title come from the reply's JSON
@@ -2101,7 +2105,16 @@ unless the policy is `"covered"`.
   whose findings name no page it read (`browser_hand_back_nothing_read`). The
   runtime shows that record to the building turn as quoted page data: not the
   person's words, not their consent, and no instruction; the turn says what it
-  built with it. It takes no
+  built with it. Any other browser turn reaches the building thread the same
+  way, as data: each building job's lease lists the chat's finished browser
+  turns since the building thread's last turn (`browser_turns_since`: the
+  newest six of this agent's, never the one a hand-back's record carries, and
+  whether older ones were left out), each with what it was asked and its reply
+  with its finding lines put back, bounded and labelled like the record. A building turn on a restored thread reads them
+  as one section of quoted page data; a new or lost building thread reads them
+  in its replay of the chat, each browser turn as one quoted block. A Let Octo
+  continue press reads as one line there, not as Studio's instructions in the
+  person's name. It takes no
   routing step: its route is decided (build in this chat), and the findings it
   builds from are in its own prompt, which a routing step never sees. So it
   runs in the lane a routed build runs in: it edits the space and ends in plain
