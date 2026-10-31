@@ -1,0 +1,37 @@
+<!doctype html>
+<!--
+  A hand-written project settings page that lists its deploy tokens in a
+  table, one row each. Nothing here was captured from a live site. The page's
+  title names no credential: only the section's heading does, and a long
+  note stands between it and the table, so no token sits near a credential
+  word. The test puts the rows in the table at run time, so no key is
+  committed.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Project settings · Forgeline</title>
+  </head>
+  <body>
+    <header>
+      <nav aria-label="Main">
+        <a href="/">Forgeline</a>
+        <a href="/projects/orbit">orbit</a>
+      </nav>
+    </header>
+    <main>
+      <h1>Project settings</h1>
+      <h2>Deploy tokens</h2>
+      <p>
+        Pipelines and machines outside this project use these to fetch its code and publish
+        its packages. Remove any that nobody uses any more, and make a new one for each machine.
+      </p>
+      <table>
+        <tr><th>Name</th><th>Value</th></tr>
+        {{ROWS}}
+      </table>
+      <h2>Members</h2>
+      <p>Three people.</p>
+    </main>
+  </body>
+</html>

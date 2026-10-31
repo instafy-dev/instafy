@@ -37,6 +37,12 @@ export declare const KNOWN_SECRET_PATTERN_SOURCES: readonly string[];
 export declare const CREDENTIAL_CONTEXT_SOURCE: string;
 export declare const PLACEHOLDER_SOURCE: string;
 export declare const MASKED_TEXT_SOURCE: string;
+/** A one-time, backup or recovery code of digits (flags "g"). */
+export declare const DIGIT_CODE_SOURCE: string;
+/** A word that names a code (flags "iu"); a digit code just after one is masked. */
+export declare const CODE_WORD_SOURCE: string;
+/** How many characters before a digit code may hold its code word. */
+export declare const CODE_NEARBY_CHARACTERS: number;
 export declare const SECRET_SCREEN_MESSAGE: string;
 
 export declare function hasCredentialWord(value: unknown): boolean;

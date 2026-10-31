@@ -42,13 +42,21 @@ type HumanInputControlsProps = Pick<BrowserHumanInputOptions, "humanControlConfi
   state: BrowserHumanInputState;
 };
 
+/**
+ * Whether this person can press Let Octo continue while a pause or take-over
+ * waits: they hold the browser, or nobody does and they may take it
+ * (`takeControl`), and the press then takes control first.
+ */
+export function canLetOctoContinue(props: HumanInputControlsProps): boolean {
+  return props.state.active && (props.humanControlConfirmed || Boolean(props.takeControl));
+}
+
 // Let Octo continue while a pause or take-over waits, else Take over (also
-// after a take-over that failed). Let Octo continue shows when the person
-// holds the browser, or when nobody does and they may take it
-// (`takeControl`): the press then takes control first.
+// after a take-over that failed). In the toolbar, where Octo still holds the
+// browser, it says Octo is stopping until the person may press.
 function HumanInputControls(props: HumanInputControlsProps & { takeOver?: ReactNode }) {
   const { state } = props;
-  const canPress = state.active && (props.humanControlConfirmed || Boolean(props.takeControl));
+  const canPress = canLetOctoContinue(props);
   const manualGuidance = state.request
     ? `Fill the ${state.request.fields.length === 1 ? "highlighted field" : `${state.request.fields.length} highlighted fields`} on the page, then let Octo continue. Keep passwords and codes out of chat.`
     : "You control the browser. Finish your changes on the page, then let Octo continue.";
@@ -75,10 +83,12 @@ function HumanInputControls(props: HumanInputControlsProps & { takeOver?: ReactN
 
 /**
  * Let Octo continue in a row of the view's own, outside its toolbar, which a
- * narrow view folds into a menu: the person finds it at every width.
+ * narrow view folds into a menu: the person finds it at every width. The row
+ * shows once Octo has let go, so when the person cannot press, someone else
+ * holds the browser (the toolbar says who) and it shows nothing.
  */
 export function BrowserHumanInputContinue(props: HumanInputControlsProps) {
-  return props.state.active ? <HumanInputControls {...props} /> : null;
+  return canLetOctoContinue(props) ? <HumanInputControls {...props} /> : null;
 }
 
 export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & BrowserHumanInputPresentation & { state: BrowserHumanInputState }) {

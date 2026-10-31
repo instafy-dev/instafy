@@ -148,13 +148,16 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
   }, [active, canContinue, humanControlConfirmed, identityKey, sendContinuation, takeControl]);
   const continueTaskRef = useRef(continueTask);
   continueTaskRef.current = continueTask;
+  const controlFree = Boolean(takeControl);
   useEffect(() => {
     if (continueOnControl === null || continueOnControl !== identityKey) return;
-    if (humanControlConfirmed) {
+    if (humanControlConfirmed || !controlFree) {
       setContinueOnControl(null);
       busyRef.current = false;
       setBusy(null);
-      void continueTaskRef.current();
+      // Control came: go on. Someone else took it first (or the browser went
+      // away): nothing to wait for, and the toolbar says who holds it now.
+      if (humanControlConfirmed) void continueTaskRef.current();
       return;
     }
     const timer = window.setTimeout(() => {
@@ -164,7 +167,7 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
       setError(CONTROL_ACTION_NO_ANSWER);
     }, CONTROL_ACTION_ANSWER_MS);
     return () => window.clearTimeout(timer);
-  }, [continueOnControl, humanControlConfirmed, identityKey]);
+  }, [continueOnControl, controlFree, humanControlConfirmed, identityKey]);
 
   const requestTakeOver = () => { if (canTakeOver && !busyRef.current) setTakeoverIdentity(identityKey); };
   const dismissTakeOver = () => { if (!busyRef.current) setTakeoverIdentity(null); };

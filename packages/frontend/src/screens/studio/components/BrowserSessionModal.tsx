@@ -42,7 +42,12 @@ import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { observeBrowserRfbFrames } from "./browserSessionRfbFrame";
 import { BrowserExpandButton } from "./BrowserExpandButton";
-import { BrowserHumanInputContinue, BrowserHumanInputStatus, sharedBrowserSignInNote } from "./BrowserHumanInputControls";
+import {
+  BrowserHumanInputContinue,
+  BrowserHumanInputStatus,
+  canLetOctoContinue,
+  sharedBrowserSignInNote,
+} from "./BrowserHumanInputControls";
 import { RemoteControlSurface } from "./RemoteControlSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { BrowserReadingRow } from "./BrowserReadingRow";
@@ -3470,6 +3475,7 @@ export function BrowserSessionModal({
   // sits in a row under the toolbar, which a narrow view folds into a menu.
   const humanInputRowShown = !shouldCollapseDocked && Boolean(humanInputIdentityKey) &&
     browserHumanInputState.active && effectiveAgentControlOwner === null;
+  const humanInputCanContinue = canLetOctoContinue({ ...browserHumanInputOptions, state: browserHumanInputState });
   const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
     ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} continueInRow={humanInputRowShown} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (
@@ -3583,7 +3589,7 @@ export function BrowserSessionModal({
           onTakeOver={() => void browserHumanInputState.takeOver()}
         />
       ) : null}
-      {humanInputRowShown ? (
+      {humanInputRowShown && (browserHumanInputState.request || humanInputCanContinue) ? (
         // Outside the toolbar, which a narrow view folds into a menu: the
         // person reads the note before they sign in, and lets Octo continue
         // from here at every width.

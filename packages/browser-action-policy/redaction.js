@@ -83,6 +83,9 @@
   // Barcode do not make an ordinary number a code.
   const codeWordPattern =
     /(?<![\p{L}])(?:codes?|kode|otp|passcode|pin|tan|2fa|mfa|(?:best(?:ä|ae)tigungs|sicherheits|verifizierungs|verifikations|zugangs|anmelde|freigabe|authentifizierungs|wiederherstellungs|einmal)code)(?![\p{L}])/iu;
+  // Kept as sources too, so the page's own checks count a code as this file does.
+  const DIGIT_CODE_SOURCE = digitCodePattern.source;
+  const CODE_WORD_SOURCE = codeWordPattern.source;
   const NEARBY_CHARACTERS = 120;
   const CODE_NEARBY_CHARACTERS = 32;
   // A credential word this close makes a UUID or long hex value a secret,
@@ -346,6 +349,9 @@
     CREDENTIAL_CONTEXT_SOURCE,
     PLACEHOLDER_SOURCE,
     MASKED_TEXT_SOURCE,
+    DIGIT_CODE_SOURCE,
+    CODE_WORD_SOURCE,
+    CODE_NEARBY_CHARACTERS,
     SECRET_SCREEN_MESSAGE,
     hasCredentialWord,
     looksRandom,

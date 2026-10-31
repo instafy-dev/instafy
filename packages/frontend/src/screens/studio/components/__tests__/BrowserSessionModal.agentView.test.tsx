@@ -83,6 +83,8 @@ const server = {
   sent: [] as string[],
   /** Whether the browser answers Take control (it gives control when nobody holds it). */
   answersTakeControl: true,
+  /** Another person is in the browser too. */
+  teammate: false,
 };
 class FakeSocket {
   static readonly CONNECTING = 0;
@@ -122,7 +124,10 @@ class FakeSocket {
   pushState() {
     if (this.readyState !== FakeSocket.OPEN) return;
     this.receive({ type: "state", revision: ++server.revision, requests: [], controlOwner: server.owner,
-      participants: [{ id: "self", displayName: "You", color: "#123456", pageId: null, cursor: null, canControl: true }] });
+      participants: [
+        { id: "self", displayName: "You", color: "#123456", pageId: null, cursor: null, canControl: true },
+        ...(server.teammate ? [{ id: "teammate", displayName: "Sam Lee", color: "#654321", pageId: null, cursor: null, canControl: true }] : []),
+      ] });
   }
   close() {
     if (this.readyState === FakeSocket.CLOSED) return;
@@ -208,7 +213,7 @@ describe("Shared Browser view while Octo drives", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
     server.owner = { kind: "human", participantId: "self" }; server.sockets = []; server.revision = 0;
-    server.sent = []; server.answersTakeControl = true;
+    server.sent = []; server.answersTakeControl = true; server.teammate = false;
     mocks.rfb.length = 0;
     mocks.actions = [];
     mocks.logRead = true;
@@ -501,5 +506,79 @@ describe("Shared Browser view while Octo drives", () => {
     await advance(100);
     expect(server.sent.filter((type) => type === "takeControl")).toHaveLength(2);
     expect(onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
+  });
+
+  // The row shows once Octo has let go of the browser, so "Stopping Octo…"
+  // is never true there: while a teammate holds the browser it said so, and
+  // a screen reader heard that input stays locked until Octo stops.
+  const saysOctoIsStopping = () => /Stopping Octo|Waiting for agent control to stop/.test(document.body.textContent ?? "");
+
+  it("says nothing untrue in the pause's row while a teammate holds the browser", async () => {
+    const onContinue = vi.fn(async () => true);
+    mocks.actions = pauseAfterCard();
+    server.teammate = true;
+    server.owner = { kind: "human", participantId: "teammate" };
+    for (const compact of [true, false]) {
+      await act(async () => root.render(<Host agentHolds={false} viewOnly compact={compact} pausedRunId={PAUSE_RUN} earlierRunIds={[CARD_RUN]} onContinue={onContinue} />));
+      await advance(1_000);
+      // The sign-in note stays; the teammate, who holds the browser, lets Octo continue.
+      expect(pauseRow()?.textContent).toBe("This space's browser keeps you signed in for its chats until you clear it.");
+      expect(continueButtons()).toHaveLength(0);
+      expect(saysOctoIsStopping()).toBe(false);
+    }
+    expect(server.sent).not.toContain("takeControl");
+    expect(onContinue).not.toHaveBeenCalled();
+  });
+
+  it("ends a press quietly when someone else takes the browser before it answers", async () => {
+    const onContinue = vi.fn(async () => true);
+    mocks.actions = pauseAfterCard();
+    server.teammate = true;
+    server.owner = null;
+    server.answersTakeControl = false;
+    await act(async () => root.render(<Host agentHolds={false} viewOnly compact pausedRunId={PAUSE_RUN} earlierRunIds={[CARD_RUN]} onContinue={onContinue} />));
+    await advance(1_000);
+    await act(async () => continueButtons()[0]!.click());
+    await advance(50);
+    expect(server.sent.filter((type) => type === "takeControl")).toHaveLength(1);
+    // The teammate's Take control reached the browser first.
+    server.owner = { kind: "human", participantId: "teammate" };
+    await act(async () => { for (const socket of server.sockets) socket.pushState(); });
+    await advance(CONTROL_ACTION_ANSWER_MS + 100);
+    expect(pauseRow()?.textContent).toBe("This space's browser keeps you signed in for its chats until you clear it.");
+    expect(pauseRow()?.querySelector('[role="alert"]')).toBeNull();
+    expect(continueButtons()).toHaveLength(0);
+    expect(saysOctoIsStopping()).toBe(false);
+    expect(onContinue).not.toHaveBeenCalled();
+    // The teammate lets go: a fresh Let Octo continue, with no notice left
+    // from the press the browser never answered.
+    server.owner = null;
+    await act(async () => { for (const socket of server.sockets) socket.pushState(); });
+    await advance(50);
+    expect(continueButtons()).toHaveLength(1);
+    expect(continueButtons()[0]!.textContent).toBe("Let Octo continue");
+    expect(continueButtons()[0]!.disabled).toBe(false);
+    expect(pauseRow()?.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("leaves no empty row after a take-over while a teammate holds the browser", async () => {
+    await octoTakesControl({ pausedRunId: PAUSE_RUN, agentPageIds: ["PAGE1"] });
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-reading-takeover"]')!.click());
+    await advance(50);
+    // Octo stopped, and a teammate took the browser before this person did.
+    server.teammate = true;
+    server.owner = { kind: "human", participantId: "teammate" };
+    await act(async () => {
+      for (const socket of server.sockets) socket.pushState();
+      root.render(<Host agentHolds={false} pausedRunId={PAUSE_RUN} agentPageIds={["PAGE1"]} />);
+    });
+    await advance(200);
+    expect(pauseRow()).toBeNull();
+    expect(saysOctoIsStopping()).toBe(false);
+    // Control comes back to this person: Let Octo continue, in its row.
+    server.owner = { kind: "human", participantId: "self" };
+    await act(async () => { for (const socket of server.sockets) socket.pushState(); });
+    await advance(200);
+    expect(pauseRow()?.contains(continueButtons()[0]!)).toBe(true);
   });
 });

@@ -1392,7 +1392,10 @@ Sign-ins on a browser host), beside **Let Octo continue**. The same row holds
 **Let Octo continue** after a take-over. When nobody holds the browser's
 control (after **Release control**, say), the press takes control first, as
 **Take control** does, and continues once the browser confirms it; without an
-answer within five seconds it says "The browser didn't answer. Try again." The
+answer within five seconds it says "The browser didn't answer. Try again." While
+someone else holds the browser, the row shows the note alone (the toolbar says
+who holds it), and a press whose control went to someone else first ends
+without a notice. The
 trusted helper highlights those exact editable elements with fixed amber outlines
 and emits bounded, page/initiator-bound guidance through the existing action feed.
 The guidance contains generic labels, not field values or page text. Highlights

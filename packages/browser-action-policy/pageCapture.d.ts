@@ -6,6 +6,9 @@ export type PagePolicySources = {
   credentialContext: string;
   placeholder: string;
   maskedText: string;
+  digitCode: string;
+  codeWord: string;
+  codeNearby: number;
 };
 
 /** One link of a sent page, masked. `linkOnly` names the link-only site it leads to. */

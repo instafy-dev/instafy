@@ -131,6 +131,85 @@ test("a page that shows a token under a credential heading is still a secret scr
   assert.ok(!JSON.stringify(view).includes(KEY));
 });
 
+// A page as the browser holds it after `setup(window)` runs (a component that
+// draws into its own shadow root, say): what Send page sends, and the page's
+// secret checks as an agent snapshot gets them.
+function captureAfter(html, setup, { url = "https://forge.example/settings" } = {}) {
+  const dom = new JSDOM(html, { url, runScripts: "outside-only" });
+  const { window } = dom;
+  setup?.(window);
+  window.eval(`(function (module, require) {\n${redactionSource}\n})(undefined, undefined);`);
+  window.eval(`(function (module, require) {\n${pageCaptureSource}\n})(undefined, undefined);`);
+  return {
+    page: JSON.parse(window.eval(
+      "JSON.stringify(globalThis.__instafyBrowserPageCapture.captureSentPage(globalThis.__instafyBrowserRedaction, { withhold: false }))",
+    )),
+    signals: JSON.parse(window.eval(
+      "JSON.stringify(globalThis.__instafyBrowserPageCapture.pageSecretSignalsInPage(globalThis.__instafyBrowserPageCapture.pagePolicySources(globalThis.__instafyBrowserRedaction)))",
+    )),
+  };
+}
+
+// Long enough that a value after it sits far from the heading's words, with no
+// word that names a credential or a key.
+const NOTE = "This note says who may use it, how long it lasts and what happens when it ends; it is long enough that nothing after it sits beside the heading's own words.";
+// Made-up values in the shape of keys, assembled at run time.
+const keyLike = (index) => join("Zq", String(index).padStart(2, "0"), "x8Lm5Rt7Vb1Nc4", "Kj6Hd9Fs3Gp0T");
+const longKey = Array.from({ length: 24 }, (_, index) => join(keyLike(index).slice(2), String(index % 10))).join("");
+
+test("a heading still names its own section's key, however the page holds it there", () => {
+  const withheld = (html, setup) => {
+    const { page, signals } = captureAfter(html, setup);
+    assert.equal(signals.credentialContext, true, html.slice(0, 160));
+    assert.equal(page.secretScreen, true, html.slice(0, 160));
+    assert.equal(page.text, "");
+    return page;
+  };
+  // Recovery codes in a list under their heading, one per line: a digit code
+  // after a code word counts as a key, as the text's mask counts it.
+  const codes = ["4821 7730", "4858 7639", "4895 7548", "4932 7457", "4969 7366", "5006 7275", "5043 7184", "5080 7093"];
+  const recovery = withheld(secretScreenFixture("recovery-codes.html")
+    .replace("{{CODES}}", codes.map((code) => `<li>${code}</li>`).join("\n        ")));
+  for (const code of codes) assert.ok(!JSON.stringify(recovery).includes(code), code);
+  // A table of many tokens, each in a cell of its own row.
+  const rows = Array.from({ length: 20 }, (_, index) => `<tr><td>deploy-${index}</td><td>${keyLike(index)}</td></tr>`);
+  const deploy = withheld(secretScreenFixture("deploy-tokens.html").replace("{{ROWS}}", rows.join("\n        ")));
+  assert.ok(!JSON.stringify(deploy).includes(keyLike(7)));
+  for (const html of [
+    // Text right inside the heading's own container, after it.
+    `<title>Settings</title><main><h2>Personal access token</h2><p>${NOTE}</p>${RANDOM_VALUE}</main>`,
+    // A card whose heading sits in the card's header row.
+    `<title>Settings</title><main><div class="card"><div class="card-header"><h3>Personal access token</h3></div><p>${NOTE}</p>${RANDOM_VALUE}</div></main>`,
+    // A long list of keys, one per item, run together in the page's markup.
+    `<title>Console</title><main><h2>API keys</h2><p>${NOTE}</p><ul>${Array.from({ length: 20 }, (_, index) => `<li>${keyLike(index)}</li>`).join("")}</ul></main>`,
+    // One key longer than a line.
+    `<title>Session</title><main><h2>Session token</h2><p>${NOTE}</p><code>${longKey}</code></main>`,
+    // One key split over inline elements, shown as one word.
+    `<title>Settings</title><main><h2>Personal access token</h2><p>${NOTE}</p><p><span>${RANDOM_VALUE.slice(0, 15)}</span><b>${RANDOM_VALUE.slice(15)}</b></p></main>`,
+  ]) {
+    withheld(html);
+  }
+  // A component that draws the key in its own shadow root, under the heading.
+  withheld(`<title>Settings</title><main><h2>API keys</h2><p>${NOTE}</p><key-box></key-box></main>`, (window) => {
+    window.document.querySelector("key-box").attachShadow({ mode: "open" }).innerHTML = `<code>${RANDOM_VALUE}</code> <button>Delete</button>`;
+  });
+  // A component whose shadow root holds the heading and slots the key in.
+  withheld(`<title>Settings</title><main><key-card><code>${RANDOM_VALUE}</code></key-card></main>`, (window) => {
+    window.document.querySelector("key-card").attachShadow({ mode: "open" }).innerHTML = `<h3>Personal access token</h3><p>${NOTE}</p><slot></slot>`;
+  });
+  // A control named by the key itself, such as a click-to-copy button: its
+  // name is part of what an agent snapshot reads.
+  const named = captureAfter(`<title>Settings</title><main><h2>Personal access token</h2><p>${NOTE}</p><button title="${RANDOM_VALUE}">Copy</button></main>`);
+  assert.equal(named.signals.credentialContext, true);
+  const redaction = require("@instafy/browser-action-policy/redaction");
+  const snapshot = redaction.redactPageObservation({
+    url: "https://forge.example/settings", title: "Settings", text: `Personal access token\n${NOTE}\nCopy`,
+    names: [RANDOM_VALUE], signals: named.signals,
+  });
+  assert.equal(snapshot.secretScreen, true);
+  assert.ok(!JSON.stringify(snapshot).includes(RANDOM_VALUE));
+});
+
 test("a key cut at the reading window never reaches the sent text, however masking moved it", () => {
   const redaction = require("@instafy/browser-action-policy/redaction");
   const { maskSentPage, MAX_SENT_PAGE_TEXT_CHARS, SENT_PAGE_MASK_MARGIN_CHARS } =

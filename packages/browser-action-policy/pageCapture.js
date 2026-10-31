@@ -50,6 +50,9 @@
       credentialContext: redaction.CREDENTIAL_CONTEXT_SOURCE,
       placeholder: redaction.PLACEHOLDER_SOURCE,
       maskedText: redaction.MASKED_TEXT_SOURCE,
+      digitCode: redaction.DIGIT_CODE_SOURCE,
+      codeWord: redaction.CODE_WORD_SOURCE,
+      codeNearby: redaction.CODE_NEARBY_CHARACTERS,
     };
   }
 
@@ -124,8 +127,8 @@
       // A credential word in the page's title or a dialog's label names the
       // whole page. In a heading (or a legend, table header, term or label)
       // it names that heading's own section only, so it counts when the
-      // section shows a value that looks like a key: a product page's
-      // "Secret scanning" card does not turn every random-looking name
+      // section shows what the text's mask counts as a key there: a product
+      // page's "Secret scanning" card does not turn every random-looking name
       // elsewhere on the page into a key.
       const labelTags = new Set(["H1", "H2", "H3", "H4", "H5", "H6", "LEGEND", "TH", "LABEL", "DT", "CAPTION"]);
       // A heading's section is what follows it up to the next heading of the
@@ -133,6 +136,12 @@
       // header, term or label is a heading of the lowest level.
       const sectionTags = new Set(["ARTICLE", "ASIDE", "NAV", "SECTION", "DIALOG", "FIELDSET", "FORM", "TABLE", "DL"]);
       const unreadTags = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
+      // The attributes a control's name or tooltip is read from: an agent
+      // snapshot names a control by them.
+      const nameAttributes = [
+        "aria-label", "title", "alt", "placeholder",
+        "data-tooltip", "data-tippy-content", "data-original-title", "data-bs-original-title",
+      ];
       const headingLevel = (element) => {
         if (elementAttribute(element, "role") === "heading") {
           const level = Number(elementAttribute(element, "aria-level"));
@@ -142,42 +151,100 @@
         return /^H[1-6]$/.test(tag) ? Number(tag.slice(1)) : 0;
       };
       const knownKeyPatterns = sources.secretPatterns.map((source) => new RegExp(source, "g"));
+      const digitCodePattern = new RegExp(sources.digitCode, "g");
+      const codeWordPattern = new RegExp(sources.codeWord, "iu");
       const runPattern = /[A-Za-z0-9][A-Za-z0-9_\-+/=~]{18,}[A-Za-z0-9=]/g;
-      // A key in a run of text, counted as redaction.js counts one in a
-      // credential context: a known key format that is not a placeholder, or
-      // a long random-looking run.
+      // A key in a run of text, as redaction.js's redactText counts one in a
+      // credential context: a known key format, a digit code just after a
+      // code word, or a random-looking run (a UUID or long hex value among
+      // them), and never a placeholder.
       const textShowsKey = (text) =>
         knownKeyPatterns.some((pattern) =>
           Array.from(text.matchAll(pattern), (match) => match[0]).some((match) => !placeholderPattern.test(match))) ||
-        (text.match(runPattern) || []).some((run) => looksLikeSecretValue(run, true));
+        Array.from(text.matchAll(digitCodePattern)).some((match) =>
+          codeWordPattern.test(text.slice(Math.max(0, match.index - sources.codeNearby), match.index))) ||
+        (text.match(runPattern) || []).some((run) => !placeholderPattern.test(run) &&
+          (uuidValuePattern.test(run) || hexValuePattern.test(run) ||
+            (run.length <= 4_096 && /[A-Za-z]/.test(run) && /[0-9]/.test(run) && valueEntropy(run) >= 3.5)));
+      // A node's parent, from a shadow root's top to its host.
+      const parentOf = (node) => (node.parentNode && node.parentNode.nodeType === 11 ? node.parentNode.host : node.parentNode) || null;
       // Sections share one reading budget. A section too long to read whole
       // counts, as any heading did before.
       let sectionBudget = 20_000;
       const sectionShowsKey = (label) => {
         const level = headingLevel(label) || 7;
-        let boundary = label.parentElement;
-        while (boundary && !sectionTags.has(elementTag(boundary)) && !isDialog(boundary)) boundary = boundary.parentElement;
-        let text = "";
-        for (let element = label; element; ) {
-          const elementLevel = element === label ? 0 : headingLevel(element);
-          if (elementLevel > 0 && elementLevel <= level) break;
-          sectionBudget -= 1;
-          if (sectionBudget < 0 || text.length > 200_000) return true;
-          const read = !unreadTags.has(elementTag(element));
-          if (read) {
-            for (const node of Array.from(element.childNodes || [])) {
-              if (node.nodeType === 3) text += node.nodeValue || "";
-            }
-            if (looksLikeSecretValue(readOnlyValue(element), true)) return true;
-          }
-          // The next element in document order, inside the boundary.
-          let next = read ? element.firstElementChild : null;
-          for (let current = element; !next && current && current !== boundary; current = current.parentElement) {
-            next = current.nextElementSibling;
-          }
-          element = next;
+        let boundary = parentOf(label);
+        while (boundary && boundary.nodeType === 1 && !sectionTags.has(elementTag(boundary)) && !isDialog(boundary)) {
+          boundary = parentOf(boundary);
         }
-        return textShowsKey(text);
+        // Everything the section shows, in document order: its text, open
+        // shadow roots and slotted nodes included, the names its controls
+        // carry and its read-only fields. `flow` reads the text as the page
+        // shows it, a line apart around each block and a tab before a table
+        // cell; `pieces` keeps every text and name apart as well, so neither
+        // a key run into its neighbours nor one split over inline elements
+        // goes unread.
+        let flow = "";
+        const pieces = [];
+        let size = 0;
+        let state = "reading";
+        const visit = (node, depth) => {
+          if (state !== "reading") return;
+          if (node.nodeType === 3) {
+            const value = node.nodeValue || "";
+            flow += value;
+            pieces.push(value);
+            size += value.length;
+            if (size > 200_000) state = "long";
+            return;
+          }
+          if (node.nodeType !== 1) return;
+          if (node !== label) {
+            const nodeLevel = headingLevel(node);
+            if (nodeLevel > 0 && nodeLevel <= level) {
+              state = "ended";
+              return;
+            }
+          }
+          sectionBudget -= 1;
+          if (sectionBudget < 0 || depth > 512) {
+            state = "long";
+            return;
+          }
+          const tag = elementTag(node);
+          if (unreadTags.has(tag)) return;
+          if (looksLikeSecretValue(readOnlyValue(node), true)) {
+            state = "key";
+            return;
+          }
+          for (const name of nameAttributes) {
+            const value = elementAttribute(node, name);
+            if (value) pieces.push(value);
+          }
+          let display = "block";
+          try {
+            display = String(getComputedStyle(node).display || "");
+          } catch (_) {
+            display = "block";
+          }
+          const block = tag === "BR" ||
+            (display !== "table-cell" && /^(?:block|flex|grid|list-item|table|flow-root|-webkit-box)/.test(display));
+          flow += block ? "\n" : display === "table-cell" ? "\t" : "";
+          const children = [
+            ...Array.from(node.shadowRoot ? node.shadowRoot.childNodes : []),
+            ...(tag === "SLOT" && typeof node.assignedNodes === "function" ? node.assignedNodes({ flatten: true }) : []),
+            ...Array.from(node.childNodes || []),
+          ];
+          for (const child of children) visit(child, depth + 1);
+          if (block) flow += "\n";
+        };
+        visit(label, 0);
+        // Then what follows it, up to the boundary.
+        for (let node = label; node && node !== boundary && state === "reading"; node = parentOf(node)) {
+          for (let next = node.nextSibling; next && state === "reading"; next = next.nextSibling) visit(next, 1);
+        }
+        if (state === "key" || state === "long") return true;
+        return textShowsKey(flow) || textShowsKey(pieces.join("\n"));
       };
       const credentialContext =
         credentialContextPattern.test(clean(document.title, 1_000)) ||
