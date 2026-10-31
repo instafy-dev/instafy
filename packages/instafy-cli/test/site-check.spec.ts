@@ -286,7 +286,10 @@ describe("preview check: pure parts", () => {
     const check = registerPreviewCheckCommand(preview);
     expect(check.name()).toBe("check");
     const flags = check.options.map((o) => o.long);
-    expect(flags).toEqual(["--port", "--path", "--phone", "--desktop", "--framed", "--workspace-playwright", "--out", "--timeout", "--wait", "--json"]);
+    expect(flags).toEqual(["--port", "--path", "--phone", "--desktop", "--framed", "--workspace-playwright", "--out", "--timeout", "--wait", "--json", "--picture-to"]);
+    // The runtime's own option is not offered in help.
+    expect(check.options.filter((o) => o.hidden).map((o) => o.long)).toEqual(["--picture-to"]);
+    expect(check.helpInformation()).not.toContain("--picture-to");
   });
 });
 
