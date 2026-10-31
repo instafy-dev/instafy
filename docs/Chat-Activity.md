@@ -314,9 +314,11 @@ activity line, to the person who started the run only, and the line says `Waitin
   {host}.` (or `to open {page}.` when the site prompt names the page it loads), `to open {page}.`,
   `to click “{label}” on {host}.`, `to type into “{label}” on {host}.`, `to send the form
   “{label}” on {host}.`, `to press Enter on “{label}” on {host}.` and `to press {key} on {host}.`,
-  plus `It goes to {site}.` when the step leaves the site (a link or a form to another site); a
-  step that stays on the site says nothing of where it goes. The browser view's sheet asks in this
-  same sentence. `{label}` is the runtime's
+  plus `It goes to {site}.` when the step sends a form to another site (a form, or a step whose
+  sentence lists what it sends), and `It may go to {site}.` for any other step bound to another
+  site: a link, or a choice in a form (Space on a toggle, a click on a box), which the runtime binds
+  to the form's address though only the page's own script would send it. A step that stays on the
+  site says nothing of where it goes. The browser view's sheet asks in this same sentence. `{label}` is the runtime's
   already-masked name of the control, cut at 40 characters: the page's own words appear only
   here, where the person needs them to decide, never in the line. The runtime leads its label
   with the step's category (`Delete, cancel or sign out: Delete account`); the row quotes only

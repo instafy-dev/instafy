@@ -461,11 +461,14 @@ about. A control whose name says more than the text it shows is named by that
 text first ("Agree and close" (also called "Agree and close: Agree to our data
 processing and close")), each name cut on its own. A step that sends a form
 lists the fields it sends, by the names the page gives them and never their
-values ("Sends: Customer name, Telephone, E-mail address"). A step that leaves
-the site says where it goes in the same sentence ("It goes to pay.example."),
-as the chat's prompt row does; a step that stays on the site the sentence
-names says nothing more of where it goes, whether it sends fields or not
-(Space on a toggle, a click on a box in a form). While the answer is sent,
+values ("Sends: Customer name, Telephone, E-mail address"). The sentence
+names the other site a step is bound to, as the chat's prompt row does: a
+step that sends a form there says it goes there ("It goes to
+pay.example."), and any other says it may ("It may go to carris.pt."): a
+link, or Space on a toggle or a click on a box in a form, which the runtime
+binds to the form's address though only the page's own script would send
+it. A step that stays on the site the sentence names says nothing more of
+where it goes, whether it sends fields or not. While the answer is sent,
 the pressed button keeps its word in view with a spinner beside it. It
 offers no routine-browsing choice: a
 run on the space's own machine starts in routine browsing, which is what

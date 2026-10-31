@@ -131,9 +131,10 @@ function controlWords(name: string): ControlWords {
  * the person needs them to decide. Each of its names is cut on its own, so
  * the text the control shows is never lost to a longer one, and a form step
  * says which fields it sends: "Sends: Customer name, Telephone." A step that
- * leaves the site says where it goes ("It goes to pay.example."); one that
- * stays on it does not, since the sentence already names the site. The chat's
- * row and the browser view's sheet both ask in this one sentence.
+ * sends a form to another site says where it goes ("It goes to
+ * pay.example."), and any other step bound to another site where it may go
+ * ("It may go to carris.pt."); one that stays on the site says neither. The
+ * chat's row and the browser view's sheet both ask in this one sentence.
  */
 export function browserApprovalSentence(agent: string, request: BrowserApprovalWordsRequest): string {
   // The step's category leads the runtime's label ("Delete, cancel or sign
@@ -154,9 +155,19 @@ function stepSentence(agent: string, request: BrowserApprovalWordsRequest, name:
   const quoted = label ? ` “${label}”${other ? ` (also called “${other}”)` : ""}` : "";
   // The exact page a site prompt or a navigation will load, when the runtime names it.
   const page = sharedBrowserApprovalTargetAddress(request);
-  // Where a step on the page goes (a link's or a form's address), named only
-  // when it is another site: on the page's own site the sentence has said it.
-  const elsewhere = destination && destination !== site ? ` It goes to ${destination}.` : "";
+  // The other site a step is bound to, named whenever it is not the page's
+  // own (the sentence has said that one), so the person always reads the
+  // site they allow. A step that sends a form goes there. Any other may: a
+  // link does, but the runtime also binds a choice in a form (Space on a
+  // toggle, a click on a box) to the form's address, which only the page's
+  // own script would send.
+  const sendsForm = request.operation === "form-submit" || words.sends !== "";
+  const elsewhere =
+    destination && destination !== site
+      ? sendsForm
+        ? ` It goes to ${destination}.`
+        : ` It may go to ${destination}.`
+      : "";
   switch (request.operation) {
     case "approve-origin":
       return page ? `${agent} wants to open ${page}.` : `${agent} wants to use ${destination ?? site}.`;

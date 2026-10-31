@@ -169,12 +169,23 @@ describe("BrowserApprovalRow", () => {
       "Octo wants to press Enter on “Places” on visitlisboa.com.", "Allow"],
     [{ operation: "press-key", display: { label: "Press Tab on Places", destinationOrigin: null } },
       "Octo wants to press Tab on Places on visitlisboa.com.", "Allow"],
-    // Where a step goes is named only when it leaves the site, in the same
-    // sentence the browser view's sheet shows.
-    [{ operation: "click", destinationOrigin: "https://www.carris.pt", display: { label: "Timetables", destinationOrigin: "https://www.carris.pt" } },
-      "Octo wants to click “Timetables” on visitlisboa.com. It goes to carris.pt.", "Allow"],
+    // The other site a step is bound to is named in the same sentence the
+    // browser view's sheet shows: where a form that sends goes.
+    [{ operation: "click", destinationOrigin: "https://pay.example", display: { label: "Purchase or payment: Pay \u00b7 Sends: Card name", destinationOrigin: "https://pay.example" } },
+      "Octo wants to click “Pay” on visitlisboa.com. It goes to pay.example. Sends: Card name. It may buy something or start a payment.", "Allow"],
     [{ operation: "press-enter", display: { label: "Change something: Submit order \u00b7 Sends: Customer name", destinationOrigin: "https://www.visitlisboa.com" } },
       "Octo wants to press Enter on “Submit order” on visitlisboa.com. Sends: Customer name.", "Allow"],
+    // A link to another site sends nothing, and may go there.
+    [{ operation: "click", destinationOrigin: "https://www.carris.pt", display: { label: "Timetables", destinationOrigin: "https://www.carris.pt" } },
+      "Octo wants to click “Timetables” on visitlisboa.com. It may go to carris.pt.", "Allow"],
+    // A local test: Space on a toggle and a click on a choice sat in a form
+    // whose address is on another site, and the runtime binds such a step to
+    // that address though it sends nothing: the row said "It goes to
+    // orders.example." for both.
+    [{ operation: "press-space", destinationOrigin: "https://orders.example", display: { label: "Change something: Disagree", destinationOrigin: "https://orders.example" } },
+      "Octo wants to press Space on “Disagree” on visitlisboa.com. It may go to orders.example.", "Allow"],
+    [{ operation: "click", destinationOrigin: "https://orders.example", display: { label: "Change something: Medium", destinationOrigin: "https://orders.example" } },
+      "Octo wants to click “Medium” on visitlisboa.com. It may go to orders.example.", "Allow"],
   ] as const)("says what it waits for in one sentence (%#)", async (overrides, sentence, allow) => {
     const value = request(overrides as Partial<RuntimeSharedBrowserApprovalRequest>);
     expect(browserApprovalSentence("Octo", value)).toBe(sentence);

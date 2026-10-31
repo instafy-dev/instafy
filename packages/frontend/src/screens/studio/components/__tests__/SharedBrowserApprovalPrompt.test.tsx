@@ -320,7 +320,7 @@ describe("SharedBrowserApprovalPrompt", () => {
 
   // A local test: the browser view's sheet said "Goes to httpbin.org" under
   // a submit on httpbin.org, and the same prompt in the chat did not.
-  it("says where a step goes only when it leaves the site, in the sentence the chat's row uses", async () => {
+  it("names the other site a step is bound to in the sentence the chat's row uses, and says it goes there only for a form", async () => {
     // The runtime binds Enter or Space, and a click on a box inside a form,
     // to the page's own address even when the step sends nothing: "Goes to"
     // under Space on a banner's "Disagree" said something would happen that
@@ -355,16 +355,30 @@ describe("SharedBrowserApprovalPrompt", () => {
     await show(step("press-enter", "Change something: Submit order · Sends: Customer name", "https://example.test"));
     expect(title()).toBe("Octo wants to press Enter on “Submit order” on example.test. Sends: Customer name.");
     expect(goesTo()).toBeNull();
-    // A step that leaves the site says where it goes, in its one sentence,
-    // which the chat's row shows too.
-    const elsewhere = step("click", "Opening hours", "https://other.example");
+    // A step that sends a form to another site says where it goes, in its one
+    // sentence, which the chat's row shows too.
+    const elsewhere = step("press-enter", "Change something: Submit order · Sends: Customer name", "https://pay.example");
     await show(elsewhere);
-    expect(title()).toBe("Octo wants to click “Opening hours” on example.test. It goes to other.example.");
+    expect(title()).toBe("Octo wants to press Enter on “Submit order” on example.test. It goes to pay.example. Sends: Customer name.");
     expect(title()).toBe(browserApprovalSentence("Octo", elsewhere));
     expect(goesTo()).toBeNull();
-    await show(step("press-enter", "Change something: Submit order · Sends: Customer name", "https://pay.example"));
-    expect(title()).toBe("Octo wants to press Enter on “Submit order” on example.test. It goes to pay.example. Sends: Customer name.");
     expect(container.textContent).not.toContain("Goes to");
+
+    // A local test: a step that sends nothing in a form whose address is on
+    // another site is bound to that address all the same, and the sentence
+    // said "It goes to orders.example." in the sheet and in the chat's row.
+    // It may go there (the page's script may send the form); so may a link.
+    for (const [operation, label, sentence] of [
+      ["press-space", "Change something: Disagree", "Octo wants to press Space on “Disagree” on example.test. It may go to orders.example."],
+      ["click", "Change something: Medium", "Octo wants to click “Medium” on example.test. It may go to orders.example."],
+      ["click", "Opening hours", "Octo wants to click “Opening hours” on example.test. It may go to orders.example."],
+    ] as const) {
+      const nothingSent = step(operation, label, "https://orders.example");
+      await show(nothingSent);
+      expect(title()).toBe(sentence);
+      expect(browserApprovalSentence("Octo", nothingSent)).toBe(sentence);
+      expect(container.textContent).not.toContain("It goes to");
+    }
   });
 
   it("keeps both decisions disabled while a decision is being written", async () => {
