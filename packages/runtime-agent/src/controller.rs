@@ -1485,6 +1485,76 @@ impl ControllerClient {
         Ok(())
     }
 
+    /// Sends a picture of a preview this runtime serves to the preview's card
+    /// (`PUT /projects/:id/previews/:previewId/thumbnail`), with this
+    /// runtime's own credential: the controller takes a preview's picture from
+    /// the runtime and lease that serve it only, and this credential still
+    /// works after the turn that changed the site has ended. A JPEG from
+    /// `instafy preview check`; the controller checks its bytes again and
+    /// removes any metadata.
+    pub async fn upload_preview_picture(
+        &self,
+        project_id: Uuid,
+        preview_id: &str,
+        image: &[u8],
+        description: Option<&str>,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        if !crate::jobs::preview_pictures::is_preview_id(preview_id) {
+            return Err(anyhow!("not a preview id"));
+        }
+        if !image.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            return Err(anyhow!("a preview's picture from a check is a JPEG"));
+        }
+        let url = self.base_url.join(&format!(
+            "/projects/{project_id}/previews/{preview_id}/thumbnail"
+        ))?;
+        let mut body = json!({
+            "image": base64::engine::general_purpose::STANDARD.encode(image),
+            "contentType": "image/jpeg",
+            "source": "capture",
+        });
+        if let Some(description) = description {
+            body["description"] = JsonValue::String(description.to_string());
+        }
+        let send = |token: String| {
+            self.http
+                .put(url.clone())
+                .bearer_auth(token)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+        };
+        let token = self.read_runtime_access_token().ok_or_else(|| {
+            anyhow!("this runtime has no credential to send a preview's picture with")
+        })?;
+        let mut response = send(token)
+            .await
+            .context("preview picture request failed")?;
+        // A renewal may have landed since: one retry with the fresh
+        // credential, never a loop.
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) && self.refresh_credentials_once().await
+            && let Some(token) = self.read_runtime_access_token()
+        {
+            response = send(token)
+                .await
+                .context("preview picture retry request failed")?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "preview picture request failed: status={} body={}",
+                status,
+                text.chars().take(300).collect::<String>()
+            ));
+        }
+        Ok(())
+    }
+
     /// Claim this runtime's preview restarts (see `preview_restarts`).
     /// `Ok(None)` when the controller does not offer them (an older one, or
     /// one without previews).

@@ -26,7 +26,7 @@ import net, { type AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import type { Command } from "commander";
+import { Option, type Command } from "commander";
 import { isLocalHostName, isPrivateAddress } from "@instafy/bind/net";
 import { defaultSkillRoots, listedSite, loadLinkOnlyGuard, type LinkOnlyGuard } from "./web-read.js";
 import {
@@ -700,8 +700,11 @@ export type SiteCheckReport = {
   problems: number;
   /** where requests off the site went: through the egress proxy, or nowhere (this machine has none) */
   offSite: "proxy" | "blocked";
-  /** the card's picture: uploaded for the open preview on this port and path, or why not */
-  thumbnail?: "uploaded" | "skipped" | "failed";
+  /**
+   * the card's picture: uploaded for the open preview on this port and path, saved to `--picture-to` for Instafy's
+   * runtime to send, or why not
+   */
+  thumbnail?: "uploaded" | "saved" | "skipped" | "failed";
   thumbnailReason?: string;
 };
 
@@ -1168,6 +1171,7 @@ export function formatSiteCheck(report: SiteCheckReport): string {
     lines.push("Blocked requests are Instafy's rule for this check, not the site's errors: people opening the preview reach only the site itself and public addresses.");
   }
   if (report.thumbnail === "uploaded") lines.push("The preview card's picture was updated.");
+  else if (report.thumbnail === "saved") lines.push("The preview card's picture was saved for Instafy to send.");
   else if (report.thumbnail) lines.push(`The preview card's picture was not updated (${report.thumbnailReason ?? report.thumbnail}).`);
   lines.push(
     report.ok
@@ -1188,7 +1192,27 @@ export type PreviewCheckCliOptions = {
   timeout?: string;
   wait?: string;
   json?: boolean;
+  /**
+   * Instafy's runtime only: save the picture for the card of the preview open on this port and path to this file
+   * instead of sending it, with what the card needs beside it (see `CheckPictureSaver`). The runtime sends it with its
+   * own credential, so the check itself needs none.
+   */
+  pictureTo?: string;
 };
+
+/**
+ * Keeps the check's desktop picture for the card of the preview open on that port and path in `file`, when there is
+ * one, for Instafy's runtime to send: `null` when no preview is open there.
+ */
+export type CheckPictureSaver = (input: {
+  port: number;
+  path: string;
+  image: Buffer;
+  description: string | null;
+  /** when the check began loading the page the picture is of (ms since the epoch) */
+  takenAt: number;
+  file: string;
+}) => Promise<{ status: "saved" | "skipped" | "failed"; reason?: string } | null>;
 
 /**
  * Gives the check's desktop picture to the card of the preview open on that port and path, when there is one: `null`
@@ -1210,6 +1234,8 @@ export type PreviewCheckIo = {
   /** whether a preview is open on this port and path, so a picture is worth taking */
   hasOpenPreview?: (port: number, path: string) => boolean;
   uploadThumbnail?: CheckThumbnailUploader;
+  /** `--picture-to`: keeps the picture in a file instead of uploading it */
+  savePicture?: CheckPictureSaver;
   /**
    * The check tried to picture the site of the preview open on that port and path and could not (a blank page, one
    * that never loaded): when it began loading the page (ms since the epoch).
@@ -1232,7 +1258,18 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
     if (opts.port === undefined) throw new PreviewCommandError("--port <port> is required.", CHECK_EXIT_USAGE);
     const port = parsePreviewPort(opts.port, env);
     const sitePath = parseCheckPath(opts.path);
-    const wantsThumbnail = Boolean(io.uploadThumbnail && io.hasOpenPreview?.(port, sitePath));
+    // `--picture-to` keeps the card's picture in a file for Instafy's runtime to send; otherwise it is uploaded.
+    const pictureTo = opts.pictureTo?.trim() ? path.resolve(opts.pictureTo.trim()) : null;
+    if (opts.pictureTo !== undefined && !pictureTo) throw new PreviewCommandError("--picture-to needs a file.", CHECK_EXIT_USAGE);
+    const savePicture = io.savePicture;
+    const deliver:
+      | ((
+          input: Parameters<CheckThumbnailUploader>[0],
+        ) => Promise<{ status: NonNullable<SiteCheckReport["thumbnail"]>; reason?: string } | null>)
+      | undefined = pictureTo
+      ? savePicture && ((input) => savePicture({ ...input, takenAt: input.takenAt ?? Date.now(), file: pictureTo }))
+      : io.uploadThumbnail;
+    const wantsThumbnail = Boolean(deliver && io.hasOpenPreview?.(port, sitePath));
     // The picture shows the site as it was when the check began loading it.
     const takenAt = Date.now();
     const result = await runSiteCheck({
@@ -1254,7 +1291,7 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
       else io.err(result.message ?? "check failed");
       return result.code;
     }
-    if (wantsThumbnail && result.thumbnail && io.uploadThumbnail) {
+    if (wantsThumbnail && result.thumbnail && deliver) {
       // The picture never changes the check's exit code.
       const shot = result.thumbnail;
       // A picture the check could not take counts as tried: another check of the unchanged site fails the same way.
@@ -1262,8 +1299,7 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
       const outcome =
         "skipped" in shot
           ? { status: "skipped" as const, reason: shot.skipped }
-          : await io
-              .uploadThumbnail({ port, path: sitePath, image: shot.image, description: shot.description, takenAt })
+          : await deliver({ port, path: sitePath, image: shot.image, description: shot.description, takenAt })
               .catch((error: unknown) => ({ status: "failed" as const, reason: firstLine(error) }));
       if (outcome) {
         result.report.thumbnail = outcome.status;
@@ -1286,7 +1322,7 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
 /** `instafy preview check`, registered under the `preview` command group. */
 export function registerPreviewCheckCommand(
   preview: Command,
-  card: Pick<PreviewCheckIo, "hasOpenPreview" | "uploadThumbnail" | "pictureTried"> = {},
+  card: Pick<PreviewCheckIo, "hasOpenPreview" | "uploadThumbnail" | "savePicture" | "pictureTried"> = {},
 ): Command {
   return preview
     .command("check")
@@ -1306,6 +1342,8 @@ export function registerPreviewCheckCommand(
     .option("--timeout <ms>", "Page load timeout in ms (default 30000)")
     .option("--wait <ms>", "Extra settle time after load in ms (default 600)")
     .option("--json", "Output JSON")
+    // Instafy's runtime takes a card's picture at a turn's end this way and sends it itself.
+    .addOption(new Option("--picture-to <file>").hideHelp())
     .action(async (opts: PreviewCheckCliOptions) => {
       process.exitCode = await runPreviewCheckCli(opts, { out: console.log, err: console.error, ...card });
     });

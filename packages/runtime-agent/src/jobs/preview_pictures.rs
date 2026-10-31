@@ -8,20 +8,28 @@
 //! So while a turn's changes are saved, each preview this machine has open
 //! for the space whose site the turn changed after it was last pictured is
 //! checked once more, at the size its picture comes from (`instafy preview
-//! check --desktop`), with the turn's own credentials. The reply waits for
-//! it a bounded time, as the save itself: the job token the picture is sent
-//! with works only while the job runs. A turn that is stopped stops it.
+//! check --desktop`). The reply does not wait for it: the check goes on after
+//! the reply is posted, and the card's picture changes in place once it is
+//! sent (the controller announces `preview.thumbnail_updated`). The check
+//! keeps the picture in a file (`--picture-to`) and is given no Instafy
+//! credential; this runtime sends the picture with its own, which still works
+//! once the turn has ended (the turn's own ends with it). A turn that is
+//! stopped, or whose changes could not be saved, stops it.
 //!
 //! `instafy preview open` records each preview in the CLI's state file
-//! (`~/.instafy/cli-preview-state.json`): its port and path, the folder its
+//! (`~/.instafy/cli-preview-state.json`): its id, port and path, the folder its
 //! site's server runs from (`siteDir`), when the site was last pictured for
 //! the card (`pictureAt`, milliseconds since the epoch, whether or not a
 //! picture came of it) and whether it was opened with `--no-thumbnail`. A
 //! preview without a recorded folder, or opened with `--no-thumbnail`, is
 //! left alone; one without a picture time counts every change as newer.
 
+use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Component, Path};
+use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use serde_json::Value as JsonValue;
@@ -41,20 +49,84 @@ const PREVIEW_STATE_RELATIVE_PATH: &str = ".instafy/cli-preview-state.json";
 const MAX_CHECKS: usize = 3;
 /// The page load limit each check gets (the CLI's own default is 30 s).
 const CHECK_PAGE_LOAD_TIMEOUT_MS: &str = "10000";
-/// How long the end of a turn waits for the checks, pictures sent included.
+/// How long the checks of one turn's end may take in all, pictures sent
+/// included. The reply does not wait for them.
 const CHECKS_TIMEOUT: Duration = Duration::from_secs(30);
 /// A check starts only with this much of `CHECKS_TIMEOUT` left: one that
-/// could not finish would only hold up the reply.
+/// could not finish would take no picture.
 const CHECK_MIN_TIME: Duration = Duration::from_secs(15);
+/// How long sending one picture may take.
+const SEND_TIMEOUT: Duration = Duration::from_secs(15);
 /// Model credentials a check never needs: it calls no model.
 const MODEL_KEYS: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY"];
+/// Instafy credentials a check never needs: it keeps its picture in a file,
+/// and this runtime sends it.
+const INSTAFY_KEYS: &[&str] = &[
+    "CONTROLLER_ACCESS_TOKEN",
+    "INSTAFY_ACCESS_TOKEN",
+    "SUPABASE_ACCESS_TOKEN",
+];
+/// The name of the picture a check keeps in its folder; what the card needs
+/// beside it is in the same name with `.json` added.
+const PICTURE_FILE: &str = "card.jpg";
+/// The largest picture a card takes, as the controller keeps it.
+const MAX_PICTURE_BYTES: u64 = 512 * 1024;
+/// What the check writes beside the picture is small.
+const MAX_PICTURE_FACTS_BYTES: u64 = 16 * 1024;
 
 /// One open preview whose card's picture is older than a change this turn
 /// made to its site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StalePicture {
+    pub(super) preview_id: String,
     pub(super) port: u16,
     pub(super) path: String,
+}
+
+/// A picture for a preview's card, as a check took it: a JPEG, and the page's
+/// own description, which the card's facts line may show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CardPicture {
+    pub(crate) image: Vec<u8>,
+    pub(crate) description: Option<String>,
+}
+
+/// Sends a picture to its preview's card with this runtime's own credential
+/// (the controller takes a preview's picture only from the runtime that
+/// serves it). [`crate::controller::ControllerClient`] is the one in use.
+pub(crate) trait PictureSender: Send + Sync {
+    fn send<'a>(
+        &'a self,
+        project_id: Uuid,
+        preview_id: &'a str,
+        picture: &'a CardPicture,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+}
+
+impl PictureSender for crate::controller::ControllerClient {
+    fn send<'a>(
+        &'a self,
+        project_id: Uuid,
+        preview_id: &'a str,
+        picture: &'a CardPicture,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        Box::pin(self.upload_preview_picture(
+            project_id,
+            preview_id,
+            &picture.image,
+            picture.description.as_deref(),
+        ))
+    }
+}
+
+/// A preview id as the CLI records it, safe to put in an address: letters,
+/// digits, `-` and `_`, at most 128 of them.
+pub(crate) fn is_preview_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 /// The workspace paths a turn changed (created, changed or removed), not the
@@ -126,6 +198,14 @@ pub(super) fn stale_pictures(
         else {
             continue;
         };
+        // The picture is sent to the card by the preview's id.
+        let Some(preview_id) = entry
+            .get("previewId")
+            .and_then(JsonValue::as_str)
+            .filter(|id| is_preview_id(id))
+        else {
+            continue;
+        };
         let path = entry
             .get("path")
             .and_then(JsonValue::as_str)
@@ -145,7 +225,11 @@ pub(super) fn stale_pictures(
             .any(|changed| changed_after(workspace_dir, changed, picture_at));
         // Only a preview whose tunnel still runs can take a new picture.
         if site_changed && client_runs(pid) {
-            stale.push(StalePicture { port, path });
+            stale.push(StalePicture {
+                preview_id: preview_id.to_string(),
+                port,
+                path,
+            });
         }
         if stale.len() == MAX_CHECKS {
             break;
@@ -226,10 +310,10 @@ const BUDGET: Budget = Budget {
     min_left: CHECK_MIN_TIME,
 };
 
-/// The checks that take new pictures for the previews a turn changed, running
-/// while the turn's changes are saved. [`PictureRetake::finish`] waits for
-/// them; dropping it (a save that failed, a lease that was lost) stops them,
-/// with everything they started.
+/// The checks that take new pictures for the previews a turn changed. They
+/// start while the turn's changes are saved, and go on after its reply
+/// ([`PictureRetake::detach`]); dropping the retake before that (a save that
+/// failed, a lease that was lost) stops them, with everything they started.
 pub(super) struct PictureRetake {
     task: Option<JoinHandle<()>>,
 }
@@ -237,32 +321,53 @@ pub(super) struct PictureRetake {
 impl PictureRetake {
     /// Starts checking each open preview whose site the turn changed (`files`,
     /// as the turn's save lists them) after it was last pictured. A read-only
-    /// turn changed nothing, and starts nothing.
+    /// turn changed nothing, and starts nothing; nor does one with nothing to
+    /// send the pictures with (`sender`).
     pub(super) fn start(
         workspace_dir: &Path,
         project_id: Uuid,
         read_only: bool,
         files: &[CodexFileDescriptor],
         cancel: Option<JobCancelSignal>,
+        sender: Option<Arc<dyn PictureSender>>,
     ) -> Self {
         let changed = if read_only {
             Vec::new()
         } else {
             changed_paths(files)
         };
-        if changed.is_empty() {
+        let Some(sender) = sender.filter(|_| !changed.is_empty()) else {
             return Self { task: None };
-        }
+        };
         let workspace_dir = workspace_dir.to_path_buf();
+        // The checks get the environment of the turn whose changes they
+        // picture, whenever they start.
+        let environment = check_environment();
         Self {
             task: Some(tokio::spawn(async move {
-                retake_stale_pictures(&workspace_dir, &project_id, &changed, cancel, BUDGET).await;
+                retake_stale_pictures(
+                    &workspace_dir,
+                    &project_id,
+                    &changed,
+                    cancel,
+                    BUDGET,
+                    &environment,
+                    sender.as_ref(),
+                )
+                .await;
             })),
         }
     }
 
+    /// Lets the checks go on after the turn's reply, within their own time
+    /// (`CHECKS_TIMEOUT`); each picture is sent once it is taken.
+    pub(super) fn detach(mut self) {
+        drop(self.task.take());
+    }
+
     /// Waits for the checks: at most `CHECKS_TIMEOUT`, less when the turn is
     /// stopped.
+    #[cfg(test)]
     pub(super) async fn finish(mut self) {
         if let Some(task) = self.task.take()
             && let Err(error) = task.await
@@ -280,27 +385,41 @@ impl Drop for PictureRetake {
     }
 }
 
+/// What a check may have of this process's environment: all of it but the
+/// credentials it never needs (a model's, Instafy's, and the runtime's own).
+fn check_environment() -> Vec<(OsString, OsString)> {
+    std::env::vars_os()
+        .filter(|(key, _)| {
+            key.to_str().is_none_or(|name| {
+                !is_model_child_excluded_env_key(name)
+                    && !MODEL_KEYS
+                        .iter()
+                        .chain(INSTAFY_KEYS)
+                        .any(|credential| name.eq_ignore_ascii_case(credential))
+            })
+        })
+        .collect()
+}
+
 /// Checks each open preview whose site this turn changed after it was last
-/// pictured, which takes the card's picture again. It runs the same
-/// `instafy preview check` a turn runs, at the desktop size only, from the
-/// workspace with the turn's own credentials; a check that fails, runs out
-/// of time or is stopped leaves the card's picture as it was.
+/// pictured, which takes the card's picture again, and sends each picture
+/// taken. It runs the same `instafy preview check` a turn runs, at the desktop
+/// size only, from the workspace; a check that fails, runs out of time or is
+/// stopped leaves the card's picture as it was.
 async fn retake_stale_pictures(
     workspace_dir: &Path,
     project_id: &Uuid,
     changed: &[String],
     cancel: Option<JobCancelSignal>,
     budget: Budget,
+    environment: &[(OsString, OsString)],
+    sender: &dyn PictureSender,
 ) {
     let Some(home) = std::env::var_os("HOME") else {
         return;
     };
-    let Ok(text) =
-        tokio::fs::read_to_string(Path::new(&home).join(PREVIEW_STATE_RELATIVE_PATH)).await
-    else {
-        return;
-    };
-    let Ok(state) = serde_json::from_str::<JsonValue>(&text) else {
+    let state_file = Path::new(&home).join(PREVIEW_STATE_RELATIVE_PATH);
+    let Some(state) = read_state(&state_file).await else {
         return;
     };
     let deadline = Instant::now() + budget.total;
@@ -309,20 +428,81 @@ async fn retake_stale_pictures(
         if left < budget.min_left || cancel.as_ref().is_some_and(JobCancelSignal::is_canceled) {
             break;
         }
-        check_preview(workspace_dir, &preview, left, cancel.as_ref()).await;
+        let Some(taken) =
+            check_preview(workspace_dir, &preview, left, cancel.as_ref(), environment).await
+        else {
+            continue;
+        };
+        // A picture taken since (the next turn's own check) is newer.
+        if read_state(&state_file)
+            .await
+            .and_then(|state| picture_at(&state, &preview.preview_id))
+            .is_some_and(|at| at > taken.taken_at)
+        {
+            info!(
+                port = preview.port,
+                "a newer picture of an open preview was taken; this one is not sent"
+            );
+            continue;
+        }
+        match tokio::time::timeout(
+            SEND_TIMEOUT,
+            sender.send(*project_id, &preview.preview_id, &taken.picture),
+        )
+        .await
+        {
+            Ok(Ok(())) => info!(
+                port = preview.port,
+                path = %preview.path,
+                "sent the new picture of an open preview whose site the turn changed"
+            ),
+            Ok(Err(error)) => warn!(
+                port = preview.port,
+                %error,
+                "could not send the new picture of an open preview; its card keeps its picture"
+            ),
+            Err(_) => warn!(
+                port = preview.port,
+                "sending the new picture of an open preview ran out of time; its card keeps its picture"
+            ),
+        }
     }
 }
 
+async fn read_state(state_file: &Path) -> Option<JsonValue> {
+    let text = tokio::fs::read_to_string(state_file).await.ok()?;
+    serde_json::from_str::<JsonValue>(&text).ok()
+}
+
+/// When the CLI last pictured a preview (ms since the epoch).
+fn picture_at(state: &JsonValue, preview_id: &str) -> Option<f64> {
+    state
+        .get("previews")?
+        .as_array()?
+        .iter()
+        .find(|entry| entry.get("previewId").and_then(JsonValue::as_str) == Some(preview_id))?
+        .get("pictureAt")?
+        .as_f64()
+}
+
+/// A picture a check took, and when it began loading the page it shows.
+#[derive(Debug)]
+struct TakenPicture {
+    picture: CardPicture,
+    taken_at: f64,
+}
+
 /// Runs one `instafy preview check` for a preview's picture, for at most
-/// `left`, or until the turn is stopped.
+/// `left`, or until the turn is stopped, and reads the picture it kept.
 async fn check_preview(
     workspace_dir: &Path,
     preview: &StalePicture,
     left: Duration,
     cancel: Option<&JobCancelSignal>,
-) {
-    // The check's screenshots go to a folder of their own, removed with it:
-    // only its picture for the card is wanted.
+    environment: &[(OsString, OsString)],
+) -> Option<TakenPicture> {
+    // The check's screenshots and the picture it keeps go to a folder of
+    // their own, removed with it.
     let screenshots = match tempfile::Builder::new()
         .prefix("instafy-preview-picture-")
         .tempdir()
@@ -330,9 +510,10 @@ async fn check_preview(
         Ok(dir) => dir,
         Err(error) => {
             warn!(%error, "no folder for an open preview's end-of-turn check; its card keeps its picture");
-            return;
+            return None;
         }
     };
+    let picture_file = screenshots.path().join(PICTURE_FILE);
     let mut command = Command::new("instafy");
     command
         .args([
@@ -348,8 +529,12 @@ async fn check_preview(
             "--out",
         ])
         .arg(screenshots.path())
+        .arg("--picture-to")
+        .arg(&picture_file)
         .arg("--json")
         .current_dir(workspace_dir)
+        .env_clear()
+        .envs(environment.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -358,23 +543,11 @@ async fn check_preview(
     // (its egress proxy) go with it when it is stopped.
     #[cfg(unix)]
     command.process_group(0);
-    for (key, _) in std::env::vars_os() {
-        let Some(name) = key.to_str() else {
-            continue;
-        };
-        if is_model_child_excluded_env_key(name)
-            || MODEL_KEYS
-                .iter()
-                .any(|model| name.eq_ignore_ascii_case(model))
-        {
-            command.env_remove(&key);
-        }
-    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             warn!(port = preview.port, %error, "could not check an open preview after the turn; its card keeps its picture");
-            return;
+            return None;
         }
     };
     let mut check = CheckGroup(child.id().and_then(|pid| i32::try_from(pid).ok()));
@@ -384,29 +557,41 @@ async fn check_preview(
             None => std::future::pending().await,
         }
     };
-    tokio::select! {
+    let finished = tokio::select! {
         status = child.wait() => match status {
-            Ok(status) => info!(
-                port = preview.port,
-                path = %preview.path,
-                exit_code = ?status.code(),
-                "checked an open preview whose site the turn changed, for its card's picture"
-            ),
-            Err(error) => warn!(
-                port = preview.port,
-                %error,
-                "could not check an open preview after the turn; its card keeps its picture"
-            ),
+            Ok(status) => {
+                info!(
+                    port = preview.port,
+                    path = %preview.path,
+                    exit_code = ?status.code(),
+                    "checked an open preview whose site the turn changed, for its card's picture"
+                );
+                true
+            }
+            Err(error) => {
+                warn!(
+                    port = preview.port,
+                    %error,
+                    "could not check an open preview after the turn; its card keeps its picture"
+                );
+                false
+            }
         },
-        () = tokio::time::sleep(left) => warn!(
-            port = preview.port,
-            "checking an open preview after the turn ran out of time; its card keeps its picture"
-        ),
-        () = stopped => info!(
-            port = preview.port,
-            "the turn was stopped while its open preview was checked; its card keeps its picture"
-        ),
-    }
+        () = tokio::time::sleep(left) => {
+            warn!(
+                port = preview.port,
+                "checking an open preview after the turn ran out of time; its card keeps its picture"
+            );
+            false
+        }
+        () = stopped => {
+            info!(
+                port = preview.port,
+                "the turn was stopped while its open preview was checked; its card keeps its picture"
+            );
+            false
+        }
+    };
     let stopped = check.stop();
     // The check itself goes even if its group could not be signalled, and is
     // reaped: its process is gone before its folder is.
@@ -415,6 +600,48 @@ async fn check_preview(
     if let Some(pgid) = stopped {
         reap_group(pgid).await;
     }
+    if !finished {
+        return None;
+    }
+    read_kept_picture(&picture_file, &preview.preview_id).await
+}
+
+/// The picture a check kept for `preview_id`, with what it wrote beside it:
+/// the preview it is for, the page's description, and when it began loading
+/// the page. None when it kept none, kept it for another preview, or either
+/// file is too big.
+async fn read_kept_picture(picture_file: &Path, preview_id: &str) -> Option<TakenPicture> {
+    let mut facts_file = picture_file.as_os_str().to_owned();
+    facts_file.push(".json");
+    let facts = read_small(Path::new(&facts_file), MAX_PICTURE_FACTS_BYTES).await?;
+    let facts: JsonValue = serde_json::from_slice(&facts).ok()?;
+    if facts.get("previewId").and_then(JsonValue::as_str) != Some(preview_id) {
+        return None;
+    }
+    let taken_at = facts.get("takenAt").and_then(JsonValue::as_f64)?;
+    let description = facts
+        .get("description")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string);
+    let image = read_small(picture_file, MAX_PICTURE_BYTES).await?;
+    // A card takes a JPEG from a check.
+    if !image.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return None;
+    }
+    Some(TakenPicture {
+        picture: CardPicture { image, description },
+        taken_at,
+    })
+}
+
+/// A regular file's bytes, when it has at most `max` of them.
+async fn read_small(file: &Path, max: u64) -> Option<Vec<u8>> {
+    let metadata = tokio::fs::symlink_metadata(file).await.ok()?;
+    if !metadata.is_file() || metadata.len() > max {
+        return None;
+    }
+    let bytes = tokio::fs::read(file).await.ok()?;
+    (bytes.len() as u64 <= max).then_some(bytes)
 }
 
 /// The process group an end-of-turn check leads: the CLI and the helpers it
@@ -521,10 +748,31 @@ mod tests {
                 &["sites/seville/data/places.json"]
             ),
             vec![StalePicture {
+                preview_id: "preview-1".to_string(),
                 port: 4173,
                 path: "/".to_string()
             }]
         );
+    }
+
+    // The picture is sent to the card by the preview's id, which goes into
+    // an address: an entry without a plain one is left alone.
+    #[test]
+    fn a_preview_without_a_plain_id_is_left_alone() {
+        let dir = workspace();
+        let project = Uuid::new_v4();
+        let mut no_id = entry(&project, json!({ "pictureAt": now_ms() - 60_000.0 }));
+        no_id.as_object_mut().unwrap().remove("previewId");
+        let state = json!({ "version": 1, "previews": [
+            no_id,
+            entry(&project, json!({ "localPort": 4174, "previewId": "../agent/complete" })),
+            entry(&project, json!({ "localPort": 4175, "previewId": "" })),
+        ]});
+        assert!(stale(state, &project, dir.path(), &["sites/seville/index.html"]).is_empty());
+        assert!(is_preview_id("tun_01J9Z-abc"));
+        for id in ["", "a/b", "a b", "a?b", &"x".repeat(129)] {
+            assert!(!is_preview_id(id), "{id}");
+        }
     }
 
     #[test]
@@ -706,11 +954,39 @@ mod tests {
         !state.is_empty() && !state.starts_with('Z')
     }
 
+    /// The pictures a retake sent, as this runtime's controller client would.
+    #[derive(Default)]
+    struct SentPictures(std::sync::Mutex<Vec<(Uuid, String, CardPicture)>>);
+
+    impl PictureSender for SentPictures {
+        fn send<'a>(
+            &'a self,
+            project_id: Uuid,
+            preview_id: &'a str,
+            picture: &'a CardPicture,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((project_id, preview_id.to_string(), picture.clone()));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    impl SentPictures {
+        fn take(&self) -> Vec<(Uuid, String, CardPicture)> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
     // The end of a turn runs `instafy preview check` for a stale picture, at
-    // the desktop size, from the workspace, with the turn's own credentials
-    // and never the machine's, and removes the check's screenshots after it.
-    // A read-only turn checks nothing. A check that runs out of time, or a
-    // turn that is stopped, ends the check and every helper it started.
+    // the desktop size, from the workspace, with no Instafy credential and
+    // never the machine's or a model's, keeps the picture in a file, sends it
+    // with the runtime's own credential, and removes the check's folder after
+    // it. A read-only turn checks nothing. A check that runs out of time, or a
+    // turn that is stopped, ends the check and every helper it started, and
+    // sends nothing. The reply does not wait: a retake let go on after it
+    // still sends its picture once the check took it.
     #[cfg(unix)]
     #[test]
     fn the_turns_own_check_runs_for_a_stale_picture_and_leaves_nothing_behind() {
@@ -726,19 +1002,23 @@ mod tests {
             std::fs::create_dir_all(&bin).unwrap();
             std::fs::create_dir_all(home.join(".instafy")).unwrap();
             let seen = sandbox.path().join("seen");
-            // A stand-in `instafy`: on port 4173 it writes its screenshot and
-            // ends; on 4175 it starts a helper in its group and hangs.
+            // A stand-in `instafy`: it keeps its picture where `--picture-to`
+            // says, with the preview and the page's description beside it.
+            // On 4175 it starts a helper in its group and hangs; on 4176 it
+            // takes a second first; on 4177 its picture is older than the
+            // card's; on 4178 it keeps the picture for another preview.
             std::fs::write(
                 bin.join("instafy"),
                 format!(
                     r#"#!/bin/sh
 seen='{seen}'
 {{ echo "args=$*"; echo "cwd=$(pwd -P)"; echo "job=${{CONTROLLER_ACCESS_TOKEN:-}}"; echo "machine=${{RUNTIME_ACCESS_TOKEN:-}}"; echo "model=${{CODEX_API_KEY:-}}"; }} >> "$seen"
-port=; out=
+port=; out=; picture=
 while [ $# -gt 0 ]; do
   case "$1" in
     --port) port=$2; shift ;;
     --out) out=$2; shift ;;
+    --picture-to) picture=$2; shift ;;
   esac
   shift
 done
@@ -748,7 +1028,15 @@ if [ "$port" = 4175 ]; then
   echo "helper=$!" >> "$seen"
   sleep 300
 fi
+[ "$port" = 4176 ] && sleep 1
+taken="$(date +%s)000"
+[ "$port" = 4177 ] && taken=1
+preview=preview-1
+[ "$port" = 4178 ] && preview=preview-2
 echo picture > "$out/desktop.png"
+printf '\377\330\377\340card' > "$picture"
+printf '{{"previewId":"%s","description":"Trip · 3 days","takenAt":%s}}' "$preview" "$taken" > "$picture.json"
+echo "sent-by-check=no" >> "$seen"
 "#,
                     seen = seen.display()
                 ),
@@ -785,33 +1073,38 @@ echo picture > "$out/desktop.png"
         let sandbox = std::path::PathBuf::from(std::env::var_os(CHILD_MARKER).unwrap());
         let seen_file = sandbox.join("seen");
         let workspace = sandbox.join("workspace");
-        std::fs::create_dir_all(workspace.join("sites/seville")).unwrap();
-        std::fs::create_dir_all(workspace.join("sites/porto")).unwrap();
-        std::fs::write(workspace.join("sites/seville/index.html"), "x").unwrap();
-        std::fs::write(workspace.join("sites/porto/index.html"), "x").unwrap();
+        for site in ["seville", "porto", "lisbon", "faro", "braga"] {
+            std::fs::create_dir_all(workspace.join("sites").join(site)).unwrap();
+            std::fs::write(workspace.join("sites").join(site).join("index.html"), "x").unwrap();
+        }
         let project = Uuid::new_v4();
         let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
         let picture_before = now_ms() - 60_000.0;
+        let preview = |port: u16, site: &str, extra: JsonValue| {
+            let mut fields = json!({
+                "localPort": port,
+                "pid": std::process::id(),
+                "siteDir": format!("sites/{site}"),
+                "pictureAt": picture_before,
+            });
+            fields
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            entry(&project, fields)
+        };
         let state = json!({ "version": 1, "previews": [
-            entry(&project, json!({
-                "path": "/map",
-                "pid": std::process::id(),
-                "pictureAt": picture_before,
-            })),
+            preview(4173, "seville", json!({ "path": "/map" })),
             // Its site did not change.
-            entry(&project, json!({
-                "localPort": 4174,
-                "pid": std::process::id(),
-                "siteDir": "sites/lisbon",
-                "pictureAt": picture_before,
-            })),
+            preview(4174, "sintra", json!({})),
             // Its check hangs.
-            entry(&project, json!({
-                "localPort": 4175,
-                "pid": std::process::id(),
-                "siteDir": "sites/porto",
-                "pictureAt": picture_before,
-            })),
+            preview(4175, "porto", json!({})),
+            // Its check takes a second.
+            preview(4176, "lisbon", json!({})),
+            // Its check's picture is older than the card's.
+            preview(4177, "faro", json!({})),
+            // Its check keeps the picture for another preview.
+            preview(4178, "braga", json!({})),
         ]});
         std::fs::write(home.join(PREVIEW_STATE_RELATIVE_PATH), state.to_string()).unwrap();
         let changed = |path: &str| CodexFileDescriptor {
@@ -838,6 +1131,18 @@ echo picture > "$out/desktop.png"
             let _ = std::fs::remove_file(&seen_file);
             seen
         };
+        let sent = Arc::new(SentPictures::default());
+        let sender = || Some(sent.clone() as Arc<dyn PictureSender>);
+        let retake = |site: &str, cancel: Option<JobCancelSignal>| {
+            PictureRetake::start(
+                &workspace,
+                project,
+                false,
+                &[changed(&format!("sites/{site}/index.html"))],
+                cancel,
+                sender(),
+            )
+        };
 
         // A read-only turn changed nothing: nothing runs.
         runtime.block_on(async {
@@ -847,24 +1152,17 @@ echo picture > "$out/desktop.png"
                 true,
                 &[changed("sites/seville/index.html")],
                 None,
+                sender(),
             )
             .finish()
             .await;
         });
         assert_eq!(take_seen(), "");
+        assert!(sent.take().is_empty());
 
-        // A turn that changed the map's site checks it, and only it.
-        runtime.block_on(async {
-            PictureRetake::start(
-                &workspace,
-                project,
-                false,
-                &[changed("sites/seville/index.html")],
-                None,
-            )
-            .finish()
-            .await;
-        });
+        // A turn that changed the map's site checks it, and only it, with no
+        // credential, and the runtime sends the picture the check kept.
+        runtime.block_on(async { retake("seville", None).finish().await });
         let seen = take_seen();
         let lines: Vec<&str> = seen.lines().collect();
         let out = lines
@@ -876,20 +1174,63 @@ echo picture > "$out/desktop.png"
         assert_eq!(
             lines,
             vec![
-                format!("args=preview check --port 4173 --path /map --desktop --timeout 10000 --out {out} --json").as_str(),
+                format!("args=preview check --port 4173 --path /map --desktop --timeout 10000 --out {out} --picture-to {out}/card.jpg --json").as_str(),
                 format!("cwd={}", workspace_real.display()).as_str(),
-                "job=job-token",
+                "job=",
                 "machine=",
                 "model=",
                 format!("out={out}").as_str(),
+                "sent-by-check=no",
             ]
         );
         assert!(
             !Path::new(&out).exists(),
             "the check's screenshots are removed"
         );
+        assert_eq!(
+            sent.take(),
+            vec![(
+                project,
+                "preview-1".to_string(),
+                CardPicture {
+                    image: b"\xFF\xD8\xFF\xE0card".to_vec(),
+                    description: Some("Trip · 3 days".to_string()),
+                }
+            )]
+        );
 
-        // A check that runs out of time ends with every helper it started.
+        // The reply does not wait: a retake let go on after it sends its
+        // picture once its check took it.
+        let started = Instant::now();
+        runtime.block_on(async { retake("lisbon", None).detach() });
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "letting the retake go on waited {:?}",
+            started.elapsed()
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        let mut late = Vec::new();
+        while late.is_empty() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+            late = sent.take();
+        }
+        assert_eq!(
+            late.iter()
+                .map(|(_, id, picture)| (id.as_str(), picture.description.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("preview-1", Some("Trip · 3 days"))]
+        );
+        take_seen();
+
+        // A picture older than the card's, or kept for another preview, is
+        // not sent.
+        runtime.block_on(async { retake("faro", None).finish().await });
+        runtime.block_on(async { retake("braga", None).finish().await });
+        assert!(take_seen().contains("sent-by-check=no"));
+        assert!(sent.take().is_empty());
+
+        // A check that runs out of time ends with every helper it started,
+        // and nothing is sent.
         let started = Instant::now();
         runtime.block_on(retake_stale_pictures(
             &workspace,
@@ -900,6 +1241,8 @@ echo picture > "$out/desktop.png"
                 total: Duration::from_secs(2),
                 min_left: Duration::from_secs(1),
             },
+            &check_environment(),
+            sent.as_ref(),
         ));
         assert!(started.elapsed() < Duration::from_secs(10));
         let seen = take_seen();
@@ -915,18 +1258,13 @@ echo picture > "$out/desktop.png"
             .to_string();
         assert!(!running(&helper), "the helper is stopped with its check");
         assert!(!Path::new(&out).exists());
+        assert!(sent.take().is_empty());
 
         // A stopped turn ends its check at once.
         let cancel = JobCancelSignal::new();
         let started = Instant::now();
         runtime.block_on(async {
-            let retake = PictureRetake::start(
-                &workspace,
-                project,
-                false,
-                &[changed("sites/porto/index.html")],
-                Some(cancel.clone()),
-            );
+            let retake = retake("porto", Some(cancel.clone()));
             tokio::time::sleep(Duration::from_millis(500)).await;
             cancel.cancel();
             retake.finish().await;
@@ -946,13 +1284,7 @@ echo picture > "$out/desktop.png"
 
         // A turn whose save failed drops its checks, and they stop.
         runtime.block_on(async {
-            let retake = PictureRetake::start(
-                &workspace,
-                project,
-                false,
-                &[changed("sites/porto/index.html")],
-                None,
-            );
+            let retake = retake("porto", None);
             tokio::time::sleep(Duration::from_millis(500)).await;
             drop(retake);
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -968,5 +1300,21 @@ echo picture > "$out/desktop.png"
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!running(&helper), "the helper is stopped with its check");
+        assert!(sent.take().is_empty());
+
+        // With nothing to send a picture with, nothing is checked.
+        runtime.block_on(async {
+            PictureRetake::start(
+                &workspace,
+                project,
+                false,
+                &[changed("sites/seville/index.html")],
+                None,
+                None,
+            )
+            .finish()
+            .await;
+        });
+        assert_eq!(take_seen(), "");
     }
 }

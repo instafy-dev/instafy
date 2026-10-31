@@ -1676,6 +1676,42 @@ export async function uploadCheckThumbnail(input: {
   return outcome;
 }
 
+/**
+ * `instafy preview check --picture-to <file>`: keeps the picture of the preview open on the check's port and path in
+ * `file` (a JPEG), and beside it in `<file>.json` the preview it is for, the page's own description and when the check
+ * began loading the page, for Instafy's runtime to send with its own credential: a turn's end takes the picture after
+ * the reply, when the turn's own credential no longer works. Null when no preview is open there. Never overwrites a
+ * file. A picture kept counts as taken, as one uploaded does.
+ */
+export async function saveCheckPicture(input: {
+  port: number;
+  path: string;
+  image: Buffer;
+  description: string | null;
+  takenAt: number;
+  file: string;
+}): Promise<{ status: "saved" | "skipped" | "failed"; reason?: string } | null> {
+  const entry = openPreviewFor(input.port, input.path);
+  if (!entry) return null;
+  const facts = sniffImage(input.image);
+  if (!facts) {
+    await recordPictured(entry.previewId, input.takenAt);
+    return { status: "skipped", reason: "the picture is not a JPEG" };
+  }
+  try {
+    fs.writeFileSync(input.file, input.image, { mode: 0o600, flag: "wx" });
+    fs.writeFileSync(
+      `${input.file}.json`,
+      JSON.stringify({ previewId: entry.previewId, description: input.description, takenAt: input.takenAt }),
+      { mode: 0o600, flag: "wx" },
+    );
+  } catch (error) {
+    return { status: "failed", reason: `the picture could not be saved (${(error as NodeJS.ErrnoException).code ?? "error"})` };
+  }
+  await recordPictured(entry.previewId, input.takenAt);
+  return { status: "saved" };
+}
+
 function toPreviewSummary(raw: unknown): PreviewSummary | null {
   if (!raw || typeof raw !== "object") return null;
   const record = raw as Record<string, unknown>;

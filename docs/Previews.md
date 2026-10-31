@@ -104,12 +104,17 @@ A member can **Present** a site whose page says it can share its view, and the o
   in the workspace (`siteDir`), and `open` and `check` record when they last pictured the site for the card
   (`pictureAt`), also when no picture came of it (a blank page, one that never loaded). While a turn's changes are
   saved, each preview whose folder holds a file the turn changed after that is checked once more, at the size its
-  picture comes from (`instafy preview check --desktop`), from the workspace with the turn's own credentials: at most
-  three previews and 30 s in all, a check starting only with 15 s of that left, none once the turn is stopped. So a
-  turn that stopped before its own check still leaves the card showing the site as it left it, and a turn whose own
-  check came after its last change adds nothing. The check's screenshots go to a folder removed after it, and a
-  check that fails, runs out of time or is stopped ends with every helper it started and leaves the old picture. A
-  preview with no recorded folder, or opened with `--no-thumbnail`, is left alone.
+  picture comes from (`instafy preview check --desktop`), from the workspace: at most three previews and 30 s in all,
+  a check starting only with 15 s of that left, none once the turn is stopped or its changes could not be saved. The
+  reply does not wait for it: the check goes on after the reply is posted, and the card's picture changes in place
+  once it is sent (`preview.thumbnail_updated`). The check is given no Instafy credential: it keeps the picture in a
+  file (`--picture-to <file>`, for the runtime only, with the preview's id, the page's description and when the page
+  began loading in `<file>.json`), and the runtime sends it with its own credential, which still works once the turn
+  has ended; a picture older than one taken since (the next turn's own check) is not sent. So a turn that stopped
+  before its own check still leaves the card showing the site as it left it, and a turn whose own check came after
+  its last change adds nothing. The check's screenshots and picture go to a folder removed after it, and a check
+  that fails, runs out of time or is stopped ends with every helper it started and leaves the old picture. A preview
+  with no recorded folder or id, or opened with `--no-thumbnail`, is left alone.
 - **What the capture may load.** Only the site's own loopback origin directly. Every other request goes through the
   image's `browser-egress-proxy`, an instance of its own on a free loopback port: public addresses on ports 80 and
   443 only, connected to the address it checked. Another loopback port, `localhost` names, private, link-local,

@@ -39,6 +39,7 @@ import {
   printPreviewList,
   printPreviewOpen,
   recordCheckPictureTried,
+  saveCheckPicture,
   uploadCheckThumbnail,
 } from "./preview.js";
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
@@ -2249,6 +2250,7 @@ failWithGroupHelp(previewCommand);
 registerPreviewCheckCommand(previewCommand, {
   hasOpenPreview: hasOpenPreviewFor,
   uploadThumbnail: uploadCheckThumbnail,
+  savePicture: saveCheckPicture,
   pictureTried: recordCheckPictureTried,
 });
 

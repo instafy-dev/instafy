@@ -1266,6 +1266,48 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
     expect(thumbnailPuts(controller.captures)).toHaveLength(1);
   }, 240000);
 
+  // The runtime takes a card's picture again after a turn's reply, when the turn's own credential no longer works: the
+  // check keeps the picture for the runtime to send with its own, and needs no credential itself.
+  it("check --picture-to keeps the card's picture beside the preview it is for, with no token, and sends nothing", async () => {
+    const projectId = randomUUID();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startPage();
+    const otherPort = await startPage();
+    const home = makeHome();
+    writeState(home, [{
+      previewId: "preview-1", projectId, title: "Lisbon weekend", localPort: sitePort, path: "/", controllerUrl: controller.url,
+      pid: 999999, logFile: path.join(home, "log"), workdir: path.join(home, "wd"), startedAt: new Date().toISOString(),
+    }]);
+    const folder = path.join(home, "picture");
+    fs.mkdirSync(folder);
+    const file = path.join(folder, "card.jpg");
+
+    const before = Date.now();
+    const saved = await execCli(["preview", "check", "--port", String(sitePort), "--desktop", "--picture-to", file, "--json"], home, browserEnv);
+    expect(saved.code, saved.stderr).toBe(0);
+    expect(JSON.parse(saved.stdout)).toMatchObject({ ok: true, thumbnail: "saved" });
+    expect(thumbnailPuts(controller.captures)).toHaveLength(0);
+    expect(sniffImage(fs.readFileSync(file))).toEqual({ contentType: "image/jpeg", width: 640, height: 400 });
+    const beside = JSON.parse(fs.readFileSync(`${file}.json`, "utf8")) as Record<string, unknown>;
+    expect(beside).toMatchObject({ previewId: "preview-1", description: "Trip · 3 days · 14 places" });
+    expect(beside.takenAt).toBeGreaterThanOrEqual(before);
+    // The picture counts as taken, for a turn that changes the site after it.
+    expect(readState(home).previews[0]!.pictureAt).toBe(beside.takenAt);
+
+    // A file that is there is never overwritten.
+    const again = await execCli(["preview", "check", "--port", String(sitePort), "--desktop", "--picture-to", file, "--json"], home, browserEnv);
+    expect(JSON.parse(again.stdout)).toMatchObject({ thumbnail: "failed" });
+    // No preview is open on this port: nothing is kept, and the report says nothing about a picture.
+    const otherFile = path.join(folder, "other.jpg");
+    const other = await execCli(["preview", "check", "--port", String(otherPort), "--desktop", "--picture-to", otherFile, "--json"], home, browserEnv);
+    expect(other.code, other.stderr).toBe(0);
+    expect(JSON.parse(other.stdout)).not.toHaveProperty("thumbnail");
+    expect(fs.existsSync(otherFile)).toBe(false);
+    // The option is for the runtime: the check's help does not offer it.
+    const help = await execCli(["preview", "check", "--help"], home, {});
+    expect(help.stdout).not.toContain("--picture-to");
+  }, 240000);
+
   // `--no-thumbnail` promises a card with no picture of the site, so a check of that preview (Octo's own, or the one
   // the runtime runs when a turn ends) takes none. A check that could not take a picture records when it tried: the
   // end of a turn does not try the unchanged site again.
