@@ -105,6 +105,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before a fact no page stated said "not checked", a reply named only steps its turn
     // started, and "I can't search the whole web here" replaced "search key" and the like.
     include_str!("legacy/agents-doc-v4.md"),
+    // From before a command still running (a `session_id` and no `exit_code`) was waited for
+    // before the reply.
+    include_str!("legacy/agents-doc-v5.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2160,6 +2163,35 @@ mod tests {
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
         let previous = include_str!("legacy/agents-doc-v4.md");
         assert!(!previous.contains("not checked\", or stays out"));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+    }
+
+    /// A command that outlives its wait is still running: a map turn left two such lookups behind
+    /// and replied with six minutes left, before its sights and day plan were in. Its model runs
+    /// commands from code, where a command still running comes back with a `session_id` and no
+    /// `exit_code`; it printed only the output, so it never saw the plain-output form ("Process
+    /// running with session ID …"). `AGENTS.md` names both, says how to wait (`write_stdin` with
+    /// that `session_id` and no input) before replying or using what the command makes, and says
+    /// a server never exits, so a turn never waits on one. The copy from before is upgraded.
+    #[test]
+    fn agents_doc_says_to_wait_for_a_command_still_running() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        let responsiveness = doc
+            .split("## Responsiveness")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Responsiveness section");
+        assert!(responsiveness.contains(
+            "- A command still running hasn't finished: its result has a `session_id` and no `exit_code` (shown as \"Process running with session ID …\"). Before you reply or use what it makes, wait for it: `write_stdin` with that `session_id` and no input, until it exits. A server never exits: start one with `instafy preview open … --start`."
+        ), "{responsiveness}");
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        let previous = include_str!("legacy/agents-doc-v5.md");
+        assert!(!previous.contains("Process running with session ID"));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
         fs::write(&path, previous).unwrap();
