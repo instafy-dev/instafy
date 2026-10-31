@@ -217,11 +217,12 @@ describe("a request_browser card", () => {
   describe("sent straight to the browser", () => {
     const routed = { task: "Open https://forms.example/order in your browser and fill in a test order.", location: "auto", routed: true };
 
-    it("reads as the turn's one line while Studio opens it, and after", async () => {
+    it("reads as the turn's one line while Studio opens it, and until its browser turn shows something", async () => {
       for (const host of [
         { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) },
-        { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]) },
-        { ...web, continuedKeys: new Set(["job:job-1"]) },
+        { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]),
+          continuedKeys: new Set(["job:job-1"]), routedWaitingKeys: new Set(["job:job-1"]) },
+        { ...web, continuedKeys: new Set(["job:job-1"]), routedWaitingKeys: new Set(["job:job-1"]) },
       ]) {
         const card = await render(routed, host);
         expect(card.routedLine).toBe("Opening Instafy's browser…");
@@ -233,6 +234,21 @@ describe("a request_browser card", () => {
         kind: "opening", note: "This space's machine restarts with the browser. This takes about two minutes and one billing interval.",
       }]]) });
       expect(slow.openingNote).toContain("about two minutes and one billing interval");
+    });
+
+    // Pressed by the person (here or on another device), or carried on by a
+    // browser turn that failed before it ran: no browser is opening, so the
+    // card never says one is.
+    it("shows today's Opened card once nothing is opening it any more", async () => {
+      for (const host of [
+        { ...web, continuedKeys: new Set(["job:job-1"]) },
+        { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]), continuedKeys: new Set(["job:job-1"]) },
+      ]) {
+        const card = await render(routed, host);
+        expect(card.routedLine).toBeNull();
+        expect(card.card).not.toBeNull();
+        expect(card.opened).toBe("Opened");
+      }
     });
 
     it("stays today's card, with its reason, when Studio could not open it by itself", async () => {

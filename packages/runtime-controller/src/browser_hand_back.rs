@@ -71,6 +71,10 @@ const FINDING_URL_MAX_CHARS: usize = 2_048;
 pub(crate) const HAND_BACK_WINDOW_MINUTES: i64 = 30;
 /// How much of what a browser turn was asked reaches the building turn.
 pub(crate) const REQUEST_MAX_CHARS: usize = 2_000;
+/// How much of a routed message's words the hand-back gives the building turn
+/// as the person's request: all of a card's task (runtime-agent
+/// `ROUTED_BROWSER_TASK_MAX_UTF16_UNITS`).
+pub(crate) const PERSON_REQUEST_MAX_CHARS: usize = 8_000;
 /// The payload key a lease stamps with [`browser_turns_since`].
 pub(crate) const TURNS_SINCE_KEY: &str = "browser_turns_since";
 /// The browser turns a building turn reads at most: the browser skill's six
@@ -440,19 +444,22 @@ fn labelled_findings(reply: &str, viewer: &str, read_at: &str) -> Vec<JsonValue>
 
 /// The checked record a building turn carries as `metadata.browserHandBack`.
 /// `request` is what the browser turn was asked: the building thread may never
-/// have seen it.
+/// have seen it. `person_request` is the words of a message the routing step
+/// sent straight to the browser, from that message's own job: the person's
+/// request, which the building thread never saw.
 pub(crate) fn hand_back_record(
     browser_job_id: &Uuid,
     card_job_id: &Uuid,
     viewer: &str,
     read_at: DateTime<Utc>,
     request: &str,
+    person_request: Option<&str>,
     reply: &str,
 ) -> JsonValue {
     let read_at = read_at.to_rfc3339_opts(SecondsFormat::Secs, true);
     let (reply, truncated) = bounded_reply(reply);
     let findings = labelled_findings(&reply, viewer, &read_at);
-    json!({
+    let mut record = json!({
         "version": HAND_BACK_VERSION,
         "verified": true,
         "browserJobId": browser_job_id.to_string(),
@@ -463,7 +470,21 @@ pub(crate) fn hand_back_record(
         "findings": findings,
         "reply": reply,
         "replyTruncated": truncated,
-    })
+    });
+    let person_request = person_request
+        .map(|words| words.replace('\0', ""))
+        .map(|words| {
+            words
+                .trim()
+                .chars()
+                .take(PERSON_REQUEST_MAX_CHARS)
+                .collect::<String>()
+        })
+        .filter(|words| !words.is_empty());
+    if let Some(words) = person_request {
+        record["personRequest"] = json!(words);
+    }
+    record
 }
 
 /// The copy the stored message keeps: which browser turn it continues, not
@@ -638,9 +659,8 @@ pub(crate) async fn require_hand_back(
             "Only the person whose request sent the card can hand the browser's findings back to it.",
         ));
     }
-    let card_metadata = card_job
-        .get::<_, PgJson<JsonValue>>("payload")
-        .0
+    let card_payload = card_job.get::<_, PgJson<JsonValue>>("payload").0;
+    let card_metadata = card_payload
         .get("metadata")
         .cloned()
         .unwrap_or(JsonValue::Null);
@@ -739,12 +759,23 @@ pub(crate) async fn require_hand_back(
         .get("prompt_text")
         .and_then(JsonValue::as_str)
         .unwrap_or_default();
+    // A card the routing step posted for the person's own message: the
+    // building thread never saw that message (its job ran no model turn), so
+    // the record gives the build its words, from the message's own job, as the
+    // person's request.
+    let person_request =
+        if job_posted_routed_browser_card(transaction, conversation_id, &card_job_id).await? {
+            card_payload.get("prompt_text").and_then(JsonValue::as_str)
+        } else {
+            None
+        };
     let record = hand_back_record(
         &browser_job_id,
         &card_job_id,
         viewer,
         completed_at,
         request,
+        person_request,
         &reply_with_finding_lines(&reply, finding_lines.as_deref()),
     );
     // A browser turn that read no page leaves the building turn nothing to
@@ -1339,6 +1370,7 @@ https://three.example.com\n\
             viewer_for_transport("shared").unwrap(),
             read_at,
             fixtures["browserRequest"].as_str().unwrap(),
+            None,
             fixtures["browserReply"].as_str().unwrap(),
         );
         assert_eq!(&record, expected);
@@ -1350,7 +1382,14 @@ https://three.example.com\n\
             viewer_for_transport("desktop_personal").unwrap(),
             read_at,
             &"y".repeat(REQUEST_MAX_CHARS + 10),
+            Some(&format!("{}\0", "z".repeat(PERSON_REQUEST_MAX_CHARS + 10))),
             &long,
+        );
+        // A routed message's words reach the build whole, as a card's task is
+        // bounded.
+        assert_eq!(
+            record["personRequest"].as_str().unwrap(),
+            "z".repeat(PERSON_REQUEST_MAX_CHARS)
         );
         assert_eq!(
             record["request"].as_str().unwrap().chars().count(),
@@ -1412,7 +1451,7 @@ https://three.example.com\n\
             "{\"url\": \"https://www.example.com/\", \"stopped\": \"blocked\"}",
             "{\"url\": \"https://a.example.com/\", \"stopped\": \"captcha\"}\n{\"url\": \"http://127.0.0.1/\", \"title\": \"Local\"}",
         ] {
-            let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at, "", reply);
+            let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at, "", None, reply);
             assert!(!record_read_a_page(&record), "{reply}");
         }
     }

@@ -63,6 +63,12 @@ export type BrowserRequestHost = {
   /** Cards a continuation was already sent for, by {@link browserRequestKey}. */
   continuedKeys?: ReadonlySet<string>;
   /**
+   * Cards for a message Octo sent straight to the browser whose continuation
+   * Studio sent by itself and is still opening (routedBrowserFold.ts), by
+   * {@link browserRequestKey}.
+   */
+  routedWaitingKeys?: ReadonlySet<string>;
+  /**
    * The conversation's newest card, by {@link browserRequestKey}. An older
    * card no longer offers its button: the newer one carries the task on.
    */

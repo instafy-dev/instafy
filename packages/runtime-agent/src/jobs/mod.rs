@@ -15575,16 +15575,25 @@ fn message_carries_attachments(job: &LeaseJob) -> bool {
 }
 
 /// The browser skill's routing section, when the routing step may send this message straight to
-/// Instafy's browser: an interactive turn that could ask for the browser itself
+/// Instafy's browser: the person's own words (never a prompt the runtime wrote for a command,
+/// such as `/learn`), on an interactive turn that could ask for the browser itself
 /// (`browser_choice_applies`: not a hand-back, a worker, a plan, an unattended run or a browser
-/// turn), with no attachments, short enough to be a card's task, in a space whose copy of the
-/// skill says when.
+/// turn) and that Octo answers (not a group chat's turn where Octo first decides whether to
+/// answer at all), with no attachments, short enough to be a card's task, in a space whose copy
+/// of the skill says when.
 fn browser_routing_snapshot_for_job(
     job: &LeaseJob,
     workspace_dir: &Path,
     prompt_text: &str,
 ) -> Option<String> {
-    (browser_choice_applies(job, false, false, false, false)
+    let own_words = job
+        .payload
+        .get("prompt_text")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|words| words.trim() == prompt_text.trim());
+    (own_words
+        && browser_choice_applies(job, false, false, false, false)
+        && !main_owns_ambient_participation(job)
         && !message_carries_attachments(job)
         && !prompt_text.trim().is_empty()
         && prompt_text.trim().encode_utf16().count() <= ROUTED_BROWSER_TASK_MAX_UTF16_UNITS)
@@ -24861,8 +24870,14 @@ mod tests {
         let tmp = tempdir().expect("temp dir");
         learn::ensure_project_memory_scaffold(tmp.path());
         let request = "Open forms.example/order in your browser and fill in a test order.";
-        let job =
-            |metadata: JsonValue| test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+        // The person's own words: the job's prompt as dispatch stored it.
+        let job_saying = |metadata: JsonValue, words: &str| {
+            test_lease_job(
+                Some("feature"),
+                json!({ "prompt_text": words, "metadata": metadata }),
+            )
+        };
+        let job = |metadata: JsonValue| job_saying(metadata, request);
         let routes = browser_routing_snapshot_for_job(&job(json!({})), tmp.path(), request)
             .expect("an ordinary message is offered the browser routes");
         assert!(routes.contains("## Routing preflight"), "{routes}");
@@ -24922,13 +24937,34 @@ mod tests {
                 request.to_string(),
             ),
             ("too long for a card", json!({}), "x".repeat(8_001)),
+            // A group chat's turn where Octo first decides whether to answer at all: words
+            // between two people never go to the browser on their own.
+            (
+                "ambient group turn",
+                json!({"groupParticipation": {
+                    "decision": "agent_evaluation",
+                    "reason": "skill_mode_ambient",
+                    "enforcedBy": "runtime-controller",
+                }}),
+                request.to_string(),
+            ),
         ] {
             assert_eq!(
-                browser_routing_snapshot_for_job(&job(metadata), tmp.path(), &text),
+                browser_routing_snapshot_for_job(&job_saying(metadata, &text), tmp.path(), &text),
                 None,
                 "{label}"
             );
         }
+        // A prompt the runtime wrote for a command (`/learn apply`) is not the person's words,
+        // so no card carries it.
+        assert_eq!(
+            browser_routing_snapshot_for_job(
+                &job_saying(json!({}), "/learn apply"),
+                tmp.path(),
+                request
+            ),
+            None
+        );
 
         // A space whose copy of the skill predates the section keeps today's routes.
         let older = tempdir().expect("temp dir");

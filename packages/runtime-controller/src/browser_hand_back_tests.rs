@@ -1540,7 +1540,11 @@ async fn a_routed_message_ends_with_its_card_and_its_browser_turn_is_the_cards(
             .map_err(|error| controller_error("check the routed card's turn", error))?;
             transaction.rollback().await?;
             drop(connection);
-            assert_eq!(stamp, Some(json!({ "version": 1, "cardJobId": routed })));
+            // Its task is the person's own words: their own turn, marked so.
+            assert_eq!(
+                stamp,
+                Some(json!({ "version": 1, "cardJobId": routed, "routed": true }))
+            );
 
             let browser = chain
                 .send(
@@ -1562,6 +1566,9 @@ async fn a_routed_message_ends_with_its_card_and_its_browser_turn_is_the_cards(
             let record = &chain.payload_metadata(&hand_back).await?[HAND_BACK_KEY];
             assert_eq!(record["cardJobId"], json!(routed.to_string()));
             assert_eq!(record["request"], json!(words));
+            // The building thread never saw the message: the record gives the build the
+            // person's own words, from the message's job.
+            assert_eq!(record["personRequest"], json!(words));
 
             // An ordinary card turn with no words keeps its blank reply.
             let card_turn = chain

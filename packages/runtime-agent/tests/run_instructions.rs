@@ -1484,33 +1484,37 @@ async fn run_browser_flows(harness: &mut Harness) {
         )
         .await;
     let browser = harness.turn("B5").job_id;
+    let mut b6 = checked_hand_back(
+        browser,
+        card,
+        &format!("[[B5]] {B5_TASK}"),
+        &[
+            (
+                "https://laptops.example/twelve",
+                "Twelve",
+                "1.3 kg, from 789 EUR",
+            ),
+            (
+                "https://laptops.example/thirteen",
+                "Thirteen",
+                "1.4 kg, from 1,799 EUR",
+            ),
+            (
+                "https://reviews.example/thirteen",
+                "Thirteen review",
+                "Battery lasts a working day",
+            ),
+        ],
+    );
+    // The card the routing step posted: the controller's record gives the build the message's
+    // own words as the person's request, since the building thread never saw B4.
+    b6["browserHandBack"]["personRequest"] = json!(format!("[[B4]] {B4_WORDS}"));
     harness
         .run(
             "B6",
             Spec::new(cb, Lane::PlainWrite, b5)
                 .asking(HAND_BACK)
-                .with_metadata(checked_hand_back(
-                    browser,
-                    card,
-                    &format!("[[B5]] {B5_TASK}"),
-                    &[
-                        (
-                            "https://laptops.example/twelve",
-                            "Twelve",
-                            "1.3 kg, from 789 EUR",
-                        ),
-                        (
-                            "https://laptops.example/thirteen",
-                            "Thirteen",
-                            "1.4 kg, from 1,799 EUR",
-                        ),
-                        (
-                            "https://reviews.example/thirteen",
-                            "Thirteen review",
-                            "Battery lasts a working day",
-                        ),
-                    ],
-                )),
+                .with_metadata(b6),
         )
         .await;
 

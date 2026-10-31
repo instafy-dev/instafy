@@ -725,15 +725,21 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
         "{} chars",
         section.chars().count()
     );
+    // A browser turn sees only the person's words and this chat's browser turns, so a message
+    // that names the browser still stays direct when the browser part needs anything else.
     for words in [
         "`browser`",
         "`browser_then_build`",
-        "names Instafy's browser",
-        "stay `direct`",
+        "sees only those words and this chat's earlier browser turns",
+        "Stay `direct`, even when the message names Instafy's browser",
+        "what only this space or another chat holds",
+        "the site runs in this space",
+        "says not to use the browser",
         "attachments",
     ] {
         assert!(section.contains(words), "{words}");
     }
+    assert!(!section.contains("always one of these two"), "{section}");
     let tmp = tempdir().expect("temp dir");
     learn::ensure_project_memory_scaffold(tmp.path());
     let snapshot = format_browser_routing_preflight_snapshot(tmp.path()).expect("snapshot");

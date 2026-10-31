@@ -393,8 +393,10 @@ browser turn, and the hand-back when the card continues building.
 
 A message the routing step sends straight to Instafy's browser runs no model turn of its own: its
 job posts the browser card alone, so it costs its reserve (1 credit by default), and the routing
-step is not billed. Its browser turn is billed as a card's browser turn. It uses two prompt slots,
-three with a hand-back.
+step is not billed. That card's task is the person's own words, so its browser turn is not a card's
+browser turn above but the person's own turn, charged as any turn they send: looking at the page and
+replying is charged too, and it is refunded only when it fails and leaves them nothing ("Failed
+turns" above). It uses two prompt slots, three with a hand-back.
 
 Billing reads only the controller's own marks on the job (`system_turns.rs`):
 
@@ -411,7 +413,9 @@ Billing reads only the controller's own marks on the job (`system_turns.rs`):
   started, the send asks the card's task and nothing else (the task alone, or after Studio's
   continuation prefix, `system_turns_fixtures.json`), it carries no attachments, and no browser
   turn carried that card on before. A card a turn Instafy started posted stays the person's own
-  to carry on, so free turns never chain.
+  to carry on, so free turns never chain. For a card the routing step posted for the person's own
+  message (`browserRequest.routed`), the stamp adds `routed: true`, and billing reads that turn as
+  one the sender sent.
 
 A send that fails a check still goes out, as an ordinary turn, and a client's own copy of any mark
 is dropped at dispatch and on recorded messages. Nothing of the person's rides on these turns:

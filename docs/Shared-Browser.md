@@ -1075,18 +1075,30 @@ goes to the browser from its first message. The routing step that runs before
 each of the person's messages may answer `browser`, or `browser_then_build`
 when Octo builds from what it finds; the browser skill's last section,
 "Routing preflight", says when, and a space whose copy of the skill lacks it
-keeps today's routes. The routes are offered only to an interactive turn that
-could ask for the browser itself (not a hand-back, a worker, a plan, an
-unattended run or a browser turn), with no attachments. That message's job
-then runs no model turn of its own: it posts one card marked `routed`, whose
-task is the person's own words, and no reply. Studio opens it as it opens any
-card, and the chat reads it as one turn: the turn's line says "Opening
-Instafy's browser…" until the browser turn shows something, and neither the
-card nor the continuation (which repeats the person's message) is shown. A
-routed card Studio cannot open by itself, or one the person presses, shows as
-any card does, with its reason. The card's browser turn, its hand-back and
-every check on them are a card's. A building or chat turn that finds mid-task
-that it needs the browser still asks with its own card. It never starts, stops or replaces a
+keeps today's routes. A message that names the browser still stays with Octo
+when the browser turn could not do it alone: it sees only the person's words
+and the chat's earlier browser turns, so a message that needs what this space
+or another chat holds, a site that runs in this space, or a message that says
+not to use the browser is not sent there. The routes are offered only for the
+person's own words (never a prompt Instafy wrote for a command such as
+`/learn`) on an interactive turn that could ask for the browser itself (not a
+hand-back, a worker, a plan, an unattended run or a browser turn) and that
+Octo answers for sure (not a group chat's message that Octo first decides
+whether to answer at all), with no attachments. That message's job then runs
+no model turn of its own: it posts one card marked `routed`, whose task is the
+person's own words, and no reply. Studio opens it as it opens any card, and
+the chat reads it as one turn: the turn's line says "Opening Instafy's
+browser…" until the browser turn shows something, and neither the card nor
+the continuation (which repeats the person's message) is shown. A routed card
+Studio cannot open by itself shows as any card does, with its reason; once the
+person presses it, or once its browser turn fails before it runs, it reads
+Opened as any card does, since nothing is opening it any more. The card's
+browser turn, its hand-back and every check on them are a card's, except that
+its browser turn is the person's own turn for billing (its task is their
+words; [Credits and billing](Credits-Billing.md)), and its hand-back gives the
+building turn the message's words as the person's request: that building
+thread never saw the message. A building or chat turn that finds mid-task that
+it needs the browser still asks with its own card. It never starts, stops or replaces a
 machine for this, and every other card waits for the person's press. The
 continuation is an ordinary Shared turn with consent version `1`. On the space's
 own machine it starts in routine browsing, as every run there does (see "Human
@@ -2059,8 +2071,10 @@ unless the policy is `"covered"`.
   the turn), and no draft or manual browser step is pending. The controller
   checks the same chain under the conversation's dispatch fence and stamps
   `browserHandBack` with what the browser turn was asked (at most 2,000
-  characters), its final reply (at most 6,000 characters) and up to six
-  labelled findings `{url, title, readAt, viewer}`
+  characters), for a card the routing step posted the message's own words as
+  `personRequest` (from that message's job, at most 8,000 characters; the
+  building turn reads them as the person's request), its final reply (at most
+  6,000 characters) and up to six labelled findings `{url, title, readAt, viewer}`
   (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
   `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
   counts as `blocked`): the address and title come from the reply's JSON

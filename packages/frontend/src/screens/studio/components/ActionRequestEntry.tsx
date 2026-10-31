@@ -342,10 +342,15 @@ export function ActionRequestEntry({
   );
 
   // A message Octo sent straight to the browser: while Studio opens its card
-  // by itself, the turn's one line says so, and the browser turn's own line
-  // follows (routedBrowserFold.ts). A card that stays a button shows as any
-  // card does, with its reason.
-  if (browserRequest?.routed && (browserPhase === "opening" || browserPhase === "opened")) {
+  // by itself, and until that browser turn shows something, the turn's one
+  // line says so; then the browser turn's own line follows
+  // (routedBrowserFold.ts). A card that stays a button, one the person
+  // pressed, or one whose browser turn failed before it ran shows as any card
+  // does: nothing is opening it.
+  const routedOpening = Boolean(browserRequest?.routed && browserKey && (
+    browserCardState?.kind === "opening" || browserHost?.routedWaitingKeys?.has(browserKey)
+  ));
+  if (routedOpening) {
     return (
       <div className="space-y-1" data-testid="routed-browser-opening">
         <TurnActivityLine

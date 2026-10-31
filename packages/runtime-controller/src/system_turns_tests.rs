@@ -340,6 +340,42 @@ async fn a_card_browser_turn_that_only_looked_costs_nothing() -> anyhow::Result<
     fixture.cleanup().await
 }
 
+/// A card the routing step posted for the person's own message carries their
+/// words as its task, so its browser turn is their own turn: one that only
+/// looked at the page and replied costs its tokens, as any turn they send.
+/// Refunded as a card's turn, a message that names the browser would get a
+/// whole answer for the routed job's reserve.
+#[tokio::test]
+async fn a_routed_cards_browser_turn_that_only_looked_costs_its_tokens() -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("routed-card-turn-looked").await? else {
+        eprintln!("skipping card turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let mut routed = card_stamp();
+    routed["routed"] = json!(true);
+    stamp(&fixture, BROWSER_CARD_TURN_KEY, routed).await?;
+    step(
+        &fixture,
+        "mcp_tool_call",
+        browser_tool("snapshot"),
+        "completed",
+    )
+    .await?;
+    let status = complete(
+        &fixture,
+        json!({
+            "job_id": fixture.job_id,
+            "outcome": "succeeded",
+            "summary": "Here is a long guide written from the page I looked at.",
+            "artifacts": [run_log_with_usage()],
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_charged_its_tokens(&fixture).await?;
+    fixture.cleanup().await
+}
+
 /// A card's browser turn that opened a page did its task's work, and costs
 /// what its tokens cost, as any turn.
 #[tokio::test]

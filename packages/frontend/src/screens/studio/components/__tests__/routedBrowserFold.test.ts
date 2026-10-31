@@ -76,6 +76,30 @@ function shown(messages: ChatMessage[]): string[] {
   return synthesizeAgentJobThreadMessages(messages, messages).map((entry) => entry.id);
 }
 
+// The browser turn's run failed before any job ran it.
+const failedBeforeItRan = message({
+  id: "failure",
+  content: "The browser could not start.",
+  timestamp: 4,
+  messageType: "error",
+  metadata: { runId: BROWSER_RUN, source: "agent", outcome: "failed", messageType: "error" },
+});
+
+describe("a routed card that is still opening", () => {
+  it("is waiting while Studio's own continuation has shown nothing", () => {
+    expect([...resolveRoutedBrowserFold([ask, routedCard(), continuation()]).waitingCardKeys])
+      .toEqual([`job:${ROUTED_JOB}`]);
+  });
+
+  it("is not once the person pressed it, or its browser turn failed before it ran", () => {
+    expect(resolveRoutedBrowserFold([ask, routedCard(), continuation(false)]).waitingCardKeys.size).toBe(0);
+    const failed = [ask, routedCard(), continuation(), failedBeforeItRan];
+    expect(resolveRoutedBrowserFold(failed).waitingCardKeys.size).toBe(0);
+    // The card stays, with the failure under it.
+    expect(shown(failed)).toEqual(["ask", "card", "failure"]);
+  });
+});
+
 describe("a message sent straight to the browser", () => {
   it("reads as the person's message and then the browser turn, once that turn shows something", () => {
     expect(shown([ask, routedCard(), continuation(), step, reply])).toEqual([
