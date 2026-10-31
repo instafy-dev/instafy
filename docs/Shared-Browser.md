@@ -2023,7 +2023,10 @@ unless the policy is `"covered"`.
   Instafy's browser", and the site it is headed for), never what pressing it
   does: older cards carry a line about that, which is not shown. A turn whose
   only action is the card posts the card and no reply of its own, except in a
-  skill setup, whose reply carries its walk. It reads
+  skill setup, whose reply carries its walk, and on a turn that decides whether
+  to answer at all. A reply that does show beside a card never says a page
+  opened before a browser tool saw it, or what the browser will submit, send or
+  buy. It reads
   **Opening Instafy's browser…** while it opens and a plain **Opened** once it
   was continued, also after a reload. A card a newer card followed offers no
   button and reads **Not opened**: the newer card carries the task on, so two
