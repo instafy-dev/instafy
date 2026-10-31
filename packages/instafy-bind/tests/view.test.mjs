@@ -158,6 +158,32 @@ test("the layout gets an ack that offers view and tap (and no insets: Studio kee
   assert.equal(off.views().length, 0);
 });
 
+// Local test, Oct 31: after a comparison card's press, Studio's "Opening …" went at the frame's load and the pane was
+// empty for 2 s while the page fetched its data. A page that draws after it loads says so, and says when it has drawn.
+test("a page that draws its first view after it loads lists ready in its ack, and says ready once, when it has drawn", async () => {
+  const p = page();
+  await ready(p);
+  p.bind.drawsLater();
+  p.layout();
+  assert.deepEqual(p.of("layout-ack")[0].msg.payload, { v: 1, supports: ["view", "tap", "ready"] });
+  assert.equal(p.of("ready").length, 0, "nothing is said before it has drawn");
+  p.bind.drawn();
+  p.bind.drawn();
+  p.layout(); // Studio's theme changed: another layout, another ack, no second ready
+  assert.deepEqual(p.of("ready").map((s) => [s.msg, s.origin]), [[{ source: "instafy-bind", v: 1, type: "ready", payload: {} }, STUDIO]]);
+  p.stop();
+  // drawn before the host's layout came: ready right after the ack
+  const early = page({ config: { view: false } });
+  await ready(early);
+  early.bind.drawsLater();
+  early.bind.drawn();
+  assert.equal(early.sent.length, 0, "no host yet: nothing is posted");
+  early.layout();
+  assert.deepEqual(early.sent.map((s) => s.msg.type), ["layout-ack", "ready"]);
+  assert.deepEqual(early.of("layout-ack")[0].msg.payload, { v: 1, supports: ["ready"] });
+  early.stop();
+});
+
 test("auto view round trip: the presenter sorts, filters and scrolls to row 30; the follower shows the same query and row", async () => {
   const a = page({ search: "?instafy_host=studio" });
   const b = page({ search: "?instafy_host=studio", innerHeight: 600, rowH: 56 }); // a phone: other window, taller rows

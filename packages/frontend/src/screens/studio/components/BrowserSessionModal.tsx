@@ -2321,6 +2321,9 @@ export function BrowserSessionModal({
       wholeScreenBehindChat
     ) {
       if (wholeScreenBehindChat) freezeCurrentBrowserFrame();
+      // A picture closed because the stage draws none of the chat's page
+      // (another chat's turn) is not held: the chat's next one is its first.
+      if (!stageDrawsChatPage) paintedFrameScopeRef.current = null;
       setResolvedViewerUrl(null);
       setBrowserInputWsUrl(null);
       setWebRtcConnection(null);
@@ -2774,9 +2777,12 @@ export function BrowserSessionModal({
     return () => window.clearTimeout(timer);
   }, [fail, projectId, reconnectingShown]);
 
-  // On screen only once the picture has been gone for the grace period.
+  // On screen only once the picture has been gone for the grace period, and
+  // only over a picture of the chat's page this view drew: its first picture
+  // (after a reload, another chat's turn or a switch to another of its tabs)
+  // is never a reconnect, even when its first frame takes long or fails once.
   const reconnectingNoteShown = useSustainedFlag(
-    !shouldCollapseDocked && viewLive && status === "connecting",
+    !shouldCollapseDocked && viewLive && status === "connecting" && paintedFrameScopeRef.current === frameScope,
     RECONNECTING_GRACE_MS,
   );
 

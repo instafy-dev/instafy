@@ -74,7 +74,7 @@ vi.mock("../WebRtcBrowserViewer", () => ({ WebRtcBrowserViewer: (props: { onConn
   };
   return <video data-testid="shared-browser-webrtc" data-active={props.active ? "true" : "false"} ref={sized} />;
 } }));
-import { BrowserSessionModal } from "../BrowserSessionModal";
+import { BrowserSessionModal, RECONNECTING_GRACE_MS } from "../BrowserSessionModal";
 
 const projectId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const runtimeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -357,5 +357,57 @@ describe("a chat's Browser view and another chat's page", () => {
     await drawFrame(pictures()[0]!.socket);
     expect(pictureShown()).toBe(true);
     expect(text()).not.toContain("Opening Instafy's browser");
+  });
+
+  /** The browser closes a picture's socket, as when the connection drops. */
+  async function closeFromBrowser(socket: FakeWebSocket) {
+    await act(async () => {
+      socket.readyState = 3;
+      for (const listener of socket.listeners.get("close") ?? []) {
+        listener(Object.assign(new Event("close"), { code: 1006, reason: "" }));
+      }
+    });
+  }
+
+  // Local test, Oct 31: as another chat's turn ended, a chat's view said
+  // "Reconnecting…" over its first picture since that turn, whose first frame
+  // took 2 s: the space's browser had connected in this Studio before, so the
+  // view counted itself as open. It had drawn no picture of the chat's page
+  // since the turn, so there was nothing to reconnect.
+  it("says nothing of reconnecting while the chat's first picture after another chat's turn loads, in a browser that connected before", async () => {
+    const space = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await render({ pages: [own(), other()], project: space });
+    await drawFrame(pictures()[0]!.socket);
+    expect(pictureShown()).toBe(true);
+    await render({ pages: [own(false), other(true)], anotherChatTurn: true, project: space });
+    expect(note()).toBe("Octo is working in another chat");
+    // The turn ends and the chat's tab is in front: its picture's first frame
+    // takes longer than the grace period.
+    await render({ pages: [own(), other()], project: space });
+    await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECTING_GRACE_MS + 500); });
+    expect(reconnecting()).toBeNull();
+    await drawFrame(pictures()[0]!.socket);
+    expect(pictureShown()).toBe(true);
+    // A picture of the chat's page it drew that goes is a reconnect.
+    await closeFromBrowser(pictures()[0]!.socket);
+    await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECTING_GRACE_MS + 100); });
+    expect(reconnecting()).not.toBeNull();
+  });
+
+  // The same when the chat's own tab stayed in front through another chat's
+  // turn (one that ended before it brought its own tab forward): the picture
+  // the view closed for that turn is not one it holds.
+  it("says nothing of reconnecting after another chat's turn that left the chat's tab in front", async () => {
+    const space = "abababab-abab-4bab-8bab-abababababab";
+    await render({ pages: [own(), other()], project: space });
+    await drawFrame(pictures()[0]!.socket);
+    await render({ pages: [own(), other()], anotherChatTurn: true, project: space });
+    expect(pictures()).toEqual([]);
+    expect(note()).toBe("Octo is working in another chat");
+    await render({ pages: [own(), other()], project: space });
+    await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECTING_GRACE_MS + 500); });
+    expect(reconnecting()).toBeNull();
+    await drawFrame(pictures()[0]!.socket);
+    expect(pictureShown()).toBe(true);
   });
 });

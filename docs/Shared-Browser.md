@@ -699,7 +699,11 @@ read, so that page would go into this chat's reply and Details):
   stage, and no still is kept from it. The view counts as open meanwhile,
   also when it opens during such a turn, and its picture connects again once
   a tab of the chat is in front (a view that has drawn no picture yet says
-  "Opening Instafy's browser…" while it loads, never "Reconnecting…").
+  "Opening Instafy's browser…" while it loads, never "Reconnecting…"). That
+  picture is the chat's first since the turn, never a reconnect, also in a
+  Studio whose browser connected before, when the view counts as open at once:
+  "Reconnecting…" shows only over a picture of the chat's page the view drew
+  and lost, so a first frame that takes long or fails once says nothing.
   Behind the Chat tab, a screencast view whose chat's tab is in front keeps
   its picture (it asks for that one page), so it shows the page at once when
   it comes on screen. RFB and WebRTC connect only while the view is shown:

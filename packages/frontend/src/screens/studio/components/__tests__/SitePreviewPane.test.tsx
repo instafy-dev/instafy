@@ -167,6 +167,25 @@ describe("SitePreviewPane", () => {
     expect(pill.textContent).toBe("Starting…");
   });
 
+  // Local drive, Oct 31: after the map card's press the bar's pill read
+  // "Starting…" beside the pane's "Opening Seville in 3 days…", though nothing
+  // was started: the pill says "Starting…" for a site still being checked
+  // (its tunnel's probe not in yet), whose page or opening line is on screen.
+  it("says nothing is starting while the site is being checked: its page, or the line opening it, is the one signal", async () => {
+    mocks.getSitePreview.mockResolvedValue(record({ health: null }));
+    await render();
+    expect(pane().dataset.state).toBe("checking");
+    expect(frame()).not.toBeNull();
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Opening Docs site…");
+    const pill = container.querySelector<HTMLElement>("[data-testid=site-preview-status]")!;
+    expect(pill.classList.contains("sr-only")).toBe(true);
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await advance(SITE_LAYOUT_ANSWER_WAIT_MS);
+    // The page is on screen, and still nothing on screen says it is starting.
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+    expect(container.querySelector<HTMLElement>("[data-testid=site-preview-status]")!.classList.contains("sr-only")).toBe(true);
+  });
+
   // A local test: a restarted site's pane was blank for 16 to 26 s, and the
   // map's for 5 to 18 s, with nothing said. Local test, Oct 30: after a
   // press the pane said "Opening …", then "Loading…", then went blank: the

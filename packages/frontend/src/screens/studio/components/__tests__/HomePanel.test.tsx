@@ -251,6 +251,21 @@ describe("HomePanel activity states", () => {
     expect(query("home-continue-working")).toBeNull();
   });
 
+  // Local drive, Oct 31: Continue working read "Personal team · local drive 9"
+  // beside Recent activity's "Personal · local drive 9", for the same team.
+  it("names the personal team as every other row does under Continue working", async () => {
+    mocks.organizations.mockResolvedValue([{ id: "team-personal", name: "Personal team", slug: "user-1" }]);
+    mocks.projects = [{ id: "project-personal", name: "My space", orgId: "team-personal", orgName: "Personal team" }];
+    mocks.conversationWorkspace = true;
+    mocks.conversations = [localConversation({ unreadCount: 0, controllerId: "conversation-recent" })];
+    mocks.activeConversationId = "local-unread";
+    mocks.activity.activityItems = [activityItem({ org: { id: "team-personal", name: "Personal team" } })];
+    await render({}, true);
+    const resume = query("home-resume-conversation")!;
+    expect(resume.textContent).toContain("Personal · My space");
+    expect(container.textContent).not.toContain("Personal team");
+  });
+
   // Local drive, Oct 28: "Conversation 1" was under both Continue working and Unread.
   it("lists a chat that is unread under Unread only, not again under Continue working", async () => {
     mocks.conversationWorkspace = true;

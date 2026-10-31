@@ -961,6 +961,9 @@
    * checks, Studio's view). render(data, state) builds the page; select(ref, data) returns a state patch (optional).
    */
   function start(o) {
+    // The page draws after its data loads: Studio says it is opening the site until the first view is drawn.
+    var b = bind();
+    if (b && typeof b.drawsLater === "function") b.drawsLater();
     var dataUrl = o.data === undefined ? "data.json" : o.data;
     var got = dataUrl ? load(dataUrl) : Promise.resolve({});
     return got.then(function (data) {
@@ -969,12 +972,19 @@
       var list = document.getElementById("list");
       if (list) list.replaceChildren();
       onState(function () { o.render(data, state()); });
+      drawnSoon();
       return data;
-    }, function () { /* fail() already showed the notice */ });
+    }, function () { /* fail() already showed the notice */ drawnSoon(); });
+  }
+  /** The first view is on the page (or the notice saying why not): told once it is painted. */
+  function drawnSoon() {
+    var b = bind();
+    if (!b || typeof b.drawn !== "function") return;
+    (window.requestAnimationFrame || setTimeout)(function () { b.drawn(); });
   }
 
   window.site = {
-    version: "1.5.0",
+    version: "1.6.0",
     h: h, append: append, icon: icon, link: link, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
     cite: cite, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,

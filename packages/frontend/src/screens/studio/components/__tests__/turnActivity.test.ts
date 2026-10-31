@@ -829,6 +829,32 @@ describe("browser steps", () => {
     }
   });
 
+  // A local test: a comparison's browser turn opened four pages on frame.work,
+  // then a review on phoronix.com and one on pcworld.com. Its line read
+  // "Opened pcworld.com, opened 4 pages on frame.work": the two reviews tied,
+  // and the later one took the place.
+  it("name both sites that tie for the line's second place", () => {
+    const page = (n: number) => n.toString(16).padStart(16, "0");
+    const open = (host: string, n: number) => browserStep(BROWSER_OPEN, { host, pageKey: page(n), step: "navigate" });
+    const read = (host: string, n: number) => browserStep(BROWSER_READ, { host, pageKey: page(n), step: "snapshot" });
+    const frame = [
+      browserStep(BROWSER_BROWSE, { host: "frame.work", step: "click" }),
+      open("frame.work", 1), open("frame.work", 2), open("frame.work", 3), open("frame.work", 4),
+    ];
+    expect(summarize([...frame, open("phoronix.com", 10), open("pcworld.com", 20)]).summary)
+      .toBe("Opened phoronix.com and pcworld.com, opened 4 pages on frame.work");
+    // Words that would read as one page on both sites stay apart.
+    expect(summarize([...frame, read("phoronix.com", 10), read("pcworld.com", 20)]).summary)
+      .toBe("Read a page on phoronix.com, read a page on pcworld.com, opened 4 pages on frame.work");
+    // Two different steps that tie are both named.
+    const searched = browserStep(BROWSER_SEARCH, { host: "phoronix.com", pageKey: page(10), step: "search" });
+    expect(summarize([...frame, searched, open("pcworld.com", 20)]).summary)
+      .toBe("Searched phoronix.com, opened pcworld.com, opened 4 pages on frame.work");
+    // With more than one site tied for that place, none is picked over the others.
+    expect(summarize([...frame, open("phoronix.com", 10), open("gizmodo.com", 30), open("pcworld.com", 20)]).summary)
+      .toBe("Opened pcworld.com, opened 4 pages on frame.work");
+  });
+
   it("name the site while a step runs, and the browser before any site is known", () => {
     expect(summarize([browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", step: "search" }, "in_progress")], "running").live)
       .toBe("Searching visitlisboa.com…");

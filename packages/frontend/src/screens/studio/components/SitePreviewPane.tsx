@@ -493,10 +493,11 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
         status={<>
           <LocationBarControl site={host.location.site} status={host.location.status} />
           <SitePreviewFollowControls follow={follow} supportsView={host.supportsView && frameOnScreen} />
-          {/* While opening or starting, the pane's own line is the one loading signal on screen. */}
+          {/* While opening or starting, the pane's own line is the one loading signal on screen; while the site is
+              being checked, its page or that line is. Nothing is starting then, so no pill says "Starting…". */}
           {problemShown ? null : (
             <BrowserStatusPill state={shown === "live" ? "ready" : "starting"} detail={PILL_DETAIL[shown] ?? null} testId="site-preview-status"
-              startingShownInView={shown === "opening" || shown === "starting"} />
+              startingShownInView={shown === "opening" || shown === "starting" || shown === "checking"} />
           )}
         </>}
         actions={

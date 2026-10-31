@@ -11,7 +11,11 @@ import { knownNumber } from "../src/check.mjs";
 
 const STARTERS = new URL("../src/starters/", import.meta.url);
 const SITE_JS = fs.readFileSync(new URL("site.js", STARTERS), "utf8");
-const APP = { compare: fs.readFileSync(new URL("compare/app.js", STARTERS), "utf8"), ranked: fs.readFileSync(new URL("ranked/app.js", STARTERS), "utf8") };
+const APP = {
+  compare: fs.readFileSync(new URL("compare/app.js", STARTERS), "utf8"),
+  ranked: fs.readFileSync(new URL("ranked/app.js", STARTERS), "utf8"),
+  blank: fs.readFileSync(new URL("blank/app.js", STARTERS), "utf8"),
+};
 
 // ---------- a small DOM: elements, text, ids, classes and attributes; selectors of one tag, class, id or attribute ----------
 
@@ -92,8 +96,11 @@ function matches(el, selector) {
   return true;
 }
 
-/** Runs a starter page with this data at this width; resolves with the page's document once it has drawn. */
-async function draw(starter, data, { width = 1280, search = "" } = {}) {
+/**
+ * Runs a starter page with this data at this width; resolves with the page's document once it has drawn. `bind`:
+ * the binder's client, made for the page's document; `failLoad`: the data does not load.
+ */
+async function draw(starter, data, { width = 1280, search = "", bind = null, failLoad = false } = {}) {
   const document = new Element("html");
   Object.assign(document, {
     documentElement: document,
@@ -124,10 +131,13 @@ async function draw(starter, data, { width = 1280, search = "" } = {}) {
     getComputedStyle: () => ({ paddingLeft: "0", paddingRight: "0", backgroundColor: "", getPropertyValue: () => "" }),
     ResizeObserver: class { observe() {} },
     requestAnimationFrame: (fn) => setTimeout(fn, 0),
-    fetch: async () => ({ ok: true, json: async () => JSON.parse(JSON.stringify(data)) }),
+    fetch: async () => (failLoad ? { ok: false, status: 500, json: async () => null } : { ok: true, json: async () => JSON.parse(JSON.stringify(data)) }),
     URL, URLSearchParams, Intl, Date, Promise, setTimeout, clearTimeout, console,
+    // with the binder's client, the page keeps "4 min ago" current: never in a test
+    setInterval: () => 0, clearInterval: () => {},
   };
   window.window = window;
+  if (bind) window.instafyBind = bind(document);
   const context = vm.createContext(window);
   vm.runInContext(SITE_JS, context);
   vm.runInContext(APP[starter], context);
@@ -144,6 +154,28 @@ function rows(document) {
   return { within: refs(list).filter((ref) => !inApart.includes(ref)), apart: inApart, heading: apart ? apart.querySelector("h2").textContent : null };
 }
 const rowText = (document, ref) => document.getElementById("list").querySelectorAll("[data-ref]").find((el) => el.getAttribute("data-ref") === ref)?.textContent.replace(/\s+/g, " ") ?? null;
+
+// Local test, Oct 31: after a comparison card's press Studio's "Opening …" went at the frame's load, and the pane
+// was empty for 2 s while the page fetched its data. A starter page tells Studio, through the client, that it draws
+// after it loads, and when its first view (or the notice saying why not) is on the page.
+test("a starter page says it draws after it loads, and that it has drawn once its first view is on the page", async () => {
+  const told = [];
+  const client = (document) => ({
+    on() {}, ready: new Promise(() => {}), isPending: () => false, records: () => [], expired: () => false,
+    drawsLater: () => told.push("draws later"),
+    drawn: () => told.push(`drawn: ${document.body.textContent}`),
+  });
+  await draw("blank", null, { bind: client });
+  assert.equal(told.length, 2, told.join(" | "));
+  assert.equal(told[0], "draws later");
+  assert.match(told[1], /^drawn: .*Nothing here yet\./u);
+  // data that does not load: drawn once the page says so
+  told.length = 0;
+  await draw("compare", null, { bind: client, failLoad: true });
+  assert.equal(told.length, 2, told.join(" | "));
+  assert.equal(told[0], "draws later");
+  assert.match(told[1], /^drawn: .*This page couldn't load its data\./u);
+});
 
 // ---------- a shopping comparison under a stated limit: the live test's case, made up ----------
 

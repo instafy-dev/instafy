@@ -9,6 +9,7 @@ import type {
 } from "./chatAssistantIdentity";
 import { extractAgentIdentityFromMetadata, resolveObservedAgentIdentity } from "./chatAssistantIdentity";
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
+import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
 
 function resolveAvatarSeed(
@@ -65,6 +66,8 @@ export function AssistantSpeakerIdentityLabel({
   statusMarker?: SpeakerStatusMarker | null;
 }) {
   const normalizedHandle = normalizeAssistantHandleLabel(handle);
+  // Named as the rest of Studio names it: Octo, not its handle "octo".
+  const shownName = getBuiltInAssistantDisplayName(normalizedHandle) ?? normalizedHandle;
   const avatarSeed = resolveAvatarSeed(normalizedHandle, agentIdentity);
   const timestampInfo = formatSpeakerTimestamp(timestamp);
 
@@ -78,7 +81,7 @@ export function AssistantSpeakerIdentityLabel({
         type="button"
         onClick={() => requestAgentProfile(normalizedHandle,
           resolveObservedAgentIdentity(agentIdentity, extractAgentIdentityFromMetadata(metadata)))}
-        aria-label={formatAiAccessibleName(`View profile for ${normalizedHandle}`)}
+        aria-label={formatAiAccessibleName(`View profile for ${shownName}`)}
         data-testid="chat-speaker-agent-profile"
         className={`flex-none ${AI_TILE_SHAPE_CLASS} outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 ${
           avatarVisibility === "narrow" ? "sm:hidden" : ""
@@ -93,8 +96,8 @@ export function AssistantSpeakerIdentityLabel({
           size="xs"
         />
       </button>
-      <span className="min-w-0 truncate font-semibold text-slate-600 dark:text-slate-300">
-        {normalizedHandle}
+      <span className="min-w-0 truncate font-semibold text-slate-600 dark:text-slate-300" data-testid="chat-speaker-name">
+        {shownName}
       </span>
       {timestampInfo ? (
         <time

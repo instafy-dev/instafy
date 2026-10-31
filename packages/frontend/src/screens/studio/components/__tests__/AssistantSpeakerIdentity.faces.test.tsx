@@ -33,13 +33,16 @@ describe("assistant speaker identity faces", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  // Local drive, Oct 31: on a phone the speaker read "octo" above replies
+  // that say "Octo", as Studio names it everywhere else.
   it.each([
-    ["Octo", "octo"],
-    ["a saved agent", "reviewer"],
-  ])("names %s's profile button as an AI and shapes its focus ring like the tile", async (_name, handle) => {
+    ["Octo", "octo", "Octo"],
+    ["a saved agent", "reviewer", "reviewer"],
+  ])("names %s as Studio does, names its profile button as an AI and shapes its focus ring like the tile", async (_name, handle, shown) => {
     await act(async () => root.render(<AssistantSpeakerIdentityLabel handle={handle} />));
+    expect(container.querySelector('[data-testid="chat-speaker-name"]')?.textContent).toBe(shown);
     const button = container.querySelector('[data-testid="chat-speaker-agent-profile"]');
-    expect(button?.getAttribute("aria-label")).toBe(`View profile for ${handle}, AI`);
+    expect(button?.getAttribute("aria-label")).toBe(`View profile for ${shown}, AI`);
     expect(classTokens(button)).toContain(AI_TILE_SHAPE_CLASS);
     expect(classTokens(button)).not.toContain("rounded-full");
     const face = button?.firstElementChild;

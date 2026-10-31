@@ -18,8 +18,8 @@ const B = "22222222-2222-4222-8222-222222222222";
 const event = (id = A) => ({ id, eventName: "support.reply", version: 1, category: "support", resourceId: id, resourceType: "support_report", occurredAt: "2026-09-06T12:00:00Z", title: "Instafy", body: "Support replied to your report.", url: `/studio?supportReportId=${id}`, readAt: null as string | null, seenAt: null, archivedAt: null });
 const page = (items = [event()], nextCursor: string | null = null) => ({ items, nextCursor, unreadCount: items.length, asOf: "2026-09-06T12:01:00Z" });
 const preferences = { hidePreviews: true, preferences: [{ category: "support", channel: "local", enabled: true }] };
-function Harness({ userId = A, token = `token-${userId}` }: { userId?: string; token?: string }) {
-  const center = useNotificationCenter({ userId, accessToken: token, navigate: mocks.navigate });
+function Harness({ userId = A, token = `token-${userId}`, chatName }: { userId?: string; token?: string; chatName?: (id: string) => string | null }) {
+  const center = useNotificationCenter({ userId, accessToken: token, navigate: mocks.navigate, chatName });
   return <div>
     {center.error ? <p role="alert">{center.error}</p> : null}
     <span data-testid="count">{center.page.items.length}</span>
@@ -305,6 +305,31 @@ describe("notification center", () => {
       resetOpenConversationsForTests();
       window.removeEventListener(CONVERSATION_REPLY_NOTIFIED_EVENT, listener);
     }
+  });
+
+  // Local drive, Oct 31: a reply in another chat toasted "There is a new reply
+  // in your conversation." without saying which chat.
+  it("names the chat a reply's toast is about when Studio knows it", async () => {
+    const PROJECT = "55555555-5555-4555-8555-555555555555";
+    const NAMED = "66666666-6666-4666-8666-666666666666";
+    const UNKNOWN = "77777777-7777-4777-8777-777777777777";
+    const C = "88888888-8888-4888-8888-888888888888";
+    const D = "99999999-9999-4999-8999-999999999999";
+    const reply = (id: string, conversation: string) => ({
+      ...event(id), eventName: "conversation.reply", category: "conversations", resourceType: "conversation", resourceId: conversation,
+      body: "There is a new reply in your conversation.", url: `/studio?projectId=${PROJECT}&conversationControllerId=${conversation}`,
+    });
+    const names: Record<string, string> = { [NAMED]: "Open github.com in your browser, sign me…" };
+    await act(async () => root.render(<Harness chatName={(id) => names[id] ?? null} />));
+    mocks.foreground = true;
+    mocks.list.mockResolvedValue(page([reply(C, NAMED), reply(D, UNKNOWN)]));
+    await act(async () => {
+      window.dispatchEvent(new Event(RECEIVED));
+      await vi.dynamicImportSettled();
+    });
+    expect(mocks.show).toHaveBeenCalledWith("There is a new reply in “Open github.com in your browser, sign me…”.", "info", 10_000, expect.objectContaining({ id: `notification:${A}:${C}` }));
+    // A chat this tab cannot name keeps the plain words.
+    expect(mocks.show).toHaveBeenCalledWith("There is a new reply in your conversation.", "info", 10_000, expect.objectContaining({ id: `notification:${A}:${D}` }));
   });
 
   it("leaves a failed run in the open chat to the chat, and toasts one elsewhere", async () => {

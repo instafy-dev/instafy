@@ -38,7 +38,7 @@ struct BrowserPagesQuery {
     include_placeholder: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct BrowserCdpTargetDescriptor {
     pub(crate) id: String,
     #[serde(rename = "type")]
@@ -1110,15 +1110,25 @@ static LISTED_TITLES: Lazy<Mutex<HashMap<String, ListedTitle>>> = Lazy::new(Defa
 /// the one still loading, and a title that is not confirmed may be the page it
 /// is leaving. A page with no DevTools socket, or no title of its own to show,
 /// keeps the title it has.
-async fn pages_still_loading<F, Fut>(
+///
+/// A tab whose new page arrives between the list and the read of its history
+/// was listed with the title of the page it was leaving, and its history
+/// already shows the new address. So once a read confirms a title, the tabs
+/// are listed again (`relist`), and a title is the page's own only when its
+/// tab still lists the same address and title. Otherwise, or when the tabs
+/// cannot be listed again, it keeps no title until a later list confirms it.
+async fn pages_still_loading<F, Fut, L, LFut>(
     targets: &[BrowserCdpTargetDescriptor],
     listed: &Mutex<HashMap<String, ListedTitle>>,
     shown_address: F,
+    relist: L,
     read_timeout: Duration,
 ) -> HashSet<String>
 where
     F: Fn(String) -> Fut,
     Fut: Future<Output = Option<String>>,
+    L: FnOnce() -> LFut,
+    LFut: Future<Output = Option<Vec<BrowserCdpTargetDescriptor>>>,
 {
     let known = listed.lock().map(|known| known.clone()).unwrap_or_default();
     let mut reads = Vec::new();
@@ -1159,8 +1169,19 @@ where
             }
         }
     }
+    let mut reads = futures_util::future::join_all(reads).await;
+    if reads.iter().any(|(_, read)| read.own) {
+        let now = relist().await;
+        for (id, read) in reads.iter_mut().filter(|(_, read)| read.own) {
+            read.own = now.as_ref().is_some_and(|now| {
+                now.iter().any(|target| {
+                    &target.id == id && target.url.trim() == read.url && target.title == read.title
+                })
+            });
+        }
+    }
     let mut loading = HashSet::new();
-    for (id, read) in futures_util::future::join_all(reads).await {
+    for (id, read) in reads {
         if !read.own {
             loading.insert(id.clone());
         }
@@ -1284,6 +1305,7 @@ async fn handle_browser_pages(
         &targets,
         &LISTED_TITLES,
         fetch_browser_shown_address,
+        || async { fetch_browser_cdp_targets(&state).await.ok() },
         BROWSER_CDP_COMMAND_TIMEOUT,
     )
     .await;
@@ -2840,9 +2862,16 @@ mod tests {
             let listed = &listed;
             let shown = &shown;
             async move {
-                pages_still_loading(&targets, listed, shown, BROWSER_CDP_COMMAND_TIMEOUT)
-                    .await
-                    .contains("page")
+                let again = targets.clone();
+                pages_still_loading(
+                    &targets,
+                    listed,
+                    shown,
+                    || async move { Some(again) },
+                    BROWSER_CDP_COMMAND_TIMEOUT,
+                )
+                .await
+                .contains("page")
             }
         };
 
@@ -2909,13 +2938,15 @@ mod tests {
             Some(FRAME.to_string())
         };
         let started = std::time::Instant::now();
+        let tabs = [
+            target("reviews", TOMS, "Framework Laptop 13 Pro review | PCWorld"),
+            target("frame", FRAME, "Framework Laptop 13 Pro"),
+        ];
         let loading = pages_still_loading(
-            &[
-                target("reviews", TOMS, "Framework Laptop 13 Pro review | PCWorld"),
-                target("frame", FRAME, "Framework Laptop 13 Pro"),
-            ],
+            &tabs,
             &listed,
             shown,
+            || async { Some(tabs.to_vec()) },
             Duration::from_millis(200),
         )
         .await;
@@ -2935,10 +2966,123 @@ mod tests {
                 std::future::pending::<()>().await;
                 None
             },
+            || async { None },
             Duration::from_millis(200),
         )
         .await;
         assert!(steady.is_empty());
+    }
+
+    // A local test: the reading row showed frame.work's title next to
+    // phoronix.com for 2.2 s. The tab list was read while the tab still showed
+    // frame.work's page, and the tab's history after Phoronix's page arrived:
+    // the title the list gave was the one the tab was leaving, and the history
+    // confirmed the address. Checked against Chromium with a page that answers
+    // 2.5 s late, reading the history 40 ms after the list.
+    #[tokio::test]
+    async fn a_page_that_arrives_between_the_list_and_the_read_keeps_no_title_until_listed_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const FRAME: &str = "https://frame.work/at/en/laptop13pro";
+        const PHORONIX: &str = "https://www.phoronix.com/review/framework-laptop-13-pro";
+        const FRAME_TITLE: &str =
+            "Framework | Framework Laptop 13 Pro: Intel Core Ultra 3 & LPCAMM2";
+        const PHORONIX_TITLE: &str =
+            "Framework Laptop 13 Pro: Aiming To Be One Of The Best Upgradeable Linux Laptops";
+        let listed = Mutex::new(HashMap::new());
+        let relists = AtomicUsize::new(0);
+        let tab = |url: &str, title: &str| BrowserCdpTargetDescriptor {
+            id: "reviews".to_string(),
+            target_type: "page".to_string(),
+            title: title.to_string(),
+            url: url.to_string(),
+            websocket_debugger_url: Some("ws://127.0.0.1:9/devtools/page/reviews".to_string()),
+        };
+        // Steady on frame.work's page.
+        let frame = [tab(FRAME, FRAME_TITLE)];
+        let shown_frame = |_websocket_url: String| async { Some(FRAME.to_string()) };
+        assert!(pages_still_loading(
+            &frame,
+            &listed,
+            shown_frame,
+            || async { Some(frame.to_vec()) },
+            BROWSER_CDP_COMMAND_TIMEOUT
+        )
+        .await
+        .is_empty());
+        // Listed while Phoronix's page was on its way; by the read, it had
+        // arrived, with no title of its own yet. Listed again: its own.
+        let leaving = [tab(PHORONIX, FRAME_TITLE)];
+        let shown_phoronix = |_websocket_url: String| async { Some(PHORONIX.to_string()) };
+        let loading = pages_still_loading(
+            &leaving,
+            &listed,
+            shown_phoronix,
+            || {
+                relists.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Some(vec![tab(
+                        PHORONIX,
+                        "www.phoronix.com/review/framework-laptop-13-pro",
+                    )])
+                }
+            },
+            BROWSER_CDP_COMMAND_TIMEOUT,
+        )
+        .await;
+        assert_eq!(
+            loading,
+            HashSet::from(["reviews".to_string()]),
+            "the title it was leaving is not shown"
+        );
+        assert_eq!(relists.load(Ordering::SeqCst), 1);
+        // The next list names it by its own title, and keeps it.
+        let arrived = [tab(PHORONIX, PHORONIX_TITLE)];
+        assert!(pages_still_loading(
+            &arrived,
+            &listed,
+            shown_phoronix,
+            || async { Some(arrived.to_vec()) },
+            BROWSER_CDP_COMMAND_TIMEOUT
+        )
+        .await
+        .is_empty());
+        // A list that cannot be read again confirms nothing.
+        let elsewhere = [tab(FRAME, FRAME_TITLE)];
+        assert_eq!(
+            pages_still_loading(
+                &elsewhere,
+                &listed,
+                shown_frame,
+                || async { None },
+                BROWSER_CDP_COMMAND_TIMEOUT
+            )
+            .await,
+            HashSet::from(["reviews".to_string()])
+        );
+        // A steady list reads nothing and lists nothing again.
+        let before = relists.load(Ordering::SeqCst);
+        assert!(pages_still_loading(
+            &arrived,
+            &listed,
+            shown_phoronix,
+            || async { Some(arrived.to_vec()) },
+            BROWSER_CDP_COMMAND_TIMEOUT
+        )
+        .await
+        .is_empty());
+        assert!(pages_still_loading(
+            &arrived,
+            &listed,
+            shown_phoronix,
+            || {
+                relists.fetch_add(1, Ordering::SeqCst);
+                async { None }
+            },
+            BROWSER_CDP_COMMAND_TIMEOUT
+        )
+        .await
+        .is_empty());
+        assert_eq!(relists.load(Ordering::SeqCst), before);
     }
 
     // The tabs a list no longer has are forgotten, and each page is judged on
@@ -2961,21 +3105,25 @@ mod tests {
                 "https://visitporto.travel/".to_string()
             })
         };
+        let tabs = [
+            target("a", "https://visitporto.travel/a"),
+            target("b", "https://visitporto.travel/b"),
+        ];
         let loading = pages_still_loading(
-            &[
-                target("a", "https://visitporto.travel/a"),
-                target("b", "https://visitporto.travel/b"),
-            ],
+            &tabs,
             &listed,
             shown,
+            || async { Some(tabs.to_vec()) },
             BROWSER_CDP_COMMAND_TIMEOUT,
         )
         .await;
         assert_eq!(loading, HashSet::from(["b".to_string()]));
+        let tab = [target("a", "https://visitporto.travel/a")];
         pages_still_loading(
-            &[target("a", "https://visitporto.travel/a")],
+            &tab,
             &listed,
             shown,
+            || async { Some(tab.to_vec()) },
             BROWSER_CDP_COMMAND_TIMEOUT,
         )
         .await;

@@ -37,6 +37,11 @@
  * Studio's look: its layout message sets <html data-theme="light|dark"> (unless <html data-theme-fixed>) and
  * data-host-title="shown" while Studio shows the page title; the starters' theme.css reads both.
  *
+ * First draw: a page that draws its first view after it loads (it fetches its data first, as the starters' site.start
+ * does) calls instafyBind.drawsLater() as it starts, and instafyBind.drawn() once that view is drawn (or it shows why
+ * it cannot draw). The layout's ack then lists "ready", and "ready" goes to the host once drawn: Studio goes on
+ * saying it is opening the site until then, instead of showing an empty page.
+ *
  * The viewer token arrives once as #k=<token>. The client trades it for an HttpOnly cookie (POST __bind/session),
  * removes it from the address bar and never exposes it to other scripts.
  */
@@ -651,8 +656,12 @@
       layoutWaiters = [];
       waiting.forEach(function (fn) { fn(); });
       emit("layout", hostLayout);
-      // follow mode: tell the host this page can share and apply its view. No "insets": Studio keeps padding the frame.
-      if (viewOn) toHost("layout-ack", { v: 1, supports: ["view", "tap"] });
+      // follow mode: tell the host this page can share and apply its view, and that it draws its first view after it
+      // loads. No "insets": Studio keeps padding the frame.
+      var supports = (viewOn ? ["view", "tap"] : []).concat(firstDraw.later ? ["ready"] : []);
+      if (supports.length) toHost("layout-ack", { v: 1, supports: supports });
+      // drawn before the host's layout came: said now
+      tellDrawn();
       return;
     }
     if (d.type === "present" || d.type === "apply-view" || d.type === "apply-tap") return onFollow(d);
@@ -682,6 +691,11 @@
   function toHost(type, payload) {
     if (!hostOrigin || !embedded()) return false;
     try { window.parent.postMessage({ source: "instafy-bind", v: 1, type: type, payload: payload }, hostOrigin); return true; } catch (e) { return false; }
+  }
+  // the page's first view: it draws after it loads (drawsLater), it has drawn (drawn), the host was told (told)
+  var firstDraw = { later: false, drawn: false, told: false };
+  function tellDrawn() {
+    if (firstDraw.later && firstDraw.drawn && !firstDraw.told && toHost("ready", {})) firstDraw.told = true;
   }
   /**
    * "host" when the frame's host answers location requests; "browser" on a page of its own, or in a frame whose host
@@ -1167,6 +1181,10 @@
     ingest: function (msg) { handleHost(msg, "api"); },
     /** The viewer's position, through the host frame when it offers that (Studio), else navigator.geolocation. */
     location: locate,
+    /** This page draws its first view after it loads: call drawn() once it has. */
+    drawsLater: function () { firstDraw.later = true; },
+    /** The page's first view is drawn, or it shows why it cannot draw: a host waiting for it is told once. */
+    drawn: function () { firstDraw.later = true; firstDraw.drawn = true; tellDrawn(); },
     /** The host frame's last layout ({caps, insets, chrome, title, theme}), or null when no host sent one. */
     get hostLayout() { return hostLayout ? JSON.parse(JSON.stringify(hostLayout)) : null; },
     /** The intents this binder runs, like `(await ready).names`; [] until the binder answers. Pages often read it directly. */
