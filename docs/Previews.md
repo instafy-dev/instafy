@@ -90,16 +90,19 @@ A member can **Present** a site whose page says it can share its view, and the o
   page's own `<meta name="description">`, read when its picture is taken. Studio shows either as one line of plain
   text, cut at 80 characters, never Markdown or a link.
 - **Taking the picture.** Once `/ready` reports the site live, `instafy preview open` loads `http://127.0.0.1:<port><path>`
-  in the runtime image's own Playwright and Chromium (the engine `instafy preview check` uses) at 1280×800 and keeps a
-  640×400 JPEG (quality 70, or 50 when that is over 256 KiB, else none), within 15 s in all. A page that draws itself
+  in the runtime image's own Playwright and Chromium (the engine `instafy preview check` uses) at 1280×800 in dark mode
+  and keeps a 640×400 JPEG (quality 70, or 50 when that is over 256 KiB, else none), within 15 s in all. A preview
+  keeps one picture, which Studio shows in its light and dark themes alike: a page that follows the person's light or
+  dark mode is pictured dark, since a light picture was a bright block in a dark Studio, and a page with only a light
+  look is pictured light, as it shows. A page that draws itself
   after it loads marks it: `data-instafy-ready="false"` on its `<html>` element, then `"true"` once drawn (the map
   engine sets it once its tiles and description are in). The picture then waits for `"true"` instead of a quiet
   network, up to 30 s in all, and a page still drawing by then gets no picture, never a half-drawn one. The JSON gains `thumbnail`
   (`uploaded`, `skipped` or `failed`) and `thumbnailReason`; the exit code never changes. `--no-thumbnail` takes none,
   and no later check takes one for that preview's card either; `--thumbnail <file>` sends a picture a skill made itself
   (JPEG, PNG or WebP, at most 512 KiB and 2000×2000). `instafy preview check` takes a new one from the desktop page it
-  already loaded, when this machine has a preview open on that port and path, so a check after a change also refreshes
-  the card.
+  already loaded (in dark mode too), when this machine has a preview open on that port and path, so a check after a
+  change also refreshes the card.
 - **After a turn.** `open` records, with each preview it opens on the machine, the folder the site's server runs from
   in the workspace (`siteDir`), and `open` and `check` record when they last pictured the site for the card
   (`pictureAt`), also when no picture came of it (a blank page, one that never loaded). While a turn's changes are

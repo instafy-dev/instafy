@@ -170,3 +170,35 @@ fn research_execution_policy_upgrades_unedited_skills_but_keeps_local_edits() {
     }
     assert!(current.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
 }
+
+/// A page written by hand follows the person's light or dark mode, as the starters do (a visit page written by hand
+/// set `color-scheme: light` and stayed light in a dark Studio, and so did its card's picture). An unedited earlier
+/// copy of the hub is upgraded; an edited one is kept.
+#[test]
+fn a_page_written_by_hand_follows_light_and_dark() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let previous = include_str!("legacy/interactive-artifacts-v4.md");
+    let rule = "a page you write sets `color-scheme: light dark` and its colours again under \
+                `@media (prefers-color-scheme: dark)`, never `color-scheme: light` alone.";
+    assert!(flat(hub).contains(&flat(rule)));
+    assert!(!previous.contains("prefers-color-scheme"));
+    assert!(
+        hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        hub.len()
+    );
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
+    let edited = format!("{previous}\nLocal page preference.\n");
+    fs::write(&path, &edited).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+}

@@ -673,9 +673,10 @@ It loads `http://127.0.0.1:<port><path>` in a headless Chromium (or `http://[::1
 `localhost` answers), waits for the page to settle, and lists the page title, console errors, uncaught errors,
 failed requests and HTTP errors (the site's own are errors; other origins' are warnings) and a blank page (when the
 screenshot cannot be read, the report says the blank check is incomplete; on a page with no text that is an error). It writes
-`desktop.png` (1280×800) and `phone.png` (390×844) to `--out <dir>` (default: a new folder under the temp folder
-for each run, readable only by you; the report names the files). `--phone` loads only the phone size, `--desktop`
-only the desktop size, which the card's picture comes from.
+`desktop.png` (1280×800, the page in dark mode) and `phone.png` (390×844, in light mode) to `--out <dir>` (default: a
+new folder under the temp folder for each run, readable only by you; the report names the files and each size's
+mode), so one check shows both looks. `--phone` loads only the phone size, `--desktop` only the desktop size, which
+the card's picture comes from.
 `--framed` loads the site inside a frame on another origin instead, and then also reports a site that refuses to be
 framed (`X-Frame-Options` or CSP `frame-ancestors`).
 

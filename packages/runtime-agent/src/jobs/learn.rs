@@ -319,6 +319,8 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     include_str!("legacy/interactive-artifacts-v2.md"),
     // From before one `instafy preview open --start` picked the port, served the site and showed it.
     include_str!("legacy/interactive-artifacts-v3.md"),
+    // From before a page written by hand followed light and dark mode.
+    include_str!("legacy/interactive-artifacts-v4.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
