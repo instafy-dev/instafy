@@ -1225,7 +1225,6 @@ async fn run_every_chain(harness: &mut Harness) {
             .run(labels[2], Spec::new(chat, Lane::Default, second))
             .await;
     }
-
 }
 
 /// What Studio sends when the person presses Let Octo continue after a pause
