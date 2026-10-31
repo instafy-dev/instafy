@@ -416,6 +416,7 @@ import { ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
+import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, isLetOctoContinuePrompt } from "./useBrowserHumanInput";
 import { useBrowserHandBack } from "./useBrowserHandBack";
 import {
   useChatBrowserRequest,
@@ -2561,8 +2562,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return { conversationId, jobId };
   }, [jobThread?.conversationId, jobThread?.jobId]);
 
-  // Try again for a failed browser run sends the card's task again through
-  // the browser handoff (set once useChatBrowserRequest below has run).
+  // Try again for a failed browser run sends the card's task again, or
+  // presses Let Octo continue again, through the browser handoff (set once
+  // useChatBrowserRequest below has run).
   const browserRequestRetryRef = useRef<
     ((promptMessage: ChatMessage, retryMetadata: Record<string, unknown>) => Promise<boolean>) | null
   >(null);
@@ -4943,7 +4945,21 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onError: (message) => showStatus(message, "error", 6000),
     auto: browserAutoStart,
   });
-  browserRequestRetryRef.current = browserRequestState.retryContinuation;
+  // Try again on a turn a press of Let Octo continue started presses it
+  // again, in this chat's browser; on a card's turn it sends the card's task
+  // again.
+  browserRequestRetryRef.current = async (promptMessage, retryMetadata) => {
+    if (!isLetOctoContinuePrompt(promptMessage)) {
+      return browserRequestState.retryContinuation(promptMessage, retryMetadata);
+    }
+    try {
+      if (await browserHandoff.retryContinue(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, retryMetadata)) return true;
+      showStatus("Open the browser to try again.", "info", 4000);
+    } catch (error) {
+      showStatus(error instanceof Error && error.message ? error.message : "Unable to continue.", "error", 6000);
+    }
+    return false;
+  };
   // Once a browser turn that continued Octo's card finishes, one turn goes
   // back to the building lane with what it found (useBrowserHandBack).
   const runStatusesById = useMemo(() => {

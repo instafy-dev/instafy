@@ -5,7 +5,7 @@ import { RUN_STOP_FIXTURE_STUBS } from "../run-stop-control/dataStubs";
 export const SUGGESTION_BROWSER_MENU_STUBS: Record<string, string> = {
   ...RUN_STOP_FIXTURE_STUBS,
   "/src/screens/studio/components/SharedLocalTabViewer.tsx": "export const SharedLocalTabViewer = () => null;",
-  "/src/screens/studio/components/useBrowserHumanInput.ts": "export const LET_OCTO_CONTINUE = 'Let Octo continue'; export const useBrowserHumanInput = () => { throw new Error('This fixture reviews browser menus only'); };",
+  "/src/screens/studio/components/useBrowserHumanInput.ts": "export const LET_OCTO_CONTINUE = 'Let Octo continue'; export const BROWSER_HUMAN_INPUT_CONTINUE_PROMPT = ''; export const isLetOctoContinuePrompt = () => false; export const useBrowserHumanInput = () => { throw new Error('This fixture reviews browser menus only'); };",
   "/src/runtime/runtimeMenuShared.ts": "export const writeClipboardText = async () => {};",
   "/src/services/runtimeController/browserProfiles.ts": `
     export const clearSharedBrowserData = async () => ({ success: true });

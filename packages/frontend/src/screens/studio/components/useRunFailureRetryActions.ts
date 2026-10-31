@@ -13,6 +13,7 @@ import {
 import type { StatusIntent } from "../../../status/StatusProvider";
 import type { ChatMessage } from "../types";
 import { readBrowserRequestOf } from "./browserRequest";
+import { isLetOctoContinuePrompt } from "./useBrowserHumanInput";
 import type { ChatSubmitOverride } from "./chatSubmitPlanning";
 import type { RunFailureRetryContextValue } from "./RunFailureNotice";
 import { useRunFailureAutoRetry } from "./useRunFailureAutoRetry";
@@ -79,9 +80,11 @@ export function useRunFailureRetryActions({
    */
   submit: (override: ChatSubmitOverride, options?: RunFailureResendOptions) => Promise<boolean>;
   /**
-   * Sends a browser card's task again for a failed continuation of it, with
-   * the given retry metadata. Resolves to whether it went out. Without it, a
-   * continuation is not resent here: its shown text is only a notice.
+   * Sends a browser card's task again for a failed continuation of it, or
+   * presses Let Octo continue again for a failed turn a press started, with
+   * the given retry metadata. Resolves to whether it went out. Without it,
+   * neither is resent here: its shown text is only a notice or the button's
+   * words.
    */
   resendBrowserRequest?: (promptMessage: ChatMessage, retryMetadata: Record<string, unknown>) => Promise<boolean>;
   showStatus: (message: string, intent?: StatusIntent, durationMs?: number) => void;
@@ -182,10 +185,18 @@ export function useRunFailureRetryActions({
         return;
       }
       // A continuation of a browser card shows a one-line notice in place of
-      // the task it sent: Try again sends that task again, never the notice.
-      const browserContinuation = readBrowserRequestOf(promptMessage) !== null;
+      // the task it sent, and a press of Let Octo continue the button's words
+      // in place of its prompt: Try again sends that task again, or presses
+      // the button again, through the browser. Never the words shown, which
+      // alone would reach Octo as a chat turn with no page.
+      const browserCard = readBrowserRequestOf(promptMessage) !== null;
+      const browserContinuation = browserCard || isLetOctoContinuePrompt(promptMessage);
       if (browserContinuation && !resendBrowserRequest) {
-        showStatus("Open the browser from Octo's message to try again.", "info", 4000);
+        showStatus(
+          browserCard ? "Open the browser from Octo's message to try again." : "Open the browser to try again.",
+          "info",
+          4000,
+        );
         return;
       }
       // Retried by hand, so never also automatically: this uses up the

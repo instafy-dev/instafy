@@ -212,9 +212,10 @@ export function useChatBrowserHandoff(options: Options) {
    * a manual step: the new run names the run it continues, so the runtime
    * can keep that run's approvals (it checks that the run is the last one
    * that held this browser, for this person on this page). The chat shows
-   * the button's own words; the turn gets the whole prompt.
+   * the button's own words; the turn gets the whole prompt. `metadata` joins
+   * the prompt's, as a retry's link to the failure it retries does.
    */
-  const continueSharedRun = useCallback(async (message: string) => {
+  const continueSharedRun = useCallback(async (message: string, metadata?: Record<string, unknown> | null) => {
     const captured = latest.current;
     const continuesRunId = continuedSharedBrowserRunId(captured.runs, {
       conversationId: captured.conversationId,
@@ -224,7 +225,10 @@ export function useChatBrowserHandoff(options: Options) {
     });
     return continueShared(message, {
       display: LET_OCTO_CONTINUE,
-      ...(continuesRunId ? { metadata: { [BROWSER_CONTINUES_RUN_METADATA_KEY]: continuesRunId } } : {}),
+      metadata: {
+        ...(metadata ?? {}),
+        ...(continuesRunId ? { [BROWSER_CONTINUES_RUN_METADATA_KEY]: continuesRunId } : {}),
+      },
     });
   }, [continueShared]);
 
@@ -308,10 +312,25 @@ export function useChatBrowserHandoff(options: Options) {
 
   /** Let Octo continue in the browser on this device: the chat shows the button's own words too. */
   const continuePersonalRun = useCallback(
-    (message: string, approvalMode: PersonalBrowserApprovalMode) =>
-      continuePersonal(message, approvalMode, { display: LET_OCTO_CONTINUE }),
+    (message: string, approvalMode: PersonalBrowserApprovalMode, metadata?: Record<string, unknown> | null) =>
+      continuePersonal(message, approvalMode, { display: LET_OCTO_CONTINUE, metadata }),
     [continuePersonal],
   );
+
+  /**
+   * Try again on a turn that a press of Let Octo continue started: the same
+   * press again, in the chat's browser, with the retry's metadata. The
+   * browser on this device takes the person's own approval choice, as a
+   * press there does.
+   */
+  const retryContinue = useCallback((message: string, metadata: Record<string, unknown>) => {
+    const captured = latest.current;
+    if (captured.transport !== "personal") return continueSharedRun(message, metadata);
+    return continuePersonalRun(message, resolvePersonalBrowserApprovalMode({
+      status: captured.personal.status,
+      choice: captured.personal.approvalModeChoice ?? null,
+    }), metadata);
+  }, [continuePersonalRun, continueSharedRun]);
 
   const startPersonal = useCallback(async (message: string, extras?: BrowserContinuationExtras | null) => {
     const captured = latest.current;
@@ -358,6 +377,6 @@ export function useChatBrowserHandoff(options: Options) {
 
   return {
     identityKey, sharedJob, sharedJobWhileAgentHolds, takeOverShared, continueShared, continueSharedRun,
-    continuePersonal, continuePersonalRun, startPersonal,
+    continuePersonal, continuePersonalRun, retryContinue, startPersonal,
   };
 }

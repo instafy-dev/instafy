@@ -3320,9 +3320,14 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// prompt asked for it, once that turn is finished, for an address the person
 /// could have seen and where nothing else is stopped or taken over; anywhere
 /// else the card is a button. Opening it changes no approval in the browser.
-/// The card itself says where the browser goes, and a turn whose only action
-/// is the card posts the card alone ([`post_only_the_card`]), so the contract
-/// asks nothing of its `summary`.
+/// The card itself says where the browser goes. A turn whose only action is
+/// the card posts the card alone ([`post_only_the_card`]), so the contract
+/// says that such a turn's `summary` may not show: what the person needs goes
+/// in `task`, or in a reply without the card. A reply that does show beside a
+/// card (with another card or a file, in a skill setup, on an evaluated turn)
+/// never says that a page was opened before a browser tool saw it, so it stays
+/// true when the card is only a button, nor what the browser will submit, send
+/// or buy: that step asks the person first, and they may say no.
 ///
 /// A sign-in the person asked for, or one a step they asked for needs, is
 /// opened and paused on (`request_human_input`), so the task can go on after
@@ -3347,6 +3352,7 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
 - `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
+- A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n\
 - Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
 - The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
@@ -10675,6 +10681,9 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
         }
     }
 
+    if let Some(reply) = without_offered_replies_line(&summary) {
+        summary = reply;
+    }
     let mut actions = parse_codex_actions(value);
     if let Some(request) = user_input_request::parse_action(value)? {
         if summary.trim().is_empty() || summary == DEFAULT_CODEX_OUTCOME_SUMMARY {
@@ -10690,6 +10699,48 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
         snippet,
         actions,
     })
+}
+
+/// The most replies one line of offered replies held, and the longest of them.
+const OFFERED_REPLIES_LINE_MAX: usize = 3;
+const OFFERED_REPLY_MAX_CHARS: usize = 160;
+
+/// A reply without the line of replies it offers last, each in quotes and joined by ` · `
+/// (`“Add another option” · “Make it shorter”`). Octo is no longer asked for them, but a thread
+/// started before that still holds the plain-text lanes' instruction to end a reply with them
+/// ("Studio shows them as buttons"), and a later turn there keeps doing it. Studio never shows
+/// them, so the line leaves the reply and is kept nowhere. None when the last line is anything
+/// else, or is all the reply says. The runtime's [`NO_FILE_CHANGES_MARKER`] line after it stays
+/// last, for the caller that reads it.
+fn without_offered_replies_line(summary: &str) -> Option<String> {
+    if let Some(unmarked) = take_no_file_changes_marker(summary) {
+        let reply = without_offered_replies_line(&unmarked)?;
+        return Some(format!("{reply}\n{NO_FILE_CHANGES_MARKER}"));
+    }
+    let (reply, last_line) = summary.trim_end().rsplit_once('\n')?;
+    let reply = reply.trim_end();
+    let parts: Vec<&str> = last_line.split('·').map(str::trim).collect();
+    if reply.is_empty() || parts.len() < 2 || parts.len() > OFFERED_REPLIES_LINE_MAX {
+        return None;
+    }
+    let offered = |part: &str| {
+        part.strip_prefix('“')
+            .and_then(|rest| rest.strip_suffix('”'))
+            .or_else(|| {
+                part.strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+            })
+            .map(str::trim)
+            .is_some_and(|quoted| {
+                !quoted.is_empty()
+                    && quoted.chars().count() <= OFFERED_REPLY_MAX_CHARS
+                    && !quoted.contains(['“', '”', '"', '\n'])
+            })
+    };
+    parts
+        .iter()
+        .all(|part| offered(part))
+        .then(|| reply.to_string())
 }
 
 fn normalize_codex_outcome_summary_text(summary: &str) -> String {
@@ -12172,7 +12223,9 @@ fn stream_settled_cards(
 /// submission."), however the contract put it. So the runtime decides what
 /// the person reads here, as it does with a hand-back's "Finished in the
 /// browser." and a pause's fixed reply. An empty reply is no reply: the
-/// controller and Studio show none, and nothing notifies.
+/// controller and Studio show none, and nothing notifies. The browser rule
+/// ([`BROWSER_CHOICE_CONTRACT`]) tells the model so, and that what the person
+/// needs goes in the card's `task` or in a reply without the card.
 ///
 /// A skill setup keeps its words: its replies carry the setup's walk and its
 /// next question beside the card ([`SKILL_SETUP_CONTINUATION`]). So does a
@@ -14072,11 +14125,14 @@ fn should_retry_codex_once(
 const HUMAN_INPUT_PAUSE_REPLY: &str = "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue. I don't ask for those details in chat.";
 
 /// What it reads when Octo's last reply in the chat was such a pause already:
-/// the turn found the page still waiting. The same words again read as if Let
-/// Octo continue had done nothing (pressed without signing in, a local test
-/// on Oct 31).
-const HUMAN_INPUT_PAUSE_AGAIN_REPLY: &str =
-    "The sign-in page is still waiting. Sign in there, then choose Let Octo continue.";
+/// the browser is still waiting for the person. The same words again read as
+/// if Let Octo continue had done nothing (pressed without signing in, a local
+/// test on Oct 31). The runtime knows only that the last reply was a pause,
+/// not which page this one is on: a one-time code, a consent screen or a card
+/// form pauses too, right after a sign-in the person did finish. So the words
+/// hold on any page, as the first pause's do, and keep saying that those
+/// details stay out of chat.
+const HUMAN_INPUT_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting for you. Sign in or fill in the highlighted fields on the page, then choose Let Octo continue. I don't ask for those details in chat.";
 
 /// Whether Octo's last reply in the chat before this turn was a pause for the
 /// person's input, in the history the controller leased the turn with.
@@ -18711,7 +18767,10 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                                 continue;
                             }
                             // The note repeats the reply as the person reads it: without the
-                            // runtime's marker.
+                            // line of replies an older thread still offers and without the
+                            // runtime's marker, in the order the reply loses them.
+                            let offered = without_offered_replies_line(text);
+                            let text = offered.as_deref().unwrap_or(text);
                             let unmarked = take_no_file_changes_marker(text);
                             let text = unmarked.as_deref().unwrap_or(text);
                             let key = format!("agent_message::{text}");
@@ -23640,11 +23699,12 @@ mod tests {
         // Since Oct 28 it says which card continues building (`continueBuilding`).
         // Since Oct 29 it says never to ask the person to enable the browser.
         // Since Oct 31 it says that a card which continues building asks only
-        // what to find or check; a turn with only the card posts no reply of
-        // its own, so the rule asks nothing of that reply.
+        // what to find or check, and that a turn with only the card may not
+        // show its reply, while a reply beside a card still never promises a
+        // page or a submit.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 540,
+            browser_choice <= 560,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
@@ -24577,8 +24637,35 @@ mod tests {
         );
         assert_eq!(reply, walk);
         assert_eq!(messages.len(), 1);
-        // The rule asks nothing of that reply any more.
-        assert!(!BROWSER_CHOICE_CONTRACT.contains("summary"));
+    }
+
+    /// The turns that still post a reply beside a card (a card with another
+    /// action or a reported file, a skill setup, an evaluated turn) carry the
+    /// browser rule, and the rule still says what such a reply never says: the
+    /// submit the person later refused ("The browser will handle the form and
+    /// submission.") came from a turn like these. It also tells the model that
+    /// a turn with only the card may show no reply, so nothing the person
+    /// needs is written where it is dropped.
+    #[test]
+    fn a_reply_beside_a_card_never_promises_and_a_lone_card_may_show_none() {
+        assert!(BROWSER_CHOICE_CONTRACT.contains(
+            "- A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n"
+        ));
+        let evaluated = test_lease_job(
+            Some("feature"),
+            json!({ "metadata": { "groupParticipation": {
+                "decision": "agent_evaluation",
+                "reason": "skill_mode_ambient",
+                "enforcedBy": "runtime-controller"
+            } } }),
+        );
+        for job in [
+            test_lease_job(Some("feature"), json!({})),
+            evaluated,
+            skill_setup_test_job(SKILL_SETUP_TEST_OPENER),
+        ] {
+            assert!(browser_choice_applies(&job, false, false, false, false));
+        }
     }
 
     /// A card that continues building asks the browser only what to find or
@@ -26144,12 +26231,16 @@ mod tests {
     }
 
     /// A turn that pauses for the person's input right after Octo's last reply
-    /// was such a pause says that the page is still waiting. Let Octo continue
-    /// pressed without signing in got the first pause's reply word for word, so
-    /// the press looked as if it did nothing. A pause after any other reply,
-    /// or in a chat with no history, reads as the first one does.
+    /// was such a pause says that the browser is still waiting. Let Octo
+    /// continue pressed without signing in got the first pause's reply word for
+    /// word, so the press looked as if it did nothing. The words hold on any
+    /// page that pauses: a pause for a one-time code, a consent screen or a
+    /// card form follows a sign-in the person did complete, with the same
+    /// history, so they never claim the page is a sign-in page, and they keep
+    /// saying that those details stay out of chat. A pause after any other
+    /// reply, or in a chat with no history, reads as the first one does.
     #[test]
-    fn a_pause_right_after_a_pause_says_the_sign_in_page_is_still_waiting() {
+    fn a_pause_right_after_a_pause_says_the_browser_is_still_waiting() {
         let continue_prompt = "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
         let job = |history: JsonValue| {
             test_lease_job(Some("feature"), json!({ "conversation_history": history }))
@@ -26178,8 +26269,12 @@ mod tests {
         );
         assert_eq!(
             summary,
-            "The sign-in page is still waiting. Sign in there, then choose Let Octo continue."
+            "Instafy's browser is still waiting for you. Sign in or fill in the highlighted fields on the page, then choose Let Octo continue. I don't ask for those details in chat."
         );
+        assert_ne!(summary, HUMAN_INPUT_PAUSE_REPLY);
+        for claim in ["sign-in page", "Sign in there"] {
+            assert!(!summary.contains(claim), "{claim}");
+        }
         // A third press reads the same: the last reply was a pause too.
         let after_two = job(json!([
             row("assistant", HUMAN_INPUT_PAUSE_AGAIN_REPLY),
@@ -26898,28 +26993,56 @@ mod tests {
     }
 
     // Studio showed no reply a turn offered (a local test, Oct 31: three replies carried four, and
-    // none was on screen), and Enter in an empty composer sent the first of them. Octo is no longer
-    // asked for any, and a reply keeps every line Octo wrote: nothing moves out of it to a place the
-    // person never sees. The note that repeats a plain-text reply among the turn's steps reads as
-    // the reply does, without the runtime's no-change line only.
+    // none was on screen), and Enter in an empty composer sent the first of them, so Octo is no
+    // longer asked for any. A thread started before that still holds the plain-text lanes' old
+    // instruction to end a reply with them on its own line (`"A" · "B"`, said to show as buttons),
+    // and a later turn there keeps doing it: that line leaves the reply and goes nowhere, as it did
+    // when it became buttons, and the note that repeats the reply among the turn's steps reads the
+    // same. Any other last line is the reply's own words, and nothing is kept as an offer.
     #[test]
-    fn a_reply_keeps_the_replies_it_offers_as_its_own_words() {
-        let reply = "Built and opened a comparison page.\n\nAssumed: boards means the newest ones.\n\n\u{201c}Include the keyboard model too\u{201d} \u{b7} \u{201c}Find independent reviews\u{201d}";
-        let outcome = extract_codex_outcome(&json!({
-            "summary": reply,
-            "files": [],
-            "suggestions": ["Find independent reviews", "Add a fourth board"]
-        }))
-        .expect("extract outcome");
-        assert_eq!(outcome.summary, reply);
+    fn a_reply_leaves_out_the_line_of_replies_an_older_thread_still_offers() {
+        let reply = "Built and opened a comparison page.\n\nAssumed: boards means the newest ones.";
+        for offered in [
+            "\u{201c}Include the keyboard model too\u{201d} \u{b7} \u{201c}Find independent reviews\u{201d}",
+            "\"Check current prices and weights\" \u{b7} \"Find two independent reviews per model\"",
+        ] {
+            let text = format!("{reply}\n\n{offered}\n");
+            let outcome = extract_codex_outcome(&json!({
+                "summary": text,
+                "files": [],
+                "suggestions": ["Find independent reviews", "Add a fourth board"]
+            }))
+            .expect("extract outcome");
+            assert_eq!(outcome.summary, reply, "{offered}");
 
-        let marked = format!("{reply}\nNO_FILE_CHANGES");
-        let messages = extract_codex_messages(&[json!({
-            "type": "item.completed",
-            "item": { "type": "agent_message", "text": marked },
-        })]);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content, reply);
+            let marked = format!("{reply}\n{offered}\nNO_FILE_CHANGES");
+            let messages = extract_codex_messages(&[json!({
+                "type": "item.completed",
+                "item": { "type": "agent_message", "text": marked },
+            })]);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].content, reply, "{offered}");
+            let outcome = extract_codex_outcome(&json!({ "summary": marked, "files": [] }))
+                .expect("extract outcome");
+            assert_eq!(
+                take_no_file_changes_marker(&outcome.summary).as_deref(),
+                Some(reply),
+                "{offered}"
+            );
+        }
+        // Any other last line stays the reply's own words.
+        for summary in [
+            "Done.\n\u{201c}Find independent reviews\u{201d}",
+            "Done.\nTry \u{201c}Find independent reviews\u{201d} \u{b7} \u{201c}Show prices in euros\u{201d}",
+            "Done.\n\u{201c}A\u{201d} \u{b7} \u{201c}B\u{201d} \u{b7} \u{201c}C\u{201d} \u{b7} \u{201c}D\u{201d}",
+            "Done.\n\u{201c}\u{201d} \u{b7} \u{201c}B\u{201d}",
+            "\u{201c}Find independent reviews\u{201d} \u{b7} \u{201c}Show prices in euros\u{201d}",
+            "Done. \u{201c}Find independent reviews\u{201d} \u{b7} \u{201c}Show prices in euros\u{201d}",
+        ] {
+            let outcome = extract_codex_outcome(&json!({ "summary": summary, "files": [] }))
+                .expect("extract outcome");
+            assert_eq!(outcome.summary, summary, "{summary}");
+        }
     }
 
     #[test]

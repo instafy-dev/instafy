@@ -124,12 +124,16 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   them; pressing that moves focus to the first row it reveals.
 - Cards (secrets, connections, action and preview cards, team plans) stay in the turn's default
   view, and the file changes stay under the reply. Run traces keep their full view.
-- Octo is not asked for replies the person could send next, and none is shown or sent for them: a
-  reply keeps every line Octo wrote, and Enter in an empty composer sends nothing. The composer's
-  own completion, when the person turned it on, is its only ghost text.
+- Octo is not asked for replies the person could send next, and none is shown or sent for them:
+  Enter in an empty composer sends nothing, and the composer's own completion, when the person
+  turned it on, is its only ghost text. A thread started before this still holds the instruction
+  to end a plain-text reply with them on its own line (2-3 quoted replies joined by ` · `), so that
+  line leaves the reply and is kept nowhere (`without_offered_replies_line`, `jobs/mod.rs`).
 - A turn whose only action is a browser card posts the card and no reply of its own
   (`post_only_the_card`, `jobs/mod.rs`): the card says where the browser goes, and the browser turn
-  says what it found. An empty reply shows nothing and notifies nobody.
+  says what it found. An empty reply shows nothing and notifies nobody. The browser rule tells Octo
+  so, and that a reply that does show beside a card never says a page opened before a browser tool
+  saw it, or what the browser will submit, send or buy.
 - A command on its own in the conversation is one row: its label (or "Ran a command"), its
   state and a chevron that shows the command and its output.
 - The typing row that shows before the turn's own line, or under a newer message while a turn

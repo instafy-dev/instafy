@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatMessage } from "../types";
 import {
   CONTROL_ACTION_ANSWER_MS,
   CONTROL_ACTION_NO_ANSWER,
@@ -25,6 +26,25 @@ export const BROWSER_HUMAN_INPUT_CONTINUE_PROMPT =
  * goes to Octo only.
  */
 export const LET_OCTO_CONTINUE = "Let Octo continue";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A prompt that a press of Let Octo continue sent: what it dispatched (its
+ * stored `dispatchContent`, also under the stored prompt's metadata after a
+ * reload) is the continuation prompt, whatever the chat shows for it. Try
+ * again on its turn presses it again; it never sends the words shown.
+ */
+export function isLetOctoContinuePrompt(message: Pick<ChatMessage, "role" | "metadata">): boolean {
+  if (message.role !== "user" || !isRecord(message.metadata)) return false;
+  const metadata = message.metadata;
+  return [metadata, metadata["promptMetadata"], metadata["prompt_metadata"]].some((record) =>
+    isRecord(record) &&
+    typeof record["dispatchContent"] === "string" &&
+    record["dispatchContent"].trim() === BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
+}
 
 export type BrowserHumanInputOptions = {
   /** Include user, project, conversation, transport, runtime/page (or native owner). */
