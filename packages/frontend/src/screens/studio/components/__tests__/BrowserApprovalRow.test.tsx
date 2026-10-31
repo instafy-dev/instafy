@@ -217,6 +217,26 @@ describe("BrowserApprovalRow", () => {
     expect(originState.decide).toHaveBeenCalledWith("allow_origin", "77777777-7777-4777-8777-777777777777");
   });
 
+  // A local test: Deny read "Saving…" while it sent the no.
+  it.each([
+    ["deny", "Deny"],
+    ["allow", "Allow"],
+  ] as const)("keeps the pressed button's word under a spinner while the answer is sent (%s)", async (button, word) => {
+    const value = request();
+    const state = withPending(value);
+    await render(state);
+    await act(async () => { byTestId(`browser-approval-${button}`)!.click(); });
+    await render({ ...state, submitting: true });
+    const pressed = byTestId(`browser-approval-${button}`)!;
+    const other = byTestId(`browser-approval-${button === "deny" ? "allow" : "deny"}`)!;
+    expect(pressed.textContent).toBe(word);
+    expect(pressed.hasAttribute("data-pending")).toBe(true);
+    expect(pressed.querySelector('[role="progressbar"]')).not.toBeNull();
+    expect(text()).not.toContain("Saving");
+    expect(isDisabled(other)).toBe(true);
+    expect(other.hasAttribute("data-pending")).toBe(false);
+  });
+
   it("never answers a newer prompt with the buttons of the one on screen", async () => {
     const shown = request();
     const newer = request({ approvalId: "99999999-9999-4999-8999-999999999999", display: { label: "Rechnung löschen", destinationOrigin: null } });

@@ -7,19 +7,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteBrowserMobileKeyboard } from "../RemoteBrowserMobileKeyboard";
 
 describe("RemoteBrowserMobileKeyboard", () => {
+  // The stage the keyboard sits over, and the toolbar slot its trigger goes in.
   let host: HTMLDivElement;
+  let slot: HTMLSpanElement;
   let root: Root;
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    slot = document.createElement("span");
     host = document.createElement("div");
-    document.body.append(host);
+    document.body.append(slot, host);
     root = createRoot(host);
   });
 
   afterEach(async () => {
     await act(async () => root.unmount());
     host.remove();
+    slot.remove();
     vi.restoreAllMocks();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false;
   });
@@ -34,9 +38,9 @@ describe("RemoteBrowserMobileKeyboard", () => {
       return this === host ? rect(154, parentHeight) : rect(154 + parentHeight - barHeight - 12, barHeight);
     });
     const render = (enabled = true) => act(async () => root.render(
-      <RemoteBrowserMobileKeyboard enabled={enabled} onMessage={onMessage} onOccupiedHeightChange={onOccupiedHeightChange} />,
+      <RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled={enabled} onMessage={onMessage} onOccupiedHeightChange={onOccupiedHeightChange} />,
     ));
-    const open = async () => act(async () => host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')!.click());
+    const open = async () => act(async () => slot.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')!.click());
     await render(); expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(0);
     await open(); expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(70);
     const input = host.querySelector<HTMLInputElement>('[data-testid="shared-browser-mobile-keyboard-input"]')!;
@@ -66,10 +70,10 @@ describe("RemoteBrowserMobileKeyboard", () => {
     const onMessage = vi.fn();
     const requestAnimationFrame = vi.spyOn(window, "requestAnimationFrame");
     await act(async () => {
-      root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />);
+      root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled onMessage={onMessage} />);
     });
 
-    const open = host.querySelector<HTMLButtonElement>(
+    const open = slot.querySelector<HTMLButtonElement>(
       '[data-testid="shared-browser-mobile-keyboard-open"]',
     );
     expect(open).not.toBeNull();
@@ -158,10 +162,10 @@ describe("RemoteBrowserMobileKeyboard", () => {
   it.each(["insertLineBreak", "insertParagraph"])("forwards software %s as one Enter action", async inputType => {
     const onMessage = vi.fn();
     await act(async () => {
-      root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />);
+      root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled onMessage={onMessage} />);
     });
     await act(async () => {
-      host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')
+      slot.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     const event = new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType });
@@ -192,10 +196,10 @@ describe("RemoteBrowserMobileKeyboard", () => {
   ])("preserves $label in a mobile field with a hardware keyboard", async ({ init, text, modifiers }) => {
     const onMessage = vi.fn();
     await act(async () => {
-      root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />);
+      root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled onMessage={onMessage} />);
     });
     await act(async () => {
-      host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')
+      slot.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await act(async () => {
@@ -211,8 +215,8 @@ describe("RemoteBrowserMobileKeyboard", () => {
 
   it("forwards rapid printable keys without waiting for beforeinput or inserting locally", async () => {
     const onMessage = vi.fn();
-    await act(async () => root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />));
-    await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')!.click());
+    await act(async () => root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled onMessage={onMessage} />));
+    await act(async () => slot.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')!.click());
     const input = host.querySelector<HTMLInputElement>("input")!;
     await act(async () => {
       for (const key of "iPhone WiFi åäö 123") {
@@ -236,10 +240,10 @@ describe("RemoteBrowserMobileKeyboard", () => {
   it("waits for IME composition to finish before forwarding text", async () => {
     const onMessage = vi.fn();
     await act(async () => {
-      root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />);
+      root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled onMessage={onMessage} />);
     });
     await act(async () => {
-      host
+      slot
         .querySelector<HTMLButtonElement>(
           '[data-testid="shared-browser-mobile-keyboard-open"]',
         )
@@ -285,10 +289,10 @@ describe("RemoteBrowserMobileKeyboard", () => {
   it("does not suppress later text after a cancelled IME composition", async () => {
     const onMessage = vi.fn();
     await act(async () => {
-      root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />);
+      root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled onMessage={onMessage} />);
     });
     await act(async () => {
-      host
+      slot
         .querySelector<HTMLButtonElement>(
           '[data-testid="shared-browser-mobile-keyboard-open"]',
         )
@@ -322,10 +326,10 @@ describe("RemoteBrowserMobileKeyboard", () => {
   it("uses the input event once when beforeinput cannot be cancelled", async () => {
     const onMessage = vi.fn();
     await act(async () => {
-      root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />);
+      root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled onMessage={onMessage} />);
     });
     await act(async () => {
-      host
+      slot
         .querySelector<HTMLButtonElement>(
           '[data-testid="shared-browser-mobile-keyboard-open"]',
         )
@@ -363,18 +367,42 @@ describe("RemoteBrowserMobileKeyboard", () => {
   it("disappears immediately when remote input authority is revoked", async () => {
     const onMessage = vi.fn();
     await act(async () => {
-      root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />);
+      root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled onMessage={onMessage} />);
     });
     expect(
-      host.querySelector('[data-testid="shared-browser-mobile-keyboard"]'),
+      slot.querySelector('[data-testid="shared-browser-mobile-keyboard"]'),
     ).not.toBeNull();
 
     await act(async () => {
-      root.render(<RemoteBrowserMobileKeyboard enabled={false} onMessage={onMessage} />);
+      root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled={false} onMessage={onMessage} />);
     });
 
     expect(
-      host.querySelector('[data-testid="shared-browser-mobile-keyboard"]'),
+      document.querySelector('[data-testid="shared-browser-mobile-keyboard"]'),
     ).toBeNull();
+  });
+
+  // A local test: a floating "Keyboard" button sat over the page on a phone.
+  it("puts its closed trigger in the toolbar's slot as an icon, never over the page", async () => {
+    const onMessage = vi.fn();
+    await act(async () => root.render(<RemoteBrowserMobileKeyboard triggerPortalTarget={slot} enabled onMessage={onMessage} />));
+    const trigger = slot.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')!;
+    expect(trigger.getAttribute("aria-label")).toBe("Open remote keyboard");
+    expect(trigger.textContent).toBe("");
+    expect(host.querySelector('[data-testid="shared-browser-mobile-keyboard-open"]')).toBeNull();
+    expect(host.textContent).toBe("");
+
+    // Its bar opens over the bottom of the page, and the icon leaves the toolbar.
+    await act(async () => trigger.click());
+    const input = host.querySelector<HTMLInputElement>('[data-testid="shared-browser-mobile-keyboard-input"]')!;
+    expect(document.activeElement).toBe(input);
+    expect(slot.childElementCount).toBe(0);
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-close"]')!.click());
+    expect(host.querySelector("input")).toBeNull();
+    expect(slot.querySelector('[data-testid="shared-browser-mobile-keyboard-open"]')).not.toBeNull();
+
+    // With no toolbar slot there is no trigger at all.
+    await act(async () => root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />));
+    expect(document.querySelector('[data-testid="shared-browser-mobile-keyboard-open"]')).toBeNull();
   });
 });

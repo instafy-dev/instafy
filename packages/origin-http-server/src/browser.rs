@@ -716,6 +716,10 @@ async fn handle_browser_capabilities(headers: HeaderMap) -> Response {
         .into_response()
 }
 
+/// A page's title, or None when it names nothing: a bare media type, or a
+/// blank tab's address. While a blank tab loads its first page, DevTools
+/// lists the new address with the blank tab's title ("about:blank") until
+/// the page arrives, so the tab is named by the site it is opening.
 fn normalize_browser_page_title(raw: &str) -> Option<String> {
     let normalized = raw.trim().replace('\n', " ");
     let collapsed = normalized
@@ -725,10 +729,42 @@ fn normalize_browser_page_title(raw: &str) -> Option<String> {
         .trim()
         .trim_matches('.')
         .to_string();
-    if collapsed.is_empty() || is_bare_media_type(&collapsed) {
+    if collapsed.is_empty() || is_bare_media_type(&collapsed) || is_blank_page_address(&collapsed) {
         return None;
     }
     Some(collapsed)
+}
+
+/// A title as the page set it. DevTools' `/json/list` writes each title
+/// escaped for HTML (`&` as `&amp;`, and `<`, `>`, `"` and `'` likewise), and
+/// a title is shown as text, never as markup, so the escapes are read back
+/// once: "Laptops &amp; PCs" is "Laptops & PCs".
+fn devtools_list_title(raw: &str) -> String {
+    const ESCAPES: [(&str, char); 5] = [
+        ("&amp;", '&'),
+        ("&lt;", '<'),
+        ("&gt;", '>'),
+        ("&quot;", '"'),
+        ("&#39;", '\''),
+    ];
+    let mut title = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(at) = rest.find('&') {
+        title.push_str(&rest[..at]);
+        rest = &rest[at..];
+        match ESCAPES.iter().find(|(escape, _)| rest.starts_with(escape)) {
+            Some((escape, character)) => {
+                title.push(*character);
+                rest = &rest[escape.len()..];
+            }
+            None => {
+                title.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    title.push_str(rest);
+    title
 }
 
 /// A title that is only a media type ("image/svg+xml"), as an image or svg
@@ -807,15 +843,16 @@ fn derive_browser_page_label(title: Option<&str>, host: &str, url: &str) -> Stri
     normalized_url.to_string()
 }
 
-fn browser_target_is_placeholder(target: &BrowserCdpTargetDescriptor) -> bool {
-    let normalized_url = target.url.trim().to_ascii_lowercase();
-    if normalized_url.is_empty() || normalized_url == "about:blank" {
-        return true;
-    }
+/// The address of a tab that shows no page yet: a blank or new tab.
+fn is_blank_page_address(address: &str) -> bool {
     matches!(
-        normalized_url.as_str(),
-        "chrome://newtab/" | "chrome://new-tab-page/" | "edge://newtab/"
+        address.trim().to_ascii_lowercase().as_str(),
+        "" | "about:blank" | "chrome://newtab/" | "chrome://new-tab-page/" | "edge://newtab/"
     )
+}
+
+fn browser_target_is_placeholder(target: &BrowserCdpTargetDescriptor) -> bool {
+    is_blank_page_address(&target.url)
 }
 
 fn filter_browser_page_targets(
@@ -845,7 +882,10 @@ fn normalize_browser_cdp_targets(
         .filter(|target| target.target_type == "page")
         .take(BROWSER_CDP_TARGET_MAX_COUNT)
         .map(|mut target| {
-            target.title = truncate_utf8_bytes(&target.title, BROWSER_CDP_TARGET_TITLE_MAX_BYTES);
+            target.title = truncate_utf8_bytes(
+                &devtools_list_title(&target.title),
+                BROWSER_CDP_TARGET_TITLE_MAX_BYTES,
+            );
             target.url = truncate_utf8_bytes(&target.url, BROWSER_CDP_TARGET_URL_MAX_BYTES);
             target
         })
@@ -2598,6 +2638,69 @@ mod tests {
                 "{title}"
             );
         }
+    }
+
+    // A local test: a tab's title read "Modular Laptops &amp; PCs". DevTools'
+    // tab list escapes every title for HTML.
+    #[test]
+    fn a_title_from_the_tab_list_reads_as_the_page_set_it() {
+        let listed = |title: &str| BrowserCdpTargetDescriptor {
+            id: "page".to_string(),
+            target_type: "page".to_string(),
+            title: title.to_string(),
+            url: "https://frame.example/".to_string(),
+            websocket_debugger_url: None,
+        };
+        let normalized = normalize_browser_cdp_targets(vec![
+            listed("Modular Laptops &amp; PCs"),
+            listed("&lt;b&gt; &quot;Fish&quot; &amp; &#39;Chips&#39;"),
+            // A page whose own title says "&amp;" is listed as "&amp;amp;".
+            listed("AT&amp;amp;T"),
+            // Only the listing's own escapes are read back.
+            listed("Q&A &nbsp; &amp"),
+        ]);
+        let titles: Vec<_> = normalized
+            .iter()
+            .map(|target| target.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "Modular Laptops & PCs",
+                "<b> \"Fish\" & 'Chips'",
+                "AT&amp;T",
+                "Q&A &nbsp; &amp",
+            ]
+        );
+        let title = normalize_browser_page_title(&normalized[0].title);
+        assert_eq!(title.as_deref(), Some("Modular Laptops & PCs"));
+        assert_eq!(
+            derive_browser_page_label(title.as_deref(), "frame.example", "https://frame.example/"),
+            "Modular Laptops & PCs"
+        );
+    }
+
+    // A local test: while a blank tab loaded a slow site, its title read
+    // "about:blank" next to the site's address for 27 s.
+    #[test]
+    fn a_blank_tabs_address_is_no_page_title() {
+        for title in ["about:blank", " About:Blank ", "chrome://newtab/"] {
+            assert_eq!(normalize_browser_page_title(title), None, "{title}");
+        }
+        // The tab is named by the site it is opening.
+        let title = normalize_browser_page_title("about:blank");
+        assert_eq!(
+            derive_browser_page_label(
+                title.as_deref(),
+                "visitporto.travel",
+                "https://www.visitporto.travel/"
+            ),
+            "visitporto.travel"
+        );
+        assert_eq!(
+            normalize_browser_page_title("About blank pages").as_deref(),
+            Some("About blank pages")
+        );
     }
 
     #[test]

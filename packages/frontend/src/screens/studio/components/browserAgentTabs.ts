@@ -67,11 +67,14 @@ const MEDIA_TYPE_TITLE = /^(?:image|video|audio|application|text|font|model|mult
 
 /**
  * A page's title as a tab shows it, or null when it has none: a title that
- * is only a media type names nothing, so the tab is named by its site.
+ * is only a media type names nothing, so the tab is named by its site. Nor
+ * does a blank tab's address: while a tab that was blank loads its first
+ * page, the browser reports the new address with the blank tab's title,
+ * "about:blank", until the page arrives.
  */
 export function shownBrowserPageTitle(title: string | null | undefined): string | null {
   const value = title?.replace(/\s+/g, " ").trim() ?? "";
-  return value && !MEDIA_TYPE_TITLE.test(value) ? value : null;
+  return value && !MEDIA_TYPE_TITLE.test(value) && !browserSessionPageIsPlaceholder({ url: value }) ? value : null;
 }
 
 /**

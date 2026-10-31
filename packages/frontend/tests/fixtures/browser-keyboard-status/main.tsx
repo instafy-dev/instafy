@@ -53,14 +53,18 @@ function PagePreview() {
 
 function KeyboardReview() {
   const inline = params.get("inline") === "1" || surface === "keyboard-inline";
+  // Over the page, as in the browser view: its icon goes in the toolbar's slot.
+  const [triggerSlot, setTriggerSlot] = useState<HTMLElement | null>(null);
   const onMessage = useCallback((message: RemoteBrowserVirtualInputMessage) => { review.messages.push(message); }, []);
   const onOccupiedHeightChange = useCallback((height: number) => { review.occupiedHeight = height; }, []);
   return <section className="review-keyboard-stage" aria-label="Remote browser keyboard preview" data-testid="keyboard-review-stage">
-    {inline ? <div className="review-keyboard-toolbar"><span>Project notes</span>
-      <RemoteBrowserMobileKeyboard enabled inlineTrigger onMessage={onMessage} onOccupiedHeightChange={onOccupiedHeightChange} />
-    </div> : null}
+    <div className="review-keyboard-toolbar"><span>Project notes</span>
+      {inline
+        ? <RemoteBrowserMobileKeyboard enabled inlineTrigger onMessage={onMessage} onOccupiedHeightChange={onOccupiedHeightChange} />
+        : <span ref={setTriggerSlot} className="contents" />}
+    </div>
     <PagePreview />
-    {!inline ? <RemoteBrowserMobileKeyboard enabled onMessage={onMessage} onOccupiedHeightChange={onOccupiedHeightChange} /> : null}
+    {!inline ? <RemoteBrowserMobileKeyboard enabled triggerPortalTarget={triggerSlot} onMessage={onMessage} onOccupiedHeightChange={onOccupiedHeightChange} /> : null}
     <p className="review-desktop-note">The remote keyboard is a touch utility; desktop uses the hardware keyboard.</p>
   </section>;
 }

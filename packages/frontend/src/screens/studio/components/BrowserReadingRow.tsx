@@ -6,6 +6,7 @@ import {
   BROWSER_AGENT_DEFAULT_NAME,
   browserReadingHost,
   browserReadingTitle,
+  shownBrowserPageTitle,
 } from "./browserAgentTabs";
 
 /**
@@ -71,12 +72,13 @@ export function BrowserReadingRow({
         {pages.map((page) => {
           const host = browserReadingHost(page);
           const title = browserReadingTitle(page);
+          const fullTitle = shownBrowserPageTitle(page.title);
           return (
             <li
               key={page.id}
               className="inline-flex min-w-0 max-w-[11rem] flex-none items-center sm:max-w-[16rem] gap-1 rounded-full border border-violet-500/25 bg-violet-500/5 px-2 py-0.5 text-slate-700 dark:text-slate-200"
               data-testid="browser-reading-page"
-              title={page.title ? `${page.title}\n${page.url}` : page.url}
+              title={fullTitle ? `${fullTitle}\n${page.url}` : page.url}
             >
               <span className="flex-none font-medium">{host}</span>
               {title ? <span className="truncate text-slate-500 dark:text-slate-400">· {title}</span> : null}

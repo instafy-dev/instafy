@@ -25,7 +25,10 @@ running only this spec does not claim that the complete lane passed.
 Use `/tests/fixtures/browser-keyboard-status/index.html?surface=keyboard&theme=light`.
 Surfaces: `keyboard`, `keyboard-inline`, `personal-opening`, `personal-error`,
 `personal-retrying`, `shared-opening`, `shared-connected`. Use `theme=dark` and
-`version=before` for comparison labels. Viewport width must be set by the browser,
+`version=before` for comparison labels. Both keyboard surfaces keep the closed
+keyboard's icon in a toolbar: `keyboard` sits over the page and puts its icon in
+the toolbar's slot, as the browser view does; `keyboard-inline` sits in the
+toolbar, as a shared tab does. Viewport width must be set by the browser,
 not simulated by a smaller div; use 320, 390, 768 and 1280px. Set `hasTouch` below
 640px. Touch controls intentionally remain hidden for a fine mouse pointer. The
 suite also covers a 768px touch tablet: the input keeps 16px native text and its

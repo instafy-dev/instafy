@@ -1346,7 +1346,7 @@ background still fills the screen; ordinary web browsers with zero insets
 retain the full viewport. Insets update when a device rotates.
 
 The expanded portal also follows the visual viewport when a mobile keyboard
-shrinks only the visible area. The app's open Keyboard input bar reserves its
+shrinks only the visible area. The app's open keyboard input bar reserves its
 own space above that keyboard, so it does not cover the remote page. These
 layout changes keep the same session, control lease, and focused app input;
 they do not automatically expand or reopen a browser.
@@ -1467,8 +1467,10 @@ locally requested socket size cannot override the aspect ratio of shared pixels.
 
 On coarse-pointer clients a tap becomes one remote click, while a one-finger
 drag becomes bounded remote wheel scrolling without an accidental click. CDP
-and WebRTC drivers also get an explicit **Keyboard** control. It opens a local
-16px text field so iOS/Android can summon their software keyboard, then sends
+and WebRTC drivers also get an explicit keyboard control: an icon in the
+browser's toolbar, beside its options, while the person controls the page,
+never a button floating over the page. It opens a local 16px text field at the
+bottom of the page so iOS/Android can summon their software keyboard, then sends
 bounded text, paste, IME composition, Backspace/Delete, Enter, Tab, Escape, and
 arrow keys through the same origin-authorized input socket. The control
 uses neutral capitalization with autocorrection and spellcheck disabled because
