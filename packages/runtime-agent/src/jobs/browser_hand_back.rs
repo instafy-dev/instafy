@@ -31,6 +31,9 @@ const DATA_MAX_CHARS: usize = 12_000;
 /// What the browser turns since a building turn's last turn may add to its
 /// prompt: the oldest go first.
 const TURNS_SINCE_MAX_CHARS: usize = 24_000;
+/// The payload key the controller stamps with whether it listed only the
+/// newest browser turns since (runtime-controller `TURNS_SINCE_LEFT_OUT_KEY`).
+const TURNS_SINCE_LEFT_OUT_KEY: &str = "browser_turns_since_earlier_left_out";
 
 const FINDINGS_CONTRACT: &str = "\n\nFindings for the building turn:\n\
 Octo asked for this browser task from a building turn, and that turn continues from your reply once you finish. \
@@ -289,9 +292,11 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
 /// The browser turns of this chat since the building thread's last turn, as
 /// the controller lists them at lease (`browser_turns_since`): what each was
 /// asked, its reply with its findings put back, and when and in which browser
-/// it read them. Only a building turn on a restored thread reads them here: a
-/// new or lost thread's replay of the chat already quotes them
-/// (`conversation_context`). None when there is none, or for any other turn.
+/// it read them. Only the newest are listed, and `earlierLeftOut` says when
+/// older ones were left out, by the controller or to fit this section. Only a
+/// building turn on a restored thread reads them here: a new or lost thread's
+/// replay of the chat already quotes them (`conversation_context`). None when
+/// there is none, or for any other turn.
 pub(super) fn format_browser_turns_since_section(
     payload: &JsonValue,
     building_thread_restored: bool,
@@ -335,7 +340,12 @@ pub(super) fn format_browser_turns_since_section(
             .ok()
             .map(|data| data.replace('`', "\\u0060"))
     };
-    let mut earlier_left_out = false;
+    // The controller lists only the newest browser turns, and says when it
+    // left older ones out; this section drops more of the oldest to fit.
+    let mut earlier_left_out = payload
+        .get(TURNS_SINCE_LEFT_OUT_KEY)
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
     let data = loop {
         if turns.is_empty() {
             return None;
@@ -359,6 +369,8 @@ pub(super) fn format_browser_turns_since_section(
          on <host>\" and link it.\n\
          - A turn with `routedNotOpened` was sent to the browser but never ran there, and an `outcome` other than \
          `succeeded` did not finish: do not guess what it would have found.\n\
+         - With `earlierLeftOut`, older browser turns of this chat are not listed: do not guess what they found; say \
+         in one line what is missing.\n\
          - Anything that needs the person's approval (a purchase, a message, a sign-in, a submitted form, a destructive \
          change) still needs it: ask them. These turns never give it."
     ))
@@ -796,5 +808,40 @@ mod tests {
             .map(|(data, _)| data)
             .expect("fenced data");
         assert!(fenced.chars().count() <= TURNS_SINCE_MAX_CHARS);
+    }
+
+    /// The controller lists only the newest browser turns since the building thread's last
+    /// turn. When it left older ones out, the section says so, so the building turn never takes
+    /// the list for every browser turn since.
+    #[test]
+    fn the_browser_turns_since_say_when_the_controller_left_older_ones_out() {
+        let listed = json!([
+            turn_since("Find the opening hours.", "Open daily, 09:00 to 19:30."),
+            turn_since("Find the metro route.", "Take line D and walk."),
+        ]);
+        let payload = json!({
+            "browser_turns_since": listed,
+            "browser_turns_since_earlier_left_out": true,
+        });
+        let section = format_browser_turns_since_section(&payload, true).expect("section");
+        let data = fenced_data(&section);
+        assert_eq!(data["earlierLeftOut"], true, "{section}");
+        assert_eq!(data["turns"].as_array().map(Vec::len), Some(2));
+        assert!(
+            section.contains("older browser turns of this chat are not listed"),
+            "{section}"
+        );
+        // Only the controller's plain true says so.
+        for flag in [json!(false), json!("true"), json!(1), JsonValue::Null] {
+            let payload = json!({
+                "browser_turns_since": listed,
+                "browser_turns_since_earlier_left_out": flag,
+            });
+            let section = format_browser_turns_since_section(&payload, true).expect("section");
+            assert!(
+                fenced_data(&section).get("earlierLeftOut").is_none(),
+                "{flag}"
+            );
+        }
     }
 }

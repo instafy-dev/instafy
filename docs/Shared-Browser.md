@@ -2082,9 +2082,9 @@ unless the policy is `"covered"`.
   built with it. Any other browser turn reaches the building thread the same
   way, as data: each building job's lease lists the chat's finished browser
   turns since the building thread's last turn (`browser_turns_since`: the
-  newest six of this agent's, never the one a hand-back's record carries), each
-  with what it was asked and its reply with its finding lines put back, bounded
-  and labelled like the record. A building turn on a restored thread reads them
+  newest six of this agent's, never the one a hand-back's record carries, and
+  whether older ones were left out), each with what it was asked and its reply
+  with its finding lines put back, bounded and labelled like the record. A building turn on a restored thread reads them
   as one section of quoted page data; a new or lost building thread reads them
   in its replay of the chat, each browser turn as one quoted block. A Let Octo
   continue press reads as one line there, not as Studio's instructions in the

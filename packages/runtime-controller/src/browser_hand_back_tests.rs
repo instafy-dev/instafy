@@ -1379,7 +1379,9 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
                 }
             };
 
-            let turns = list(payload.clone()).await?;
+            let listed = list(payload.clone()).await?;
+            assert!(!listed.earlier_left_out, "{listed:?}");
+            let turns = listed.turns;
             let ids: Vec<&str> = turns
                 .iter()
                 .map(|turn| turn["browserJobId"].as_str().unwrap())
@@ -1414,14 +1416,40 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
             let mut handed_back = payload.clone();
             handed_back["metadata"][HAND_BACK_KEY] =
                 json!({ "verified": true, "browserJobId": browser.to_string() });
-            let turns = list(handed_back).await?;
+            let turns = list(handed_back).await?.turns;
             assert_eq!(turns.len(), 1);
             assert_eq!(turns[0]["browserJobId"], json!(continued.to_string()));
 
             // A browser job's own lease lists none.
             let mut browser_payload = payload.clone();
             browser_payload["metadata"]["browserTransport"] = json!("shared");
-            assert!(list(browser_payload).await?.is_empty());
+            assert_eq!(
+                list(browser_payload).await?,
+                crate::browser_hand_back::BrowserTurnsSince::default()
+            );
+
+            // Past the newest six, the oldest are left out, and the lease says so.
+            let mut more = Vec::new();
+            for part in 1..=5 {
+                more.push(
+                    chain
+                        .browser_turn(
+                            &format!("Keep going with part {part}."),
+                            &format!("Read part {part}."),
+                        )
+                        .await?,
+                );
+            }
+            let listed = list(payload.clone()).await?;
+            assert!(listed.earlier_left_out, "{listed:?}");
+            let ids: Vec<String> = listed
+                .turns
+                .iter()
+                .map(|turn| turn["browserJobId"].as_str().unwrap().to_string())
+                .collect();
+            let mut newest = vec![continued.to_string()];
+            newest.extend(more.iter().map(Uuid::to_string));
+            assert_eq!(ids, newest);
             Ok(())
         })
     })
@@ -1616,8 +1644,10 @@ async fn a_routed_message_whose_card_never_ran_is_listed() -> anyhow::Result<()>
                     anyhow::Ok(turns)
                 }
             };
+            let listed = list(next).await?;
+            assert!(!listed.earlier_left_out, "{listed:?}");
             assert_eq!(
-                list(next).await?,
+                listed.turns,
                 vec![json!({
                     "routedJobId": routed.to_string(),
                     "request": words,
@@ -1639,10 +1669,43 @@ async fn a_routed_message_whose_card_never_ran_is_listed() -> anyhow::Result<()>
             chain
                 .finish(&browser, Some("Filled in the order."), "succeeded")
                 .await?;
-            let turns = list(next).await?;
+            let turns = list(next).await?.turns;
             assert_eq!(turns.len(), 1, "{turns:?}");
             assert_eq!(turns[0]["browserJobId"], json!(browser.to_string()));
             assert!(turns[0].get("routedNotOpened").is_none());
+
+            // Past the newest six of both kinds, the oldest are left out, and
+            // the lease says so.
+            let later = chain
+                .routed_message("Open the timetable site in your browser.", false)
+                .await?;
+            let mut more = Vec::new();
+            for part in 1..=5 {
+                more.push(
+                    chain
+                        .browser_turn(
+                            &format!("Keep going with part {part}."),
+                            &format!("Read part {part}."),
+                        )
+                        .await?,
+                );
+            }
+            let listed = list(next).await?;
+            assert!(listed.earlier_left_out, "{listed:?}");
+            let kept: Vec<String> = listed
+                .turns
+                .iter()
+                .map(|turn| {
+                    turn["browserJobId"]
+                        .as_str()
+                        .or_else(|| turn["routedJobId"].as_str())
+                        .unwrap()
+                        .to_string()
+                })
+                .collect();
+            let mut newest = vec![later.to_string()];
+            newest.extend(more.iter().map(Uuid::to_string));
+            assert_eq!(kept, newest);
             Ok(())
         })
     })
