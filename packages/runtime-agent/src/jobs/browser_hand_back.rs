@@ -64,7 +64,7 @@ fn is_browser_turn(metadata: &JsonValue) -> bool {
 /// Whether a browser turn continues a card which continues building, so its
 /// findings go back to the building turn. A question's browser turn answers in
 /// its own words, and nothing goes back.
-fn hands_back(metadata: &JsonValue) -> bool {
+pub(super) fn hands_back(metadata: &JsonValue) -> bool {
     is_browser_turn(metadata)
         && metadata_string(metadata, &["browserRequestOf", "browser_request_of"]).is_some()
         && ["browserHandsBack", "browser_hands_back"]
