@@ -5,6 +5,10 @@
 // browser turn its stage held another chat's picture under its own address,
 // with "Reconnecting…", for 31 s; after a reload it showed the browser's
 // first tab, another chat's page. A chat's view now shows only its own tabs.
+//
+// Local test, Oct 31: the blank stage still kept its viewer connected, so its
+// hidden surface drew another chat's live page. While no tab of the chat is
+// in front, or another chat's turn holds the browser, no viewer connects.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -130,11 +134,15 @@ describe("a chat's Browser view", () => {
         onNavigate: noop, onBack: noop, onForward: noop, onReload: noop, onFocusPage: noop, onClearError: noop }} />));
     await act(async () => { await vi.advanceTimersByTimeAsync(0); await vi.dynamicImportSettled(); });
   }
-  const latest = () => mocks.instances.at(-1)!;
-  async function paint() { await act(async () => { latest().listeners.connect(); latest()._framebufferUpdate(); }); }
-  /** The live picture: the surface the viewer draws in. */
-  const surface = () => latest().canvas.parentElement!;
-  const pictureShown = () => !surface().classList.contains("invisible") &&
+  /** The viewer connected now: its canvas is on the page until it disconnects. */
+  const viewer = () => mocks.instances.find((instance) => instance.canvas.isConnected) ?? null;
+  async function paint() {
+    const live = viewer()!;
+    await act(async () => { live.listeners.connect(); live._framebufferUpdate(); });
+  }
+  /** The live picture: the surface the connected viewer draws in. */
+  const surface = () => viewer()!.canvas.parentElement!;
+  const pictureShown = () => viewer() !== null && !surface().classList.contains("invisible") &&
     !surface().classList.contains("opacity-0");
   const still = () => document.querySelector('[data-testid="browser-session-frozen-frame"]');
   /** What the address bar shows: on a narrow view, its button holds the address. */
@@ -142,33 +150,32 @@ describe("a chat's Browser view", () => {
     document.querySelector('[data-testid="shared-browser-address-trigger"]')!.textContent;
   const note = () => document.querySelector('[data-testid="browser-session-agent-arrival"]')?.textContent ?? null;
 
-  it("draws the chat's own tab, and leaves the stage blank with no address while another tab is in front", async () => {
+  it("draws the chat's own tab, and leaves the stage blank with no address and no viewer while another tab is in front", async () => {
     await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)] });
     await paint();
     expect(pictureShown()).toBe(true);
     expect(address()).toBe(GITHUB);
-    expect(latest().viewOnly).toBe(false);
+    expect(viewer()!.viewOnly).toBe(false);
 
-    // Another chat's page comes to the front.
+    // Another chat's page comes to the front: nothing of it is drawn, not
+    // even on a hidden surface, and the person's input cannot reach it.
     await render({ pages: [tab(CHAT_TAB, GITHUB, false), tab(OTHER_TAB, PICO, true)] });
-    await paint();
-    expect(pictureShown()).toBe(false);
+    expect(viewer()).toBeNull();
     expect(still()).toBeNull();
     expect(address()).not.toMatch(/https?:/);
-    // The person's input never reaches that page under the blank stage.
-    expect(latest().viewOnly).toBe(true);
 
     // The browser names no tab in front (after a reload): never its first
     // tab in its place.
     await render({ pages: [tab(OTHER_TAB, PICO, false), tab(CHAT_TAB, GITHUB, false)] });
-    expect(pictureShown()).toBe(false);
+    expect(viewer()).toBeNull();
     expect(address()).not.toMatch(/https?:/);
 
-    // The chat's own tab in front again: its picture is back at once.
+    // The chat's own tab in front again: its picture comes back.
     await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)] });
-    expect(pictureShown()).toBe(true);
     expect(address()).toBe(GITHUB);
-    expect(latest().viewOnly).toBe(false);
+    await paint();
+    expect(pictureShown()).toBe(true);
+    expect(viewer()!.viewOnly).toBe(false);
   });
 
   it("shows the tab in front where a chat has no tabs of its own (an older browser)", async () => {
@@ -183,26 +190,29 @@ describe("a chat's Browser view", () => {
     await paint();
     expect(note()).toBeNull();
     await render({ pages: [tab(CHAT_TAB, GITHUB, false), tab(OTHER_TAB, PICO, true)], anotherChatTurn: true });
-    expect(pictureShown()).toBe(false);
+    expect(viewer()).toBeNull();
     expect(still()).toBeNull();
     expect(address()).not.toMatch(/https?:/);
     expect(note()).toBe("Octo is working in another chat");
     // Even while the chat's own tab is the one in front.
     await render({ pages: [tab(CHAT_TAB, GITHUB, true)], anotherChatTurn: true });
-    expect(pictureShown()).toBe(false);
+    expect(viewer()).toBeNull();
     expect(note()).toBe("Octo is working in another chat");
     await render({ pages: [tab(CHAT_TAB, GITHUB, true)] });
+    await paint();
     expect(pictureShown()).toBe(true);
     expect(note()).toBeNull();
   });
 
   it("follows the chat's own turn into Octo's tabs, and says Octo is starting until the chat's page is in front", async () => {
     const octoTab = { ...tab("PAGE-OCTO", "https://www.metrodoporto.pt/", true), openedBy: "agent" as const, agentTabNumber: 2 };
+    // Opened while another chat's page is in front: the view is open, with
+    // no picture, and says where Octo is going.
     await render({ pages: [tab(CHAT_TAB, GITHUB, false), tab(OTHER_TAB, PICO, true)], arriving: true });
-    await paint();
-    expect(pictureShown()).toBe(false);
+    expect(viewer()).toBeNull();
     expect(note()).toBe("Octo is starting…");
     await render({ pages: [tab(CHAT_TAB, "about:blank", true), tab(OTHER_TAB, PICO, false)], arriving: true });
+    await paint();
     expect(pictureShown()).toBe(true);
     expect(note()).toBe("Octo is starting…");
     // The turn reads in a tab of its own: the view follows it there.
@@ -214,13 +224,13 @@ describe("a chat's Browser view", () => {
 
   it("on a phone, shows nothing of another chat's page either", async () => {
     await render({ pages: [tab(CHAT_TAB, GITHUB, false), tab(OTHER_TAB, PICO, true)], compact: true });
-    await paint();
-    expect(pictureShown()).toBe(false);
+    expect(viewer()).toBeNull();
     expect(address()).not.toMatch(/https?:/);
     await render({ pages: [tab(CHAT_TAB, GITHUB, false), tab(OTHER_TAB, PICO, true)], compact: true, anotherChatTurn: true });
-    expect(pictureShown()).toBe(false);
+    expect(viewer()).toBeNull();
     expect(note()).toBe("Octo is working in another chat");
     await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)], compact: true });
+    await paint();
     expect(pictureShown()).toBe(true);
     expect(address()).toBe(GITHUB);
   });
@@ -239,29 +249,23 @@ describe("a chat's Browser view", () => {
 
   // The stage drew whatever was in front while the browser named no tab
   // there, under the chat's own address; on "Reconnecting…" that picture
-  // stayed as the chat's page (another chat's) for 31 s.
-  it("keeps no picture drawn while no tab of the chat was named in front, on Reconnecting…", async () => {
+  // stayed as the chat's page (another chat's) for 31 s. A picture of a tab
+  // that is not the chat's is now never drawn, so none can be held.
+  it("connects no viewer while no tab of the chat is named in front", async () => {
     await render({ pages: [tab(CHAT_TAB, GITHUB, false), tab(OTHER_TAB, PICO, false)] });
-    await paint();
-    expect(pictureShown()).toBe(false);
-    await act(async () => latest().listeners.disconnect());
-    expect(still()).toBeNull();
+    expect(mocks.instances).toHaveLength(0);
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); await vi.dynamicImportSettled(); });
+    expect(mocks.instances).toHaveLength(0);
     expect(still()).toBeNull();
-  });
-  // On "Reconnecting…" the surface keeps what it drew last. It was drawn
-  // while another chat's tab was in front; the chat's own tab came forward
-  // with no new picture since, so the held picture is still the other page.
-  it("drops a held picture of another tab on Reconnecting…, even once the chat's tab is in front", async () => {
+    // Nor while another chat's tab is: back on the chat's tab, the stage
+    // waits for the chat's own picture.
     await render({ pages: [tab(CHAT_TAB, GITHUB, false), tab(OTHER_TAB, PICO, true)] });
-    await paint();
-    const held = surface();
-    expect(pictureShown()).toBe(false);
+    expect(mocks.instances).toHaveLength(0);
     await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)] });
+    expect(mocks.instances).toHaveLength(1);
+    expect(pictureShown()).toBe(false);
+    await paint();
     expect(pictureShown()).toBe(true);
-    await act(async () => latest().listeners.disconnect());
-    expect(held.classList.contains("invisible")).toBe(true);
-    expect(still()).toBeNull();
   });
 
   it("keeps the chat's own picture on Reconnecting…", async () => {
@@ -269,7 +273,7 @@ describe("a chat's Browser view", () => {
     await paint();
     const held = surface();
     expect(pictureShown()).toBe(true);
-    await act(async () => latest().listeners.disconnect());
+    await act(async () => viewer()!.listeners.disconnect());
     expect(held.classList.contains("invisible")).toBe(false);
   });
 
@@ -280,10 +284,8 @@ describe("a chat's Browser view", () => {
     mocks.owner = "other";
     mocks.participants = [{ id: "other", displayName: "Anna", color: "#2563eb", pageId: OTHER_TAB, cursor: null, canControl: true }];
     await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)], viewOnlyLane: true });
-    await paint();
-    expect(pictureShown()).toBe(false);
-    // A picture drawn then is never kept as the chat's page.
-    await act(async () => latest().listeners.disconnect());
+    // No picture of that tab is asked for, so none is kept as the chat's page.
+    expect(viewer()).toBeNull();
     expect(still()).toBeNull();
     // Back on the chat's tab: its picture shows again.
     mocks.participants = [{ ...mocks.participants[0], pageId: CHAT_TAB }];
@@ -291,5 +293,26 @@ describe("a chat's Browser view", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); await vi.dynamicImportSettled(); });
     await paint();
     expect(pictureShown()).toBe(true);
+  });
+
+  // RFB draws the whole screen, so a picture of the tab someone else in
+  // control brought forward can arrive before their view says so. The
+  // viewer then closes, and its last picture is never kept as the chat's
+  // still: until the next read of the tab list it would stand on the stage.
+  it("keeps no still of the tab someone else in control brought forward when its picture closes", async () => {
+    mocks.owner = "other";
+    mocks.participants = [{ id: "other", displayName: "Anna", color: "#2563eb", pageId: CHAT_TAB, cursor: null, canControl: true }];
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)], viewOnlyLane: true });
+    await paint();
+    expect(pictureShown()).toBe(true);
+    // Anna brings her tab forward: its picture arrives first, then her view's
+    // page.
+    await act(async () => { viewer()!._framebufferUpdate(); });
+    mocks.participants = [{ ...mocks.participants[0], pageId: OTHER_TAB }];
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)], viewOnlyLane: true });
+    expect(viewer()).toBeNull();
+    expect(still()).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); await vi.dynamicImportSettled(); });
+    expect(still()).toBeNull();
   });
 });
