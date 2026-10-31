@@ -5866,10 +5866,10 @@ fn chosen_options(fixture: &EmbeddedControllerFixture) -> Vec<String> {
         .collect()
 }
 
-/// A journey planner's station list (31 Oct drive: Metro do Porto's "Start" asked as a commit
-/// named by all of its stations, and no step could pick one). Under routine browsing Octo
-/// chooses an option by its label with no prompt, case and accents aside; the list is named by
-/// its own label and says which option it holds; and a click on it is no commit button.
+/// A journey planner's station list labelled "Start" asked as a commit, named by all of its
+/// stations run together, and no step could pick one. Under routine browsing Octo chooses an
+/// option by its label with no prompt, case and accents aside; the list is named by its own
+/// label and says which option it holds; and a click on it is no commit button.
 #[test]
 fn a_routine_start_chooses_a_station_by_its_label_without_a_prompt() {
     let fixture = EmbeddedControllerFixture::new();

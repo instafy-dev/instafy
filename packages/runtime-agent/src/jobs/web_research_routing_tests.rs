@@ -641,10 +641,9 @@ fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
-/// A journey planner's station list was clicked and asked as a commit, and no step could pick a station (31 Oct
-/// drive). The Shared Browser section says to set a list with `choose` and its option's label, never by clicking it,
-/// within the part a snapshot carries and without pushing the sign-in rules out of it. An unedited earlier copy is
-/// upgraded.
+/// A journey planner's station list was clicked and asked as a commit, and no step could pick a station. The Shared
+/// Browser section says to set a list with `choose` and its option's label, never by clicking it, within the part a
+/// snapshot carries and without pushing the sign-in rules out of it. An unedited earlier copy is upgraded.
 #[test]
 fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
