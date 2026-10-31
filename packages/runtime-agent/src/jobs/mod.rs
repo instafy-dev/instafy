@@ -14143,7 +14143,9 @@ fn has_successful_shared_browser_mcp_message(messages: &[JobMessage]) -> bool {
     has_successful_bound_mcp_message(
         messages,
         "instafy_shared_browser",
-        &["snapshot", "navigate", "click", "type", "press", "scroll"],
+        &[
+            "snapshot", "navigate", "click", "type", "choose", "press", "scroll",
+        ],
     )
 }
 

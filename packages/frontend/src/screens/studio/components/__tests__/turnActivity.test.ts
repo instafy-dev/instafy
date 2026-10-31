@@ -1091,6 +1091,26 @@ describe("answered browser prompts", () => {
     expect(summarize([opened, failedRead]).summary).toBe("Opened carris.pt");
   });
 
+  it("name a choice in a list the person answered, from the step or from this tab's prompt", () => {
+    const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
+    const denied = browserStep(BROWSER_BROWSE, { host: "metrodoporto.pt", step: "choose", approval: "denied" }, "failed");
+    expect(summarize([opened, denied]).summary).toBe("Opened carris.pt · you said no to choosing an option on metrodoporto.pt");
+    const activity = summarizeTurnActivity([opened], {
+      jobId: JOB,
+      phase: "completed",
+      approvals: [{
+        approvalId: "approval-1", outcome: "allowed", operation: "choose",
+        host: "metrodoporto.pt", destinationHost: null,
+      }],
+    });
+    expect(activity.summary).toBe("Opened carris.pt · you allowed choosing an option on metrodoporto.pt");
+    // A choice can move the page, so a look after it is not a look at the page the turn began on.
+    const before = browserStep(BROWSER_READ, { host: "metrodoporto.pt", pageKey: PAGE_A, step: "snapshot" });
+    const chosen = browserStep(BROWSER_BROWSE, { host: "metrodoporto.pt", step: "choose", approval: "routine" });
+    const after = browserStep(BROWSER_READ, { host: "metrodoporto.pt", pageKey: PAGE_B, step: "snapshot" });
+    expect(summarize([before, chosen, after]).summary).toBe("Read a page on metrodoporto.pt");
+  });
+
   it("count the answers when there are several, and never count a step's routine or free approval", () => {
     const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate", approval: "once" });
     const clicked = browserStep(BROWSER_BROWSE, { host: "carris.pt", step: "click", approval: "once" });

@@ -641,6 +641,33 @@ fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
+/// A journey planner's station list was clicked and asked as a commit, and no step could pick a station (31 Oct
+/// drive). The Shared Browser section says to set a list with `choose` and its option's label, never by clicking it,
+/// within the part a snapshot carries and without pushing the sign-in rules out of it. An unedited earlier copy is
+/// upgraded.
+#[test]
+fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = BROWSER_SKILL
+        .find("## Shared Browser command")
+        .expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    let section = flat(&BROWSER_SKILL[start..end]);
+    let line = "Set a list (a select) with `choose` and its option's label, never by clicking it. Choosing sends nothing: the form's own button sends it, and asks.";
+    assert!(section.contains(line), "{section}");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(line));
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+
+    let previous = include_str!("legacy/browser-automation-v18.md");
+    assert!(!previous.contains("`choose`"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
 /// Reviews come from a search or from a reviewer's home page and its links, never from addresses guessed for
 /// publishers "you know review this kind of item". Unedited earlier copies of both skills are upgraded.
 #[test]

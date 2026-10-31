@@ -74,6 +74,8 @@ const MAX_LABEL_CHARS = 240;
 const MAX_VISIBLE_TEXT_CHARS = 12_000;
 const MAX_URL_CHARS = 4_096;
 const MAX_TEXT_CHARS = 16_384;
+// The longest option label a choose step names.
+const MAX_OPTION_CHARS = 500;
 const MAX_SCROLL_DELTA = 10_000;
 const SNAPSHOT_ID_PATTERN = /^[0-9a-f]{64}$/;
 const ALLOWED_PRESS_KEYS = new Set([
@@ -1752,6 +1754,14 @@ function promptLabel(description, fallback, sentFields = []) {
   return sentFields.length > 0 ? `${name} \u00b7 Sends: ${sentFieldsText(sentFields)}` : name;
 }
 
+// A choice in a prompt: the option, then the list it is in, by the list's
+// own name (never its options), each cut on its own: `São Bento · In: Start`.
+function choicePromptLabel(description, option) {
+  const { shown } = controlNames(description);
+  const name = boundedBytes(maskedDisplayText(option), 2 * PROMPT_NAME_BYTES);
+  return shown ? `${name} \u00b7 In: ${boundedBytes(shown, PROMPT_NAME_BYTES)}` : name;
+}
+
 // The controls a person can see, in document order. Snapshots and actions
 // both index this list, so an index means the same control in both.
 async function collectInteractiveElements(page, hiddenNames = null) {
@@ -1851,10 +1861,11 @@ function targetFingerprint(description) {
 
 // What the model reads about one control. Empty fields are left out to keep
 // the observation small; the box stays internal, where the visible cursor
-// uses it.
+// uses it. A select says which option it holds (`chosen`), as a person sees it
+// closed; `choose` sets it.
 function publicElementDescription(description) {
   const entry = { index: description.index, label: description.label, tag: description.tag };
-  for (const field of ["role", "href", "inputType", "autocomplete", "area"]) {
+  for (const field of ["role", "href", "inputType", "autocomplete", "area", "chosen"]) {
     if (typeof description[field] === "string" && description[field]) {
       entry[field] = description[field];
     }
@@ -2096,6 +2107,11 @@ async function snapshot(page, { withhold = false } = {}) {
         autocomplete: description.autocomplete
           ? strictlyMasked(description.autocomplete)
           : description.autocomplete,
+        // The option a select holds, page text masked like a control's name;
+        // a secret screen lists none.
+        chosen: isSelectDescription(description) && !view.secretScreen
+          ? strictlyMasked(Array.from(description.shownText || "").slice(0, MAX_LABEL_CHARS).join(""))
+          : "",
       }),
     ),
     // How many controls were left out because a person cannot see them yet,
@@ -2254,7 +2270,10 @@ function descriptionContent(description) {
     .trim();
 }
 
-function assertSafeTypeTarget(description) {
+// Authentication, payment and identity fields are the person's to fill: a
+// step that types into one, presses a key in one or chooses its option is
+// refused.
+function assertSafeTypeTarget(description, step = "type") {
   const sensitiveAutocomplete = new Set([
     "current-password",
     "new-password",
@@ -2275,7 +2294,9 @@ function assertSafeTypeTarget(description) {
     sensitiveLabel.test(content)
   ) {
     throw new Error(
-      "Shared Browser refuses to type authentication, payment, or identity secrets; let the user enter this value directly",
+      step === "choose"
+        ? "Shared Browser does not choose options in authentication, payment, or identity fields; let the user choose this value directly"
+        : "Shared Browser refuses to type authentication, payment, or identity secrets; let the user enter this value directly",
     );
   }
 }
@@ -2519,6 +2540,98 @@ async function freeSiteSearch(page, target, typed) {
 // a post is stopped before it leaves the browser.
 const FREE_SEARCH_POST_ORIGINS = Object.freeze([]);
 
+// A list the page draws as a select: the control `choose` sets. A list a page
+// builds from other elements is clicked and typed into instead.
+function isSelectDescription(description) {
+  return String(description?.tag || "").toLowerCase() === "select";
+}
+
+// The most options of one list a choose step reads.
+const MAX_SELECT_OPTIONS = 1_000;
+// An error lists the options in at most this many characters.
+const MAX_OPTIONS_TEXT_CHARS = 1_500;
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. A select's options as a person reads them once it is
+// open, in order: each one's label and index, whether the page turned it off
+// and whether it is chosen now. An option the page hides is left out: nobody
+// can pick it.
+function selectOptionsInPage(element, request) {
+  if (!(element instanceof HTMLSelectElement)) return { kind: "select-options", select: false, options: [] };
+  const limit = Math.min(Math.max(Number(request && request.limit) || 0, 0), 2_000);
+  const options = [];
+  for (const option of Array.from(element.options).slice(0, limit)) {
+    let hidden = option.hidden;
+    try {
+      hidden = hidden || element.ownerDocument.defaultView.getComputedStyle(option).display === "none";
+    } catch (_) {
+      // An option whose style cannot be read counts as shown.
+    }
+    if (hidden) continue;
+    options.push({
+      index: option.index,
+      label: String(option.label || option.text || "").replace(/\s+/g, " ").trim().slice(0, 500),
+      disabled: option.matches(":disabled"),
+      chosen: option.selected,
+    });
+  }
+  return { kind: "select-options", select: true, options };
+}
+
+// The options a select offers now, as the page reports them. The step stops
+// when the page did not say.
+async function selectOptions(target) {
+  const answer = await target.locator
+    .evaluate(selectOptionsInPage, { kind: "select-options", limit: MAX_SELECT_OPTIONS })
+    .catch(() => null);
+  if (!answer || answer.kind !== "select-options" || answer.select !== true || !Array.isArray(answer.options)) {
+    throw new Error("Shared Browser could not read this list's options, so nothing was chosen. Take a fresh snapshot.");
+  }
+  return answer.options.filter((option) =>
+    option && Number.isSafeInteger(option.index) && option.index >= 0 && typeof option.label === "string");
+}
+
+// A label as a person matches it by eye: case, accents and spacing aside.
+function optionKey(label) {
+  return String(label).normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+// A list's options for an error: as many whole labels as fit, then how many more.
+function optionsText(options) {
+  const labels = options.map((option) => option.label).filter(Boolean);
+  if (!labels.length) return "It has no options to choose from.";
+  let text = "";
+  let listed = 0;
+  for (const label of labels) {
+    const next = text ? `${text}, ${label}` : label;
+    if (next.length > MAX_OPTIONS_TEXT_CHARS) break;
+    text = next;
+    listed += 1;
+  }
+  const more = labels.length - listed;
+  return `Its options: ${text || "(too long to list)"}${more > 0 ? ` and ${more} more` : ""}.`;
+}
+
+// The option `wanted` names in a list: the one whose label reads the same, as
+// written or with case, accents and spacing aside, that the page lets a person
+// pick. Otherwise nothing is chosen, and the error lists the list's options so
+// the next try can name one exactly.
+function optionNamed(options, wanted, listName) {
+  const text = String(wanted).replace(/\s+/g, " ").trim();
+  let matches = options.filter((option) => option.label === text);
+  if (!matches.length) {
+    const key = optionKey(text);
+    matches = options.filter((option) => optionKey(option.label) === key);
+  }
+  const option = matches.find((candidate) => candidate.disabled !== true);
+  if (option) return option;
+  const list = listName ? `"${listName}"` : "this list";
+  if (matches.length) {
+    throw new Error(`The page has turned off "${matches[0].label}" in ${list}, so nothing was chosen. ${optionsText(options.filter((candidate) => candidate.disabled !== true))}`);
+  }
+  throw new Error(`No option in ${list} is called "${text}", so nothing was chosen. ${optionsText(options)} Choose one of them by its label.`);
+}
+
 // What a step was, for the turn's plain-language activity line
 // (docs/Chat-Activity.md): its kind, the page it left the tab on (masked like
 // the result's own address, and only on a site the run may read) and how it
@@ -2761,6 +2874,12 @@ function validateRequestBody(requestPath, body) {
     }
     if (body.submit !== undefined && typeof body.submit !== "boolean") {
       throw new Error("Shared Browser type submit must be a boolean");
+    }
+  } else if (requestPath === "/v1/choose") {
+    requireOnlyKeys(body, new Set(["index", "snapshotId", "option"]));
+    validateTarget(body);
+    if (typeof body.option !== "string" || !body.option.trim() || body.option.length > MAX_OPTION_CHARS) {
+      throw new Error("Shared Browser choose requires the option's label");
     }
   } else if (requestPath === "/v1/press") {
     requireOnlyKeys(body, new Set(["index", "snapshotId", "key"]));
@@ -3880,6 +3999,84 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       await snapshotAfterStep(page, withholding),
       stepActivity(page, typeKind, freeSearch ? "free" : stepApproval()),
     );
+  }
+
+  // Choosing an option of a list, by its label, as a person picks it from the
+  // open list. It sends nothing by itself, so it is judged like typing that
+  // does not submit: routine browsing takes it without a prompt unless the
+  // list's own label or the option says it is risky ("Payment method",
+  // "Delete selected"), and a form is sent only by its own button, which asks.
+  // The page may send a form to its own site while the option changes, as it
+  // may while text is typed; anywhere else is stopped.
+  if (method === "POST" && requestPath === "/v1/choose") {
+    const sourceOrigin = await ensureSiteApproved(
+      page.url(),
+      "Allow the assistant to interact with this site for this run",
+    );
+    page = await resolveExpectedPage(browser);
+    assertSameOrigin(page.url(), sourceOrigin);
+    let target = await targetLocator(page, body);
+    if (!isSelectDescription(target.description)) {
+      throw new Error(
+        "choose sets a list the page draws as a select, and this control is not one, so nothing was chosen. Click it to open it, then click the option, or type into it.",
+      );
+    }
+    assertSafeTypeTarget(target.description, "choose");
+    const listName = controlNames(target.description).shown;
+    const option = optionNamed(await selectOptions(target), body.option, listName);
+    const step = classifyStep("choose", target.description, { pageUrl: page.url(), option: option.label });
+    refuseUserStep(step);
+    // The older consequential words count for the option a person would
+    // click, as they do for a control's own name.
+    const readingStep = routineCovers(step, target.description, { consequential: false }) &&
+      !CONSEQUENTIAL_ACTION_PATTERN.test(option.label);
+    refuseUnlessReadingStep(readingStep);
+    const approvedTargetFingerprint = targetFingerprint(target.description);
+    const destination = approvalProtocol.destinationBinding(null);
+    await allowStepOnce({
+      operation: "choose",
+      label: choicePromptLabel(target.description, option.label),
+      categoryTitle: approvalCategoryTitle(step),
+      sourceOrigin,
+      ...destination,
+      snapshotId: body.snapshotId,
+      targetFingerprint: approvedTargetFingerprint,
+      payloadFingerprint: approvalProtocol.sha256(JSON.stringify({ option: option.label, index: option.index })),
+    }, { routine: readingStep });
+    page = await resolveExpectedPage(browser);
+    assertSameOrigin(page.url(), sourceOrigin);
+    target = await targetLocator(page, body, true);
+    assertSameTarget(target, page.url(), approvedTargetFingerprint, destination, "none");
+    assertSafeTypeTarget(target.description, "choose");
+    // The option the step was judged on, still at its place in the list.
+    const still = optionNamed(await selectOptions(target), option.label, listName);
+    if (still.index !== option.index || still.label !== option.label) {
+      throw new Error(
+        "Shared Browser target changed while approval was pending; take a fresh snapshot and retry [approval_stale_non_retryable]",
+      );
+    }
+    const withholding = await withholdBeforeStep(page, step);
+    documents?.limitFormPosts(stepPostOrigins(readingStep, sourceOrigin, null, destination));
+    const box = target.description.box;
+    const size = await viewport(page);
+    assertStepOnTime();
+    emitAction({
+      type: "click",
+      label: `Choose "${Array.from(option.label).slice(0, MAX_LABEL_CHARS).join("")}" in ${quotedControlLabel(target.description)}`,
+      url: page.url(),
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+      ...size,
+    });
+    const beforeUrl = page.url();
+    await target.locator.selectOption({ index: option.index });
+    await settleAfterAction(page);
+    page = await resolveExpectedPage(browser);
+    await page.bringToFront();
+    if (page.url() !== beforeUrl) {
+      await emitNavigationResult(page);
+    }
+    return withActivity(await snapshotAfterStep(page, withholding), stepActivity(page, "choose", stepApproval()));
   }
 
   if (method === "POST" && requestPath === "/v1/press") {

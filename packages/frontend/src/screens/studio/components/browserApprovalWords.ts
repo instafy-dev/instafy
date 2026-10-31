@@ -108,6 +108,17 @@ const SENDS_SEPARATOR = " \u00b7 Sends: ";
 const ALSO_CALLED = /^(.*) \(also called "(.*)"\)$/su;
 // An older runtime led with the other name: `Learn More: Configure (shown as "Learn More")`.
 const SHOWN_AS = /^(.*) \(shown as "(.*)"\)$/su;
+// How the runtime writes a choice: the option, then the list it is in, by the
+// list's own name: `São Bento · In: Start`.
+const IN_SEPARATOR = " \u00b7 In: ";
+
+/** A choice's option and the list it is in, from the runtime's label. */
+function choiceWords(name: string): { option: string; list: string } {
+  const at = name.lastIndexOf(IN_SEPARATOR);
+  return at < 0
+    ? { option: name.trim(), list: "" }
+    : { option: name.slice(0, at).trim(), list: name.slice(at + IN_SEPARATOR.length).trim() };
+}
 
 type ControlWords = {
   /** The text the control shows, which the person finds on the page. */
@@ -169,6 +180,13 @@ function stepSentence(agent: string, request: BrowserApprovalWordsRequest, name:
       return `${agent} wants to click${quoted} on ${site}.`;
     case "type":
       return `${agent} wants to type into${quoted || " a field"} on ${site}.`;
+    case "choose": {
+      // "Octo wants to choose “São Bento” in “Start” on metrodoporto.pt."
+      const choice = choiceWords(name);
+      const option = cut(choice.option);
+      const list = cut(choice.list);
+      return `${agent} wants to choose ${option ? `“${option}”` : "an option"}${list ? ` in “${list}”` : ""} on ${site}.`;
+    }
     case "form-submit": {
       const elsewhere = destination && destination !== site ? ` It goes to ${destination}.` : "";
       return `${agent} wants to send ${label ? `the form${quoted}` : "a form"} on ${site}.${elsewhere}`;

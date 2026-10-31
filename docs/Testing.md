@@ -1624,7 +1624,12 @@ label of a hidden submit button, a form that opens another window, a
 `<base href>` to another site, a keydown handler that moves the form after
 approval, submit buttons in a closed shadow tree or laid over a control, and
 controls nested inside a hostile submit button, and checks that no cross-site
-POST goes out without the prompts for that site. The Personal Browser lane runs
+POST goes out without the prompts for that site. Last, a journey planner: under
+routine browsing it chooses a start and an end station by label with no prompt
+and nothing sent, the planner's own button asks once and the route is read; a
+list is named by its own label or the option it holds; a list the page posts
+when it changes reaches only the page's own site; and Ask mode asks for each
+choice, naming the option and the list. The Personal Browser lane runs
 the same table through the built page bridge in Electron, and a keydown handler
 that moves the form there too.
 

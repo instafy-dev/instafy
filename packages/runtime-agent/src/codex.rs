@@ -131,9 +131,9 @@ macro_rules! shared_browser_developer_instructions {
     ($approval_start:literal) => {
         concat!(
             r#"Shared Browser transport (managed runtime policy):
-- A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, `request_human_input`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`.
+- A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `choose`, `press`, `scroll`, `request_human_input`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`.
 - Work on the page the person chose with `navigate`: it is this chat's own tab, and the page you leave there is the one the person sees after this turn. Open a tab of your own with `open_tab` only to keep a second page open at the same time (up to three, in the same visible browser: everyone watching sees them with your badge, and the person can take any of them over). The other tools act on the tab `select_tab` (or `open_tab`) last chose; `snapshot` and `navigate` also take a `tabId`. Use only those tabs, never another tab the person or a page opened. A site's approval holds in the tab it was given in. Your own tabs are for reading: a sign-in, a step that may show a secret, a field the person must fill, a form submission or a purchase stays on the page the person chose or with the person. Close a tab you are done with; the rest close when this turn ends unless the person keeps them.
-- Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted.
+- Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted. Set a select with `choose` and its option's label, never by clicking it.
 - The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` first: with the http(s) address the task names, or, when it names none, with the official site of what the task is about (for a product, its maker's site); any approval the browser asks for applies there. Never end the turn on a blank page for want of an address. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
@@ -154,11 +154,11 @@ macro_rules! shared_browser_developer_instructions {
 }
 /// A run that starts in Ask, on every runtime but an attested browser host.
 const SHARED_BROWSER_DEVELOPER_INSTRUCTIONS: &str = shared_browser_developer_instructions!(
-    r#"- By default, the authenticated initiating user approves each site and every navigation, click, type, submission and key press for this run. The user may explicitly grant routine browsing at the first site prompt; the runtime then handles routine actions without repeated prompts, while purchases, transfers, messages, sharing or access changes, key or password changes, downloads or exports, deletions, cancellations and sign-outs, entries that may show a secret, submissions and activation keys still require **Allow once**. Never assume, request through a tool, or synthesize that grant; it is only a user-facing policy choice. Secret-entry restrictions always apply."#
+    r#"- By default, the authenticated initiating user approves each site and every navigation, click, type, choice, submission and key press for this run. The user may explicitly grant routine browsing at the first site prompt; the runtime then handles routine actions without repeated prompts, while purchases, transfers, messages, sharing or access changes, key or password changes, downloads or exports, deletions, cancellations and sign-outs, entries that may show a secret, submissions and activation keys still require **Allow once**. Never assume, request through a tool, or synthesize that grant; it is only a user-facing policy choice. Secret-entry restrictions always apply."#
 );
 /// A run on an attested browser host, which starts in routine browsing.
 const SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS: &str = shared_browser_developer_instructions!(
-    r#"- This run starts in routine browsing: opening, reading and navigating http(s) sites, plain links, menus, ordinary clicks, typing that does not submit, and non-activation keys run without prompts. Purchases, transfers, messages, sharing or access changes, key or password changes, downloads or exports, deletions, cancellations and sign-outs, entries that may show a secret, risky addresses, save or confirm buttons, submissions and Enter/Space activation still ask the authenticated initiating user to **Allow once**. The runtime set this mode for the run. Never assume, request through a tool, or synthesize that grant or any wider one. Secret-entry restrictions always apply."#
+    r#"- This run starts in routine browsing: opening, reading and navigating http(s) sites, plain links, menus, ordinary clicks, typing that does not submit, choosing an option, and non-activation keys run without prompts. Purchases, transfers, messages, sharing or access changes, key or password changes, downloads or exports, deletions, cancellations and sign-outs, entries that may show a secret, risky addresses, save or confirm buttons, submissions and Enter/Space activation still ask the authenticated initiating user to **Allow once**. The runtime set this mode for the run. Never assume, request through a tool, or synthesize that grant or any wider one. Secret-entry restrictions always apply."#
 );
 const PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Personal Browser transport (managed runtime policy):
 - A private browser embedded in the user's desktop app is available to this runtime. Use it for browser work instead of Playwright, CDP, noVNC, or a hosted browser.
@@ -292,6 +292,9 @@ const BROWSER_MCP_TOOL_NAMES: [&str; 8] = [
 /// Tab tools both bounded browsers serve on top of the page tools: the agent
 /// opens at most three visible tabs of its own, next to the person's page.
 const BROWSER_TAB_TOOL_NAMES: [&str; 4] = ["list_tabs", "open_tab", "select_tab", "close_tab"];
+/// Page tools only the Shared Browser serves: choosing an option of a list. The
+/// Personal Browser's tools are the desktop app's own list, which has none.
+const SHARED_BROWSER_PAGE_TOOL_NAMES: [&str; 1] = ["choose"];
 const CODEX_REQUIRED_TOOL_COMMAND_ONCE: &str = "command_once";
 const MISSING_FINAL_ASSISTANT_MESSAGE_SUMMARY: &str =
     "Codex automation completed, but no final assistant message was returned.";
@@ -4075,6 +4078,13 @@ fn browser_mcp_enabled_tools() -> Vec<String> {
 /// The exact tool allowlist of one bounded browser server.
 fn bounded_browser_enabled_tools(server_name: &str) -> Vec<String> {
     let mut tools = browser_mcp_enabled_tools();
+    if server_name == SHARED_BROWSER_MCP_SERVER_NAME {
+        tools.extend(
+            SHARED_BROWSER_PAGE_TOOL_NAMES
+                .into_iter()
+                .map(str::to_string),
+        );
+    }
     if server_name == PERSONAL_BROWSER_MCP_SERVER_NAME
         || server_name == SHARED_BROWSER_MCP_SERVER_NAME
     {
@@ -7127,12 +7137,13 @@ mod tests {
             cwd: None,
         });
         assert_eq!(bounded.tool_timeout_sec, Some(Duration::from_secs(40)));
-        // The Shared Browser adds Octo's own tabs to the bounded tools.
+        // The Shared Browser adds choosing an option and Octo's own tabs to the bounded tools.
         assert_eq!(
             shared.enabled_tools,
             Some(
                 BROWSER_MCP_TOOL_NAMES
                     .iter()
+                    .chain(SHARED_BROWSER_PAGE_TOOL_NAMES.iter())
                     .chain(BROWSER_TAB_TOOL_NAMES.iter())
                     .map(|name| name.to_string())
                     .collect()
@@ -7735,6 +7746,48 @@ mod tests {
                 "{tool} is named in the Shared Browser policy"
             );
         }
+    }
+
+    /// Only the Shared Browser serves `choose`, which sets a select by its option's label,
+    /// and both of its policies name it and say how a list is set. The Personal Browser's
+    /// allowlist stays its desktop app's own list.
+    #[test]
+    fn only_the_shared_browser_offers_choose_and_its_policies_say_how_a_list_is_set() {
+        let transport = || McpServerTransportConfig::StreamableHttp {
+            url: "http://127.0.0.1/contract-only".to_string(),
+            bearer_token_env_var: None,
+            http_headers: None,
+            env_http_headers: None,
+            http_headers_helper: None,
+        };
+        let shared = shared_browser_mcp_server_config(transport(), None)
+            .enabled_tools
+            .expect("allowlist");
+        let personal = personal_browser_mcp_server_config(transport())
+            .enabled_tools
+            .expect("allowlist");
+        assert!(shared.iter().any(|tool| tool == "choose"));
+        assert!(!personal.iter().any(|tool| tool == "choose"));
+        assert!(!BROWSER_MCP_TOOL_NAMES.contains(&"choose"));
+        for policy in [
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
+        ] {
+            assert!(policy.contains("`type`, `choose`, `press`"), "{policy}");
+            assert!(
+                policy.contains(
+                    "Set a select with `choose` and its option's label, never by clicking it."
+                ),
+                "{policy}"
+            );
+        }
+        assert!(SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS
+            .contains("typing that does not submit, choosing an option, and non-activation keys run without prompts"));
+        assert!(
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS
+                .contains("every navigation, click, type, choice, submission and key press")
+        );
+        assert!(!PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains("`choose`"));
     }
 
     #[test]
