@@ -84,11 +84,43 @@
 
   const credentialNoun = new RegExp(redaction.CREDENTIAL_CONTEXT_SOURCE, "iu");
 
+  // The lists below are English and German. Buy, pay, order, send, delete,
+  // cancel, confirm and save are there in French, Spanish, Italian,
+  // Portuguese and Dutch too, the languages of the consent words below, in
+  // the words buttons use ("Comprar", "Finalizar compra", "Pagar", "Enviar
+  // mensagem", "Eliminar conta"), and match whole words like the rest. An
+  // order or a purchase as a noun counts only with its verb, so "Mes
+  // commandes" and "Ordina per prezzo" (sort by price) stay ordinary, and so
+  // do "Huizen te koop" (for sale), German "wissen" (know) and "stain
+  // remover": "koop", "wissen" and "remover" are left out.
   const PURCHASE = words([
     "buy", "buy\\s+now", "purchase", "pay", "pay\\s+now", "payment", "checkout", "check\\s+out",
     "place\\s+order", "order\\s+now", "subscribe", "upgrade", "add\\s+to\\s+(?:cart|basket|bag)",
     "kaufen", "jetzt\\s+kaufen", "bezahlen", "zahlen", "zahlungspflichtig", "bestellen", "abonnieren",
     "zur\\s+kasse", "upgraden", "in\\s+den\\s+warenkorb",
+    // French.
+    "acheter", "achetez", "j['’]ach[èe]te", "payer", "payez", "paiement", "commander", "commandez",
+    "(?:passer|valider|finaliser|confirmer|terminer)\\s+(?:(?:la|ma|votre|une)\\s+)?commande",
+    "(?:valider|finaliser|confirmer)\\s+(?:l['’]\\s*|mon\\s+|votre\\s+)?achat",
+    "valider\\s+(?:(?:le|mon|votre)\\s+)?panier", "ajouter\\s+au\\s+panier",
+    // Spanish and Portuguese.
+    "comprar", "compre", "c[óo]mpralo", "compra\\s+(?:ahora|ya)", "pagar", "pague", "paga", "pagamento",
+    "encomendar", "pedir\\s+(?:ahora|ya)",
+    "(?:finalizar|concluir|tramitar|realizar|hacer|fazer|confirmar|completar|efe(?:c)?tuar)\\s+" +
+      "(?:(?:el|la|mi|tu|su|a|o|sua|seu|minha|meu)\\s+)?(?:compra|pedido|encomenda)",
+    "(?:realizar|efectuar|confirmar|finalizar)\\s+(?:el\\s+)?pago", "(?:ir|proceder|continuar)\\s+al\\s+pago",
+    "(?:a[ñn]adir|agregar)\\s+(?:al\\s+carrito|a\\s+la\\s+(?:cesta|bolsa))",
+    "adicionar\\s+(?:ao\\s+(?:carrinho|cesto)|[àa]\\s+(?:cesta|sacola))",
+    // Italian.
+    "acquista", "acquistare", "compra\\s+(?:ora|adesso|subito)", "pagare",
+    "(?:procedi\\s+all['’]\\s*|(?:conferma|completa|finalizza)\\s+(?:l['’]\\s*)?)acquisto",
+    "ordina\\s+(?:ora|adesso|subito)",
+    "(?:effettua|conferma|completa|invia|procedi\\s+con)\\s+(?:l['’]\\s*)?ordine",
+    "aggiungi\\s+al\\s+carrello",
+    // Dutch.
+    "kopen", "koop\\s+nu", "betalen", "betaal", "betaling", "bestel", "afrekenen", "reken\\s+af",
+    "bestelling\\s+(?:plaatsen|afronden|bevestigen)", "(?:plaats|bevestig)\\s+(?:(?:je|jouw|uw|de)\\s+)?bestelling",
+    "(?:in|toevoegen\\s+aan)\\s+(?:(?:de|je|mijn)\\s+)?winkel(?:wagen|mand)(?:tje|je)?",
   ]);
   const TRANSFER = new RegExp(
     `${START}(?:transfer|transfers|withdraw|withdrawal|payout|send\\s+money|wire)${END}|überweis|auszahl`,
@@ -120,6 +152,11 @@
     "austragen", "verwerfen", "leeren", "trennen", "abbestellen", "beenden", "ausloggen", "auflösen",
     "widerrufen", "zurücksetzen", "(?:konto|account|abo|abonnement|mandant|firma|unternehmen)\\s+schließen",
     "papierkorb", "in\\s+den\\s+papierkorb", "blockieren", "sperren", "melden", "als\\s+spam\\s+markieren",
+    // Delete and cancel in French, Spanish, Italian, Portuguese and Dutch.
+    "supprimer", "effacer", "annuler", "r[ée]silier",
+    "eliminar", "borrar", "suprimir", "apagar", "excluir", "cancelar", "anular", "dar(?:me|se)?\\s+de\\s+baja",
+    "elimina", "eliminare", "cancella", "cancellare", "annulla", "annullare", "disdici", "disdire",
+    "verwijderen", "verwijder", "annuleren", "annuleer", "opzeggen",
   ]);
   const DOWNLOAD = new RegExp(
     `${START}(?:backup|herunterladen|exportieren|datev|csv|tsv|xlsx?|pdf|ofx|qif|zip|mt940|camt)${END}|export|download`,
@@ -128,6 +165,8 @@
   const MESSAGE = words([
     "send", "post", "publish", "reply", "comment", "tweet", "share\\s+post",
     "senden", "absenden", "versenden", "verschicken", "veröffentlichen", "antworten", "kommentieren", "posten",
+    // Send in French, Spanish, Italian, Portuguese and Dutch.
+    "envoyer", "envoyez", "enviar", "invia", "inviare", "verzenden", "verzend", "versturen", "verstuur",
   ]);
   // Commit words keep a labelled control out of the free menu, tab and
   // navigation rules. Bookkeeping verbs that change records belong here.
@@ -149,6 +188,11 @@
     "reconcile", "void", "write[\\s-]*off",
     "issue\\s+(?:an?\\s+)?(?:invoices?|refunds?|credit\\s+notes?)",
     "file\\s+(?:a\\s+|the\\s+)?(?:(?:tax\\s+)?returns?|reports?|tax(?:es)?)",
+    // Confirm and save in French, Spanish, Italian, Portuguese and Dutch.
+    "confirmer", "valider", "enregistrer", "sauvegarder",
+    "confirmar", "guardar", "salvar",
+    "conferma", "confermare", "salva", "salvare",
+    "bevestigen", "bevestig", "opslaan",
   ]);
   // Bookkeeping nouns that name a step on a button ("Stornobuchung" posts a
   // reversal) but a list on a menu item, tab or navigation entry. They only

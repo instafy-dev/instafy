@@ -6520,6 +6520,126 @@ fn a_routine_start_asks_for_menu_items_that_write_and_frees_menu_items_that_name
     }
 }
 
+/// Buying, paying, ordering, sending, deleting, cancelling, confirming and
+/// saving ask under routine browsing in French, Spanish, Italian, Portuguese
+/// and Dutch too, the languages the cookie banner words cover. On a
+/// Portuguese shop page a script-driven "Comprar", "Finalizar compra",
+/// "Pagar", "Enviar mensagem" or "Eliminar conta" asks with its category, a
+/// save asks as a commit, on a menu item too as "Speichern" does, and an
+/// address with those words asks before it opens. A journey planner's
+/// "Planear Viagem", "Ver horários", a sort by price and a list of houses for
+/// sale ("te koop") run without a prompt.
+#[test]
+fn a_routine_start_asks_for_risk_words_in_the_cookie_banner_languages() {
+    for (label, category) in [
+        ("Comprar", "Purchase or payment"),
+        ("Finalizar compra", "Purchase or payment"),
+        ("Pagar", "Purchase or payment"),
+        ("Enviar mensagem", "Send a message"),
+        ("Eliminar conta", "Delete, cancel or sign out"),
+        ("Guardar alterações", "Change something"),
+        ("Passer la commande", "Purchase or payment"),
+        ("Supprimer le compte", "Delete, cancel or sign out"),
+        ("Valider", "Change something"),
+        ("Tramitar pedido", "Purchase or payment"),
+        ("Cancelar suscripción", "Delete, cancel or sign out"),
+        ("Acquista ora", "Purchase or payment"),
+        ("Invia messaggio", "Send a message"),
+        ("Afrekenen", "Purchase or payment"),
+        ("Opslaan", "Change something"),
+    ] {
+        let mode = format!("button:{label}");
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(&mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for(&mode, "page-target", "POST", "/v1/click", Some(&body)),
+            &["deny"],
+        );
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert_eq!(requests.len(), 1, "{mode}");
+        assert_eq!(requests[0]["kind"], "action", "{mode}");
+        assert_eq!(
+            requests[0]["display"]["label"],
+            format!("{category}: {label}"),
+            "{mode}"
+        );
+        assert!(
+            !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode} clicked"
+        );
+    }
+
+    for label in ["Guardar", "Enregistrer", "Salva", "Opslaan"] {
+        let mode = format!("menu-item:{label}");
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(&mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        // "100" fails the prompt this click must publish as unanswered.
+        let output = fixture
+            .command_for_with_timeout(
+                &mode,
+                "page-target",
+                "POST",
+                "/v1/click",
+                Some(&body),
+                "100",
+            )
+            .output()
+            .expect("routine click");
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("approval_timeout_non_retryable"),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for url in [
+        "https://example.test/carrinho/finalizar-compra",
+        "https://example.test/conta/eliminar",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        fixture.prepare_routine_start("page-target");
+        let body = json!({ "url": url }).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for("safe", "page-target", "POST", "/v1/navigate", Some(&body)),
+            &["deny"],
+        );
+        assert!(!output.status.success(), "{url} opened without asking");
+        assert_eq!(requests.len(), 1, "{url}");
+        assert_eq!(requests[0]["operation"], "navigate");
+        assert!(!fixture.action_log().contains("\"type\":\"navigate\""));
+    }
+
+    for mode in [
+        "button:Planear Viagem",
+        "button:Ver horários",
+        "button:Ordina per prezzo",
+        "button:Huizen te koop",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("routine click");
+        assert!(
+            output.status.success(),
+            "{mode} asked: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+}
+
 /// An unnamed control is named from its own hints, never its index (a
 /// dogfood prompt read "button 5" for an avatar button). A position
 /// outside the fixed vocabulary is dropped, an email address in an image's

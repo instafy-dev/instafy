@@ -1,0 +1,51 @@
+<!doctype html>
+<!--
+  Portuguese shop fixture: a ticket shop with a journey planner. Its buttons
+  sit in no form, as a page script's buttons do, so only their words tell a
+  purchase, a message or a deletion from an ordinary step. All names and
+  values are synthetic.
+-->
+<html lang="pt">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Loja – Transportes de exemplo</title>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; margin: 24px; max-width: 760px; }
+      section { border-top: 1px solid #ccc; padding: 12px 0; }
+    </style>
+  </head>
+  <body>
+    <nav aria-label="Principal">
+      <a href="./pt.html">Início</a>
+      <a href="./encomendas.html">Minhas encomendas</a>
+      <a href="./horarios.html">Ver horários</a>
+      <a href="./bilhetes.html">Comprar bilhete</a>
+    </nav>
+    <main>
+      <h1>Bilhete diário</h1>
+      <p>Preço: 7,50 €</p>
+      <button type="button">Comprar</button>
+      <button type="button">Finalizar compra</button>
+      <button type="button">Pagar</button>
+
+      <section>
+        <h2>Planear viagem</h2>
+        <input type="button" value="Planear Viagem" />
+      </section>
+
+      <section>
+        <h2>Contacto</h2>
+        <div role="textbox" contenteditable="true" aria-label="Mensagem"></div>
+        <button type="button">Enviar mensagem</button>
+      </section>
+
+      <section>
+        <h2>A minha conta</h2>
+        <button type="button">Guardar alterações</button>
+        <button type="button">Cancelar encomenda</button>
+        <button type="button">Eliminar conta</button>
+      </section>
+    </main>
+  </body>
+</html>

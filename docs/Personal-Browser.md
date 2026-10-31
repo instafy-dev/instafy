@@ -311,8 +311,11 @@ password field, editable-field count and submit labels, and the enclosing page
 area (dialog, search, navigation, menu, tree, tab list or pagination). An
 element is in a credential context when the nearest heading before it, its
 dialog title, its table column header or its row names a credential. Label
-words in English and German only add risk; verbs match whole words and
-credential nouns also match inside compounds such as Zugangsschlüssel.
+words in English and German only add risk, and so do the words that buy, pay,
+order, send, delete, cancel, confirm and save in French, Spanish, Italian,
+Portuguese and Dutch ("Comprar", "Finalizar compra", "Eliminar conta"); verbs
+match whole words and credential nouns also match inside compounds such as
+Zugangsschlüssel.
 Bookkeeping compounds such as Buchungsschlüssel or Steuerschlüssel are not
 credential words.
 
@@ -368,8 +371,9 @@ fingerprint gains only structural fields; whether a menu is open and heading
 text stay out of it, so opening a menu does not cancel a pending approval.
 
 The case table in `packages/desktop-app/test/fixtures/risky-steps/cases.json`
-and the English and German fixture pages beside it hold synthetic values only;
-the canary key is assembled by script at run time.
+and the fixture pages beside it (English and German, and a shop page in each of
+French, Spanish, Italian, Portuguese and Dutch in `shops/`) hold synthetic
+values only; the canary key is assembled by script at run time.
 
 ### Sensitive input is hard-blocked
 

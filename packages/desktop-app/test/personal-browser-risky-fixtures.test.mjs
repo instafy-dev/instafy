@@ -193,6 +193,93 @@ test("bookkeeping write steps ask as commits through the real bridge; list names
   }
 });
 
+// Shop pages in the languages the consent words cover, whose buttons sit in
+// no form: only their words tell buying, paying, ordering, sending,
+// deleting, cancelling and saving from an ordinary step. Each asks under
+// routine browsing in its category; a list of orders, a timetable and a
+// journey planner's button stay ordinary.
+const SHOP_PAGES = {
+  "shops/pt.html": {
+    asks: [
+      ["Comprar", "purchase"], ["Finalizar compra", "purchase"], ["Pagar", "purchase"],
+      ["Comprar bilhete", "purchase"], ["Enviar mensagem", "message"], ["Cancelar encomenda", "destructive"],
+      ["Eliminar conta", "destructive"], ["Guardar alterações", "change", true],
+    ],
+    links: ["Minhas encomendas", "Ver horários"],
+    ordinary: ["Planear Viagem"],
+  },
+  "shops/fr.html": {
+    asks: [
+      ["Ajouter au panier", "purchase"], ["Passer la commande", "purchase"], ["Payer", "purchase"],
+      ["Envoyer le message", "message"], ["Annuler la réservation", "destructive"],
+      ["Supprimer le compte", "destructive"], ["Enregistrer", "change", true],
+    ],
+    links: ["Mes commandes", "Voir les horaires"],
+    ordinary: ["Voir le plan"],
+  },
+  "shops/es.html": {
+    asks: [
+      ["Comprar ahora", "purchase"], ["Tramitar pedido", "purchase"], ["Pagar", "purchase"],
+      ["Enviar mensaje", "message"], ["Cancelar suscripción", "destructive"], ["Eliminar cuenta", "destructive"],
+      ["Guardar cambios", "change", true],
+    ],
+    links: ["Mis pedidos", "Ver horarios"],
+    ordinary: ["Cómo llegar"],
+  },
+  "shops/it.html": {
+    asks: [
+      ["Acquista ora", "purchase"], ["Procedi all'acquisto", "purchase"], ["Paga ora", "purchase"],
+      ["Invia messaggio", "message"], ["Annulla prenotazione", "destructive"], ["Elimina account", "destructive"],
+      ["Salva", "change", true],
+    ],
+    links: ["I miei ordini", "Orari"],
+    ordinary: ["Ordina per prezzo"],
+  },
+  "shops/nl.html": {
+    asks: [
+      ["In winkelwagen", "purchase"], ["Afrekenen", "purchase"], ["Nu betalen", "purchase"],
+      ["Bericht versturen", "message"], ["Abonnement opzeggen", "destructive"],
+      ["Account verwijderen", "destructive"], ["Opslaan", "change", true],
+    ],
+    links: ["Mijn bestellingen", "Huizen te koop"],
+    ordinary: ["Openingstijden bekijken"],
+  },
+};
+
+for (const [file, expected] of Object.entries(SHOP_PAGES)) {
+  test(`${file}: buying, paying, ordering, sending, deleting, cancelling and saving ask through the real bridge`, async () => {
+    const page = loadFixture(file);
+    const { snapshot } = await describePage(page);
+    const pageUrl = page.window.location.href;
+    // An input button is found by its value, the words it shows.
+    const target = (name) => {
+      const entry = snapshot.interactive.find((item) => item.name === name || item.descriptor.value === name);
+      assert.ok(entry, `no target named ${name}: ${snapshot.interactive.map((item) => item.name).join(", ")}`);
+      return entry.descriptor;
+    };
+    const classify = (name) => security.classifyPersonalBrowserStep("click", target(name), { pageUrl });
+    const asksUnderRoutine = (name) =>
+      security.personalBrowserActivationRequiresConfirmation(target(name), "routine", { pageUrl });
+    for (const [name, category, commit = false] of expected.asks) {
+      const result = classify(name);
+      expectVerdict(result, "ask", category, name);
+      assert.equal(result.commit === true, commit, `${name} commit: ${JSON.stringify(result)}`);
+      assert.equal(asksUnderRoutine(name), true, `${name} asks under routine browsing`);
+    }
+    for (const name of expected.links) {
+      expectVerdict(classify(name), "allow", "navigation", name);
+      assert.equal(asksUnderRoutine(name), false, `${name} is free under routine browsing`);
+    }
+    // An ordinary button is a change and no commit, which the hosted browser
+    // takes without a prompt under routine browsing.
+    for (const name of expected.ordinary) {
+      const result = classify(name);
+      expectVerdict(result, "ask", "change", name);
+      assert.notEqual(result.commit, true, `${name} commit: ${JSON.stringify(result)}`);
+    }
+  });
+}
+
 test("ordinary header sign-in controls are not refused", async () => {
   const { classify } = await describePage(loadPage(`<!doctype html><body><header>
     <button type="button">Log in</button>

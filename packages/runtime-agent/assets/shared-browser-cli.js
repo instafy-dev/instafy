@@ -2449,8 +2449,50 @@ function assertSafeTypeTarget(description, step = "type") {
 // on a menu item, while a menu item that only names a list ("Buchungen",
 // "Stornobuchung") is navigation. The shared classifier's commit words hold
 // the same verbs for buttons.
-const CONSEQUENTIAL_ACTION_PATTERN =
-  /(?<![\p{L}\p{N}])(?:buy|purchase|pay|checkout|place[\s_-]*order|delete|remove|erase|destroy|send|post|publish|submit|authorize|approve|allow|confirm[\s_-]*(?:order|payment|purchase)|transfer|withdraw|book|reserve|sign[\s_-]*(?:contract|document|agreement)|save|finalize|mark[\s_-]*(?:as[\s_-]*)?paid|speichern|buchen|verbuchen|(?:um|aus|ab|rück|zurück|gegen|storno)buchen|übermitteln|einreichen|abgeben|ausstellen|festschreiben|als[\s_-]*bezahlt|bezahlen|überweisen|freigeben|absenden|versenden|löschen|stornieren)(?![\p{L}\p{N}])/iu;
+// French, Spanish, Italian, Portuguese and Dutch, as the classifier has them:
+// buy, pay, order and check out, confirm an order or a payment, send, delete
+// and save, and cancel where it ends a contract, subscription or booking, as
+// "stornieren" does. A bare cancel ("Annuler", "Cancelar"), which also closes
+// a dialog, stays out as "cancel" does, and so do "commander" and "payer",
+// which are English words too ("Jeep Commander", "single-payer"); the
+// classifier still asks for those on a control.
+const CONSEQUENTIAL_ACTION_PATTERN = new RegExp(
+  `(?<![\\p{L}\\p{N}])(?:${[
+    "buy", "purchase", "pay", "checkout", "place[\\s_-]*order", "delete", "remove", "erase", "destroy", "send",
+    "post", "publish", "submit", "authorize", "approve", "allow", "confirm[\\s_-]*(?:order|payment|purchase)",
+    "transfer", "withdraw", "book", "reserve", "sign[\\s_-]*(?:contract|document|agreement)", "save", "finalize",
+    "mark[\\s_-]*(?:as[\\s_-]*)?paid",
+    "speichern", "buchen", "verbuchen", "(?:um|aus|ab|rück|zurück|gegen|storno)buchen", "übermitteln", "einreichen",
+    "abgeben", "ausstellen", "festschreiben", "als[\\s_-]*bezahlt", "bezahlen", "überweisen", "freigeben", "absenden",
+    "versenden", "löschen", "stornieren",
+    // French.
+    "acheter", "achetez", "j['’]ach[èe]te", "payez", "commandez",
+    "(?:passer|valider|finaliser|confirmer|terminer)[\\s_-]*(?:(?:la|ma|votre|une)[\\s_-]*)?commande",
+    "(?:valider|finaliser|confirmer)[\\s_-]*(?:l['’]\\s*|mon[\\s_-]*|votre[\\s_-]*)?achat",
+    "valider[\\s_-]*(?:(?:le|mon|votre)[\\s_-]*)?panier", "confirmer[\\s_-]*(?:le[\\s_-]*)?paiement",
+    "envoyer", "envoyez", "supprimer", "effacer", "r[ée]silier", "enregistrer", "sauvegarder",
+    // Spanish and Portuguese.
+    "comprar", "compre", "c[óo]mpralo", "compra[\\s_-]*(?:ahora|ya)", "pagar", "pague", "paga", "encomendar",
+    "pedir[\\s_-]*(?:ahora|ya)", "(?:ir|proceder|continuar)[\\s_-]*al[\\s_-]*pago",
+    "(?:finalizar|concluir|tramitar|realizar|hacer|fazer|confirmar|completar|efe(?:c)?tuar)[\\s_-]*" +
+      "(?:(?:el|la|mi|tu|su|a|o|sua|seu|minha|meu)[\\s_-]*)?(?:compra|pedido|encomenda|pago|pagamento)",
+    "enviar", "eliminar", "borrar", "suprimir", "apagar", "excluir", "dar(?:me|se)?[\\s_-]*de[\\s_-]*baja",
+    "guardar", "salvar",
+    // Italian.
+    "acquista", "acquistare", "compra[\\s_-]*(?:ora|adesso|subito)", "pagare",
+    "(?:procedi[\\s_-]*all['’]\\s*|(?:conferma|completa|finalizza)[\\s_-]*(?:l['’]\\s*)?)acquisto",
+    "ordina[\\s_-]*(?:ora|adesso|subito)",
+    "(?:effettua|conferma|completa|invia|procedi[\\s_-]*con)[\\s_-]*(?:l['’]\\s*)?ordine",
+    "conferma[\\s_-]*(?:il[\\s_-]*)?pagamento",
+    "invia", "inviare", "elimina", "eliminare", "cancella", "cancellare", "disdici", "disdire", "salva", "salvare",
+    // Dutch.
+    "kopen", "koop[\\s_-]*nu", "betalen", "betaal", "bestel", "afrekenen", "reken[\\s_-]*af",
+    "bestelling[\\s_-]*(?:plaatsen|afronden|bevestigen)",
+    "(?:plaats|bevestig)[\\s_-]*(?:(?:je|jouw|uw|de)[\\s_-]*)?(?:bestelling|betaling)", "betaling[\\s_-]*bevestigen",
+    "verzenden", "verzend", "versturen", "verstuur", "verwijderen", "verwijder", "opzeggen", "opslaan",
+  ].join("|")})(?![\\p{L}\\p{N}])`,
+  "iu",
+);
 
 // The control's own names and address, the fields the Desktop Personal
 // Browser's high-impact check reads, plus its id and name attributes. Never

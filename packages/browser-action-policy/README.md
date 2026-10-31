@@ -24,7 +24,10 @@ load `redaction.js` first.
   named by the list's own label and that option, so signing in with another
   account ("Sign in with GitHub") is refused; the list's other options never
   count. Free verdicts come only from structure;
-  label words and the icons of icon-only controls only add risk. The
+  label words and the icons of icon-only controls only add risk. The words
+  are English and German, and those that buy, pay, order, send, delete,
+  cancel, confirm and save are also French, Spanish, Italian, Portuguese and
+  Dutch, the languages of the consent words. The
   exceptions are short whole-name lists that also need the right structure:
   cookie dismissals, page numbers and menu or section toggles ("Menü
   ein-/ausklappen", "Toggle navigation", or a hamburger icon on an unnamed
