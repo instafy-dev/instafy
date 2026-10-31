@@ -196,17 +196,21 @@ fn input_text(body: &Value) -> String {
     body["input"].to_string()
 }
 /// The run-instruction blocks of a request: Codex's developer messages, which the proxy carries
-/// in the user-role instruction message it puts first.
+/// in the user-role instruction message it puts first when they open the thread, and as developer
+/// messages in their place after that.
 fn run_instruction_blocks(body: &Value) -> Vec<String> {
-    let first = &body["input"][0];
-    if first["role"] != "user" {
+    let items = body["input"].as_array().cloned().unwrap_or_default();
+    if items.first().is_none_or(|first| first["role"] != "user") {
         return Vec::new();
     }
-    let text = first["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|part| part["text"].as_str())
+    let text = items
+        .iter()
+        .enumerate()
+        .filter(|(position, item)| {
+            *position == 0 || (item["type"] == "message" && item["role"] == "developer")
+        })
+        .flat_map(|(_, item)| item["content"].as_array().cloned().unwrap_or_default())
+        .filter_map(|part| part["text"].as_str().map(str::to_string))
         .collect::<Vec<_>>()
         .join("\n");
     text.split("<instafy_run_instructions>")

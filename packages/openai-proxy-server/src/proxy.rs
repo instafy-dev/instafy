@@ -27,6 +27,7 @@ use crate::client::{
     CodexClient, CodexCompletion, CodexReply, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL,
     RequiredToolCallFallbackHook, SendHook, ServiceTierEndpoints, conversation_id_enabled,
     is_additional_tools_item, normalize_reasoning_effort, sends_service_tier, sends_tool_controls,
+    takes_later_developer_messages,
 };
 use crate::context_controls::{AffinityCodec, ResponseContext, TURN_STATE_HEADER};
 use crate::controller_integration::ControllerIntegration;
@@ -1929,7 +1930,8 @@ async fn create_response(
         .unwrap_or_default()
         .to_string();
 
-    let input_items = extract_input_items(&payload).map_err(AppError::bad_request)?;
+    let input_items =
+        extract_input_items(&payload, LaterInstructions::InPlace).map_err(AppError::bad_request)?;
 
     let auth_mode = lane.auth_mode();
     let plain_text_completion = plain_text_completion_requested(&payload);
@@ -1994,6 +1996,15 @@ async fn create_response(
             leased.credentials.is_chatgpt(),
         )
         .map_err(AppError::bad_request)?;
+    // The only developer messages left in the input are later ones. A renewed lease is the same
+    // credential, so it takes what this one takes.
+    let input_items = if takes_later_developer_messages(&leased.credentials)
+        || !input_items.iter().any(is_instruction_message)
+    {
+        input_items
+    } else {
+        extract_input_items(&payload, LaterInstructions::Folded).map_err(AppError::bad_request)?
+    };
     let send_hook = state.service_tier_override_hook(
         &service_tier,
         &leased.credentials,
@@ -3359,33 +3370,73 @@ fn apply_instruction_overrides(
     items.insert(0, build_user_message_from_text(&combined));
 }
 
-fn split_input_instruction_messages(input_items: &[Value]) -> (Vec<String>, Vec<Value>) {
+/// Where a request's later developer and system messages go upstream: the ones after the run of
+/// them that opens the request (a thread's first developer message and any right after it, or
+/// the ones a compaction put back).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaterInstructions {
+    /// Each stays in its place, as a developer message. Codex records a turn's changed run
+    /// instructions or note where the turn starts, so the start of every later request, which
+    /// the provider caches, stays as it was. The Responses API takes developer messages
+    /// anywhere in its input.
+    InPlace,
+    /// Each joins the instruction message at the start of the request, as all of them did
+    /// before: the providers behind a Chat Completions or Gemini upstream differ on
+    /// instructions after the first message, and some refuse the developer role.
+    Folded,
+}
+
+/// Whether `item` is a developer or system message, and so instructions rather than history.
+fn is_instruction_message(item: &Value) -> bool {
+    let is_message = item
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|item_type| item_type.eq_ignore_ascii_case("message"));
+    let role = item.get("role").and_then(Value::as_str).unwrap_or("");
+    is_message && (role.eq_ignore_ascii_case("system") || role.eq_ignore_ascii_case("developer"))
+}
+
+/// Splits a request's input into the text of the developer and system messages that open it,
+/// which [`apply_instruction_overrides`] puts into the instruction message at the start of the
+/// request, and the rest of the input in order. The opening ones are the first developer or
+/// system message and those right after it: a thread's initial context, or the context a
+/// compaction put back. A later one is placed as `later` says; in place, it keeps no system
+/// role, which the Responses API's developer role stands for.
+fn split_input_instruction_messages(
+    input_items: &[Value],
+    later: LaterInstructions,
+) -> (Vec<String>, Vec<Value>) {
     let mut instruction_segments: Vec<String> = Vec::new();
     let mut normalized_items: Vec<Value> = Vec::new();
+    // None until the first developer or system message; then whether the run it opens goes on.
+    let mut opening: Option<bool> = None;
 
     for item in input_items {
-        let is_message = item
-            .get("type")
-            .and_then(Value::as_str)
-            .map(|item_type| item_type.eq_ignore_ascii_case("message"))
-            .unwrap_or(false);
-        if is_message {
-            let role = item.get("role").and_then(Value::as_str).unwrap_or("");
-            if role.eq_ignore_ascii_case("system") || role.eq_ignore_ascii_case("developer") {
-                if let Some(text) = extract_message_text(item) {
-                    instruction_segments.push(text);
-                }
-                continue;
+        if !is_instruction_message(item) {
+            if opening == Some(true) {
+                opening = Some(false);
             }
+            normalized_items.push(item.clone());
+            continue;
         }
-
-        normalized_items.push(item.clone());
+        let opens = *opening.get_or_insert(true);
+        // A message without text carries no instructions, as before.
+        let Some(text) = extract_message_text(item) else {
+            continue;
+        };
+        if opens || later == LaterInstructions::Folded {
+            instruction_segments.push(text);
+        } else {
+            let mut item = item.clone();
+            item["role"] = json!("developer");
+            normalized_items.push(item);
+        }
     }
 
     (instruction_segments, normalized_items)
 }
 
-fn extract_input_items(payload: &Value) -> Result<Vec<Value>> {
+fn extract_input_items(payload: &Value, later: LaterInstructions) -> Result<Vec<Value>> {
     if let Some(input_array) = payload.get("input").and_then(Value::as_array) {
         let object_items = input_array
             .iter()
@@ -3393,7 +3444,8 @@ fn extract_input_items(payload: &Value) -> Result<Vec<Value>> {
             .cloned()
             .collect::<Vec<_>>();
         if !object_items.is_empty() {
-            let (instruction_segments, mut items) = split_input_instruction_messages(&object_items);
+            let (instruction_segments, mut items) =
+                split_input_instruction_messages(&object_items, later);
             apply_instruction_overrides(payload, instruction_segments, &mut items);
             return Ok(items);
         }
@@ -3402,7 +3454,7 @@ fn extract_input_items(payload: &Value) -> Result<Vec<Value>> {
     if let Some(obj) = payload.get("input").and_then(Value::as_object) {
         let item = Value::Object(obj.clone());
         let (instruction_segments, mut items) =
-            split_input_instruction_messages(std::slice::from_ref(&item));
+            split_input_instruction_messages(std::slice::from_ref(&item), later);
         apply_instruction_overrides(payload, instruction_segments, &mut items);
         if !items.is_empty() {
             return Ok(items);
@@ -3592,10 +3644,12 @@ mod tests {
             "prompt": "Say hello"
         });
 
-        let items = extract_input_items(&payload).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["role"], json!("user"));
-        assert_eq!(items[0]["content"][0]["text"], json!("Say hello"));
+        for later in [LaterInstructions::InPlace, LaterInstructions::Folded] {
+            let items = extract_input_items(&payload, later).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["role"], json!("user"));
+            assert_eq!(items[0]["content"][0]["text"], json!("Say hello"));
+        }
     }
 
     #[test]
@@ -3619,22 +3673,161 @@ mod tests {
             ]
         });
 
-        let items = extract_input_items(&payload).unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["role"], json!("user"));
-        assert_eq!(items[1]["role"], json!("user"));
-        assert_eq!(
-            items[0]["content"][0]["text"],
-            json!("Always explain your steps.")
+        for later in [LaterInstructions::InPlace, LaterInstructions::Folded] {
+            let items = extract_input_items(&payload, later).unwrap();
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0]["role"], json!("user"));
+            assert_eq!(items[1]["role"], json!("user"));
+            assert_eq!(
+                items[0]["content"][0]["text"],
+                json!("Always explain your steps.")
+            );
+            assert_eq!(
+                items[1]["content"][0]["text"],
+                json!("Generate a simple React app.")
+            );
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item.get("role").and_then(Value::as_str) != Some("developer"))
+            );
+        }
+    }
+
+    fn message(role: &str, text: &str) -> Value {
+        let kind = if role == "assistant" {
+            "output_text"
+        } else {
+            "input_text"
+        };
+        json!({ "type": "message", "role": role, "content": [{ "type": kind, "text": text }] })
+    }
+
+    /// Two requests of one thread as Codex sends them: its instructions, the thread's opening
+    /// developer message and the first turn; then the same, the first answer, and the second
+    /// turn, whose changed run instructions and note Codex records where that turn starts.
+    fn one_thread_two_turns() -> (Value, Value) {
+        let opening = message(
+            "developer",
+            "<permissions instructions>Opening rules.</permissions instructions>",
         );
+        let first = vec![opening, message("user", "First request.")];
+        let mut second = first.clone();
+        second.extend([
+            message("assistant", "First answer."),
+            message(
+                "developer",
+                "<instafy_run_instructions>\nThese run instructions replace all run instructions given earlier.\n</instafy_run_instructions>",
+            ),
+            message("system", "<instafy_turn_notes>\nFor this turn only.\n</instafy_turn_notes>"),
+            message("user", "Second request."),
+        ]);
+        let request = |input: Vec<Value>| json!({ "instructions": "Codex base.", "input": input });
+        (request(first), request(second))
+    }
+
+    #[test]
+    fn a_later_developer_message_stays_in_its_place_so_the_start_stays_the_same() {
+        let (first, second) = one_thread_two_turns();
+        let first = extract_input_items(&first, LaterInstructions::InPlace).unwrap();
+        let second = extract_input_items(&second, LaterInstructions::InPlace).unwrap();
+
+        // The whole of the earlier request starts the later one, so a provider that cached it
+        // serves the later one's start from its cache.
         assert_eq!(
-            items[1]["content"][0]["text"],
-            json!("Generate a simple React app.")
+            second.get(..first.len()),
+            Some(&first[..]),
+            "the later request does not start with the earlier one: {second:#?}"
         );
-        assert!(
-            items
-                .iter()
-                .all(|item| item.get("role").and_then(Value::as_str) != Some("developer"))
+        // The opening developer message and Codex's instructions are the instruction message.
+        assert_eq!(
+            first[0],
+            message(
+                "user",
+                "<permissions instructions>Opening rules.</permissions instructions>\n\nCodex base."
+            )
+        );
+        // The later ones are where Codex put them, as developer messages, a system one too.
+        assert_eq!(
+            second[2..],
+            [
+                message("assistant", "First answer."),
+                message(
+                    "developer",
+                    "<instafy_run_instructions>\nThese run instructions replace all run instructions given earlier.\n</instafy_run_instructions>",
+                ),
+                message(
+                    "developer",
+                    "<instafy_turn_notes>\nFor this turn only.\n</instafy_turn_notes>"
+                ),
+                message("user", "Second request."),
+            ]
+        );
+    }
+
+    #[test]
+    fn folded_later_developer_messages_join_the_instruction_message_as_before() {
+        let (_, second) = one_thread_two_turns();
+        let items = extract_input_items(&second, LaterInstructions::Folded).unwrap();
+
+        assert_eq!(
+            items,
+            [
+                message(
+                    "user",
+                    "<permissions instructions>Opening rules.</permissions instructions>\n\n<instafy_run_instructions>\nThese run instructions replace all run instructions given earlier.\n</instafy_run_instructions>\n\n<instafy_turn_notes>\nFor this turn only.\n</instafy_turn_notes>\n\nCodex base."
+                ),
+                message("user", "First request."),
+                message("assistant", "First answer."),
+                message("user", "Second request."),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_developer_messages_that_open_a_request_go_first_wherever_they_start() {
+        let tools = json!({ "type": "additional_tools", "role": "developer", "tools": [] });
+        // A Responses Lite request: its tool list, then Codex's instructions and the thread's
+        // opening developer message, both as developer messages.
+        let lite = json!({ "input": [
+            tools.clone(),
+            message("developer", "Codex base."),
+            message("developer", "Opening rules."),
+            message("user", "First request."),
+            message("assistant", "First answer."),
+            message("developer", "Changed rules."),
+            message("user", "Second request."),
+        ]});
+        assert_eq!(
+            extract_input_items(&lite, LaterInstructions::InPlace).unwrap(),
+            [
+                message("user", "Codex base.\n\nOpening rules."),
+                tools,
+                message("user", "First request."),
+                message("assistant", "First answer."),
+                message("developer", "Changed rules."),
+                message("user", "Second request."),
+            ]
+        );
+        // After a compaction: the requests kept come first, then the context it put back.
+        let compacted = json!({ "instructions": "Codex base.", "input": [
+            message("user", "First request."),
+            json!({ "type": "compaction", "encrypted_content": "opaque" }),
+            message("developer", "Opening rules."),
+            message("user", "Second request."),
+            message("developer", "Changed rules."),
+            message("user", "Third request."),
+        ]});
+        assert_eq!(
+            extract_input_items(&compacted, LaterInstructions::InPlace).unwrap(),
+            [
+                message("user", "Opening rules.\n\nCodex base."),
+                message("user", "First request."),
+                json!({ "type": "compaction", "encrypted_content": "opaque" }),
+                message("user", "Second request."),
+                message("developer", "Changed rules."),
+                message("user", "Third request."),
+            ]
         );
     }
 

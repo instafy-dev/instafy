@@ -638,11 +638,25 @@ breakpoints. Their existing native request adaptation remains: native key,
 context/include and session controls are omitted on these non-Responses routes.
 
 On API-key Responses upstreams, user/assistant content blocks keep their explicit
-`prompt_cache_breakpoint: {"mode":"explicit"}` markers. The existing instruction
-normalization joins developer/system text into a leading user message, and Chat
-Completions text conversion reconstructs content blocks. Breakpoints at those
-unsupported locations receive 400 rather than silently losing the boundary.
-This change does not alter that existing instruction trust policy.
+`prompt_cache_breakpoint: {"mode":"explicit"}` markers. Instruction normalization
+(below) joins developer/system text into a leading user message, and Chat
+Completions text conversion reconstructs content blocks. A breakpoint in any
+developer or system message, or in Chat Completions content, receives 400 rather
+than silently losing the boundary.
+
+### Where a request's instructions go
+
+The proxy joins the developer and system messages that open a request's `input`
+(a thread's first ones, or the ones a compaction put back), and then the request's
+own `instructions`, into one user message at the start of `input`. Each developer
+or system message after them stays in its place, as a developer message: Codex
+records a turn's changed instructions where that turn starts, so every request of a
+thread starts as the one before it did and the provider can serve that start from
+its cache. The Responses API takes developer messages anywhere in its input, on
+the OpenAI API and on a ChatGPT login's Codex endpoint. A Chat Completions or
+Gemini Code Assist upstream gets every developer and system message in that
+leading message instead, as before: their providers differ on instructions after
+the first message, and some refuse the developer role.
 
 Only imported Codex Responses requests round-trip `x-codex-turn-state`. The proxy
 returns a signed, bounded, one-hour opaque envelope and accepts it back only for
