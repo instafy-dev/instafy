@@ -807,8 +807,8 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   in the turn. A stop covers the URL asked for and each address it redirected to: do not read them another way
   (another tool, user agent or browser, or a copy at another address), and give the person the plain link. The
   `tell` says what is still open: the site's other pages (such as each product's own page, when a listing page
-  stopped), each checked on its own, and other sources; only other sources after a stop of the whole site (a
-  link-only site, a 429 or bot check, or a robots.txt that refuses every page).
+  stopped), each checked on its own, and other sources; only other sources after a refused address or a stop of the
+  whole site (a link-only site, a 429 or bot check, or a robots.txt that refuses every page).
 - **Redaction.** The browsers' `redaction.js` (`packages/browser-action-policy`) masks keys and tokens in the text,
   title, links, addresses and structured data before anything is printed or cached. A page that shows a credential is
   withheld as `secret_screen`.
