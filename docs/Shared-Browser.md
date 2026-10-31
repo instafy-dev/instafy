@@ -1111,11 +1111,11 @@ page was read), and the Shared Browser policy says to take a snapshot
 and go on from there: only an approval's own outcome is final. On the turn's
 line it reads as a page read when the page was read, and like `status`
 ("Browsed <site>") when only its address was, so it adds no new wording and
-never says a page was read when none was. A load a step started (a
+never says a page was read when none was. A step that started a load (a
 `navigate`, an `open_tab`, or a link, form or key that opens a page) whose site
-(one that is down) had not answered when the step stopped waiting for it, its
+(one that is down) had not answered when the step stopped waiting for it (its
 time up or, sooner, a click's or a key's own 15-second wait for the page it
-opens, stops that load, whatever page the tab showed before, the blank page or
+opens) stops that load, whatever page the tab showed before, the blank page or
 a page that had loaded: while it waited, Instafy's browser could not be reached
 by the next step, and it would have landed after the step ended. So the step
 opened nothing, and it fails with "The site did not answer in time, so nothing
@@ -1342,9 +1342,10 @@ the retry all tell it to call `navigate` first: with the address the task names,
 or, when the task names none (a research or comparison card carries no address),
 with the official site of what the task is about. A turn that stops on a blank
 page with no step the browser answered (below) is retried once with that
-instruction, and `navigate` asks for the site's approval as usual. Every other page without an http(s) origin (`data:`,
-`about:srcdoc`, a blank page with a fragment, other browser-internal pages)
-still fails closed with `[origin_not_approvable]`. That error is not a consent
+instruction, and `navigate` asks for the site's approval as usual. Every other
+page without an http(s) origin (`data:`, `about:srcdoc`, a blank page with a
+fragment, other browser-internal pages) still fails closed with
+`[origin_not_approvable]`. That error is not a consent
 decision and does not end the run; it tells the agent to navigate first. Neither
 Studio nor the runtime opens a card's site on its own; the card's hosts are only
 shown to the person.
