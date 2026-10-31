@@ -194,6 +194,48 @@ describe("chatMessagePresentation", () => {
     ]);
   });
 
+  // A turn whose only output is a browser card posts the card and an empty
+  // reply: the card says where the browser goes, and its words beside it had
+  // promised a submit the person then refused.
+  it("shows a turn that posted only a browser card as the card alone", () => {
+    const messages: ChatMessage[] = [
+      createMessage({
+        id: "browser-card",
+        content: "Continue this task in Instafy's browser.",
+        timestamp: 100,
+        messageType: "action_request",
+        metadata: { jobId: "job-3", messageType: "action_request", details: { testId: "browser-request-card" } },
+      }),
+      createMessage({
+        id: "reply",
+        content: "",
+        timestamp: 200,
+        metadata: { jobId: "job-3", source: "agent", outcome: "succeeded" },
+      }),
+    ];
+    const collapsedAll = collapseLifecycleMessages(messages);
+    const collapsedVisible = collapsedAll.filter((message) => shouldDisplayChatMessage(message));
+    expect(synthesizeAgentJobThreadMessages(collapsedAll, collapsedVisible).map((message) => message.id)).toEqual([
+      "browser-card",
+    ]);
+    // A reply that is only its files still shows them.
+    const withFiles = createMessage({
+      id: "files-reply",
+      content: " ",
+      files: [
+        {
+          path: "sites/hours/index.html",
+          workspacePath: "sites/hours/index.html",
+          label: "index.html",
+          changeType: "changed",
+          lineRanges: [],
+        },
+      ],
+      metadata: { jobId: "job-4", source: "agent" },
+    });
+    expect(shouldDisplayChatMessage(withFiles)).toBe(true);
+  });
+
   it("lists the replies a synthesized job thread row presents, newest first, for read acknowledgement", () => {
     const collapsedAll: ChatMessage[] = [
       createMessage({ id: "command", content: "ls", messageType: "command_execution", metadata: { jobId: "job-1", messageType: "command_execution" } }),

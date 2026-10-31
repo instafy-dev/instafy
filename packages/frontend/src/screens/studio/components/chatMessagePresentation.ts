@@ -7,6 +7,7 @@ import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { isGenericProgressLabel, THREAD_ACTION_CARD_TYPES } from "./threadPreviewHelpers";
 import { readEarlierAttempts, resolveAutomaticRetryFold } from "./automaticRetryFold";
+import { resolveRoutedBrowserFold } from "./routedBrowserFold";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -237,6 +238,17 @@ export function shouldDisplayChatMessage(message: ChatMessage): boolean {
   if (message.role === "assistant" && isGenericProgressLabel(message.content)) {
     return false;
   }
+  // A reply with nothing in it shows nothing: a turn whose only output is a
+  // browser card posts the card and an empty reply (runtime-agent
+  // `post_only_the_card`), which the controller counts as no reply too.
+  if (
+    message.role === "assistant" &&
+    !messageType &&
+    !message.content.trim() &&
+    !(Array.isArray(message.files) && message.files.length > 0)
+  ) {
+    return false;
+  }
   if (
     !messageType &&
     message.role === "assistant" &&
@@ -402,9 +414,18 @@ export function synthesizeAgentJobThreadMessages(
 
   // A turn sent again folds into the turn that replaced it.
   const retryFold = resolveAutomaticRetryFold(collapsedAll);
+  // A message sent straight to the browser folds into its browser turn.
+  const routedFold = resolveRoutedBrowserFold(collapsedAll);
+  const hiddenIds = new Set([...retryFold.hiddenPromptIds, ...routedFold.hiddenPromptIds]);
+  for (const [browserJobId, cardId] of routedFold.cardIdByBrowserJobId) {
+    // The card says the browser is opening until its browser turn shows something.
+    if (collapsedVisible.some((message) => message.id !== cardId && extractAgentJobId(message) === browserJobId)) {
+      hiddenIds.add(cardId);
+    }
+  }
   const visible =
-    retryFold.hiddenPromptIds.size > 0
-      ? collapsedVisible.filter((message) => !retryFold.hiddenPromptIds.has(message.id))
+    hiddenIds.size > 0
+      ? collapsedVisible.filter((message) => !hiddenIds.has(message.id))
       : collapsedVisible;
 
   const threadStartMessageIdByJobId = new Map<string, string>();

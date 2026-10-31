@@ -632,6 +632,26 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opened" });
   });
 
+  // A message Octo sent straight to the browser: Studio opens its card the
+  // same way, and the continuation leaves no notice, since the person's own
+  // message is right above it (routedBrowserFold.ts).
+  it("opens a card the routing step sent with the person's own words, and leaves no notice", async () => {
+    await render();
+    await advance(5_000);
+    const prompt = sendPrompt({}, "job-1", TASK);
+    const routed: ChatMessage = { ...card("job-1"), metadata: { messageType: "action_request", jobId: "job-1",
+      details: { browserRequest: { task: TASK, location: "auto", routed: true } } } };
+    value.messages = [...value.messages, prompt, routed];
+    await render();
+    await advance(10);
+    expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal", PERSONAL);
+    await becomeReady();
+    expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("personal", TASK, {
+      metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
+      knownHosts: ["app.example.test"],
+    });
+  });
+
   it("waits while the conversation is still busy", async () => {
     value.busy = true;
     await cardArrives();

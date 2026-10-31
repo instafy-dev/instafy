@@ -18,6 +18,11 @@ import {
   mapServerSendQueueEntryToQueuedItem,
 } from "../useChatServerSendQueue";
 import {
+  BROWSER_HUMAN_INPUT_CONTINUE_PROMPT,
+  LET_OCTO_CONTINUE,
+  isLetOctoContinuePrompt,
+} from "../useBrowserHumanInput";
+import {
   useRunFailureRetryActions,
   type RunFailureResendOptions,
 } from "../useRunFailureRetryActions";
@@ -307,6 +312,76 @@ describe("useRunFailureRetryActions", () => {
       });
       expect(submit).not.toHaveBeenCalled();
       expect(showStatus).toHaveBeenCalledWith("Open the browser from Octo's message to try again.", "info", 4000);
+    });
+  });
+
+  // The chat shows a press of Let Octo continue as the button's words; the
+  // turn got the whole continuation prompt, aimed at the chat's page. Sent
+  // again as an ordinary message, those words reached Octo alone, as a chat
+  // turn with no page and without the prompt's "do not … repeat any values I
+  // may have entered".
+  describe("a failed run of Let Octo continue", () => {
+    const PRESSED = createMessage({
+      id: "continue-1",
+      role: "user",
+      authorId: CURRENT_USER_ID,
+      content: LET_OCTO_CONTINUE,
+      timestamp: 1,
+      metadata: {
+        clientMessageId: "client-continue-1",
+        client: { sessionId: CHAT_CLIENT_SESSION_ID, userId: CURRENT_USER_ID },
+        browserTransport: "shared",
+        browserRuntimeId: "shared-runtime-1",
+        browserPageId: "page-1",
+        displayContent: LET_OCTO_CONTINUE,
+        dispatchContent: BROWSER_HUMAN_INPUT_CONTINUE_PROMPT,
+      },
+    });
+    beforeEach(() => {
+      rememberPromptSentFromThisPage(PRESSED);
+      recordRunsStartedByPromptSentFromThisPage(PRESSED, ["job-continue"]);
+    });
+
+    it("presses it again through the browser, never sending the button's words as a prompt", async () => {
+      const failed = failure("failure-c", MISSING_FINAL_MESSAGE, 2, { jobId: "job-continue" });
+      const submit = vi.fn<Submit>(async () => true);
+      const resendBrowserRequest = vi.fn(async (_prompt: ChatMessage, metadata: Record<string, unknown>) => {
+        const sent = { id: "resend-c", metadata: { ...metadata, clientMessageId: "client-resend-c" } };
+        rememberPromptSentFromThisPage(sent);
+        recordRunsStartedByPromptSentFromThisPage(sent, ["job-resend-c"]);
+        return true;
+      });
+      await render({ messages: [PRESSED, failed], submit, resendBrowserRequest });
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(submit).not.toHaveBeenCalled();
+      expect(resendBrowserRequest).toHaveBeenCalledExactlyOnceWith(PRESSED, { retryOfMessageId: "failure-c" });
+      expect(latest?.isRetrySuperseded?.(failed)).toBe(true);
+    });
+
+    it("says to open the browser where no browser handoff is available", async () => {
+      const failed = failure("failure-c", MISSING_FINAL_MESSAGE, 2, { jobId: "job-continue" });
+      const submit = vi.fn<Submit>(async () => true);
+      const showStatus = vi.fn();
+      await render({ messages: [PRESSED, failed], submit, showStatus });
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(submit).not.toHaveBeenCalled();
+      expect(showStatus).toHaveBeenCalledWith("Open the browser to try again.", "info", 4000);
+    });
+
+    it("reads a press stored before a reload, whose prompt metadata is nested", () => {
+      expect(isLetOctoContinuePrompt(PRESSED)).toBe(true);
+      expect(isLetOctoContinuePrompt(createMessage({
+        role: "user",
+        content: LET_OCTO_CONTINUE,
+        metadata: { promptMetadata: { displayContent: LET_OCTO_CONTINUE, dispatchContent: BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } },
+      }))).toBe(true);
+      // Typed by the person, or Octo's own words: not a press.
+      expect(isLetOctoContinuePrompt(createMessage({ role: "user", content: LET_OCTO_CONTINUE }))).toBe(false);
+      expect(isLetOctoContinuePrompt({ ...PRESSED, role: "assistant" })).toBe(false);
     });
   });
 

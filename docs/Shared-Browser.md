@@ -752,10 +752,13 @@ skill, whatever its words: the router loads a skill by the words of a request,
 and a browser turn's often has none of the skill's ("Now find how to get there
 by tram", or a task that names an address). On a fresh thread the skill loads
 first of the turn's skills, so the snapshot's budget never runs out before it.
-Most browser turns resume their chat's thread instead (a card's turn follows the
-turn that posted the card), which loads no snapshot, and a browser turn cannot
-read a skill file, so such a turn is given the skill's "Finding a page" section
-again, from the space's own copy. Codex withdraws the space's `AGENTS.md` from a
+Most browser turns resume their chat's browser thread instead, which loads no
+snapshot, and a browser turn cannot read a skill file, so such a turn is given
+the skill's "Finding a page" section again, from the space's own copy. A chat's
+browser thread holds only its browser turns: each starts from what it is asked
+(the person's words or a card's task), and a new or lost browser thread is
+given the chat's earlier browser turns, never Octo's building turns, files or
+command output. Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
 a fact no page read this turn states, and only steps the turn started). The
@@ -1094,7 +1097,38 @@ Studio opens the Shared Browser by itself for Octo's `request_browser` card
 on the conversation's own machine in a space the controller covers, whether
 that browser runs yet or not, unless someone else has it open, controls it,
 runs in it or is starting it (see "How Studio opens it" below and
-[Browser Profiles](Browser-Profiles.md)). It never starts, stops or replaces a
+[Browser Profiles](Browser-Profiles.md)).
+
+A message that names Instafy's browser, or whose work happens on a website,
+goes to the browser from its first message. The routing step that runs before
+each of the person's messages may answer `browser`, or `browser_then_build`
+when Octo builds from what it finds; the browser skill's last section,
+"Routing preflight", says when, and a space whose copy of the skill lacks it
+keeps today's routes. A message that names the browser still stays with Octo
+when the browser turn could not do it alone: it sees only the person's words
+and the chat's earlier browser turns, so a message that needs what this space
+or another chat holds, a site that runs in this space, or a message that says
+not to use the browser is not sent there. The routes are offered only for the
+person's own words (never a prompt Instafy wrote for a command such as
+`/learn`) on an interactive turn that could ask for the browser itself (not a
+hand-back, a worker, a plan, an unattended run or a browser turn) and that
+Octo answers for sure (not a group chat's message that Octo first decides
+whether to answer at all), with no attachments. That message's job then runs
+no model turn of its own: it posts one card marked `routed`, whose task is the
+person's own words, and no reply. Studio opens it as it opens any card, and
+the chat reads it as one turn: the turn's line says "Opening Instafy's
+browser…" until the browser turn shows something, and neither the card nor
+the continuation (which repeats the person's message) is shown. A routed card
+Studio cannot open by itself shows as any card does, with its reason; once the
+person presses it, or once its browser turn fails or is stopped before it
+shows anything, it reads Opened as any card does, since nothing is opening it
+any more. The card's
+browser turn, its hand-back and every check on them are a card's, except that
+its browser turn is the person's own turn for billing (its task is their
+words; [Credits and billing](Credits-Billing.md)), and its hand-back gives the
+building turn the message's words as the person's request: that building
+thread never saw the message. A building or chat turn that finds mid-task that
+it needs the browser still asks with its own card. It never starts, stops or replaces a
 machine for this, and every other card waits for the person's press. The
 continuation is an ordinary Shared turn with consent version `1`. On the space's
 own machine it starts in routine browsing, as every run there does (see "Human
@@ -1387,7 +1421,16 @@ thread is given its own policy as well (once, when it differs from the one the
 thread last read), and the hint says the rule again where it applies. The
 turn's reply after a pause says "Sign in or fill in the highlighted
 fields on the page in Instafy's browser, then choose Let Octo continue. I don't
-ask for those details in chat."
+ask for those details in chat." When Octo's last reply in the chat was such a
+pause already, it says "Instafy's browser is still waiting for you. Sign in or
+fill in the highlighted fields on the page, then choose Let Octo continue. I
+don't ask for those details in chat." instead, so a press before signing in
+does not read as if it did nothing. The runtime knows only that the last reply
+was a pause, and a one-time code, consent or card page can pause right after a
+sign-in that worked, so neither reply says which page it is. The chat shows a
+press of **Let Octo continue** as those words in the person's name; the turn
+gets the whole continuation prompt, and Try again on a turn it started presses
+it again the same way.
 
 A browser that has just started, such as the on-demand browser on a space's own
 machine, shows exactly `about:blank`, and a tab opened in the viewer shows the
@@ -2042,7 +2085,12 @@ unless the policy is `"covered"`.
   check and every check before sending still apply.
 - **Cards after a press.** A card says what it is for ("Continue in
   Instafy's browser", and the site it is headed for), never what pressing it
-  does: older cards carry a line about that, which is not shown. It reads
+  does: older cards carry a line about that, which is not shown. A turn whose
+  only action is the card posts the card and no reply of its own, except in a
+  skill setup, whose reply carries its walk, and on a turn that decides whether
+  to answer at all. A reply that does show beside a card never says a page
+  opened before a browser tool saw it, or what the browser will submit, send or
+  buy. It reads
   **Opening Instafy's browser…** while it opens and a plain **Opened** once it
   was continued, also after a reload. A card a newer card followed offers no
   button and reads **Not opened**: the newer card carries the task on, so two
@@ -2067,8 +2115,11 @@ unless the policy is `"covered"`.
   stop for the person (`request_human_input`, or a step whose approval ended
   the turn), and no draft or manual browser step is pending. The controller
   checks the same chain under the conversation's dispatch fence and stamps
-  `browserHandBack` with the browser turn's final reply (at most 6,000
-  characters) and up to six labelled findings `{url, title, readAt, viewer}`
+  `browserHandBack` with what the browser turn was asked (at most 2,000
+  characters), for a card the routing step posted the message's own words as
+  `personRequest` (from that message's job, at most 8,000 characters; the
+  building turn reads them as the person's request), its final reply (at most
+  6,000 characters) and up to six labelled findings `{url, title, readAt, viewer}`
   (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
   `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
   counts as `blocked`): the address and title come from the reply's JSON
@@ -2087,7 +2138,16 @@ unless the policy is `"covered"`.
   whose findings name no page it read (`browser_hand_back_nothing_read`). The
   runtime shows that record to the building turn as quoted page data: not the
   person's words, not their consent, and no instruction; the turn says what it
-  built with it. It takes no
+  built with it. Any other browser turn reaches the building thread the same
+  way, as data: each building job's lease lists the chat's finished browser
+  turns since the building thread's last turn (`browser_turns_since`: the
+  newest six of this agent's, never the one a hand-back's record carries, and
+  whether older ones were left out), each with what it was asked and its reply
+  with its finding lines put back, bounded and labelled like the record. A building turn on a restored thread reads them
+  as one section of quoted page data; a new or lost building thread reads them
+  in its replay of the chat, each browser turn as one quoted block. A Let Octo
+  continue press reads as one line there, not as Studio's instructions in the
+  person's name. It takes no
   routing step: its route is decided (build in this chat), and the findings it
   builds from are in its own prompt, which a routing step never sees. So it
   runs in the lane a routed build runs in: it edits the space and ends in plain

@@ -18,6 +18,7 @@ const CHILD: &str = "INSTAFY_BROWSER_HAND_BACK_TEST_CHILD";
 const PROVIDER_KEY: &str = "inert-hand-back-provider-key";
 const REQUEST: &str =
     "Compare the three latest laptops from maker.example on a page, with two reviews for each.";
+/// What the model writes beside the card, which nobody reads: the turn posts the card alone.
 const CARD_REPLY: &str =
     "Instafy's browser will read the maker's pages, then I'll build the comparison page.";
 const CARD_TASK: &str =
@@ -99,7 +100,7 @@ fn message(text: &str) -> Value {
 fn final_answer(summary: &str, actions: Value) -> Value {
     message(
         &json!({
-            "summary":summary,"code":"","suggestions":[],"actions":actions,"files":[]
+            "summary":summary,"code":"","actions":actions,"files":[]
         })
         .to_string(),
     )
@@ -427,7 +428,23 @@ async fn run_case() -> Result<()> {
     .await
     .context("the card's turn timed out")?
     .context("the card's turn failed")?;
-    assert_eq!(card.summary, CARD_REPLY);
+    // It posts the card and no reply of its own: the card says where the browser goes, and
+    // the browser turn says what it found.
+    assert_eq!(card.summary, "");
+    assert_eq!(card.final_messages.len(), 1, "{:?}", card.final_messages);
+    assert_eq!(
+        card.final_messages[0].message_type.as_deref(),
+        Some("action_request")
+    );
+    let posted = card.final_messages[0]
+        .metadata
+        .as_ref()
+        .context("the card's details")?;
+    assert_eq!(posted["details"]["browserRequest"]["task"], CARD_TASK);
+    assert_eq!(
+        posted["details"]["browserRequest"]["continueBuilding"],
+        true
+    );
     let thread = card
         .provider_conversation_state
         .context("the chat's thread")?;

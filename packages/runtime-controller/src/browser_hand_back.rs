@@ -2,7 +2,8 @@
 //!
 //! A building turn cannot open web pages, so it asks for Instafy's browser
 //! with a `request_browser` card, and the browser turn that continues the
-//! card runs on its own thread without the workspace. When that browser turn
+//! card runs on its chat's browser thread without the workspace: the
+//! runtime keeps a building thread and a browser thread per chat. When that browser turn
 //! finishes, Studio sends one ordinary turn back to the building lane with
 //! `metadata.continuesFromBrowserJob` naming the browser job. Anyone who can
 //! send a message can write that field, so the controller never trusts it: a
@@ -33,6 +34,13 @@
 //! words and never as their consent (runtime-agent `jobs/browser_hand_back.rs`).
 //! A hand-back is never queued or recorded without a dispatch: it resumes an
 //! idle lane or is refused.
+//!
+//! Every other browser turn reaches the building thread the same way, as
+//! data: a building job's lease lists the conversation's browser turns since
+//! the building thread's last turn ([`browser_turns_since`]), each with what
+//! it was asked and its reply, bounded and labelled like the record above.
+//! The runtime quotes them to a building turn on a restored thread; the
+//! hand-back's own browser turn is in its record, not the list.
 
 use axum::{http::StatusCode, Json};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -61,6 +69,26 @@ const FINDING_TITLE_MAX_CHARS: usize = 160;
 const FINDING_URL_MAX_CHARS: usize = 2_048;
 /// A browser turn older than this is history, not a turn to resume from.
 pub(crate) const HAND_BACK_WINDOW_MINUTES: i64 = 30;
+/// How much of what a browser turn was asked reaches the building turn.
+pub(crate) const REQUEST_MAX_CHARS: usize = 2_000;
+/// How much of a routed message's words the hand-back gives the building turn
+/// as the person's request: all of a card's task (runtime-agent
+/// `ROUTED_BROWSER_TASK_MAX_UTF16_UNITS`).
+pub(crate) const PERSON_REQUEST_MAX_CHARS: usize = 8_000;
+/// The payload key a lease stamps with [`browser_turns_since`].
+pub(crate) const TURNS_SINCE_KEY: &str = "browser_turns_since";
+/// The browser turns a building turn reads at most: the browser skill's six
+/// reads per card, the newest ones.
+pub(crate) const TURNS_SINCE_MAX: i64 = 6;
+/// The payload key a lease stamps with whether [`browser_turns_since`] left
+/// older turns out to keep the newest [`TURNS_SINCE_MAX`].
+pub(crate) const TURNS_SINCE_LEFT_OUT_KEY: &str = "browser_turns_since_earlier_left_out";
+/// What Studio sends when the person presses Let Octo continue
+/// (`BROWSER_HUMAN_INPUT_CONTINUE_PROMPT`; the fixture pins it).
+pub(crate) const LET_OCTO_CONTINUE_PROMPT: &str = "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
+/// How a building turn reads that press: one line, not Studio's
+/// instructions in the person's name.
+pub(crate) const LET_OCTO_CONTINUE_LINE: &str = "The person let Octo continue in the browser.";
 
 const VIEWER_WORKSPACE: &str = "Instafy's browser in the workspace";
 const VIEWER_DEVICE: &str = "Instafy's browser on the person's device";
@@ -384,17 +412,20 @@ pub(crate) fn viewer_for_transport(transport: &str) -> Option<&'static str> {
     }
 }
 
-/// The checked record a building turn carries as `metadata.browserHandBack`.
-pub(crate) fn hand_back_record(
-    browser_job_id: &Uuid,
-    card_job_id: &Uuid,
-    viewer: &str,
-    read_at: DateTime<Utc>,
-    reply: &str,
-) -> JsonValue {
-    let read_at = read_at.to_rfc3339_opts(SecondsFormat::Secs, true);
-    let (reply, truncated) = bounded_reply(reply);
-    let findings: Vec<JsonValue> = findings_from_reply(&reply)
+/// What a browser turn was asked, as the building turn reads it: its prompt,
+/// bounded, with a Let Octo continue press as one line.
+pub(crate) fn browser_request_for_building(prompt: &str) -> String {
+    let prompt = prompt.replace('\0', "");
+    let prompt = prompt.trim();
+    if prompt == LET_OCTO_CONTINUE_PROMPT {
+        return LET_OCTO_CONTINUE_LINE.to_string();
+    }
+    prompt.chars().take(REQUEST_MAX_CHARS).collect()
+}
+
+/// A reply's findings, labelled with when and in which browser they were read.
+fn labelled_findings(reply: &str, viewer: &str, read_at: &str) -> Vec<JsonValue> {
+    findings_from_reply(reply)
         .into_iter()
         .map(|finding| {
             let mut labelled = json!({
@@ -408,18 +439,52 @@ pub(crate) fn hand_back_record(
             }
             labelled
         })
-        .collect();
-    json!({
+        .collect()
+}
+
+/// The checked record a building turn carries as `metadata.browserHandBack`.
+/// `request` is what the browser turn was asked: the building thread may never
+/// have seen it. `person_request` is the words of a message the routing step
+/// sent straight to the browser, from that message's own job: the person's
+/// request, which the building thread never saw.
+pub(crate) fn hand_back_record(
+    browser_job_id: &Uuid,
+    card_job_id: &Uuid,
+    viewer: &str,
+    read_at: DateTime<Utc>,
+    request: &str,
+    person_request: Option<&str>,
+    reply: &str,
+) -> JsonValue {
+    let read_at = read_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let (reply, truncated) = bounded_reply(reply);
+    let findings = labelled_findings(&reply, viewer, &read_at);
+    let mut record = json!({
         "version": HAND_BACK_VERSION,
         "verified": true,
         "browserJobId": browser_job_id.to_string(),
         "cardJobId": card_job_id.to_string(),
         "viewer": viewer,
         "readAt": read_at,
+        "request": browser_request_for_building(request),
         "findings": findings,
         "reply": reply,
         "replyTruncated": truncated,
-    })
+    });
+    let person_request = person_request
+        .map(|words| words.replace('\0', ""))
+        .map(|words| {
+            words
+                .trim()
+                .chars()
+                .take(PERSON_REQUEST_MAX_CHARS)
+                .collect::<String>()
+        })
+        .filter(|words| !words.is_empty());
+    if let Some(words) = person_request {
+        record["personRequest"] = json!(words);
+    }
+    record
 }
 
 /// The copy the stored message keeps: which browser turn it continues, not
@@ -594,9 +659,8 @@ pub(crate) async fn require_hand_back(
             "Only the person whose request sent the card can hand the browser's findings back to it.",
         ));
     }
-    let card_metadata = card_job
-        .get::<_, PgJson<JsonValue>>("payload")
-        .0
+    let card_payload = card_job.get::<_, PgJson<JsonValue>>("payload").0;
+    let card_metadata = card_payload
         .get("metadata")
         .cloned()
         .unwrap_or(JsonValue::Null);
@@ -691,11 +755,27 @@ pub(crate) async fn require_hand_back(
     })?;
 
     let finding_lines = finding_lines_note(transaction, conversation_id, &browser_job_id).await?;
+    let request = payload
+        .get("prompt_text")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    // A card the routing step posted for the person's own message: the
+    // building thread never saw that message (its job ran no model turn), so
+    // the record gives the build its words, from the message's own job, as the
+    // person's request.
+    let person_request =
+        if job_posted_routed_browser_card(transaction, conversation_id, &card_job_id).await? {
+            card_payload.get("prompt_text").and_then(JsonValue::as_str)
+        } else {
+            None
+        };
     let record = hand_back_record(
         &browser_job_id,
         &card_job_id,
         viewer,
         completed_at,
+        request,
+        person_request,
         &reply_with_finding_lines(&reply, finding_lines.as_deref()),
     );
     // A browser turn that read no page leaves the building turn nothing to
@@ -736,6 +816,34 @@ async fn card_continues_building(
         .await
         .map(|row| row.get::<_, bool>(0))
         .map_err(|error| internal_error(format!("failed to read the browser card: {error}")))
+}
+
+/// Whether a job posted the card of a message the runtime sent straight to
+/// Instafy's browser (`browserRequest.routed`): the runtime's own
+/// `action_request` message for that job.
+pub(crate) async fn job_posted_routed_browser_card(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    job_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select exists (
+                 select 1 from conversation_messages
+                  where conversation_id = $1
+                    and role = 'assistant'
+                    and created_by is null
+                    and metadata #>> '{jobId}' = $2
+                    and lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', ''))
+                        = 'action_request'
+                    and (metadata #> '{details,browserRequest,routed}' = 'true'::jsonb
+                         or metadata #> '{details,details,browserRequest,routed}' = 'true'::jsonb)
+             )",
+            &[conversation_id, &job_id.to_string()],
+        )
+        .await
+        .map(|row| row.get::<_, bool>(0))
+        .map_err(|error| internal_error(format!("failed to read the routed card: {error}")))
 }
 
 /// The finding lines the runtime moved out of the browser turn's reply into
@@ -841,6 +949,283 @@ async fn last_streamed_reply(
             internal_error(format!("failed to load the browser turn's reply: {error}"))
         })?;
     Ok(row.map(|row| row.get::<_, String>("content")))
+}
+
+/// What a building job's lease lists ([`browser_turns_since`]).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct BrowserTurnsSince {
+    /// The browser turns, oldest first: the newest [`TURNS_SINCE_MAX`].
+    pub(crate) turns: Vec<JsonValue>,
+    /// Older browser turns since the building thread's last turn were left
+    /// out to keep the newest; the building turn is told so
+    /// ([`TURNS_SINCE_LEFT_OUT_KEY`]).
+    pub(crate) earlier_left_out: bool,
+}
+
+/// The browser turns of a conversation since its building thread's last
+/// turn, for a building job's lease: what each was asked, its reply with the
+/// findings its runtime moved into Details put back, bounded and labelled as
+/// the hand-back's record is, oldest first.
+///
+/// The building thread's last turn is the newest other job of the
+/// conversation that is not a browser turn and saved a provider state, in the
+/// credential and agent scope `dispatch::load_provider_conversation_state_for_job`
+/// resumes from, so it names the thread the leased job resumes. The browser
+/// turns are the conversation's finished Shared and Personal Browser jobs of
+/// the same agent created after it (all of them when there is none), the
+/// newest [`TURNS_SINCE_MAX`], and whether older ones were left out. Never
+/// another conversation's or agent's, never one still running, and never the
+/// browser turn this job's checked hand-back already carries. A browser job's
+/// own lease lists none: its thread holds its browser turns.
+pub(crate) async fn browser_turns_since(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    job_id: &Uuid,
+    payload: &JsonValue,
+    credential_id: Option<&Uuid>,
+    agent_id: Option<&Uuid>,
+    agent_handle: Option<&str>,
+) -> Result<BrowserTurnsSince, (StatusCode, Json<ApiError>)> {
+    let metadata = payload.get("metadata").cloned().unwrap_or(JsonValue::Null);
+    if browser_transport_of(&metadata).is_some() {
+        return Ok(BrowserTurnsSince::default());
+    }
+    let handed_back = metadata
+        .get(HAND_BACK_KEY)
+        .filter(|record| record.get("verified") == Some(&JsonValue::Bool(true)))
+        .and_then(|record| record.get("browserJobId"))
+        .and_then(JsonValue::as_str)
+        .and_then(|raw| Uuid::parse_str(raw.trim()).ok());
+    let agent_handle = agent_handle
+        .map(|value| value.trim().trim_start_matches('@').to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    // A job on a connection of its own matches it exactly; a managed job only
+    // through its platform record, which a deleted connection also leaves
+    // without one (`dispatch::load_provider_conversation_state_for_job`). A
+    // job with a connection never reads the platform records.
+    let credential_clause = if credential_id.is_some() {
+        "j.credential_id = $3::uuid"
+    } else {
+        "($3::uuid is null and j.credential_id is null
+          and exists (
+              select 1 from ai_usage_jobs u
+               where u.job_id = j.id
+                 and u.project_id = j.project_id
+                 and u.run_id = j.run_id
+          ))"
+    };
+    let anchor = transaction
+        .query_opt(
+            &format!(
+                "select r.created_at
+                   from runs r
+                   join agent_jobs j on j.run_id = r.id
+                     and j.project_id = r.project_id
+                     and j.conversation_id = r.conversation_id
+                  where r.conversation_id = $1
+                    and j.id <> $2
+                    and j.proxy_metadata->'conversation' is not null
+                    and j.proxy_metadata->'conversation' <> 'null'::jsonb
+                    and coalesce(j.payload #>> '{{metadata,browserTransport}}',
+                                 j.payload #>> '{{metadata,browser_transport}}', '') = ''
+                    and (r.metadata->>'jobId' is null or r.metadata->>'jobId' = j.id::text)
+                    and {credential_clause}
+                    and case
+                        when $4::uuid is not null and r.metadata #>> '{{agent,id}}' is not null
+                            then r.metadata #>> '{{agent,id}}' = $4::text
+                        when $5::text is not null
+                            then lower(ltrim(btrim(r.metadata #>> '{{agent,handle}}'), '@')) = $5
+                        else $4::uuid is null
+                    end
+                  order by r.created_at desc, r.id desc, j.id desc
+                  limit 1"
+            ),
+            &[
+                conversation_id,
+                job_id,
+                &credential_id,
+                &agent_id,
+                &agent_handle,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to find the building thread's last turn: {error}"
+            ))
+        })?
+        .map(|row| row.get::<_, DateTime<Utc>>("created_at"));
+    let rows = transaction
+        .query(
+            "select j.id, j.run_id, j.outcome, j.summary, j.payload, j.completed_at,
+                    r.created_at as run_created_at
+               from runs r
+               join agent_jobs j on j.run_id = r.id
+                 and j.project_id = r.project_id
+                 and j.conversation_id = r.conversation_id
+              where r.conversation_id = $1
+                and j.id <> $2
+                and j.status = 'completed'
+                and j.completed_at is not null
+                and lower(replace(coalesce(j.payload #>> '{metadata,browserTransport}',
+                                           j.payload #>> '{metadata,browser_transport}', ''),
+                                  '_', '-')) in ('shared', 'desktop-personal')
+                and ($3::timestamptz is null or r.created_at > $3)
+                and ($4::uuid is null or j.id <> $4)
+                and case
+                    when $5::uuid is not null and r.metadata #>> '{agent,id}' is not null
+                        then r.metadata #>> '{agent,id}' = $5::text
+                    when $6::text is not null
+                        then lower(ltrim(btrim(r.metadata #>> '{agent,handle}'), '@')) = $6
+                    else $5::uuid is null
+                end
+              order by r.created_at desc, r.id desc, j.id desc
+              limit $7",
+            &[
+                conversation_id,
+                job_id,
+                &anchor,
+                &handed_back,
+                &agent_id,
+                &agent_handle,
+                // One more than are kept, to know whether any were left out.
+                &(TURNS_SINCE_MAX + 1),
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to list the browser turns since the building thread's last turn: {error}"
+            ))
+        })?;
+    // A message the runtime sent straight to the browser whose card no
+    // browser turn carried on: the building thread never saw it, and the
+    // person may now ask for it without the browser.
+    let unopened = transaction
+        .query(
+            "select j.id, j.payload, r.created_at
+               from runs r
+               join agent_jobs j on j.run_id = r.id
+                 and j.project_id = r.project_id
+                 and j.conversation_id = r.conversation_id
+              where r.conversation_id = $1
+                and j.id <> $2
+                and j.status = 'completed'
+                and ($3::timestamptz is null or r.created_at > $3)
+                and exists (
+                    select 1 from conversation_messages card
+                     where card.conversation_id = $1
+                       and card.role = 'assistant'
+                       and card.created_by is null
+                       and card.metadata #>> '{jobId}' = j.id::text
+                       and (card.metadata #> '{details,browserRequest,routed}' = 'true'::jsonb
+                            or card.metadata #> '{details,details,browserRequest,routed}' = 'true'::jsonb))
+                and not exists (
+                    select 1 from agent_jobs browser_job
+                     where browser_job.conversation_id = $1
+                       and browser_job.payload #>> '{metadata,browserRequestOf}' = 'job:' || j.id::text)
+                and case
+                    when $4::uuid is not null and r.metadata #>> '{agent,id}' is not null
+                        then r.metadata #>> '{agent,id}' = $4::text
+                    when $5::text is not null
+                        then lower(ltrim(btrim(r.metadata #>> '{agent,handle}'), '@')) = $5
+                    else $4::uuid is null
+                end
+              order by r.created_at desc, r.id desc, j.id desc
+              limit $6",
+            &[
+                conversation_id,
+                job_id,
+                &anchor,
+                &agent_id,
+                &agent_handle,
+                // One more than are kept, to know whether any were left out.
+                &(TURNS_SINCE_MAX + 1),
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to list the messages sent straight to the browser: {error}"
+            ))
+        })?;
+    let mut listed: Vec<(DateTime<Utc>, JsonValue)> = unopened
+        .into_iter()
+        .map(|row| {
+            let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
+            let request = payload
+                .get("prompt_text")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            (
+                row.get::<_, DateTime<Utc>>("created_at"),
+                json!({
+                    "routedJobId": row.get::<_, Uuid>("id").to_string(),
+                    "request": browser_request_for_building(request),
+                    "routedNotOpened": true,
+                }),
+            )
+        })
+        .collect();
+    for row in rows.into_iter().rev() {
+        let browser_job_id: Uuid = row.get("id");
+        let run_id: Option<Uuid> = row.get("run_id");
+        let browser_payload = row.get::<_, PgJson<JsonValue>>("payload").0;
+        let browser_metadata = browser_payload
+            .get("metadata")
+            .cloned()
+            .unwrap_or(JsonValue::Null);
+        let Some(viewer) = browser_transport_of(&browser_metadata).and_then(viewer_for_transport)
+        else {
+            continue;
+        };
+        let completed_at: DateTime<Utc> = row.get("completed_at");
+        let read_at = completed_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let reply = match (
+            row.get::<_, Option<String>>("summary")
+                .filter(|summary| !summary.trim().is_empty()),
+            run_id,
+        ) {
+            (Some(summary), _) => summary,
+            (None, Some(run_id)) => last_streamed_reply(transaction, conversation_id, &run_id)
+                .await?
+                .unwrap_or_default(),
+            (None, None) => String::new(),
+        };
+        let finding_lines =
+            finding_lines_note(transaction, conversation_id, &browser_job_id).await?;
+        let (reply, truncated) =
+            bounded_reply(&reply_with_finding_lines(&reply, finding_lines.as_deref()));
+        let request = browser_payload
+            .get("prompt_text")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        listed.push((
+            row.get::<_, DateTime<Utc>>("run_created_at"),
+            json!({
+                "browserJobId": browser_job_id.to_string(),
+                "request": browser_request_for_building(request),
+                "reply": reply,
+                "replyTruncated": truncated,
+                "findings": labelled_findings(&reply, viewer, &read_at),
+                "readAt": read_at,
+                "viewer": viewer,
+                "outcome": row.get::<_, Option<String>>("outcome"),
+            }),
+        ));
+    }
+    // Oldest first, the newest TURNS_SINCE_MAX of both kinds. Each query
+    // read one more than are kept, so a longer list means some were left out.
+    listed.sort_by_key(|(created_at, _)| *created_at);
+    let keep_from = listed.len().saturating_sub(TURNS_SINCE_MAX as usize);
+    Ok(BrowserTurnsSince {
+        turns: listed
+            .into_iter()
+            .skip(keep_from)
+            .map(|(_, turn)| turn)
+            .collect(),
+        earlier_left_out: keep_from > 0,
+    })
 }
 
 #[cfg(test)]
@@ -984,6 +1369,8 @@ https://three.example.com\n\
             &card_job,
             viewer_for_transport("shared").unwrap(),
             read_at,
+            fixtures["browserRequest"].as_str().unwrap(),
+            None,
             fixtures["browserReply"].as_str().unwrap(),
         );
         assert_eq!(&record, expected);
@@ -994,7 +1381,19 @@ https://three.example.com\n\
             &card_job,
             viewer_for_transport("desktop_personal").unwrap(),
             read_at,
+            &"y".repeat(REQUEST_MAX_CHARS + 10),
+            Some(&format!("{}\0", "z".repeat(PERSON_REQUEST_MAX_CHARS + 10))),
             &long,
+        );
+        // A routed message's words reach the build whole, as a card's task is
+        // bounded.
+        assert_eq!(
+            record["personRequest"].as_str().unwrap(),
+            "z".repeat(PERSON_REQUEST_MAX_CHARS)
+        );
+        assert_eq!(
+            record["request"].as_str().unwrap().chars().count(),
+            REQUEST_MAX_CHARS
         );
         assert_eq!(record["replyTruncated"], true);
         assert_eq!(
@@ -1052,7 +1451,7 @@ https://three.example.com\n\
             "{\"url\": \"https://www.example.com/\", \"stopped\": \"blocked\"}",
             "{\"url\": \"https://a.example.com/\", \"stopped\": \"captcha\"}\n{\"url\": \"http://127.0.0.1/\", \"title\": \"Local\"}",
         ] {
-            let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at, reply);
+            let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at, "", None, reply);
             assert!(!record_read_a_page(&record), "{reply}");
         }
     }
@@ -1155,6 +1554,23 @@ https://three.example.com\n\
             let line = format!(r#"{{"url": "{address}"}}"#);
             assert_eq!(findings_from_reply(&line)[0].url, address);
         }
+    }
+
+    // Studio's test pins its Let Octo continue prompt to the same fixture.
+    #[test]
+    fn a_let_octo_continue_press_reads_as_one_line() {
+        assert_eq!(
+            json!(LET_OCTO_CONTINUE_PROMPT),
+            fixtures()["letOctoContinuePrompt"]
+        );
+        assert_eq!(
+            browser_request_for_building(&format!("  {LET_OCTO_CONTINUE_PROMPT}\n")),
+            LET_OCTO_CONTINUE_LINE
+        );
+        assert_eq!(
+            browser_request_for_building("Find the opening hours.\0"),
+            "Find the opening hours."
+        );
     }
 
     #[test]
