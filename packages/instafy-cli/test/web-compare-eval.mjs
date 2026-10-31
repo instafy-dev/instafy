@@ -428,7 +428,7 @@ export function gradeCompare(transcript, kase = CASE) {
   // Two failures on the maker's own site send the turn to an independent source before it builds: a review publisher's
   // page or a shop a reader allows (28 Oct drive 3: the maker's site never answered, nothing else was read, and the
   // page had no rows).
-  // "Two failed pages on one site: find another source with `instafy web search`" (the browser skill's "Finding a
+  // A failed page sends the turn to the place's own site, then to another source (the browser skill's "Finding a
   // page"): an independent page read, or, when none could be, every independent page a search found tried.
   const makerHosts = new Set([kase.official.url, kase.wikidata.website, ...items.map((item) => item.page.url)].map(host));
   const officialFailures = reads.filter((r) => makerHosts.has(host(r.url)) && r.status !== "read").length;

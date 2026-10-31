@@ -714,9 +714,9 @@ a fact no page read this turn states, and only steps the turn started). The
 skill prints just that section with one command), says how every reader finds a
 page: an address the person, a skill or a search result gave, a link on a page
 read, or the official site's home page, never a search engine or a guessed
-path; a missing page's own site search; one more snapshot of a page that reads
-as busy, then the place's own site; another source after two failed pages
-on one site, and the best result of the search for it read; facts from a place's
+path; a missing page's own site search; a page that fails (busy, blank or an
+error page such as a 504) sends the turn to the place's own site at once, in the
+same turn, and then to another official source; facts from a place's
 own page, not a listing or a kiosk page; "not checked" on anything not read this
 turn; and a cookie banner's refusal, so the banner does not cover the page. A
 sign-in, a bot check, a paywall or a refused read ends that page, never the task:
@@ -1090,7 +1090,15 @@ page was read), and the Shared Browser policy says to take a snapshot
 and go on from there: only an approval's own outcome is final. On the turn's
 line it reads as a page read when the page was read, and like `status`
 ("Browsed <site>") when only its address was, so it adds no new wording and
-never says a page was read when none was. The step's guards still hold while
+never says a page was read when none was. A step whose time ran out while its
+tab still showed the blank page (a site that had not answered, as one that is
+down) stops that load: while it waited, Instafy's browser could not be reached
+by the next step, and it would have landed after the step ended. So the step
+opened nothing, and it fails with "The site did not answer within 20 seconds,
+so nothing was opened and the page is still blank.", never the blank page's
+"Call navigate", which sent Octo to load the same site again; its line reads
+"Tried opening <site>". A load the browser does not confirm stopped fails as a
+busy page instead. The step's guards still hold while
 the page is read, then end as a step's guards end: a window the step opened
 is closed by its target (a busy page's window may not be a page Playwright can
 show yet) and fails the step as it would have in its time, as does a
@@ -1100,8 +1108,11 @@ not all highlighted in time leaves no prompt behind.
 whose results page keeps the page busy for a minute answers after about 29
 seconds, a loaded page whose content is still hidden reads as busy, a prompt
 answered after 23 seconds is waited for, a click that opens
-a window and keeps the page busy fails with the window closed for good, and a
-hand-off on a page too busy to highlight in time leaves no prompt.
+a window and keeps the page busy fails with the window closed for good, a
+hand-off on a page too busy to highlight in time leaves no prompt, and a
+navigation from a blank tab to a site that does not answer is stopped after
+about 29 seconds: the next step reaches the browser at once, and the site's late
+answer never loads.
 
 In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
 step yields to the model only after the browser server's tool timeout (180
@@ -1973,17 +1984,29 @@ unless the policy is `"covered"`.
   whose findings name no page it read (`browser_hand_back_nothing_read`). The
   runtime shows that record to the building turn as quoted page data: not the
   person's words, not their consent, and no instruction; the turn says what it
-  built with it, without repeating the browser turn's answer. A hand-back turn
-  never asks for the browser again: the runtime drops its `request_browser`
-  card and leaves the browser rule out of its prompt, and the controller still
-  refuses a second hop from an older runtime (`browser_hand_back_second_hop`).
+  built with it. It takes no
+  routing step: its route is decided (build in this chat), and the findings it
+  builds from are in its own prompt, which a routing step never sees. So it
+  runs in the lane a routed build runs in: it edits the space and ends in plain
+  words, with no team plan, goal or lookup of earlier chats to offer. A
+  hand-back turn never asks for the browser again: the runtime drops its
+  `request_browser` card, leaves the browser rule out of its prompt and its
+  reply contract does not offer the card (nor does a browser turn's), and the
+  controller still refuses a second hop from an older runtime
+  (`browser_hand_back_second_hop`).
   A browser turn that continues a building card is asked to end its reply
   with one finding per page, one JSON object per line, as the browser skill
   writes them. Those lines are for Octo: the runtime takes every line the
   controller would read as a finding out of the reply the person reads, and
-  posts them as one note in the turn's Details
+  posts them as one note of the turn
   (`details.browserFindings: {pages, pagesRead}`), where the controller reads
-  them back after the reply for the record. The fixtures in
+  them back after the reply for the record. Studio's Details leaves that note
+  out. Unless a finding says a page stopped it, the person reads "Finished
+  in the browser." in place of the browser turn's own words: the building turn
+  says what it made a moment later, and the browser turn's account of what it
+  could not build ("this turn is read-only") is no answer. Those words go into
+  the note ahead of the findings, so the record still gives the building turn
+  what the browser turn did not read. The fixtures in
   `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
   three halves together.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live
