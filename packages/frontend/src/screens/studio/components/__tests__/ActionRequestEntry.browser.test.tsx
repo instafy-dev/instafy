@@ -60,6 +60,8 @@ describe("a request_browser card", () => {
       notOpened: text("browser-request-not-opened"),
       reason: text("browser-request-reason"),
       button: container.querySelector<HTMLButtonElement>('[data-testid="browser-request-continue"]'),
+      routedLine: text("routed-browser-opening"),
+      card: container.querySelector('[data-testid="browser-request-card"]'),
     };
   }
 
@@ -207,5 +209,49 @@ describe("a request_browser card", () => {
     expect(card.destination).toBe("For app.example.test");
     expect(card.unavailable).toBeNull();
     expect(card.button?.disabled).toBe(false);
+  });
+
+  // A message Octo sent straight to the browser: while Studio opens its card
+  // by itself, the turn's one line says so, and no card shows. One Studio
+  // could not open by itself shows as any card does, with its reason.
+  describe("sent straight to the browser", () => {
+    const routed = { task: "Open https://forms.example/order in your browser and fill in a test order.", location: "auto", routed: true };
+
+    it("reads as the turn's one line while Studio opens it, and after", async () => {
+      for (const host of [
+        { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) },
+        { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]) },
+        { ...web, continuedKeys: new Set(["job:job-1"]) },
+      ]) {
+        const card = await render(routed, host);
+        expect(card.routedLine).toBe("Opening Instafy's browser…");
+        expect(card.card).toBeNull();
+        expect(card.button).toBeNull();
+        expect(card.opened).toBeNull();
+      }
+      const slow = await render(routed, { ...web, cardStates: new Map([["job:job-1", {
+        kind: "opening", note: "This space's machine restarts with the browser. This takes about two minutes and one billing interval.",
+      }]]) });
+      expect(slow.openingNote).toContain("about two minutes and one billing interval");
+    });
+
+    it("stays today's card, with its reason, when Studio could not open it by itself", async () => {
+      const held = await render(routed, { ...web, cardStates: new Map([["job:job-1", {
+        kind: "button", reason: "Someone else is using Instafy's browser right now.",
+      }]]) });
+      expect(held.routedLine).toBeNull();
+      expect(held.card).not.toBeNull();
+      expect(held.reason).toBe("Someone else is using Instafy's browser right now.");
+      expect(held.button?.disabled).toBe(false);
+      const unavailable = await render(routed, { ...web, sharedUnavailable: true });
+      expect(unavailable.routedLine).toBeNull();
+      expect(unavailable.unavailable).toBe("Instafy's browser is not available in this workspace.");
+    });
+
+    it("leaves a card the routing step did not send as it was", async () => {
+      const card = await render({ task: routed.task, location: "auto" }, { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) });
+      expect(card.routedLine).toBeNull();
+      expect(card.opening).toBe("Opening Instafy's browser for forms.example");
+    });
   });
 });

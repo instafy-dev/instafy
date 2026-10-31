@@ -1068,7 +1068,25 @@ Studio opens the Shared Browser by itself for Octo's `request_browser` card
 on the conversation's own machine in a space the controller covers, whether
 that browser runs yet or not, unless someone else has it open, controls it,
 runs in it or is starting it (see "How Studio opens it" below and
-[Browser Profiles](Browser-Profiles.md)). It never starts, stops or replaces a
+[Browser Profiles](Browser-Profiles.md)).
+
+A message that names Instafy's browser, or whose work happens on a website,
+goes to the browser from its first message. The routing step that runs before
+each of the person's messages may answer `browser`, or `browser_then_build`
+when Octo builds from what it finds; the browser skill's last section,
+"Routing preflight", says when, and a space whose copy of the skill lacks it
+keeps today's routes. The routes are offered only to an interactive turn that
+could ask for the browser itself (not a hand-back, a worker, a plan, an
+unattended run or a browser turn), with no attachments. That message's job
+then runs no model turn of its own: it posts one card marked `routed`, whose
+task is the person's own words, and no reply. Studio opens it as it opens any
+card, and the chat reads it as one turn: the turn's line says "Opening
+Instafy's browser…" until the browser turn shows something, and neither the
+card nor the continuation (which repeats the person's message) is shown. A
+routed card Studio cannot open by itself, or one the person presses, shows as
+any card does, with its reason. The card's browser turn, its hand-back and
+every check on them are a card's. A building or chat turn that finds mid-task
+that it needs the browser still asks with its own card. It never starts, stops or replaces a
 machine for this, and every other card waits for the person's press. The
 continuation is an ordinary Shared turn with consent version `1`. On the space's
 own machine it starts in routine browsing, as every run there does (see "Human

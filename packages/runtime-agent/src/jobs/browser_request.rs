@@ -12,6 +12,10 @@ pub(super) struct BrowserRequest {
     /// A card for a question leaves it out, and the browser turn's reply is
     /// the answer.
     continue_building: bool,
+    /// The routing step sent the person's message straight to the browser:
+    /// the card's task is their own words, and Studio folds the card into its
+    /// browser turn when it opens it by itself.
+    routed: bool,
 }
 
 impl BrowserRequest {
@@ -32,6 +36,23 @@ impl BrowserRequest {
             task: task.to_owned(),
             location,
             continue_building,
+            routed: false,
+        })
+    }
+
+    /// The card for a message the routing step sent straight to the browser:
+    /// the person's own words are its task, and the browser is chosen as for
+    /// any card. None for a message no card could carry.
+    pub(super) fn routed(task: &str, continue_building: bool) -> Option<Self> {
+        let task = task.trim();
+        if task.is_empty() || task.encode_utf16().count() > 8_000 {
+            return None;
+        }
+        Some(Self {
+            task: task.to_owned(),
+            location: "auto",
+            continue_building,
+            routed: true,
         })
     }
 
@@ -39,6 +60,9 @@ impl BrowserRequest {
         let mut request = json!({ "task": self.task, "location": self.location });
         if self.continue_building {
             request["continueBuilding"] = json!(true);
+        }
+        if self.routed {
+            request["routed"] = json!(true);
         }
         JobMessage {
             content: "Continue this task in Instafy's browser.".to_owned(),

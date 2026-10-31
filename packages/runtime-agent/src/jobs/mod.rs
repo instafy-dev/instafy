@@ -139,6 +139,11 @@ const AGENT_CONTEXT_CARD_LIMIT: usize = 4;
 const AGENT_CONTEXT_CARD_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PLANNING_MAX_CHARS: usize = 3_200;
 const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
+/// How much of the browser skill's "Routing preflight" section the routing step reads.
+const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 1_200;
+/// The longest message a routed card carries as its task, as a card's own task is bounded
+/// (`BrowserRequest::parse`).
+const ROUTED_BROWSER_TASK_MAX_UTF16_UNITS: usize = 8_000;
 const COLLABORATION_SKILL_DELEGATION_MAX_CHARS: usize = 1_600;
 const COLLABORATION_RESULT_POLICY_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PATH: &str = ".agents/skills/instafy-agent-collaboration/SKILL.md";
@@ -189,6 +194,12 @@ enum AgentRoutingPreflightRoute {
     MultiAgentCandidate,
     CrossChatLookup,
     WriteCoordinationRequired,
+    /// The message runs in Instafy's browser from its first step (`browser`); with
+    /// `continue_building`, Octo then builds from what it found (`browser_then_build`). Offered
+    /// only where the browser skill says when (`browser_routing_snapshot_for_job`).
+    Browser {
+        continue_building: bool,
+    },
 }
 
 /// Recorded on a turn whose request was read as needing file changes and whose
@@ -4060,6 +4071,12 @@ fn parse_agent_routing_preflight_route(raw: &str) -> Option<AgentRoutingPrefligh
         "write_coordination_required" | "coordination_required" => {
             AgentRoutingPreflightRoute::WriteCoordinationRequired
         }
+        "browser" => AgentRoutingPreflightRoute::Browser {
+            continue_building: false,
+        },
+        "browser_then_build" => AgentRoutingPreflightRoute::Browser {
+            continue_building: true,
+        },
         _ => return None,
     }
     .into()
@@ -4177,6 +4194,12 @@ fn agent_routing_preflight_artifact(preflight: &AgentRoutingPreflight) -> JsonVa
             AgentRoutingPreflightRoute::MultiAgentCandidate => "multi_agent_candidate",
             AgentRoutingPreflightRoute::CrossChatLookup => "cross_chat_lookup",
             AgentRoutingPreflightRoute::WriteCoordinationRequired => "write_coordination_required",
+            AgentRoutingPreflightRoute::Browser {
+                continue_building: false,
+            } => "browser",
+            AgentRoutingPreflightRoute::Browser {
+                continue_building: true,
+            } => "browser_then_build",
         },
         "reason": preflight.reason,
         "selectedSkills": preflight.selected_skills,
@@ -4335,7 +4358,9 @@ fn agent_routing_preflight_metadata(preflight: &AgentRoutingPreflight) -> JsonVa
                 }),
             );
         }
-        AgentRoutingPreflightRoute::Direct => {}
+        // A browser route ends its job before the main turn, or is read as `direct` where it
+        // was not offered.
+        AgentRoutingPreflightRoute::Direct | AgentRoutingPreflightRoute::Browser { .. } => {}
     }
 
     JsonValue::Object(metadata)
@@ -6886,6 +6911,9 @@ impl JobProcessor {
         };
 
         let mut worker_question_reply = None;
+        // Where the routing step may send this message straight to Instafy's browser: the browser
+        // skill's routing section, which says when.
+        let mut browser_routes: Option<String> = None;
         anyhow::ensure!(
             pending_worker_input.is_none()
                 || (skills_kickoff.is_none()
@@ -6896,11 +6924,16 @@ impl JobProcessor {
             && should_run_agent_routing_preflight_for_execution(job, prompt_text)
         {
             let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
-            let preflight_prompt = build_agent_routing_preflight_prompt(
+            browser_routes = pending_worker_input
+                .is_none()
+                .then(|| browser_routing_snapshot_for_job(job, &workspace_dir, prompt_text))
+                .flatten();
+            let preflight_prompt = build_agent_routing_preflight_prompt_with_browser_routes(
                 &workspace_dir,
                 prompt_text,
                 active_plan_group_id.as_deref(),
                 pending_worker_input.as_ref(),
+                browser_routes.as_deref(),
             );
             let (preflight_prompt, primary_context) =
                 agent_routing_primary_prompt(&preflight_prompt, &job.payload);
@@ -6940,6 +6973,33 @@ impl JobProcessor {
             }
         } else {
             None
+        };
+        // A message the routing step sent straight to Instafy's browser ends here with its card.
+        // A browser route that was not offered, or does not apply, is read as `direct`.
+        let routing_preflight = match routing_preflight {
+            Some(mut preflight) => {
+                if let AgentRoutingPreflightRoute::Browser { continue_building } = preflight.route {
+                    if browser_routes.is_some()
+                        && worker_question_reply.is_none()
+                        && pending_worker_input.is_none()
+                        && let Some(execution) = routed_browser_execution(
+                            prompt_text,
+                            continue_building,
+                            agent_routing_preflight_artifact(&preflight),
+                        )
+                    {
+                        tracing::info!(
+                            job_id = %job.id,
+                            continue_building,
+                            "routing step sent the message straight to Instafy's browser"
+                        );
+                        return Ok(execution);
+                    }
+                    preflight.route = AgentRoutingPreflightRoute::Direct;
+                }
+                Some(preflight)
+            }
+            None => None,
         };
         let remaining_request;
         let mut worker_reply_receipt = None;
@@ -15443,13 +15503,95 @@ fn format_collaboration_routing_preflight_snapshot(
 ) -> Option<String> {
     let path = ".agents/skills/instafy-agent-collaboration/SKILL.md";
     let content = read_workspace_file_utf8(workspace_dir, path)?;
-    let mut excerpt = extract_markdown_h2_section(&content, "Routing preflight")
+    let excerpt = extract_markdown_h2_section(&content, "Routing preflight")
         .or_else(|| extract_markdown_h2_section(&content, "Skill-authored workstreams"))
         .unwrap_or(content);
-    excerpt = strip_markdown_fenced_blocks(&excerpt);
+    Some(format_routing_skill_snapshot(
+        "collaboration",
+        path,
+        &excerpt,
+        max_chars,
+    ))
+}
+
+/// The browser skill's "Routing preflight" section from the space's own copy, which says when a
+/// message goes straight to Instafy's browser: None when the copy has no such section, so a
+/// space whose copy predates it keeps today's routes.
+fn format_browser_routing_preflight_snapshot(workspace_dir: &Path) -> Option<String> {
+    let path = ".agents/skills/instafy-browser-automation/SKILL.md";
+    let content = read_workspace_file_utf8(workspace_dir, path)?;
+    let excerpt = extract_markdown_h2_section(&content, "Routing preflight")?;
+    Some(format_routing_skill_snapshot(
+        "browser",
+        path,
+        &excerpt,
+        BROWSER_SKILL_ROUTING_MAX_CHARS,
+    ))
+}
+
+/// Whether the person's message carries files or images of its own.
+fn message_carries_attachments(job: &LeaseJob) -> bool {
+    job.payload
+        .get("metadata")
+        .and_then(|metadata| metadata.get("attachments"))
+        .and_then(JsonValue::as_array)
+        .is_some_and(|attachments| !attachments.is_empty())
+}
+
+/// The browser skill's routing section, when the routing step may send this message straight to
+/// Instafy's browser: an interactive turn that could ask for the browser itself
+/// (`browser_choice_applies`: not a hand-back, a worker, a plan, an unattended run or a browser
+/// turn), with no attachments, short enough to be a card's task, in a space whose copy of the
+/// skill says when.
+fn browser_routing_snapshot_for_job(
+    job: &LeaseJob,
+    workspace_dir: &Path,
+    prompt_text: &str,
+) -> Option<String> {
+    (browser_choice_applies(job, false, false, false, false)
+        && !message_carries_attachments(job)
+        && !prompt_text.trim().is_empty()
+        && prompt_text.trim().encode_utf16().count() <= ROUTED_BROWSER_TASK_MAX_UTF16_UNITS)
+        .then(|| format_browser_routing_preflight_snapshot(workspace_dir))
+        .flatten()
+}
+
+/// A message the routing step sent straight to Instafy's browser: its job runs no main model
+/// turn. Its only message is the card, marked `routed`, whose task is the person's own words;
+/// Studio opens it by itself where it can, and where it cannot, it stays a button with its
+/// reason. The card's browser turn and its hand-back follow the card's own checks. No reply, no
+/// run log and no provider state: the building thread never sees this turn (its browser turn
+/// reaches it through `browser_turns_since`).
+fn routed_browser_execution(
+    task: &str,
+    continue_building: bool,
+    preflight_artifact: JsonValue,
+) -> Option<JobExecution> {
+    let card = browser_request::BrowserRequest::routed(task, continue_building)?;
+    Some(JobExecution {
+        summary: String::new(),
+        suggested_replies: Vec::new(),
+        provider: "codex-embedded".to_string(),
+        artifacts: vec![preflight_artifact],
+        credit_snapshot: None,
+        provider_conversation_state: None,
+        messages: Vec::new(),
+        messages_streamed: false,
+        final_messages: vec![card.message()],
+    })
+}
+
+/// One skill's routing judgement as the routing step reads it.
+fn format_routing_skill_snapshot(
+    label: &str,
+    path: &str,
+    excerpt: &str,
+    max_chars: usize,
+) -> String {
+    let excerpt = strip_markdown_fenced_blocks(excerpt);
     let truncated = excerpt.chars().count() > max_chars;
     let snippet = excerpt.chars().take(max_chars).collect::<String>();
-    let mut out = String::from("\nFocused collaboration routing skill snapshot:\n");
+    let mut out = format!("\nFocused {label} routing skill snapshot:\n");
     let _ = writeln!(
         out,
         "- Source: `{path}` (routing excerpt{})",
@@ -15461,7 +15603,7 @@ fn format_collaboration_routing_preflight_snapshot(
         out.push_str("\n...");
     }
     out.push_str("\n```\n");
-    Some(out)
+    out
 }
 
 /// Most recent multi-agent plan group id visible to this job: the job's own
@@ -15513,12 +15655,46 @@ fn latest_plan_group_id_from_payload(payload: &JsonValue) -> Option<String> {
         })
 }
 
+/// The routing prompt where no browser route is offered.
+#[cfg(test)]
 fn build_agent_routing_preflight_prompt(
     workspace_dir: &Path,
     prompt_text: &str,
     active_plan_group_id: Option<&str>,
     pending: Option<&worker_input_routing::PendingContext>,
 ) -> String {
+    build_agent_routing_preflight_prompt_with_browser_routes(
+        workspace_dir,
+        prompt_text,
+        active_plan_group_id,
+        pending,
+        None,
+    )
+}
+
+/// The routing prompt; with `browser_routes` (the browser skill's routing section,
+/// `browser_routing_snapshot_for_job`), it also offers `browser` and `browser_then_build`.
+fn build_agent_routing_preflight_prompt_with_browser_routes(
+    workspace_dir: &Path,
+    prompt_text: &str,
+    active_plan_group_id: Option<&str>,
+    pending: Option<&worker_input_routing::PendingContext>,
+    browser_routes: Option<&str>,
+) -> String {
+    // A pending worker reply is answered here; it never goes to the browser.
+    let browser_routes = browser_routes.filter(|_| pending.is_none());
+    let browser_route_lines = if browser_routes.is_some() {
+        "- `browser`: runs in Instafy's browser from its first step; its reply answers.\n\
+        - `browser_then_build`: the same, then a build from what it found.\n"
+    } else {
+        ""
+    };
+    let browser_change_line = if browser_routes.is_some() {
+        "With `browser` or `browser_then_build`, set `workspaceFileChangeRequirement: none`: the browser changes no file, and a build after it is its own turn.\n"
+    } else {
+        "A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`: its card hands back to a build.\n"
+    };
+    let browser_snapshot = browser_routes.unwrap_or_default();
     let skill_snapshot = format_collaboration_routing_preflight_snapshot(workspace_dir, if pending.is_some() { 3200 } else { COLLABORATION_SKILL_ROUTING_MAX_CHARS })
         .unwrap_or_else(|| {
             "\nFocused collaboration routing skill snapshot unavailable. Prefer `direct`; use `multi_agent_candidate` only for durable Instafy workstreams, not merely generic parallel work.\n".to_string()
@@ -15538,14 +15714,15 @@ fn build_agent_routing_preflight_prompt(
         - `multi_agent_candidate`: enter durable top-level Instafy team planning under the collaboration skill; this is not the route for native helpers.\n\
         - `cross_chat_lookup`: retrieve required prior conversation or context evidence missing from supplied history and refs, without creating a new team.\n\
         - `write_coordination_required`: the request asks for concurrent writes to the same target and needs a safer split first.\n\
+        {browser_route_lines}\
         Prefer current-conversation evidence for follow-ups. Apply the collaboration skill to choose the execution lane; mentioning another chat alone does not require retrieving evidence already supplied.\n\
         Set `requiresContextLookup = true` only when required prior conversation/context evidence is absent from the latest request and supplied current-conversation evidence and must be retrieved. Referring to prior work or supplying links alone neither requires nor satisfies retrieval; use the actual supplied evidence. This flag independently requires a read-only Instafy context/conversation lookup, regardless of `requiresCommandExecution`.\n\
         Set `requiresCommandExecution = true` when a correct final answer needs a separate fresh observation of current filesystem, Git, process, repo, runtime, server, or tool state. Prior-conversation retrieval belongs only in `requiresContextLookup`; the fact that its transport uses a CLI does not set this flag. Leave it false when supplied current evidence is enough. Both flags may be true when both kinds of evidence are needed.\n\
         Set `workspaceFileChangeRequirement` from the success condition, independently of write permission: `required` when success necessarily requires creating, editing, moving, deleting, committing, or syncing workspace files; `conditional` when inspection or validation decides whether changes are warranted, and a justified unchanged result can satisfy the request; `none` when no workspace mutation is requested. Conditional work still permits warranted edits under the existing write scope. Do not turn permission to improve or repair into a requirement to produce a patch. Preserve the requested observations and tests even when no change is warranted.\n\
-        A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`: its card hands back to a build.\n\
+        {browser_change_line}\
         Always include `observationCommands`; use an empty array when no current-state observation is needed. When `requiresCommandExecution` is true, propose up to 3 concrete safe commands for that observation. These are proposals, not permission grants: the host executes only its existing allowlist, and the main agent must obtain any remaining observation under its normal tool permissions. Do not place conversation/context retrieval commands here. Do not set `requiresCommandExecution = true` merely because the main task includes workspace writes, patches, commits, pushes, or syncs. Do not put file-writing, patching, commit, push, or sync commands in `observationCommands`; classify `workspaceFileChangeRequirement` instead and let the main run make the requested changes under its existing permissions. Explicit non-file Instafy CLI actions such as `instafy automations create` or `instafy automations update` are allowed only when the user asked for that exact action. Propose independent read-only commands, not shell pipelines or command lists whose final status can hide a failed read. If no supported proposal fits, leave `observationCommands` empty and keep the observation requirement for the main agent.\n\
         {plan_group_guidance}\
-        {skill_snapshot}\n\
+        {skill_snapshot}{browser_snapshot}\n\
         Latest user request:\n```text\n{prompt_text}\n```\n\
         Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, `observationCommands`, and nullable `workerQuestionReply`."
     );
@@ -24616,6 +24793,158 @@ mod tests {
             None,
         );
         assert!(!without.contains("instafy agents status"));
+    }
+
+    /// The routing step may send a message straight to Instafy's browser only where the browser
+    /// skill says when: the space's copy has its "Routing preflight" section, and the turn is an
+    /// interactive one that could ask for the browser itself, with no attachments and words a
+    /// card could carry. Anywhere else the routes are not offered, and the routing prompt keeps
+    /// today's line about a card that hands back.
+    #[test]
+    fn the_routing_prompt_offers_browser_routes_only_with_the_skill_section() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let request = "Open forms.example/order in your browser and fill in a test order.";
+        let job =
+            |metadata: JsonValue| test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+        let routes = browser_routing_snapshot_for_job(&job(json!({})), tmp.path(), request)
+            .expect("an ordinary message is offered the browser routes");
+        assert!(routes.contains("## Routing preflight"), "{routes}");
+        let prompt = build_agent_routing_preflight_prompt_with_browser_routes(
+            tmp.path(),
+            request,
+            None,
+            None,
+            Some(&routes),
+        );
+        assert!(prompt.contains(
+            "- `browser`: runs in Instafy's browser from its first step; its reply answers."
+        ));
+        assert!(
+            prompt.contains("- `browser_then_build`: the same, then a build from what it found.")
+        );
+        assert!(prompt.contains(
+            "With `browser` or `browser_then_build`, set `workspaceFileChangeRequirement: none`"
+        ));
+        assert!(!prompt.contains("its card hands back to a build"));
+        assert!(prompt.contains(&routes));
+
+        let without = build_agent_routing_preflight_prompt(tmp.path(), request, None, None);
+        assert!(!without.contains("`browser`:"), "{without}");
+        assert!(!without.contains("browser_then_build"), "{without}");
+        assert!(without.contains("its card hands back to a build"));
+
+        for (label, metadata, text) in [
+            (
+                "unattended",
+                json!({"automation": {"id": "nightly"}}),
+                request.to_string(),
+            ),
+            (
+                "space review",
+                json!({"spaceReview": {"id": "review"}}),
+                request.to_string(),
+            ),
+            (
+                "hand-back",
+                json!({"browserHandBack": {"verified": true, "reply": "Read 1 page."}}),
+                request.to_string(),
+            ),
+            (
+                "shared browser turn",
+                json!({"browserTransport": "shared", "browserPageId": "page-one"}),
+                request.to_string(),
+            ),
+            (
+                "personal browser turn",
+                json!({"browserTransport": "desktop-personal"}),
+                request.to_string(),
+            ),
+            (
+                "attachments",
+                json!({"attachments": [{"name": "photo.png", "storagePath": "a/photo.png"}]}),
+                request.to_string(),
+            ),
+            ("too long for a card", json!({}), "x".repeat(8_001)),
+        ] {
+            assert_eq!(
+                browser_routing_snapshot_for_job(&job(metadata), tmp.path(), &text),
+                None,
+                "{label}"
+            );
+        }
+
+        // A space whose copy of the skill predates the section keeps today's routes.
+        let older = tempdir().expect("temp dir");
+        let skill = older
+            .path()
+            .join(".agents/skills/instafy-browser-automation/SKILL.md");
+        fs::create_dir_all(skill.parent().expect("dir")).expect("skill dir");
+        fs::write(
+            &skill,
+            "# Browser automation\n\n## Finding a page\nRead the place's own site.\n",
+        )
+        .expect("write skill");
+        assert_eq!(
+            browser_routing_snapshot_for_job(&job(json!({})), older.path(), request),
+            None
+        );
+
+        for (raw, continue_building) in [
+            ("browser", false),
+            ("browser_then_build", true),
+            ("Browser-Then-Build", true),
+        ] {
+            assert_eq!(
+                parse_agent_routing_preflight_route(raw),
+                Some(AgentRoutingPreflightRoute::Browser { continue_building }),
+                "{raw}"
+            );
+        }
+    }
+
+    /// A message sent straight to Instafy's browser ends its job with the routed card alone: its
+    /// task is the person's own words, it says whether Octo builds after it, and the job has no
+    /// reply, no run log and no provider state. A message no card could carry gets none.
+    #[test]
+    fn a_browser_route_ends_the_job_with_a_routed_card() {
+        let preflight = json!({"kind": "agent/routing-preflight", "route": "browser_then_build"});
+        let execution = routed_browser_execution(
+            "  In your browser, find each laptop's weight and add it to the page.  ",
+            true,
+            preflight.clone(),
+        )
+        .expect("routed card");
+        assert_eq!(execution.summary, "");
+        assert!(execution.messages.is_empty());
+        assert_eq!(execution.provider_conversation_state, None);
+        assert_eq!(execution.artifacts, vec![preflight.clone()]);
+        assert_eq!(execution.final_messages.len(), 1);
+        let card = &execution.final_messages[0];
+        assert_eq!(card.message_type.as_deref(), Some("action_request"));
+        let metadata = card.metadata.as_ref().expect("card metadata");
+        assert_eq!(
+            metadata["details"]["browserRequest"],
+            json!({
+                "task": "In your browser, find each laptop's weight and add it to the page.",
+                "location": "auto",
+                "continueBuilding": true,
+                "routed": true,
+            })
+        );
+        let question = routed_browser_execution(
+            "Open example.com in your browser.",
+            false,
+            preflight.clone(),
+        )
+        .expect("routed card");
+        assert_eq!(
+            question.final_messages[0].metadata.as_ref().unwrap()["details"]["browserRequest"],
+            json!({"task": "Open example.com in your browser.", "location": "auto", "routed": true})
+        );
+        for task in ["   ".to_string(), "🌍".repeat(4_001)] {
+            assert!(routed_browser_execution(&task, false, preflight.clone()).is_none());
+        }
     }
 
     #[test]

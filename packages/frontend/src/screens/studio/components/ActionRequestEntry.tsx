@@ -16,6 +16,7 @@ import {
   browserRequestUnavailableReason,
 } from "./browserRequest";
 import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
+import { TurnActivityLine } from "./TurnActivityLine";
 import type { ChatMessage } from "../types";
 
 type ParsedActionRequest = {
@@ -339,6 +340,31 @@ export function ActionRequestEntry({
     },
     [busyActionId, inputValue, message.id, showStatus]
   );
+
+  // A message Octo sent straight to the browser: while Studio opens its card
+  // by itself, the turn's one line says so, and the browser turn's own line
+  // follows (routedBrowserFold.ts). A card that stays a button shows as any
+  // card does, with its reason.
+  if (browserRequest?.routed && (browserPhase === "opening" || browserPhase === "opened")) {
+    return (
+      <div className="space-y-1" data-testid="routed-browser-opening">
+        <TurnActivityLine
+          text="Opening Instafy's browser…"
+          live
+          animate
+          interactive={false}
+          detailsOpen={false}
+          detailsId=""
+          onToggleDetails={() => {}}
+        />
+        {browserPhase === "opening" && browserCardState?.kind === "opening" && browserCardState.note ? (
+          <Text as="div" variant="caption" tone="muted" data-testid="browser-request-opening-note">
+            {browserCardState.note}
+          </Text>
+        ) : null}
+      </div>
+    );
+  }
 
   if (!parsed) {
     if (message.content.trim().length === 0) {

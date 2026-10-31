@@ -784,6 +784,34 @@ async fn card_continues_building(
         .map_err(|error| internal_error(format!("failed to read the browser card: {error}")))
 }
 
+/// Whether a job posted the card of a message the runtime sent straight to
+/// Instafy's browser (`browserRequest.routed`): the runtime's own
+/// `action_request` message for that job.
+pub(crate) async fn job_posted_routed_browser_card(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    job_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select exists (
+                 select 1 from conversation_messages
+                  where conversation_id = $1
+                    and role = 'assistant'
+                    and created_by is null
+                    and metadata #>> '{jobId}' = $2
+                    and lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', ''))
+                        = 'action_request'
+                    and (metadata #> '{details,browserRequest,routed}' = 'true'::jsonb
+                         or metadata #> '{details,details,browserRequest,routed}' = 'true'::jsonb)
+             )",
+            &[conversation_id, &job_id.to_string()],
+        )
+        .await
+        .map(|row| row.get::<_, bool>(0))
+        .map_err(|error| internal_error(format!("failed to read the routed card: {error}")))
+}
+
 /// The finding lines the runtime moved out of the browser turn's reply into
 /// its Details note, if any.
 async fn finding_lines_note(
@@ -984,7 +1012,8 @@ pub(crate) async fn browser_turns_since(
         .map(|row| row.get::<_, DateTime<Utc>>("created_at"));
     let rows = transaction
         .query(
-            "select j.id, j.run_id, j.outcome, j.summary, j.payload, j.completed_at
+            "select j.id, j.run_id, j.outcome, j.summary, j.payload, j.completed_at,
+                    r.created_at as run_created_at
                from runs r
                join agent_jobs j on j.run_id = r.id
                  and j.project_id = r.project_id
@@ -1024,6 +1053,74 @@ pub(crate) async fn browser_turns_since(
             ))
         })?;
     let mut turns = Vec::with_capacity(rows.len());
+    // A message the runtime sent straight to the browser whose card no
+    // browser turn carried on: the building thread never saw it, and the
+    // person may now ask for it without the browser.
+    let unopened = transaction
+        .query(
+            "select j.id, j.payload, r.created_at
+               from runs r
+               join agent_jobs j on j.run_id = r.id
+                 and j.project_id = r.project_id
+                 and j.conversation_id = r.conversation_id
+              where r.conversation_id = $1
+                and j.id <> $2
+                and j.status = 'completed'
+                and ($3::timestamptz is null or r.created_at > $3)
+                and exists (
+                    select 1 from conversation_messages card
+                     where card.conversation_id = $1
+                       and card.role = 'assistant'
+                       and card.created_by is null
+                       and card.metadata #>> '{jobId}' = j.id::text
+                       and (card.metadata #> '{details,browserRequest,routed}' = 'true'::jsonb
+                            or card.metadata #> '{details,details,browserRequest,routed}' = 'true'::jsonb))
+                and not exists (
+                    select 1 from agent_jobs browser_job
+                     where browser_job.conversation_id = $1
+                       and browser_job.payload #>> '{metadata,browserRequestOf}' = 'job:' || j.id::text)
+                and case
+                    when $4::uuid is not null and r.metadata #>> '{agent,id}' is not null
+                        then r.metadata #>> '{agent,id}' = $4::text
+                    when $5::text is not null
+                        then lower(ltrim(btrim(r.metadata #>> '{agent,handle}'), '@')) = $5
+                    else $4::uuid is null
+                end
+              order by r.created_at desc, r.id desc, j.id desc
+              limit $6",
+            &[
+                conversation_id,
+                job_id,
+                &anchor,
+                &agent_id,
+                &agent_handle,
+                &TURNS_SINCE_MAX,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to list the messages sent straight to the browser: {error}"
+            ))
+        })?;
+    let mut listed: Vec<(DateTime<Utc>, JsonValue)> = unopened
+        .into_iter()
+        .map(|row| {
+            let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
+            let request = payload
+                .get("prompt_text")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            (
+                row.get::<_, DateTime<Utc>>("created_at"),
+                json!({
+                    "routedJobId": row.get::<_, Uuid>("id").to_string(),
+                    "request": browser_request_for_building(request),
+                    "routedNotOpened": true,
+                }),
+            )
+        })
+        .collect();
     for row in rows.into_iter().rev() {
         let browser_job_id: Uuid = row.get("id");
         let run_id: Option<Uuid> = row.get("run_id");
@@ -1057,17 +1154,24 @@ pub(crate) async fn browser_turns_since(
             .get("prompt_text")
             .and_then(JsonValue::as_str)
             .unwrap_or_default();
-        turns.push(json!({
-            "browserJobId": browser_job_id.to_string(),
-            "request": browser_request_for_building(request),
-            "reply": reply,
-            "replyTruncated": truncated,
-            "findings": labelled_findings(&reply, viewer, &read_at),
-            "readAt": read_at,
-            "viewer": viewer,
-            "outcome": row.get::<_, Option<String>>("outcome"),
-        }));
+        listed.push((
+            row.get::<_, DateTime<Utc>>("run_created_at"),
+            json!({
+                "browserJobId": browser_job_id.to_string(),
+                "request": browser_request_for_building(request),
+                "reply": reply,
+                "replyTruncated": truncated,
+                "findings": labelled_findings(&reply, viewer, &read_at),
+                "readAt": read_at,
+                "viewer": viewer,
+                "outcome": row.get::<_, Option<String>>("outcome"),
+            }),
+        ));
     }
+    // Oldest first, the newest TURNS_SINCE_MAX of both kinds.
+    listed.sort_by_key(|(created_at, _)| *created_at);
+    let keep_from = listed.len().saturating_sub(TURNS_SINCE_MAX as usize);
+    turns.extend(listed.into_iter().skip(keep_from).map(|(_, turn)| turn));
     Ok(turns)
 }
 

@@ -1427,3 +1427,224 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
     })
     .await
 }
+
+impl Chain {
+    /// A message the runtime sent straight to Instafy's browser: its job posts
+    /// only the routed card, with the person's own words as its task, and ends
+    /// with no reply.
+    async fn routed_message(&self, words: &str, continue_building: bool) -> anyhow::Result<Uuid> {
+        let turn = self
+            .send(&self.owner, words, json!({}))
+            .await
+            .map_err(|error| controller_error("routed message", error))?;
+        let job = self.job_of(&turn).await?;
+        let mut request = json!({ "task": words, "location": "auto", "routed": true });
+        if continue_building {
+            request["continueBuilding"] = json!(true);
+        }
+        self.post(
+            &job,
+            "Continue this task in Instafy's browser.",
+            "action_request",
+            json!({
+                "messageType": "action_request",
+                "details": { "testId": "browser-request-card", "browserRequest": request },
+            }),
+        )
+        .await?;
+        self.finish(&job, Some(""), "succeeded").await?;
+        Ok(job)
+    }
+
+    async fn assistant_messages_of(&self, job_id: &Uuid) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query(
+                "select content from conversation_messages
+                  where conversation_id = $1 and role = 'assistant'
+                    and metadata #>> '{jobId}' = $2
+                    and coalesce(metadata #>> '{messageType}', '') <> 'token_usage'
+                  order by created_at",
+                &[&self.conversation_id, &job_id.to_string()],
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect())
+    }
+}
+
+/// A message the runtime sent straight to Instafy's browser ends with its
+/// card alone, not even a blank reply. Its card's browser turn is the card's
+/// (`browserCardTurn`), and with `continueBuilding` it hands back as any
+/// card's browser turn does. An ordinary card turn that ends with no words
+/// still posts its reply as it always did.
+#[tokio::test]
+async fn a_routed_message_ends_with_its_card_and_its_browser_turn_is_the_cards(
+) -> anyhow::Result<()> {
+    with_chain("routed-message-card", |chain| {
+        Box::pin(async move {
+            let words = "In your browser, read the coastal timetables and add them to the page.";
+            let routed = chain.routed_message(words, true).await?;
+            assert_eq!(
+                chain.assistant_messages_of(&routed).await?,
+                vec!["Continue this task in Instafy's browser.".to_string()]
+            );
+
+            // Studio opens it by itself with the person's own words.
+            let claim = json!({
+                "browserRequestOf": format!("job:{routed}"),
+                "browserTransport": "shared",
+                "browserAutoStarted": true,
+            });
+            let mut connection = chain.pool.get().await?;
+            let transaction = connection.transaction().await?;
+            let stamp = crate::system_turns::verify_browser_card_turn(
+                &transaction,
+                &chain.conversation_id,
+                &chain.context(&chain.owner),
+                words,
+                &claim,
+            )
+            .await
+            .map_err(|error| controller_error("check the routed card's turn", error))?;
+            transaction.rollback().await?;
+            drop(connection);
+            assert_eq!(stamp, Some(json!({ "version": 1, "cardJobId": routed })));
+
+            let browser = chain
+                .send(
+                    &chain.owner,
+                    words,
+                    json!({ "browserRequestOf": format!("job:{routed}") }),
+                )
+                .await
+                .map_err(|error| controller_error("browser turn", error))?;
+            let browser = chain.job_of(&browser).await?;
+            chain.make_browser_turn(&browser).await?;
+            let reply = fixtures()["browserReply"].as_str().unwrap().to_string();
+            chain.finish(&browser, Some(&reply), "succeeded").await?;
+            let response = chain
+                .hand_back(&chain.owner, &browser, json!({}))
+                .await
+                .map_err(|error| controller_error("hand-back", error))?;
+            let hand_back = chain.job_of(&response).await?;
+            let record = &chain.payload_metadata(&hand_back).await?[HAND_BACK_KEY];
+            assert_eq!(record["cardJobId"], json!(routed.to_string()));
+            assert_eq!(record["request"], json!(words));
+
+            // An ordinary card turn with no words keeps its blank reply.
+            let card_turn = chain
+                .send(&chain.owner, "Plan a day on the coast.", json!({}))
+                .await
+                .map_err(|error| controller_error("card turn", error))?;
+            let card_job = chain.job_of(&card_turn).await?;
+            chain.post_card(&card_job, false).await?;
+            chain.finish(&card_job, Some(""), "succeeded").await?;
+            assert_eq!(
+                chain.assistant_messages_of(&card_job).await?,
+                vec![
+                    "Continue this task in Instafy's browser.".to_string(),
+                    String::new()
+                ]
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A message the runtime sent straight to the browser that no browser turn
+/// carried on (its card stayed a button) reaches the building thread too, as
+/// what the person asked, so "do it without the browser" has its subject.
+/// Once a browser turn carries it on, that turn is listed instead.
+#[tokio::test]
+async fn a_routed_message_whose_card_never_ran_is_listed() -> anyhow::Result<()> {
+    with_chain("routed-message-listed", |chain| {
+        Box::pin(async move {
+            let built = chain
+                .send(&chain.owner, "Make a page for the trip.", json!({}))
+                .await
+                .map_err(|error| controller_error("building turn", error))?;
+            let built = chain.job_of(&built).await?;
+            chain.finish(&built, Some("Made it."), "succeeded").await?;
+            chain.save_provider_state(&built).await?;
+            let words = "Open forms.example/order in your browser and fill in a test order.";
+            let routed = chain.routed_message(words, false).await?;
+
+            let next = chain
+                .send(
+                    &chain.owner,
+                    "Never mind, do it without the browser.",
+                    json!({}),
+                )
+                .await
+                .map_err(|error| controller_error("next building turn", error))?;
+            let next = chain.job_of(&next).await?;
+            let list = |next: Uuid| {
+                let pool = chain.pool.clone();
+                async move {
+                    let row = pool
+                        .get()
+                        .await?
+                        .query_one(
+                            "select payload, credential_id from agent_jobs where id = $1",
+                            &[&next],
+                        )
+                        .await?;
+                    let payload: serde_json::Value = row.get::<_, PgJson<serde_json::Value>>(0).0;
+                    let credential: Option<Uuid> = row.get(1);
+                    let agent = payload["metadata"]["agent"].clone();
+                    let agent_id = agent["id"].as_str().and_then(|id| Uuid::parse_str(id).ok());
+                    let agent_handle = agent["handle"].as_str().map(str::to_string);
+                    let mut client = pool.get().await?;
+                    let transaction = client.transaction().await?;
+                    let turns = crate::browser_hand_back::browser_turns_since(
+                        &transaction,
+                        &chain.conversation_id,
+                        &next,
+                        &payload,
+                        credential.as_ref(),
+                        agent_id.as_ref(),
+                        agent_handle.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| controller_error("browser turns since", error))?;
+                    transaction.commit().await?;
+                    anyhow::Ok(turns)
+                }
+            };
+            assert_eq!(
+                list(next).await?,
+                vec![json!({
+                    "routedJobId": routed.to_string(),
+                    "request": words,
+                    "routedNotOpened": true,
+                })]
+            );
+
+            // Carried on by a browser turn: that turn is listed, not the message.
+            let browser = chain
+                .send(
+                    &chain.owner,
+                    words,
+                    json!({ "browserRequestOf": format!("job:{routed}") }),
+                )
+                .await
+                .map_err(|error| controller_error("browser turn", error))?;
+            let browser = chain.job_of(&browser).await?;
+            chain.make_browser_turn(&browser).await?;
+            chain
+                .finish(&browser, Some("Filled in the order."), "succeeded")
+                .await?;
+            let turns = list(next).await?;
+            assert_eq!(turns.len(), 1, "{turns:?}");
+            assert_eq!(turns[0]["browserJobId"], json!(browser.to_string()));
+            assert!(turns[0].get("routedNotOpened").is_none());
+            Ok(())
+        })
+    })
+    .await
+}

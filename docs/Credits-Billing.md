@@ -391,6 +391,11 @@ dispatched, as a message they send does, and gives it back when it is not charge
 uses up to three of the default 20 prompts in any 24 hours: the turn that posts the card, the card's
 browser turn, and the hand-back when the card continues building.
 
+A message the routing step sends straight to Instafy's browser runs no model turn of its own: its
+job posts the browser card alone, so it costs its reserve (1 credit by default), and the routing
+step is not billed. Its browser turn is billed as a card's browser turn. It uses two prompt slots,
+three with a hand-back.
+
 Billing reads only the controller's own marks on the job (`system_turns.rs`):
 
 - the `browserHandBack` record that dispatch stamps on a hand-back it checked;

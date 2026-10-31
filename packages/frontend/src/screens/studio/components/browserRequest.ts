@@ -13,6 +13,12 @@ export type BrowserRequest = {
    * for a question leaves it out: the browser turn's reply is the answer.
    */
   continueBuilding?: boolean;
+  /**
+   * Octo sent the person's message straight to the browser: its words are the
+   * task, and when Studio opens the card by itself, the card and its
+   * continuation fold into the browser turn (routedBrowserFold.ts).
+   */
+  routed?: true;
 };
 
 /**
@@ -80,6 +86,7 @@ export function browserRequestFromMessage(message: ChatMessage): BrowserRequest 
     task: value.task.trim(),
     location: value.location,
     ...(value.continueBuilding === true ? { continueBuilding: true } : {}),
+    ...(value.routed === true ? { routed: true as const } : {}),
   };
 }
 
@@ -243,7 +250,8 @@ export function readBrowserRequestOf(message: Pick<ChatMessage, "role" | "metada
   return null;
 }
 
-function isAutoStartedContinuation(message: Pick<ChatMessage, "metadata">): boolean {
+/** A continuation Studio sent for a card by itself, without a press. */
+export function isAutoStartedContinuation(message: Pick<ChatMessage, "metadata">): boolean {
   return promptMetadataRecords(message.metadata).some((record) => record[BROWSER_AUTO_STARTED_METADATA_KEY] === true);
 }
 

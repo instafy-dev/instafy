@@ -106,6 +106,16 @@ describe("browserRequestUnavailableReason", () => {
         .toEqual({ task: "Open x", location: "auto" });
     }
   });
+
+  // The routing step sent the person's message straight to the browser.
+  it("reads a card the routing step sent, and only a plain true", () => {
+    expect(browserRequestFromMessage(card({ task: "Open x", location: "auto", routed: true, continueBuilding: true })))
+      .toEqual({ task: "Open x", location: "auto", routed: true, continueBuilding: true });
+    for (const routed of [false, "true", 1, null]) {
+      expect(browserRequestFromMessage(card({ task: "Open x", location: "auto", routed })))
+        .toEqual({ task: "Open x", location: "auto" });
+    }
+  });
 });
 
 describe("browserRequestTransport on Desktop with Instafy AI", () => {
