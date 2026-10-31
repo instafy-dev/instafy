@@ -18,35 +18,53 @@ pub(super) struct BrowserRequest {
     routed: bool,
 }
 
-/// A card a reply asked for that is not posted. Nothing of it reaches the person, while the
-/// reply beside it may still send them to the browser, so the log says why it was dropped.
-fn dropped(reason: &str) -> Option<BrowserRequest> {
-    tracing::warn!(%reason, "dropped request_browser action");
-    None
+/// Why each `request_browser` card of a reply is dropped as the reply is read
+/// ([`BrowserRequest::parse`]), one reason per card. Nothing of such a card reaches the person,
+/// while the reply beside it may still send them to the browser, so the runtime logs each one
+/// with the turn's job.
+pub(super) fn dropped_requests(reply: &Value) -> Vec<&'static str> {
+    reply
+        .get("actions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter(|action| {
+            action
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    kind.trim().to_ascii_lowercase().replace('-', "_") == "request_browser"
+                })
+        })
+        .filter_map(|action| BrowserRequest::parse(action).err())
+        .collect()
 }
 
 impl BrowserRequest {
-    pub(super) fn parse(value: &serde_json::Map<String, Value>) -> Option<Self> {
+    /// The card a reply's `request_browser` action asks for, or why none is posted: no task, a
+    /// task over 8,000 characters or an unknown browser location.
+    pub(super) fn parse(value: &serde_json::Map<String, Value>) -> Result<Self, &'static str> {
         let task = value
             .get("task")
             .and_then(Value::as_str)
             .map(str::trim)
             .unwrap_or_default();
         if task.is_empty() {
-            return dropped("no task");
+            return Err("no task");
         }
         if task.encode_utf16().count() > 8_000 {
-            return dropped("task over 8,000 characters");
+            return Err("task over 8,000 characters");
         }
         let location = match value.get("browserLocation") {
             None | Some(Value::Null) => "auto",
             Some(Value::String(location)) if location == "auto" => "auto",
             Some(Value::String(location)) if location == "device" => "device",
             Some(Value::String(location)) if location == "workspace" => "workspace",
-            _ => return dropped("unknown browserLocation"),
+            _ => return Err("unknown browserLocation"),
         };
         let continue_building = value.get("continueBuilding") == Some(&Value::Bool(true));
-        Some(Self {
+        Ok(Self {
             task: task.to_owned(),
             location,
             continue_building,
@@ -198,82 +216,43 @@ mod tests {
             json!({"task":"Open a page", "browserLocation":42}),
             json!({"task":"Open a page", "browserLocation":"another-users-device"}),
         ] {
-            assert!(BrowserRequest::parse(value.as_object().unwrap()).is_none());
+            assert!(BrowserRequest::parse(value.as_object().unwrap()).is_err());
         }
     }
 
-    #[derive(Clone, Default)]
-    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturedLog {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
-        type Writer = Self;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    fn warnings_while(run: impl FnOnce()) -> String {
-        let log = CapturedLog::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(log.clone())
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, run);
-        String::from_utf8_lossy(&log.0.lock().unwrap()).to_string()
-    }
-
-    /// A card no one can act on posts nothing, and the reply beside it may still send the person
-    /// to the browser: a reply ended "Open Instafy's browser to check…" over a card with no task,
-    /// and nothing said that no card came with it. The log now says so, and why.
+    /// A card no one can act on posts nothing, while the reply beside it may still send the
+    /// person to the browser: a reply ended "Open Instafy's browser to check…" over a card with
+    /// no task, and nothing said that no card came with it. Each such card has a reason, which
+    /// the runtime logs with the turn's job; a card that is posted, or another action, has none.
     #[test]
-    fn a_card_dropped_for_having_no_task_leaves_a_log_line() {
-        let log = warnings_while(|| {
-            for value in [
-                json!({"type": "request_browser"}),
-                json!({"type": "request_browser", "task": null, "browserLocation": null}),
-                json!({"type": "request_browser", "task": " "}),
-            ] {
-                assert!(BrowserRequest::parse(value.as_object().unwrap()).is_none());
-            }
-        });
+    fn a_card_dropped_for_having_no_task_says_why() {
+        let reply = json!({"actions": [
+            {"type": "request_browser"},
+            {"type": "request_browser", "task": null, "browserLocation": null},
+            {"type": " Request-Browser ", "task": " "},
+            {"type": "request_browser", "task": 42},
+            {"type": "request_browser", "task": "x".repeat(8001)},
+            {"type": "request_browser", "task": "Open a page", "browserLocation": "another-users-device"},
+            {"type": "request_browser", "task": "Find the opening hours"},
+            {"type": "request_location", "precision": "approximate"},
+        ]});
         assert_eq!(
-            log.matches("dropped request_browser action").count(),
-            3,
-            "{log}"
+            dropped_requests(&reply),
+            [
+                "no task",
+                "no task",
+                "no task",
+                "no task",
+                "task over 8,000 characters",
+                "unknown browserLocation",
+            ]
         );
-        assert_eq!(log.matches("reason=no task").count(), 3, "{log}");
-
-        let log = warnings_while(|| {
-            for value in [
-                json!({"task": "x".repeat(8001)}),
-                json!({"task": "Open a page", "browserLocation": "another-users-device"}),
-            ] {
-                assert!(BrowserRequest::parse(value.as_object().unwrap()).is_none());
-            }
-        });
-        assert!(log.contains("reason=task over 8,000 characters"), "{log}");
-        assert!(log.contains("reason=unknown browserLocation"), "{log}");
-
-        // A card that is posted logs nothing.
-        let log = warnings_while(|| {
-            BrowserRequest::parse(
-                json!({"task": "Find the opening hours"})
-                    .as_object()
-                    .unwrap(),
-            )
-            .expect("a card");
-        });
-        assert!(log.is_empty(), "{log}");
+        for reply in [
+            json!({"summary": "Done."}),
+            json!({"summary": "Done.", "actions": null}),
+            json!({"actions": [{"type": "request_browser", "task": "Find the opening hours"}]}),
+        ] {
+            assert!(dropped_requests(&reply).is_empty(), "{reply}");
+        }
     }
 }

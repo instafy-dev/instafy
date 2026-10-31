@@ -44,7 +44,7 @@ End your reply with one finding per page, each one JSON object on its own line: 
 `{\"url\": \"<address>\", \"title\": \"<page title>\", \"facts\": [\"<what the page showed>\"]}` for a page you read, \
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only\"}` for one that ended at a sign-in, \
 a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site (never retry such a page another way). \
-Report only what the pages showed, each fact under the page that states it, not one that only quotes it (a review quoted on a shop's page is the reviewer's), and copy no long listing text; Instafy adds when and in which browser each page was read. \
+Report only what the pages showed, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text; Instafy adds when and in which browser each page was read. \
 The building turn finishes the work, so your reply says what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". \
 If a page stopped you (a manual step, a refused or challenge page), say so in your first line.";
 
@@ -492,11 +492,13 @@ mod tests {
         assert_eq!(format_browser_findings_contract_section(None), None);
     }
 
-    /// A fact goes under the page that states it. A maker's page quoted a review's battery figure,
-    /// the finding put the figure under the maker's page, and the page built from it cited the
-    /// maker for what only the review said; a review read in the same turn stated it itself.
+    /// A fact goes under a page the turn read that states it. A maker's page quoted a review's
+    /// battery figure, the finding put the figure under the maker's page, and the page built from
+    /// it cited the maker for what only the review said; a review read in the same turn stated it
+    /// itself. A quote never moves a fact to a page the turn did not open: every finding line
+    /// reads as a page read, and the building turn cites it as checked.
     #[test]
-    fn a_finding_puts_each_fact_under_the_page_that_states_it() {
+    fn a_finding_puts_each_fact_under_a_page_read_that_states_it() {
         let metadata = json!({
             "browserTransport": "shared",
             "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
@@ -505,7 +507,7 @@ mod tests {
         let section = format_browser_findings_contract_section(Some(&metadata)).expect("contract");
         assert!(
             section.contains(
-                "Report only what the pages showed, each fact under the page that states it, not one that only quotes it (a review quoted on a shop's page is the reviewer's), and copy no long listing text;"
+                "Report only what the pages showed, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text;"
             ),
             "{section}"
         );

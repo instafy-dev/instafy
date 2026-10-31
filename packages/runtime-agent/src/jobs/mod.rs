@@ -498,6 +498,20 @@ fn thread_lane_for_job(job: &LeaseJob) -> ThreadLane {
     }
 }
 
+/// The grammar of a turn's final reply. A planning turn answers with a team plan. A Shared
+/// Browser turn's grammar leaves out the notes on filling in a browser card, which such a turn
+/// may not send; its thread is its own, so each of its requests starts with the same grammar.
+/// Every other turn keeps the default.
+fn final_output_schema_for_job(job: &LeaseJob, granted_execution: bool) -> CodexFinalOutputSchema {
+    if is_explicit_team_planning_job(job) && !granted_execution {
+        CodexFinalOutputSchema::MultiAgentPlan
+    } else if thread_lane_for_job(job) == ThreadLane::SharedBrowser {
+        CodexFinalOutputSchema::SharedBrowser
+    } else {
+        CodexFinalOutputSchema::Default
+    }
+}
+
 /// A chat's turns used to share one provider thread: a Shared Browser turn found no browser
 /// thread of its own, resumed the default thread through the legacy keys and saved that
 /// thread's id and rollout as `browserThreadId` and `browserRolloutPath`. Such a thread holds
@@ -7147,11 +7161,7 @@ impl JobProcessor {
         );
         let records_workspace_change_receipts =
             records_workspace_change_receipts(commit_to_workspace, read_only_workspace);
-        let final_output_schema = if is_explicit_team_planning_job(job) && !granted_execution {
-            CodexFinalOutputSchema::MultiAgentPlan
-        } else {
-            CodexFinalOutputSchema::Default
-        };
+        let final_output_schema = final_output_schema_for_job(job, granted_execution);
         let evidence_requirements = routing_evidence_requirements(job, runtime_expectations);
         let mut codex_run_options = CodexRunOptions {
             usage_observer: Some(task_usage.call(UsagePhase::Main)),
@@ -7612,6 +7622,7 @@ impl JobProcessor {
                 || expects_generic_mcp_tool_execution,
         );
         suppress_multi_agent_plan_actions_for_worker(job, &mut outcome);
+        log_browser_requests_dropped_as_read(job, &output.final_json);
         suppress_browser_requests_where_unsupported(job, &mut outcome);
         let mut codex_fallback_summary_kind =
             classify_internal_codex_fallback_summary(&outcome.summary);
@@ -8255,6 +8266,7 @@ impl JobProcessor {
             retry_outcome.read_files =
                 normalize_codex_read_files(&workspace_dir, retry_outcome.read_files);
             suppress_multi_agent_plan_actions_for_worker(job, &mut retry_outcome);
+            log_browser_requests_dropped_as_read(job, &retry_output.final_json);
             suppress_browser_requests_where_unsupported(job, &mut retry_outcome);
             let mut retry_codex_fallback_summary_kind =
                 classify_internal_codex_fallback_summary(&retry_outcome.summary);
@@ -8597,6 +8609,7 @@ impl JobProcessor {
                 user_input_request::validate_outcome_scope(job, &finalization_outcome)?;
                 finalization_outcome.files.clear();
                 suppress_multi_agent_plan_actions_for_worker(job, &mut finalization_outcome);
+                log_browser_requests_dropped_as_read(job, &finalization_output.final_json);
                 suppress_browser_requests_where_unsupported(job, &mut finalization_outcome);
                 let finalization_fallback_kind =
                     classify_internal_codex_fallback_summary(&finalization_outcome.summary);
@@ -10747,6 +10760,15 @@ fn browser_request_unsupported(job: &LeaseJob) -> bool {
         || browser_hand_back::is_hand_back_job(job)
 }
 
+/// Logs each `request_browser` card of a reply that is dropped as the reply is read
+/// ([`browser_request::dropped_requests`]), with the turn's job and why: nothing of it reaches
+/// the person, while the reply beside it may still send them to the browser.
+fn log_browser_requests_dropped_as_read(job: &LeaseJob, reply: &JsonValue) {
+    for reason in browser_request::dropped_requests(reply) {
+        tracing::warn!(job_id = %job.id, %reason, "dropped request_browser action");
+    }
+}
+
 /// Drops the `request_browser` actions of a turn that may not ask for the
 /// browser ([`browser_request_unsupported`]).
 fn suppress_browser_requests_where_unsupported(job: &LeaseJob, outcome: &mut CodexOutcome) {
@@ -11095,7 +11117,7 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
         }
 
         if normalized_type == "request_browser" {
-            if let Some(request) = browser_request::BrowserRequest::parse(map) {
+            if let Ok(request) = browser_request::BrowserRequest::parse(map) {
                 out.push(CodexAction::RequestBrowser(request));
             }
             continue;
@@ -25707,6 +25729,45 @@ mod tests {
             "No browser tools on this turn is not a failure: emit `request_browser`.\n",
         ] {
             assert!(building.contains(offer), "{offer}");
+        }
+    }
+
+    /// Nor does a Shared Browser turn's reply grammar tell it how to fill in the card: two
+    /// browse-then-build turns ended on one filled in as the default grammar's notes say
+    /// (`browserLocation` auto, `continueBuilding` true). Every turn of its thread gets that
+    /// grammar, and every turn of the building thread, a Personal Browser turn's included, keeps
+    /// the default, so each thread's requests start with one grammar.
+    #[test]
+    fn only_a_shared_browser_turn_replies_without_the_cards_notes() {
+        for (metadata, expected) in [
+            (
+                json!({"browserTransport": "shared"}),
+                CodexFinalOutputSchema::SharedBrowser,
+            ),
+            (
+                json!({
+                    "browserTransport": "shared",
+                    "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                    "browserHandsBack": true,
+                }),
+                CodexFinalOutputSchema::SharedBrowser,
+            ),
+            (
+                json!({"browserTransport": "desktop-personal"}),
+                CodexFinalOutputSchema::Default,
+            ),
+            (json!({}), CodexFinalOutputSchema::Default),
+            (
+                json!({"agentCollaboration": {"mode": "team_plan", "requested": true}}),
+                CodexFinalOutputSchema::MultiAgentPlan,
+            ),
+        ] {
+            let job = test_lease_job(Some("feature"), json!({ "metadata": metadata.clone() }));
+            assert_eq!(
+                final_output_schema_for_job(&job, false),
+                expected,
+                "{metadata}"
+            );
         }
     }
 
