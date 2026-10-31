@@ -578,7 +578,10 @@ cargo fmt
 cargo test
 ```
 
-The backend smoke test will automatically skip if credentials are missing or the backend rejects the request (e.g., rate limits).
+The backend smoke test calls the provider with your own login (`OPENAI_API_KEY`, or the Codex
+`auth.json`), so `cargo test` leaves it out. Run it on purpose with
+`cargo test --test backend_smoke -- --ignored`; it skips if credentials are missing or the backend
+rejects the request (e.g., rate limits).
 
 For deterministic failure and retry validation without provider access or local auth files:
 
