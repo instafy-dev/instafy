@@ -389,13 +389,19 @@ for (const counts of [{ participantCount: 4, pageCount: 3 }, { participantCount:
   });
 }
 
-// A local test: a floating "Keyboard" button sat over the page on a phone.
-for (const width of [320, 390]) {
-  test(`puts the touch keyboard's icon in the ${width}px toolbar, never over the page`, async ({ browser, baseURL }) => {
+// A local test: a floating "Keyboard" button sat over the page on a phone. The icon fits the toolbar at its
+// narrowest, with many people and tabs too.
+const KEYBOARD_TOOLBARS = [
+  { width: 320, counts: { participantCount: 4, pageCount: 3 } },
+  { width: 390, counts: { participantCount: 4, pageCount: 3 } },
+  { width: 320, counts: { participantCount: 32, pageCount: 24 } },
+] as const;
+for (const { width, counts } of KEYBOARD_TOOLBARS) {
+  test(`puts the touch keyboard's icon in the ${width}px toolbar with ${counts.participantCount} participants, never over the page`, async ({ browser, baseURL }) => {
     const context = await browser.newContext({ baseURL, hasTouch: true, viewport: { width, height: 800 } });
     try {
       const page = await context.newPage();
-      await mountCompactBrowserChrome(page, true);
+      await mountCompactBrowserChrome(page, true, counts);
       const chrome = page.getByTestId("shared-browser-chrome");
       const stage = page.getByTestId("keyboard-layout-stage");
       const trigger = chrome.getByTestId("shared-browser-mobile-keyboard-open");
