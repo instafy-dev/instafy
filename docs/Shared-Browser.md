@@ -2175,13 +2175,21 @@ unless the policy is `"covered"`.
   words, with no team plan, goal or lookup of earlier chats to offer. A
   hand-back turn never asks for the browser again: the runtime drops its
   `request_browser` card, leaves the browser rule out of its prompt and its
-  reply contract does not offer the card (nor does a browser turn's), and the
-  controller still refuses a second hop from an older runtime
-  (`browser_hand_back_second_hop`).
+  reply contract does not offer the card, and the controller still refuses a
+  second hop from an older runtime (`browser_hand_back_second_hop`). A
+  browser turn's contract does not offer the card either, on its thread's
+  first turn or any later one, and a Shared Browser turn's reply format leaves
+  out the notes on filling one in: a chat keeps one browser thread, so what its
+  first turn is offered stays in every later one, and a browser turn that
+  ended on a card stopped where it could have read the pages itself. A card
+  from a turn that may not send it, and one dropped as the reply is read (no
+  task, a task over 8,000 characters or an unknown browser location), leaves a
+  line in the runtime's log with the turn's job.
   A browser turn that continues a building card is asked to end its reply
   with one finding per page, one JSON object per line, as the browser skill
-  writes them. Those lines are for Octo: the runtime takes every line the
-  controller would read as a finding out of the reply the person reads, and
+  writes them, each fact under a page it read that states it rather than one
+  that only quotes it. Those lines are for Octo: the runtime takes every line
+  the controller would read as a finding out of the reply the person reads, and
   posts them as one note of the turn
   (`details.browserFindings: {pages, pagesRead}`), where the controller reads
   them back after the reply for the record. Studio's Details leaves that note
