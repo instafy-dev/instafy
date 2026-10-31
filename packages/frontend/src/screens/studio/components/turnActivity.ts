@@ -639,25 +639,26 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
   const contentGroups = all.filter(
     (group) => group.entry.role === "content" && !(namesASite && group.entry.key === BROWSER_WITHOUT_SITE),
   );
-  // The step that answered is the last thing the turn did, and it leads:
-  // "Read a page on carris.pt", never the first page opened on the way. The
-  // biggest of the rest follows it (the later one when they tie). On one site
-  // they read in the order they ran: "Searched visitlisboa.com, read 2 pages".
+  // The line names the two things the turn did most (the later one when they
+  // tie): a turn that read four sites names the two it read most, not the
+  // last one it happened to open. The step that answered is the last thing
+  // the turn did, and when it is one of the two it leads: "Read a page on
+  // carris.pt", never the first page opened on the way. Otherwise the bigger
+  // leads. On one site they read in the order they ran: "Searched
+  // visitlisboa.com, read 2 pages".
   const answered = contentGroups.reduce<Group | null>(
     (latest, group) => (latest === null || group.last > latest.last ? group : latest),
     null,
   );
-  const other = contentGroups
-    .filter((group) => group !== answered)
-    .sort((a, b) => weight(b) - weight(a) || b.last - a.last)
-    .at(0);
-  const content = !answered
+  const [most, next] = [...contentGroups].sort((a, b) => weight(b) - weight(a) || b.last - a.last);
+  const [lead, other] = next === answered ? [next, most] : [most, next];
+  const content = !lead
     ? []
     : !other
-      ? [answered]
-      : other.entry.host !== undefined && other.entry.host === answered.entry.host && other.first < answered.first
-        ? [other, answered]
-        : [answered, other];
+      ? [lead]
+      : other.entry.host !== undefined && other.entry.host === lead.entry.host && other.first < lead.first
+        ? [other, lead]
+        : [lead, other];
   const outcome = all
     .filter((group) => group.entry.role === "outcome")
     .sort((a, b) => b.last - a.last)

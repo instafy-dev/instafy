@@ -169,10 +169,28 @@ describe("BrowserApprovalRow", () => {
       "Octo wants to press Enter on “Places” on visitlisboa.com.", "Allow"],
     [{ operation: "press-key", display: { label: "Press Tab on Places", destinationOrigin: null } },
       "Octo wants to press Tab on Places on visitlisboa.com.", "Allow"],
+    // The other site a step is bound to is named in the same sentence the
+    // browser view's sheet shows: where a form that sends goes.
+    [{ operation: "click", destinationOrigin: "https://pay.example", display: { label: "Purchase or payment: Pay \u00b7 Sends: Card name", destinationOrigin: "https://pay.example" } },
+      "Octo wants to click “Pay” on visitlisboa.com. It goes to pay.example. Sends: Card name. It may buy something or start a payment.", "Allow"],
+    [{ operation: "press-enter", display: { label: "Change something: Submit order \u00b7 Sends: Customer name", destinationOrigin: "https://www.visitlisboa.com" } },
+      "Octo wants to press Enter on “Submit order” on visitlisboa.com. Sends: Customer name.", "Allow"],
+    // A link to another site sends nothing, and may go there.
+    [{ operation: "click", destinationOrigin: "https://www.carris.pt", display: { label: "Timetables", destinationOrigin: "https://www.carris.pt" } },
+      "Octo wants to click “Timetables” on visitlisboa.com. It may go to carris.pt.", "Allow"],
+    // A local test: Space on a toggle and a click on a choice sat in a form
+    // whose address is on another site, and the runtime binds such a step to
+    // that address though it sends nothing: the row said "It goes to
+    // orders.example." for both.
+    [{ operation: "press-space", destinationOrigin: "https://orders.example", display: { label: "Change something: Disagree", destinationOrigin: "https://orders.example" } },
+      "Octo wants to press Space on “Disagree” on visitlisboa.com. It may go to orders.example.", "Allow"],
+    [{ operation: "click", destinationOrigin: "https://orders.example", display: { label: "Change something: Medium", destinationOrigin: "https://orders.example" } },
+      "Octo wants to click “Medium” on visitlisboa.com. It may go to orders.example.", "Allow"],
   ] as const)("says what it waits for in one sentence (%#)", async (overrides, sentence, allow) => {
     const value = request(overrides as Partial<RuntimeSharedBrowserApprovalRequest>);
     expect(browserApprovalSentence("Octo", value)).toBe(sentence);
     await render(withPending(value));
+    expect(byTestId("browser-approval-sentence")?.textContent).toBe(sentence);
     expect(byTestId("browser-approval-allow")?.textContent).toBe(allow);
   });
 
@@ -217,11 +235,12 @@ describe("BrowserApprovalRow", () => {
     expect(originState.decide).toHaveBeenCalledWith("allow_origin", "77777777-7777-4777-8777-777777777777");
   });
 
-  // A local test: Deny read "Saving…" while it sent the no.
+  // A local test: Deny read "Saving…" while it sent the no. Then its word was
+  // faded out under the spinner, so it showed a spinner and no word.
   it.each([
     ["deny", "Deny", "Allow"],
     ["allow", "Allow", "Deny"],
-  ] as const)("keeps the pressed button's word under a spinner while the answer is sent (%s)", async (button, word, otherWord) => {
+  ] as const)("keeps the pressed button's word in view beside a spinner while the answer is sent (%s)", async (button, word, otherWord) => {
     const value = request();
     const state = withPending(value);
     await render(state);
@@ -229,13 +248,15 @@ describe("BrowserApprovalRow", () => {
     await render({ ...state, submitting: true });
     const pressed = byTestId(`browser-approval-${button}`)!;
     const other = byTestId(`browser-approval-${button === "deny" ? "allow" : "deny"}`)!;
-    // On screen, the shared look of a pressed button with no icon: the spinner
-    // over its own word, which keeps its place (and the button's name) faded
-    // out, so nothing moves and nothing reads "Saving…".
+    // On screen, the spinner beside the button's own word, which stays in
+    // view, and nothing reads "Saving…".
     expect(pressed.textContent).toBe(word);
     expect(pressed.hasAttribute("data-pending")).toBe(true);
-    expect(pressed.querySelector('[role="progressbar"]')).not.toBeNull();
-    expect(pressed.querySelector(".opacity-0")?.textContent).toBe(word);
+    const progress = pressed.querySelector('[role="progressbar"]');
+    expect(progress).not.toBeNull();
+    expect(progress?.className).not.toContain("absolute");
+    expect(progress?.parentElement?.textContent).toBe(word);
+    expect(pressed.querySelector(".opacity-0")).toBeNull();
     expect(text()).not.toContain("Saving");
     // The other button keeps its word in view and waits.
     expect(other.textContent).toBe(otherWord);

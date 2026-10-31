@@ -7,7 +7,6 @@ import { Text } from "../../../components/Text";
 import { StudioDialogBody, StudioDialogFooter } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogGutterContext } from "../../../components/aria/StudioDialogSpacing";
 import {
-  browserApprovalGoesTo,
   browserApprovalSentence,
   sharedBrowserApprovalTargetAddress,
 } from "./browserApprovalWords";
@@ -37,11 +36,10 @@ export function sharedBrowserApprovalAllowDecision(
 export { sharedBrowserApprovalTargetAddress };
 
 /**
- * The browser view's sheet for a pending prompt, in the chat row's own words
- * ("Octo wants to use visitlisboa.com." [Deny] [Allow site]), which name the
- * exact site or page it is about, and where a step on the page goes ("Goes to
- * httpbin.org") when the sentence does not say. It shares the row's approval
- * state, so one answer settles both.
+ * The browser view's sheet for a pending prompt, in the chat row's own
+ * sentence ("Octo wants to use visitlisboa.com." [Deny] [Allow site]), which
+ * names the exact site or page it is about, and another site a step goes to.
+ * It shares the row's approval state, so one answer settles both.
  */
 export function SharedBrowserApprovalPrompt({
   active = true,
@@ -63,13 +61,12 @@ export function SharedBrowserApprovalPrompt({
   const pressedRef = useRef<{ approvalId: string; decision: SharedBrowserApprovalDecision } | null>(null);
   const isOriginApproval = request.kind === "origin";
   const sentence = browserApprovalSentence(agentName.trim() || "Octo", request);
-  const goesTo = browserApprovalGoesTo(request);
   const decide = (decision: SharedBrowserApprovalDecision) => {
     pressedRef.current = { approvalId: request.approvalId, decision };
     onDecision(decision);
   };
-  // While the answer is sent, the pressed button keeps its word under a
-  // spinner and the other waits: Deny never reads "Saving…".
+  // While the answer is sent, the pressed button keeps its word in view with
+  // a spinner beside it, and the other waits: Deny never reads "Saving…".
   const pressed = pressedRef.current?.approvalId === request.approvalId ? pressedRef.current.decision : null;
   const denyPending = submitting && pressed === "deny";
   const allowPending = submitting && pressed !== null && pressed !== "deny";
@@ -131,12 +128,6 @@ export function SharedBrowserApprovalPrompt({
               </Text>
             </div>
 
-            {goesTo ? (
-              <Text as="p" tone="muted" className="break-words" data-testid="shared-browser-approval-destination">
-                Goes to {goesTo}
-              </Text>
-            ) : null}
-
             {error ? (
               <InlineNotice
                 tone="danger"
@@ -155,6 +146,7 @@ export function SharedBrowserApprovalPrompt({
               fullWidth
               isDisabled={submitting && !denyPending}
               isPending={denyPending}
+              pendingLabel="beside"
               onPress={() => decide("deny")}
               preset="form"
               variant="secondary"
@@ -167,6 +159,7 @@ export function SharedBrowserApprovalPrompt({
               fullWidth
               isDisabled={submitting && !allowPending}
               isPending={allowPending}
+              pendingLabel="beside"
               onPress={() => decide(sharedBrowserApprovalAllowDecision(request.kind))}
               preset="form"
               variant="primary"

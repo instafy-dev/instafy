@@ -144,8 +144,8 @@ export function BrowserApprovalRow({
     void approval.decide(decision, shownRequest.approvalId);
   };
   const copy = BROWSER_APPROVAL_ROW_COPY;
-  // While the answer is sent, the pressed button keeps its word under a
-  // spinner: Deny never reads "Saving…".
+  // While the answer is sent, the pressed button keeps its word in view with
+  // a spinner beside it: Deny never reads "Saving…".
   const denyPending = submitting && pressed === "deny";
   const allowPending = submitting && pressed !== null && pressed !== "deny";
 
@@ -176,6 +176,7 @@ export function BrowserApprovalRow({
           onPress={() => press("deny")}
           isDisabled={!answerable || (submitting && !denyPending)}
           isPending={denyPending}
+          pendingLabel="beside"
           data-testid="browser-approval-deny"
         >
           {copy.deny}
@@ -187,6 +188,7 @@ export function BrowserApprovalRow({
           onPress={() => press(sharedBrowserApprovalAllowDecision(shownRequest.kind))}
           isDisabled={!answerable || (submitting && !allowPending)}
           isPending={allowPending}
+          pendingLabel="beside"
           data-testid="browser-approval-allow"
         >
           {shownRequest.kind === "origin" ? copy.allowSite : copy.allow}

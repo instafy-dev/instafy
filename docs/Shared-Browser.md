@@ -128,7 +128,11 @@ the label Octo's own prompts use) with one **Take over** button. A tab still
 loading another address is named by the site it opens, with no title until that
 page arrives: DevTools' tab list gives the new address with the title of the page
 the tab is leaving (a blank tab's "about:blank"), so `GET /browser/pages` drops a
-title while the tab's history does not yet show the listed address, and reads each
+title while the tab's history does not yet show the listed address. It reads the
+histories of the tabs whose address or title changed together, each for at most
+2 s, and a tab whose history does not answer in that time (often the busy one,
+still loading) has no title until a later list confirms it, rather than the title
+of the page it is leaving. It reads each
 title back from the list's HTML escapes ("Laptops & PCs", not "Laptops &amp; PCs"). A tab an
 earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
 earlier tab" in the tab picker. Take over
@@ -457,11 +461,16 @@ about. A control whose name says more than the text it shows is named by that
 text first ("Agree and close" (also called "Agree and close: Agree to our data
 processing and close")), each name cut on its own. A step that sends a form
 lists the fields it sends, by the names the page gives them and never their
-values ("Sends: Customer name, Telephone, E-mail address"). Under the sentence,
-"Goes to httpbin.org" names where a step on the page goes when the sentence
-does not: a step that leaves the site, or one that sends fields. A step that
-stays on the site and sends nothing (Space on a toggle, a click on a box in a
-form) says nothing of where it goes. It offers no routine-browsing choice: a
+values ("Sends: Customer name, Telephone, E-mail address"). The sentence
+names the other site a step is bound to, as the chat's prompt row does: a
+step that sends a form there says it goes there ("It goes to
+pay.example."), and any other says it may ("It may go to carris.pt."): a
+link, or Space on a toggle or a click on a box in a form, which the runtime
+binds to the form's address though only the page's own script would send
+it. A step that stays on the site the sentence names says nothing more of
+where it goes, whether it sends fields or not. While the answer is sent,
+the pressed button keeps its word in view with a spinner beside it. It
+offers no routine-browsing choice: a
 run on the space's own machine starts in routine browsing, which is what
 users' spaces get.
 

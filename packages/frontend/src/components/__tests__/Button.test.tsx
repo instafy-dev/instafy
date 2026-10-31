@@ -138,6 +138,32 @@ describe("Button", () => {
     expect(progress?.className).toContain("-translate-x-1/2");
   });
 
+  it("keeps an icon-less label in view beside the spinner when asked, in the same room", async () => {
+    const idle = await render(<Button pendingLabel="beside">Deny</Button>);
+    // Idle, the spinner's room (a 1rem spinner and its 0.5rem gap) sits
+    // around the label, so the button is as wide once the spinner shows.
+    expect(idle.querySelector(".animate-spin")).toBeNull();
+    const room = [...idle.querySelectorAll("span")].find((node) => node.textContent === "Deny");
+    expect(room?.className).toContain("px-3");
+    expect(idle.textContent).toBe("Deny");
+
+    const button = await render(<Button pendingLabel="beside" isPending>Deny</Button>);
+    expect(button.querySelectorAll(".animate-spin")).toHaveLength(1);
+    expect(button.textContent).toBe("Deny");
+    expect(button.querySelector(".opacity-0")).toBeNull();
+    const progress = button.querySelector('[role="progressbar"]');
+    expect(progress?.getAttribute("aria-label")).toBe("Loading");
+    expect(progress?.className).not.toContain("absolute");
+    // The spinner comes first, then the word, in one row.
+    expect(progress?.parentElement?.firstElementChild).toBe(progress);
+    expect(progress?.parentElement?.textContent).toBe("Deny");
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+
+    // An xs button's spinner is smaller, and so is its room.
+    const small = await render(<Button size="xs" pendingLabel="beside">Deny</Button>);
+    expect([...small.querySelectorAll("span")].find((node) => node.textContent === "Deny")?.className).toContain("px-2.5");
+  });
+
   it("replaces an icon button's glyph and keeps its accessible name", async () => {
     const button = await render(
       <IconButton aria-label="Remove account" isPending>

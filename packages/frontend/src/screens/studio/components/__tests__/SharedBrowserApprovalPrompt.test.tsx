@@ -9,6 +9,7 @@ import {
   sharedBrowserApprovalTargetAddress,
   type SharedBrowserApprovalPromptRequest,
 } from "../SharedBrowserApprovalPrompt";
+import { browserApprovalSentence } from "../browserApprovalWords";
 
 const originRequest: SharedBrowserApprovalPromptRequest = {
   approvalId: "11111111-1111-4111-8111-111111111111",
@@ -148,11 +149,12 @@ describe("SharedBrowserApprovalPrompt", () => {
   });
 
   // A local test: Deny read "Saving…" while it sent the no, and it read so
-  // too after a press of Allow.
+  // too after a press of Allow. Then its word was faded out under the spinner,
+  // so the pressed button showed a spinner and no word.
   it.each([
     ["deny", "Deny", "allow"],
     ["allow", "Allow", "deny"],
-  ] as const)("keeps the pressed button's word under a spinner while the answer is sent (%s)", async (button, word, other) => {
+  ] as const)("keeps the pressed button's word in view beside a spinner while the answer is sent (%s)", async (button, word, other) => {
     const request = { ...originRequest, kind: "action" as const, operation: "click", display: { label: "Submit order", destinationOrigin: null } };
     const sheet = (submitting: boolean) => (
       <SharedBrowserApprovalPrompt onDecision={vi.fn()} request={request} submitting={submitting} />
@@ -161,13 +163,15 @@ describe("SharedBrowserApprovalPrompt", () => {
     await act(async () => root.render(sheet(false)));
     await act(async () => byTestId(button).click());
     await act(async () => root.render(sheet(true)));
-    // On screen, the shared look of a pressed button with no icon: the spinner
-    // over its own word, which keeps its place (and the button's name) faded
-    // out, so nothing moves and nothing reads "Saving…".
+    // On screen, the spinner beside the button's own word, which stays in
+    // view, and nothing reads "Saving…".
     expect(byTestId(button).textContent).toBe(word);
     expect(byTestId(button).hasAttribute("data-pending")).toBe(true);
-    expect(byTestId(button).querySelector('[role="progressbar"]')).not.toBeNull();
-    expect(byTestId(button).querySelector(".opacity-0")?.textContent).toBe(word);
+    const progress = byTestId(button).querySelector('[role="progressbar"]');
+    expect(progress).not.toBeNull();
+    expect(progress?.className).not.toContain("absolute");
+    expect(progress?.parentElement?.textContent).toBe(word);
+    expect(byTestId(button).querySelector(".opacity-0")).toBeNull();
     expect(container.textContent).not.toContain("Saving");
     // The other button keeps its word in view and waits.
     expect(byTestId(other).textContent).toBe(other === "deny" ? "Deny" : "Allow");
@@ -270,7 +274,9 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(title()).toBe(
       "Octo wants to click “Submit order” on httpbin.org. Sends: Customer name, Telephone, E-mail address, Pizza Size, Delivery instructions.",
     );
-    expect(goesTo()).toBe("Goes to httpbin.org");
+    // It stays on the site the sentence names: nothing says where it goes.
+    expect(goesTo()).toBeNull();
+    expect(container.textContent).not.toContain("Goes to");
     expect(container.textContent).not.toContain("https://");
     expect(container.textContent).not.toContain("Destination");
 
@@ -312,7 +318,9 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(goesTo()).toBeNull();
   });
 
-  it("says where a step goes only when it leaves the site or sends what the person typed", async () => {
+  // A local test: the browser view's sheet said "Goes to httpbin.org" under
+  // a submit on httpbin.org, and the same prompt in the chat did not.
+  it("names the other site a step is bound to in the sentence the chat's row uses, and says it goes there only for a form", async () => {
     // The runtime binds Enter or Space, and a click on a box inside a form,
     // to the page's own address even when the step sends nothing: "Goes to"
     // under Space on a banner's "Disagree" said something would happen that
@@ -327,6 +335,7 @@ describe("SharedBrowserApprovalPrompt", () => {
       display: { label, destinationOrigin },
     });
     const goesTo = () => container.querySelector('[data-testid="shared-browser-approval-destination"]')?.textContent ?? null;
+    const title = () => container.querySelector("#shared-browser-approval-title")?.textContent;
     const show = async (request: SharedBrowserApprovalPromptRequest) => {
       await act(async () => root.render(
         <SharedBrowserApprovalPrompt onDecision={vi.fn()} request={request} submitting={false} />,
@@ -341,11 +350,35 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(goesTo()).toBeNull();
     expect(container.textContent).not.toContain("Goes to");
 
-    // A step that sends the person's fields, and a link to another site, do go.
+    // A step that sends the person's fields to the site it is on names no
+    // place: the sentence already says "on example.test".
     await show(step("press-enter", "Change something: Submit order · Sends: Customer name", "https://example.test"));
-    expect(goesTo()).toBe("Goes to example.test");
-    await show(step("click", "Opening hours", "https://other.example"));
-    expect(goesTo()).toBe("Goes to other.example");
+    expect(title()).toBe("Octo wants to press Enter on “Submit order” on example.test. Sends: Customer name.");
+    expect(goesTo()).toBeNull();
+    // A step that sends a form to another site says where it goes, in its one
+    // sentence, which the chat's row shows too.
+    const elsewhere = step("press-enter", "Change something: Submit order · Sends: Customer name", "https://pay.example");
+    await show(elsewhere);
+    expect(title()).toBe("Octo wants to press Enter on “Submit order” on example.test. It goes to pay.example. Sends: Customer name.");
+    expect(title()).toBe(browserApprovalSentence("Octo", elsewhere));
+    expect(goesTo()).toBeNull();
+    expect(container.textContent).not.toContain("Goes to");
+
+    // A local test: a step that sends nothing in a form whose address is on
+    // another site is bound to that address all the same, and the sentence
+    // said "It goes to orders.example." in the sheet and in the chat's row.
+    // It may go there (the page's script may send the form); so may a link.
+    for (const [operation, label, sentence] of [
+      ["press-space", "Change something: Disagree", "Octo wants to press Space on “Disagree” on example.test. It may go to orders.example."],
+      ["click", "Change something: Medium", "Octo wants to click “Medium” on example.test. It may go to orders.example."],
+      ["click", "Opening hours", "Octo wants to click “Opening hours” on example.test. It may go to orders.example."],
+    ] as const) {
+      const nothingSent = step(operation, label, "https://orders.example");
+      await show(nothingSent);
+      expect(title()).toBe(sentence);
+      expect(browserApprovalSentence("Octo", nothingSent)).toBe(sentence);
+      expect(container.textContent).not.toContain("It goes to");
+    }
   });
 
   it("keeps both decisions disabled while a decision is being written", async () => {

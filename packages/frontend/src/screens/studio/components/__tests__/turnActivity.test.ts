@@ -798,6 +798,37 @@ describe("browser steps", () => {
     expect(summarize(elsewhere).summary).toBe("Read a page on carris.pt, opened 2 pages on metrolisboa.pt");
   });
 
+  // A local test: a comparison's browser turn read six pages on frame.work and
+  // reviews on phoronix.com, pcworld.com and gizmodo.com, and its line read
+  // "Opened gizmodo.com, opened 6 pages on frame.work": the last site it
+  // opened, not the sites it read most.
+  it("name the sites the turn read most, not the last one it opened", () => {
+    const page = (n: number) => n.toString(16).padStart(16, "0");
+    const open = (host: string, n: number, step = "navigate") => browserStep(BROWSER_OPEN, { host, pageKey: page(n), step });
+    const messages = [
+      browserStep(BROWSER_BROWSE, { host: "frame.work", step: "click" }),
+      browserStep(BROWSER_READ, { host: "frame.work", pageKey: page(1), step: "snapshot" }),
+      open("frame.work", 2),
+      open("phoronix.com", 10, "open_tab"),
+      open("frame.work", 3), open("frame.work", 4), open("frame.work", 5), open("frame.work", 6),
+      open("phoronix.com", 11),
+      open("frame.work", 7), open("frame.work", 2),
+      open("phoronix.com", 11),
+      open("pcworld.com", 20), open("pcworld.com", 20),
+      browserStep(BROWSER_BROWSE, { host: "tomshardware.com", step: "navigate" }),
+      open("gizmodo.com", 30),
+    ];
+    expect(summarize(messages).summary).toBe("Opened 6 pages on frame.work, opened 2 pages on phoronix.com");
+    // The last site leads when it is one of the two the turn did most.
+    expect(summarize([...messages, open("gizmodo.com", 31), open("gizmodo.com", 32)]).summary)
+      .toBe("Opened 3 pages on gizmodo.com, opened 6 pages on frame.work");
+    // Details keeps every site.
+    const labels = summarize(messages).details.map((item) => item.kind === "step" && item.step.label);
+    for (const host of ["frame.work", "phoronix.com", "pcworld.com", "tomshardware.com", "gizmodo.com"]) {
+      expect(labels.some((label) => typeof label === "string" && label.includes(host)), host).toBe(true);
+    }
+  });
+
   it("name the site while a step runs, and the browser before any site is known", () => {
     expect(summarize([browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", step: "search" }, "in_progress")], "running").live)
       .toBe("Searching visitlisboa.com…");
