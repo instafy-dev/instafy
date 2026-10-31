@@ -659,8 +659,9 @@ read, so that page would go into this chat's reply and Details):
   another chat's page reaches the person's device, not even under the blank
   stage. The view counts as open meanwhile, also when it opens during such a
   turn, and its picture connects again once a tab of the chat is in front.
-  Behind the Chat tab, a view whose chat's tab is in front keeps its picture,
-  so it shows the page at once when it comes on screen. The address bar's tab
+  Behind the Chat tab, a screencast or WebRTC view whose chat's tab is in
+  front keeps its picture, so it shows the page at once when it comes on
+  screen (RFB connects only while the view is shown). The address bar's tab
   list names only the chat's tabs, never another chat's page by its title,
   and with one tab there is no list. Once
   that turn or another person is done and no browser turn is under way, the
