@@ -138,7 +138,7 @@ const AGENT_CONTEXT_CARD_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PLANNING_MAX_CHARS: usize = 3_200;
 const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
 /// How much of the browser skill's "Routing preflight" section the routing step reads.
-const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 1_200;
+const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 1_300;
 /// The longest message a routed card carries as its task, as a card's own task is bounded
 /// (`BrowserRequest::parse`).
 const ROUTED_BROWSER_TASK_MAX_UTF16_UNITS: usize = 8_000;
@@ -18269,14 +18269,28 @@ fn resolve_exact_owned_write_scope_path(workspace_dir: &Path, raw: &str) -> Opti
     })
 }
 
-/// What a read-only turn is told about files. A browser turn that hands back
-/// reads the pages its building turn needs, and that turn makes the page: told
-/// only that the job was read-only, under a card task that ended "then build a
-/// comparison page", a comparison's browser turn read one page and stopped
-/// "because this turn is read-only" (a local test, Oct 31).
+/// What a read-only turn is told about files. A browser turn reads pages, and
+/// Octo builds in the chat: told only that the job was read-only, under a card
+/// task that ended "then build a comparison page", a comparison's browser turn
+/// read one page and stopped "because this turn is read-only", and a browser
+/// turn asked for a page told the person "in this run: it's read-only" (local
+/// tests, Oct 31). A browser turn that hands back is told which turn makes the
+/// page; any other read-only job is told it is read-only.
 fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> &'static str {
+    let browser = metadata
+        .and_then(|metadata| {
+            metadata
+                .get("browserTransport")
+                .or_else(|| metadata.get("browser_transport"))
+        })
+        .and_then(JsonValue::as_str)
+        .map(|transport| transport.trim().to_ascii_lowercase().replace('_', "-"));
     if metadata.is_some_and(browser_hand_back::hands_back) {
         "- This turn reads pages; the building turn after it makes the page.\n"
+    } else if browser.as_deref() == Some("shared") {
+        "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n"
+    } else if browser.as_deref() == Some("desktop-personal") {
+        "- This turn reads pages in the browser on this device; Octo builds in the chat.\n"
     } else {
         "- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n"
     }
@@ -32035,42 +32049,71 @@ mod tests {
         assert!(metadata_requests_read_only_workspace(Some(&metadata)));
     }
 
-    /// A browser turn that hands back reads the pages its building turn needs.
-    /// Told only that the job was read-only, under a card task that ended "then
-    /// build a comparison page", a comparison's browser turn read one page and
-    /// stopped "because this turn is read-only" (a local test, Oct 31). It stays
-    /// read-only, and is told which turn makes the page. A question's browser
-    /// turn is told what any read-only job is told.
+    /// A browser turn reads pages, and Octo builds in the chat. Told only that
+    /// the job was read-only, under a card task that ended "then build a
+    /// comparison page", a comparison's browser turn read one page and stopped
+    /// "because this turn is read-only", and a browser turn asked for a page
+    /// told the person "in this run: it's read-only" (local tests, Oct 31).
+    /// Every browser turn stays read-only: one that hands back is told which
+    /// turn makes the page, any other that Octo builds in the chat. A read-only
+    /// job outside the browser is told it is read-only.
     #[test]
-    fn a_browser_turn_that_hands_back_is_told_the_building_turn_makes_the_page() {
-        let browser_turn = |hands_back: bool, scope: &JsonValue| {
-            json!({
-                "browserTransport": "shared",
-                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+    fn a_browser_turn_is_told_it_reads_pages_and_octo_builds_in_the_chat() {
+        let browser_turn = |transport: &str, card: bool, hands_back: bool, scope: &JsonValue| {
+            let mut metadata = json!({
+                "browserTransport": transport,
                 "browserHandsBack": hands_back,
                 "writeScope": scope,
-            })
+            });
+            if card {
+                metadata["browserRequestOf"] = json!("job:00000000-0000-4000-8000-0000000000a1");
+            }
+            metadata
+        };
+        let line = |metadata: &JsonValue| {
+            let section =
+                format_write_scope_guardrail_section(Some(metadata)).expect("write scope section");
+            assert!(section.contains("- Mode: read_only\n"), "{section}");
+            assert!(metadata_requests_read_only_workspace(Some(metadata)));
+            section
         };
         for scope in [
             json!({"mode": "read_only", "rationale": "explicit write scope metadata"}),
             json!("read_only"),
         ] {
-            let metadata = browser_turn(true, &scope);
-            let section =
-                format_write_scope_guardrail_section(Some(&metadata)).expect("write scope section");
-            assert!(section.contains("- Mode: read_only\n"), "{section}");
+            let section = line(&browser_turn("shared", true, true, &scope));
             assert!(
                 section.contains(
                     "- This turn reads pages; the building turn after it makes the page.\n"
                 ),
                 "{section}"
             );
-            assert!(!section.contains("This job is read-only"), "{section}");
-            assert!(metadata_requests_read_only_workspace(Some(&metadata)));
+            assert!(!section.contains("read-only."), "{section}");
 
-            let question = browser_turn(false, &scope);
-            let section =
-                format_write_scope_guardrail_section(Some(&question)).expect("write scope section");
+            // A question's card, and the person's own message in the browser.
+            for metadata in [
+                browser_turn("shared", true, false, &scope),
+                browser_turn("shared", false, false, &scope),
+            ] {
+                let section = line(&metadata);
+                assert!(
+                    section.contains(
+                        "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n"
+                    ),
+                    "{section}"
+                );
+                assert!(!section.contains("read-only."), "{section}");
+            }
+            let section = line(&browser_turn("desktop-personal", false, false, &scope));
+            assert!(
+                section.contains(
+                    "- This turn reads pages in the browser on this device; Octo builds in the chat.\n"
+                ),
+                "{section}"
+            );
+            assert!(!section.contains("read-only."), "{section}");
+
+            let section = line(&json!({"writeScope": scope}));
             assert!(section.contains(
                 "- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n"
             ), "{section}");

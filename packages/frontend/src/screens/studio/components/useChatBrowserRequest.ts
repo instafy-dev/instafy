@@ -58,6 +58,13 @@ export type BrowserTaskExtras = {
    * treat them as the run's own sites; they are not recorded with the prompt.
    */
   knownHosts: string[];
+  /**
+   * For a message Octo sent straight to the browser (`routed`), the job of
+   * that message, which posted the card: its browser turn goes on from this
+   * person's browser turn right before it, when there is one
+   * (sharedBrowserFollowUp).
+   */
+  routedJobId?: string;
 };
 
 /** What Studio needs to start a card by itself. Absent, every card waits for a press. */
@@ -513,6 +520,7 @@ export function useChatBrowserRequest(options: Options) {
               ...(request.continueBuilding ? { [BROWSER_HANDS_BACK_METADATA_KEY]: true } : {}),
             },
             knownHosts: destinations,
+            ...(request.routed && key.startsWith("job:") ? { routedJobId: key.slice("job:".length) } : {}),
           });
           if (!sent) throw new Error("The browser task was not sent. You can retry from its message.");
           return;

@@ -120,6 +120,29 @@ describe("Chat browser request handoff", () => {
       expect.objectContaining({ metadata: { browserRequestOf: "message:request-2" } }));
   });
 
+  // A routed card the person presses names its message's job too, so its
+  // browser turn goes on from the browser turn before that message; a card
+  // without a job names none.
+  it("names the message's job on a routed card the person presses", async () => {
+    value.messages = [{ id: "request-1", role: "assistant", content: "Continue in browser", timestamp: 1,
+      metadata: { messageType: "action_request", jobId: "job-7",
+        details: { browserRequest: { task: TASK, location: "auto", routed: true } } } }];
+    value.transport = "shared"; await render();
+    let attempt = await begin();
+    value.open = true; value.sharedReady = true; await render(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenLastCalledWith("shared", TASK, expect.objectContaining({
+      metadata: expect.objectContaining({ browserRequestOf: "job:job-7" }),
+      routedJobId: "job-7",
+    }));
+
+    value.messages = [request("auto", { routed: true })]; await render();
+    attempt = await begin(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(value.continueTask).mock.calls[1]![2]).not.toHaveProperty("routedJobId");
+  });
+
   it("honors an explicit Workspace request after a native default and waits for the original run to finish", async () => {
     value.messages = [request("workspace")]; value.busy = true; await render();
     const attempt = await begin(); expect(value.activate).toHaveBeenCalledWith("shared", null);
@@ -634,7 +657,10 @@ describe("Studio starting a request_browser card by itself", () => {
 
   // A message Octo sent straight to the browser: Studio opens its card the
   // same way, and the continuation leaves no notice, since the person's own
-  // message is right above it (routedBrowserFold.ts).
+  // message is right above it (routedBrowserFold.ts). It names the message's
+  // job, so its browser turn goes on from the browser turn before that
+  // message (sharedBrowserFollowUp): a local test, Oct 31, sent every message
+  // after a browser turn to the browser instead of through the routing step.
   it("opens a card the routing step sent with the person's own words, and leaves no notice", async () => {
     await render();
     await advance(5_000);
@@ -649,6 +675,7 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("personal", TASK, {
       metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
       knownHosts: ["app.example.test"],
+      routedJobId: "job-1",
     });
   });
 

@@ -730,10 +730,11 @@ read, so that page would go into this chat's reply and Details):
   `chat-tabs.json`). Once the turn has ended, that tab is the chat's tab: the
   page the person is left with is the one Octo read last, after a reload, on
   another device and for other members too.
-- A follow-up stays in the tab of the turn it continues (the tab that turn
-  left the chat, when it left one), while no other chat took that tab since
-  the turn started; otherwise the message is an ordinary
-  chat turn. Let Octo continue stays in the tab the person worked in when the
+- A message the routing step sends to the browser right after a browser turn
+  of the chat goes on in that turn's tab (the tab that turn left the chat,
+  when it left one), while no other chat took that tab since the turn
+  started; otherwise its turn runs in the chat's own tab, as any card's
+  does. Let Octo continue stays in the tab the person worked in when the
   chat's view shows it, else in the chat's own tab; never another chat's page
   in front, nor the browser's first tab when it names none in front, and with
   no tab of the chat's it sends nothing. A message aimed at a page goes out in the
@@ -1580,23 +1581,23 @@ keeps the manual-step controls, so login redirects can finish before continuatio
 a fresh turn. A target change during asynchronous continuation aborts it; no
 hidden or stale completion may send it automatically.
 
-A follow-up typed in the chat keeps them too. When the conversation's newest
-run is the person's own Shared Browser run on the browser that is open, it
-succeeded less than ten minutes ago, its tab is still open and no other chat
-took it since (see One tab per chat), and it did not
-continue a card Octo builds from (`browserHandsBack`), a message from the chat
-composer goes on in that tab as a browser turn, as one from the browser's own
-composer would, and names that run (`browserContinuesRunId`,
-`sharedBrowserFollowUp`). It needs no new card or press, and the site the
-person already allowed does not ask again. A browser turn has only the
-browser's tools, so this never happens silently: while it applies, the
-composer shows **Goes to Instafy's browser** in its own row, beside the view switch,
-and its × ("Don't send it to the browser") keeps the next message in the chat,
-where Octo can also build, until a newer browser turn ends
-(`useSharedBrowserFollowUp`). After the browser turn of a card Octo builds
-from, the building turn keeps the chat, as with the hand-back. A skill setup's
-replies, a message with a picture, a message for a new tab and a send the app
-makes for the person stay chat turns.
+A follow-up typed in the chat keeps them too. A message from the chat
+composer is an ordinary message, also right after a browser turn: the routing
+step decides whether it goes to the browser, as for any message, and a message
+that carries on this chat's browser work ("Now find how to get there by
+metro", "keep going") goes there (the browser skill's "Routing preflight"). A
+browser turn has only the browser's tools, so a message that asks Octo to build
+("Put the hours and the route on a small page I can share") goes to the
+building turn, which reads the chat's browser turns as page data. When the
+routing step sends the message to the browser and the conversation's newest
+run before that message is the person's own Shared Browser run on that
+browser, it succeeded less than ten minutes ago, its tab is still open and no
+other chat took it since (see One tab per chat), Studio sends the card's
+browser turn in that tab and names that run (`browserContinuesRunId`,
+`sharedBrowserFollowUp`), so the site the person already allowed does not ask
+again. A browser turn is told that it reads pages in Instafy's browser and that
+Octo builds in the chat, never only that it is read-only: told that, a browser
+turn asked for a page replied that "this run" was read-only.
 
 Action/cursor polling runs only while Shared is visible and filters the selected
 page. If the agent requests input while Chat is visible, the field guidance is

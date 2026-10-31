@@ -55,7 +55,6 @@ function MobileComposerReview() {
       attachmentCount={query.has("attachments") ? Math.max(0, Math.min(12, Number(query.get("attachments")) || 0)) : undefined}
       attachmentSending={query.has("sending")}
       newTab={query.has("newtab")}
-      browserFollowUp={query.has("followup")}
       queueReview={query.has("queue") || query.has("stash") || utilityReview ? { count: Math.max(0, Math.min(6, Number(query.get("queue")) || 0)), initialDraft: query.get("draft") ?? "", withStash: query.has("stash") || Boolean(utilityReview) } : undefined}
       viewNavigation={header ? undefined :
       <ConversationSurfaceTabs presentation="composer" chatPanelId="review-chat" activeId={activeId} resourceId="browser"

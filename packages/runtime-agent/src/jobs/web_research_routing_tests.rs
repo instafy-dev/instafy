@@ -754,6 +754,9 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
     );
     // A browser turn sees only the person's words and this chat's browser turns, so a message
     // that names the browser still stays direct when the browser part needs anything else.
+    // A message that carries on the chat's browser work goes on in the browser, also when
+    // public pages could answer it ("Now find how to get there by metro"), now that every
+    // message after a browser turn goes through this step (a local test, Oct 31).
     for words in [
         "`browser`",
         "`browser_then_build`",
@@ -763,6 +766,8 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
         "the site runs in this space",
         "says not to use the browser",
         "attachments",
+        "or it carries on browser work this chat started.",
+        "when public pages answer it (facts, prices, opening hours, reviews), unless it carries on this chat's browser work:",
     ] {
         assert!(section.contains(words), "{words}");
     }

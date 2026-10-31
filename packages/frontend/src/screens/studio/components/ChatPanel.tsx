@@ -415,7 +415,7 @@ import {
 import { ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
-import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
+import { BROWSER_CONTINUES_RUN_METADATA_KEY, useChatBrowserHandoff } from "./useChatBrowserHandoff";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, isLetOctoContinuePrompt } from "./useBrowserHumanInput";
 import { useBrowserHandBack } from "./useBrowserHandBack";
 import {
@@ -446,8 +446,7 @@ import { useSharedBrowserHostSnapshot } from "./useSharedBrowserHostSnapshot";
 import { sharedBrowserLateAttachInputs, useSharedBrowserAutoAttach } from "./useSharedBrowserAutoAttach";
 import { hostedBrowserPagesActive, type HostedBrowserViewKind } from "./hostedBrowserViewState";
 import { isSkillSetupConversation } from "./skillSetupConversation";
-import { sharedBrowserAgentPageIds, sharedBrowserConversationRunIds } from "./browserHandoffRouting";
-import { useSharedBrowserFollowUp } from "./useSharedBrowserFollowUp";
+import { sharedBrowserAgentPageIds, sharedBrowserConversationRunIds, sharedBrowserFollowUp } from "./browserHandoffRouting";
 import { BROWSER_AGENT_DEFAULT_NAME } from "./browserAgentTabs";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
@@ -4582,38 +4581,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     })();
   }, [currentRuntime?.isLikelyLocal, ensureDesktopRuntime, ensureHostedRuntime]);
 
-  // A message from the chat right after this person's turn in Instafy's
-  // browser goes on there while that browser is still open, without another
-  // card or press (sharedBrowserFollowUp). The composer says so, and the
-  // person can keep the message in the chat instead.
-  const followUpRuns = useMemo(() => Object.values(runs ?? {}), [runs]);
-  const sharedBrowserFollowUpState = useSharedBrowserFollowUp({
-    enabled: browserTransport === "shared" && (browserSessionOpen || hasHiddenBrowserSession),
-    runs: followUpRuns,
-    conversationId: activeConversationEntry?.controllerId ?? null,
-    runtimeId: resolvedBrowserRuntimeId,
-    userId: currentUserId,
-    pages: sharedBrowserChromePages,
-    // A follow-up is a browser turn: never in a tab another chat took since.
-    takenByAnotherChat: chatBrowserTab.takenByAnotherChat,
-  });
-  const resolveSharedBrowserFollowUp = sharedBrowserFollowUpState.resolve;
-  const dismissSharedBrowserFollowUp = sharedBrowserFollowUpState.dismiss;
-  const keepNextMessageInChat = useCallback(() => {
-    dismissSharedBrowserFollowUp();
-    focusInput();
-  }, [dismissSharedBrowserFollowUp, focusInput]);
-  // Shown only where a send would follow up in the browser (useChatSubmitFlow):
-  // the chat's own composer, with no picture and no new tab for the message.
-  const composerBrowserFollowUp =
-    sharedBrowserFollowUpState.followUp &&
-    !browserComposerActive &&
-    !skillSetupConversation &&
-    imageAttachments.length === 0 &&
-    pendingBrowserLaunchMode !== "new_page"
-      ? { onCancel: keepNextMessageInChat }
-      : null;
-
   const { submissionPending, submitMessage } = useChatSubmitFlow({
     activeConversationEntry,
     activeConversationId,
@@ -4677,7 +4644,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserActive:
       browserTransport === "shared" && browserComposerActive,
     sharedBrowserBindingPage,
-    resolveSharedBrowserFollowUp,
     resolveSharedBrowserTab: resolveChatBrowserTab,
     sharedBrowserRuntimeId: resolvedBrowserRuntimeId,
     showCredentialsGate: showChatCredentialsGate,
@@ -4913,7 +4879,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         // by itself: exactly that machine, and never starting it. A view that
         // is open but off or did not open attaches again by itself too. Only
         // a press switches to the Browser view: this stays in Chat, with the
-        // reading line and the Browser tab's dot, as a follow-up does.
+        // reading line and the Browser tab's dot.
         setBrowserTransport("shared");
         setSharedBrowserActivated(true);
         setBrowserAttachOnly(true);
@@ -4939,10 +4905,29 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       setBrowserSubtab("browser");
     },
     // A card's turn in Instafy's browser runs in this chat's own tab: the
-    // one its last browser turn used, or a blank one opened for it now.
-    continueTask: (transport, message, extras) => transport === "personal"
-      ? browserHandoff.startPersonal(message, extras)
-      : browserHandoff.continueShared(message, extras, resolveChatBrowserTab),
+    // one its last browser turn used, or a blank one opened for it now. A
+    // message Octo sent straight to the browser right after this person's
+    // turn there goes on from that turn: in its tab, naming it, so the sites
+    // the person allowed in it keep their OK (sharedBrowserFollowUp).
+    continueTask: (transport, message, extras) => {
+      if (transport === "personal") return browserHandoff.startPersonal(message, extras);
+      const followUp = extras.routedJobId
+        ? sharedBrowserFollowUp(Object.values(runs ?? {}), {
+          conversationId: activeConversationEntry?.controllerId ?? null,
+          runtimeId: resolvedBrowserRuntimeId,
+          userId: currentUserId,
+          pages: sharedBrowserChromePages,
+          routedJobId: extras.routedJobId,
+          takenByAnotherChat: chatBrowserTab.takenByAnotherChat,
+        })
+        : null;
+      if (!followUp) return browserHandoff.continueShared(message, extras, resolveChatBrowserTab);
+      const followUpTab = toBrowserSessionPageTarget(followUp.page);
+      return browserHandoff.continueShared(message, {
+        ...extras,
+        metadata: { ...extras.metadata, [BROWSER_CONTINUES_RUN_METADATA_KEY]: followUp.runId },
+      }, async () => followUpTab);
+    },
     onError: (message) => showStatus(message, "error", 6000),
     auto: browserAutoStart,
   });
@@ -6834,7 +6819,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         pendingNewTab={pendingBrowserLaunchMode === "new_page"
           ? { onCancel: handleClearPendingNewBrowserSession }
           : null}
-        browserFollowUp={composerBrowserFollowUp}
         composerOverlayRef={composerOverlayRef}
         composerAutoHidden={composerAutoHidden}
         touchLikeInput={touchLikeInput}

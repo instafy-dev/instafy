@@ -396,7 +396,9 @@ job posts the browser card alone, so it costs its reserve (1 credit by default),
 step is not billed. That card's task is the person's own words, so its browser turn is not a card's
 browser turn above but the person's own turn, charged as any turn they send: looking at the page and
 replying is charged too, and it is refunded only when it fails and leaves them nothing ("Failed
-turns" above). It uses two prompt slots, three with a hand-back.
+turns" above). It uses two prompt slots, three with a hand-back. A message typed right after a
+browser turn goes through the routing step too, so one it sends to the browser ("keep going") costs
+the same.
 
 Billing reads only the controller's own marks on the job (`system_turns.rs`):
 

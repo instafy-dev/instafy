@@ -380,6 +380,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v18.md"),
     // From before a message that names the browser, or acts on a site, went straight to it.
     include_str!("legacy/browser-automation-v19.md"),
+    // From before a message that carries on the chat's browser work went to the browser even when
+    // public pages answer it.
+    include_str!("legacy/browser-automation-v20.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
