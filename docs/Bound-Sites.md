@@ -225,7 +225,7 @@ from a site"): it reads `bound.json` (`agent.prompt` is the recipe), adds typed 
 on their next load or from `instafy bind command <dir> reload '{}'`, which needs the binder's admin token and so does
 not work from a turn in an isolated workspace.
 
-## 2b. Location and follow mode (the page's half)
+## 2b. Location, follow mode and first draw (the page's half)
 
 Both talk to the host frame with `{source:"instafy-bind"|"instafy-host", v:1, type, payload}` messages, only with a
 frame at an origin the binder lists (§4 Frames) that sent a `layout`. Studio's preview pane is such a host.
@@ -237,6 +237,11 @@ frame at an origin the binder lists (§4 Frames) that sent a `layout`. Studio's 
   at the top, scroll); a follower's copy applies the presenter's. Once a page was given a position, views leave out
   its query, hash and own state unless the presenter shares location (`present.share.location`) or the page says its
   view never holds a position (`follow({locationFree: true})`). A follower never sends its own position.
+- **First draw.** A page that draws its first view after it loads (it fetches its data first) calls
+  `instafyBind.drawsLater()` as it starts and `instafyBind.drawn()` once that view, or the notice saying why it cannot
+  draw, is on the page. Its acknowledgement of the layout then lists `ready`, and `ready` goes to the host once, so
+  Studio's pane goes on saying it is opening the site until then instead of showing an empty page. The starters'
+  `site.start()` calls both.
 
 ## 3. `bound.json`
 
