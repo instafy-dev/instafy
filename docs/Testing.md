@@ -1633,7 +1633,7 @@ choice, naming the option and the list. The Personal Browser lane runs
 the same table through the built page bridge in Electron, and a keydown handler
 that moves the form there too.
 
-Last, `scripts/shared-browser-sign-in-e2e.mjs` plays a task that goes on past a
+Then `scripts/shared-browser-sign-in-e2e.mjs` plays a task that goes on past a
 sign-in ("sign in, then star the repository") on a loopback code host. The
 signed-out repository page has no sign-in fields, so its result names its "Sign
 in" link, which opens the sign-in page without a prompt; the sign-in page's
@@ -1644,6 +1644,24 @@ the turn with nothing sent. The person then signs in on the page, and a fresh ru
 on the same page (what **Let Octo continue** starts) stars the repository, asking
 once before the form post. The person's values never reach a tool's output or
 the action feed.
+
+Last, `scripts/shared-browser-allowed-step-e2e.mjs` answers prompts on loopback
+pages that change by themselves while a prompt waits. On a journey planner, a
+carousel shows its next slide, a clock in a link ticks, a live count goes up and
+the form is drawn again as it was: the allowed click, typing that sends the form
+and Enter in a field each run once, on the control the person was asked about,
+and of two controls alike it is always the one they were asked about. A
+control swapped for another, a form sent elsewhere, the page's address or
+fragment moved (an app that went to another order in its fragment), a shop
+carousel's next "Add to cart" shown in place of the one asked about, another
+product drawn beside the control in place, a countdown inside its form, a form
+given another field, and the twin left once the one asked about went are not
+used: the step fails without a terminal code, says it asks the person again,
+and its failed command lists their yes and says it went unused (runtime-agent
+ends the run at the second, which its unit tests cover); asked again, the new
+prompt names the form as it is now. A take-over while the prompt waits still
+ends the step, and a page that left its site after the yes ends the run with
+`approval_stale`.
 
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across
