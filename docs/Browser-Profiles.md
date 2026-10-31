@@ -257,8 +257,9 @@ See each mode's policy for scope and revocation.
 **Take over → fill highlighted fields → Let Octo continue** is a sequential handoff.
 The browser must confirm that agent operations have stopped before manual input
 is enabled. **Let Octo continue** sends a fixed message without entered values and
-starts a fresh browser turn on that page; the chat shows it as "Let Octo continue". Shared page contents are still visible to
-project members; expansion and manual input do not make a Shared page private.
+starts a fresh browser turn on that page; the chat shows it as "Let Octo continue".
+Shared page contents are still visible to project members; expansion and manual
+input do not make a Shared page private.
 
 ## Clearing data
 
