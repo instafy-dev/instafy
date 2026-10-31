@@ -186,6 +186,31 @@ pub(crate) const BROWSER_HELPER_ENV_KEYS: &[&str] = &[
     "INSTAFY_VNC_GEOMETRY",
 ];
 
+/// What the check that takes an open preview's card picture again after a
+/// turn (`instafy preview check`, see `jobs::preview_pictures`) may inherit
+/// on top of the persistent helper baseline: it goes on after the turn has
+/// ended, while the next turn runs with its own granted secrets. Only the
+/// settings the check reads: where Node finds Playwright and Playwright its
+/// browsers, the skill packs whose link-only lists the capture enforces, and
+/// the ports a preview may not be (the CLI's reserved ports). It needs no
+/// credential: the runtime sends the picture it keeps.
+pub(crate) const PREVIEW_CHECK_ENV_KEYS: &[&str] = &[
+    "NODE_PATH",
+    "PLAYWRIGHT_BROWSERS_PATH",
+    "INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH",
+    "INSTAFY_SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT",
+    "INSTAFY_SKILL_PACKS_DIR",
+    "INSTAFY_PREVIEW_DENY_PORTS",
+    "INSTAFY_VNC_PORT",
+    "INSTAFY_PROVIDER_HOST_URL",
+    "PROXY_BASE_URL",
+    "INSTAFY_PLAYWRIGHT_CDP_PORT",
+    "INSTAFY_PLAYWRIGHT_CDP_URL",
+    "INSTAFY_BROWSER_EGRESS_PROXY_BIND",
+    "INSTAFY_PERSONAL_BROWSER_CONTROL_URL",
+    "ORIGIN_BIND_PORT",
+];
+
 pub(crate) const TERMINAL_HELPER_ENV_KEYS: &[&str] = &[
     "CARGO_HOME",
     "RUSTUP_HOME",
@@ -215,7 +240,7 @@ pub(crate) fn is_model_child_excluded_env_key(candidate: &str) -> bool {
             .any(|key| candidate.eq_ignore_ascii_case(key))
 }
 
-fn allowlisted_environment(extra_keys: &[&str]) -> Vec<(OsString, OsString)> {
+pub(crate) fn allowlisted_environment(extra_keys: &[&str]) -> Vec<(OsString, OsString)> {
     PERSISTENT_HELPER_BASE_ENV_KEYS
         .iter()
         .copied()
@@ -288,6 +313,10 @@ mod tests {
         for key in FORBIDDEN_KEYS {
             assert!(!PERSISTENT_HELPER_BASE_ENV_KEYS.contains(key));
             assert!(!TERMINAL_HELPER_ENV_KEYS.contains(key));
+            assert!(!PREVIEW_CHECK_ENV_KEYS.contains(key));
+        }
+        for key in PREVIEW_CHECK_ENV_KEYS {
+            assert!(!is_model_child_excluded_env_key(key), "{key}");
         }
         for key in INTERNAL_CREDENTIAL_ENV_KEYS {
             assert!(

@@ -1658,12 +1658,13 @@ export async function uploadCheckThumbnail(input: {
     return { status: "skipped", reason: "the preview was opened on another server" };
   }
   const takenAt = input.takenAt ?? Date.now();
+  // Recorded before the picture is sent, so an older picture still on its way (Instafy's runtime takes one after a
+  // turn's reply) is not sent after this one. A picture the server would not take counts as tried too: the same site
+  // would only fail the same way again.
+  await recordPictured(entry.previewId, takenAt);
   const facts = sniffImage(input.image);
-  if (!facts) {
-    await recordPictured(entry.previewId, takenAt);
-    return { status: "skipped", reason: "the picture is not a JPEG" };
-  }
-  const outcome = await uploadPreviewThumbnail({
+  if (!facts) return { status: "skipped", reason: "the picture is not a JPEG" };
+  return uploadPreviewThumbnail({
     controllerUrl,
     auth,
     projectId: entry.projectId,
@@ -1671,9 +1672,6 @@ export async function uploadCheckThumbnail(input: {
     thumbnail: { image: input.image, ...facts, source: "capture", description: input.description },
     retryCommand,
   });
-  // A picture the server would not take counts as tried too: the same site would only fail the same way again.
-  await recordPictured(entry.previewId, takenAt);
-  return outcome;
 }
 
 /**

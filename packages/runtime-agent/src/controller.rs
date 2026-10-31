@@ -1491,13 +1491,16 @@ impl ControllerClient {
     /// the runtime and lease that serve it only, and this credential still
     /// works after the turn that changed the site has ended. A JPEG from
     /// `instafy preview check`; the controller checks its bytes again and
-    /// removes any metadata.
+    /// removes any metadata. The controller keeps the picture sent last, so
+    /// one tried again after a credential renewal is sent only while
+    /// `still_newest` says no newer picture was taken meanwhile.
     pub async fn upload_preview_picture(
         &self,
         project_id: Uuid,
         preview_id: &str,
         image: &[u8],
         description: Option<&str>,
+        still_newest: crate::jobs::preview_pictures::StillNewest<'_>,
     ) -> Result<()> {
         use base64::Engine as _;
         if !crate::jobs::preview_pictures::is_preview_id(preview_id) {
@@ -1532,13 +1535,19 @@ impl ControllerClient {
             .await
             .context("preview picture request failed")?;
         // A renewal may have landed since: one retry with the fresh
-        // credential, never a loop.
+        // credential, never a loop, and none once a newer picture was taken
+        // while it waited.
         if matches!(
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
         ) && self.refresh_credentials_once().await
             && let Some(token) = self.read_runtime_access_token()
         {
+            if !still_newest() {
+                return Err(anyhow!(
+                    "a newer picture of the preview was taken while this one waited to be sent again"
+                ));
+            }
             response = send(token)
                 .await
                 .context("preview picture retry request failed")?;
@@ -1894,5 +1903,189 @@ mod tests {
             items.last().and_then(|item| item.get("kind")),
             Some(&json!("runtime/payload-array-truncated"))
         );
+    }
+
+    /// A stand-in controller for previews' pictures: it keeps each request it
+    /// gets (method, path, credential and body) and answers each with the next
+    /// of its statuses, then 200.
+    #[derive(Clone, Default)]
+    struct PictureStandIn {
+        requests: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String, JsonValue)>>>,
+        statuses: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u16>>>,
+    }
+
+    async fn picture_stand_in(
+        axum::extract::State(stand_in): axum::extract::State<PictureStandIn>,
+        method: axum::http::Method,
+        uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
+        body: axum::body::Bytes,
+    ) -> (axum::http::StatusCode, String) {
+        let bearer = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = serde_json::from_slice(&body).unwrap_or(JsonValue::Null);
+        stand_in.requests.lock().unwrap().push((
+            method.to_string(),
+            uri.path().to_string(),
+            bearer,
+            body,
+        ));
+        let status = stand_in.statuses.lock().unwrap().pop_front().unwrap_or(200);
+        (
+            axum::http::StatusCode::from_u16(status).unwrap(),
+            r#"{"version":"0123456789abcdef","width":640,"height":400}"#.to_string(),
+        )
+    }
+
+    async fn picture_client(
+        stand_in: &PictureStandIn,
+    ) -> (
+        ControllerClient,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
+        let app = axum::Router::new()
+            .fallback(picture_stand_in)
+            .with_state(stand_in.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url: Url = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let workspace = tempfile::tempdir().unwrap();
+        let config = Config {
+            controller_base_url: base_url.clone(),
+            controller_jwks_url: base_url.join("/.well-known/jwks.json").unwrap(),
+            project_id: Uuid::new_v4(),
+            runtime_id: None,
+            runtime_lease_id: None,
+            provider: "test-runtime".into(),
+            runtime_version: "0.0.1".into(),
+            capabilities: json!({}),
+            metadata: json!({}),
+            lease_scope: None,
+            workspace_manifest: None,
+            tenant_projects: Vec::new(),
+            parent_lease_id: None,
+            poll_interval: Duration::from_millis(10),
+            lease_wait: Duration::ZERO,
+            lease_max_jobs: 1,
+            lease_seconds: 120,
+            heartbeat_seconds: 60,
+            workspace_root: workspace.path().to_path_buf(),
+            project_workspace_override: None,
+            strict_mode: false,
+            dev_isolation_mode: true,
+            display_name: None,
+            origin: None,
+            codex_bin: None,
+            require_codex_bin: false,
+            runtime_access_token: Some("runtime-token".into()),
+            parent_dispositions_runtime_on_shutdown: false,
+        };
+        (ControllerClient::new(&config).unwrap(), server, workspace)
+    }
+
+    // A turn's end sends an open preview's new picture with this runtime's own
+    // credential, after the turn's reply, when the turn's own no longer
+    // works: to the preview's picture, as the JPEG a check took, with the
+    // page's description. A picture that is not a JPEG, or a preview id that
+    // is not plain, goes nowhere. A credential the controller refuses is
+    // renewed and the picture sent again once, never more, and not at all
+    // when a newer picture was taken while it waited.
+    #[tokio::test]
+    async fn a_preview_picture_goes_to_its_card_with_the_runtimes_own_credential() {
+        use base64::Engine as _;
+        let stand_in = PictureStandIn::default();
+        let (client, server, _workspace) = picture_client(&stand_in).await;
+        let project = Uuid::new_v4();
+        let jpeg = b"\xFF\xD8\xFF\xE0card".to_vec();
+        let newest = || true;
+        let requests = || std::mem::take(&mut *stand_in.requests.lock().unwrap());
+        let refuse_next = |statuses: &[u16]| stand_in.statuses.lock().unwrap().extend(statuses);
+        // Publishes a renewed credential once the client asks for one.
+        let renew = |token: &'static str| {
+            let store = client.runtime_token_handle();
+            tokio::spawn(async move {
+                store.refresh_requested().await;
+                store.store(token.to_string());
+            })
+        };
+
+        client
+            .upload_preview_picture(project, "tun_01-map", &jpeg, Some("Trip · 3 days"), &newest)
+            .await
+            .unwrap();
+        assert_eq!(
+            requests(),
+            vec![(
+                "PUT".to_string(),
+                format!("/projects/{project}/previews/tun_01-map/thumbnail"),
+                "Bearer runtime-token".to_string(),
+                json!({
+                    "image": base64::engine::general_purpose::STANDARD.encode(&jpeg),
+                    "contentType": "image/jpeg",
+                    "source": "capture",
+                    "description": "Trip · 3 days",
+                }),
+            )]
+        );
+
+        for (preview, image) in [
+            ("tun_01-map", b"\x89PNG\r\n\x1a\ncard".to_vec()),
+            ("../agent/complete", jpeg.clone()),
+        ] {
+            assert!(
+                client
+                    .upload_preview_picture(project, preview, &image, None, &newest)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(requests().is_empty());
+
+        // Refused, renewed, sent again once with the renewed credential.
+        refuse_next(&[401]);
+        let renewal = renew("renewed-token");
+        client
+            .upload_preview_picture(project, "tun_01-map", &jpeg, None, &newest)
+            .await
+            .unwrap();
+        renewal.await.unwrap();
+        let bearers: Vec<String> = requests().into_iter().map(|request| request.2).collect();
+        assert_eq!(
+            bearers,
+            vec!["Bearer runtime-token", "Bearer renewed-token"]
+        );
+
+        // Refused again after the renewal: no loop.
+        refuse_next(&[403, 401]);
+        let renewal = renew("third-token");
+        assert!(
+            client
+                .upload_preview_picture(project, "tun_01-map", &jpeg, None, &newest)
+                .await
+                .is_err()
+        );
+        renewal.await.unwrap();
+        assert_eq!(requests().len(), 2);
+
+        // A newer picture was taken while it waited for the renewal: not sent
+        // again over it.
+        refuse_next(&[401]);
+        let renewal = renew("fourth-token");
+        let newer_since = || false;
+        assert!(
+            client
+                .upload_preview_picture(project, "tun_01-map", &jpeg, None, &newer_since)
+                .await
+                .is_err()
+        );
+        renewal.await.unwrap();
+        assert_eq!(requests().len(), 1);
+        server.abort();
     }
 }

@@ -11,10 +11,15 @@
 //! check --desktop`). The reply does not wait for it: the check goes on after
 //! the reply is posted, and the card's picture changes in place once it is
 //! sent (the controller announces `preview.thumbnail_updated`). The check
-//! keeps the picture in a file (`--picture-to`) and is given no Instafy
-//! credential; this runtime sends the picture with its own, which still works
-//! once the turn has ended (the turn's own ends with it). A turn that is
-//! stopped, or whose changes could not be saved, stops it.
+//! keeps the picture in a file (`--picture-to`), and this runtime sends it with
+//! its own credential, which still works once the turn has ended (the turn's
+//! own ends with it). The check is given no credential at all: it goes on
+//! while the next turn may run, another member's with other granted secrets,
+//! and any process here can read another's environment, so it gets only what
+//! a helper that outlives a turn may have and the settings it reads
+//! ([`PREVIEW_CHECK_ENV_KEYS`]). A picture is not sent once a newer one was
+//! taken (the next turn's own check records its time before it sends), and a
+//! turn that is stopped, or whose changes could not be saved, stops it.
 //!
 //! `instafy preview open` records each preview in the CLI's state file
 //! (`~/.instafy/cli-preview-state.json`): its id, port and path, the folder its
@@ -41,7 +46,7 @@ use uuid::Uuid;
 use super::CodexFileDescriptor;
 use crate::browser_host::process::group;
 use crate::job_cancel::JobCancelSignal;
-use crate::model_environment::is_model_child_excluded_env_key;
+use crate::model_environment::{PREVIEW_CHECK_ENV_KEYS, allowlisted_environment};
 
 /// The CLI's record of the previews it opened on this machine, under `HOME`.
 const PREVIEW_STATE_RELATIVE_PATH: &str = ".instafy/cli-preview-state.json";
@@ -57,15 +62,6 @@ const CHECKS_TIMEOUT: Duration = Duration::from_secs(30);
 const CHECK_MIN_TIME: Duration = Duration::from_secs(15);
 /// How long sending one picture may take.
 const SEND_TIMEOUT: Duration = Duration::from_secs(15);
-/// Model credentials a check never needs: it calls no model.
-const MODEL_KEYS: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY"];
-/// Instafy credentials a check never needs: it keeps its picture in a file,
-/// and this runtime sends it.
-const INSTAFY_KEYS: &[&str] = &[
-    "CONTROLLER_ACCESS_TOKEN",
-    "INSTAFY_ACCESS_TOKEN",
-    "SUPABASE_ACCESS_TOKEN",
-];
 /// The name of the picture a check keeps in its folder; what the card needs
 /// beside it is in the same name with `.json` added.
 const PICTURE_FILE: &str = "card.jpg";
@@ -91,15 +87,22 @@ pub(crate) struct CardPicture {
     pub(crate) description: Option<String>,
 }
 
+/// Whether a picture is still the newest of its preview: false once a newer
+/// one was taken, so it is not sent (again).
+pub(crate) type StillNewest<'a> = &'a (dyn Fn() -> bool + Send + Sync);
+
 /// Sends a picture to its preview's card with this runtime's own credential
 /// (the controller takes a preview's picture only from the runtime that
-/// serves it). [`crate::controller::ControllerClient`] is the one in use.
+/// serves it), while `still_newest` says it is the newest: a send tried again
+/// after a credential renewal asks once more. [`crate::controller::ControllerClient`]
+/// is the one in use.
 pub(crate) trait PictureSender: Send + Sync {
     fn send<'a>(
         &'a self,
         project_id: Uuid,
         preview_id: &'a str,
         picture: &'a CardPicture,
+        still_newest: StillNewest<'a>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 }
 
@@ -109,12 +112,14 @@ impl PictureSender for crate::controller::ControllerClient {
         project_id: Uuid,
         preview_id: &'a str,
         picture: &'a CardPicture,
+        still_newest: StillNewest<'a>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
         Box::pin(self.upload_preview_picture(
             project_id,
             preview_id,
             &picture.image,
             picture.description.as_deref(),
+            still_newest,
         ))
     }
 }
@@ -385,20 +390,13 @@ impl Drop for PictureRetake {
     }
 }
 
-/// What a check may have of this process's environment: all of it but the
-/// credentials it never needs (a model's, Instafy's, and the runtime's own).
+/// What a check may have of this process's environment: what a helper that
+/// outlives a turn may have, and the settings the check reads. Never a
+/// credential: not the turn's granted secrets, which this process's
+/// environment holds while the turn runs, nor Instafy's, a model's or this
+/// runtime's own.
 fn check_environment() -> Vec<(OsString, OsString)> {
-    std::env::vars_os()
-        .filter(|(key, _)| {
-            key.to_str().is_none_or(|name| {
-                !is_model_child_excluded_env_key(name)
-                    && !MODEL_KEYS
-                        .iter()
-                        .chain(INSTAFY_KEYS)
-                        .any(|credential| name.eq_ignore_ascii_case(credential))
-            })
-        })
-        .collect()
+    allowlisted_environment(PREVIEW_CHECK_ENV_KEYS)
 }
 
 /// Checks each open preview whose site this turn changed after it was last
@@ -433,12 +431,12 @@ async fn retake_stale_pictures(
         else {
             continue;
         };
-        // A picture taken since (the next turn's own check) is newer.
-        if read_state(&state_file)
-            .await
-            .and_then(|state| picture_at(&state, &preview.preview_id))
-            .is_some_and(|at| at > taken.taken_at)
-        {
+        // A picture taken since (the next turn's own check, which records its
+        // time before it sends) is newer: this one is not sent, nor sent
+        // again after a credential renewal.
+        let still_newest =
+            || !newer_picture_taken(&state_file, &preview.preview_id, taken.taken_at);
+        if !still_newest() {
             info!(
                 port = preview.port,
                 "a newer picture of an open preview was taken; this one is not sent"
@@ -447,7 +445,12 @@ async fn retake_stale_pictures(
         }
         match tokio::time::timeout(
             SEND_TIMEOUT,
-            sender.send(*project_id, &preview.preview_id, &taken.picture),
+            sender.send(
+                *project_id,
+                &preview.preview_id,
+                &taken.picture,
+                &still_newest,
+            ),
         )
         .await
         {
@@ -483,6 +486,16 @@ fn picture_at(state: &JsonValue, preview_id: &str) -> Option<f64> {
         .find(|entry| entry.get("previewId").and_then(JsonValue::as_str) == Some(preview_id))?
         .get("pictureAt")?
         .as_f64()
+}
+
+/// Whether the CLI's state file (`state_file`) says a picture of the preview
+/// newer than `taken_at` was taken. Read as it is now: it is small.
+fn newer_picture_taken(state_file: &Path, preview_id: &str, taken_at: f64) -> bool {
+    std::fs::read_to_string(state_file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<JsonValue>(&text).ok())
+        .and_then(|state| picture_at(&state, preview_id))
+        .is_some_and(|at| at > taken_at)
 }
 
 /// A picture a check took, and when it began loading the page it shows.
@@ -942,6 +955,68 @@ mod tests {
         );
     }
 
+    // The check gets no environment but what it reads: each setting the CLI
+    // reads to find Playwright and Chromium, the skill packs' link-only lists
+    // and the ports a preview may not be reaches it, so a setting the CLI
+    // starts reading is not silently lost.
+    #[test]
+    fn the_check_keeps_every_setting_the_cli_reads_for_it() {
+        // Of the web helpers, the check uses only where skills are found.
+        let web = include_str!("../../../instafy-cli/src/web-shared.ts");
+        let skill_roots = web
+            .find("export function homeDir")
+            .and_then(|start| {
+                let end = web[start..].find("\n/** One skill's copy")?;
+                Some(&web[start..start + end])
+            })
+            .expect("the CLI finds skills with homeDir and defaultSkillRoots");
+        let sources = [
+            include_str!("../../../instafy-cli/src/local-site.ts"),
+            include_str!("../../../instafy-cli/src/site-check.ts"),
+            skill_roots,
+        ];
+        let named = |text: &str, before: &str| -> Vec<String> {
+            text.match_indices(before)
+                .filter_map(|(at, _)| {
+                    let rest = &text[at + before.len()..];
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                        .collect();
+                    (!name.is_empty()).then_some(name)
+                })
+                .collect()
+        };
+        let mut read = Vec::new();
+        for source in sources {
+            // `env.NODE_PATH`, `{ env: "INSTAFY_VNC_PORT", … }` and
+            // `export const …_ENV = "INSTAFY_PREVIEW_DENY_PORTS"`.
+            read.extend(named(source, "env."));
+            read.extend(named(source, "env: \""));
+            read.extend(named(source, "_ENV = \""));
+        }
+        for expected in [
+            "INSTAFY_VNC_PORT",
+            "INSTAFY_PREVIEW_DENY_PORTS",
+            "PLAYWRIGHT_BROWSERS_PATH",
+            "INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH",
+            "INSTAFY_SKILL_PACKS_DIR",
+        ] {
+            assert!(
+                read.iter().any(|name| name == expected),
+                "{expected} in {read:?}"
+            );
+        }
+        let kept: Vec<String> = crate::model_environment::PERSISTENT_HELPER_BASE_ENV_KEYS
+            .iter()
+            .chain(PREVIEW_CHECK_ENV_KEYS)
+            .map(|key| key.to_string())
+            .collect();
+        for name in read {
+            assert!(kept.contains(&name), "the check does not get {name}");
+        }
+    }
+
     /// Whether a process is still running: gone, or a zombie, is not.
     #[cfg(unix)]
     fn running(pid: &str) -> bool {
@@ -955,8 +1030,15 @@ mod tests {
     }
 
     /// The pictures a retake sent, as this runtime's controller client would.
+    /// With `newer_while_sending`, a newer picture of the preview is recorded
+    /// in the CLI's state file (at that path) while one is sent, and what
+    /// `still_newest` then says is kept.
     #[derive(Default)]
-    struct SentPictures(std::sync::Mutex<Vec<(Uuid, String, CardPicture)>>);
+    struct SentPictures {
+        sent: std::sync::Mutex<Vec<(Uuid, String, CardPicture)>>,
+        newer_while_sending: std::sync::Mutex<Option<std::path::PathBuf>>,
+        still_newest_after: std::sync::Mutex<Vec<bool>>,
+    }
 
     impl PictureSender for SentPictures {
         fn send<'a>(
@@ -964,8 +1046,20 @@ mod tests {
             project_id: Uuid,
             preview_id: &'a str,
             picture: &'a CardPicture,
+            still_newest: StillNewest<'a>,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
-            self.0
+            if let Some(state_file) = self.newer_while_sending.lock().unwrap().clone() {
+                let mut state: JsonValue =
+                    serde_json::from_str(&std::fs::read_to_string(&state_file).unwrap()).unwrap();
+                for entry in state["previews"].as_array_mut().unwrap() {
+                    if entry["previewId"] == preview_id {
+                        entry["pictureAt"] = json!(now_ms() + 60_000.0);
+                    }
+                }
+                std::fs::write(&state_file, state.to_string()).unwrap();
+                self.still_newest_after.lock().unwrap().push(still_newest());
+            }
+            self.sent
                 .lock()
                 .unwrap()
                 .push((project_id, preview_id.to_string(), picture.clone()));
@@ -975,18 +1069,20 @@ mod tests {
 
     impl SentPictures {
         fn take(&self) -> Vec<(Uuid, String, CardPicture)> {
-            std::mem::take(&mut *self.0.lock().unwrap())
+            std::mem::take(&mut *self.sent.lock().unwrap())
         }
     }
 
     // The end of a turn runs `instafy preview check` for a stale picture, at
-    // the desktop size, from the workspace, with no Instafy credential and
-    // never the machine's or a model's, keeps the picture in a file, sends it
-    // with the runtime's own credential, and removes the check's folder after
-    // it. A read-only turn checks nothing. A check that runs out of time, or a
-    // turn that is stopped, ends the check and every helper it started, and
-    // sends nothing. The reply does not wait: a retake let go on after it
-    // still sends its picture once the check took it.
+    // the desktop size, from the workspace, with no credential (never the
+    // turn's granted secrets, Instafy's, the machine's or a model's) but the
+    // settings it reads, keeps the picture in a file, sends it with the
+    // runtime's own credential, and removes the check's folder after it. A
+    // read-only turn checks nothing. A check that runs out of time, or a turn
+    // that is stopped, ends the check and every helper it started, and sends
+    // nothing. The reply does not wait: a retake let go on after it still
+    // sends its picture once the check took it, and it is not sent again once
+    // a newer picture was taken.
     #[cfg(unix)]
     #[test]
     fn the_turns_own_check_runs_for_a_stale_picture_and_leaves_nothing_behind() {
@@ -1012,7 +1108,7 @@ mod tests {
                 format!(
                     r#"#!/bin/sh
 seen='{seen}'
-{{ echo "args=$*"; echo "cwd=$(pwd -P)"; echo "job=${{CONTROLLER_ACCESS_TOKEN:-}}"; echo "machine=${{RUNTIME_ACCESS_TOKEN:-}}"; echo "model=${{CODEX_API_KEY:-}}"; }} >> "$seen"
+{{ echo "args=$*"; echo "cwd=$(pwd -P)"; echo "job=${{CONTROLLER_ACCESS_TOKEN:-}}"; echo "machine=${{RUNTIME_ACCESS_TOKEN:-}}"; echo "model=${{CODEX_API_KEY:-}}"; echo "github=${{GITHUB_TOKEN:-}}"; echo "research=${{INSTAFY_RESEARCH_ACCESS_TOKEN:-}}"; echo "secret=${{BOOKING_PARTNER:-}}"; echo "settings=${{NODE_PATH:-}} ${{INSTAFY_SKILL_PACKS_DIR:-}} ${{INSTAFY_PREVIEW_DENY_PORTS:-}}"; }} >> "$seen"
 port=; out=; picture=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -1057,6 +1153,15 @@ echo "sent-by-check=no" >> "$seen"
                 .env("CONTROLLER_ACCESS_TOKEN", "job-token")
                 .env("RUNTIME_ACCESS_TOKEN", "machine-token")
                 .env("CODEX_API_KEY", "model-key")
+                // The turn's granted secrets: the check goes on after the
+                // turn, while the next one runs.
+                .env("GITHUB_TOKEN", "space-secret")
+                .env("INSTAFY_RESEARCH_ACCESS_TOKEN", "research-token")
+                .env("BOOKING_PARTNER", "plain-named-secret")
+                // The settings the check reads.
+                .env("NODE_PATH", "/opt/node/lib")
+                .env("INSTAFY_SKILL_PACKS_DIR", "/opt/instafy/skill-packs")
+                .env("INSTAFY_PREVIEW_DENY_PORTS", "6000")
                 .output()
                 .unwrap();
             assert!(
@@ -1179,6 +1284,10 @@ echo "sent-by-check=no" >> "$seen"
                 "job=",
                 "machine=",
                 "model=",
+                "github=",
+                "research=",
+                "secret=",
+                "settings=/opt/node/lib /opt/instafy/skill-packs 6000",
                 format!("out={out}").as_str(),
                 "sent-by-check=no",
             ]
@@ -1220,7 +1329,11 @@ echo "sent-by-check=no" >> "$seen"
                 .collect::<Vec<_>>(),
             vec![("preview-1", Some("Trip · 3 days"))]
         );
-        take_seen();
+        // The check that goes on after the turn has none of its secrets.
+        let seen = take_seen();
+        for line in ["job=", "github=", "research=", "secret="] {
+            assert!(seen.lines().any(|seen| seen == line), "{line} in {seen}");
+        }
 
         // A picture older than the card's, or kept for another preview, is
         // not sent.
@@ -1301,6 +1414,15 @@ echo "sent-by-check=no" >> "$seen"
         }
         assert!(!running(&helper), "the helper is stopped with its check");
         assert!(sent.take().is_empty());
+
+        // A newer picture taken while one is sent (the next turn's own check
+        // records its time before it sends) stops a send tried again after a
+        // credential renewal.
+        *sent.newer_while_sending.lock().unwrap() = Some(home.join(PREVIEW_STATE_RELATIVE_PATH));
+        runtime.block_on(async { retake("seville", None).finish().await });
+        assert_eq!(*sent.still_newest_after.lock().unwrap(), vec![false]);
+        assert_eq!(sent.take().len(), 1);
+        take_seen();
 
         // With nothing to send a picture with, nothing is checked.
         runtime.block_on(async {

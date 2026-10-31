@@ -18,6 +18,8 @@ type RequestCapture = {
   authorization?: string;
   // preview clients the CLI had recorded as running when the request arrived
   liveClients: number[];
+  // when the CLI had recorded the preview as last pictured, when the request arrived
+  pictureAt?: number;
 };
 
 const RUNTIME_ENV_KEYS = [
@@ -164,6 +166,8 @@ async function startMockController(options: {
   credentials?: Record<string, unknown> | null;
   // What PUT …/thumbnail answers (default 200).
   thumbnailStatus?: number;
+  // When the CLI has recorded the preview as last pictured, read as each request arrives.
+  pictureAt?: () => number | undefined;
 }) {
   const captures: RequestCapture[] = [];
   let created = 0;
@@ -177,6 +181,7 @@ async function startMockController(options: {
         body,
         authorization: req.headers.authorization,
         liveClients: options.livePids?.() ?? [],
+        pictureAt: options.pictureAt?.(),
       });
       const base = `/projects/${options.projectId}/previews`;
       const json = (status: number, payload: unknown) => {
@@ -1237,10 +1242,10 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
 
   it("check uploads for an open preview on its port, and for none other", async () => {
     const projectId = randomUUID();
-    const controller = await startMockController({ projectId });
+    const home = makeHome();
+    const controller = await startMockController({ projectId, pictureAt: () => readState(home).previews[0]?.pictureAt });
     const sitePort = await startPage();
     const otherPort = await startPage();
-    const home = makeHome();
     writeState(home, [{
       previewId: "preview-1", projectId, title: "Lisbon weekend", localPort: sitePort, path: "/", controllerUrl: controller.url,
       pid: 999999, logFile: path.join(home, "log"), workdir: path.join(home, "wd"), startedAt: new Date().toISOString(),
@@ -1255,6 +1260,10 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
     expect(readState(home).previews[0]!.pictureAt).toBeGreaterThanOrEqual(before);
     const puts = thumbnailPuts(controller.captures);
     expect(puts.map((capture) => capture.path)).toEqual([`/projects/${projectId}/previews/preview-1/thumbnail`]);
+    // A local test: the picture's time was recorded only once it was sent, so the runtime's own picture of the site
+    // from before this one, still on its way, could not see it was older and was sent after it. It is recorded first.
+    expect(puts[0]!.pictureAt).toBeGreaterThanOrEqual(before);
+    expect(puts[0]!.pictureAt).toBe(readState(home).previews[0]!.pictureAt);
     const body = JSON.parse(puts[0]!.body) as Record<string, unknown>;
     expect(body).toMatchObject({ contentType: "image/jpeg", source: "capture", description: "Trip · 3 days · 14 places" });
     expect(sniffImage(Buffer.from(String(body.image), "base64"))).toEqual({ contentType: "image/jpeg", width: 640, height: 400 });
