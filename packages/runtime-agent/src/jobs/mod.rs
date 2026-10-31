@@ -14522,7 +14522,10 @@ fn final_output_mode_for_runtime_job(
             .payload
             .pointer("/metadata/agentRoutingPreflight/workspaceFileChangeRequirement")
             .and_then(JsonValue::as_str)
-            == Some("conditional"))
+            == Some("conditional")
+        // A hand-back's route is decided, with no routing step: it builds in
+        // this chat with what the browser found, as a routed build does.
+        || browser_hand_back::is_hand_back_job(job))
         && !metadata_requests_read_only_workspace(job.payload.get("metadata"))
     {
         // Workspace-write jobs run the natural agentic loop: edit via tools, finish with a
@@ -21877,6 +21880,59 @@ mod tests {
         assert!(should_run_agent_routing_preflight(&unchecked, prompt));
     }
 
+    /// A hand-back's decided route is a build in this chat, so without a
+    /// routing step it runs in the lane a routed build runs in: it edits the
+    /// workspace and ends in plain words, with no team plan, goal, lookup of
+    /// earlier chats or browser card to offer. Left to the general lane, it was
+    /// offered all of those, and a team plan from it would have queued workers.
+    #[test]
+    fn a_hand_back_builds_in_the_workspace_change_lane() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let prompt_text = "Continue building with what the browser turn found.";
+        let job = |record: JsonValue| {
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({ "prompt_text": prompt_text, "metadata": { "browserHandBack": record } }),
+            );
+            job.project_id = Some(project_id);
+            job
+        };
+        let mode = |job: &LeaseJob| {
+            final_output_mode_for_runtime_job(job, false, runtime_job_expectations(&job.payload))
+        };
+        let hand_back = job(json!({"verified": true, "reply": "Read the maker's pages."}));
+        assert_eq!(mode(&hand_back), RuntimeFinalOutputMode::PlainTextWrite);
+        // Only the controller's checked record makes a hand-back.
+        let unchecked = job(json!({"reply": "Read the maker's pages."}));
+        assert_eq!(mode(&unchecked), RuntimeFinalOutputMode::StrictStructured);
+
+        let provider_state =
+            json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
+        let (prompt, _, _) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &hand_back,
+                tmp.path(),
+                prompt_text,
+                true,
+                Some(&provider_state),
+                &[],
+                None,
+                None,
+            )
+            .expect("prompt should build");
+        assert!(prompt.contains("\nDirect workspace-change response contract:\n"));
+        assert!(prompt.contains(
+            "- Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.\n"
+        ));
+        assert!(!prompt.contains("\nResponse contract reminder:\n"));
+        assert!(!prompt.contains("\nCurrent Studio runtime invariants:\n"));
+        assert!(!prompt.contains("request_browser"));
+    }
+
     /// A request that needs Instafy's browser before a change gets the card,
     /// and the card hands back to a build. Routed as a change that must write
     /// files, it ran in the lane that cannot open the browser and answered "No
@@ -24543,6 +24599,7 @@ mod tests {
             "cross_chat",
             "kickoff",
             "setup_follow_up",
+            "routed_none",
         ] {
             let tmp = tempdir().expect("temp dir");
             learn::ensure_project_memory_scaffold(tmp.path());
@@ -24562,6 +24619,19 @@ mod tests {
                         true,
                         false,
                     ),
+                );
+            }
+            // The routing step's verdict for a request that needs the browser
+            // before a change (`workspaceFileChangeRequirement: none`) keeps
+            // the turn in a lane that offers the card.
+            if lane == "routed_none" {
+                job = job_with_agent_routing_preflight(
+                    &job,
+                    &test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false),
+                );
+                assert_eq!(
+                    job.payload["metadata"]["agentRoutingPreflight"]["workspaceFileChangeRequirement"],
+                    "none"
                 );
             }
             let prompt_text = if lane == "kickoff" {
@@ -24760,7 +24830,9 @@ mod tests {
     /// browser turn's reminder listed `request_browser`, and the turn ended on a
     /// card ("use the official venue site instead") where it could have opened
     /// that site itself; the runtime drops such a card, so the step never
-    /// happened. A hand-back turn may not ask for the browser either.
+    /// happened. A hand-back turn may not ask for the browser either; it builds
+    /// in the workspace-change lane, which offers no action at all
+    /// (`a_hand_back_builds_in_the_workspace_change_lane`).
     #[test]
     fn a_turn_that_may_not_ask_for_the_browser_is_not_offered_its_card() {
         let tmp = tempdir().expect("temp dir");
@@ -24793,7 +24865,6 @@ mod tests {
         for metadata in [
             json!({"browserTransport":"shared"}),
             json!({"browserTransport":"desktop-personal"}),
-            json!({"browserHandBack":{"verified": true, "reply": "Read the timetable."}}),
         ] {
             let reminder = reminder(metadata.clone());
             assert!(

@@ -18,8 +18,9 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // person answers after more than the step's time is never cut short. A step
 // whose time runs out still ends as every step ends: a window it opened is
 // closed and said, and a hand-off it had not finished is never left behind. A
-// navigation from a blank tab to a site that does not answer in time fails as
-// a busy page, never as a blank one to navigate again. No model,
+// navigation from a blank tab to a site that does not answer in time is
+// stopped and fails as a page that opened nothing, never as a blank one to
+// navigate again, and the next step reaches the browser at once. No model,
 // Studio, controller, account or external site is used, and Chromium resolves
 // no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -94,6 +95,8 @@ const HIDDEN = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link
 <title>Opening hours</title><style>body { visibility: hidden; }</style></head>
 <body><h1>Opening hours</h1><p>Open daily from 9 to 17.</p><a href="/places/tower">The tower</a></body></html>`;
 const BUSY_MESSAGE = "The page is still busy, so it could not be read yet. Take a snapshot in a moment.";
+// What a navigation answers whose site sent nothing back within the step's time.
+const UNANSWERED_MESSAGE = "The site did not answer within 20 seconds, so nothing was opened and the page is still blank.";
 // A form whose script does heavy work once one of its fields is highlighted.
 const FORM = `<form><label>Your name <input name="name"></label><label>Your city <input name="city"></label></form>`;
 const BUSY_ON_HIGHLIGHT = `let busy = false;
@@ -285,32 +288,40 @@ export async function runSharedBrowserStepTimeFixture() {
 
     // 1c. A navigation from a blank tab to a site that does not answer within
     // the step's time: when the time is up the tab still shows the blank page,
-    // as a just-started browser does. The load has not arrived, so the page is
-    // busy, not blank: the step fails (its line reads as a step tried) with
-    // the busy page's answer, never the blank page's "Call navigate", which
-    // sent Octo to load the same site again.
+    // as a just-started browser does. A load still waiting for its first answer
+    // keeps Instafy's browser from being reached by the next step, and would
+    // land after the step ended, so the step stops it: it opened nothing, and
+    // it fails (its line reads as a step tried) saying the site did not answer,
+    // never the blank page's "Call navigate", which sent Octo to load the same
+    // site again.
     await runPage.goto("about:blank");
     requests.length = 0;
     const loading = await runTool("POST", "/v1/navigate", { url: `${origin}/slow` });
     assert.deepEqual(requests, ["GET /slow"], "The site was asked once");
     assert.equal(loading.code, 1, `The step fails: ${loading.stdout}`);
     assert.equal(loading.stdout, "", "A failed navigation answers with no page");
-    assert.ok(
-      loading.stderr.includes(`${BUSY_MESSAGE} This step was still running after 20 seconds, so it stopped where it was. Check what the step did before you act again.`),
-      loading.stderr,
-    );
-    assert.doesNotMatch(loading.stderr, /The page is blank|Call navigate/u);
-    // It answered when its time was up, and before the site did: the site
-    // answers only below. Its late read waits out LATE_READ_MS while the load
-    // is pending.
+    assert.ok(loading.stderr.includes(UNANSWERED_MESSAGE), loading.stderr);
+    assert.doesNotMatch(loading.stderr, /The page is blank|Call navigate|still busy|Check what the step did/u);
+    // It answered when its time and its late read were up, and no later: its
+    // failure waits on no check of the browser while the load is pending.
     assert.ok(loading.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(loading.wallMs)} ms)`);
+    assert.ok(loading.wallMs < STEP_TIME_MS + LATE_READ_MS + 4_000, `It answered without waiting on the pending load (${Math.round(loading.wallMs)} ms)`);
     assert.equal(prompts.length, 1, "Nothing asked during the navigation");
-    // The site answers at last, as a slow site's gateway does, and the next
-    // case starts on a page that loaded.
+    // The next step reaches the browser at once, while the site still holds
+    // its answer, and finds the blank page.
+    const after = await ok("GET", "/v1/snapshot");
+    assert.ok(after.wallMs < 5_000, `The next step reached the browser at once (${Math.round(after.wallMs)} ms)`);
+    assert.equal(after.payload.url, "about:blank");
+    assert.equal(after.payload.blank, true);
+    // The site answers at last: nothing of it lands, so nothing was opened.
     for (const response of unanswered.splice(0)) {
-      response.writeHead(504, { "content-type": "text/html; charset=utf-8" }).end(page("Gateway Time-out", "<p>The site did not answer in time.</p>"));
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(page("Opening hours", "<p>Open daily from 09:00 to 19:30.</p>"));
     }
-    await runPage.waitForURL(`${origin}/slow`);
+    await delay(1_000);
+    assert.equal(runPage.url(), "about:blank", "The late answer never loaded");
+    const late = await ok("GET", "/v1/snapshot");
+    assert.equal(late.payload.url, "about:blank");
+    assert.equal(late.payload.visibleText, "");
 
     // 2. A click that opens another window and then keeps the page busy: the
     // step's time runs out, and it still ends as a step does. The window is
@@ -378,7 +389,7 @@ export async function runSharedBrowserStepTimeFixture() {
       checks: [
         "a prompt answered after more than a step's time is waited for, and the step then reads the page as usual",
         "a loaded page that shows no text and no controls reads as still busy, not as an empty page, and its line says no page was read",
-        "a navigation from a blank tab to a site that does not answer in time fails once the step's time is up, as a busy page and never as a blank one to navigate again",
+        "a navigation from a blank tab to a site that does not answer in time is stopped once the step's time is up and fails as one that opened nothing, never as a blank page to navigate again; the next step reaches the browser at once, and the site's late answer never loads",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
