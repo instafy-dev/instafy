@@ -717,6 +717,9 @@ impl RuntimeAgent {
 
         let client = Arc::new(ControllerClient::new(&config)?);
         let executor = Arc::new(AgentExecutor::new(config.clone()));
+        // A turn that changed an open preview's site sends its new picture
+        // with this runtime's own credential, after the turn's reply.
+        executor.send_card_pictures_with(client.clone());
         // A lazy browser host lives as long as this process, across
         // registration renewals; it is published only on an attested lease.
         crate::browser_host::install(client.clone());

@@ -69,7 +69,7 @@ mod learn;
 /// Where a space keeps its copy of the web-research skill's link-only list.
 pub(crate) use learn::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH;
 mod mcp;
-mod preview_pictures;
+pub(crate) mod preview_pictures;
 #[cfg(test)]
 mod preview_routing_tests;
 mod project_preferences;
@@ -184,6 +184,11 @@ pub struct JobProcessor {
     /// The executable that serves a granted turn's `provider-mcp`: this runtime-agent's own
     /// unless a test names another.
     provider_mcp_program: Option<PathBuf>,
+    /// What sends the new picture of an open preview a turn changed, with
+    /// this runtime's own credential, once the turn has replied (see
+    /// [`preview_pictures`]). Set by the agent loop; without it no picture is
+    /// taken again at a turn's end.
+    picture_sender: Mutex<Option<Arc<dyn preview_pictures::PictureSender>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5150,7 +5155,18 @@ impl JobProcessor {
             isolated_workers: isolated_worker::IsolatedWorkerSettings::from_env(),
             isolated_apply: AsyncMutex::new(()),
             provider_mcp_program: None,
+            picture_sender: Mutex::new(None),
         }
+    }
+
+    /// Sends the new picture of an open preview a turn changed with `sender`
+    /// (this runtime's controller client), after the turn's reply.
+    pub(crate) fn set_picture_sender(&self, sender: Arc<dyn preview_pictures::PictureSender>) {
+        *self.picture_sender.lock() = Some(sender);
+    }
+
+    fn picture_sender(&self) -> Option<Arc<dyn preview_pictures::PictureSender>> {
+        self.picture_sender.lock().clone()
     }
 
     /// Serves granted turns' `provider-mcp` from `program` rather than this executable. A test
@@ -8823,8 +8839,9 @@ impl JobProcessor {
                 .as_ref()
                 .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
                 .unwrap_or_default();
-            // The previews whose sites the turn changed take a new picture
-            // while its changes are saved.
+            // The previews whose sites the turn changed start taking a new
+            // picture while its changes are saved; the reply does not wait
+            // for it.
             let mut retry_pictures = None;
             if commit_to_workspace {
                 let retry_commit_files = if read_only_workspace {
@@ -8843,6 +8860,7 @@ impl JobProcessor {
                     read_only_workspace,
                     &retry_commit_files,
                     cancel_signal.clone(),
+                    self.picture_sender(),
                 ));
                 if let Some(token) = workspace_token.as_deref() {
                     if !retry_commit_files.is_empty() {
@@ -8910,6 +8928,7 @@ impl JobProcessor {
                     }));
                 }
             }
+            // The card's picture changes in place once it is sent.
             retry_pictures
                 .unwrap_or_else(|| {
                     preview_pictures::PictureRetake::start(
@@ -8918,10 +8937,10 @@ impl JobProcessor {
                         read_only_workspace,
                         &retry_outcome.files,
                         cancel_signal.clone(),
+                        self.picture_sender(),
                     )
                 })
-                .finish()
-                .await;
+                .detach();
 
             if read_only_workspace
                 && (retry_reported_files_len > 0 || !retry_read_only_changed_paths.is_empty())
@@ -9035,8 +9054,8 @@ impl JobProcessor {
             .as_ref()
             .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
             .unwrap_or_default();
-        // The previews whose sites the turn changed take a new picture while
-        // its changes are saved.
+        // The previews whose sites the turn changed start taking a new
+        // picture while its changes are saved; the reply does not wait for it.
         let mut pictures = None;
         if commit_to_workspace {
             let commit_files = if read_only_workspace {
@@ -9055,6 +9074,7 @@ impl JobProcessor {
                 read_only_workspace,
                 &commit_files,
                 cancel_signal.clone(),
+                self.picture_sender(),
             ));
             if let Some(token) = workspace_token.as_deref() {
                 if !commit_files.is_empty() {
@@ -9122,6 +9142,7 @@ impl JobProcessor {
                 }));
             }
         }
+        // The card's picture changes in place once it is sent.
         pictures
             .unwrap_or_else(|| {
                 preview_pictures::PictureRetake::start(
@@ -9130,10 +9151,10 @@ impl JobProcessor {
                     read_only_workspace,
                     &outcome.files,
                     cancel_signal.clone(),
+                    self.picture_sender(),
                 )
             })
-            .finish()
-            .await;
+            .detach();
 
         if read_only_workspace && (reported_files_len > 0 || !read_only_changed_paths.is_empty()) {
             artifacts.push(build_read_only_write_blocked_artifact(

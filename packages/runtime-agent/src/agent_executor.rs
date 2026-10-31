@@ -197,6 +197,12 @@ impl AgentExecutor {
         self.processor.set_local_origin_sync(value);
     }
 
+    /// A turn that changed an open preview's site sends the preview's new
+    /// picture with `client`, this runtime's own, after its reply.
+    pub fn send_card_pictures_with(&self, client: Arc<ControllerClient>) {
+        self.processor.set_picture_sender(client);
+    }
+
     pub async fn run_apply_with_progress(
         &self,
         client: Arc<ControllerClient>,

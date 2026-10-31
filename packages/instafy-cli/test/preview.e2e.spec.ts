@@ -18,6 +18,8 @@ type RequestCapture = {
   authorization?: string;
   // preview clients the CLI had recorded as running when the request arrived
   liveClients: number[];
+  // when the CLI had recorded the preview as last pictured, when the request arrived
+  pictureAt?: number;
 };
 
 const RUNTIME_ENV_KEYS = [
@@ -164,6 +166,8 @@ async function startMockController(options: {
   credentials?: Record<string, unknown> | null;
   // What PUT …/thumbnail answers (default 200).
   thumbnailStatus?: number;
+  // When the CLI has recorded the preview as last pictured, read as each request arrives.
+  pictureAt?: () => number | undefined;
 }) {
   const captures: RequestCapture[] = [];
   let created = 0;
@@ -177,6 +181,7 @@ async function startMockController(options: {
         body,
         authorization: req.headers.authorization,
         liveClients: options.livePids?.() ?? [],
+        pictureAt: options.pictureAt?.(),
       });
       const base = `/projects/${options.projectId}/previews`;
       const json = (status: number, payload: unknown) => {
@@ -1237,10 +1242,10 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
 
   it("check uploads for an open preview on its port, and for none other", async () => {
     const projectId = randomUUID();
-    const controller = await startMockController({ projectId });
+    const home = makeHome();
+    const controller = await startMockController({ projectId, pictureAt: () => readState(home).previews[0]?.pictureAt });
     const sitePort = await startPage();
     const otherPort = await startPage();
-    const home = makeHome();
     writeState(home, [{
       previewId: "preview-1", projectId, title: "Lisbon weekend", localPort: sitePort, path: "/", controllerUrl: controller.url,
       pid: 999999, logFile: path.join(home, "log"), workdir: path.join(home, "wd"), startedAt: new Date().toISOString(),
@@ -1255,6 +1260,10 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
     expect(readState(home).previews[0]!.pictureAt).toBeGreaterThanOrEqual(before);
     const puts = thumbnailPuts(controller.captures);
     expect(puts.map((capture) => capture.path)).toEqual([`/projects/${projectId}/previews/preview-1/thumbnail`]);
+    // A local test: the picture's time was recorded only once it was sent, so the runtime's own picture of the site
+    // from before this one, still on its way, could not see it was older and was sent after it. It is recorded first.
+    expect(puts[0]!.pictureAt).toBeGreaterThanOrEqual(before);
+    expect(puts[0]!.pictureAt).toBe(readState(home).previews[0]!.pictureAt);
     const body = JSON.parse(puts[0]!.body) as Record<string, unknown>;
     expect(body).toMatchObject({ contentType: "image/jpeg", source: "capture", description: "Trip · 3 days · 14 places" });
     expect(sniffImage(Buffer.from(String(body.image), "base64"))).toEqual({ contentType: "image/jpeg", width: 640, height: 400 });
@@ -1264,6 +1273,48 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
     expect(other.code, other.stderr).toBe(0);
     expect(JSON.parse(other.stdout)).not.toHaveProperty("thumbnail");
     expect(thumbnailPuts(controller.captures)).toHaveLength(1);
+  }, 240000);
+
+  // The runtime takes a card's picture again after a turn's reply, when the turn's own credential no longer works: the
+  // check keeps the picture for the runtime to send with its own, and needs no credential itself.
+  it("check --picture-to keeps the card's picture beside the preview it is for, with no token, and sends nothing", async () => {
+    const projectId = randomUUID();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startPage();
+    const otherPort = await startPage();
+    const home = makeHome();
+    writeState(home, [{
+      previewId: "preview-1", projectId, title: "Lisbon weekend", localPort: sitePort, path: "/", controllerUrl: controller.url,
+      pid: 999999, logFile: path.join(home, "log"), workdir: path.join(home, "wd"), startedAt: new Date().toISOString(),
+    }]);
+    const folder = path.join(home, "picture");
+    fs.mkdirSync(folder);
+    const file = path.join(folder, "card.jpg");
+
+    const before = Date.now();
+    const saved = await execCli(["preview", "check", "--port", String(sitePort), "--desktop", "--picture-to", file, "--json"], home, browserEnv);
+    expect(saved.code, saved.stderr).toBe(0);
+    expect(JSON.parse(saved.stdout)).toMatchObject({ ok: true, thumbnail: "saved" });
+    expect(thumbnailPuts(controller.captures)).toHaveLength(0);
+    expect(sniffImage(fs.readFileSync(file))).toEqual({ contentType: "image/jpeg", width: 640, height: 400 });
+    const beside = JSON.parse(fs.readFileSync(`${file}.json`, "utf8")) as Record<string, unknown>;
+    expect(beside).toMatchObject({ previewId: "preview-1", description: "Trip · 3 days · 14 places" });
+    expect(beside.takenAt).toBeGreaterThanOrEqual(before);
+    // The picture counts as taken, for a turn that changes the site after it.
+    expect(readState(home).previews[0]!.pictureAt).toBe(beside.takenAt);
+
+    // A file that is there is never overwritten.
+    const again = await execCli(["preview", "check", "--port", String(sitePort), "--desktop", "--picture-to", file, "--json"], home, browserEnv);
+    expect(JSON.parse(again.stdout)).toMatchObject({ thumbnail: "failed" });
+    // No preview is open on this port: nothing is kept, and the report says nothing about a picture.
+    const otherFile = path.join(folder, "other.jpg");
+    const other = await execCli(["preview", "check", "--port", String(otherPort), "--desktop", "--picture-to", otherFile, "--json"], home, browserEnv);
+    expect(other.code, other.stderr).toBe(0);
+    expect(JSON.parse(other.stdout)).not.toHaveProperty("thumbnail");
+    expect(fs.existsSync(otherFile)).toBe(false);
+    // The option is for the runtime: the check's help does not offer it.
+    const help = await execCli(["preview", "check", "--help"], home, {});
+    expect(help.stdout).not.toContain("--picture-to");
   }, 240000);
 
   // `--no-thumbnail` promises a card with no picture of the site, so a check of that preview (Octo's own, or the one
