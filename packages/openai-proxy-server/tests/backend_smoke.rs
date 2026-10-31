@@ -5,7 +5,11 @@ use openai_proxy_server::client::CodexClient;
 const DEFAULT_PROMPT: &str =
     "Reply with a single sentence explaining what this Rust test just did.";
 
+// A live call on the developer's own login (OPENAI_API_KEY, or the Codex
+// auth.json), so it runs only when asked:
+// `cargo test --test backend_smoke -- --ignored`.
 #[tokio::test]
+#[ignore = "requires a real OpenAI key or Codex login and calls the provider"]
 async fn backend_completion_smoke() -> Result<()> {
     let credentials = match auth::load_credentials(None) {
         Ok(creds) => creds,
