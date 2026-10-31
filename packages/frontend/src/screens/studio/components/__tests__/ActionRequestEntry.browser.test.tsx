@@ -237,8 +237,8 @@ describe("a request_browser card", () => {
     });
 
     // Pressed by the person (here or on another device), or carried on by a
-    // browser turn that failed before it ran: no browser is opening, so the
-    // card never says one is.
+    // browser turn that failed or was stopped before it showed anything: no
+    // browser is opening, so the card never says one is.
     it("shows today's Opened card once nothing is opening it any more", async () => {
       for (const host of [
         { ...web, continuedKeys: new Set(["job:job-1"]) },

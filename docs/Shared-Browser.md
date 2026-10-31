@@ -1091,8 +1091,9 @@ the chat reads it as one turn: the turn's line says "Opening Instafy's
 browser…" until the browser turn shows something, and neither the card nor
 the continuation (which repeats the person's message) is shown. A routed card
 Studio cannot open by itself shows as any card does, with its reason; once the
-person presses it, or once its browser turn fails before it runs, it reads
-Opened as any card does, since nothing is opening it any more. The card's
+person presses it, or once its browser turn fails or is stopped before it
+shows anything, it reads Opened as any card does, since nothing is opening it
+any more. The card's
 browser turn, its hand-back and every check on them are a card's, except that
 its browser turn is the person's own turn for billing (its task is their
 words; [Credits and billing](Credits-Billing.md)), and its hand-back gives the

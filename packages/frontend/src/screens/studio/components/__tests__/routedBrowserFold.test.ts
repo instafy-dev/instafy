@@ -85,18 +85,34 @@ const failedBeforeItRan = message({
   metadata: { runId: BROWSER_RUN, source: "agent", outcome: "failed", messageType: "error" },
 });
 
+// The person stopped it before it showed anything: the controller's notice.
+const stoppedBeforeItShowedAnything = message({
+  id: "stopped",
+  content: "Stopped (1 run canceled.)",
+  timestamp: 4,
+  metadata: {
+    runId: BROWSER_RUN,
+    source: "controller",
+    kind: "run_cancellation",
+    details: { runIds: [BROWSER_RUN], jobIds: [BROWSER_JOB], outcome: "canceled", runStatus: "canceled" },
+  },
+});
+
 describe("a routed card that is still opening", () => {
   it("is waiting while Studio's own continuation has shown nothing", () => {
     expect([...resolveRoutedBrowserFold([ask, routedCard(), continuation()]).waitingCardKeys])
       .toEqual([`job:${ROUTED_JOB}`]);
   });
 
-  it("is not once the person pressed it, or its browser turn failed before it ran", () => {
+  it("is not once the person pressed it, or its browser turn failed or was stopped before it showed anything", () => {
     expect(resolveRoutedBrowserFold([ask, routedCard(), continuation(false)]).waitingCardKeys.size).toBe(0);
     const failed = [ask, routedCard(), continuation(), failedBeforeItRan];
     expect(resolveRoutedBrowserFold(failed).waitingCardKeys.size).toBe(0);
     // The card stays, with the failure under it.
     expect(shown(failed)).toEqual(["ask", "card", "failure"]);
+    const stopped = [ask, routedCard(), continuation(), stoppedBeforeItShowedAnything];
+    expect(resolveRoutedBrowserFold(stopped).waitingCardKeys.size).toBe(0);
+    expect(shown(stopped)).toContain("card");
   });
 });
 

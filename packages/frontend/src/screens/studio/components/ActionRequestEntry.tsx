@@ -345,8 +345,8 @@ export function ActionRequestEntry({
   // by itself, and until that browser turn shows something, the turn's one
   // line says so; then the browser turn's own line follows
   // (routedBrowserFold.ts). A card that stays a button, one the person
-  // pressed, or one whose browser turn failed before it ran shows as any card
-  // does: nothing is opening it.
+  // pressed, or one whose browser turn failed or was stopped before it showed
+  // anything shows as any card does: nothing is opening it.
   const routedOpening = Boolean(browserRequest?.routed && browserKey && (
     browserCardState?.kind === "opening" || browserHost?.routedWaitingKeys?.has(browserKey)
   ));

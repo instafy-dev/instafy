@@ -8,11 +8,13 @@
 // the card goes too. A routed card that stays a button (Studio could not
 // open it by itself) or that the person pressed is never folded: it shows as
 // any card does, with its reason, and reads Opened once pressed. So does one
-// whose browser turn failed before it ran: nothing is opening any more.
+// whose browser turn failed or was stopped before it showed anything: nothing
+// is opening any more.
 
 import { hasFailedRunMetadata } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
 import { getMessageType } from "./chatMessageMetadata";
+import { getControllerConversationNoticeKind } from "./controllerConversationNotice";
 import {
   browserRequestFromMessage,
   browserRequestKey,
@@ -41,17 +43,24 @@ export type RoutedBrowserFold = {
   cardIdByBrowserJobId: ReadonlyMap<string, string>;
   /**
    * Routed cards, by {@link browserRequestKey}, whose continuation Studio
-   * sent by itself and whose browser turn has not failed before it ran: the
-   * card reads "Opening Instafy's browser…" until that turn shows something.
+   * sent by itself and whose browser turn has not ended before it showed
+   * anything: the card reads "Opening Instafy's browser…" until that turn
+   * shows something.
    */
   waitingCardKeys: ReadonlySet<string>;
 };
 
-/** A failure posted for a run that no job ran (the run's job never started). */
-function failedBeforeAJobRan(message: ChatMessage): boolean {
+/**
+ * A run that ended before its job showed anything: a failure posted for it
+ * without a job (no job ran it), or the controller's notice that it stopped
+ * or could not start.
+ */
+function endsARunWithoutItsJob(message: ChatMessage): boolean {
   return message.role === "assistant" &&
     !stringField(message, ["jobId", "job_id"]) &&
-    ((getMessageType(message) ?? "").trim().toLowerCase() === "error" || hasFailedRunMetadata(message.metadata));
+    ((getMessageType(message) ?? "").trim().toLowerCase() === "error" ||
+      hasFailedRunMetadata(message.metadata) ||
+      getControllerConversationNoticeKind(message) !== null);
 }
 
 /**
@@ -62,14 +71,14 @@ function failedBeforeAJobRan(message: ChatMessage): boolean {
 export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): RoutedBrowserFold {
   const routedCards = new Map<string, ChatMessage>();
   const jobByRunId = new Map<string, string>();
-  const runsFailedBeforeAJob = new Set<string>();
+  const runsEndedWithoutAJob = new Set<string>();
   for (const message of messages) {
     if (message.role !== "assistant") continue;
     if (browserRequestFromMessage(message)?.routed) routedCards.set(browserRequestKey(message), message);
     const jobId = stringField(message, ["jobId", "job_id"]);
     const runId = stringField(message, ["runId", "run_id"]);
     if (jobId && runId && !jobByRunId.has(runId)) jobByRunId.set(runId, jobId);
-    if (runId && failedBeforeAJobRan(message)) runsFailedBeforeAJob.add(runId);
+    if (runId && endsARunWithoutItsJob(message)) runsEndedWithoutAJob.add(runId);
   }
   const hiddenPromptIds = new Set<string>();
   const cardIdByBrowserJobId = new Map<string, string>();
@@ -83,7 +92,7 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
     const runId = stringField(message, ["runId", "run_id"]);
     const browserJobId = jobByRunId.get(runId);
     if (browserJobId) cardIdByBrowserJobId.set(browserJobId, card.id);
-    if (!runsFailedBeforeAJob.has(runId)) waitingCardKeys.add(key);
+    if (!runsEndedWithoutAJob.has(runId)) waitingCardKeys.add(key);
   }
   return { hiddenPromptIds, cardIdByBrowserJobId, waitingCardKeys };
 }
