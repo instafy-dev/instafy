@@ -688,7 +688,12 @@ const makePage = (targetId, opened = null) => {
         throw new Error("element <button title=\"Target page, context or browser has been closed\"> is not visible");
       }
     },
-    focus: async () => {},
+    focus: async () => {
+      // A field whose focus handler sends the page to another site.
+      if (mode === "focus-leaves-site") {
+        currentUrl = "https://other.example/";
+      }
+    },
     fill: async () => {},
     press: async (key) => {
       if (mode === "site-search-posts-own" && key === "Enter") {
@@ -702,7 +707,12 @@ const makePage = (targetId, opened = null) => {
       ? formEntriesFor(arg)
       : arg && arg.kind === "sent-fields"
         ? sentFieldsFor(arg)
-        : controlsFor(targetId)[ordinal],
+        : arg && arg.kind === "around-text"
+          // The control's card: "around-changed-after-allow" shows another
+          // product beside the same control once the person said yes.
+          ? { connected: true, around: mode === "around-changed-after-allow" && approvalWasConsumed()
+            ? "Red mug Add to cart" : "Blue mug Add to cart" }
+          : controlsFor(targetId)[ordinal],
     click: async () => {
       if (clickLogPath) fs.appendFileSync(clickLogPath, `${ordinal}\n`);
       return handle.click();
@@ -2794,16 +2804,125 @@ fn a_search_said_no_to_names_its_step_a_search() {
         );
     }
 
-    // Only that exact line names a step; anything else on stdout names none.
-    for stdout in [
-        r#"{"ok":false,"activity":{"step":"search","url":"https://evil.example/"}}"#,
-        r#"{"ok":false,"activity":{"step":"buy"}}"#,
-        r#"{"ok":true,"activity":{"step":"search"}}"#,
-        "search",
-        "",
+    // Only that exact line names a step and the person's yes, and whether a
+    // change on the page left that yes unused; anything else on stdout names
+    // nothing.
+    let named = |step, approval| {
+        Some(FailedStep {
+            step,
+            approval,
+            changed_after_yes: false,
+        })
+    };
+    let unused = |step, approval| {
+        Some(FailedStep {
+            step,
+            approval,
+            changed_after_yes: true,
+        })
+    };
+    for (stdout, expected) in [
+        (
+            r#"{"ok":false,"activity":{"step":"search"}}"#,
+            named(Some("search"), None),
+        ),
+        (
+            r#"{"ok":false,"activity":{"approval":"once"}}"#,
+            named(None, Some("once")),
+        ),
+        (
+            r#"{"ok":false,"activity":{"step":"submit","approval":"once"}}"#,
+            named(Some("submit"), Some("once")),
+        ),
+        (
+            r#"{"ok":false,"activity":{"step":"search","url":"https://evil.example/"}}"#,
+            None,
+        ),
+        (r#"{"ok":false,"activity":{"step":"buy"}}"#, None),
+        (
+            r#"{"ok":false,"activity":{"step":"search","approval":"always"}}"#,
+            None,
+        ),
+        (r#"{"ok":false,"activity":{"approval":"routine"}}"#, None),
+        (r#"{"ok":false,"activity":{}}"#, None),
+        (r#"{"ok":true,"activity":{"step":"search"}}"#, None),
+        (
+            r#"{"ok":false,"activity":{"approval":"once"},"changedAfterYes":true}"#,
+            unused(None, Some("once")),
+        ),
+        (
+            r#"{"ok":false,"activity":{"step":"submit","approval":"once"},"changedAfterYes":true}"#,
+            unused(Some("submit"), Some("once")),
+        ),
+        // Only a yes can go unused, and only as that exact word.
+        (
+            r#"{"ok":false,"activity":{"step":"search"},"changedAfterYes":true}"#,
+            None,
+        ),
+        (
+            r#"{"ok":false,"activity":{"approval":"once"},"changedAfterYes":false}"#,
+            None,
+        ),
+        (
+            r#"{"ok":false,"activity":{"approval":"once"},"changedAfterYes":"yes"}"#,
+            None,
+        ),
+        (
+            r#"{"ok":false,"activity":{"approval":"once"},"changedAfterYes":true,"why":"x"}"#,
+            None,
+        ),
+        (r#"{"ok":false,"changedAfterYes":true}"#, None),
+        ("search", None),
+        ("", None),
     ] {
-        assert_eq!(failed_step_kind(stdout.as_bytes()), None, "{stdout}");
+        assert_eq!(failed_step(stdout.as_bytes()), expected, "{stdout}");
     }
+}
+
+/// A step the person allowed whose control then changed fails without ending
+/// the run, and its failed result keeps their yes for the turn's Details; a
+/// failure with nothing said of its step carries no activity.
+#[test]
+fn a_failed_step_keeps_the_persons_yes_in_its_result() {
+    let failure = |stdout: &str| -> anyhow::Error {
+        let FailedStep {
+            step,
+            approval,
+            changed_after_yes,
+        } = failed_step(stdout.as_bytes()).unwrap_or_default();
+        ControllerFailure {
+            message: "Shared Browser command exited with exit status: 1: The page changed after the person said yes".to_string(),
+            step,
+            approval,
+            changed_after_yes,
+        }
+        .into()
+    };
+    let allowed = failed_call_result(&failure(r#"{"ok":false,"activity":{"approval":"once"}}"#));
+    assert_eq!(allowed.is_error, Some(true));
+    assert_eq!(
+        allowed.structured_content.expect("structured"),
+        json!({"activity": {"approval": "once"}})
+    );
+    let plain = failed_call_result(&failure(""));
+    assert_eq!(plain.is_error, Some(true));
+    assert_eq!(plain.structured_content, None);
+    // A page the network did not deliver keeps its own plain reason beside it.
+    let network: anyhow::Error = ControllerFailure {
+        message: "page.goto: net::ERR_CONNECTION_REFUSED at https://example.test/".to_string(),
+        step: None,
+        approval: Some("once"),
+        changed_after_yes: false,
+    }
+    .into();
+    let structured = failed_call_result(&network)
+        .structured_content
+        .expect("structured");
+    assert_eq!(structured["activity"], json!({"approval": "once"}));
+    assert_eq!(
+        structured["error"]["details"],
+        "net::ERR_CONNECTION_REFUSED"
+    );
 }
 
 #[tokio::test]
@@ -2821,6 +2940,8 @@ async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
             Err(ControllerFailure {
                 message: "the person denied it [approval_denied_non_retryable]".to_string(),
                 step: Some("search"),
+                approval: None,
+                changed_after_yes: false,
             }
             .into())
         })
@@ -2848,6 +2969,90 @@ async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
         ))
     ));
     assert_eq!(server.terminal_step.lock().await.take(), None);
+}
+
+/// A yes the page's change left unused (the control changed while the prompt
+/// waited) is asked about again once in a run. The second ends the run with
+/// `approval_stale`, its answer names the step's kind, and nothing runs after
+/// it, so a countdown beside a control never turns into a chain of prompts.
+/// Other failures, a yes that went through and failures with no yes do not
+/// count.
+#[tokio::test]
+async fn a_second_yes_left_unused_by_a_changing_page_ends_the_run() {
+    let server = SharedBrowserMcpServer::new();
+    let request = SharedBrowserRequest {
+        method: "POST".to_string(),
+        path: "/v1/click".to_string(),
+        body: Some(json!({ "index": 0, "snapshotId": SNAPSHOT_ID })),
+    };
+    let failure = |approval: Option<&'static str>, changed_after_yes: bool| {
+        move || async move {
+            Err(ControllerFailure {
+                message: "The page changed after the person said yes".to_string(),
+                step: Some("submit"),
+                approval,
+                changed_after_yes,
+            }
+            .into())
+        }
+    };
+    let other = |result: &std::result::Result<JsonValue, SharedBrowserMcpExecutionFailure>| {
+        matches!(result, Err(SharedBrowserMcpExecutionFailure::Other(_)))
+    };
+    // The first is asked about again; failures that left no yes unused,
+    // answers and successes in between do not count.
+    assert!(other(
+        &server
+            .execute_with_failure_latch(&request, failure(Some("once"), true))
+            .await
+    ));
+    assert!(other(
+        &server
+            .execute_with_failure_latch(&request, failure(Some("once"), false))
+            .await
+    ));
+    assert!(other(
+        &server
+            .execute_with_failure_latch(&request, failure(None, false))
+            .await
+    ));
+    assert!(
+        server
+            .execute_with_failure_latch(&request, || async { Ok(json!({ "ok": true })) })
+            .await
+            .is_ok()
+    );
+    // The second ends the run.
+    let second = server
+        .execute_with_failure_latch(&request, failure(Some("once"), true))
+        .await;
+    assert!(matches!(
+        second,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_stale"
+        ))
+    ));
+    let step = server.terminal_step.lock().await.take();
+    assert_eq!(step, Some("submit"));
+    let answer = terminal_consent_call_result_with_step("approval_stale", step);
+    let structured = answer.structured_content.expect("structured");
+    assert_eq!(structured["terminalConsent"]["code"], "approval_stale");
+    assert_eq!(structured["activity"], json!({"step": "submit"}));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let later_calls = Arc::clone(&calls);
+    let later = server
+        .execute_with_failure_latch(&request, || async move {
+            later_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(json!({ "unexpected": "ran after the stop" }))
+        })
+        .await;
+    assert!(matches!(
+        later,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "approval_stale"
+        ))
+    ));
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
 }
 
 #[test]
@@ -3218,6 +3423,55 @@ fn deny_timeout_replay_and_stale_target_fail_closed_without_action() {
             .contains("approval_stale_or_replayed_non_retryable")
     );
 
+    // A control that changed after the person's yes is not acted on. The
+    // step is asked about again instead of ending the run: its error is not
+    // terminal, the failed command still says the person allowed it, and
+    // says that yes went unused, which the run counts.
+    let changed_after_yes = |output: &Output, what: &str| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{what} ran after its control changed"
+        );
+        assert!(
+            stderr.contains("The page changed after the person said yes")
+                && stderr.contains("it asks the person again"),
+            "unexpected {what} error: {stderr}"
+        );
+        assert!(
+            !stderr.contains("_non_retryable"),
+            "{what} ended the run: {stderr}"
+        );
+        // The step's own action line is written just before it acts.
+        let actions = std::fs::read_to_string(&fixture.actions_path).unwrap_or_default();
+        assert!(
+            !actions.contains(r#""type":"click""#) && !actions.contains(r#""type":"type""#),
+            "{what} was done: {actions}"
+        );
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&output.stdout).expect("one JSON line"),
+            json!({"ok": false, "activity": {"approval": "once"}, "changedAfterYes": true}),
+            "{what}"
+        );
+        let error = controller_failure(output.status, &output.stderr, &output.stdout);
+        assert!(
+            terminal_consent_failure_code_from_error(&error).is_none(),
+            "{what}"
+        );
+        assert!(
+            error
+                .downcast_ref::<ControllerFailure>()
+                .is_some_and(|failure| failure.changed_after_yes),
+            "{what}"
+        );
+        let result = failed_call_result(&error);
+        assert_eq!(result.is_error, Some(true), "{what}");
+        assert_eq!(
+            result.structured_content.expect("structured")["activity"],
+            json!({"approval": "once"}),
+            "{what}"
+        );
+    };
     let stale_snapshot_id = fixture.snapshot_id("stale-after-allow");
     let stale_body = json!({ "index": 0, "snapshotId": stale_snapshot_id }).to_string();
     let (stale, stale_requests) = fixture.run_with_decisions(
@@ -3230,11 +3484,10 @@ fn deny_timeout_replay_and_stale_target_fail_closed_without_action() {
         &["allow_once"],
     );
     assert_eq!(stale_requests.len(), 1);
-    assert!(!stale.status.success());
+    changed_after_yes(&stale, "click");
     assert!(
-        String::from_utf8_lossy(&stale.stderr).contains("approval_stale_non_retryable"),
-        "unexpected stale-action error: {}",
-        String::from_utf8_lossy(&stale.stderr)
+        !fixture.click_log.exists(),
+        "the changed control was clicked"
     );
 
     let stale_type_body = json!({
@@ -3255,12 +3508,7 @@ fn deny_timeout_replay_and_stale_target_fail_closed_without_action() {
     );
     assert_eq!(stale_type_requests.len(), 1);
     assert_eq!(stale_type_requests[0]["operation"], "type");
-    assert!(!stale_type.status.success());
-    assert!(
-        String::from_utf8_lossy(&stale_type.stderr).contains("approval_stale_non_retryable"),
-        "unexpected stale-type error: {}",
-        String::from_utf8_lossy(&stale_type.stderr)
-    );
+    changed_after_yes(&stale_type, "typing");
 
     let stale_press_body = json!({
         "index": 0,
@@ -3279,12 +3527,102 @@ fn deny_timeout_replay_and_stale_target_fail_closed_without_action() {
     );
     assert_eq!(stale_press_requests.len(), 1);
     assert_eq!(stale_press_requests[0]["operation"], "press-key");
-    assert!(!stale_press.status.success());
-    assert!(
-        String::from_utf8_lossy(&stale_press.stderr).contains("approval_stale_non_retryable"),
-        "unexpected stale-press error: {}",
-        String::from_utf8_lossy(&stale_press.stderr)
+    changed_after_yes(&stale_press, "key press");
+
+    // The same control, unchanged, with another product beside it once the
+    // person said yes (a card the page drew again in place) is asked about
+    // again too.
+    let around_body = json!({
+        "index": 0,
+        "snapshotId": fixture.snapshot_id("around-changed-after-allow")
+    })
+    .to_string();
+    let (around, around_requests) = fixture.run_with_decisions(
+        "around-changed-after-allow",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&around_body),
+        &["https://example.test"],
+        &["allow_once"],
     );
+    assert_eq!(around_requests.len(), 1);
+    changed_after_yes(&around, "click beside another product");
+    assert!(
+        !fixture.click_log.exists(),
+        "the control was clicked beside another product"
+    );
+}
+
+/// A page that leaves its site during a step is never acted on. After the
+/// person's yes it ends the browser run, and the failed command still lists
+/// their yes; with nobody asked it only fails the step, so the run goes on and
+/// a fresh snapshot judges the new site.
+#[test]
+fn a_page_that_leaves_its_site_ends_the_run_only_after_a_yes() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("focus-leaves-site");
+    let body = json!({
+        "index": 0,
+        "snapshotId": snapshot_id,
+        "text": "must not be entered",
+        "submit": false
+    })
+    .to_string();
+    let (asked, requests) = fixture.run_with_decisions(
+        "focus-leaves-site",
+        "page-target",
+        "POST",
+        "/v1/type",
+        Some(&body),
+        &["https://example.test"],
+        &["allow_once"],
+    );
+    assert_eq!(requests.len(), 1);
+    assert!(!asked.status.success());
+    let stderr = String::from_utf8_lossy(&asked.stderr);
+    assert!(
+        stderr.contains("The page moved to another site after the person said yes")
+            && stderr.contains("[approval_stale_non_retryable]"),
+        "unexpected error: {stderr}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&asked.stdout).expect("one JSON line"),
+        json!({"ok": false, "activity": {"approval": "once"}})
+    );
+    let error = controller_failure(asked.status, &asked.stderr, &asked.stdout);
+    assert_eq!(
+        terminal_consent_failure_code_from_error(&error),
+        Some("approval_stale")
+    );
+
+    // Under routine browsing typing asks nobody: the step fails, the run goes on.
+    fixture.prepare_routine_start("page-target");
+    let unasked = fixture
+        .command_for(
+            "focus-leaves-site",
+            "page-target",
+            "POST",
+            "/v1/type",
+            Some(&body),
+        )
+        .output()
+        .expect("run embedded Shared Browser controller");
+    assert!(!unasked.status.success());
+    let stderr = String::from_utf8_lossy(&unasked.stderr);
+    assert!(
+        stderr.contains(
+            "The page moved to another site, so nothing was done. Take a fresh snapshot."
+        ),
+        "unexpected error: {stderr}"
+    );
+    assert!(
+        !stderr.contains("_non_retryable"),
+        "the run ended: {stderr}"
+    );
+    assert!(unasked.stdout.is_empty(), "nothing was allowed or judged");
+    let error = controller_failure(unasked.status, &unasked.stderr, &unasked.stdout);
+    assert_eq!(terminal_consent_failure_code_from_error(&error), None);
 }
 
 #[test]

@@ -2204,15 +2204,14 @@ async function emitNavigationResult(page) {
   });
 }
 
-async function targetLocator(page, body, revalidationAfterApproval = false) {
+// The control a step is for, by its index in the snapshot Octo observed: the
+// page must still read as that snapshot did (the run, the tab, the address and
+// every control), so the index names the control Octo saw. `asked` keeps what
+// the person is asked about, for approvedTarget: that very control, the page's
+// address and the text around the control.
+async function targetLocator(page, body) {
   const interactive = await collectInteractiveElements(page);
-  const currentSnapshotId = snapshotFingerprint(page.url(), interactive);
-  if (body.snapshotId !== currentSnapshotId) {
-    if (revalidationAfterApproval) {
-      throw new Error(
-        "Shared Browser snapshot changed while approval was pending; the action was not performed [approval_stale_non_retryable]",
-      );
-    }
+  if (body.snapshotId !== snapshotFingerprint(page.url(), interactive)) {
     throw new Error(
       "Shared Browser snapshot is stale; take a fresh snapshot before acting",
     );
@@ -2223,7 +2222,98 @@ async function targetLocator(page, body, revalidationAfterApproval = false) {
       `Shared Browser element index ${body.index} is unavailable; take a fresh snapshot`,
     );
   }
-  return target;
+  const place = await controlPlace(target.locator);
+  return { ...target, asked: { locator: target.locator, url: page.url(), around: place ? place.around : null } };
+}
+
+// After the person's answer, the step acts on the control they were asked
+// about, whatever else on the page changed while they read the prompt: a
+// carousel's slide, a clock, a live count. It is that very control, still
+// shown, on the same address (its fragment too, which some sites keep their
+// page in), with the same text around it (aroundTextInPage: its card, its
+// form's labels), so a product, an order or a total that changed beside it is
+// asked about again. A control the page drew again in its place stands for it only
+// on a page that reads exactly as Octo's snapshot did. Anything else is not
+// used (controlChanged). The run's authority is read again last, so a
+// take-over or a new run still ends the step there. `around: false` leaves
+// the text around it out, for the check right after the step's own focus,
+// which may open a list beside a field.
+async function approvedTarget(page, body, asked, { around = true } = {}) {
+  const place = await controlPlace(asked.locator);
+  let target = null;
+  let placeNow = place;
+  if (place && place.connected) {
+    const description = await describeElement(asked.locator, body.index, null);
+    target = description ? { locator: asked.locator, description } : null;
+  } else {
+    const interactive = await collectInteractiveElements(page);
+    if (body.snapshotId === snapshotFingerprint(page.url(), interactive) && interactive[body.index]) {
+      target = interactive[body.index];
+      placeNow = await controlPlace(target.locator);
+    }
+  }
+  if (
+    !target ||
+    page.url() !== asked.url ||
+    (around && (!placeNow || asked.around === null || placeNow.around !== asked.around))
+  ) {
+    throw controlChanged();
+  }
+  approvalProtocol.authority();
+  return { ...target, asked };
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether the control is still in the page, and the text
+// around it that tells what it acts on: that of the nearest element around it
+// whose text is more than the control's own (a product's card, a form with its
+// labels, a table's row), when that is a small part of the page. Text further
+// away, such as a carousel elsewhere or a clock in the header, is not in it.
+function aroundTextInPage(element, request) {
+  const max = Math.min(Math.max(Number(request && request.maxChars) || 0, 0), 4_000);
+  const textOf = (node) => String((node && node.textContent) || "").replace(/\s+/g, " ").trim();
+  const own = textOf(element);
+  let around = "";
+  for (let node = element.parentElement; node; node = node.parentElement) {
+    const text = textOf(node);
+    if (text !== own) {
+      around = text.length <= max ? text : "";
+      break;
+    }
+  }
+  return { connected: element.isConnected === true, around };
+}
+
+const AROUND_TEXT_MAX_CHARS = 2_000;
+async function controlPlace(locator) {
+  const place = await locator
+    .evaluate(aroundTextInPage, { kind: "around-text", maxChars: AROUND_TEXT_MAX_CHARS })
+    .catch(() => null);
+  return place && typeof place === "object" && typeof place.connected === "boolean" &&
+    typeof place.around === "string"
+    ? { connected: place.connected, around: place.around.slice(0, AROUND_TEXT_MAX_CHARS) }
+    : null;
+}
+
+// Set when a step the person said yes to was not done because its control
+// changed. The failed command says so on stdout, and runtime-agent ends the
+// run at the second such step, so a page that keeps changing never turns into
+// a chain of prompts.
+let changedAfterYes = false;
+
+// The control a step is for is not on the page as it was when the step was
+// judged, so nothing was done. This does not end the run: Octo looks at the
+// page again and, if the step still fits, does it again, which asks the person
+// again when it asked them before.
+function controlChanged() {
+  if (stepAllowedAtPrompt) {
+    changedAfterYes = true;
+  }
+  return new Error(
+    stepAllowedAtPrompt
+      ? "The page changed after the person said yes, and the control this step was for is not there as it was, so nothing was done. Take a fresh snapshot and do the step again if it still fits the request: it asks the person again."
+      : "The page changed before this step ran, and the control it was for is not there as it was, so nothing was done. Take a fresh snapshot and do the step again if it still fits the request.",
+  );
 }
 
 function descriptionContent(description) {
@@ -2613,12 +2703,21 @@ function resolvedTargetDestination(description, currentUrl) {
   }
 }
 
+// The step stays on the site it was judged on. A page that moved to another
+// site after the person said yes in this step ends the browser run
+// (approval_stale): their yes was for a step on that site, and the reply says
+// the page changed after it. One that moved while nobody was asked only fails
+// the step, and a fresh snapshot judges the site it is on now.
 function assertSameOrigin(actualUrl, expectedOrigin) {
-  if (approvalProtocol.normalizedOrigin(actualUrl) !== expectedOrigin) {
+  if (approvalProtocol.normalizedOrigin(actualUrl) === expectedOrigin) {
+    return;
+  }
+  if (stepAllowedAtPrompt) {
     throw new Error(
-      "Shared Browser page changed while approval was pending; take a fresh snapshot and retry [approval_stale_non_retryable]",
+      "The page moved to another site after the person said yes, so the step was not done [approval_stale_non_retryable]",
     );
   }
+  throw new Error("The page moved to another site, so nothing was done. Take a fresh snapshot.");
 }
 
 function assertSameTarget(
@@ -2629,9 +2728,7 @@ function assertSameTarget(
   destinationMode = "target",
 ) {
   if (targetFingerprint(actual.description) !== expectedFingerprint) {
-    throw new Error(
-      "Shared Browser target changed while approval was pending; take a fresh snapshot and retry [approval_stale_non_retryable]",
-    );
+    throw controlChanged();
   }
   const targetDestination = resolvedTargetDestination(
     actual.description,
@@ -2648,9 +2745,7 @@ function assertSameTarget(
       expectedDestination.destinationFingerprint ||
     actualBinding.destinationOrigin !== expectedDestination.destinationOrigin
   ) {
-    throw new Error(
-      "Shared Browser destination changed while approval was pending; take a fresh snapshot and retry [approval_stale_non_retryable]",
-    );
+    throw controlChanged();
   }
 }
 
@@ -3812,7 +3907,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
-    target = await targetLocator(page, body, true);
+    target = await approvedTarget(page, body, target.asked);
     assertSameTarget(
       target,
       page.url(),
@@ -3921,7 +4016,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
-    target = await targetLocator(page, body, true);
+    target = await approvedTarget(page, body, target.asked);
     assertSameTarget(
       target,
       page.url(),
@@ -3939,7 +4034,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     await target.locator.focus();
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
-    target = await targetLocator(page, body, true);
+    target = await approvedTarget(page, body, target.asked, { around: false });
     assertSafeTypeTarget(target.description);
     assertSameTarget(
       target,
@@ -4049,7 +4144,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
-    target = await targetLocator(page, body, true);
+    target = await approvedTarget(page, body, target.asked);
     assertSameTarget(
       target,
       page.url(),
@@ -4152,10 +4247,21 @@ async function main() {
 main().then(
   () => process.exit(0),
   async (error) => {
-    // The step's kind, for the turn's line, on stdout: runtime-agent reads it
-    // only from a failed command's stdout, as one of a few fixed words.
-    if (FAILED_STEP_KINDS.has(stepKind)) {
-      await writeStdout(`${JSON.stringify({ ok: false, activity: { step: stepKind } })}\n`).catch(() => {});
+    // What the step was, for the turn's line and Details, on stdout:
+    // runtime-agent reads it only from a failed command's stdout, as a few
+    // fixed words. Its kind when the browser judged it before it asked, and
+    // "once" when the person said yes at its prompt: a step they allowed that
+    // then did not happen still lists their yes. `changedAfterYes` when that
+    // yes was not used because the control changed (controlChanged), which
+    // runtime-agent counts for the run.
+    const activity = {
+      ...(FAILED_STEP_KINDS.has(stepKind) ? { step: stepKind } : {}),
+      ...(stepAllowedAtPrompt ? { approval: "once" } : {}),
+    };
+    if (Object.keys(activity).length) {
+      await writeStdout(
+        `${JSON.stringify({ ok: false, activity, ...(changedAfterYes ? { changedAfterYes: true } : {}) })}\n`,
+      ).catch(() => {});
     }
     const message = error && error.message ? error.message : String(error);
     // Errors reach the model and logs; browser errors can quote page markup.

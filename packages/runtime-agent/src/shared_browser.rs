@@ -165,6 +165,14 @@ const BROWSER_UNAVAILABLE_EXIT_CODE: i32 = 75;
 /// while a browser that is gone ends it within seconds instead of the model
 /// retrying for minutes.
 const BROWSER_UNAVAILABLE_STREAK_LIMIT: u32 = 2;
+/// Steps in one run the person said yes to that were then not done because
+/// their control changed (the controller's `changedAfterYes`). The first is
+/// asked about again; the second ends the run with `approval_stale`, so a page
+/// that keeps changing beside a control (a countdown in its form) never turns
+/// into a chain of prompts.
+const CHANGED_AFTER_YES_LIMIT: u32 = 2;
+/// The terminal code a run ends on at [`CHANGED_AFTER_YES_LIMIT`].
+const CHANGED_AFTER_YES_CODE: &str = "approval_stale";
 /// How long a person has to answer the prompts of one Shared Browser tool
 /// call, as `assets/shared-browser-approval.js` reads it. The script's
 /// `DEFAULT_APPROVAL_WAIT_MS` and `MAX_APPROVAL_WAIT_MS`, and the origin's
@@ -2533,6 +2541,9 @@ struct SharedBrowserMcpServer {
     terminal_step: Arc<AsyncMutex<Option<&'static str>>>,
     /// Tool calls in a row that found the browser unavailable.
     browser_unavailable_streak: Arc<AtomicU32>,
+    /// Steps in this run whose yes was not used because their control
+    /// changed ([`CHANGED_AFTER_YES_LIMIT`]).
+    changed_after_yes: Arc<AtomicU32>,
 }
 
 impl SharedBrowserMcpServer {
@@ -2543,6 +2554,7 @@ impl SharedBrowserMcpServer {
             terminal_consent_failure: Arc::new(AsyncMutex::new(None)),
             terminal_step: Arc::new(AsyncMutex::new(None)),
             browser_unavailable_streak: Arc::new(AtomicU32::new(0)),
+            changed_after_yes: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -2607,6 +2619,24 @@ impl SharedBrowserMcpServer {
                 if streak >= BROWSER_UNAVAILABLE_STREAK_LIMIT {
                     return Err(self.latch_terminal_failure(BROWSER_UNAVAILABLE_CODE).await);
                 }
+                // A yes the page's change left unused is asked about again
+                // once in a run; the second ends the run, and its answer
+                // names the step's kind like any other that ends it.
+                if let Some(failure) = error.downcast_ref::<ControllerFailure>()
+                    && failure.changed_after_yes
+                    && self
+                        .changed_after_yes
+                        .fetch_add(1, Ordering::SeqCst)
+                        .saturating_add(1)
+                        >= CHANGED_AFTER_YES_LIMIT
+                {
+                    let latched = self.latch_terminal_failure(CHANGED_AFTER_YES_CODE).await;
+                    if matches!(latched, SharedBrowserMcpExecutionFailure::TerminalConsent(code) if code == CHANGED_AFTER_YES_CODE)
+                    {
+                        *self.terminal_step.lock().await = failure.step;
+                    }
+                    return Err(latched);
+                }
                 Err(SharedBrowserMcpExecutionFailure::Other(error))
             }
         }
@@ -2661,6 +2691,25 @@ impl ServerHandler for SharedBrowserMcpServer {
             Err(SharedBrowserMcpExecutionFailure::Other(error)) => Ok(failed_call_result(&error)),
         }
     }
+}
+
+/// A failed call's result, with what the controller said of its step
+/// (`activity`): a step the person allowed that then did not happen, such as a
+/// control the page changed after their yes, lists their yes in Details.
+fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
+    let mut result = failed_tool_result(&format!("{error:#}"));
+    let activity = error
+        .downcast_ref::<ControllerFailure>()
+        .and_then(ControllerFailure::activity);
+    if let Some(activity) = activity {
+        match result.structured_content.as_mut() {
+            Some(JsonValue::Object(structured)) => {
+                structured.insert("activity".to_string(), activity);
+            }
+            _ => result.structured_content = Some(json!({ "activity": activity })),
+        }
+    }
+    result
 }
 
 /// A page that did not load because of the network: one of Chromium's
@@ -3369,20 +3418,47 @@ fn controller_failure(
     if status.code() == Some(BROWSER_UNAVAILABLE_EXIT_CODE) {
         BrowserUnavailable(message).into()
     } else {
+        let FailedStep {
+            step,
+            approval,
+            changed_after_yes,
+        } = failed_step(stdout).unwrap_or_default();
         ControllerFailure {
             message,
-            step: failed_step_kind(stdout),
+            step,
+            approval,
+            changed_after_yes,
         }
         .into()
     }
 }
 
 /// A controller command that failed, with the step's kind when the command
-/// said it (a search, or a form sent) before it asked the person.
+/// said it (a search, or a form sent) before it asked the person, `once`
+/// when the person allowed the step at its prompt, and `changed_after_yes`
+/// when that yes was not used because the step's control changed.
 #[derive(Debug)]
 struct ControllerFailure {
     message: String,
     step: Option<&'static str>,
+    approval: Option<&'static str>,
+    changed_after_yes: bool,
+}
+
+impl ControllerFailure {
+    /// What the failed call's result says of its step (`activity`), for the
+    /// turn's line and Details: a step the person allowed that then did not
+    /// happen still lists their yes.
+    fn activity(&self) -> Option<JsonValue> {
+        let mut activity = serde_json::Map::new();
+        if let Some(step) = self.step {
+            activity.insert("step".to_string(), JsonValue::from(step));
+        }
+        if let Some(approval) = self.approval {
+            activity.insert("approval".to_string(), JsonValue::from(approval));
+        }
+        (!activity.is_empty()).then_some(JsonValue::Object(activity))
+    }
 }
 
 impl std::fmt::Display for ControllerFailure {
@@ -3393,26 +3469,63 @@ impl std::fmt::Display for ControllerFailure {
 
 impl std::error::Error for ControllerFailure {}
 
-/// The step kind a failed command printed: exactly `{"ok":false,"activity":
-/// {"step":<kind>}}` on stdout, the kind one of the few the controller names
-/// there. Anything else names none. The controller writes nothing else to
-/// stdout before it fails, and never page text there.
-fn failed_step_kind(stdout: &[u8]) -> Option<&'static str> {
+/// What a failed command said of its step.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FailedStep {
+    step: Option<&'static str>,
+    approval: Option<&'static str>,
+    changed_after_yes: bool,
+}
+
+/// What a failed command printed of its step: exactly `{"ok":false,"activity":
+/// {...}}` on stdout, with `step` (one of the few kinds the controller names
+/// there), `approval` (`once`), or both, and `"changedAfterYes":true` beside
+/// `activity` when the person's yes was not used because the step's control
+/// changed (only with `approval`). Anything else names nothing. The
+/// controller writes nothing else to stdout before it fails, and never page
+/// text there.
+fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
     const KINDS: &[&str] = &["search", "submit"];
+    const APPROVALS: &[&str] = &["once"];
     if stdout.len() > 256 {
         return None;
     }
     let value = serde_json::from_slice::<JsonValue>(stdout).ok()?;
     let object = value.as_object()?;
-    if object.len() != 2 || object.get("ok") != Some(&JsonValue::Bool(false)) {
+    let changed_after_yes = match object.get("changedAfterYes") {
+        None => false,
+        Some(JsonValue::Bool(true)) => true,
+        Some(_) => return None,
+    };
+    if object.len() != 2 + usize::from(changed_after_yes)
+        || object.get("ok") != Some(&JsonValue::Bool(false))
+    {
         return None;
     }
     let activity = object.get("activity")?.as_object()?;
-    if activity.len() != 1 {
+    if activity.is_empty()
+        || activity
+            .keys()
+            .any(|key| key != "step" && key != "approval")
+    {
         return None;
     }
-    let step = activity.get("step")?.as_str()?;
-    KINDS.iter().copied().find(|known| *known == step)
+    // A field that is there names one of its known words, or nothing is read.
+    let known = |field: &str, words: &[&'static str]| match activity.get(field) {
+        None => Some(None),
+        Some(value) => words
+            .iter()
+            .copied()
+            .find(|word| value.as_str() == Some(*word))
+            .map(Some),
+    };
+    let failed = FailedStep {
+        step: known("step", KINDS)?,
+        approval: known("approval", APPROVALS)?,
+        changed_after_yes,
+    };
+    // Only a yes can go unused.
+    (!changed_after_yes || failed.approval.is_some()).then_some(failed)
 }
 
 fn embedded_shared_browser_script() -> String {
