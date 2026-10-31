@@ -93,8 +93,8 @@ A member can **Present** a site whose page says it can share its view, and the o
   in the runtime image's own Playwright and Chromium (the engine `instafy preview check` uses) at 1280×800 in dark mode
   and keeps a 640×400 JPEG (quality 70, or 50 when that is over 256 KiB, else none), within 15 s in all. A preview
   keeps one picture, which Studio shows in its light and dark themes alike: a page that follows the person's light or
-  dark mode is pictured dark, since a light picture was a bright block in a dark Studio, and a page with only a light
-  look is pictured light, as it shows. A page that draws itself
+  dark mode is pictured dark, since a light picture would be a bright block in a dark Studio, and a page with only a
+  light look is pictured light, as it shows. A page that draws itself
   after it loads marks it: `data-instafy-ready="false"` on its `<html>` element, then `"true"` once drawn (the map
   engine sets it once its tiles and description are in). The picture then waits for `"true"` instead of a quiet
   network, up to 30 s in all, and a page still drawing by then gets no picture, never a half-drawn one. The JSON gains `thumbnail`
@@ -456,8 +456,9 @@ Studio → site, on every frame load and when Studio's theme changes:
 ```
 
 `caps.location: "host"` means the person's location is available through Studio: ask Studio, not
-`navigator.geolocation`, which the frame may not use. `theme` is Studio's, so a site can match it. A site that speaks
-before it got the layout is sent it again. In a conversation's preview pane the layout also carries `caps.ask`: `true`
+`navigator.geolocation`, which the frame may not use. `theme` is Studio's, so a site can match it: the bind client
+puts it on `<html data-theme>`, which the starters' `theme.css` reads. A framed page's `prefers-color-scheme` follows
+the device, not Studio's theme. A site that speaks before it got the layout is sent it again. In a conversation's preview pane the layout also carries `caps.ask`: `true`
 when this person may send messages there, so a site's Ask Octo click (`ask`) is sent as their own message, or the
 plain reason they may not (Bound-Sites.md §2a).
 

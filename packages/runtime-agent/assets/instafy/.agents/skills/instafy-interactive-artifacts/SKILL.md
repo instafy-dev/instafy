@@ -30,8 +30,10 @@ own kind of page.
 ## 2. Build
 
 - Phone-first, no build step, no secrets in the page. Render text with `textContent`; only open `https:` links.
-- Light and dark, like the starters: a page you write sets `color-scheme: light dark` and its colours again under
-  `@media (prefers-color-scheme: dark)`, never `color-scheme: light` alone. One look only when asked.
+- Light and dark, like the starters' `theme.css`: a page you write sets its dark colours, with `color-scheme: dark`,
+  under `:root:not([data-theme="light"])` inside `@media (prefers-color-scheme: dark)` and under
+  `:root[data-theme="dark"]` (Studio's theme, which `instafy bind serve` puts on `<html>`). Never
+  `color-scheme: light` alone; one look only when asked.
 - One primary button per page; no search, filter or sort nobody asked for. The lede: the verdict plus the biggest
   unknown. Facts carry their trust: `checked 17 Oct on maker.com`, `€549 at Shop · seen 17 Oct`, `checked 4 min
   ago`, `Estimate`, `Unknown`.
