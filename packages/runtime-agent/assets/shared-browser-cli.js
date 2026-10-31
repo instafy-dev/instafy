@@ -3090,7 +3090,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
         assertStepOnTime();
         emitAction({ type: "navigate", label: `Open a tab: ${url}`, url });
         loading = true;
-        await opened.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+        await openAddress(opened, url);
         await settleAfterAction(opened);
         documents.assertNoneBlocked();
       } catch (error) {
@@ -3166,21 +3166,52 @@ async function within(ms, promise, fallback = null) {
   }
 }
 
+// The load a step of Octo's started (navigate, open_tab) while its site has
+// not answered: the tab it loads in, and whether the site answered in the end
+// (the tab's new page committed) or the load failed or was stopped.
+let unansweredLoad = null;
+
+// Opens `url` in `page`, as the address bar does, and waits for the page's
+// content. Until the site answers, the load is the step's unanswered load
+// (pageAsItIs).
+async function openAddress(page, url) {
+  const deadline = Date.now() + 30_000;
+  const committed = page.goto(url, { waitUntil: "commit", timeout: 30_000 });
+  const load = { page, answered: committed.then(() => true, () => false) };
+  unansweredLoad = load;
+  try {
+    await committed;
+  } finally {
+    if (unansweredLoad === load) unansweredLoad = null;
+  }
+  await page.waitForLoadState("domcontentloaded", { timeout: Math.max(deadline - Date.now(), 1) });
+}
+
 // The answer of a step whose time ran out: the page as it is now, read like a
 // snapshot within LATE_READ_MS, or its address alone when the page is too busy
 // to be read. It says that the step's time ran out, so Octo checks what the step
 // did before it acts again. Its activity says what it is: a read of the page,
-// or, for the address alone, the page it is on, as status names it. A tab still
-// on the blank page has a load whose site has not answered: while it waits,
-// Instafy's browser cannot be reached by the next step, and it would land after
-// the step ended. The step stops it, so it opened nothing, and fails (its line
-// reads as a step tried) saying the site did not answer, never the blank page's
-// "Call navigate", which sent Octo to load the same site again; a load the
-// browser did not confirm stopped is still busy. The step's guards still hold
+// or, for the address alone, the page it is on, as status names it. A load whose
+// site has not answered, whatever page the tab showed before (unansweredLoad),
+// is stopped first: while it waits, Instafy's browser cannot be reached by the
+// next step, and it would land after the step ended. So the step opened nothing,
+// and it fails (its line reads as opening the site it tried) saying the site did
+// not answer and where to go next, never the page the tab still shows, nor the
+// blank page's "Call navigate", which sent Octo to load the same site again. A
+// site that answered as the time ran out has its page, which is read as it is,
+// and a load the browser did not confirm stopped is still busy. A tab that is
+// still blank is stopped and answered the same way. The step's guards still hold
 // while the page is read, then end as a step's guards end: a window it opened is
 // closed, and what they stopped fails the step as it would have in its time.
 async function pageAsItIs(browser) {
-  const read = await within(LATE_READ_MS, (async () => snapshotForResult(await resolveExpectedPage(browser)))());
+  const load = unansweredLoad;
+  const stoppedLoad = load
+    ? await within(GUARD_RELEASE_MS, stopLoading(load.page).catch(() => false), false)
+    : false;
+  const unanswered = load !== null && !(stoppedLoad && (await within(GUARD_RELEASE_MS, load.answered, false)));
+  const read = unanswered
+    ? null
+    : await within(LATE_READ_MS, (async () => snapshotForResult(await resolveExpectedPage(browser)))());
   const guards = [...openStepGuards];
   let stopped = null;
   try {
@@ -3197,16 +3228,19 @@ async function pageAsItIs(browser) {
   }
   await within(GUARD_RELEASE_MS, Promise.all(guards.map((guard) => guard.release())));
   if (stopped) throw stopped;
-  const view = read ?? addressOnly(resolvedPage);
+  const view = unanswered ? null : read ?? addressOnly(resolvedPage);
   const readSomething = read && view.blank !== true && !isBusyPageResult(read);
   // Only a page that was read is "the page as it is now"; a busy one says so
   // in its own message.
   const note = `This step was still running after ${STEP_TIME_MS / 1000} seconds, so it stopped where it was. ${
     readSomething ? "This is the page as it is now: check" : "Check"
   } what the step did before you act again.`;
+  if (unanswered) {
+    throw new Error(stoppedLoad ? unansweredLoadMessage(load.page) : `${BUSY_PAGE_MESSAGE} ${note}`);
+  }
   if (view.blank === true) {
-    const stoppedLoad = await within(GUARD_RELEASE_MS, stopLoading(resolvedPage).catch(() => false), false);
-    throw new Error(stoppedLoad ? UNANSWERED_PAGE_MESSAGE : `${BUSY_PAGE_MESSAGE} ${note}`);
+    const stoppedBlankLoad = await within(GUARD_RELEASE_MS, stopLoading(resolvedPage).catch(() => false), false);
+    throw new Error(stoppedBlankLoad ? UNANSWERED_PAGE_MESSAGE : `${BUSY_PAGE_MESSAGE} ${note}`);
   }
   emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
   return withActivity(
@@ -3216,7 +3250,16 @@ async function pageAsItIs(browser) {
 }
 
 const BUSY_PAGE_MESSAGE = "The page is still busy, so it could not be read yet. Take a snapshot in a moment.";
-const UNANSWERED_PAGE_MESSAGE = `The site did not answer within ${STEP_TIME_MS / 1000} seconds, so nothing was opened and the page is still blank.`;
+// What a load answers whose site sent nothing back within the step's time: the
+// tab still shows what it showed before, and Octo goes to the next source in
+// the same turn (the browser skill's "Finding a page").
+const UNANSWERED_NEXT_SOURCE = "Open the place's own site now (the venue's or the operator's), or another official source if this was it.";
+const UNANSWERED_PAGE_MESSAGE = `The site did not answer within ${STEP_TIME_MS / 1000} seconds, so nothing was opened and the page is still blank. ${UNANSWERED_NEXT_SOURCE}`;
+const UNANSWERED_LOADED_PAGE_MESSAGE = `The site did not answer within ${STEP_TIME_MS / 1000} seconds, so nothing was opened and the tab still shows the page it showed before. ${UNANSWERED_NEXT_SOURCE}`;
+
+function unansweredLoadMessage(page) {
+  return isBlankPage(page) ? UNANSWERED_PAGE_MESSAGE : UNANSWERED_LOADED_PAGE_MESSAGE;
+}
 
 // Stops what the page is still loading, as the browser's stop button does; true
 // once the browser says it did.
@@ -3661,7 +3704,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }
     assertStepOnTime();
     emitAction({ type: "navigate", label: `Go to ${url}`, url });
-    await page.goto(revalidatedUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await openAddress(page, revalidatedUrl);
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
     await emitNavigationResult(page);
