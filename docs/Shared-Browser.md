@@ -1146,8 +1146,10 @@ for the rest of the run without another prompt (the run's state lists it in
 `declinedOrigins`), and the tool tells Octo to take another route that fits the
 person's request, such as opening the site they named directly, or to end the
 turn and ask. Declining a second site, or declining a step, ends the run. A
-denial of a step, an unanswered prompt, a stale request, revocation, storage
-failure, or malformed approval protocol is terminal for that browser run. The
+denial of a step, an unanswered prompt, a stale request, a page that left its
+site after the person's yes or a second yes left unused because its control
+changed (`approval_stale`), revocation, storage failure, or malformed approval
+protocol is terminal for that browser run. The
 runtime latches the failure, rejects later mutations without opening another
 prompt, and reports machine-readable terminal-consent state so the job layer
 does not invoke its normal missing-action retry. The user starts a new turn if
@@ -1156,8 +1158,10 @@ consent prompts, and an unanswered prompt from becoming a chain of prompts
 while the person is away. What the person reads tells the two apart, with no code: an unanswered
 prompt reads "I'm waiting for your OK to continue in Instafy's browser. I
 haven't done that step yet.", a denial reads "You said no, so that step didn't
-happen, and nothing from it was sent.", and every other terminal code reads one
-plain message. Each speaks
+happen, and nothing from it was sent.", `approval_stale` (the page changed
+after the yes) reads "The page changed after you said yes, so I didn't do that
+step. Send a message and I'll ask again.", and every other terminal code reads one plain
+message. Each speaks
 only about the step that asked, because earlier steps of the same turn may
 already have opened pages or changed something. The code stays in the run's
 `browser/terminal-consent` artifact. The tool result tells
@@ -1256,9 +1260,33 @@ author Playwright/CDP scripts or receive a raw debugger endpoint. Click, type,
 and every key press must carry both an index and the SHA-256 `snapshotId` from
 the observed page. The selected CDP target is part of that fingerprint, so even
 two tabs with identical URLs and DOM cannot replay each other's snapshots. The
-controller recomputes that fingerprint immediately before acting and uses a
-concrete element handle, so reordered or relabeled DOM cannot silently retarget
-an action. It resolves `aria-labelledby` references into the raw safety
+controller recomputes that fingerprint before it judges or asks about a step and
+uses a concrete element handle, so reordered or relabeled DOM cannot silently
+retarget an action. Once the person has answered the step's prompt, the page
+elsewhere may have changed by itself while they read it (a carousel's slide, a
+clock, a live count), so the step checks the control they were asked about
+rather than the whole page. It acts on that very element, still shown, with
+the same fingerprint (its names, where it leads, its form and that form's
+text), the same destination, the same address (its fragment too, which some
+sites keep their page in) and the same text around it: that of the nearest
+element around it whose text is more than its own (its card, its form's
+labels, its row), when that is a small part of the page. So a look-alike shown
+in its place (a shop carousel's next "Add to cart"), another order in the
+address, or another product drawn beside it in place is never taken for it. A
+control the page drew again in its place stands for it only on a page that
+reads exactly as Octo's snapshot did. The run's authority is read again last,
+so a take-over or a new run still ends the step there, and the step stays on
+its tab and its site. A control that changed is not used: the step fails
+without ending the run, and Octo takes a fresh snapshot and, if the step still
+fits, does it again, which asks the person again. The run ends
+(`approval_stale`) when the page left its site after the yes, and at the second
+yes in the run left unused this way, so a page that keeps changing beside a
+control (a countdown in its form) never turns into a chain of prompts. A page
+that left its site while nobody was asked only fails the step. A failed step the person allowed still
+says so (`approval: "once"` beside its kind on the controller's stdout, and
+`changedAfterYes` when its yes went unused, which runtime-agent counts), so
+Details list that yes. `scripts/shared-browser-allowed-step-e2e.mjs` plays each
+of these in real Chromium. It resolves `aria-labelledby` references into the raw safety
 descriptor before classifying sensitive and consequential targets; Delete,
 Backspace, Enter, and the rest of the key allowlist cannot bypass that
 classification. CSS selectors are not accepted. The embedded controller loads
