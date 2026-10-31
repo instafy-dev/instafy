@@ -1139,7 +1139,9 @@ words; [Credits and billing](Credits-Billing.md)), and its hand-back gives the
 building turn the message's words as the person's request: that building
 thread never saw the message. A building or chat turn that finds mid-task that
 it needs the browser still asks with its own card. It never starts, stops or replaces a
-machine for this, and every other card waits for the person's press. The
+machine for this, and every other card waits for the person's press, apart
+from a routed card that goes on from the person's own browser turn in the
+browser open in the chat (see "Manual input handoff"). The
 continuation is an ordinary Shared turn with consent version `1`. On the space's
 own machine it starts in routine browsing, as every run there does (see "Human
 approval policy" above); elsewhere it starts in **Ask**, with the per-run origin
@@ -1595,9 +1597,21 @@ browser, it succeeded less than ten minutes ago, its tab is still open and no
 other chat took it since (see One tab per chat), Studio sends the card's
 browser turn in that tab and names that run (`browserContinuesRunId`,
 `sharedBrowserFollowUp`), so the site the person already allowed does not ask
-again. A browser turn is told that it reads pages in Instafy's browser and that
-Octo builds in the chat, never only that it is read-only: told that, a browser
-turn asked for a page replied that "this run" was read-only.
+again. While the browser is open in the chat on that turn's machine, Studio
+sends that card's turn by itself, as the chat's own message went before the
+routing step decided where a message goes: it opens nothing, so it goes in
+any space, whatever a press there would open, also within ten minutes of
+another automatic start and after the person closed, paused or stopped the
+browser earlier in the chat (`routedBrowserFollowUp`, `continue` in
+`useChatBrowserRequest`). On the conversation's own machine in a covered space
+it goes as any card there, after a fresh reading. An address the person has
+not seen, someone else holding the browser and a draft still hold it, and it
+goes only while that browser stays open on that machine and the turn still
+goes on from that run; otherwise the card waits for a press. A browser
+closed or hidden now keeps the press. A browser turn is told that it reads pages in
+Instafy's browser and that Octo builds in the chat, never only that it is
+read-only: told that, a browser turn asked for a page replied that "this run"
+was read-only.
 
 Action/cursor polling runs only while Shared is visible and filters the selected
 page. If the agent requests input while Chat is visible, the field guidance is
@@ -2082,9 +2096,11 @@ unless the policy is `"covered"`.
   controls it, or another person's run works in it. Opening by itself leaves
   the person in Chat, where the reading line and the Browser tab's dot show
   the turn; only a press switches to the Browser view. A stopped machine, a
-  machine without `sharedBrowserHost` and an uncovered space keep the press.
-  The person's own Retry or press inside the browser still may start the
-  machine.
+  machine without `sharedBrowserHost` and an uncovered space keep the press,
+  apart from a routed card that goes on from the person's own browser turn in
+  the browser open in the chat, which opens nothing (see "Manual input
+  handoff"). The person's own Retry or press inside the browser still may
+  start the machine.
   Only a draft in the composer holds a card ("Opens by itself once your draft
   is empty.", shown only on a card that would otherwise open by itself, and
   only while the draft holds it); a narrow pane or side-by-side view turned off

@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../../../types";
 import type { RuntimeBrowserSessionAction } from "../../../../sdk/instafy";
+import type { BrowserSessionPage } from "../browserSessionPages";
 import {
   SHARED_BROWSER_FOLLOW_UP_WINDOW_MS,
   browserPageOrigin,
   continuedSharedBrowserRunId,
+  routedBrowserFollowUp,
   selectSharedBrowserHumanInput,
   sharedBrowserAgentPageIds,
   sharedBrowserConversationRunIds,
@@ -345,5 +347,60 @@ describe("sharedBrowserFollowUp", () => {
     expect(sharedBrowserFollowUp([browserTurn(), routedRun], { ...scope, userId: null })).toBeNull();
     expect(sharedBrowserFollowUp([browserTurn(), routedRun], { ...scope, runtimeId: null })).toBeNull();
     expect(sharedBrowserFollowUp([browserTurn(), routedRun], { ...scope, pages: [] })).toBeNull();
+  });
+});
+
+// What Studio reads, by the routed message's job, to send that card's turn on
+// from the person's own browser turn (useChatBrowserRequest's followUp): only
+// while Instafy's browser is open in this chat, with the run, the machine the
+// browser is open on, and that turn's tab as a page to send a turn for.
+describe("routedBrowserFollowUp", () => {
+  const ROUTED_JOB = "00000000-0000-4000-8000-000000000020";
+  const NOW = Date.parse("2026-10-28T19:56:10Z");
+  const page = (id: string, extra: Partial<BrowserSessionPage> = {}): BrowserSessionPage => ({
+    id, url: `https://www.example.test/${id}`, host: "www.example.test", label: `Page ${id}`, title: `Page ${id}`,
+    lastReferencedAt: 1, isActive: false, ...extra,
+  });
+  const pages = [page("page-0", { isActive: true }), page("page-1")];
+  const scope = {
+    open: true, conversationId: "conversation-1", runtimeId: "runtime-1", userId: USER_ID, pages, nowMs: NOW,
+  };
+  const browserTurn = run({
+    status: "success", createdAt: "2026-10-28T19:53:39Z", updatedAt: "2026-10-28T19:55:10Z",
+    metadata: { ...run().metadata, initiatingUserId: USER_ID },
+  });
+  const routedRun = run({
+    id: "00000000-0000-4000-8000-000000000021", status: "in_progress",
+    createdAt: "2026-10-28T19:56:02Z", updatedAt: "2026-10-28T19:56:05Z", metadata: { jobId: ROUTED_JOB },
+  });
+
+  it("names the run, the machine and that turn's tab while the browser is open in this chat", () => {
+    expect(routedBrowserFollowUp([browserTurn, routedRun], scope, ROUTED_JOB)).toEqual({
+      runId: RUN_ID,
+      runtimeId: "runtime-1",
+      tab: { id: "page-1", url: "https://www.example.test/page-1", host: "www.example.test", label: "Page page-1" },
+    });
+    // The tab the turn left its chat, when it left one.
+    const left = page("page-left", { leftByRun: RUN_ID });
+    expect(routedBrowserFollowUp([browserTurn, routedRun], { ...scope, pages: [...pages, left] }, ROUTED_JOB)?.tab)
+      .toEqual({ id: "page-left", url: left.url, host: left.host, label: left.label });
+  });
+
+  it("names nothing while the browser is closed or hidden, or for another chat, person, machine or job", () => {
+    for (const changed of [
+      { ...scope, open: false },
+      { ...scope, conversationId: "conversation-2" },
+      { ...scope, userId: "00000000-0000-4000-8000-000000000099" },
+      { ...scope, runtimeId: "runtime-2" },
+      { ...scope, runtimeId: null },
+      { ...scope, pages: [] },
+      { ...scope, takenByAnotherChat: (pageId: string) => pageId === "page-1" },
+      { ...scope, nowMs: NOW + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS },
+    ]) {
+      expect(routedBrowserFollowUp([browserTurn, routedRun], changed, ROUTED_JOB)).toBeNull();
+    }
+    // Another message's run came between.
+    expect(routedBrowserFollowUp([browserTurn, routedRun], scope, "00000000-0000-4000-8000-000000000099")).toBeNull();
+    expect(routedBrowserFollowUp([browserTurn, routedRun], scope, "")).toBeNull();
   });
 });

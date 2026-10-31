@@ -1,5 +1,6 @@
 import type { RunRecord } from "../../../types";
 import type { RuntimeBrowserSessionAction } from "../../../sdk/instafy";
+import { toBrowserSessionPageTarget, type BrowserSessionPage, type BrowserSessionPageTarget } from "./browserSessionPages";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -145,6 +146,36 @@ export function sharedBrowserFollowUp<Page extends { id: string; leftByRun?: str
     scope.pages.find((candidate) => candidate.id === metadata.browserPageId);
   if (!page || scope.takenByAnotherChat?.(page.id, runStartedAt(newest))) return null;
   return { runId, page };
+}
+
+/**
+ * The person's browser turn a message Octo sent straight to Instafy's browser
+ * goes on from (sharedBrowserFollowUp), while that browser is open in this
+ * chat (`open`: open over Instafy's browser, not closed or hidden): the run,
+ * the machine the browser is open on, and the tab to go on in. Studio sends
+ * that card's turn there by itself, as the person's next turn, and names the
+ * run so the runtime can carry its approvals over (useChatBrowserRequest).
+ * Null otherwise.
+ */
+export function routedBrowserFollowUp(
+  runs: readonly RunRecord[],
+  scope: {
+    open: boolean;
+    conversationId: string | null;
+    runtimeId: string | null;
+    userId: string | null;
+    pages: readonly BrowserSessionPage[];
+    nowMs?: number;
+    takenByAnotherChat?: ((pageId: string, sinceMs: number) => boolean) | null;
+  },
+  routedJobId: string,
+): { runId: string; runtimeId: string; tab: BrowserSessionPageTarget } | null {
+  const { open, ...followUpScope } = scope;
+  if (!open || !scope.runtimeId || !routedJobId) return null;
+  const followUp = sharedBrowserFollowUp(runs, { ...followUpScope, routedJobId });
+  return followUp
+    ? { runId: followUp.runId, runtimeId: scope.runtimeId, tab: toBrowserSessionPageTarget(followUp.page) }
+    : null;
 }
 
 function activeSharedBrowserRuns(runs: readonly RunRecord[], runtimeId: string): RunRecord[] {
