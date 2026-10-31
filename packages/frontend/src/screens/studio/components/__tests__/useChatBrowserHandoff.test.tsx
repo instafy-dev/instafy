@@ -223,6 +223,13 @@ describe("useChatBrowserHandoff", () => {
         browserRuntimeId: "shared-runtime-1",
       }),
     }));
+    // With the chat's browser closed (after a reload, say), nothing is sent:
+    // the chat says to open the browser first.
+    vi.mocked(value.onSubmit).mockClear();
+    await render({ ...value, runs: [paused], open: false });
+    await expect(resultRef.current!.retryContinue(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, { retryOfMessageId: "failure-1" }))
+      .resolves.toBe(false);
+    expect(value.onSubmit).not.toHaveBeenCalled();
   });
 
   it("sends a Let Octo continue again in the browser on this device with the person's own approval choice", async () => {

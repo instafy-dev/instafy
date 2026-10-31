@@ -321,10 +321,12 @@ export function useChatBrowserHandoff(options: Options) {
    * Try again on a turn that a press of Let Octo continue started: the same
    * press again, in the chat's browser, with the retry's metadata. The
    * browser on this device takes the person's own approval choice, as a
-   * press there does.
+   * press there does. False, with nothing sent, while the chat's browser is
+   * not open.
    */
-  const retryContinue = useCallback((message: string, metadata: Record<string, unknown>) => {
+  const retryContinue = useCallback(async (message: string, metadata: Record<string, unknown>) => {
     const captured = latest.current;
+    if (!captured.open) return false;
     if (captured.transport !== "personal") return continueSharedRun(message, metadata);
     return continuePersonalRun(message, resolvePersonalBrowserApprovalMode({
       status: captured.personal.status,
