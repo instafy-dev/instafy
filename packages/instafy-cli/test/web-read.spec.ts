@@ -833,7 +833,14 @@ describe("stop reasons, never worked around", () => {
       const result = await one("http://news.example.org/x");
       expect(result).toMatchObject({ status: "stopped", code });
       expect(result.text).toBeUndefined();
-      expect(result.tell).toMatch(/do not read it another way/);
+      expect(result.tell).toMatch(/don't read it another way/);
+      // One page's answer leaves the rest of the site open; a 429 or a bot check closes the site for the turn.
+      if (code === "rate_limited" || code === "captcha") {
+        expect(result.tell).toMatch(/nothing more is read from (it|this site) in this turn\. Other sources can still be read\.$/);
+        expect(result.tell).not.toContain("The site's other pages");
+      } else {
+        expect(result.tell).toContain("The site's other pages, such as each product's own page, and other sources can still be read.");
+      }
     });
   }
 
@@ -924,6 +931,93 @@ describe("no retry after a block", () => {
       ["stopped", "rate_limited", true],
     ]);
     expect(hits).not.toContain("news.example.org/b");
+  });
+});
+
+describe("what a stop leaves open", () => {
+  const PAGE_OPEN =
+    "This address only (and where it redirected): don't read it another way. Give the person the plain link. " +
+    "The site's other pages, such as each product's own page, and other sources can still be read.";
+
+  it("stops only the address and where it redirected: the same turn reads the site's other pages and other sources, and the stop names that page", async () => {
+    // A maker's short address redirects to a listing page its robots.txt closes to bots; each product's own page is open.
+    routes["shop.example.net/robots.txt"] = { type: "text/plain", body: "User-agent: *\nDisallow: /marketplace/\n" };
+    routes["shop.example.net/laptop"] = { status: 301, headers: { location: "/marketplace/laptops" } };
+    routes["shop.example.net/marketplace/laptops"] = { body: ARTICLE };
+    routes["shop.example.net/laptop-13"] = { body: page("<h1>Laptop 13</h1><p>Battery: 61 Wh. Weight: 1.3 kg.</p>", "Laptop 13") };
+    routes["news.example.org/laptop-13-review"] = { body: ARTICLE };
+
+    const first = await read("http://shop.example.net/laptop");
+    const stopped = first.pages[0]!;
+    expect(stopped).toMatchObject({
+      status: "stopped",
+      code: "robots",
+      requestedUrl: "http://shop.example.net/laptop",
+      redirects: ["http://shop.example.net/marketplace/laptops"],
+      provenance: { requestedUrl: "http://shop.example.net/laptop", finalUrl: "http://shop.example.net/marketplace/laptops" },
+      tell: PAGE_OPEN,
+    });
+    // The page that stopped it, so what is not checked names that page rather than the maker's site or its products.
+    expect(stopped.message).toBe(
+      "redirected to http://shop.example.net/marketplace/laptops: robots.txt disallows http://shop.example.net/marketplace/laptops for all bots",
+    );
+    const text = formatWebRead(first);
+    expect(text).toContain("[stopped: robots] http://shop.example.net/laptop -> http://shop.example.net/marketplace/laptops\n");
+    expect(text).toContain(`  ${PAGE_OPEN}\n`);
+    expect(text).not.toMatch(/different source/);
+
+    // The same turn: the address and where it redirected stay stopped; the product's own page and a review are read.
+    const report = await read([
+      "http://shop.example.net/laptop",
+      "http://shop.example.net/marketplace/laptops",
+      "http://shop.example.net/laptop-13",
+      "http://news.example.org/laptop-13-review",
+    ]);
+    expect(report.pages.map((p) => [p.status, p.code ?? null, p.previouslyStopped ?? false])).toEqual([
+      ["stopped", "robots", true],
+      ["stopped", "robots", true],
+      ["read", null, false],
+      ["read", null, false],
+    ]);
+    expect(report.pages.slice(0, 2).map((p) => p.message)).toEqual([stopped.message, stopped.message]);
+    expect(report.pages.slice(0, 2).map((p) => p.tell)).toEqual([PAGE_OPEN, PAGE_OPEN]);
+    expect(report.pages[2]!.text).toContain("Battery: 61 Wh. Weight: 1.3 kg.");
+    expect(report.pages[2]!.provenance.finalUrl).toBe("http://shop.example.net/laptop-13");
+    expect(hits).not.toContain("shop.example.net/marketplace/laptops");
+  });
+
+  it("after a stop of the whole site, leaves only other sources open, never the site's other pages", async () => {
+    // robots.txt answers 503: every page of the site is refused, not just the path asked for.
+    routes["news.example.org/robots.txt"] = { status: 503, type: "text/plain", body: "down" };
+    routes["news.example.org/a"] = { body: ARTICLE };
+    routes["news.example.org/b"] = { body: ARTICLE };
+    dns["www.booking.com"] = [PUBLIC_A];
+    const report = await read(["http://news.example.org/a", "http://news.example.org/b", "https://www.booking.com/hotel/x.html", "http://10.1.2.3/"]);
+    expect(report.pages.map((p) => [p.status, p.code])).toEqual([
+      ["stopped", "robots"],
+      ["stopped", "robots"],
+      ["stopped", "link_only"],
+      ["stopped", "blocked_address"],
+    ]);
+    const robotsSite = "This address only (and where it redirected): don't read it another way. Give the person the plain link. " +
+      "The site's robots.txt refuses all of its pages for now. Other sources can still be read.";
+    expect(report.pages.slice(0, 2).map((p) => p.tell)).toEqual([robotsSite, robotsSite]);
+    expect(report.pages[2]!.tell).toBe(
+      "This address only (and where it redirected): don't read it another way. Give the person the plain link. " +
+        "A skill lists this site as link-only: none of its pages is read. Other sources can still be read.",
+    );
+    expect(report.pages[3]!.tell).toBe(
+      "This address only (and where it redirected): don't read it another way. Give the person the plain link. Other sources can still be read.",
+    );
+    for (const result of report.pages) {
+      expect(result.tell).not.toContain("The site's other pages");
+      expect(result.tell).not.toMatch(/different source/);
+    }
+    // Remembered, it says the same: in this turn, and in the next one through the workspace cache.
+    const nextTurn = { INSTAFY_TURN_STARTED_AT: "2026-10-26T11:00:00Z", INSTAFY_PROJECT_ID: "project-1" };
+    expect(await one("http://news.example.org/a")).toMatchObject({ code: "robots", previouslyStopped: true, tell: robotsSite });
+    expect(await one("http://news.example.org/a", {}, { env: nextTurn })).toMatchObject({ code: "robots", previouslyStopped: true, tell: robotsSite });
+    expect(hits.filter((hit) => !hit.endsWith("/robots.txt"))).toEqual([]);
   });
 });
 

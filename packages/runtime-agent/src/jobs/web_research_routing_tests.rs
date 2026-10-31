@@ -668,6 +668,32 @@ fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
+/// A route was answered from memory and marked "not checked", while the turn had read the operator's page that links
+/// its journey planner and could choose the stations there: the line that says where a fact comes from named sights,
+/// stops, opening hours and prices, not routes. It names a route too, which comes from the operator's journey
+/// planner with its stations chosen, in "Finding a page" within the part a snapshot carries, and without pushing the
+/// sign-in rules out of it. An unedited earlier copy is upgraded.
+#[test]
+fn a_route_comes_from_the_operators_journey_planner() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    let section = flat(&BROWSER_SKILL[start..end]);
+    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page: those only lead to it.";
+    assert!(section.contains(line), "{section}");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(line));
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+
+    let previous = include_str!("legacy/browser-automation-v20.md");
+    assert!(!previous.contains("journey planner"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
 /// Reviews come from a search or from a reviewer's home page and its links, never from addresses guessed for
 /// publishers "you know review this kind of item". Unedited earlier copies of both skills are upgraded.
 #[test]
@@ -1083,7 +1109,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "Never a search engine or a guessed path.",
         "A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu.",
         "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
-        "A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page",
+        "A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page",
         "Anything not read on a page this turn (from memory or a search result) says \"not checked\" next to it.",
         "Comparing: list the models a page you read names, and mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
         "A cookie banner with a reject button (\"Reject all\", \"Only necessary\"): press it so it does not cover the page the person watches.",
