@@ -28,6 +28,13 @@
 //! lanes require (no browser, no project MCP server, no file change) and fail after their
 //! recovery run; for the chat's next turn the test saves the state a successful turn would have
 //! saved.
+//!
+//! What a turn costs: chains B, H, G and F replay four browser flows as a person meets them (a
+//! comparison page whose browser turns hand back twice, research that keeps going in the
+//! browser, a sign-in pause that the person lets Octo continue, and a form), and the test prints
+//! what billing would charge for each turn of every chain (`print_costs`): its tokens in, how
+//! many of them a provider with a cache would serve from it, the share of its first request
+//! that is cached, its exact cost in credits and its charge.
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -224,7 +231,10 @@ fn run_isolated_child() -> Result<()> {
         status.success(),
         "the run-instructions fixture failed ({status}):\n{output}"
     );
-    for line in output.lines().filter(|line| line.starts_with("cache ")) {
+    for line in output
+        .lines()
+        .filter(|line| line.starts_with("cache ") || line.starts_with("cost "))
+    {
         println!("{line}");
     }
     Ok(())
@@ -251,7 +261,9 @@ enum Step {
 struct Provider {
     label: StdMutex<String>,
     scripts: StdMutex<HashMap<String, VecDeque<Step>>>,
-    requests: StdMutex<Vec<(String, Value)>>,
+    /// Each request by the label of its job, and whether the stub answered it (a 502 is no
+    /// answer, and reports no usage).
+    requests: StdMutex<Vec<(String, Value, bool)>>,
 }
 
 fn fixture_response(
@@ -316,12 +328,12 @@ async fn provider_request(
     );
     let streams = body["stream"].as_bool().unwrap_or(true);
     let label = state.label.lock().unwrap().clone();
-    state
-        .requests
-        .lock()
-        .unwrap()
-        .push((label.clone(), body.clone()));
     if is_compaction_request(&body) {
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .push((label.clone(), body.clone(), true));
         return fixture_response(
             streams,
             json!({"type":"compaction","encrypted_content":OPAQUE}),
@@ -336,6 +348,11 @@ async fn provider_request(
         .get_mut(&label)
         .and_then(VecDeque::pop_front)
         .unwrap_or(Step::Final { total_tokens: 80 });
+    state.requests.lock().unwrap().push((
+        label.clone(),
+        body.clone(),
+        !matches!(step, Step::Fail502),
+    ));
     match step {
         Step::Final { total_tokens } => {
             fixture_response(streams, final_item(&label), total_tokens, false)
@@ -517,6 +534,11 @@ struct Spec {
     /// Send this job through the API-key proxy instead of the ChatGPT one.
     api_key: bool,
     script: Vec<Step>,
+    /// What the job's prompt asks, after its label; the chains' museum question when None.
+    prompt: Option<&'static str>,
+    /// Metadata the job carries next to its lane's own, as Studio and the controller would
+    /// have set it (a card's continuation, a checked hand-back).
+    metadata: Value,
 }
 
 impl Spec {
@@ -530,7 +552,19 @@ impl Spec {
             emulate_success: matches!(lane, Lane::Shared(_) | Lane::Mcp | Lane::PlainWrite),
             api_key: false,
             script: Vec::new(),
+            prompt: None,
+            metadata: json!({}),
         }
+    }
+
+    fn asking(mut self, prompt: &'static str) -> Self {
+        self.prompt = Some(prompt);
+        self
+    }
+
+    fn with_metadata(mut self, metadata: Value) -> Self {
+        self.metadata = metadata;
+        self
     }
 
     /// The markers of the run text this turn must read.
@@ -556,8 +590,12 @@ impl Spec {
 struct Turn {
     label: &'static str,
     lane: Lane,
+    job_id: Uuid,
+    run_id: Uuid,
     expected: Vec<&'static str>,
     requests: Vec<Value>,
+    /// Whether the stub answered each request (`Provider::requests`).
+    answered: Vec<bool>,
     /// The provider state the job saved, or why it failed.
     outcome: std::result::Result<Option<Value>, String>,
 }
@@ -602,7 +640,7 @@ fn rollout_thread_id(path: &Path) -> Option<String> {
 }
 
 impl Harness {
-    fn lease_job(&self, label: &str, spec: &Spec) -> Result<LeaseJob> {
+    fn lease_job(&self, label: &str, spec: &Spec, job_id: Uuid, run_id: Uuid) -> Result<LeaseJob> {
         let mut metadata = json!({
             "execution_mode":"apply","agentRoutingPreflight":{},
             "runtimeExpectations":{
@@ -623,14 +661,20 @@ impl Harness {
             }
             Lane::Default | Lane::PlainWrite | Lane::Mcp | Lane::Granted => {}
         }
+        for (key, value) in spec.metadata.as_object().into_iter().flatten() {
+            metadata[key] = value.clone();
+        }
+        let prompt = spec
+            .prompt
+            .unwrap_or("Find the opening hours of the city museum and report them.");
         let mut job = json!({
-            "id": Uuid::new_v4(),
+            "id": job_id,
             "intent": "feature",
             "project_id": self.project_id,
-            "run_id": Uuid::new_v4(),
+            "run_id": run_id,
             "conversation_id": spec.conversation,
             "payload": {
-                "prompt_text": format!("[[{label}]] Find the opening hours of the city museum and report them."),
+                "prompt_text": format!("[[{label}]] {prompt}"),
                 "provider_conversation_state": spec.previous,
                 "user_id": INITIATOR,
                 "metadata": metadata,
@@ -664,7 +708,8 @@ impl Harness {
     /// Runs one job; returns the provider state the next turn of its chat gets.
     async fn run(&mut self, label: &'static str, spec: Spec) -> Option<Value> {
         let processor = self.processor(spec.lane);
-        let job = self.lease_job(label, &spec).expect("job");
+        let (job_id, run_id) = (Uuid::new_v4(), Uuid::new_v4());
+        let job = self.lease_job(label, &spec, job_id, run_id).expect("job");
         *self.provider.label.lock().unwrap() = label.to_string();
         self.provider
             .scripts
@@ -733,10 +778,11 @@ impl Harness {
             remove_env(key);
         }
         set_env("OPENAI_BASE_URL", &self.chatgpt_proxy);
-        let requests: Vec<Value> = self.provider.requests.lock().unwrap()[before..]
+        let (requests, answered): (Vec<Value>, Vec<bool>) = self.provider.requests.lock().unwrap()
+            [before..]
             .iter()
-            .map(|(_, body)| body.clone())
-            .collect();
+            .map(|(_, body, answered)| (body.clone(), *answered))
+            .unzip();
         let mut created = Vec::new();
         rollout_files(&self.runtime_home.join("sessions"), &mut created);
         created.retain(|path| !rollouts_before.contains(path));
@@ -768,8 +814,11 @@ impl Harness {
         self.turns.push(Turn {
             label,
             lane: spec.lane,
+            job_id,
+            run_id,
             expected: spec.expected_markers(),
             requests,
+            answered,
             outcome,
         });
         next_state
@@ -1021,6 +1070,7 @@ async fn run_chains() -> Result<()> {
         older_threads: Vec::new(),
     };
     run_every_chain(&mut harness).await;
+    run_browser_flows(&mut harness).await;
 
     for tx in shutdowns {
         let _ = tx.send(());
@@ -1175,6 +1225,231 @@ async fn run_every_chain(harness: &mut Harness) {
             .run(labels[2], Spec::new(chat, Lane::Default, second))
             .await;
     }
+
+}
+
+/// What Studio sends when the person presses Let Octo continue after a pause
+/// (`BROWSER_HUMAN_INPUT_CONTINUE_PROMPT`).
+const LET_OCTO_CONTINUE: &str = "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
+/// What a hand-back asks, whatever its send said (runtime-controller `HAND_BACK_PROMPT`).
+const HAND_BACK: &str = "Continue building with what the browser turn found.";
+
+/// The metadata of the Shared Browser turn that carries on a card the turn `card` posted, as
+/// Studio sends it when it opens the card by itself; a card that continues building hands
+/// its findings back.
+fn card_continuation(card: Uuid, continue_building: bool) -> Value {
+    let mut metadata = json!({
+        "browserRequestOf": format!("job:{card}"),
+        "browserAutoStarted": true,
+    });
+    if continue_building {
+        metadata["browserHandsBack"] = json!(true);
+    }
+    metadata
+}
+
+/// The hand-back the controller checks and stamps on the building turn after the browser turn
+/// `browser` (its card from `card`) read `pages`: its reply with one finding per page.
+fn checked_hand_back(browser: Uuid, card: Uuid, pages: &[(&str, &str, &str)]) -> Value {
+    let read_at = "2026-01-05T10:00:00Z";
+    let viewer = "Instafy's browser in the workspace";
+    let mut reply = format!("Read {} pages.", pages.len());
+    let mut findings = Vec::new();
+    for (url, title, fact) in pages {
+        reply.push('\n');
+        reply.push_str(&json!({"url": url, "title": title, "facts": [fact]}).to_string());
+        findings.push(json!({"url": url, "title": title, "readAt": read_at, "viewer": viewer}));
+    }
+    json!({
+        "browserHandBack": {
+            "version": 1,
+            "verified": true,
+            "browserJobId": browser.to_string(),
+            "cardJobId": card.to_string(),
+            "viewer": viewer,
+            "readAt": read_at,
+            "findings": findings,
+            "reply": reply,
+            "replyTruncated": false,
+        }
+    })
+}
+
+/// B, H, G and F: four browser flows as a person meets them. A message that asks for the
+/// browser is an ordinary turn whose answer is a `request_browser` card, and Studio then opens
+/// the card by itself: a Shared Browser turn that asks the card's task. B builds a comparison
+/// page: its card continues building, so its browser turn hands back to a write turn; then the
+/// person asks for more in the browser, and it hands back again. H looks something up and keeps
+/// going in the browser over three follow-ups. G pauses on a sign-in page, and the person lets
+/// Octo continue. F fills in a form. Each chain uses a page of its own.
+async fn run_browser_flows(harness: &mut Harness) {
+    let cb = Uuid::new_v4();
+    let b1 = harness
+        .run(
+            "B1",
+            Spec::new(cb, Lane::Default, None).asking(
+                "Compare three laptops of one maker (CPU, battery, weight, price and two independent reviews each), then build a comparison page with sources.",
+            ),
+        )
+        .await;
+    let card = harness.turn("B1").job_id;
+    let b2 = harness
+        .run(
+            "B2",
+            Spec::new(cb, Lane::Shared("page-b"), b1)
+                .asking("Find the maker's three newest laptops on laptops.example and read each one's own page for its CPU, battery, weight and price.")
+                .with_metadata(card_continuation(card, true)),
+        )
+        .await;
+    let browser = harness.turn("B2").job_id;
+    let b3 = harness
+        .run(
+            "B3",
+            Spec::new(cb, Lane::PlainWrite, b2)
+                .asking(HAND_BACK)
+                .with_metadata(checked_hand_back(
+                    browser,
+                    card,
+                    &[(
+                        "https://laptops.example/",
+                        "Laptops",
+                        "Three laptops: Twelve, Thirteen and Sixteen",
+                    )],
+                )),
+        )
+        .await;
+    let b4 = harness
+        .run(
+            "B4",
+            Spec::new(cb, Lane::Default, b3).asking(
+                "In your browser, find each laptop's weight and price on the maker's own pages and two independent reviews for each on the reviewers' own sites, add them to the page, and show me the page.",
+            ),
+        )
+        .await;
+    let card = harness.turn("B4").job_id;
+    let b5 = harness
+        .run(
+            "B5",
+            Spec::new(cb, Lane::Shared("page-b"), b4)
+                .asking("Find each laptop's weight and price on the maker's own pages and two independent reviews for each on the reviewers' own sites.")
+                .with_metadata(card_continuation(card, true)),
+        )
+        .await;
+    let browser = harness.turn("B5").job_id;
+    harness
+        .run(
+            "B6",
+            Spec::new(cb, Lane::PlainWrite, b5)
+                .asking(HAND_BACK)
+                .with_metadata(checked_hand_back(
+                    browser,
+                    card,
+                    &[
+                        (
+                            "https://laptops.example/twelve",
+                            "Twelve",
+                            "1.3 kg, from 789 EUR",
+                        ),
+                        (
+                            "https://laptops.example/thirteen",
+                            "Thirteen",
+                            "1.4 kg, from 1,799 EUR",
+                        ),
+                        (
+                            "https://reviews.example/thirteen",
+                            "Thirteen review",
+                            "Battery lasts a working day",
+                        ),
+                    ],
+                )),
+        )
+        .await;
+
+    let ch = Uuid::new_v4();
+    let h1 = harness
+        .run(
+            "H1",
+            Spec::new(ch, Lane::Default, None)
+                .asking("Find the opening hours of the old bookshop on the city's tourism site."),
+        )
+        .await;
+    let card = harness.turn("H1").job_id;
+    let h2 = harness
+        .run(
+            "H2",
+            Spec::new(ch, Lane::Shared("page-h"), h1)
+                .asking("Look up the old bookshop's opening hours on the city's tourism site.")
+                .with_metadata(card_continuation(card, false)),
+        )
+        .await;
+    let h3 = harness
+        .run(
+            "H3",
+            Spec::new(ch, Lane::Shared("page-h"), h2)
+                .asking("Please keep going and find the opening hours."),
+        )
+        .await;
+    let h4 = harness
+        .run(
+            "H4",
+            Spec::new(ch, Lane::Shared("page-h"), h3)
+                .asking("Now find how to get there by metro from the main station."),
+        )
+        .await;
+    harness
+        .run(
+            "H5",
+            Spec::new(ch, Lane::Shared("page-h"), h4)
+                .asking("Please keep going and find the metro route."),
+        )
+        .await;
+
+    let cg = Uuid::new_v4();
+    let g1 = harness
+        .run(
+            "G1",
+            Spec::new(cg, Lane::Default, None).asking(
+                "Open the code host in your browser, sign me in, then star its example project.",
+            ),
+        )
+        .await;
+    let card = harness.turn("G1").job_id;
+    let g2 = harness
+        .run(
+            "G2",
+            Spec::new(cg, Lane::Shared("page-g"), g1)
+                .asking("Open the code host's sign-in page so the person can sign in there, then star its example project.")
+                .with_metadata(card_continuation(card, false)),
+        )
+        .await;
+    let paused = harness.turn("G2").run_id;
+    harness
+        .run(
+            "G3",
+            Spec::new(cg, Lane::Shared("page-g"), g2)
+                .asking(LET_OCTO_CONTINUE)
+                .with_metadata(json!({"browserContinuesRunId": paused.to_string()})),
+        )
+        .await;
+
+    let cf = Uuid::new_v4();
+    let f1 = harness
+        .run(
+            "F1",
+            Spec::new(cf, Lane::Default, None).asking(
+                "Open the test form site in your browser and fill in a test order with made-up details, then submit it.",
+            ),
+        )
+        .await;
+    let card = harness.turn("F1").job_id;
+    harness
+        .run(
+            "F2",
+            Spec::new(cf, Lane::Shared("page-f"), f1)
+                .asking("Open forms.example/order and fill in a test order with made-up details.")
+                .with_metadata(card_continuation(card, false)),
+        )
+        .await;
 }
 
 /// A workspace task's run text as it began until that lane's heading was renamed, and an
@@ -1624,9 +1899,194 @@ fn check(harness: &Harness) -> Result<()> {
         }
     }
     // (vi) The cache.
+    print_costs(harness);
     check_cached_starts(harness)?;
     println!("every turn read its own run instructions");
     Ok(())
+}
+
+/// The controller's default prices for managed AI, in micro-dollars per 1,000 tokens, and how
+/// many credits a dollar buys (`MANAGED_AI_*_USD_MICROS_PER_1K`, `BILLING_UNITS_PER_USD`).
+const INPUT_USD_MICROS_PER_1K: u64 = 100;
+const CACHED_INPUT_USD_MICROS_PER_1K: u64 = 10;
+const OUTPUT_USD_MICROS_PER_1K: u64 = 500;
+const CREDITS_PER_USD: u64 = 1_000;
+/// The output tokens each answer of the stub reports.
+const OUTPUT_TOKENS_PER_ANSWER: u64 = 10;
+
+/// Tokens as a provider would count a request's text: about one per four bytes.
+fn tokens_of(bytes: usize) -> u64 {
+    (bytes as u64).div_ceil(4)
+}
+
+/// The bytes of a request's head: its instructions, tools and output format.
+fn head_bytes(request: &Value) -> usize {
+    ["instructions", "tools", "text"]
+        .iter()
+        .map(|key| match &request[*key] {
+            Value::Null => 0,
+            value => value.to_string().len(),
+        })
+        .sum()
+}
+
+/// Whether a sampling request opens a Codex turn: its input ends with that turn's own user
+/// message. A request that goes on with a turn ends with a tool call's output, or with the
+/// compaction that took the place of the history.
+fn opens_a_codex_turn(request: &Value) -> bool {
+    request["input"]
+        .as_array()
+        .and_then(|items| items.last())
+        .is_some_and(|item| item["type"] == "message" && item["role"] == "user")
+}
+
+/// Tokens a turn was billed for.
+#[derive(Clone, Copy, Default)]
+struct Usage {
+    requests: usize,
+    input: u64,
+    cached: u64,
+    output: u64,
+}
+
+impl Usage {
+    /// What billing charges for these tokens, in micro-dollars: each kind priced on its own and
+    /// rounded up (`calculate_managed_ai_usage_charge`).
+    fn usd_micros(&self) -> u64 {
+        let price = |tokens: u64, per_1k: u64| (tokens * per_1k).div_ceil(1_000);
+        price(self.input - self.cached, INPUT_USD_MICROS_PER_1K)
+            + price(self.cached, CACHED_INPUT_USD_MICROS_PER_1K)
+            + price(self.output, OUTPUT_USD_MICROS_PER_1K)
+    }
+
+    fn exact_credits(&self) -> f64 {
+        self.usd_micros() as f64 * CREDITS_PER_USD as f64 / 1_000_000.0
+    }
+
+    /// The turn's charge: its cost rounded up to a whole credit, and at least one when it cost
+    /// anything.
+    fn charge(&self) -> u64 {
+        let micros = self.usd_micros();
+        if micros == 0 {
+            0
+        } else {
+            (micros * CREDITS_PER_USD).div_ceil(1_000_000).max(1)
+        }
+    }
+}
+
+/// What billing would charge for each turn, from the requests the stub provider saw: a request's
+/// tokens are its bytes / 4 (its head and its input), and the cached ones are its head and the
+/// start of its input it shares with its thread's latest earlier request on the same head, as
+/// `check_cached_starts` finds it: what a provider that still holds that request serves from its
+/// cache. Each answer adds the stub's 10 output tokens. A turn is billed for its first Codex
+/// run: its first sampling request and the requests that go on with that run. Its recovery run
+/// (a lane whose tool evidence this host cannot give ends in one) is not billed, nor is a request
+/// the stub answered with a 502. Printed per turn, then per chain.
+fn print_costs(harness: &Harness) {
+    let requests: Vec<(&Turn, usize, &Value)> = harness
+        .turns
+        .iter()
+        .flat_map(|turn| {
+            turn.requests
+                .iter()
+                .enumerate()
+                .map(move |(index, request)| (turn, index, request))
+        })
+        .collect();
+    let cached_bytes = |position: usize| -> usize {
+        let (_, _, request) = requests[position];
+        let Some((_, _, earlier)) =
+            requests[..position]
+                .iter()
+                .rev()
+                .find(|(turn, index, earlier)| {
+                    earlier["prompt_cache_key"] == request["prompt_cache_key"]
+                        && !is_compaction_request(earlier)
+                        && turn.answered[*index]
+                        && same_head(earlier, request)
+                })
+        else {
+            return 0;
+        };
+        let input = request["input"].as_array().cloned().unwrap_or_default();
+        let earlier_input = earlier["input"].as_array().cloned().unwrap_or_default();
+        let shared = input
+            .iter()
+            .zip(&earlier_input)
+            .take_while(|(item, earlier_item)| item == earlier_item)
+            .count();
+        head_bytes(request) + input_bytes(&input[..shared])
+    };
+    let mut chains: Vec<(String, Usage, f64, u64, usize)> = Vec::new();
+    let mut position = 0;
+    for turn in &harness.turns {
+        let first = position;
+        position += turn.requests.len();
+        let mut usage = Usage::default();
+        let mut first_share = None;
+        for (index, request) in turn.requests.iter().enumerate() {
+            if is_compaction_request(request) {
+                continue;
+            }
+            if first_share.is_some() && opens_a_codex_turn(request) {
+                // The run that follows the turn's first is a recovery run.
+                break;
+            }
+            let input = tokens_of(
+                head_bytes(request)
+                    + input_bytes(
+                        request["input"]
+                            .as_array()
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                    ),
+            );
+            let cached = tokens_of(cached_bytes(first + index)).min(input);
+            first_share.get_or_insert(100 * cached / input.max(1));
+            if !turn.answered[index] {
+                continue;
+            }
+            usage.requests += 1;
+            usage.input += input;
+            usage.cached += cached;
+            usage.output += OUTPUT_TOKENS_PER_ANSWER;
+        }
+        let sampling = sampling_requests(turn).count();
+        println!(
+            "cost {} ({:?}): billed for {} of {sampling} request(s), {} tokens in, {} cached ({}% of its first request), {} out: {:.3} credits, charged {}",
+            turn.label,
+            turn.lane,
+            usage.requests,
+            usage.input,
+            usage.cached,
+            first_share.unwrap_or(0),
+            usage.output,
+            usage.exact_credits(),
+            usage.charge(),
+        );
+        let chain: String = turn
+            .label
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect();
+        match chains.iter_mut().find(|(name, ..)| *name == chain) {
+            Some((_, total, exact, charged, turns)) => {
+                total.input += usage.input;
+                total.cached += usage.cached;
+                *exact += usage.exact_credits();
+                *charged += usage.charge();
+                *turns += 1;
+            }
+            None => chains.push((chain, usage, usage.exact_credits(), usage.charge(), 1)),
+        }
+    }
+    for (chain, total, exact, charged, turns) in chains {
+        println!(
+            "cost chain {chain}: {turns} turn(s), {} tokens in, {} cached: {exact:.3} credits, charged {charged}",
+            total.input, total.cached,
+        );
+    }
 }
 
 /// The request head a provider caches ahead of the input: a request can be served from the
