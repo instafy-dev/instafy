@@ -457,8 +457,9 @@ the moment it sets `data-instafy-ready="true"` (see
 
 Until then the pane goes on saying it is opening the site ("Loading…" after Reload), for at most 15 s. It waits once
 each time it loads the frame fresh (the press, Reload): a `ready` said before the frame's load event counts, and a page
-that moves on inside the frame after that shows as it loads. A page that does not list `ready` is shown once its frame
-has loaded.
+that moves on inside the frame after that shows as it loads. Its line stays through the frame's load until the page
+answers the layout sent then, so it does not go off for that moment: a page that does not list `ready` is shown at that
+answer, or 250 ms after its load when it does not answer.
 
 Studio → site:
 

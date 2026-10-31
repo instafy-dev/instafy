@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControllerApiError } from "../../../../services/runtimeController/core";
 import { NO_MOUNTED_SITE_PREVIEWS, SITE_PREVIEW_HEALTH_POLL_MS, SITE_PREVIEW_HEARTBEAT_MS, SitePreviewPane, nextMountedSitePreviews } from "../SitePreviewPane";
 import { withHostQuery } from "../previewHost/hostMessages";
+import { SITE_LAYOUT_ANSWER_WAIT_MS } from "../previewHost/useSiteHost";
 import { waitForSitePreviewPage } from "../SitePreviewCard";
 import { resetFollowStoreForTests, setFollowPresence } from "../previewHost/followStore";
 
@@ -178,12 +179,15 @@ describe("SitePreviewPane", () => {
     expect(frame()).not.toBeNull();
     expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Opening Docs site…");
     await act(async () => frame()!.dispatchEvent(new Event("load")));
-    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
     expect(shown).toHaveBeenCalledOnce();
+    // A page that never answers the layout sent at its load shows a moment later.
+    await advance(SITE_LAYOUT_ANSWER_WAIT_MS);
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
     // Reload loads a new frame: blank again until its page loads.
     await click("[data-testid=site-preview-reload]");
     expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Loading…");
     await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await advance(SITE_LAYOUT_ANSWER_WAIT_MS);
     expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
     stop();
   });
@@ -265,6 +269,37 @@ describe("SitePreviewPane", () => {
     expect(progress()).toBeNull();
   });
 
+  // Checked in a browser: at the frame's load the line went off for a frame,
+  // then came back when the page answered the layout sent at the load and
+  // said it draws later. The line now stays until that answer, so it shows
+  // from the press to the first draw without a gap.
+  it("keeps the line through the frame's load until the page answers the layout sent then", async () => {
+    const progress = () => container.querySelector("[data-testid=site-preview-progress]")?.textContent ?? null;
+    const origin = new URL(FIRST).origin;
+    const site = (data: Record<string, unknown>) => post({ source: "site-kit", v: 1, ...data }, origin, frame()!.contentWindow);
+    await render();
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(progress()).toContain("Opening Docs site…");
+    await site({ type: "layout-ack", payload: { supports: ["ready"] } });
+    expect(progress()).toContain("Opening Docs site…");
+    await site({ type: "ready" });
+    expect(progress()).toBeNull();
+  });
+
+  it("shows a page that never answers a moment after its load, and a page moving on inside the frame as it loads", async () => {
+    const progress = () => container.querySelector("[data-testid=site-preview-progress]");
+    await render();
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(progress()).not.toBeNull();
+    await advance(SITE_LAYOUT_ANSWER_WAIT_MS - 1);
+    expect(progress()).not.toBeNull();
+    await advance(1);
+    expect(progress()).toBeNull();
+    // A link inside the site: no line over the page it opens.
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(progress()).toBeNull();
+  });
+
   // The pane waits for a site's first draw once each time it loads it fresh
   // (the press, Reload). A site that then moves on inside the frame (it
   // reloads itself in place, or opens its next page) shows as it loads, as
@@ -293,6 +328,7 @@ describe("SitePreviewPane", () => {
   it("says Loading… over the new frame of a site that answers again, until its page loads", async () => {
     await render();
     await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await advance(SITE_LAYOUT_ANSWER_WAIT_MS);
     expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
     mocks.getSitePreview.mockResolvedValue(record({ health: { listening: false, status: null } }));
     await advance(SITE_PREVIEW_HEALTH_POLL_MS);
@@ -302,6 +338,7 @@ describe("SitePreviewPane", () => {
     expect(frame()?.getAttribute("src")).toBe(withHostQuery(FIRST));
     expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Loading…");
     await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await advance(SITE_LAYOUT_ANSWER_WAIT_MS);
     expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
   });
 

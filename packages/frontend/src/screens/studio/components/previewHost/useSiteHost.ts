@@ -15,6 +15,13 @@ const NO_ERROR = () => {};
  * or gives up itself.
  */
 export const SITE_FIRST_DRAW_WAIT_MS = 15_000;
+/**
+ * How long after a fresh frame's first load the pane waits for its page to
+ * answer the layout sent then: until it answers, whether it draws itself
+ * later is not known, and the line going off for that moment showed as a
+ * blink before it came back.
+ */
+export const SITE_LAYOUT_ANSWER_WAIT_MS = 250;
 
 /** The preview record's title, port and path: what keys a site for location. */
 export type SiteRecord = { title: string; port: number; path: string };
@@ -46,8 +53,9 @@ export type SiteMessageEvent = Pick<MessageEvent, "data" | "origin" | "source">;
  * saying it is opening the site instead of showing an empty page. It waits
  * once each time the frame is loaded fresh (the press, Reload, a new
  * address), through the frame's load event: a `ready` said before that event
- * counts, and a page that moves on inside the frame after the first draw
- * shows as it loads.
+ * counts, the page's answer to the layout sent at that load is waited for (at
+ * most SITE_LAYOUT_ANSWER_WAIT_MS), and a page that moves on inside the frame
+ * after the first draw shows as it loads.
  */
 export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, frameOnScreen, record, title = "", spaceName = null, asks = null, onError = NO_ERROR }: {
   frame: RefObject<HTMLIFrameElement | null>;
@@ -109,6 +117,11 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
    * shows as it loads.
    */
   const [drawn, setDrawn] = useState(false);
+  /**
+   * The frame's first page since it was loaded fresh has loaded and not said
+   * anything since (at most SITE_LAYOUT_ANSWER_WAIT_MS).
+   */
+  const [answerDue, setAnswerDue] = useState(false);
   /** A document in this pane has drawn once: a later one draws again under "Loading…". */
   const [drawnOnce, setDrawnOnce] = useState(false);
   if (drawn && !drawnOnce) setDrawnOnce(true);
@@ -118,6 +131,8 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     heardFromSite.current = false;
     loadsSinceFresh.current += 1;
     setSupports([]);
+    // Its answer to the layout sent below says whether it draws later.
+    if (loadsSinceFresh.current === 1) setAnswerDue(true);
     setFrameLoads(count => count + 1);
     // The site moved to another page inside the frame: that page did not ask, so this
     // frame's watches and pending answers end. The first load is left alone, since the
@@ -189,7 +204,7 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   // A new document in the frame (Reload, a new capability) did not ask: its watches end, and what it held is gone.
   useEffect(() => {
     loadsSinceFresh.current = 0;
-    return () => { broker.current?.stopAll(); broker.current?.forgetPositions(); setSupports([]); setDrawsLater(false); setDrawn(false); };
+    return () => { broker.current?.stopAll(); broker.current?.forgetPositions(); setSupports([]); setDrawsLater(false); setDrawn(false); setAnswerDue(false); };
   }, [frameKey, viewerUrl]);
   const locationStatus = useLocationSiteStatus(siteKey);
 
@@ -219,6 +234,7 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     if (!isSiteEnvelope(event.data)) return false;
     // A site whose bridge starts after the frame's load event missed the first layout message.
     if (!heardFromSite.current) { heardFromSite.current = true; sendLayout(); }
+    setAnswerDue(false);
     const parsed = parseSiteMessage(event.data);
     if (parsed) {
       // Within one document what a site supports only grows.
@@ -234,18 +250,28 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     return true;
   }, [sendLayout]);
 
-  // A page that said it draws itself after it loads, and has not said it has.
-  const drawing = drawsLater && !drawn;
+  // A page that said it draws itself after it loads, and has not said it has;
+  // or a fresh frame's first page that has not answered since its load yet.
+  const drawing = (drawsLater || answerDue) && !drawn;
   useEffect(() => {
-    if (!drawing) return;
+    if (!drawsLater || drawn) return;
     const timer = window.setTimeout(() => setDrawn(true), SITE_FIRST_DRAW_WAIT_MS);
     return () => window.clearTimeout(timer);
-  }, [drawing]);
+  }, [drawsLater, drawn]);
+  useEffect(() => {
+    if (!answerDue) return;
+    const timer = window.setTimeout(() => setAnswerDue(false), SITE_LAYOUT_ANSWER_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [answerDue]);
 
   return {
     onFrameLoad,
     handleSiteMessage,
-    /** The page is drawing its first view: it said it draws after it loads, and has not said it has. */
+    /**
+     * The page is drawing its first view: it said it draws after it loads,
+     * and has not said it has (or a fresh frame's first page has not
+     * answered since its load yet).
+     */
     drawing,
     drawnOnce,
     follow,
