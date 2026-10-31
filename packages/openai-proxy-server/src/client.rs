@@ -127,6 +127,14 @@ pub(crate) fn sends_tool_controls(credentials: &Credentials) -> bool {
     wire_api_for(credentials) == UpstreamWireApi::Responses
 }
 
+/// Whether requests with `credentials` may carry developer messages after the start of their
+/// input: the Responses wire API, to the OpenAI API or to a ChatGPT login's Codex endpoint,
+/// takes them anywhere. A Chat Completions or Gemini Code Assist request gets all of its
+/// instructions in its first message.
+pub(crate) fn takes_later_developer_messages(credentials: &Credentials) -> bool {
+    wire_api_for(credentials) == UpstreamWireApi::Responses
+}
+
 /// Whether `item` is the `additional_tools` input item in which codex lists
 /// the tools of a Responses Lite model, such as gpt-6-luna, whose request
 /// carries no `tools`. It marks the Lite shape whatever tools it holds, none
