@@ -94,6 +94,27 @@ test("text that only says an item is unavailable does not count as showing it", 
   }
 });
 
+test("a map's places count as shown: its layers are GeoJSON data files", () => {
+  // a map site keeps its places in data/<layer>.geojson and what it could not place under "missing" in its config
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-map-"));
+  try {
+    fs.mkdirSync(path.join(dir, "data"));
+    fs.writeFileSync(path.join(dir, "index.html"), "<!doctype html><title>Map</title><div id=map></div>");
+    fs.writeFileSync(path.join(dir, "map.config.json"), JSON.stringify({ title: "Cafés in Lisbon", layers: [{ id: "cafes", data: "data/cafes.geojson" }],
+      missing: [{ name: "Pastéis de Belém", layer: "cafes" }] }));
+    const point = (id, name, coordinates) => ({ type: "Feature", geometry: { type: "Point", coordinates }, properties: { id, name, kind: "cafe" } });
+    fs.writeFileSync(path.join(dir, "data", "cafes.geojson"), JSON.stringify({ type: "FeatureCollection",
+      features: [point("a-brasileira", "A Brasileira", [-9.1427, 38.7107]), point("cafe-nicola", "Café Nicola", [-9.1393, 38.7139])] }));
+    const out = run("check", dir, "--expect", "A Brasileira, Café Nicola, Pastéis de Belém");
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /^MISSING: the request named 1 item\(s\) the site does not show: Pastéis de Belém\./m);
+    assert.match(out.stdout, /2 of 3 expected item\(s\) shown: A Brasileira, Café Nicola\./);
+    assert.deepEqual(checkSite(dir, "A Brasileira").shown, [{ item: "A Brasileira", files: ["data/cafes.geojson"] }]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("check with nothing to check says how to give the list (exit 2)", () => {
   const dir = compareSite(["Brooks Adrenaline GTS 24"]);
   try {
