@@ -1498,16 +1498,33 @@ const DESCRIBE_IN_PAGE = new Function(
   "...args",
   `return (${describeInPage})((${shownRuleInPage})(), (${formSubmission.formSubmissionRulesInPage})(), (${actionPolicy.controlNameRulesInPage})(), ...args);`,
 );
+// The same describer for every control of a page in one call: its source (over
+// 50 KB with the rules it carries) is sent and compiled once per read of the
+// page, not once per control. Each control is described on its own, as with
+// DESCRIBE_IN_PAGE, and one that cannot be described is null.
+const DESCRIBE_ALL_IN_PAGE = new Function(
+  "request",
+  `const describe = ${DESCRIBE_IN_PAGE};
+  return request.elements.map((element) => {
+    try {
+      return describe(element, request.sources);
+    } catch (_) {
+      return null;
+    }
+  });`,
+);
 const SHOWN_TEXT_IN_PAGE = withShownRule(shownTextInPage);
 const AREA_NAMES = new Set(["dialog", "menu", "tabs", "nav", "search", "header", "footer", "aside"]);
 
 // `hiddenNames` collects one name, empty when it has none, for each control a
 // person cannot see; they are left out of the observation but still count for
 // the secret-screen check, and their number tells the model some are left out.
-async function describeElement(locator, index, hiddenNames) {
-  const attributes = await locator
-    .evaluate(DESCRIBE_IN_PAGE, PAGE_POLICY_SOURCES)
-    .catch(() => null);
+// `described`: what DESCRIBE_ALL_IN_PAGE said of this control, when it was
+// read with the rest of the page.
+async function describeElement(locator, index, hiddenNames, described = undefined) {
+  const attributes = described !== undefined
+    ? described
+    : await locator.evaluate(DESCRIBE_IN_PAGE, PAGE_POLICY_SOURCES).catch(() => null);
   if (attributes && attributes.shown === false) {
     if (hiddenNames) {
       hiddenNames.push(typeof attributes.name === "string" ? attributes.name.slice(0, 4_000) : "");
@@ -1801,19 +1818,31 @@ function choicePromptLabel(description, option) {
 }
 
 // The controls a person can see, in document order. Snapshots and actions
-// both index this list, so an index means the same control in both.
+// both index this list, so an index means the same control in both. The page
+// is asked once for its controls and once to describe them all: asking for
+// each control on its own would send the describer again for every one, which
+// takes seconds on a page with a few hundred links, and a click or a choice
+// reads the page twice (its check, then its result).
 async function collectInteractiveElements(page, hiddenNames = null) {
-  const matches = page.locator(INTERACTIVE_SELECTOR);
-  const count = Math.min(await matches.count(), MAX_INTERACTIVE_ELEMENTS * 3);
+  const handles = (await page.locator(INTERACTIVE_SELECTOR).elementHandles())
+    .slice(0, MAX_INTERACTIVE_ELEMENTS * 3);
+  const described = await page
+    .evaluate(DESCRIBE_ALL_IN_PAGE, { elements: handles, sources: PAGE_POLICY_SOURCES })
+    .catch(() => null);
+  // A page that could not answer for all of them at once is asked for each
+  // control on its own.
+  const together = Array.isArray(described) && described.length === handles.length;
   const elements = [];
-  for (let ordinal = 0; ordinal < count; ordinal += 1) {
-    const locator = await matches.nth(ordinal).elementHandle().catch(() => null);
-    if (!locator) {
-      continue;
-    }
+  for (let ordinal = 0; ordinal < handles.length; ordinal += 1) {
+    const locator = handles[ordinal];
     // The shown rule in describeInPage covers what Playwright's isVisible
     // checks (rendered, visibility visible, a box with a size).
-    const description = await describeElement(locator, elements.length, hiddenNames);
+    const description = await describeElement(
+      locator,
+      elements.length,
+      hiddenNames,
+      together ? described[ordinal] ?? null : undefined,
+    );
     if (!description) {
       continue;
     }

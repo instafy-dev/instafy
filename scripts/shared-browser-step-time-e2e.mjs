@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createServer } from "node:http";
+import net from "node:net";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -24,9 +25,10 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // go next, never as a blank page to navigate again nor as the page the tab
 // still shows; the next step reaches the browser at once, and the site's late
 // answer never loads. A form sent to such a site has reached it, so its load
-// runs on and the step never says nothing was opened. No model, Studio,
-// controller, account or external site is used, and Chromium resolves no other
-// host.
+// runs on and the step never says nothing was opened. A page with a few
+// hundred controls is described in one call to the page each time a step
+// reads it, not in one call per control. No model, Studio, controller, account
+// or external site is used, and Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
 const playwrightRequire = createRequire(frontendRequire.resolve("@playwright/test"));
@@ -116,6 +118,100 @@ const UNANSWERED_ANSWER_MS = 5_000;
 const CLICK_WAIT_MS = 15_000;
 // A form whose script does heavy work once one of its fields is highlighted.
 const FORM = `<form><label>Your name <input name="name"></label><label>Your city <input name="city"></label></form>`;
+// A transport operator's page: menus of links that open on hover, timetables
+// with links and buttons, a footer of links, and the journey planner's two
+// lists and its button. Over 500 controls, about 230 of them shown.
+const STATIONS = Array.from({ length: 80 }, (_, n) => ["Trindade", "São Bento", "Aliados"][n] ?? `Station ${n + 1}`);
+const MENUS = Array.from({ length: 12 }, (_, m) => `<li><button type="button" aria-expanded="false">Menu ${m + 1}</button><ul hidden>${
+  Array.from({ length: 25 }, (_, l) => `<li><a href="/pages/${m}/${l}">Page ${m + 1}.${l + 1}</a></li>`).join("")}</ul></li>`).join("");
+const PLANNER = `<nav><ul>${MENUS}</ul></nav>
+<form action="/route"><label>Start <select name="from">${STATIONS.map((name) => `<option>${name}</option>`).join("")}</select></label>
+<label>End <select name="to">${STATIONS.map((name) => `<option>${name}</option>`).join("")}</select></label>
+<input type="button" value="Plan journey"></form>
+${Array.from({ length: 60 }, (_, n) => `<p>Line ${n + 1}: every 6 minutes. <a href="/lines/${n}">Line ${n + 1}</a> <button type="button">Share line ${n + 1}</button></p>`).join("")}
+<footer>${Array.from({ length: 100 }, (_, n) => `<a href="/about/${n}">About ${n + 1}</a>`).join(" ")}</footer>`;
+// What carries the controller's control describer to the page: its source.
+const DESCRIBER_SOURCE = "function describeInPage(";
+
+// A pass-through to Chromium's DevTools socket that counts the messages that
+// carry the describer to the page. It asks for no compression of the socket,
+// reads the controller's frames unmasked (RFC 6455 §5.3), and passes every
+// byte after the opening request on unchanged.
+async function describerCountingSocket(browserSocketUrl) {
+  const target = new URL(browserSocketUrl);
+  let sent = 0;
+  const sockets = new Set();
+  const server = net.createServer((client) => {
+    const upstream = net.connect(Number(target.port), target.hostname);
+    sockets.add(client).add(upstream);
+    let pending = Buffer.alloc(0);
+    let upgraded = false;
+    let parts = [];
+    client.on("data", (chunk) => {
+      pending = Buffer.concat([pending, chunk]);
+      if (!upgraded) {
+        const end = pending.indexOf("\r\n\r\n");
+        if (end < 0) return;
+        upgraded = true;
+        const request = pending.subarray(0, end + 4).toString("latin1")
+          .split("\r\n").filter((line) => !/^sec-websocket-extensions:/iu.test(line)).join("\r\n");
+        pending = pending.subarray(end + 4);
+        upstream.write(Buffer.from(request, "latin1"));
+        upstream.write(pending);
+      } else {
+        upstream.write(chunk);
+      }
+      for (;;) {
+        if (pending.length < 2) return;
+        let length = pending[1] & 0x7f;
+        let offset = 2;
+        if (length === 126) {
+          if (pending.length < 4) return;
+          length = pending.readUInt16BE(2);
+          offset = 4;
+        } else if (length === 127) {
+          if (pending.length < 10) return;
+          length = Number(pending.readBigUInt64BE(2));
+          offset = 10;
+        }
+        const masked = (pending[1] & 0x80) !== 0;
+        const mask = offset;
+        if (masked) offset += 4;
+        if (pending.length < offset + length) return;
+        const payload = Buffer.from(pending.subarray(offset, offset + length));
+        if (masked) for (let index = 0; index < payload.length; index += 1) payload[index] ^= pending[mask + (index % 4)];
+        const final = (pending[0] & 0x80) !== 0;
+        const control = (pending[0] & 0x0f) >= 0x8;
+        pending = pending.subarray(offset + length);
+        if (control) continue;
+        parts.push(payload);
+        if (final) {
+          if (Buffer.concat(parts).toString("utf8").includes(DESCRIBER_SOURCE)) sent += 1;
+          parts = [];
+        }
+      }
+    });
+    upstream.on("data", (chunk) => client.write(chunk));
+    const close = () => { client.destroy(); upstream.destroy(); };
+    for (const socket of [client, upstream]) {
+      socket.on("close", close);
+      socket.on("error", close);
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = new URL(browserSocketUrl);
+  url.port = String(server.address().port);
+  return {
+    url: url.toString(),
+    sent: () => sent,
+    reset: () => { sent = 0; },
+    close: () => new Promise((resolve) => {
+      for (const socket of sockets) socket.destroy();
+      server.close(resolve);
+    }),
+  };
+}
+
 const BUSY_ON_HIGHLIGHT = `let busy = false;
 new MutationObserver(() => {
   if (busy || !document.querySelector("input[style*=outline]")) return;
@@ -151,7 +247,7 @@ export async function runSharedBrowserStepTimeFixture() {
       const body = {
         "/": [page("Places", SEARCH)], "/results": [page("Results", RESULTS, BUSY)], "/places/tower": [page("The tower", "<p>Open daily.</p>")],
         "/window": [page("Details", WINDOW, OPENS_WINDOW)], "/popup": [page("Popup", "<p>Another window.</p>")], "/form": [page("Your details", FORM, BUSY_ON_HIGHLIGHT)],
-        "/hidden": [HIDDEN], "/places/live": [page("The tower", "<p>Open daily.</p>", LIVE)],
+        "/hidden": [HIDDEN], "/places/live": [page("The tower", "<p>Open daily.</p>", LIVE)], "/planner": [page("Plan a journey", PLANNER)],
         "/visit": [page("Visiting", "<p><a href=\"/slow\">Opening hours</a></p>")],
         "/ask": [page("Ask us", "<form action=\"/slow\" method=\"post\"><label>Your question <input name=\"question\"></label><button>Send question</button></form>")],
       }[url.pathname];
@@ -202,7 +298,8 @@ export async function runSharedBrowserStepTimeFixture() {
 
     const prompts = [];
     // `answerAfterMs`: how long the person takes to answer each prompt.
-    async function runTool(method, requestPath, body = null, decisions = [], { answerAfterMs = 0 } = {}) {
+    // `cdpUrl`: where the controller reaches the browser, when not its own address.
+    async function runTool(method, requestPath, body = null, decisions = [], { answerAfterMs = 0, cdpUrl = null } = {}) {
       const started = performance.now();
       const child = spawn(process.execPath, ["-", method, requestPath, ...(body ? [JSON.stringify(body)] : [])], {
         cwd: temporary,
@@ -211,7 +308,7 @@ export async function runSharedBrowserStepTimeFixture() {
           INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH: playwrightDirectory,
           INSTAFY_SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT: path.dirname(playwrightDirectory),
           INSTAFY_SHARED_BROWSER_PAGE_ID: runPageId,
-          INSTAFY_PLAYWRIGHT_CDP_URL: `http://127.0.0.1:${port}`,
+          INSTAFY_PLAYWRIGHT_CDP_URL: cdpUrl ?? `http://127.0.0.1:${port}`,
           INSTAFY_BROWSER_AGENT_CONTROL_FILE: markerPath,
           INSTAFY_SHARED_BROWSER_APPROVAL_DIR: approvalDirectory,
           // Long enough for the slow answer below.
@@ -290,6 +387,33 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.equal(slow.payload.url, `${origin}/`);
     assert.ok(slow.payload.interactiveElements.some((element) => element.label === "Search places"), "The search box is observed");
     const actions = () => fs.readFileSync(actionsPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+
+    // 1a. A page with a few hundred controls: each read of it describes them
+    // in one call to the page. One call per control sent the describer again
+    // for every control: a choice on a journey planner took 12 s where a read
+    // of the page took 6.5 s, as a choice or a click reads the page twice (its
+    // check, then its result). Counted on the browser's own socket.
+    await ok("POST", "/v1/navigate", { url: `${origin}/planner` });
+    const { webSocketDebuggerUrl } = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    const counted = await describerCountingSocket(webSocketDebuggerUrl);
+    let planner;
+    let chose;
+    try {
+      planner = await ok("GET", "/v1/snapshot", null, [], { cdpUrl: counted.url });
+      assert.equal(planner.payload.interactiveElements.length, 200, "The page's first 200 shown controls are observed");
+      assert.ok(planner.payload.omittedControls > 250, `The hidden ones are counted (${planner.payload.omittedControls})`);
+      assert.equal(counted.sent(), 1, `One read sent the describer once (${counted.sent()} times)`);
+      const from = planner.payload.interactiveElements.find((element) => element.tag === "select" && element.chosen === "Trindade");
+      assert.ok(from, "The first list is observed");
+      counted.reset();
+      chose = await ok("POST", "/v1/choose", { index: from.index, option: "São Bento", snapshotId: planner.payload.snapshotId }, [], { cdpUrl: counted.url });
+      assert.equal(chose.payload.interactiveElements.find((element) => element.index === from.index)?.chosen, "São Bento");
+      // Its check of the page, the chosen list itself, and its result.
+      assert.ok(counted.sent() <= 3, `A choice sent the describer ${counted.sent()} times`);
+    } finally {
+      await counted.close();
+    }
+    assert.equal(prompts.length, 1, "Nothing asked on the planner");
 
     // 1b. A page that has loaded but shows no text and no controls yet: a read
     // of it says the page is still busy, never that the page is empty, and its
@@ -502,6 +626,7 @@ export async function runSharedBrowserStepTimeFixture() {
       fixtureVersion: 1,
       checks: [
         "a prompt answered after more than a step's time is waited for, and the step then reads the page as usual",
+        "a page with a few hundred controls is described in one call to the page each time a step reads it: once for a read, at most three times for a choice (its check, the list, its result)",
         "a loaded page that shows no text and no controls reads as still busy, not as an empty page, and its line says no page was read",
         "a navigation from a blank tab to a site that does not answer in time is stopped once the step's time is up and fails as one that opened nothing, naming where to go next, never as a blank page to navigate again; the next step reaches the browser at once, and the site's late answer never loads",
         "a navigation from a page that had loaded, and keeps changing its own address, to a site that does not answer in time is stopped and fails the same way, never naming the page the tab still shows; the next step reaches the browser at once and finds that page, and the site's late answer never lands",
@@ -511,7 +636,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs) },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs) },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);
