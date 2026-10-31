@@ -221,7 +221,7 @@ test("sending attachment status remains visible while a long preview list scroll
 });
 
 for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
-  test(`composer utilities, the new-tab token and the browser follow-up token remain reachable in ${theme} at ${width}px`, async ({ page }) => {
+  test(`composer utilities and the new-tab token remain reachable in ${theme} at ${width}px`, async ({ page }) => {
     const { errors } = await openFixture(page, { width, theme, utilities: true });
     const goal = page.getByTestId("chat-active-goal");
     const summary = page.getByTestId("chat-active-goal-summary");
@@ -302,24 +302,6 @@ for (const width of [320, 1280]) for (const theme of ["light", "dark"]) {
     await cancelNewTab.press("Enter");
     await expect(page.getByTestId("review-new-tab-pending")).toHaveText("false");
     await expect(token).toHaveCount(0);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-
-    // A message that goes on in Instafy's browser says so in the same row,
-    // whole, and the person can keep it in the chat.
-    await page.goto(`${fixture}&followup=1&queue=0&theme=${theme}${width >= 1024 ? "&placement=header" : ""}`);
-    const followUp = page.getByTestId("composer-browser-follow-up-token");
-    await expect(followUp).toHaveText("Goes to Instafy's browser");
-    const label = followUp.getByText("Goes to Instafy's browser");
-    expect(await label.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-    const keepInChat = followUp.getByRole("button", { name: "Don't send it to the browser" });
-    if (width < 640) expect((await keepInChat.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-    expect((await followUp.boundingBox())!.y + (await followUp.boundingBox())!.height)
-      .toBeLessThanOrEqual((await editor(page).boundingBox())!.y);
-    await keepInChat.focus();
-    await expect(keepInChat).toBeInViewport();
-    await keepInChat.press("Enter");
-    await expect(page.getByTestId("review-browser-follow-up")).toHaveText("false");
-    await expect(followUp).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   });

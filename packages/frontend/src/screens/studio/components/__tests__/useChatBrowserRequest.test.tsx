@@ -16,6 +16,7 @@ import {
   forgetBrowserAutoStartsForTests,
   isBrowserAutoStartClaimed,
   markBrowserAutoStartDeclined,
+  recordBrowserAutoStart,
   type BrowserAutoStartPlan,
   type SharedBrowserPresence,
 } from "../browserAutoStart";
@@ -118,6 +119,34 @@ describe("Chat browser request handoff", () => {
     expect(await attempt.result).toBeNull();
     expect(value.continueTask).toHaveBeenLastCalledWith("personal", expect.any(String),
       expect.objectContaining({ metadata: { browserRequestOf: "message:request-2" } }));
+  });
+
+  // A routed card the person presses goes on from their own browser turn
+  // right before its message too, by that message's job: in that turn's tab,
+  // naming its run. A card without a job asks for none.
+  it("goes on from the person's own browser turn on a routed card they press", async () => {
+    const tab = { id: "page-run", url: "https://app.example.test/settings", host: "app.example.test", label: "Settings" };
+    value.followUp = vi.fn((jobId: string) => jobId === "job-7" ? { runId: "run-7", runtimeId: "runtime-1", tab } : null);
+    value.messages = [{ id: "request-1", role: "assistant", content: "Continue in browser", timestamp: 1,
+      metadata: { messageType: "action_request", jobId: "job-7",
+        details: { browserRequest: { task: TASK, location: "auto", routed: true } } } }];
+    value.transport = "shared"; value.sharedRuntimeId = "runtime-1"; await render();
+    let attempt = await begin();
+    value.open = true; value.sharedReady = true; await render(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.followUp).toHaveBeenCalledWith("job-7");
+    expect(value.continueTask).toHaveBeenLastCalledWith("shared", TASK, expect.objectContaining({
+      metadata: expect.objectContaining({ browserRequestOf: "job:job-7", browserContinuesRunId: "run-7" }),
+      tab,
+    }));
+
+    value.messages = [request("auto", { routed: true })]; await render();
+    attempt = await begin(); await advance();
+    expect(await attempt.result).toBeNull();
+    expect(value.continueTask).toHaveBeenCalledTimes(2);
+    const extras = vi.mocked(value.continueTask).mock.calls[1]![2];
+    expect(extras).not.toHaveProperty("tab");
+    expect(extras.metadata).not.toHaveProperty("browserContinuesRunId");
   });
 
   it("honors an explicit Workspace request after a native default and waits for the original run to finish", async () => {
@@ -1248,5 +1277,162 @@ describe("Studio starting a request_browser card by itself", () => {
     await render();
     await advance(20_000);
     expect(reattach).not.toHaveBeenCalled();
+  });
+
+  // A message Octo sent straight to the browser right after the person's own
+  // turn there, while that browser is still open in this chat, goes on from
+  // that turn. Without this, such a "keep going" stopped at a card to press
+  // wherever Studio does not open a card by itself (a space whose browser does
+  // not run on its own machine, a browser the person closed or stopped earlier
+  // in the chat), after the routing step had charged for it, where the chat
+  // used to send it straight to the open browser.
+  describe("a message that goes on from the person's own browser turn", () => {
+    const RUN_ID = "00000000-0000-4000-8000-0000000000b2";
+    const SESSION = "session-runtime";
+    const TAB = { id: "page-run", url: "https://www.example.test/hours", host: "www.example.test", label: "Hours" };
+    const followUp = (runtimeId = SESSION) => ({ runId: RUN_ID, runtimeId, tab: TAB });
+
+    /** Instafy's browser is open in this chat, on the machine the person's last browser turn ran on. */
+    function browserOpen(runtimeId = SESSION) {
+      value.transport = "shared"; value.personalAvailable = false;
+      value.open = true; value.sharedReady = true; value.sharedRuntimeId = runtimeId;
+    }
+    /** The routing step sent the person's message to the browser: its card. */
+    async function routedCardArrives(words = "keep going", jobId = "job-2") {
+      await render(); await advance(5_000);
+      const prompt = sendPrompt({}, jobId, words);
+      value.messages = [...value.messages, prompt, { id: `card-${jobId}`, role: "assistant",
+        content: "Continue this task in Instafy's browser.", timestamp: Date.now(),
+        metadata: { messageType: "action_request", jobId,
+          details: { browserRequest: { task: words, location: "auto", routed: true } } } }];
+      await render(); await advance(10);
+    }
+
+    it.each([
+      ["whose browser runs on a separate session", { kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession }],
+      ["where Studio opens no card by itself", { kind: "button", reason: null }],
+    ] as const)("goes on there by itself in a space %s, in that turn's tab, naming it", async (_name, planned) => {
+      plan.mockReturnValue(planned);
+      browserOpen();
+      value.followUp = vi.fn((jobId: string) => jobId === "job-2" ? followUp() : null);
+      await routedCardArrives();
+      // It opens nothing: the browser is open already.
+      expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "continue", runtimeId: SESSION });
+      await advance();
+      expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", "keep going", {
+        metadata: { browserRequestOf: "job:job-2", browserAutoStarted: true, browserContinuesRunId: RUN_ID },
+        knownHosts: [],
+        tab: TAB,
+      });
+      expect(lastState?.cardStates.get("job:job-2")).toEqual({ kind: "opened" });
+    });
+
+    it("goes on also after the person closed, paused or stopped the browser earlier in the chat, and within ten minutes of another start", async () => {
+      plan.mockReturnValue({ kind: "button", reason: null });
+      markBrowserAutoStartDeclined(IDENTITY);
+      recordBrowserAutoStart(IDENTITY);
+      browserOpen();
+      value.followUp = vi.fn(() => followUp());
+      await routedCardArrives();
+      await advance();
+      expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", "keep going", expect.objectContaining({
+        metadata: expect.objectContaining({ browserContinuesRunId: RUN_ID }), tab: TAB,
+      }));
+    });
+
+    // On the space's own machine it goes as any card there: after a fresh
+    // reading of that browser, which someone else holding it still holds.
+    it("attaches as any card on the conversation's machine, also after the person closed it earlier", async () => {
+      const host = coveredHost();
+      value.sharedHost = { runtimeId: HOST_ID, heldByOther: false };
+      markBrowserAutoStartDeclined(IDENTITY);
+      browserOpen(HOST_ID);
+      value.followUp = vi.fn(() => followUp(HOST_ID));
+      await routedCardArrives(); await settleReading();
+      expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "attach", runtimeId: HOST_ID });
+      await advance(); await advance();
+      expect(host.refreshHost).toHaveBeenCalledWith({ force: true });
+      expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", "keep going", expect.objectContaining({
+        metadata: expect.objectContaining({ browserContinuesRunId: RUN_ID }), tab: TAB,
+      }));
+    });
+
+    // Started past an earlier close for going on from that turn, it is sent
+    // only while it still does.
+    it("sends nothing on the conversation's machine once it no longer goes on from that turn", async () => {
+      coveredHost();
+      value.sharedHost = { runtimeId: HOST_ID, heldByOther: false };
+      markBrowserAutoStartDeclined(IDENTITY);
+      browserOpen(HOST_ID);
+      let goesOn = true;
+      value.followUp = vi.fn(() => goesOn ? followUp(HOST_ID) : null);
+      await routedCardArrives(); await settleReading();
+      expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "attach", runtimeId: HOST_ID });
+      goesOn = false;
+      await render(); await advance(); await advance();
+      expect(value.continueTask).not.toHaveBeenCalled();
+      expect(value.onError).not.toHaveBeenCalled();
+      expect(lastState?.cardStates.get("job:job-2")).toEqual({ kind: "button", reason: null });
+    });
+
+    it.each([
+      ["a draft", () => { auto.blocked = { reason: BROWSER_AUTO_START_COPY.draftHeld }; }, () => { auto.blocked = null; },
+        BROWSER_AUTO_START_COPY.draftHeld],
+      ["someone else in the browser", () => { auto.heldByOther = true; }, () => { auto.heldByOther = false; },
+        BROWSER_AUTO_START_COPY.inUse],
+    ] as const)("waits while %s holds it", async (_name, hold, release, reason) => {
+      plan.mockReturnValue({ kind: "button", reason: null });
+      browserOpen();
+      value.followUp = vi.fn(() => followUp());
+      hold();
+      await routedCardArrives();
+      expect(value.activate).not.toHaveBeenCalled();
+      expect(lastState?.cardStates.get("job:job-2")).toEqual({ kind: "button", reason });
+      release();
+      await render(); await advance();
+      expect(value.continueTask).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["the browser is closed", () => { value.open = false; }],
+      ["the browser is open on another machine", () => { value.sharedRuntimeId = "other-runtime"; }],
+      ["the person's last turn was not theirs in this browser", () => { value.followUp = vi.fn(() => null); }],
+    ] as const)("leaves the card to the person when %s", async (_name, change) => {
+      plan.mockReturnValue({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
+      browserOpen();
+      value.followUp = vi.fn(() => followUp());
+      change();
+      await routedCardArrives();
+      await advance();
+      expect(value.activate).not.toHaveBeenCalled();
+      expect(value.continueTask).not.toHaveBeenCalled();
+      expect(lastState?.cardStates.get("job:job-2")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.otherSession });
+    });
+
+    it("never takes a card Octo sent from its own turn for one", async () => {
+      plan.mockReturnValue({ kind: "button", reason: null });
+      browserOpen();
+      value.followUp = vi.fn(() => followUp());
+      await cardArrives({ jobId: "job-2" });
+      await advance();
+      expect(value.followUp).not.toHaveBeenCalled();
+      expect(value.continueTask).not.toHaveBeenCalled();
+    });
+
+    it("sends nothing when it no longer goes on from that turn by the time it would send", async () => {
+      plan.mockReturnValue({ kind: "button", reason: null });
+      browserOpen();
+      // It does when Studio decides; by the send, another chat took that
+      // tab, say.
+      value.followUp = vi.fn<(jobId: string) => ReturnType<typeof followUp> | null>()
+        .mockReturnValueOnce(followUp()).mockReturnValue(null);
+      await routedCardArrives();
+      await advance();
+      expect(value.activate).toHaveBeenCalledTimes(1);
+      expect(value.followUp).toHaveBeenCalledTimes(2);
+      expect(value.continueTask).not.toHaveBeenCalled();
+      expect(value.onError).not.toHaveBeenCalled();
+      expect(lastState?.cardStates.get("job:job-2")).toEqual({ kind: "button", reason: null });
+    });
   });
 });
