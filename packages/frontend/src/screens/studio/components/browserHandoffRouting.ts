@@ -1,6 +1,6 @@
 import type { RunRecord } from "../../../types";
 import type { RuntimeBrowserSessionAction } from "../../../sdk/instafy";
-import { BROWSER_HANDS_BACK_METADATA_KEY } from "./browserRequest";
+import { toBrowserSessionPageTarget, type BrowserSessionPage, type BrowserSessionPageTarget } from "./browserSessionPages";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -77,9 +77,9 @@ export function continuedSharedBrowserRunId(
 }
 
 /**
- * How long after a browser turn a message from the chat still goes on in the
- * browser: as long as the runtime keeps that turn's approvals for a run that
- * continues it.
+ * How long after a browser turn a message the routing step sends to the
+ * browser still goes on from it: as long as the runtime keeps that turn's
+ * approvals for a run that continues it.
  */
 export const SHARED_BROWSER_FOLLOW_UP_WINDOW_MS = 10 * 60_000;
 
@@ -87,27 +87,28 @@ function runStartedAt(run: RunRecord): number {
   return Date.parse(run.createdAt ?? run.updatedAt ?? "") || 0;
 }
 
-/** The browser turn a chat message continues, its tab, and until when that applies. */
-export type SharedBrowserFollowUp<Page> = { runId: string; page: Page; endsAtMs: number };
+/** The browser turn a routed message goes on from, and its tab. */
+export type SharedBrowserFollowUp<Page> = { runId: string; page: Page };
 
 /**
- * The browser turn a message from the chat continues in Instafy's browser,
- * and the tab it continues in. Only when the conversation's newest run is
+ * The browser turn a message Octo sent straight to Instafy's browser goes on
+ * from, and the tab it goes on in. A message from the chat is an ordinary
+ * turn: the routing step decides whether it goes to the browser at all (a
+ * card marked `routed`, whose task is the person's own words), and this says
+ * only where its browser turn goes on. That is the chat's newest run before
+ * the message's own (`routedJobId`, the job that posted the card), when it is
  * this person's Shared Browser run on this browser, it finished successfully
- * within {@link SHARED_BROWSER_FOLLOW_UP_WINDOW_MS}, its tab is still open,
- * and it did not continue a card Octo builds from (`browserHandsBack`): a
- * browser turn has only the browser's tools, so after a building card's
- * browser turn the building turn keeps the chat, as it does with the
- * hand-back. Studio sends such a message as a browser turn in that tab,
- * naming the run it continues (`browserContinuesRunId`), so the runtime
- * carries the run's approvals over and no card or press stands in between;
- * the composer says so while it applies (useSharedBrowserFollowUp). Null
- * otherwise: the message is an ordinary chat turn. Also null once another
- * chat took that tab after the turn started (`takenByAnotherChat`, from
- * chatBrowserTab.ts): a follow-up is a browser turn, and a browser turn uses
- * only its own chat's tab. When the turn left its chat another tab (Octo read
- * last in a tab of its own, `leftByRun`), the follow-up goes on there, on the
- * page the person was left with.
+ * within {@link SHARED_BROWSER_FOLLOW_UP_WINDOW_MS} and its tab is still
+ * open. Studio sends the card's browser turn in that tab, naming the run
+ * (`browserContinuesRunId`), so the runtime can carry its approvals over (it
+ * checks the run, the person and the page itself) and a site the person
+ * allowed does not ask again. Null otherwise: the card's turn runs in the
+ * chat's own tab with nothing carried, as any card's does. Also null once
+ * another chat took that tab after the turn started (`takenByAnotherChat`,
+ * from chatBrowserTab.ts): a browser turn uses only its own chat's tab. When
+ * the turn left its chat another tab (Octo read last in a tab of its own,
+ * `leftByRun`), the follow-up goes on there, on the page the person was left
+ * with.
  */
 export function sharedBrowserFollowUp<Page extends { id: string; leftByRun?: string }>(
   runs: readonly RunRecord[],
@@ -116,6 +117,7 @@ export function sharedBrowserFollowUp<Page extends { id: string; leftByRun?: str
     runtimeId: string | null;
     userId: string | null;
     pages: readonly Page[];
+    routedJobId: string;
     nowMs?: number;
     takenByAnotherChat?: ((pageId: string, sinceMs: number) => boolean) | null;
   },
@@ -124,6 +126,8 @@ export function sharedBrowserFollowUp<Page extends { id: string; leftByRun?: str
   let newest: RunRecord | null = null;
   for (const run of runs) {
     if (run.conversationId !== scope.conversationId) continue;
+    // The message's own run posted the card and ran no turn of its own.
+    if (run.id === scope.routedJobId || run.metadata?.jobId === scope.routedJobId) continue;
     if (!newest || runStartedAt(run) > runStartedAt(newest)) newest = run;
   }
   const metadata = newest?.metadata;
@@ -131,19 +135,47 @@ export function sharedBrowserFollowUp<Page extends { id: string; leftByRun?: str
     !newest || !UUID.test(newest.id) || newest.status !== "success" ||
     metadata?.browserTransport !== "shared" ||
     metadata.browserRuntimeId !== scope.runtimeId ||
-    metadata.initiatingUserId !== scope.userId ||
-    metadata[BROWSER_HANDS_BACK_METADATA_KEY] === true
+    metadata.initiatingUserId !== scope.userId
   ) {
     return null;
   }
   const endedAt = runTimestamp(newest);
-  const endsAtMs = endedAt + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS;
-  if (!endedAt || (scope.nowMs ?? Date.now()) > endsAtMs) return null;
+  if (!endedAt || (scope.nowMs ?? Date.now()) > endedAt + SHARED_BROWSER_FOLLOW_UP_WINDOW_MS) return null;
   const runId = newest.id;
   const page = scope.pages.find((candidate) => candidate.leftByRun === runId) ??
     scope.pages.find((candidate) => candidate.id === metadata.browserPageId);
   if (!page || scope.takenByAnotherChat?.(page.id, runStartedAt(newest))) return null;
-  return { runId: newest.id, page, endsAtMs };
+  return { runId, page };
+}
+
+/**
+ * The person's browser turn a message Octo sent straight to Instafy's browser
+ * goes on from (sharedBrowserFollowUp), while that browser is open in this
+ * chat (`open`: open over Instafy's browser, not closed or hidden): the run,
+ * the machine the browser is open on, and the tab to go on in. Studio sends
+ * that card's turn there by itself, as the person's next turn, and names the
+ * run so the runtime can carry its approvals over (useChatBrowserRequest).
+ * Null otherwise.
+ */
+export function routedBrowserFollowUp(
+  runs: readonly RunRecord[],
+  scope: {
+    open: boolean;
+    conversationId: string | null;
+    runtimeId: string | null;
+    userId: string | null;
+    pages: readonly BrowserSessionPage[];
+    nowMs?: number;
+    takenByAnotherChat?: ((pageId: string, sinceMs: number) => boolean) | null;
+  },
+  routedJobId: string,
+): { runId: string; runtimeId: string; tab: BrowserSessionPageTarget } | null {
+  const { open, ...followUpScope } = scope;
+  if (!open || !scope.runtimeId || !routedJobId) return null;
+  const followUp = sharedBrowserFollowUp(runs, { ...followUpScope, routedJobId });
+  return followUp
+    ? { runId: followUp.runId, runtimeId: scope.runtimeId, tab: toBrowserSessionPageTarget(followUp.page) }
+    : null;
 }
 
 function activeSharedBrowserRuns(runs: readonly RunRecord[], runtimeId: string): RunRecord[] {

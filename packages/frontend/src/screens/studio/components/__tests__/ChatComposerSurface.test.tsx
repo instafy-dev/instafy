@@ -535,34 +535,6 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="composer-new-tab-token"]')).toBeNull();
   });
 
-  // A message from the chat right after the person's turn in Instafy's
-  // browser goes on there, where Octo has only the browser's tools. The
-  // composer says so in the same context row, and the person can keep the
-  // next message in the chat.
-  it("says when the next message goes to Instafy's browser, and lets the person keep it in the chat", async () => {
-    const onCancel = vi.fn();
-    const onSubmit = vi.fn((event) => event.preventDefault());
-    const props = createProps({ onSubmit });
-    await act(async () => root.render(<ChatComposerSurface {...props} browserFollowUp={{ onCancel }} />));
-    const token = container.querySelector<HTMLElement>('[data-testid="composer-browser-follow-up-token"]')!;
-    expect(token).not.toBeNull();
-    expect(token.textContent).toBe("Goes to Instafy's browser");
-    // A local test: above the composer it floated over the newest turn's header
-    // until the person scrolled. It is part of the composer itself now.
-    expect(container.querySelector('[data-testid="chat-composer-surface"]')!.contains(token)).toBe(true);
-    expect(container.querySelector('[data-testid="chat-composer-joined-toolbar"]')!.contains(token)).toBe(true);
-    expect(token.compareDocumentPosition(container.querySelector('[data-testid="chat-input"]')!))
-      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    const keep = token.querySelector<HTMLButtonElement>('button[aria-label="Don\'t send it to the browser"]')!;
-    expect(keep.type).toBe("button");
-    expect(keep.className).toContain("pointer-coarse:min-h-11");
-    await act(async () => keep.click());
-    expect(onCancel).toHaveBeenCalledOnce();
-    expect(onSubmit).not.toHaveBeenCalled();
-    await act(async () => root.render(<ChatComposerSurface {...props} browserFollowUp={null} />));
-    expect(container.querySelector('[data-testid="composer-browser-follow-up-token"]')).toBeNull();
-  });
-
   it("hides a wide composer with the class alone, without an inline transform", async () => {
     const props = createProps({ composerAutoHidden: true, compactBrowserViewport: false });
     await act(async () => root.render(<ChatComposerSurface {...props} />));

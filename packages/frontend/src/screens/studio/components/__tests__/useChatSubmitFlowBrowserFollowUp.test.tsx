@@ -1,17 +1,18 @@
 /** @vitest-environment jsdom */
 
-// Local drive, Oct 28: after a browser turn answered "find the opening hours",
-// "Now find how to get there by tram" from the chat composer started an
-// ordinary turn that only sent another browser card. It took 13 s, a second
-// press and a second approval for the same site, and left two live cards. A
-// follow-up in a browser chat now goes straight to the open browser,
-// continuing the run that just answered so its approvals carry over.
+// A local test, Oct 31: for ten minutes after a browser turn, every message
+// from the chat composer went to the browser, whose turn cannot build. "Put
+// the hours and the metro route on a small page I can share." was refused as
+// "read-only". A message from the chat composer is an ordinary turn now,
+// whatever came before it: the routing step decides whether it goes to the
+// browser, and a card it sends there goes on from the browser turn before it
+// (sharedBrowserFollowUp, from ChatPanel).
 
 import { act, type MutableRefObject } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedPromptAgentSelection } from "../../../../conversations/assistantMentions";
-import type { BrowserSessionPage } from "../browserSessionPages";
+import { toBrowserSessionPageTarget, type BrowserSessionPage } from "../browserSessionPages";
 import { BROWSER_CONTINUES_RUN_METADATA_KEY } from "../useChatBrowserHandoff";
 import { useChatSubmitFlow } from "../useChatSubmitFlow";
 
@@ -27,9 +28,8 @@ const OCTO_SELECTION: ResolvedPromptAgentSelection = {
   usesDefaultAssistantOnly: true,
 };
 
-const DRAFT = "Now find how to get there by tram from the main square.";
+const DRAFT = "Now find how to get there by metro from the main station.";
 const RUNTIME_ID = "rt-space-machine";
-const BROWSER_RUN = "00000000-0000-4000-8000-0000000000b2";
 
 // The tab the browser turn worked in.
 const RUN_TAB: BrowserSessionPage = {
@@ -153,7 +153,7 @@ function createOptions(overrides: Partial<HookOptions> = {}): HookOptions {
   };
 }
 
-describe("a follow-up in a browser chat", () => {
+describe("a message from the chat right after a browser turn", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -170,7 +170,7 @@ describe("a follow-up in a browser chat", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function submit(options: HookOptions, automatic = false): Promise<boolean | undefined> {
+  async function submit(options: HookOptions): Promise<boolean | undefined> {
     const resultRef: MutableRefObject<HookResult | null> = { current: null };
     await act(async () => {
       root.render(<Harness options={options} resultRef={resultRef} />);
@@ -180,7 +180,6 @@ describe("a follow-up in a browser chat", () => {
       sent = await resultRef.current?.submitMessage(undefined, {
         intent: "send",
         expectedActiveJobId: null,
-        automatic,
       });
     });
     return sent;
@@ -190,63 +189,30 @@ describe("a follow-up in a browser chat", () => {
     return (options.performSubmit as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
   }
 
-  const followUp = () => ({ runId: BROWSER_RUN, page: RUN_TAB });
-
-  it("goes straight to the open browser, in the run's own tab, continuing that run", async () => {
-    const options = createOptions({ resolveSharedBrowserFollowUp: vi.fn(followUp) });
+  it.each([
+    "Put the hours and the metro route on a small page I can share.",
+    DRAFT,
+    "keep going",
+  ])("goes out as an ordinary turn in the person's own words: %s", async (words) => {
+    const resolveSharedBrowserTab = vi.fn(async () => toBrowserSessionPageTarget(RUN_TAB));
+    const options = createOptions({ inputValue: words, resolveSharedBrowserTab });
     expect(await submit(options)).toBe(true);
     const sent = payload(options);
-    // The person's own words, as a browser turn on the browser's machine.
-    expect(sent.message).toBe(DRAFT);
-    expect(sent.runtimeOverride).toEqual(expect.objectContaining({ runtimeId: RUNTIME_ID, preferRuntime: true }));
-    expect(sent.metadata).toEqual(expect.objectContaining({
-      browserTransport: "shared",
-      browserRuntimeId: RUNTIME_ID,
-      browserPageId: RUN_TAB.id,
-      [BROWSER_CONTINUES_RUN_METADATA_KEY]: BROWSER_RUN,
-    }));
-  });
-
-  it("aims words about the page at the run's tab, not the one in front", async () => {
-    const options = createOptions({
-      inputValue: "Click the menu button on that page",
-      resolveSharedBrowserFollowUp: vi.fn(followUp),
-    });
-    expect(await submit(options)).toBe(true);
-    const sent = payload(options);
-    expect(sent.message).not.toContain(OTHER_TAB.url);
-    expect(sent.metadata).toEqual(expect.objectContaining({ browserPageId: RUN_TAB.id, browserPageUrl: RUN_TAB.url }));
-  });
-
-  it("stays an ordinary chat turn when the last turn was not one in the browser", async () => {
-    const options = createOptions({ resolveSharedBrowserFollowUp: vi.fn(() => null) });
-    expect(await submit(options)).toBe(true);
-    const sent = payload(options);
+    expect(sent.message).toBe(words);
     expect(sent.runtimeOverride).toBeNull();
-    expect(sent.metadata).not.toHaveProperty("browserTransport");
-    expect(sent.metadata).not.toHaveProperty(BROWSER_CONTINUES_RUN_METADATA_KEY);
+    for (const key of ["browserTransport", "browserPageId", BROWSER_CONTINUES_RUN_METADATA_KEY]) {
+      expect(sent.metadata ?? {}).not.toHaveProperty(key);
+    }
+    expect(resolveSharedBrowserTab).not.toHaveBeenCalled();
   });
 
-  const cases: [string, Partial<HookOptions>, boolean][] = [
-    ["a skill setup, whose replies answer the setup", { skillSetupConversation: true }, false],
-    ["a message with a picture, which a browser turn cannot open", { imageFiles: [new File(["x"], "x.png")] }, false],
-    ["a message for a new tab", { pendingBrowserLaunchMode: "new_page" }, false],
-    ["a send the app makes for the person (an automatic retry)", {}, true],
-  ];
-  it.each(cases)("leaves %s to the chat", async (_name, overrides, automatic) => {
-    const resolve = vi.fn(followUp);
-    const options = createOptions({ ...overrides, resolveSharedBrowserFollowUp: resolve });
-    await submit(options, automatic);
-    expect(resolve).not.toHaveBeenCalled();
-    const sent = payload(options);
-    if (sent) expect(sent.metadata ?? {}).not.toHaveProperty(BROWSER_CONTINUES_RUN_METADATA_KEY);
-  });
-
-  it("leaves the browser's own composer as it was", async () => {
-    const resolve = vi.fn(followUp);
-    const options = createOptions({ sharedBrowserActive: true, resolveSharedBrowserFollowUp: resolve });
+  it("leaves the browser's own composer as it was: a browser turn in the chat's own tab", async () => {
+    const resolveSharedBrowserTab = vi.fn(async () => toBrowserSessionPageTarget(RUN_TAB));
+    const options = createOptions({ sharedBrowserActive: true, resolveSharedBrowserTab });
     expect(await submit(options)).toBe(true);
-    expect(resolve).not.toHaveBeenCalled();
-    expect(payload(options).metadata).toEqual(expect.objectContaining({ browserPageId: OTHER_TAB.id }));
+    const sent = payload(options);
+    expect(sent.runtimeOverride).toEqual(expect.objectContaining({ runtimeId: RUNTIME_ID, preferRuntime: true }));
+    expect(sent.metadata).toEqual(expect.objectContaining({ browserTransport: "shared", browserPageId: RUN_TAB.id }));
+    expect(sent.metadata).not.toHaveProperty(BROWSER_CONTINUES_RUN_METADATA_KEY);
   });
 });

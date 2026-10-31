@@ -20,6 +20,7 @@ import {
 import { browserHandBackOfPromptMetadata } from "./browserHandBack";
 import {
   BROWSER_AUTO_STARTED_METADATA_KEY,
+  BROWSER_CONTINUES_RUN_METADATA_KEY,
   BROWSER_HANDS_BACK_METADATA_KEY,
   BROWSER_REQUEST_OF_METADATA_KEY,
   browserRequestContinuation,
@@ -39,6 +40,7 @@ import {
   type BrowserRequestCardState,
   type BrowserRequestHost,
 } from "./browserRequest";
+import type { BrowserSessionPageTarget } from "./browserSessionPages";
 import { SHARED_BROWSER_HOST_COPY, SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS } from "./sharedBrowserHostAttach";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
 import type { SharedBrowserHostRefresh } from "./useSharedBrowserHostSnapshot";
@@ -58,7 +60,24 @@ export type BrowserTaskExtras = {
    * treat them as the run's own sites; they are not recorded with the prompt.
    */
   knownHosts: string[];
+  /**
+   * The tab the turn goes on in, for a message Octo sent straight to the
+   * browser that goes on from the person's own browser turn
+   * ({@link BrowserFollowUp}). Absent, the chat's own tab.
+   */
+  tab?: BrowserSessionPageTarget;
 };
+
+/**
+ * The person's own browser turn a message Octo sent straight to Instafy's
+ * browser goes on from, while that browser is still open in this chat
+ * (routedBrowserFollowUp): the run, the machine the browser is open on, and
+ * that turn's tab. The card's turn goes on there, naming the run so the
+ * runtime can carry its approvals over, and Studio sends it by itself: it
+ * opens nothing, as the chat's own message did before the routing step
+ * decided where a message goes.
+ */
+export type BrowserFollowUp = { runId: string; runtimeId: string; tab: BrowserSessionPageTarget };
 
 /** What Studio needs to start a card by itself. Absent, every card waits for a press. */
 export type BrowserAutoStartOptions = {
@@ -152,6 +171,12 @@ type Options = {
   agentName?: string;
   activate: (transport: BrowserTransport, plan: BrowserAutoStartPlan | null) => void;
   continueTask: (transport: BrowserTransport, message: string, extras: BrowserTaskExtras) => Promise<boolean>;
+  /**
+   * The person's browser turn a message Octo sent straight to the browser
+   * goes on from, by that message's job (the job that posted the card); null
+   * when there is none.
+   */
+  followUp?: ((routedJobId: string) => BrowserFollowUp | null) | null;
   onError: (message: string) => void;
   auto?: BrowserAutoStartOptions | null;
 };
@@ -202,6 +227,24 @@ function openSharedBrowserHostId(options: Options): string | null {
   return options.open && options.transport === "shared" && hostId && (options.sharedRuntimeId ?? null) === hostId
     ? hostId
     : null;
+}
+
+/**
+ * The person's own browser turn a card for a message Octo sent straight to
+ * Instafy's browser goes on from, while that browser is open in this chat on
+ * the machine that turn ran on; null for any other card.
+ */
+function browserFollowUpOf(
+  options: Options,
+  request: BrowserRequest,
+  transport: BrowserTransport,
+  routedJobId: string | null,
+): BrowserFollowUp | null {
+  if (!request.routed || !routedJobId || transport !== "shared" || !options.open || options.transport !== "shared") {
+    return null;
+  }
+  const followUp = options.followUp?.(routedJobId) ?? null;
+  return followUp && followUp.runtimeId === (options.sharedRuntimeId ?? null) ? followUp : null;
 }
 
 function hostOf(options: Options): BrowserRequestHost {
@@ -307,6 +350,15 @@ function autoStartStillApplies(current: Options, key: string): boolean {
  *   own machine in a space the controller covers, when nobody else has it,
  *   controls it, runs in it or is starting it. A separate browser session
  *   and every other case leave the card a button, with the reason;
+ * - except for a message Octo sent straight to Instafy's browser right after
+ *   the person's own turn there, while that browser is still open in this
+ *   chat on that turn's machine ({@link BrowserFollowUp}): it opens nothing,
+ *   so it goes on there, in that turn's tab, as the chat's own message did
+ *   before the routing step decided where a message goes, whatever the
+ *   space's browser, the ten-minute window or a close, pause or stop earlier
+ *   in the conversation. On the conversation's own machine it goes as any
+ *   card there; an address the person has not seen, someone else holding the
+ *   browser and a draft still hold it;
  * - and, checked again once the browser is ready, only while nobody wrote
  *   after the card, the conversation is idle and no one else holds the
  *   browser. For Instafy's browser, Studio also waits for a fresh reading
@@ -368,6 +420,9 @@ export function useChatBrowserRequest(options: Options) {
     request: BrowserRequest,
     plan: BrowserAutoStartPlan | null,
     extraMetadata: Record<string, unknown> | null = null,
+    // Studio starts it by itself because it goes on from the person's own
+    // browser turn (BrowserFollowUp): it is sent only while it still does.
+    goesOn = false,
   ) => {
     const captured = latest.current;
     const epoch = generation.current;
@@ -378,14 +433,18 @@ export function useChatBrowserRequest(options: Options) {
     if (unavailable) throw new Error(unavailable);
     const transport = browserRequestTransport(request, captured.transport, host);
     const autoStarted = plan !== null;
-    // Studio starts by itself only the browser on this device, or Instafy's
-    // browser on the conversation's own machine (see browserAutoStartPlan).
+    // Studio starts by itself only the browser on this device, Instafy's
+    // browser on the conversation's own machine (see browserAutoStartPlan),
+    // or a turn that goes on in the browser open in this chat (`continue`).
     if (autoStarted &&
         !(plan.kind === "personal" && transport === "personal") &&
-        !(plan.kind === "attach" && transport === "shared")) {
+        !(plan.kind === "attach" && transport === "shared") &&
+        !(plan.kind === "continue" && transport === "shared")) {
       throw new BrowserAutoStartDropped();
     }
     const attachRuntimeId = plan?.kind === "attach" ? plan.runtimeId : null;
+    const continueRuntimeId = plan?.kind === "continue" ? plan.runtimeId : null;
+    const routedJobId = request.routed && key.startsWith("job:") ? key.slice("job:".length) : null;
     // A press for Instafy's browser reads it while it waits, and may ask the
     // browser view to attach again; an automatic start never does either.
     const pressed = !autoStarted && transport === "shared";
@@ -426,10 +485,14 @@ export function useChatBrowserRequest(options: Options) {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
       for (;;) {
         const current = latest.current;
-        if (generation.current !== epoch || !current.canWrite ||
-            (activated && (!current.open || current.transport !== transport))) {
-          throw new Error(BROWSER_CHANGED_MESSAGE);
+        if (generation.current !== epoch || !current.canWrite) throw new Error(BROWSER_CHANGED_MESSAGE);
+        // A turn that goes on in the browser open in this chat opens
+        // nothing: it goes only while that browser stays open on its machine.
+        if (continueRuntimeId && (!current.open || current.transport !== transport ||
+            (current.sharedRuntimeId ?? null) !== continueRuntimeId)) {
+          throw new BrowserAutoStartDropped();
         }
+        if (activated && (!current.open || current.transport !== transport)) throw new Error(BROWSER_CHANGED_MESSAGE);
         if (!activated && current.open && current.transport === transport) {
           activated = true;
           activatedAtMs = Date.now();
@@ -496,6 +559,10 @@ export function useChatBrowserRequest(options: Options) {
           }
           const sending = latest.current;
           const destinations = browserRequestDestinations(request.task);
+          // A message Octo sent straight to the browser goes on from the
+          // person's own browser turn right before it, in that turn's tab.
+          const followUp = browserFollowUpOf(sending, request, transport, routedJobId);
+          if (goesOn && !followUp) throw new BrowserAutoStartDropped();
           const sent = await sending.continueTask(transport, browserRequestContinuation(request), {
             // A message Octo sent straight to the browser, opened by itself,
             // leaves no notice: the person's own message is right above, and
@@ -511,8 +578,11 @@ export function useChatBrowserRequest(options: Options) {
               ...(autoStarted ? { [BROWSER_AUTO_STARTED_METADATA_KEY]: true } : {}),
               ...(!autoStarted && destinations.length > 0 ? { [BROWSER_CARD_SITES_METADATA_KEY]: destinations } : {}),
               ...(request.continueBuilding ? { [BROWSER_HANDS_BACK_METADATA_KEY]: true } : {}),
+              // So the runtime can carry that turn's approvals over.
+              ...(followUp ? { [BROWSER_CONTINUES_RUN_METADATA_KEY]: followUp.runId } : {}),
             },
             knownHosts: destinations,
+            ...(followUp ? { tab: followUp.tab } : {}),
           });
           if (!sent) throw new Error("The browser task was not sent. You can retry from its message.");
           return;
@@ -712,7 +782,15 @@ export function useChatBrowserRequest(options: Options) {
       setCardState(key, { kind: "button", reason });
     };
     const conversation = current.identity;
-    if (isBrowserAutoStartDeclined(conversation)) {
+    const host = hostOf(current);
+    const transport = browserRequestTransport(request, current.transport, host);
+    // A message Octo sent straight to the browser right after the person's
+    // own turn there, while that browser is still open in this chat, goes on
+    // from that turn and opens nothing (BrowserFollowUp): as the person's
+    // next turn, also after they closed, paused or stopped the browser
+    // earlier in this chat, and within ten minutes of another start.
+    const followUp = browserFollowUpOf(current, request, transport, jobId);
+    if (!followUp && isBrowserAutoStartDeclined(conversation)) {
       leave(null);
       return DECIDED;
     }
@@ -720,7 +798,7 @@ export function useChatBrowserRequest(options: Options) {
     // conversation's machine starts nothing new, so the once-per-conversation
     // window does not hold it; every other check still does.
     const openHostId = openSharedBrowserHostId(current);
-    if (!openHostId && browserAutoStartedRecently(conversation)) {
+    if (!followUp && !openHostId && browserAutoStartedRecently(conversation)) {
       leave(null);
       return DECIDED;
     }
@@ -735,7 +813,6 @@ export function useChatBrowserRequest(options: Options) {
       leave(BROWSER_AUTO_START_COPY.unseenAddress);
       return DECIDED;
     }
-    const host = hostOf(current);
     // The card says itself why no browser opens here.
     if (browserRequestUnavailableReason(request, host)) return DECIDED;
     // Held for now: the button shows why, and the card is looked at again
@@ -744,7 +821,13 @@ export function useChatBrowserRequest(options: Options) {
       setCardState(key, { kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
       return DECIDED;
     }
-    const plan = auto.plan(request, browserRequestTransport(request, current.transport, host));
+    // On the conversation's own machine it goes as any card there: after a
+    // fresh reading of that browser, which someone else holding it holds.
+    // Anywhere else Studio sends it in the browser open in this chat as it
+    // is, whatever opening a browser in this space would take.
+    const plan: BrowserAutoStartPlan = followUp && followUp.runtimeId !== openHostId
+      ? { kind: "continue", runtimeId: followUp.runtimeId }
+      : auto.plan(request, transport);
     // Instafy's browser on the space's machine needs a fresh reading first:
     // the reading changes the revision, and the card is decided again. A
     // draft that holds this card keeps saying so meanwhile.
@@ -763,7 +846,7 @@ export function useChatBrowserRequest(options: Options) {
       return plan.reason === BROWSER_AUTO_START_COPY.hostInUse ? WAITING : DECIDED;
     }
     // Only a continuation in that same open browser skips the window.
-    if (openHostId && (plan.kind !== "attach" || plan.runtimeId !== openHostId) &&
+    if (!followUp && openHostId && (plan.kind !== "attach" || plan.runtimeId !== openHostId) &&
         browserAutoStartedRecently(conversation)) {
       leave(null);
       return DECIDED;
@@ -778,7 +861,7 @@ export function useChatBrowserRequest(options: Options) {
     recordBrowserAutoStart(conversation);
     setCardState(key, { kind: "opening", note: null });
     const epoch = generation.current;
-    void start(key, request, plan).then(
+    void start(key, request, plan, null, followUp !== null).then(
       () => setCardState(key, { kind: "opened" }),
       (error: unknown) => {
         if (error instanceof BrowserAutoStartDropped) {

@@ -30,6 +30,11 @@ import type { BrowserTransport } from "./usePersonalBrowserBridge";
  * - `pending`: Studio needs a fresh reading of that browser first; it fetches
  *   one and decides again. Never claimed.
  * - `button`: the card stays a button, with the reason when there is one.
+ * - `continue`: a message Octo sent straight to Instafy's browser right after
+ *   the person's own turn there, while that browser is still open in this
+ *   chat on another machine than the conversation's own (BrowserFollowUp in
+ *   useChatBrowserRequest). It goes on in that browser as it is: nothing
+ *   opens, starts or moves for it. browserAutoStartPlan never returns it.
  *
  * A separate browser session machine, and the space's machine without
  * Instafy's browser on demand, still wait for a press. Studio cannot tell
@@ -43,7 +48,8 @@ export type BrowserAutoStartPlan =
   | { kind: "personal" }
   | { kind: "attach"; runtimeId: string }
   | { kind: "pending" }
-  | { kind: "button"; reason: string | null };
+  | { kind: "button"; reason: string | null }
+  | { kind: "continue"; runtimeId: string };
 
 /**
  * Who else is in Instafy's hosted browser, from its collaboration roster:
