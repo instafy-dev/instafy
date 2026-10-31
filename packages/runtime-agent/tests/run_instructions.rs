@@ -10,10 +10,16 @@
 //! cannot serve. The binary re-runs itself in a child with an emptied environment and an owned
 //! HOME and TMPDIR, so host credentials are never consulted.
 //!
-//! What a request carries: the proxy moves every developer message of `input`, joined in history
-//! order, and Codex's own instructions into one user-role message at `input[0]`. A run's
-//! instructions are developer messages tagged `<instafy_run_instructions>`, a turn's note
-//! `<instafy_turn_notes>`; so both reach the provider inside `input[0]` and nowhere else.
+//! What a request carries: the proxy moves the developer messages that open `input` (a thread's
+//! first ones, or those a compaction put back) and Codex's own instructions into one user-role
+//! message at `input[0]`, and leaves each later developer message in its place, as a developer
+//! message. A run's instructions are developer messages tagged `<instafy_run_instructions>`, a
+//! turn's note `<instafy_turn_notes>`; so both reach the provider inside `input[0]` or as a
+//! developer message, and nowhere else. A turn whose run text or note changed adds its block
+//! after the history its thread already sent, so the start of its first request is the whole
+//! of the thread's earlier request on the same instructions, tools and output format, which a
+//! provider serves from its cache. The test prints that share for every turn
+//! (`INSTAFY_RUN_INSTRUCTIONS_API_KEY=1` runs every chain on the API-key transport).
 //!
 //! Lanes this host cannot run (the owner-local browser, and a Shared Browser run that starts in
 //! routine browsing: both need Linux-only trust checks) put their text into the same run text
@@ -53,6 +59,8 @@ use uuid::Uuid;
 
 const TEST_NAME: &str = "every_turn_reads_its_own_run_instructions";
 const CHILD: &str = "INSTAFY_RUN_INSTRUCTIONS_TEST_CHILD";
+/// Set to `1` to run every chain on the API-key transport.
+const EVERY_CHAIN_ON_API_KEY: &str = "INSTAFY_RUN_INSTRUCTIONS_API_KEY";
 const PROVIDER_KEY: &str = "inert-run-instructions-provider-key";
 const ACCOUNT: &str = "inert-run-instructions-account";
 const OPAQUE: &str = "inert-opaque-run-instructions-checkpoint+/=";
@@ -187,6 +195,10 @@ fn run_isolated_child() -> Result<()> {
         .env("SHELL", "/bin/sh")
         .env("LANG", "C.UTF-8")
         .env("RUST_MIN_STACK", "33554432")
+        .env(
+            EVERY_CHAIN_ON_API_KEY,
+            std::env::var(EVERY_CHAIN_ON_API_KEY).unwrap_or_default(),
+        )
         .current_dir(&home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(output.try_clone()?))
@@ -207,11 +219,14 @@ fn run_isolated_child() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+    let output = fs::read_to_string(&output_path)?;
     ensure!(
         status.success(),
-        "the run-instructions fixture failed ({status}):\n{}",
-        fs::read_to_string(&output_path)?
+        "the run-instructions fixture failed ({status}):\n{output}"
     );
+    for line in output.lines().filter(|line| line.starts_with("cache ")) {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -665,9 +680,10 @@ impl Harness {
             Some((text, _)) => set_env("CODEX_BROWSER_MODE_DEVELOPER_INSTRUCTIONS", text),
             None => remove_env("CODEX_BROWSER_MODE_DEVELOPER_INSTRUCTIONS"),
         }
+        let api_key = spec.api_key || std::env::var(EVERY_CHAIN_ON_API_KEY).as_deref() == Ok("1");
         set_env(
             "OPENAI_BASE_URL",
-            if spec.api_key {
+            if api_key {
                 &self.api_key_proxy
             } else {
                 &self.chatgpt_proxy
@@ -1073,12 +1089,14 @@ async fn run_every_chain(harness: &mut Harness) {
     let d1 = harness.run("D1", Spec::new(cd, Lane::Default, None)).await;
     harness.run("D2", Spec::new(cd, Lane::Granted, d1)).await;
 
-    // E: ordinary, then MCP, Summarize and a write turn, on one default thread.
+    // E: ordinary, then MCP, Summarize and a write turn, on one default thread, and back to
+    // an ordinary turn.
     let ce = Uuid::new_v4();
     let e1 = harness.run("E1", Spec::new(ce, Lane::Default, None)).await;
     let e2 = harness.run("E2", Spec::new(ce, Lane::Mcp, e1)).await;
     let e3 = harness.run("E3", Spec::new(ce, Lane::PlainFinal, e2)).await;
-    harness.run("E4", Spec::new(ce, Lane::PlainWrite, e3)).await;
+    let e4 = harness.run("E4", Spec::new(ce, Lane::PlainWrite, e3)).await;
+    harness.run("E5", Spec::new(ce, Lane::Default, e4)).await;
 
     // P: ordinary, then a Personal Browser turn (always on a thread of its own), then ordinary.
     let cp = Uuid::new_v4();
@@ -1117,14 +1135,17 @@ async fn run_every_chain(harness: &mut Harness) {
     let r5 = harness.run("R5", r5).await;
     harness.run("R6", Spec::new(cr, Lane::PlainFinal, r5)).await;
 
-    // T: the API-key transport, a fresh thread and a resumed lane change.
+    // T: the API-key transport, a fresh thread, a resumed lane change and back.
     let ct = Uuid::new_v4();
     let mut t1 = Spec::new(ct, Lane::Default, None);
     t1.api_key = true;
     let t1 = harness.run("T1", t1).await;
     let mut t2 = Spec::new(ct, Lane::PlainFinal, t1);
     t2.api_key = true;
-    harness.run("T2", t2).await;
+    let t2 = harness.run("T2", t2).await;
+    let mut t3 = Spec::new(ct, Lane::Default, t2);
+    t3.api_key = true;
+    harness.run("T3", t3).await;
 
     // O and Q: threads started before run instructions were a section of their own, by a
     // workspace task while that lane's heading was still the renamed one (O) and by an ordinary
@@ -1247,15 +1268,29 @@ fn item_text(item: &Value) -> String {
     parts.join("\n")
 }
 
-/// I(r): the text of a request's `input[0]`, the user-role message the proxy builds from every
-/// developer message of the request and Codex's instructions.
+fn is_developer_message(item: &Value) -> bool {
+    item["type"] == "message" && item["role"] == "developer"
+}
+
+/// I(r): the instructions a request carries, in order: its `input[0]`, the user-role message the
+/// proxy builds from Codex's instructions and the developer messages that open the request, then
+/// each developer message the proxy left in its place.
 fn instructions_text(request: &Value) -> String {
-    let first = &request["input"][0];
+    let input = request["input"].as_array().cloned().unwrap_or_default();
+    let first = input.first().cloned().unwrap_or(Value::Null);
     assert_eq!(
         first["role"], "user",
         "the proxy puts the instructions first"
     );
-    item_text(first)
+    std::iter::once(item_text(&first))
+        .chain(
+            input[1..]
+                .iter()
+                .filter(|item| is_developer_message(item))
+                .map(item_text),
+        )
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Each tagged block's body, in order.
@@ -1319,8 +1354,8 @@ fn check(harness: &Harness) -> Result<()> {
     }
     // Turns that must complete do. R5 fails before the model answers.
     for label in [
-        "A1", "A4", "U1", "U2", "C2", "D1", "E1", "E3", "P1", "P3", "K1", "K2", "K3", "K5", "R1",
-        "R6", "T1", "T2", "O1", "O2", "O3", "Q1", "Q2", "Q3",
+        "A1", "A4", "U1", "U2", "C2", "D1", "E1", "E3", "E5", "P1", "P3", "K1", "K2", "K3", "K5",
+        "R1", "R6", "T1", "T2", "T3", "O1", "O2", "O3", "Q1", "Q2", "Q3",
     ] {
         let turn = harness.turn(label);
         ensure!(turn.outcome.is_ok(), "{label} failed: {:?}", turn.outcome);
@@ -1353,18 +1388,20 @@ fn check(harness: &Harness) -> Result<()> {
     // Phase 2: how the text is delivered.
     for turn in &harness.turns {
         for (index, request) in turn.requests.iter().enumerate() {
-            // (i) Only inside input[0]: Codex sent them as developer messages.
+            // (i) Only inside input[0] or as a developer message: Codex sent them as developer
+            // messages, and the proxy keeps nothing else in either.
             for (position, item) in request["input"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .enumerate()
                 .skip(1)
+                .filter(|(_, item)| !is_developer_message(item))
             {
                 let text = item_text(item);
                 ensure!(
                     !text.contains(RUN_OPEN) && !text.contains(NOTE_OPEN),
-                    "{}#{index}: input[{position}] carries run instructions outside the instruction message",
+                    "{}#{index}: input[{position}] carries run instructions outside the instruction message and the developer messages",
                     turn.label
                 );
             }
@@ -1418,6 +1455,7 @@ fn check(harness: &Harness) -> Result<()> {
         ("E2", 2),
         ("E3", 3),
         ("E4", 4),
+        ("E5", 5),
         ("P1", 1),
         ("P2", 1),
         ("P3", 1),
@@ -1430,6 +1468,7 @@ fn check(harness: &Harness) -> Result<()> {
         ("R6", 2),
         ("T1", 1),
         ("T2", 2),
+        ("T3", 3),
         ("O1", 1),
         ("O2", 1),
         ("O3", 1),
@@ -1580,6 +1619,114 @@ fn check(harness: &Harness) -> Result<()> {
             }
         }
     }
+    // (vi) The cache.
+    check_cached_starts(harness)?;
     println!("every turn read its own run instructions");
+    Ok(())
+}
+
+/// The request head a provider caches ahead of the input: a request can be served from the
+/// cache of an earlier one only when all of it is the same, on the same thread.
+fn same_head(earlier: &Value, later: &Value) -> bool {
+    [
+        "prompt_cache_key",
+        "model",
+        "instructions",
+        "tools",
+        "text",
+        "reasoning",
+    ]
+    .iter()
+    .all(|key| earlier[*key] == later[*key])
+}
+
+fn compactions(request: &Value) -> Vec<&Value> {
+    request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["type"] == "compaction")
+        .collect()
+}
+
+fn input_bytes(items: &[Value]) -> usize {
+    items.iter().map(|item| item.to_string().len()).sum()
+}
+
+/// (vi) A turn's first request starts with the whole input of its thread's latest earlier request
+/// on the same head, so a provider that still holds that request serves the share printed here
+/// from its cache: a turn whose run text or note changed adds them after it, never at the start.
+/// Left out: a thread whose history a compaction rewrote in between, and a thread this test
+/// rewrote after its first turn ran (O and Q).
+fn check_cached_starts(harness: &Harness) -> Result<()> {
+    let requests: Vec<(&Turn, usize, &Value)> = harness
+        .turns
+        .iter()
+        .flat_map(|turn| {
+            turn.requests
+                .iter()
+                .enumerate()
+                .map(move |(index, request)| (turn, index, request))
+        })
+        .collect();
+    let mut broken = Vec::new();
+    for (position, (turn, index, request)) in requests.iter().enumerate() {
+        if sampling_requests(turn).next().map(|(first, _)| first) != Some(*index) {
+            continue;
+        }
+        let name = format!("{}#{index} ({:?})", turn.label, turn.lane);
+        let input = request["input"].as_array().cloned().unwrap_or_default();
+        let thread = |(_, _, earlier): &&(&Turn, usize, &Value)| {
+            earlier["prompt_cache_key"] == request["prompt_cache_key"]
+                && !is_compaction_request(earlier)
+        };
+        if !requests[..position].iter().any(|entry| thread(&entry)) {
+            println!("cache {name}: a new thread");
+            continue;
+        }
+        let Some((earlier_turn, earlier_index, earlier)) = requests[..position]
+            .iter()
+            .rev()
+            .filter(|entry| thread(entry))
+            .find(|(_, _, earlier)| same_head(earlier, request))
+        else {
+            println!(
+                "cache {name}: no earlier request of its thread on its instructions, tools and output format"
+            );
+            continue;
+        };
+        let earlier_name = format!("{}#{earlier_index}", earlier_turn.label);
+        let earlier_input = earlier["input"].as_array().cloned().unwrap_or_default();
+        let shared = input
+            .iter()
+            .zip(&earlier_input)
+            .take_while(|(item, earlier_item)| item == earlier_item)
+            .count();
+        let share = 100 * input_bytes(&input[..shared]) / input_bytes(&input).max(1);
+        let rewritten = harness
+            .older_threads
+            .iter()
+            .any(|(label, _)| *label == earlier_turn.label);
+        let compacted = compactions(earlier) != compactions(request);
+        let why_not = if rewritten {
+            " (this test rewrote that thread after it)"
+        } else if compacted {
+            " (a compaction rewrote the history since)"
+        } else {
+            ""
+        };
+        println!("cache {name}: {share}% of its input starts as {earlier_name}'s{why_not}");
+        if !rewritten && !compacted && shared != earlier_input.len() {
+            broken.push(format!(
+                "{name} starts with {shared} of the {} items of {earlier_name}'s input ({share}% of its own)",
+                earlier_input.len()
+            ));
+        }
+    }
+    ensure!(
+        broken.is_empty(),
+        "a turn's first request does not start with its thread's earlier request on the same instructions, tools and output format, so a provider serves none of that history from its cache:\n{}",
+        broken.join("\n")
+    );
     Ok(())
 }

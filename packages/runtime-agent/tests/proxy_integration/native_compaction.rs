@@ -480,8 +480,9 @@ fn input_text(request: &Value) -> String {
         .join("\n")
 }
 
-/// A run's instructions are developer messages: the proxy carries them, with Codex's own
-/// instructions, in the user-role instruction message it puts first, and nowhere else.
+/// A run's instructions are developer messages: the proxy carries the ones that open a thread
+/// (or the context a compaction put back), with Codex's own instructions, in the user-role
+/// instruction message it puts first, and a later one as a developer message in its place.
 fn assert_run_instructions_once(request: &Value, context: &str) {
     const OPEN: &str = "<instafy_run_instructions>";
     let items = request["input"].as_array().expect("provider input items");
@@ -489,10 +490,14 @@ fn assert_run_instructions_once(request: &Value, context: &str) {
         items[0]["role"], "user",
         "{context}: the proxy puts the instructions first"
     );
-    let instructions = items[0]["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let is_instructions = |position: usize, item: &Value| {
+        position == 0 || (item["type"] == "message" && item["role"] == "developer")
+    };
+    let instructions = items
+        .iter()
+        .enumerate()
+        .filter(|(position, item)| is_instructions(*position, item))
+        .flat_map(|(_, item)| item["content"].as_array().into_iter().flatten())
         .filter_map(|part| part["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
@@ -508,10 +513,10 @@ fn assert_run_instructions_once(request: &Value, context: &str) {
             .starts_with("Instafy Studio structured execution run:"),
         "{context}: the run block is this run's lane text"
     );
-    for (position, item) in items.iter().enumerate().skip(1) {
+    for (position, item) in items.iter().enumerate() {
         assert!(
-            !item.to_string().contains(OPEN),
-            "{context}: input[{position}] carries run instructions outside the instruction message"
+            is_instructions(position, item) || !item.to_string().contains(OPEN),
+            "{context}: input[{position}] carries run instructions outside the instruction message and the developer messages"
         );
     }
 }
