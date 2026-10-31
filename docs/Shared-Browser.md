@@ -1298,7 +1298,15 @@ visible and answerable while the browser view reconnects, shows an error, is
 hidden behind the Chat tab, collapsed in a narrow pane or was never opened in this
 tab. The browser view's sheet shows the same poll for that machine, so both
 surfaces share one state: an answer in either settles both, and the card then says
-**Allowed**, **Denied** or, after the window, **Expired**. A press answers only the
+**Allowed**, **Denied** or, after the window, **Expired**. A chat's browser view
+shows and answers only that chat's prompts: those bound to one of the tabs it
+shows (the chat's own tab and Octo's tabs of its turns). The origin gives a
+prompt to the person who started the run from any of their chats, and the
+view's own poll reads the prompt of the tab in front, so it reads only while
+its stage shows a tab of the chat (never during another chat's turn) and keeps
+no prompt of another tab. Another chat's prompt, with its address and fields,
+never shows there, never takes its keys and never marks its **Browser** tab
+**Approve**; only the asking chat's tab says so. A press answers only the
 prompt that surface shows: a newer prompt the poll found first, or another run's,
 is never answered by it, and the card's buttons are off while it still shows a
 prompt that is no longer the one waiting. The pending and decision

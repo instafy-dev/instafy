@@ -17,6 +17,7 @@ import { Text } from "../../../components/Text";
 import {
   controllerClient,
   type RuntimeBrowserSessionCapabilities,
+  type RuntimeSharedBrowserApprovalRequest,
 } from "../../../sdk/instafy";
 import { beginBrowserRuntimeClaim } from "../../../runtime/browserRuntimeClaimRegistry";
 import {
@@ -597,14 +598,15 @@ export function BrowserSessionModal({
    * the chat's own tab and Octo's tabs of its turns while the browser lists
    * them as Octo's. The stage draws a picture, and the address bar an
    * address, only while one of them is in front; any other tab (another
-   * chat's page, or none named in front) leaves the stage blank. Null for a
-   * view that is not a chat's own (an older browser that cannot give a chat
-   * a tab): it shows the tab in front.
+   * chat's page, or none named in front) leaves the stage blank. Its prompts
+   * are only those of these tabs. Null for a view that is not a chat's own
+   * (an older browser that cannot give a chat a tab): it shows the tab in
+   * front.
    */
   chatPageIds?: readonly string[] | null;
   /**
    * A browser turn of another chat holds the browser: the view shows none of
-   * it, only that Octo is working in another chat.
+   * it, not even its prompts, only that Octo is working in another chat.
    */
   anotherChatTurn?: boolean;
   /**
@@ -957,11 +959,24 @@ export function BrowserSessionModal({
   // settles both.
   const viewRuntimeId = (browserOriginConnection?.runtimeId ?? selectedSessionRuntimeId)?.toLowerCase() ?? null;
   const runApprovalApplies = Boolean(runApproval) && (!viewRuntimeId || viewRuntimeId === runApproval?.runtimeId);
+  // A chat's view shows and answers only its own chat's prompts, those of a
+  // step on one of the chat's tabs, as the chat's own row keeps only its
+  // run's. The origin gives a prompt to the person who started the run in
+  // any of their chats, so another chat's prompt (its address, its fields,
+  // Deny and Allow) would show here, light this chat's Approve, and an
+  // answer here would settle that chat's step. A view that is not a chat's
+  // own keeps the prompt of the tab it shows.
+  const promptOnChatTab = useCallback(
+    (request: RuntimeSharedBrowserApprovalRequest) => chatPageIds === null || chatPageIds.includes(request.browserPageId),
+    [chatPageIds],
+  );
   const ownSharedBrowserApproval = useSharedBrowserApproval({
     // The signed origin marker/request remains authoritative even if the user
-    // switches conversations or hides the Shared transport. The endpoint is
-    // initiator-scoped, so a writable mounted surface can safely keep polling.
-    active: isOpen && canControlBrowser && !browserDataClearInFlight && !runApprovalApplies,
+    // switches views or hides the Shared transport, so a writable mounted
+    // view keeps polling. It reads the prompt of the tab in front, so only
+    // while its stage shows a tab of its chat: never during another chat's
+    // turn, nor while another chat's page is in front.
+    active: isOpen && canControlBrowser && !browserDataClearInFlight && !runApprovalApplies && stageShowsPage,
     // Prompts are raised only inside a run; with none, a slow safety read.
     runActive: spaceBusy || effectiveAgentControlOwner !== null,
     projectId: browserOriginConnection?.projectId ?? projectId,
@@ -970,6 +985,7 @@ export function BrowserSessionModal({
     browserPageId: sharedBrowserPageId,
     originEndpoint: browserOriginConnection?.endpoint ?? null,
     originAccessToken: browserOriginConnection?.accessToken ?? null,
+    acceptsRequest: promptOnChatTab,
   });
   const sharedBrowserApproval =
     runApprovalApplies && runApproval && canControlBrowser && !browserDataClearInFlight

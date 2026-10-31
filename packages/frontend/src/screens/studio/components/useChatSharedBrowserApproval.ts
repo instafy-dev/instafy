@@ -120,8 +120,7 @@ export function useChatSharedBrowserApproval(params: {
   });
   // The origin already answers only the person who started the run; this
   // also keeps another run's prompt out of this conversation. The lane
-  // applies it to its latest poll when a press is answered, as well as to
-  // what is shown here.
+  // holds, shows and answers only the prompts it accepts.
   const forThisRun = useCallback(
     (request: RuntimeSharedBrowserApprovalRequest) =>
       target !== null && request.runId === target.runId && request.initiatorUserId === userId,
@@ -137,7 +136,7 @@ export function useChatSharedBrowserApproval(params: {
     originAccessToken: grant?.accessToken ?? null,
     acceptsRequest: forThisRun,
   });
-  const pending = lane.pending && forThisRun(lane.pending.request) ? lane.pending : null;
+  const pending = lane.pending;
   const decide = lane.decide;
   const approval = useMemo<SharedBrowserApprovalState>(() => ({
     pending,
