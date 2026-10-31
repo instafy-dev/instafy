@@ -1,5 +1,13 @@
 # @instafy/cli
 
+## 0.5.1
+
+### Patch Changes
+
+- b4361f5: `instafy bind check` fails a row of a comparison (the compare starter's `data.json`) that says nowhere where it comes from: no value or `sources` entry cites an https page that was read, and no `found` names the site of the search result that alone names it. It reads this from the data's shape, never from the row's words, so rows such as "Model 1/2/3" with every cell unknown fail, also when `--expect` lists them, and a model only a search names passes once its row says so. The compare starter marks such a row "Not checked" and names the result's site under Details, and an empty page now still lists what was not checked. A failed or stopped page in a browser or research turn ends that page, not the task: the browser skill says "Finding a page" says what comes next and to read the best result of the search for another source, and neither a card's task ("what to do and where to stop") nor the reply rule for a failed browser step ("and stop") tells a turn to stop any more. The runtime's reply guidance names a few more inside words to leave out ("the shared browser", "a validation pass", "no visible report", "could not visually inspect those images", "placeholder rows"). Spaces with an unedited earlier copy of the browser skill or of `AGENTS.md` get the new one.
+- 0b75b2e: `instafy preview open` records, with each preview it opens on the machine, the folder the site's server runs from (inside the space's workspace) and whether it was opened with `--no-thumbnail`; `instafy preview open` and `instafy preview check` record when they last pictured the site for the preview's card, also when no picture came of it. A preview opened with `--no-thumbnail` gets no picture from a later `check` either. `instafy preview check --desktop` loads only the desktop size, which the card's picture comes from. While a turn that changed a file in the site's folder after it was last pictured saves its changes, the runtime checks the site again with `instafy preview check --desktop`, so the card shows the site as the turn left it, also when the turn stopped before its own check: a map opened early no longer keeps its blank starter on its card. A preview restarted after the space slept keeps what was recorded.
+- bd6461b: `instafy web search` without a search key no longer tells Octo to read "the pages of publishers you know cover this": it says to read, for reviews, a reviewer's home page and the pages it links. A turn asked for reviews read guessed review addresses instead, none of which answered. The research skill says the same, so reviews come from a search or from the reviewer's own site, never from a guessed address.
+
 ## 0.5.0
 
 ### Minor Changes
