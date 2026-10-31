@@ -435,13 +435,16 @@ differs from a request it saw before. That start depends on the turn's lane (run
 
 So a lane's requests reuse only that lane's own earlier requests, and only while the provider
 still holds them (a few minutes). The first request of a turn pays the uncached price for its whole
-history the first time a chat uses the lane, after a pause, and after a turn of another lane, whose
-run instructions change the start of every later request (below). The requests after it are
-cached. A one-command turn ("open the map"), the chat's first in its lane, sent its 75k-token
-history uncached once and cached once, and cost 9 credits; with the start cached it would cost
-about 2. A browser follow-up after a browser turn was 97% cached. A chat that moves between
-building, asking and browsing pays the whole history again at the first turn after each change of
-lane, and more the longer the chat. Making the start the same for every lane of a thread (the same
+history the first time a chat uses the lane, and after a pause. A turn in a lane the chat used a few
+minutes earlier pays the uncached price only for what the thread added since that lane's last
+request: the turns of other lanes in between, and its own run instructions (below). The requests
+after it are cached. A one-command turn ("open the map"), the chat's first in its lane, sent its
+75k-token history uncached once and cached once, and cost 9 credits; with the start cached it would
+cost about 2. A browser follow-up after a browser turn was 97% cached. A chat that moves between
+building, asking and browsing pays the whole history again at the first turn in each lane, and more
+the longer the chat. After a browser turn, a chat's ordinary turns get no helper agents, so their
+tools differ from those of the ordinary turns before it, and the first ordinary turn after a browser
+turn pays its whole history too. Making the start the same for every lane of a thread (the same
 base instructions, tools and output format, with each lane's rules later in the request), or giving
 each lane its own thread, would remove it; both change what every turn is told, so they are left to
 a change of their own.
@@ -450,18 +453,31 @@ A run's developer instructions (its lane's rules and browser policy) are sent wh
 and again, once, at a turn whose run differs from the one the thread last read: a browser turn
 after an ordinary one adds about 1.8k tokens of Shared Browser policy, and the ordinary turn after
 it its own rules again (about 370 tokens). A note for one turn only (a page another chat left open)
-adds about 100 tokens, and the thread's next turn without it withdraws it in about 25. All of them
-stay in the thread's history until it is compacted. The proxy puts every developer message of a
-thread into the instruction message at the start of each request, so a turn that adds one changes
-that start and pays its whole history uncached on its first request, even when its lane ran a few
-minutes before: at every change of lane, a return to a lane the chat used minutes earlier included
-(a building turn after a card's browser turn was 98% cached when the run's instructions reached
-only a new thread), and at a turn that adds or withdraws a note. Only a turn whose run instructions
-and note are both the same as the last turn's keeps the cached start. A thread started before run
-instructions followed each turn is given its run's instructions once more at its next turn, which
-pays that once. Keeping the developer messages that come after a thread's first ones in their own
-place in the request, rather than at its start, would keep the cached start; that changes what every
-request carries, so it is left to a change of its own.
+adds about 100 tokens, and the thread's next turn without it withdraws it in about 25. Each stays in
+the thread's history, at the start of the turn that sent it, until the thread is compacted. The
+proxy puts the developer messages that open a thread, with Codex's own instructions, into the
+instruction message at the start of each request, and leaves each later one in its place, as a
+developer message. So a turn that changes its run instructions or adds or withdraws a note sends
+them after the history its thread already sent, and its first request starts with the whole of its
+lane's last request, which a provider that still holds it serves from its cache.
+`tests/run_instructions.rs` prints, for every turn, the share of its first request that starts as
+its thread's latest earlier request on the same instructions, tools and output format; it is the
+same on a ChatGPT login and on an API key:
+
+| Turn | Share |
+| --- | --- |
+| Run instructions and note unchanged | 88-90% |
+| A browser turn that adds or withdraws the note | 90-91% |
+| A turn whose run text changed, on the same tools (an approval start, an MCP turn after an ordinary one) | 86-96% |
+| An ordinary turn after a Summarize or a write turn (what those added is not cached) | 70-77% |
+
+The last three were 0% while every developer message went into the instruction message: any change
+of run instructions or note changed the start of every later request. A thread started before run
+instructions followed each turn is given its run's instructions once more at its next turn, after
+its history too. A Chat Completions upstream (a DeepSeek, Z.ai or Gemini key) still gets every
+developer message in its first message, because those providers differ on instructions later in a
+request; there a turn that changes its run instructions or note still pays its history uncached
+once.
 
 ### Measuring root-call usage
 
