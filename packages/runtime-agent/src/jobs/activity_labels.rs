@@ -215,8 +215,8 @@ const BROWSER_SEARCH: BuiltinLabel = BuiltinLabel {
         "searched {host}",
     ),
 };
-// Clicks, other keys, typing, sending a form that is not a search, scrolling, tabs and status:
-// the line names the pages and searches they lead to, not each step.
+// Clicks, other keys, typing, choosing an option, sending a form that is not a search, scrolling,
+// tabs and status: the line names the pages and searches they lead to, not each step.
 const BROWSER_BROWSE: BuiltinLabel = BuiltinLabel {
     key: "browser/browse",
     role: ActivityRole::Quiet,
@@ -1848,6 +1848,7 @@ mod tests {
             ("snapshot", "browser/read", "content"),
             ("click", "browser/browse", "quiet"),
             ("type", "browser/browse", "quiet"),
+            ("choose", "browser/browse", "quiet"),
             ("submit", "browser/browse", "quiet"),
             ("press", "browser/browse", "quiet"),
             ("scroll", "browser/browse", "quiet"),

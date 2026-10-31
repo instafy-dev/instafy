@@ -24,8 +24,8 @@ use sha2::{Digest, Sha256};
 
 /// The step kinds a browser step may name.
 const STEPS: &[&str] = &[
-    "navigate", "open_tab", "snapshot", "search", "submit", "click", "type", "press", "scroll",
-    "tabs", "status",
+    "navigate", "open_tab", "snapshot", "search", "submit", "click", "type", "choose", "press",
+    "scroll", "tabs", "status",
 ];
 /// The ways the controller says a step was allowed.
 const CONTROLLER_APPROVALS: &[&str] = &["once", "routine", "free"];
@@ -47,6 +47,7 @@ fn step_of_tool(tool: &str, arguments: Option<&JsonValue>) -> Option<&'static st
         "click" => "click",
         "type" if submits => "submit",
         "type" => "type",
+        "choose" => "choose",
         "press" => "press",
         "scroll" => "scroll",
         "list_tabs" | "select_tab" | "close_tab" => "tabs",
@@ -273,6 +274,49 @@ mod tests {
         );
         // The typed text is never kept.
         assert!(!facts.to_string().contains("Belém"));
+    }
+
+    /// Choosing an option of a list is a step of its own, before the controller answers, once
+    /// it answered and when the person said no; the option it chose is never kept.
+    #[test]
+    fn choosing_an_option_is_a_step_of_its_own() {
+        let mut last_host = Some("metrodoporto.pt".to_string());
+        let arguments = json!({"index": 7, "snapshotId": "0".repeat(64), "option": "São Bento"});
+        let started =
+            browser_step_facts("choose", Some(&arguments), None, None, &mut last_host).unwrap();
+        assert_eq!(
+            started,
+            json!({"step": "choose", "host": "metrodoporto.pt"})
+        );
+        let payload = json!({
+            "activity": {"step": "choose", "url": "https://en.metrodoporto.pt/", "approval": "routine"},
+        });
+        let done = browser_step_facts(
+            "choose",
+            Some(&arguments),
+            Some(&payload),
+            None,
+            &mut last_host,
+        )
+        .unwrap();
+        assert_eq!(done["step"], "choose");
+        assert_eq!(done["host"], "en.metrodoporto.pt");
+        assert_eq!(done["approval"], "routine");
+        let denied = browser_step_facts(
+            "choose",
+            Some(&arguments),
+            None,
+            Some("approval_denied"),
+            &mut last_host,
+        )
+        .unwrap();
+        assert_eq!(
+            denied,
+            json!({"step": "choose", "host": "en.metrodoporto.pt", "approval": "denied"})
+        );
+        for facts in [started, done, denied] {
+            assert!(!facts.to_string().contains("Bento"));
+        }
     }
 
     #[test]

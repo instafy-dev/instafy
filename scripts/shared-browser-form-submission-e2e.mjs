@@ -25,6 +25,17 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    origin that sends nothing key-like, in the run's page and in Octo's own
 //    tabs, and lets no form post leave the tab; every other form step still
 //    asks or is refused, and Ask mode asks for each.
+// 4. A journey planner: under routine browsing, choosing a start and an end
+//    station asks nothing and sends nothing, the planner's own button asks
+//    once and the route is read. A list is named by its own label or the
+//    option it holds, never by its options; a list the page posts when it
+//    changes may post to its own site, never elsewhere; and Ask mode asks for
+//    each choice, naming the option and the list.
+// 5. Other lists: inside their own labels, with a word of a payment detail
+//    among their options, holding several options, long, posting to another
+//    site after an Allow or from Octo's own tab, signing in with another
+//    account, on a page that may show a secret, and moving their options
+//    while Octo chooses.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -130,6 +141,64 @@ document.getElementById("flip").addEventListener("keydown", (event) => {
 });
 </script>`;
 
+// A transport operator's journey planner: two station lists, departure or
+// arrival, a day and a time, and a button that posts the form to the site.
+// Beside it, a list of lines with no label, a list the page posts to its own
+// site when it changes, and one it posts to another site.
+const STATIONS = ["24 Agosto", "Aeroporto", "Aliados", "Bolhão", "Campanhã", "São Bento", "Trindade"];
+const stationOptions = STATIONS.map((station) => `<option>${station}</option>`).join("");
+const PLANNER = `<h1>Journey Planner</h1>
+<form action="/route" method="post">
+<label for="start">Start</label><select id="start" name="start">${stationOptions}</select>
+<label for="end">End</label><select id="end" name="end">${stationOptions}</select>
+<select name="type" aria-label="Type"><option>Departure</option><option>Arrival</option></select>
+<label for="day">Day</label><input id="day" type="date" name="day" value="2026-10-31">
+<label for="time">Time</label><input id="time" type="time" name="time" value="09:00">
+<input type="submit" value="Plan Your Journey">
+</form>
+<select name="line"><option>All lines</option><option>Line A</option><option>Line D</option></select>
+<form action="/lines" method="post"><label for="status">Line status</label>
+<select id="status" name="status" onchange="this.form.submit()"><option>Today</option><option>Tomorrow</option></select></form>
+<form action="{other}/collect" method="post"><label for="sort">Sort stations</label>
+<select id="sort" name="sort" onchange="this.form.submit()"><option>By name</option><option>By line</option></select></form>`;
+// Other lists a person meets: lists inside their own labels, a list of cars
+// with a "Swift" among them, one that holds several options at once, a long
+// list, and a bulk-actions list the page posts to another site when it
+// changes.
+const AIRPORTS = Array.from({ length: 1_200 }, (_, index) => `Airport ${String(index + 1).padStart(4, "0")}`);
+const LISTS = `<h1>Lists</h1>
+<form action="/route" method="post">
+<label>Start <select name="start">${stationOptions}</select></label>
+<label>Action <select name="action"><option>View</option> <option>Delete</option></select></label>
+<input type="submit" value="Go">
+</form>
+<label for="car">Car</label><select id="car" name="car"><option>Fiat Panda</option><option>Suzuki Swift</option></select>
+<label for="topics">Topics</label><select id="topics" name="topics" multiple size="3"><option selected>Art</option><option selected>Music</option><option>Sport</option></select>
+<label for="airport">Airport</label><select id="airport" name="airport">${AIRPORTS.map((name) => `<option>${name}</option>`).join("")}</select>
+<form action="{other}/collect" method="post"><label for="bulk">Bulk actions</label>
+<select id="bulk" name="bulk" onchange="this.form.submit()"><option>Select all</option><option>Delete selected</option></select></form>`;
+// A list whose option signs in with another account.
+const ACCOUNT_LIST = `<h1>Account</h1>
+<label for="account">Account</label><select id="account" onchange="location.href = '/oauth/' + this.value"><option value="none">Choose</option><option value="github">Sign in with GitHub</option></select>`;
+// A page that shows recovery codes, with a list of them.
+const CODES = `<h1>Recovery codes</h1><p>Keep these recovery codes somewhere safe.</p><p><code>{key}</code></p>
+<label for="used">Mark as used</label><select id="used"><option>4829 1037</option><option>7731 2284</option></select>`;
+// A list whose two stations trade places every two milliseconds while the
+// option it holds stays, and which notes the option it holds each time it
+// changes.
+const FLIP = `<h1>Departures</h1>
+<label for="from">From</label><select id="from"><option>Choose a station</option><option label="Sao Bento">first</option><option label="Trindade">second</option></select>
+<script>
+const from = document.getElementById("from");
+window.seen = [];
+from.addEventListener("change", () => window.seen.push(from.selectedOptions[0].label));
+setInterval(() => {
+  const [, first, second] = from.options;
+  [first.label, second.label] = [second.label, first.label];
+}, 2);
+</script>`;
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => `&#${character.codePointAt(0)};`);
+
 export async function runSharedBrowserFormSubmissionFixture() {
   assert.ok(fs.existsSync(executablePath), "Locked Playwright Chromium is missing; run pnpm --filter @instafy/frontend exec playwright install chromium");
   fs.mkdirSync(resultDirectory, { recursive: true });
@@ -152,11 +221,14 @@ export async function runSharedBrowserFormSubmissionFixture() {
     // The same requests with their queries, for the searches that must send
     // exactly what was typed.
     const searches = [];
+    // The journeys the planner was asked for, as the form posted them.
+    const routes = [];
     const sites = () => ({
       shop: `http://shop.test:${port}`,
       mall: `http://mall.test:${port}`,
       sub: `http://www.mall.test:${port}`,
       other: `http://other.test:${port}`,
+      transit: `http://transit.test:${port}`,
     });
     const fill = (html, name = "") => html
       .replaceAll("{shop}", sites().shop)
@@ -172,6 +244,18 @@ export async function runSharedBrowserFormSubmissionFixture() {
       }
       requests.push(`${request.method} ${url.origin}${url.pathname}`);
       searches.push(`${request.method} ${url.origin}${url.pathname}${url.search}`);
+      if (request.method === "POST" && url.pathname === "/route") {
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk) => { body += chunk; });
+        request.on("end", () => {
+          const journey = Object.fromEntries(new URLSearchParams(body));
+          routes.push(journey);
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+          response.end(page("Your journey", `<h1>Your journey</h1><p>From ${escapeHtml(journey.start)} to ${escapeHtml(journey.end)}: take Line D towards Hospital S. João, 1 stop, about 2 minutes.</p>`));
+        });
+        return;
+      }
       request.resume();
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       const name = url.pathname.startsWith("/case/") ? decodeURIComponent(url.pathname.slice("/case/".length)) : "";
@@ -188,6 +272,16 @@ export async function runSharedBrowserFormSubmissionFixture() {
         response.end(page("Places", fill(SEARCH)));
       } else if (url.pathname === "/scenario/search-checks") {
         response.end(page("Searches", fill(SEARCH_CHECKS)));
+      } else if (url.pathname === "/scenario/planner") {
+        response.end(page("Journey Planner", fill(PLANNER)));
+      } else if (url.pathname === "/scenario/lists") {
+        response.end(page("Lists", fill(LISTS)));
+      } else if (url.pathname === "/scenario/account") {
+        response.end(page("Account", fill(ACCOUNT_LIST)));
+      } else if (url.pathname === "/scenario/codes") {
+        response.end(page("Recovery codes", fill(CODES)));
+      } else if (url.pathname === "/scenario/flip") {
+        response.end(page("Departures", fill(FLIP)));
       } else {
         response.end(page("Fixture", `<p>${request.method} ${url.pathname}</p>`));
       }
@@ -207,7 +301,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
       args: [
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
-        "--host-resolver-rules=MAP shop.test 127.0.0.1, MAP mall.test 127.0.0.1, MAP www.mall.test 127.0.0.1, MAP other.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+        "--host-resolver-rules=MAP shop.test 127.0.0.1, MAP mall.test 127.0.0.1, MAP www.mall.test 127.0.0.1, MAP other.test 127.0.0.1, MAP transit.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
       ],
     });
     const runPage = context.pages()[0];
@@ -590,9 +684,196 @@ export async function runSharedBrowserFormSubmissionFixture() {
     await delay(300);
     assert.deepEqual(sentTo(`POST ${sites().mall}/collect`), [], "The post was stopped before it left the browser");
 
+    // 4. A journey planner, under routine browsing (still on). A list is
+    // named by its own label, or by the option it holds when it has none,
+    // never by all of its options run together, and says which option it
+    // holds.
+    const plannerPage = `${sites().transit}/scenario/planner`;
+    const list = (observed, label) => {
+      const found = control(observed, label);
+      assert.equal(found.tag, "select", `${label} is a list`);
+      return found;
+    };
+    await runPage.goto(plannerPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    assert.equal(list(snapshot, "Start").chosen, "24 Agosto");
+    assert.equal(list(snapshot, "End").chosen, "24 Agosto");
+    assert.equal(list(snapshot, "All lines").chosen, "All lines", "a list with no label is named by the option it holds");
+    assert.ok(
+      !snapshot.interactiveElements.some((element) => /Agosto ?Aeroporto|Line A ?Line D/.test(element.label)),
+      "no list is named by its options",
+    );
+    // a. Choosing a start and an end station asks nothing and sends nothing;
+    // a label reads the same with case and accents aside.
+    start = prompts.length;
+    requests.length = 0;
+    let chosen = await ok("POST", "/v1/choose", { index: list(snapshot, "Start").index, snapshotId: snapshot.snapshotId, option: "São Bento" });
+    assert.equal(list(chosen, "Start").chosen, "São Bento");
+    assert.deepEqual(chosen.activity, { step: "choose", url: plannerPage, approval: "routine" });
+    chosen = await ok("POST", "/v1/choose", { index: list(chosen, "End").index, snapshotId: chosen.snapshotId, option: "trindade" });
+    assert.equal(list(chosen, "End").chosen, "Trindade");
+    assert.equal(list(chosen, "Start").chosen, "São Bento");
+    assert.deepEqual(promptsSince(start), [], "Choosing the stations asks nothing");
+    assert.deepEqual(requests, [], "Choosing the stations sends nothing");
+    assert.match(fs.readFileSync(actionsPath, "utf8"), /"label":"Choose \\"Trindade\\" in \\"End\\""/u);
+    // A list with no label of its own is named by neither the option it holds
+    // nor its options: its step names the option chosen alone.
+    chosen = await ok("POST", "/v1/choose", { index: list(chosen, "All lines").index, snapshotId: chosen.snapshotId, option: "Line D" });
+    assert.equal(list(chosen, "Line D").chosen, "Line D");
+    assert.match(fs.readFileSync(actionsPath, "utf8").trim().split("\n").at(-1), /"label":"Choose \\"Line D\\"","url"/u);
+    // An option the list does not have chooses nothing; the answer lists
+    // the options, so the next try names one exactly.
+    const missing = await refused(/No option in "Start" is called "Sao Bentoo", so nothing was chosen\. Its options: 24 Agosto, Aeroporto, Aliados, Bolhão, Campanhã, São Bento, Trindade\./u, "POST", "/v1/choose", { index: list(chosen, "Start").index, snapshotId: chosen.snapshotId, option: "Sao Bentoo" });
+    assert.ok(!missing.includes("approval_"), missing);
+    // A control that is not a list is refused, and nothing is typed.
+    await refused(/choose sets a list the page draws as a select/u, "POST", "/v1/choose", { index: control(chosen, "Time").index, snapshotId: chosen.snapshotId, option: "10:00" });
+    assert.deepEqual(promptsSince(start), [], "Neither asked");
+    // b. The planner's own button asks once, naming the fields it sends and
+    // never their values, and the route is read.
+    const plan = control(chosen, "Plan Your Journey");
+    const planned = await ok("POST", "/v1/click", { index: plan.index, snapshotId: chosen.snapshotId }, ["allow_once"]);
+    assert.deepEqual(promptsSince(start), [["action", "click", sites().transit]], "The planner's button asks once");
+    assert.equal(prompts.at(-1).display.label, "Change something: Plan Your Journey · Sends: Start, End, Type, Day, Time");
+    assert.deepEqual(routes, [{ start: "São Bento", end: "Trindade", type: "Departure", day: "2026-10-31", time: "09:00" }]);
+    assert.equal(planned.url, `${sites().transit}/route`);
+    assert.match(planned.visibleText, /From São Bento to Trindade: take Line D/u);
+    // c. A list the page posts when it changes may post to the page's own
+    // site, as typing may, and to nowhere else: the step's guard stops it.
+    await runPage.goto(plannerPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    start = prompts.length;
+    requests.length = 0;
+    const statusPosted = await ok("POST", "/v1/choose", { index: list(snapshot, "Line status").index, snapshotId: snapshot.snapshotId, option: "Tomorrow" });
+    assert.deepEqual(sentTo(`POST ${sites().transit}/lines`), [`POST ${sites().transit}/lines`], "posted to the page's own site");
+    assert.equal(statusPosted.activity.step, "choose");
+    await runPage.goto(plannerPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    requests.length = 0;
+    await refused(/sent a form to http:\/\/other\.test:\d+\/?, which the step was not approved to send to/u, "POST", "/v1/choose", { index: list(snapshot, "Sort stations").index, snapshotId: snapshot.snapshotId, option: "By line" });
+    await delay(300);
+    assert.deepEqual(sentTo(collect), [], "Nothing was posted to the other site");
+    assert.deepEqual(promptsSince(start), [], "Neither asked");
+
+    // d. Ask mode, in the person's next run: each choice asks, naming the
+    // option and the list by its own label, and a click on a list names the
+    // list, never its options. Nothing is chosen when the person says no.
+    for (const name of fs.readdirSync(approvalDirectory)) fs.rmSync(path.join(approvalDirectory, name));
+    Object.assign(authority, { ownerId: randomUUID(), runId: randomUUID() });
+    writeProtectedJson(markerPath, authority);
+    await runPage.goto(plannerPage);
+    snapshot = await ok("GET", "/v1/snapshot", null, ["allow_origin"]);
+    start = prompts.length;
+    await refused(/approval_denied|denied/i, "POST", "/v1/choose", { index: list(snapshot, "Start").index, snapshotId: snapshot.snapshotId, option: "São Bento" }, ["deny"]);
+    assert.deepEqual(promptsSince(start), [["action", "choose", null]]);
+    assert.equal(prompts.at(-1).display.label, "Change something: São Bento · In: Start");
+    assert.equal(prompts.at(-1).destinationOrigin, null);
+    snapshot = await ok("GET", "/v1/snapshot");
+    assert.equal(list(snapshot, "Start").chosen, "24 Agosto", "Nothing was chosen when the person said no");
+    await refused(/approval_denied|denied/i, "POST", "/v1/click", { index: list(snapshot, "Start").index, snapshotId: snapshot.snapshotId }, ["deny"]);
+    assert.equal(prompts.at(-1).operation, "click");
+    assert.equal(prompts.at(-1).display.label, "Change something: Start");
+    // A list with no label of its own: the prompt names the option alone.
+    await refused(/approval_denied|denied/i, "POST", "/v1/choose", { index: list(snapshot, "All lines").index, snapshotId: snapshot.snapshotId, option: "Line A" }, ["deny"]);
+    assert.equal(prompts.at(-1).operation, "choose");
+    assert.equal(prompts.at(-1).display.label, "Change something: Line A");
+
+    // 5. Other lists, under routine browsing in the person's next run.
+    for (const name of fs.readdirSync(approvalDirectory)) fs.rmSync(path.join(approvalDirectory, name));
+    Object.assign(authority, { ownerId: randomUUID(), runId: randomUUID() });
+    writeProtectedJson(markerPath, authority);
+    const listsPage = `${sites().transit}/scenario/lists`;
+    await runPage.goto(listsPage);
+    snapshot = await ok("GET", "/v1/snapshot", null, ["allow_routine"]);
+    // a. A list inside its own label is named by the label's own words, never
+    // its options, and its other options' words never count: choosing "View"
+    // beside "Delete" asks nothing.
+    assert.equal(list(snapshot, "Start").chosen, "24 Agosto");
+    assert.equal(list(snapshot, "Action").chosen, "View");
+    assert.ok(
+      !snapshot.interactiveElements.some((element) => /Agosto ?Aeroporto|View ?Delete/.test(element.label)),
+      "no list is named by its options",
+    );
+    start = prompts.length;
+    requests.length = 0;
+    chosen = await ok("POST", "/v1/choose", { index: list(snapshot, "Start").index, snapshotId: snapshot.snapshotId, option: "Aliados" });
+    assert.equal(list(chosen, "Start").chosen, "Aliados");
+    assert.match(fs.readFileSync(actionsPath, "utf8").trim().split("\n").at(-1), /"label":"Choose \\"Aliados\\" in \\"Start\\""/u);
+    chosen = await ok("POST", "/v1/choose", { index: list(chosen, "Action").index, snapshotId: chosen.snapshotId, option: "View" });
+    assert.equal(list(chosen, "Action").chosen, "View");
+    // b. A list of cars with a "Swift" among them is no payment field.
+    chosen = await ok("POST", "/v1/choose", { index: list(chosen, "Car").index, snapshotId: chosen.snapshotId, option: "Suzuki Swift" });
+    assert.equal(list(chosen, "Car").chosen, "Suzuki Swift");
+    // c. A list that holds several options at once is left to the person:
+    // choose sets one, and would drop the ones it holds.
+    await refused(/"Topics" holds several options at once/u, "POST", "/v1/choose", { index: list(chosen, "Topics").index, snapshotId: chosen.snapshotId, option: "Sport" });
+    assert.deepEqual(
+      await runPage.evaluate(() => Array.from(document.getElementById("topics").selectedOptions, (option) => option.label)),
+      ["Art", "Music"],
+    );
+    // d. An option past the first thousand of a long list is found.
+    snapshot = await ok("GET", "/v1/snapshot");
+    chosen = await ok("POST", "/v1/choose", { index: list(snapshot, "Airport").index, snapshotId: snapshot.snapshotId, option: "Airport 1100" });
+    assert.equal(list(chosen, "Airport").chosen, "Airport 1100");
+    assert.deepEqual(promptsSince(start), [], "None of these asked");
+    assert.deepEqual(requests, [], "None of these sent anything");
+    // e. A risky choice the person allows still sends no form to another
+    // site, which its prompt never named.
+    start = prompts.length;
+    await refused(/sent a form to http:\/\/other\.test:\d+\/?, which the step was not approved to send to/u, "POST", "/v1/choose", { index: list(chosen, "Bulk actions").index, snapshotId: chosen.snapshotId, option: "Delete selected" }, ["allow_once"]);
+    assert.deepEqual(promptsSince(start), [["action", "choose", null]]);
+    assert.equal(prompts.at(-1).display.label, "Delete, cancel or sign out: Delete selected · In: Bulk actions");
+    await delay(300);
+    assert.deepEqual(sentTo(collect), [], "Nothing was posted to the other site");
+    // f. In one of Octo's own tabs, which are for reading, a list the page
+    // posts when it changes sends no form, even to the page's own site.
+    const readingTab = await ok("POST", "/v1/tabs/open", { url: plannerPage });
+    snapshot = await ok("GET", "/v1/snapshot", { tabId: readingTab.tabId });
+    start = prompts.length;
+    requests.length = 0;
+    await refused(/sent a form to http:\/\/transit\.test:\d+\/?, which the step was not approved to send to/u, "POST", "/v1/choose", { index: list(snapshot, "Line status").index, snapshotId: snapshot.snapshotId, option: "Tomorrow" });
+    await delay(300);
+    assert.deepEqual(sentTo(`POST ${sites().transit}/lines`), [], "Nothing was posted from Octo's own tab");
+    assert.deepEqual(promptsSince(start), []);
+    await ok("POST", "/v1/tabs/close", { tabId: readingTab.tabId });
+    // g. An option that signs in with another account is the person's step,
+    // as a click on the same words is: refused before any prompt.
+    await runPage.goto(`${sites().transit}/scenario/account`);
+    snapshot = await ok("GET", "/v1/snapshot");
+    start = prompts.length;
+    requests.length = 0;
+    await refused(/\[step_refused_sign_in\]/u, "POST", "/v1/choose", { index: list(snapshot, "Account").index, snapshotId: snapshot.snapshotId, option: "Sign in with GitHub" });
+    await delay(200);
+    assert.deepEqual(promptsSince(start), []);
+    assert.deepEqual(requests, [], "Nothing was opened");
+    // h. On a page that may show a secret, an option the list does not have
+    // chooses nothing, and the answer names none of the list's options.
+    await runPage.goto(`${sites().transit}/scenario/codes`);
+    snapshot = await ok("GET", "/v1/snapshot");
+    assert.equal(snapshot.secretScreen, true);
+    const unlisted = await refused(/No option in "Mark as used" is called "anything", so nothing was chosen\./u, "POST", "/v1/choose", { index: list(snapshot, "Mark as used").index, snapshotId: snapshot.snapshotId, option: "anything" });
+    assert.ok(!/4829|7731/u.test(unlisted), unlisted);
+    // i. The option chosen is the one named, even on a page that moves its
+    // options while Octo chooses: no choice that goes through picks another,
+    // and one that cannot be bound to the option chooses nothing.
+    let flips = 0;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await runPage.goto(`${sites().transit}/scenario/flip`);
+      snapshot = await ok("GET", "/v1/snapshot");
+      const tried = await runTool("POST", "/v1/choose", { index: list(snapshot, "From").index, snapshotId: snapshot.snapshotId, option: "Sao Bento" });
+      const seen = await runPage.evaluate(() => window.seen);
+      if (tried.code !== 0) {
+        assert.match(tried.stderr, /The page changed before this step ran/u);
+        assert.deepEqual(seen, [], "nothing was chosen");
+        continue;
+      }
+      assert.deepEqual(seen, ["Sao Bento"], "the option chosen is the one named");
+      flips += 1;
+    }
+    assert.ok(flips >= 6, `most choices went through (${flips} of 12)`);
+
     const result = {
       status: "passed",
-      fixtureVersion: 3,
+      fixtureVersion: 4,
       cases: table.cases.length,
       prompts: prompts.length,
       checks: [
@@ -609,6 +890,16 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "under routine browsing a GET search of the page's own origin goes without a prompt, sends exactly the form's GET and says approval free, in the run's page and in Octo's own tab",
         "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
+        "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read",
+        "a list is named by its own label or the option it holds, never its options, and a snapshot says which option it holds",
+        "an option a list does not have chooses nothing and the answer lists the options; a control that is no list is refused",
+        "a list the page posts when it changes may post to its own site, and a post elsewhere is stopped by the step's guard",
+        "in Ask mode a choice asks, naming the option and the list, or the option alone for a list with no label, and a click on a list names the list",
+        "a list inside its own label is named by the label's own words, and its other options' words never count",
+        "a car list with a Swift is no payment field, a list that holds several options is left to the person, and an option past the first thousand is found",
+        "a risky choice the person allows, and a choice in Octo's own tab, send no form anywhere the step was not approved to send it",
+        "an option that signs in with another account is refused before any prompt, and an answer on a page that may show a secret names no option",
+        "a list that moves its options while Octo chooses never gets another option than the one named",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",
@@ -630,7 +921,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 3 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 4 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });

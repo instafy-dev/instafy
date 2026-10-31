@@ -1,4 +1,5 @@
-export type PersonalBrowserStep = "navigate" | "click" | "type" | "submit" | "press";
+/** The steps a host classifies. "choose" picks one option of a list by its label (`ctx.option`). */
+export type PersonalBrowserStep = "navigate" | "click" | "type" | "choose" | "submit" | "press";
 
 export type PersonalBrowserStepCategory =
   | "purchase"
@@ -37,7 +38,8 @@ export type PersonalBrowserStepClassification = {
   /**
    * Set on an ordinary "change" control whose label commits a change, such as
    * a Save or Speichern button. Never set on a menu item, tab, tree item,
-   * disclosure or menu opener, or navigation-area item.
+   * disclosure or menu opener, navigation-area item, or a list (a select,
+   * combobox or listbox) or its options.
    */
   commit?: boolean;
   /**
@@ -59,6 +61,8 @@ export type PersonalBrowserStepContext = {
   url?: string;
   /** The key a press step sends. */
   key?: string;
+  /** The label of the option a choose step picks. */
+  option?: string;
   /** Whether the target is a password, code or payment field. */
   sensitive?: boolean;
 };
