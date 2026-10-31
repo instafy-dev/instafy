@@ -14297,13 +14297,15 @@ fn has_successful_shared_browser_mcp_message(messages: &[JobMessage]) -> bool {
     has_successful_bound_mcp_message(
         messages,
         "instafy_shared_browser",
-        &["snapshot", "navigate", "click", "type", "press", "scroll"],
+        &[
+            "snapshot", "navigate", "click", "type", "choose", "press", "scroll",
+        ],
     )
 }
 
-/// A step the browser answered, also with an error: a `navigate`, `open_tab`, `click`, `type`
-/// or `press` call that ended (a site that did not answer, a page that changed, a step the
-/// policy refused). The turn has seen why it failed and said so; the browser retry would only
+/// A step the browser answered, also with an error: a `navigate`, `open_tab`, `click`, `type`,
+/// `choose` or `press` call that ended (a site that did not answer, a page that changed, a step
+/// the policy refused). The turn has seen why it failed and said so; the browser retry would only
 /// send it back to the same address (a local test, Oct 31: a second 30-second wait on a site
 /// that was down, before the same answer). A call that could not reach the browser at all was
 /// answered by nothing, so its turn is still retried.
@@ -14311,7 +14313,7 @@ fn has_answered_shared_browser_step(messages: &[JobMessage]) -> bool {
     has_ended_bound_mcp_message(
         messages,
         "instafy_shared_browser",
-        &["navigate", "open_tab", "click", "type", "press"],
+        &["navigate", "open_tab", "click", "type", "choose", "press"],
         &["completed", "failed"],
     )
 }
@@ -26676,7 +26678,7 @@ mod tests {
                 }
             })])
         };
-        for tool in ["navigate", "open_tab", "click", "type", "press"] {
+        for tool in ["navigate", "open_tab", "click", "type", "choose", "press"] {
             let messages = ended("instafy_shared_browser", tool, "failed");
             assert!(
                 !has_successful_shared_browser_mcp_message(&messages),
@@ -26717,7 +26719,7 @@ mod tests {
         // A step that could not reach the browser at all (one slow connect, a
         // browser starting again) was answered by nothing: the turn still gets
         // its retry, as before. A second one in a row ends the run instead.
-        for tool in ["navigate", "open_tab", "click", "type", "press"] {
+        for tool in ["navigate", "open_tab", "click", "type", "choose", "press"] {
             let unreachable = extract_codex_messages(&[json!({
                 "type": "item.completed",
                 "item": {

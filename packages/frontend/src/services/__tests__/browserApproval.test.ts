@@ -65,6 +65,26 @@ describe("Shared Browser approval transport", () => {
     ).toBeNull();
   });
 
+  it("maps a choice of an option in a list, which sends nothing anywhere", () => {
+    const choice = {
+      pending: {
+        ...pendingApprovalPayload.pending,
+        request: {
+          ...pendingApprovalPayload.pending.request,
+          operation: "choose",
+          destinationOrigin: null,
+          display: { label: "Change something: São Bento · In: Start", destinationOrigin: null },
+        },
+      },
+    };
+    expect(mapRuntimeSharedBrowserPendingApprovalPayload(choice)).toEqual(choice.pending);
+    expect(
+      mapRuntimeSharedBrowserPendingApprovalPayload({
+        pending: { ...choice.pending, request: { ...choice.pending.request, operation: "select" } },
+      }),
+    ).toBeNull();
+  });
+
   it("polls the exact runtime and page with browser view", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(pendingApprovalPayload), {

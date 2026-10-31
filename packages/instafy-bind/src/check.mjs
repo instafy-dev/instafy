@@ -1,7 +1,8 @@
 // `instafy-bind check <dir> --expect "<item>,<item>"`: does the site show every item the request named?
 // A builder that loses an item to a lookup that timed out, or trims a list to what fits, must not ship a page that
 // quietly leaves it out. The check reads what the page can show without a browser: the text of its HTML pages and
-// every string in its data files (data.json, data/**/*.json, records included). Items come from --expect and from
+// every string in its data files (data.json, data/**/*.json, records included, and GeoJSON layers: a map's places are
+// in data/<layer>.geojson). Items come from --expect and from
 // an "expect" array in data.json. Text that only says an item is unavailable ("Not found yet: Tokyo", a data file's
 // "missing" list) does not count as showing it: builders are told to say on the page what they could not add, and
 // that line must not pass the check. On a page of options it also checks the values and where each row comes from
@@ -106,7 +107,7 @@ function siteFiles(root) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".") && depth < 4) walk(full, depth + 1);
-      } else if (entry.isFile() && /\.(html?|json)$/i.test(entry.name) && entry.name !== "bound.json" && entry.name !== "package.json") {
+      } else if (entry.isFile() && /\.(html?|json|geojson)$/i.test(entry.name) && entry.name !== "bound.json" && entry.name !== "package.json") {
         files.push(full);
       }
     }
@@ -130,7 +131,7 @@ export function readSite(dir) {
       continue;
     }
     const rel = path.relative(root, file).split(path.sep).join("/");
-    if (/\.json$/i.test(file)) {
+    if (/\.(geo)?json$/i.test(file)) {
       let value;
       try {
         value = JSON.parse(raw);

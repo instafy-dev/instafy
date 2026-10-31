@@ -24,8 +24,8 @@ pub(crate) const REQUIRE_TOOL_CALL_METADATA_KEY: &str = "instafy.require_tool_ca
 
 /// Browser MCP tools that act on or read the page. `status`, `request_human_input` and the tab
 /// tools that only list, show or close tabs do not; `open_tab` loads a page.
-const BROWSER_EXECUTION_TOOL_NAMES: [&str; 7] = [
-    "snapshot", "navigate", "click", "type", "press", "scroll", "open_tab",
+const BROWSER_EXECUTION_TOOL_NAMES: [&str; 8] = [
+    "snapshot", "navigate", "click", "type", "choose", "press", "scroll", "open_tab",
 ];
 const BROWSER_MCP_SERVER_NAMES: [&str; 2] = ["instafy_personal_browser", "instafy_shared_browser"];
 
