@@ -39,6 +39,8 @@ describe("site → host events", () => {
     for (const source of ["instafy-site", "site-kit", "acme-kit"]) expect(isSiteMessageSource(source)).toBe(true);
     for (const source of ["instafy-host", "", "Bad Name", "x".repeat(41), 3, null]) expect(isSiteMessageSource(source)).toBe(false);
     expect(parseSiteMessage({ source: "acme-kit", v: 1, type: "interact" })).toEqual({ type: "interact" });
+    // A page that draws itself after it loads says when it has.
+    expect(parseSiteMessage({ source: "acme-kit", v: 1, type: "ready", payload: { title: "Map" } })).toEqual({ type: "ready" });
     expect(parseSiteMessage({ source: "instafy-host", v: 1, type: "interact" })).toBeNull();
     expect(parseSiteMessage({ source: "acme-kit", v: 2, type: "interact" })).toBeNull();
     expect(parseSiteMessage("interact")).toBeNull();

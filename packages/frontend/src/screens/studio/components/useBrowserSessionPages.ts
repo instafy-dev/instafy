@@ -26,6 +26,12 @@ export const BROWSER_SESSION_PAGES_REQUEST_TIMEOUT_MS = 10_000;
 /** A capability read that has not answered by then is given up and asked again. */
 export const BROWSER_SESSION_CAPABILITIES_REQUEST_TIMEOUT_MS = 10_000;
 /**
+ * How long a focus on its way keeps the tab it brought forward in front
+ * against reads that began meanwhile: a focus that never answers does not
+ * hold the tab list for longer.
+ */
+export const BROWSER_SESSION_FOCUS_ANSWER_WAIT_MS = 5_000;
+/**
  * How long an open browser may keep answering `browser_host_not_ready` before
  * the hook says it did not start (the same bound as the browser view's own
  * wait for Instafy's browser).
@@ -179,6 +185,8 @@ export function useBrowserSessionPages(params: {
   const commandGenerationRef = useRef(0);
   const commandPendingRef = useRef<{ scopeKey: string; generation: number } | null>(null);
   const focusGenerationRef = useRef(0);
+  /** When the latest focus asked for left for the browser, while it is on its way; null once it answered. */
+  const focusPendingRef = useRef<number | null>(null);
 
   const pages = pageState.scopeKey === scopeKey ? pageState.pages : [];
   const resolved = pageState.scopeKey === scopeKey ? pageState.resolved : false;
@@ -251,6 +259,11 @@ export function useBrowserSessionPages(params: {
       return inFlight.promise;
     }
 
+    // A focus on its way, or asked for after this read began, is newer than
+    // the read's answer about the tab in front.
+    const focusAtStart = focusGenerationRef.current;
+    const focusPendingAtStart = focusPendingRef.current !== null &&
+      Date.now() - focusPendingRef.current < BROWSER_SESSION_FOCUS_ANSWER_WAIT_MS;
     const request = (async (): Promise<boolean> => {
       let livePages: RuntimeBrowserSessionPage[] | null;
       const abort = new AbortController();
@@ -306,7 +319,17 @@ export function useBrowserSessionPages(params: {
         preferredActivePageIdRef.current.scopeKey === requestScope
           ? preferredActivePageIdRef.current.pageId
           : null;
+      // A read that began before a focus says which tab was in front before
+      // it: the focused tab stays in front until a read after it says
+      // otherwise. Taking it back and forth made the view open a new picture
+      // stream on each flip, until the browser refused one.
+      const focusNewer = focusPendingAtStart || focusGenerationRef.current !== focusAtStart;
+      const focusedPageId = focusNewer && preferredPageId !== null &&
+        livePages.some((page) => page.id === preferredPageId)
+        ? preferredPageId
+        : null;
       const resolvedActivePageId =
+        focusedPageId ??
         livePages.find((page) => page.isActive)?.id ??
         (preferredPageId && livePages.some((page) => page.id === preferredPageId)
           ? preferredPageId
@@ -540,8 +563,13 @@ export function useBrowserSessionPages(params: {
 
       const requestScope = scopeKey;
       const generation = ++focusGenerationRef.current;
+      focusPendingRef.current = Date.now();
       const focusIsCurrent = () =>
         scopeIsCurrent(requestScope) && focusGenerationRef.current === generation;
+      // The browser answered: reads that begin from now on say what it shows.
+      const settle = () => {
+        if (focusGenerationRef.current === generation) focusPendingRef.current = null;
+      };
       preferredActivePageIdRef.current = { scopeKey: requestScope, pageId: trimmedPageId };
       setPageState((current) => ({
         scopeKey: requestScope,
@@ -554,12 +582,16 @@ export function useBrowserSessionPages(params: {
 
       let focused = false;
       try {
-        focused = await controllerClient.browserSessions.focusPage({
-          projectId,
-          browserSessionId,
-          pageId: trimmedPageId,
-          preferRuntimeId,
-        });
+        try {
+          focused = await controllerClient.browserSessions.focusPage({
+            projectId,
+            browserSessionId,
+            pageId: trimmedPageId,
+            preferRuntimeId,
+          });
+        } finally {
+          settle();
+        }
       } catch (error) {
         if (!focusIsCurrent()) {
           return false;
@@ -652,6 +684,7 @@ export function useBrowserSessionPages(params: {
     unavailableSuspendedRef.current = { scopeKey, suspended: false };
     commandGenerationRef.current += 1;
     focusGenerationRef.current += 1;
+    focusPendingRef.current = null;
     commandPendingRef.current = null;
     setPageState({ scopeKey, pages: [], resolved: false });
     setCapabilityState({
@@ -675,6 +708,7 @@ export function useBrowserSessionPages(params: {
         mountedRef.current = false;
         commandGenerationRef.current += 1;
         focusGenerationRef.current += 1;
+        focusPendingRef.current = null;
         commandPendingRef.current = null;
       };
     },

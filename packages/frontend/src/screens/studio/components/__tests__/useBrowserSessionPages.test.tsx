@@ -34,6 +34,7 @@ vi.mock("../../../../sdk/instafy", () => ({
 }));
 
 import { useBrowserSessionPages } from "../useBrowserSessionPages";
+import { sharedBrowserPagesFast } from "../useChatComposerBrowserTargeting";
 import { BrowserTabRefusedError } from "../../../../services/runtimeController/browserSession";
 
 type HookResult = ReturnType<typeof useBrowserSessionPages>;
@@ -46,6 +47,8 @@ describe("useBrowserSessionPages", () => {
   let hookRuntimeId: string;
   let hookSuspendOnUnavailable: boolean;
   let hookPollPages: boolean;
+  let hookPollFast: boolean | undefined;
+  let hookSurfaceVisible: boolean | undefined;
   const onUnavailable = vi.fn();
 
   function Harness() {
@@ -58,6 +61,8 @@ describe("useBrowserSessionPages", () => {
       suspendOnUnavailable: hookSuspendOnUnavailable,
       onUnavailable,
       pollPages: hookPollPages,
+      pollFast: hookPollFast,
+      surfaceVisible: hookSurfaceVisible,
     });
     return null;
   }
@@ -72,6 +77,8 @@ describe("useBrowserSessionPages", () => {
     hookRuntimeId = "runtime-1";
     hookSuspendOnUnavailable = false;
     hookPollPages = true;
+    hookPollFast = undefined;
+    hookSurfaceVisible = undefined;
     onUnavailable.mockReset();
     commandPageMock.mockReset().mockResolvedValue(true);
     focusPageMock.mockReset().mockResolvedValue(true);
@@ -332,6 +339,96 @@ describe("useBrowserSessionPages", () => {
 
     expect(fetchPagesMock).toHaveBeenCalledTimes(1);
     expect(latestResult?.pages.find((page) => page.isActive)?.id).toBe("page-1");
+  });
+
+  // Seen Oct 30: a chat's Browser view, opened while another chat's
+  // page was in front, showed the chat's address over a black stage for 15 s
+  // and more. Studio brought the chat's tab forward, a page read from before
+  // that answered with the other tab, the next read brought the chat's tab
+  // back: three picture streams in a fifth of a second, and the browser
+  // refused the one for the chat's page ("pixel stream capacity is full").
+  it.each([
+    ["before the focus was asked for", "before"],
+    ["while the focus is on its way", "during"],
+  ] as const)("keeps the tab a focus brought forward when a read from %s still names the other tab", async (_name, when) => {
+    const page = (id: string, isActive: boolean) => ({
+      id, url: `https://${id}.example/`, host: `${id}.example`, label: id, title: id, isActive, canGoBack: false, canGoForward: false,
+    });
+    fetchPagesMock.mockResolvedValue([page("other-chat", true), page("this-chat", false)]);
+    await renderHook();
+    const fronts: string[] = [];
+    const front = () => latestResult?.pages.find((entry) => entry.isActive)?.id ?? "none";
+    fronts.push(front());
+
+    let answerRead: ((pages: unknown[]) => void) | null = null;
+    let answerFocus: ((focused: boolean) => void) | null = null;
+    fetchPagesMock.mockReturnValueOnce(new Promise((resolve) => { answerRead = resolve; }));
+    focusPageMock.mockReturnValueOnce(new Promise<boolean>((resolve) => { answerFocus = resolve; }));
+    let focusing: Promise<boolean> | undefined;
+    await act(async () => {
+      if (when === "before") void latestResult!.refresh();
+      focusing = latestResult!.focusPage("this-chat");
+      if (when === "during") void latestResult!.refresh();
+      await Promise.resolve();
+    });
+    fronts.push(front());
+    // The read answers with the tab that was in front before the focus.
+    await act(async () => {
+      answerRead?.([page("other-chat", true), page("this-chat", false)]);
+      await Promise.resolve(); await Promise.resolve();
+    });
+    fronts.push(front());
+    // The browser took the focus: the read after it names the chat's tab.
+    fetchPagesMock.mockResolvedValue([page("other-chat", false), page("this-chat", true)]);
+    await act(async () => {
+      answerFocus?.(true);
+      await expect(focusing).resolves.toBe(true);
+    });
+    fronts.push(front());
+    expect(fronts).toEqual(["other-chat", "this-chat", "this-chat", "this-chat"]);
+  });
+
+  it("lets the browser say which tab is in front again once a focus has not answered for five seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const page = (id: string, isActive: boolean) => ({
+        id, url: `https://${id}.example/`, host: `${id}.example`, label: id, title: id, isActive, canGoBack: false, canGoForward: false,
+      });
+      fetchPagesMock.mockResolvedValue([page("other-chat", true), page("this-chat", false)]);
+      await renderHook();
+      focusPageMock.mockReturnValueOnce(new Promise<boolean>(() => {}));
+      await act(async () => { void latestResult!.focusPage("this-chat"); await Promise.resolve(); });
+      await act(async () => { await latestResult!.refresh(); });
+      expect(latestResult?.pages.find((entry) => entry.isActive)?.id).toBe("this-chat");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      await act(async () => { await latestResult!.refresh(); });
+      expect(latestResult?.pages.find((entry) => entry.isActive)?.id).toBe("other-chat");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Seen Oct 30: with the person in Chat, a card that opened Instafy's
+  // browser by itself waited on the tabs of a view off screen, read every
+  // 15 s. While a card opens the browser, its tabs are read at the fast pace,
+  // so the card's turn goes out within seconds of the browser listing a tab.
+  it.each([
+    ["while a card opens the browser", true],
+    ["while nothing else asks for them", false],
+  ] as const)("reads the tabs of a browser whose view is off screen every 2.5 s only %s", async (_name, cardOpening) => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    try {
+      hookSurfaceVisible = false;
+      hookPollFast = sharedBrowserPagesFast({ runActive: false, cardOpening, presence: null });
+      await renderHook();
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      // Fast: at 0, 2.5 and 7.5 s (an unchanged list doubles the wait, up to 5 s). Otherwise at 0, then at 15 s.
+      expect(fetchPagesMock).toHaveBeenCalledTimes(cardOpening ? 3 : 1);
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
   });
 
   it("ignores a capability response from the previous project scope", async () => {

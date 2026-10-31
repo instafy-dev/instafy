@@ -308,6 +308,24 @@ export function chatBrowserTarget<Page extends BrowserSessionPage>(input: {
 }
 
 /**
+ * A browser card's turn can go out now (useChatBrowserRequest's
+ * `sharedReady`): the space's browser has a tab for it (`chatBrowserTarget`'s
+ * `tabAvailable`), the chat's own or one it gets as it is sent
+ * (`resolveForTurn`), whether the chat's Browser view is on screen or not.
+ * Never the page on screen (`chatBrowserHandoffPage`): a chat with no tab yet
+ * has one only while its view shows, so its card waited for the person to
+ * open that view.
+ */
+export function chatBrowserCardReady(input: {
+  /** The machine whose browser the card opens. */
+  runtimeId: string | null;
+  /** The chat's `chatBrowserTarget`, null while there is none. */
+  target: { tabAvailable: boolean } | null;
+}): boolean {
+  return Boolean(input.runtimeId && input.target?.tabAvailable);
+}
+
+/**
  * The tab in front, while the chat's Browser view shows it: one of the
  * chat's tabs (`chatPageIds`), or whatever tab is in front for a view that is
  * not a chat's own (an older browser that cannot give a chat a tab,

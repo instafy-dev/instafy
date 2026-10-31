@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const read = vi.hoisted(() => vi.fn());
 vi.mock("../../services/runtimeController/productNotifications", () => ({ readConversationProductNotifications: read }));
 vi.mock("../notificationPresentation", () => ({ NOTIFICATION_RECEIVED_EVENT: "notification-read-test" }));
-import { useConversationNotificationRead } from "../useConversationNotificationRead";
+import { useConversationNotificationRead, type ArrivedMessage } from "../useConversationNotificationRead";
 import { setNotificationSession } from "../notificationSession";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
@@ -24,11 +24,12 @@ class FakeIntersectionObserver {
     this.callback(elements.map((element) => ({ target: element, isIntersecting: intersecting, intersectionRect: element.getBoundingClientRect() })) as IntersectionObserverEntry[], this as unknown as IntersectionObserver);
   }
 }
-function Harness({ userId = ACCOUNT, messages = [id(1)], enabled = true, hidden = false, grouped }: {
+function Harness({ userId = ACCOUNT, messages = [id(1)], enabled = true, hidden = false, grouped, arrivals = null, open = false }: {
   userId?: string; messages?: string[]; enabled?: boolean; hidden?: boolean; grouped?: string[];
+  arrivals?: ArrivedMessage[] | null; open?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  useConversationNotificationRead({ currentUserId: userId, conversationId: CONVERSATION, rootRef: ref as RefObject<HTMLElement | null>, enabled });
+  useConversationNotificationRead({ currentUserId: userId, conversationId: CONVERSATION, rootRef: ref as RefObject<HTMLElement | null>, enabled, arrivals, open });
   return <div ref={ref} data-testid="transcript" hidden={hidden}>
     {messages.map((messageId, index) => <div key={messageId} data-chat-message-id={messageId} data-top={index * 3}>{messageId}</div>)}
     {grouped ? <div data-chat-message-id="agent-job-thread:job-1" data-chat-message-ids={grouped.join(" ")} data-top={messages.length * 3}>thread</div> : null}
@@ -177,3 +178,78 @@ describe("reading only visible persisted conversation messages", () => {
     expect(read.mock.calls[1][0].messageIds).toEqual([id(9)]);
   });
 });
+
+// Seen Oct 30: a reply landed while its chat's Browser view was in
+// front, stayed unread, and Home showed it under Unread with a badge on the
+// rail, the team and the space. A reply that lands in the chat the person has
+// open, with the window visible, is read in either view.
+describe("reading a reply as it lands in the open chat", () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  let visibility: DocumentVisibilityState;
+  const at = (index: number) => ({ id: id(index), timestamp: 1_000 + index });
+  async function render(props: Parameters<typeof Harness>[0] = {}) {
+    await act(async () => root.render(<Harness {...props} />));
+  }
+  async function advance(ms = 250) { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); }
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.useFakeTimers(); read.mockReset(); read.mockResolvedValue(undefined); observers.length = 0;
+    visibility = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+    setNotificationSession({ userId: ACCOUNT, accessToken: "token-a" });
+  });
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    setNotificationSession(null); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("reads a reply that lands while the chat's Browser view is in front, and never the history it opened on", async () => {
+    // The transcript is hidden behind the Browser view: no row of it is on screen.
+    const view = { messages: [id(1), id(2)], enabled: false, hidden: true, open: true };
+    await render({ ...view, arrivals: [at(1), at(2)] });
+    await advance(5_000);
+    expect(read).not.toHaveBeenCalled();
+    await render({ ...view, messages: [id(1), id(2), id(3)], arrivals: [at(1), at(2), at(3)] });
+    await advance();
+    expect(read).toHaveBeenCalledOnce();
+    expect(read.mock.calls[0][0]).toMatchObject({ conversationId: CONVERSATION, messageIds: [id(3)], expectedUserId: ACCOUNT });
+    // Read once: the next look sends nothing more.
+    await advance(5_000);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("reads a reply that lands in Chat wherever the transcript is scrolled", async () => {
+    await render({ messages: [id(1)], open: true, arrivals: [at(1)] });
+    await advance();
+    await render({ messages: [id(1), id(2)], open: true, arrivals: [at(1), at(2)] });
+    await advance();
+    // No intersection was reported: the new row is not on screen.
+    expect(read).toHaveBeenCalledOnce();
+    expect(read.mock.calls[0][0].messageIds).toEqual([id(2)]);
+  });
+
+  it.each([
+    ["the window is hidden", { open: true }, () => { visibility = "hidden"; }],
+    ["a file or a preview is in front of the chat", { open: false }, () => {}],
+  ] as const)("leaves a reply unread that lands while %s", async (_name, view, arrange) => {
+    await render({ ...view, enabled: false, hidden: true, arrivals: [at(1)] });
+    arrange();
+    await render({ ...view, enabled: false, hidden: true, messages: [id(1), id(2)], arrivals: [at(1), at(2)] });
+    visibility = "visible";
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    await advance(5_000);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("counts an older message the newest page lists later as history", async () => {
+    await render({ enabled: false, hidden: true, open: true, arrivals: [at(5)] });
+    await render({ enabled: false, hidden: true, open: true, arrivals: [at(3), at(5)] });
+    await advance(5_000);
+    expect(read).not.toHaveBeenCalled();
+  });
+});
+

@@ -12,9 +12,11 @@
  * Site → Studio: `{source:<the site's kit>, v:1, type, payload}`. Location has
  * its own pair in `locationBroker.ts`; follow mode reads `layout-ack` (what the
  * site supports), `view`, `tap` and `interact`; Ask Octo reads `ask`
- * (siteAsks.ts) and answers `ask-status`. Messages are data, never
- * commands, and the pane reads them only from its own frame at the viewer's
- * origin.
+ * (siteAsks.ts) and answers `ask-status`. A page that draws itself after it
+ * loads can list "ready" in its `layout-ack` and send `ready` once its first
+ * view is drawn: until then the pane says it is opening the site
+ * (SitePreviewPane). Messages are data, never commands, and the pane reads
+ * them only from its own frame at the viewer's origin.
  */
 import { parseSiteAsk, type SiteAsk } from "./siteAsks";
 
@@ -131,7 +133,9 @@ export type SiteEvent =
   /** An Ask Octo click (siteAsks.ts checked its shape and sizes); a request, never a decision. */
   | { type: "ask"; ask: SiteAsk }
   /** An ask Studio could not read (malformed or too large): it is declined, never sent. */
-  | { type: "ask-invalid"; id: string };
+  | { type: "ask-invalid"; id: string }
+  /** The page's first view is drawn (one that lists "ready" in its `layout-ack` draws itself after it loads). */
+  | { type: "ready" };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -166,6 +170,8 @@ export function parseSiteMessage(data: unknown): SiteEvent | null {
     }
     case "interact":
       return { type: "interact" };
+    case "ready":
+      return { type: "ready" };
     case "ask": {
       const parsed = parseSiteAsk(data.payload);
       if (parsed.ok) return { type: "ask", ask: parsed.ask };

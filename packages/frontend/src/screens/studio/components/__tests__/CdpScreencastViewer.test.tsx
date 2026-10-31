@@ -490,6 +490,80 @@ describe("CdpScreencastViewer", () => {
     expect(canvas.dataset.inputReady).toBe("true");
   });
 
+  // Seen Oct 30: a chat's Browser view moved its picture between two tabs
+  // three times in a fifth of a second. The browser allows each viewer two
+  // picture streams, and counts one it closed until it has set it up, so it
+  // refused the third; the view then gave up its picture for another viewer
+  // that showed nothing. A picture the view asks for right after it closed
+  // its last one, and that ends before it said anything, is asked for once
+  // more a second later.
+  describe("a picture refused right after the view moved it to another tab", () => {
+    const viewer = (page: string, callbacks: { onConnected: () => void; onDisconnected: () => void; onTransportError: () => void }) => (
+      <CdpScreencastViewer
+        wsUrl={`wss://runtime.test/browser/screencast?pageId=${page}`}
+        connectionGeneration={0}
+        active
+        inputEnabled={false}
+        {...callbacks}
+      />
+    );
+    const refuse = (socket: FakeWebSocket) => {
+      socket.readyState = 3;
+      socket.emit("error");
+      socket.emit("close", Object.assign(new Event("close"), { code: 1006, reason: "" }));
+    };
+    const answer = async (socket: FakeWebSocket) => {
+      socket.emit("message", Object.assign(new Event("message"), {
+        data: JSON.stringify({ type: "ready", pageId: "PAGE", width: 640, height: 360, dpr: 1, deviceWidth: 640, deviceHeight: 360 }),
+      }));
+      emitFrame(socket, 1);
+      await Promise.resolve();
+      await Promise.resolve();
+    };
+
+    it("is asked for once more a second later, and the view never counts it as failed", async () => {
+      vi.useFakeTimers();
+      const callbacks = { onConnected: vi.fn(), onDisconnected: vi.fn(), onTransportError: vi.fn() };
+      await act(async () => root.render(viewer("OTHER", callbacks)));
+      await act(async () => root.render(viewer("CHAT", callbacks)));
+      expect(socketsMatching("pageId=OTHER")[0]?.readyState).toBe(3);
+      await act(async () => refuse(socketsMatching("pageId=CHAT")[0]!));
+      expect(callbacks.onTransportError).not.toHaveBeenCalled();
+      expect(callbacks.onDisconnected).not.toHaveBeenCalled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+      expect(socketsMatching("pageId=CHAT")).toHaveLength(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      const asked = socketsMatching("pageId=CHAT");
+      expect(asked).toHaveLength(2);
+      await act(async () => answer(asked[1]!));
+      expect(callbacks.onConnected).toHaveBeenCalledOnce();
+      expect(callbacks.onTransportError).not.toHaveBeenCalled();
+      expect(callbacks.onDisconnected).not.toHaveBeenCalled();
+    });
+
+    it("counts as failed when it is refused again, as the view's first picture does at once", async () => {
+      vi.useFakeTimers();
+      const callbacks = { onConnected: vi.fn(), onDisconnected: vi.fn(), onTransportError: vi.fn() };
+      await act(async () => root.render(viewer("CHAT", callbacks)));
+      // The view's first picture: no stream of this view to wait out.
+      await act(async () => refuse(socketsMatching("pageId=CHAT")[0]!));
+      expect(callbacks.onTransportError).toHaveBeenCalledWith("Shared Browser renderer connection failed.", true);
+      expect(callbacks.onDisconnected).toHaveBeenCalledWith({ connected: false, reason: "WebSocket closed (1006)" });
+
+      await act(async () => root.render(viewer("OTHER", callbacks)));
+      callbacks.onTransportError.mockClear();
+      callbacks.onDisconnected.mockClear();
+      await act(async () => root.render(viewer("CHAT", callbacks)));
+      await act(async () => refuse(socketsMatching("pageId=CHAT")[1]!));
+      expect(callbacks.onTransportError).not.toHaveBeenCalled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      await act(async () => refuse(socketsMatching("pageId=CHAT")[2]!));
+      expect(callbacks.onTransportError).toHaveBeenCalledOnce();
+      expect(callbacks.onDisconnected).toHaveBeenCalledOnce();
+      expect(callbacks.onConnected).not.toHaveBeenCalled();
+    });
+  });
+
   it("fails closed when the socket never produces a ready message or frame", async () => {
     vi.useFakeTimers();
     const onTransportError = vi.fn();

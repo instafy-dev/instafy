@@ -9,6 +9,19 @@ import { useSiteAsks, type SiteAskHost } from "./useSiteAsks";
 import { useFrameGesture } from "./frameGesture";
 
 const NO_ERROR = () => {};
+/**
+ * How long a page that said it draws itself after it loads may take to say
+ * it has (`ready`) before the pane stops waiting: the map engine draws by then
+ * or gives up itself.
+ */
+export const SITE_FIRST_DRAW_WAIT_MS = 15_000;
+/**
+ * How long after a fresh frame's first load the pane waits for its page to
+ * answer the layout sent then: until it answers, whether it draws itself
+ * later is not known, and the line going off for that moment showed as a
+ * blink before it came back.
+ */
+export const SITE_LAYOUT_ANSWER_WAIT_MS = 250;
 
 /** The preview record's title, port and path: what keys a site for location. */
 export type SiteRecord = { title: string; port: number; path: string };
@@ -33,6 +46,16 @@ export type SiteMessageEvent = Pick<MessageEvent, "data" | "origin" | "source">;
  * Ask Octo (docs/Bound-Sites.md §2a, useSiteAsks): the layout says whether
  * this person may ask (`caps.ask`), and a site's `ask` becomes their own chat
  * message through `asks.send`, answered with `ask-status`.
+ *
+ * First draw: a page that draws itself after it loads lists "ready" in its
+ * `layout-ack` and says `ready` once drawn. `drawing` is true from that
+ * `layout-ack` until then (at most SITE_FIRST_DRAW_WAIT_MS), so the pane keeps
+ * saying it is opening the site instead of showing an empty page. It waits
+ * once each time the frame is loaded fresh (the press, Reload, a new
+ * address), through the frame's load event: a `ready` said before that event
+ * counts, the page's answer to the layout sent at that load is waited for (at
+ * most SITE_LAYOUT_ANSWER_WAIT_MS), and a page that moves on inside the frame
+ * after the first draw shows as it loads.
  */
 export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, frameOnScreen, record, title = "", spaceName = null, asks = null, onError = NO_ERROR }: {
   frame: RefObject<HTMLIFrameElement | null>;
@@ -79,12 +102,37 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   const loadsSinceFresh = useRef(0);
   /** What the site's `layout-ack` listed ("view", "tap"); cleared with each new document. */
   const [supports, setSupports] = useState<readonly string[]>([]);
+  /**
+   * The page listed "ready" in a `layout-ack` since the frame was loaded
+   * fresh: it draws itself after it loads. Kept through the frame's load
+   * event, so the pane's line does not go off between the load and the
+   * page's answer to the layout sent then.
+   */
+  const [drawsLater, setDrawsLater] = useState(false);
+  /**
+   * The page said its first view is drawn since the frame was loaded fresh,
+   * or the pane stopped waiting for it. Kept through the frame's load events:
+   * a page can draw before its own load event fires (a picture or a font on
+   * it still loading), and one that moves on inside the frame after it drew
+   * shows as it loads.
+   */
+  const [drawn, setDrawn] = useState(false);
+  /**
+   * The frame's first page since it was loaded fresh has loaded and not said
+   * anything since (at most SITE_LAYOUT_ANSWER_WAIT_MS).
+   */
+  const [answerDue, setAnswerDue] = useState(false);
+  /** A document in this pane has drawn once: a later one draws again under "Loading…". */
+  const [drawnOnce, setDrawnOnce] = useState(false);
+  if (drawn && !drawnOnce) setDrawnOnce(true);
   /** Counts the frame's documents: a site that navigates must be told again that it presents. */
   const [frameLoads, setFrameLoads] = useState(0);
   const onFrameLoad = useCallback(() => {
     heardFromSite.current = false;
     loadsSinceFresh.current += 1;
     setSupports([]);
+    // Its answer to the layout sent below says whether it draws later.
+    if (loadsSinceFresh.current === 1) setAnswerDue(true);
     setFrameLoads(count => count + 1);
     // The site moved to another page inside the frame: that page did not ask, so this
     // frame's watches and pending answers end. The first load is left alone, since the
@@ -156,7 +204,7 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   // A new document in the frame (Reload, a new capability) did not ask: its watches end, and what it held is gone.
   useEffect(() => {
     loadsSinceFresh.current = 0;
-    return () => { broker.current?.stopAll(); broker.current?.forgetPositions(); setSupports([]); };
+    return () => { broker.current?.stopAll(); broker.current?.forgetPositions(); setSupports([]); setDrawsLater(false); setDrawn(false); setAnswerDue(false); };
   }, [frameKey, viewerUrl]);
   const locationStatus = useLocationSiteStatus(siteKey);
 
@@ -186,12 +234,15 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     if (!isSiteEnvelope(event.data)) return false;
     // A site whose bridge starts after the frame's load event missed the first layout message.
     if (!heardFromSite.current) { heardFromSite.current = true; sendLayout(); }
+    setAnswerDue(false);
     const parsed = parseSiteMessage(event.data);
     if (parsed) {
       // Within one document what a site supports only grows.
       if (parsed.type === "layout-ack") {
         setSupports(current => parsed.supports.every(name => current.includes(name)) ? current : [...new Set([...current, ...parsed.supports])]);
+        if (parsed.supports.includes("ready")) setDrawsLater(true);
       }
+      if (parsed.type === "ready") { setDrawn(true); return true; }
       if (parsed.type === "ask") { askEvent.current.handleAsk(parsed.ask); return true; }
       if (parsed.type === "ask-invalid") { askEvent.current.handleInvalid(parsed.id); return true; }
       followSiteEvent.current(parsed);
@@ -199,9 +250,30 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     return true;
   }, [sendLayout]);
 
+  // A page that said it draws itself after it loads, and has not said it has;
+  // or a fresh frame's first page that has not answered since its load yet.
+  const drawing = (drawsLater || answerDue) && !drawn;
+  useEffect(() => {
+    if (!drawsLater || drawn) return;
+    const timer = window.setTimeout(() => setDrawn(true), SITE_FIRST_DRAW_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [drawsLater, drawn]);
+  useEffect(() => {
+    if (!answerDue) return;
+    const timer = window.setTimeout(() => setAnswerDue(false), SITE_LAYOUT_ANSWER_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [answerDue]);
+
   return {
     onFrameLoad,
     handleSiteMessage,
+    /**
+     * The page is drawing its first view: it said it draws after it loads,
+     * and has not said it has (or a fresh frame's first page has not
+     * answered since its load yet).
+     */
+    drawing,
+    drawnOnce,
     follow,
     /** An ask waiting for the person's confirm in Studio's own strip (the intent said `confirm: true`). */
     askConfirm: siteAsks.confirm,

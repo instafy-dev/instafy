@@ -163,7 +163,7 @@ Studio Shared Browser shell
 
 `GET /browser/capabilities` returns a versioned, `Cache-Control: no-store` contract. Studio waits for that authoritative response before opening a pixel transport, so runtime discovery cannot briefly connect RFB and then tear it down to upgrade. A WebRTC-enabled runtime advertises `webrtc`, `cdp-screencast`, and `rfb` in that order. A CDP-only runtime advertises `cdp-screencast` and `rfb`; RFB is always the safety lane. Runtime capabilities are authoritative—the Vite flags provision transports on new runtimes, while the runtime flags are the operational kill switches.
 
-Fallback stays on the same runtime and profile. A fatal WebRTC error moves to CDP; a fatal CDP error moves to RFB. During reconnect the UI captures a bounded frozen frame, keeps the prior page visible, and shows an explicit **Reconnecting…** state once the picture has been gone for 1.5 s (`RECONNECTING_GRACE_MS`); a reconnect that is back sooner shows nothing, so the note never flickers with the live view. CDP is ready after its first painted JPEG. WebRTC controllers wait for both a decoded video frame and the separate input WebSocket; view-only participants are ready from video alone and never open the input socket. CDP has a bounded first-frame startup watchdog; WebRTC also monitors active, visible video for frame stalls.
+Fallback stays on the same runtime and profile. A fatal WebRTC error moves to CDP; a fatal CDP error moves to RFB. The origin admits each viewer two pixel streams at a time (any transport) and counts a closed CDP stream until it has finished setting it up, so a CDP picture asked for within 2 s of the view closing its last one (it moved to another tab, or its address was renewed) can be refused for that alone: one that ends before the origin said anything is asked for once more 1 s later, and only a second such end counts as fatal. During reconnect the UI captures a bounded frozen frame, keeps the prior page visible, and shows an explicit **Reconnecting…** state once the picture has been gone for 1.5 s (`RECONNECTING_GRACE_MS`); a reconnect that is back sooner shows nothing, so the note never flickers with the live view. CDP is ready after its first painted JPEG. WebRTC controllers wait for both a decoded video frame and the separate input WebSocket; view-only participants are ready from video alone and never open the input socket. CDP has a bounded first-frame startup watchdog; WebRTC also monitors active, visible video for frame stalls.
 
 ## Multi-user presence and exclusive control
 
@@ -1905,7 +1905,9 @@ unless the policy is `"covered"`.
   keeps failing to read, or stays held, stops being read once it is too old to
   open by itself. Studio then opens that exact machine's browser as
   `attachOnly`, so it may start the browser but never the machine, and sends
-  the task only once the browser shows that machine's first page and a fresh
+  the task only once the browser lists that machine's tabs (the turn takes the
+  chat's own tab, or a blank one no chat uses, whether the chat's Browser view
+  is on screen or not; the tabs are read every 2.5 seconds meanwhile) and a fresh
   `GET browser/host` read after the open says `ready` (and, while the Browser
   view is on screen, once its roster has connected). It waits for each of
   these within the two-minute bound, which also ends a read that has not
