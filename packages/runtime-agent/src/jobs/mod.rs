@@ -10069,13 +10069,25 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - A conversation that began with a skill setup (`/skills import ... --start` or `/skills start`) stays that setup until the skill's \"## Getting started\" is done. On every later turn, including the one a saved card continues, first pick the setup up at its next unanswered step, re-reading that SKILL.md if you need to (confirm what it asks you to confirm, write the files it names, offer its schedule), and only then take up anything new. While the setup lasts, write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n",
             );
             prompt.push_str(WORKSPACE_IS_CURRENT_RULE);
-            prompt.push_str(
-            "- Context you recovered from earlier turns, other conversations or context cards is for you: never say that you recovered it, where from, or any conversation, job, thread or context-card id.\n\
-              - Use `actions` for interactive UI help: secrets, integrations, location, and opening Instafy's browser. Supported actions:\n\
-              - { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
-              - { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n\
-              - { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }\n\
-              - { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, optional expectedReportFormat: string only for an explicit user-requested format }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
+            // A turn that may not ask for the browser is not offered its card, here as in a
+            // restored thread's reminder. A chat keeps one browser thread, so what its first turn
+            // is offered stays in every later browser turn's history.
+            let offers_browser_card = !browser_request_unsupported(job);
+            prompt.push_str(&[
+            "- Context you recovered from earlier turns, other conversations or context cards is for you: never say that you recovered it, where from, or any conversation, job, thread or context-card id.\n",
+            if offers_browser_card {
+                "- Use `actions` for interactive UI help: secrets, integrations, location, and opening Instafy's browser. Supported actions:\n"
+            } else {
+                "- Use `actions` for interactive UI help: secrets, integrations and location. Supported actions:\n"
+            },
+            "- { type: 'request_integration', provider: string, optional description: string, optional requiredScopes: string[], optional capabilities: string[], optional authMethods: string[], optional suggestedSecretNames: string[], optional suggestedSecrets: { name: string, optional description: string }[], optional agentHandles: string[] }\n\
+              - { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n",
+            if offers_browser_card {
+                "- { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }\n"
+            } else {
+                ""
+            },
+            "- { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, optional expectedReportFormat: string only for an explicit user-requested format }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
               - { type: 'goal_update', status: 'active' | 'paused' | 'completed' | 'blocked' | 'canceled', optional objective: string, optional progressSummary: string, optional doneWhen: string, optional stopWhen: string, optional operation: 'clear' }\n\
               - Emit `goal_update` when the latest user request explicitly asks to create, set, start, update, pause, resume, complete, block, cancel, or clear a conversation goal, or when an active conversation goal is included and this turn has concrete evidence that the goal changed. Use status `active` with `objective` to create or update a goal. Do not infer goals from ordinary questions or small one-off requests.\n\
               - A request to create/start a goal also authorizes starting the work now. Do not respond with only a goal-created acknowledgement or a suggestion to start later.\n\
@@ -10098,7 +10110,13 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
               - If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
               - If you emit `request_secret`, keep `summary` short: what is blocked, and that the value goes in the card on this message. Do not write a retry phrase or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen. Assume the person has never made an API token and has never seen the provider's developer screens. Teaching them is not `summary`'s job: carry the skill's own \"## Getting started\" walkthrough in the conversation beside the card, a step or two at a time, waiting for each answer, and naming the screens the skill declares. While a value's card is unanswered, carry on in words and do not emit `request_secret` for it again; a value the service or the skill's check rejected is a new ask, not a repeat. Write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks.\n\
-              - In a skill setup and its `request_secret` cards, addresses come only from the skill. If the skill declares an address, use that exact one and no other. If it declares none, name the screen in words and ask the person what they see. Never write a host or a link you did not read in the skill, and never offer two candidate addresses: a guessed address is a link the person will trust because it is yours. Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content.\n\
+              - In a skill setup and its `request_secret` cards, addresses come only from the skill. If the skill declares an address, use that exact one and no other. If it declares none, name the screen in words and ask the person what they see. Never write a host or a link you did not read in the skill, and never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.",
+            if offers_browser_card {
+                " Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content."
+            } else {
+                ""
+            },
+            "\n\
               - If you emit `request_location`, keep `summary` focused on why location is needed and whether approximate or precise location is enough. Do not mention action cards, UI steps, or retry phrases for location; the app handles that.\n\
             - Use `request_location` when the user wants nearby/current-location recommendations or routes and they have not already provided a place/city. Prefer `approximate` unless exact turn-by-turn or meter-level precision is clearly necessary.\n\
               - When a retry phrase applies (`request_integration`), provide exactly one. Do not include any other retry/confirmation phrase anywhere in `summary` (avoid extra lines like \"Then reply …\").\n\
@@ -10131,15 +10149,26 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n\
             - If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages` (it already knows this conversation; `instafy api get` is the fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
             - Those `token_usage` rows are per turn: each counts only its own turn's tokens, not the conversation's running total. For how much one answer used, add the rows whose `metadata.details.usageScope` is `turn` and whose `metadata.jobId` is that answer's job: a recovery retry adds its own row, marked with `metadata.details.attempt`. The row without `usageScope` and the credit ledger reflect only the first attempt, so do not add that row or quote either for the answer. For a total across answers, add only the rows whose `metadata.details.usageScope` is `turn`; rows from before per-turn reporting have none and hold a running total. If an answer's job has no `usageScope` `turn` row, its usage was not reported: say so rather than quoting a neighbouring row or a zero. A final wrap-up pass after a missing answer is not reported as a row, so a job that ran one used somewhat more than its rows add up to.\n\
-            - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n\
-            - For browser/UI tasks, use this turn's browser tools when it has them and report observed page output. Without them, emit `request_browser`: it is a handoff to Instafy's browser, not evidence that a page was opened or a task completed.\n\
-            - For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
+            - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n",
+            if offers_browser_card {
+                "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output. Without them, emit `request_browser`: it is a handoff to Instafy's browser, not evidence that a page was opened or a task completed.\n"
+            } else {
+                "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n"
+            },
+            "- For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
             - For recommendation-seeking browser tasks, prefer map/listing/review pages over repeating search-result links. If needed, inspect a few likely candidates and summarize the strongest observed option with concrete details.\n\
             - Use loaded skills and learned blocks for workflow behavior. Treat Rust/runtime prompts as execution invariants only, not as the source of task-specific strategy.\n\
-            - If a browser tool fails, say in plain words what did not work (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution. No browser tools on this turn is not a failure: emit `request_browser`.\n\
+            - If a browser tool fails, say in plain words what did not work (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution.",
+            if offers_browser_card {
+                " No browser tools on this turn is not a failure: emit `request_browser`."
+            } else {
+                ""
+            },
+            "\n\
             - Ask for clarification if you lack enough information to act.
-            "
-        );
+            ",
+            ]
+            .concat());
             record_prompt_section_metric(
                 &mut prompt_section_metrics,
                 "responseContract",
@@ -25599,6 +25628,86 @@ mod tests {
             );
         }
         assert!(reminder(json!({})).contains("opening Instafy's browser (`request_browser`)"));
+    }
+
+    /// Nor is a browser thread's first turn offered the card. A chat keeps one
+    /// browser thread, so its first turn's contract stays in every later browser
+    /// turn's history: a browse-then-build turn told "Without them, emit
+    /// `request_browser`" read one page, ended on a card the runtime drops, and
+    /// told the person to "continue in the browser" with nothing to press. The
+    /// next turn on that thread ended on one again, part-way through.
+    #[test]
+    fn a_browser_threads_first_turn_is_not_offered_the_card() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        // The chat has a building thread, and its browser thread starts now.
+        let building_thread_only =
+            json!({"defaultThreadId": "existing-thread", "historyReplayRequired": false});
+        let contract = |metadata: JsonValue, provider_state: Option<&JsonValue>| {
+            let job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+            let (prompt, _, _) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Open each laptop's own page and two reviews for each, then update the page.",
+                    false,
+                    provider_state,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+            prompt
+                .split("\nPlease follow these constraints:\n")
+                .nth(1)
+                .and_then(|rest| rest.split("\nChat references in replies:\n").next())
+                .expect("the full response contract")
+                .to_string()
+        };
+        for (metadata, provider_state) in [
+            (json!({"browserTransport": "shared"}), None),
+            (
+                json!({"browserTransport": "shared"}),
+                Some(&building_thread_only),
+            ),
+            (
+                json!({
+                    "browserTransport": "shared",
+                    "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                    "browserHandsBack": true,
+                }),
+                Some(&building_thread_only),
+            ),
+            (json!({"browserTransport": "desktop-personal"}), None),
+        ] {
+            let contract = contract(metadata.clone(), provider_state);
+            assert!(
+                !contract.contains("request_browser"),
+                "{metadata}: {contract}"
+            );
+            for kept in [
+                "- Use `actions` for interactive UI help: secrets, integrations and location. Supported actions:\n",
+                "- { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n- { type: 'multi_agent_plan',",
+                "never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.\n",
+                "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n",
+                "do not claim success without real execution.\n- Ask for clarification",
+            ] {
+                assert!(contract.contains(kept), "{metadata}: {kept}");
+            }
+        }
+        // A building turn is still offered the card in each of those places.
+        let building = contract(json!({}), None);
+        for offer in [
+            "- Use `actions` for interactive UI help: secrets, integrations, location, and opening Instafy's browser. Supported actions:\n",
+            "- { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }\n",
+            "Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content.\n",
+            "Without them, emit `request_browser`: it is a handoff to Instafy's browser, not evidence that a page was opened or a task completed.\n",
+            "No browser tools on this turn is not a failure: emit `request_browser`.\n",
+        ] {
+            assert!(building.contains(offer), "{offer}");
+        }
     }
 
     /// A browser turn's own card would open the browser again from the page

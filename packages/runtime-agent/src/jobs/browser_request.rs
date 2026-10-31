@@ -18,18 +18,32 @@ pub(super) struct BrowserRequest {
     routed: bool,
 }
 
+/// A card a reply asked for that is not posted. Nothing of it reaches the person, while the
+/// reply beside it may still send them to the browser, so the log says why it was dropped.
+fn dropped(reason: &str) -> Option<BrowserRequest> {
+    tracing::warn!(%reason, "dropped request_browser action");
+    None
+}
+
 impl BrowserRequest {
     pub(super) fn parse(value: &serde_json::Map<String, Value>) -> Option<Self> {
-        let task = value.get("task")?.as_str()?.trim();
-        if task.is_empty() || task.encode_utf16().count() > 8_000 {
-            return None;
+        let task = value
+            .get("task")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if task.is_empty() {
+            return dropped("no task");
+        }
+        if task.encode_utf16().count() > 8_000 {
+            return dropped("task over 8,000 characters");
         }
         let location = match value.get("browserLocation") {
             None | Some(Value::Null) => "auto",
             Some(Value::String(location)) if location == "auto" => "auto",
             Some(Value::String(location)) if location == "device" => "device",
             Some(Value::String(location)) if location == "workspace" => "workspace",
-            _ => return None,
+            _ => return dropped("unknown browserLocation"),
         };
         let continue_building = value.get("continueBuilding") == Some(&Value::Bool(true));
         Some(Self {
@@ -186,5 +200,80 @@ mod tests {
         ] {
             assert!(BrowserRequest::parse(value.as_object().unwrap()).is_none());
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn warnings_while(run: impl FnOnce()) -> String {
+        let log = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        String::from_utf8_lossy(&log.0.lock().unwrap()).to_string()
+    }
+
+    /// A card no one can act on posts nothing, and the reply beside it may still send the person
+    /// to the browser: a reply ended "Open Instafy's browser to check…" over a card with no task,
+    /// and nothing said that no card came with it. The log now says so, and why.
+    #[test]
+    fn a_card_dropped_for_having_no_task_leaves_a_log_line() {
+        let log = warnings_while(|| {
+            for value in [
+                json!({"type": "request_browser"}),
+                json!({"type": "request_browser", "task": null, "browserLocation": null}),
+                json!({"type": "request_browser", "task": " "}),
+            ] {
+                assert!(BrowserRequest::parse(value.as_object().unwrap()).is_none());
+            }
+        });
+        assert_eq!(
+            log.matches("dropped request_browser action").count(),
+            3,
+            "{log}"
+        );
+        assert_eq!(log.matches("reason=no task").count(), 3, "{log}");
+
+        let log = warnings_while(|| {
+            for value in [
+                json!({"task": "x".repeat(8001)}),
+                json!({"task": "Open a page", "browserLocation": "another-users-device"}),
+            ] {
+                assert!(BrowserRequest::parse(value.as_object().unwrap()).is_none());
+            }
+        });
+        assert!(log.contains("reason=task over 8,000 characters"), "{log}");
+        assert!(log.contains("reason=unknown browserLocation"), "{log}");
+
+        // A card that is posted logs nothing.
+        let log = warnings_while(|| {
+            BrowserRequest::parse(
+                json!({"task": "Find the opening hours"})
+                    .as_object()
+                    .unwrap(),
+            )
+            .expect("a card");
+        });
+        assert!(log.is_empty(), "{log}");
     }
 }
