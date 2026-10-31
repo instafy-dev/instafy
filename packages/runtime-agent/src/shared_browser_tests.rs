@@ -760,6 +760,10 @@ const makePage = (targetId, opened = null) => {
     targetId,
     context: () => context,
     isClosed: () => closedPages.has(targetId),
+    // A step follows the tab's own loads (guardStepDocuments); this
+    // fixture's pages have none that wait for a site.
+    on: () => {},
+    off: () => {},
     // Page-side helpers identify themselves by their argument.
     evaluate: async (_fn, arg) => {
       if (arg && arg.kind === "shown-text") return shownTextFor(currentUrl, targetId);
@@ -4359,6 +4363,57 @@ async fn a_run_stops_after_two_calls_in_a_row_find_the_browser_unavailable() {
     let signal = result.structured_content.expect("terminal signal")["terminalConsent"].clone();
     assert_eq!(signal["retryable"], false);
     assert_eq!(signal["code"], "browser_unavailable");
+}
+
+/// A call that could not reach the browser at all says so in its result, so
+/// the turn does not count it as a step the browser answered; a step the
+/// browser answered with an error, and a page the network did not deliver,
+/// carry no such mark.
+#[test]
+fn a_call_that_could_not_reach_the_browser_is_marked_in_its_result() {
+    use std::os::unix::process::ExitStatusExt;
+    let unreachable = failed_call_result(&controller_failure(
+        std::process::ExitStatus::from_raw(BROWSER_UNAVAILABLE_EXIT_CODE << 8),
+        b"Shared Browser command failed: Instafy's browser could not be reached: browserType.connectOverCDP: Timeout 15000ms exceeded.",
+        b"",
+    ));
+    assert_eq!(unreachable.is_error, Some(true));
+    assert_eq!(
+        unreachable.structured_content,
+        Some(json!({ "browserUnavailable": true }))
+    );
+
+    let answered = failed_call_result(&controller_failure(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"Shared Browser command failed: The site did not answer in time, so nothing was opened and the page is still blank.",
+        b"",
+    ));
+    assert_eq!(answered.is_error, Some(true));
+    assert_eq!(answered.structured_content, None);
+
+    let undelivered = failed_call_result(&controller_failure(
+        std::process::ExitStatus::from_raw(1 << 8),
+        b"Shared Browser command failed: page.goto: net::ERR_CONNECTION_REFUSED at https://down.example/",
+        b"",
+    ));
+    assert_eq!(
+        undelivered.structured_content,
+        Some(json!({
+            "error": {
+                "reason": SITE_UNREACHABLE_REASON,
+                "details": "net::ERR_CONNECTION_REFUSED",
+            }
+        }))
+    );
+    // A tab that closed under a load keeps the network's plain reason too.
+    let closed = failed_call_result(&controller_failure(
+        std::process::ExitStatus::from_raw(BROWSER_UNAVAILABLE_EXIT_CODE << 8),
+        b"Shared Browser command failed: Instafy's browser or the run's tab closed: page.goto: net::ERR_ABORTED at https://example.test/",
+        b"",
+    ));
+    let content = closed.structured_content.expect("structured content");
+    assert_eq!(content["browserUnavailable"], true);
+    assert_eq!(content["error"]["details"], "net::ERR_ABORTED");
 }
 
 /// An approval code still ends a run on its first failure, whatever the

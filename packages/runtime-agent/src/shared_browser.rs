@@ -2697,18 +2697,26 @@ impl ServerHandler for SharedBrowserMcpServer {
 
 /// A failed call's result, with what the controller said of its step
 /// (`activity`): a step the person allowed that then did not happen, such as a
-/// control the page changed after their yes, lists their yes in Details.
+/// control the page changed after their yes, lists their yes in Details. A
+/// call that could not reach the browser at all says so (`browserUnavailable`):
+/// the browser never answered its step, so that step does not stand in for the
+/// browser work of the turn (runtime-agent's retry of a turn with none still
+/// runs).
 fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
     let mut result = failed_tool_result(&format!("{error:#}"));
     let activity = error
         .downcast_ref::<ControllerFailure>()
         .and_then(ControllerFailure::activity);
-    if let Some(activity) = activity {
+    let unavailable = error
+        .downcast_ref::<BrowserUnavailable>()
+        .map(|_| JsonValue::Bool(true));
+    for (field, value) in [("activity", activity), ("browserUnavailable", unavailable)] {
+        let Some(value) = value else { continue };
         match result.structured_content.as_mut() {
             Some(JsonValue::Object(structured)) => {
-                structured.insert("activity".to_string(), activity);
+                structured.insert(field.to_string(), value);
             }
-            _ => result.structured_content = Some(json!({ "activity": activity })),
+            _ => result.structured_content = Some(json!({ field: value })),
         }
     }
     result

@@ -18,11 +18,15 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // person answers after more than the step's time is never cut short. A step
 // whose time runs out still ends as every step ends: a window it opened is
 // closed and said, and a hand-off it had not finished is never left behind. A
-// navigation from a blank tab to a site that does not answer in time is
-// stopped and fails as a page that opened nothing, never as a blank one to
-// navigate again, and the next step reaches the browser at once. No model,
-// Studio, controller, account or external site is used, and Chromium resolves
-// no other host.
+// load of a site that does not answer in time, opened from a blank tab or from
+// a page that had loaded, by a navigation or a link, is stopped once the step
+// stops waiting for it and fails as one that opened nothing and names where to
+// go next, never as a blank page to navigate again nor as the page the tab
+// still shows; the next step reaches the browser at once, and the site's late
+// answer never loads. A form sent to such a site has reached it, so its load
+// runs on and the step never says nothing was opened. No model, Studio,
+// controller, account or external site is used, and Chromium resolves no other
+// host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
 const playwrightRequire = createRequire(frontendRequire.resolve("@playwright/test"));
@@ -88,6 +92,9 @@ const OPENS_WINDOW = `document.getElementById("open").addEventListener("click", 
   const end = Date.now() + ${WINDOW_BUSY_MS}; while (Date.now() < end) {}
   try { opened.location = "/popup?later=1"; } catch (_) {}
 });`;
+// A page that keeps changing its own address, as a page's script does when it
+// follows what it shows.
+const LIVE = `let shown = 0; setInterval(() => history.replaceState(null, "", "?shown=" + (shown += 1)), 200);`;
 // A page that has loaded but shows nothing yet: its content stays hidden, as a
 // page's does while its script still builds it.
 const HIDDEN = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,">
@@ -95,8 +102,18 @@ const HIDDEN = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link
 <title>Opening hours</title><style>body { visibility: hidden; }</style></head>
 <body><h1>Opening hours</h1><p>Open daily from 9 to 17.</p><a href="/places/tower">The tower</a></body></html>`;
 const BUSY_MESSAGE = "The page is still busy, so it could not be read yet. Take a snapshot in a moment.";
-// What a navigation answers whose site sent nothing back within the step's time.
-const UNANSWERED_MESSAGE = "The site did not answer within 20 seconds, so nothing was opened and the page is still blank.";
+// What a load answers whose site sent nothing back before the step stopped
+// waiting for it, from a blank tab and from a page that had loaded: nothing was
+// opened, and Octo goes to the next source in the same turn.
+const NEXT_SOURCE = "Open the place's own site now (the venue's or the operator's), or another official source if this was it.";
+const UNANSWERED_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${NEXT_SOURCE}`;
+const UNANSWERED_LOADED_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${NEXT_SOURCE}`;
+// How long a step whose site did not answer may take past its time: stopping
+// the load and ending its guards, never a read of the page while it waits.
+const UNANSWERED_ANSWER_MS = 5_000;
+// How long a click waits for the page it opens (the controller's action
+// timeout), which may end before the step's time does.
+const CLICK_WAIT_MS = 15_000;
 // A form whose script does heavy work once one of its fields is highlighted.
 const FORM = `<form><label>Your name <input name="name"></label><label>Your city <input name="city"></label></form>`;
 const BUSY_ON_HIGHLIGHT = `let busy = false;
@@ -134,7 +151,9 @@ export async function runSharedBrowserStepTimeFixture() {
       const body = {
         "/": [page("Places", SEARCH)], "/results": [page("Results", RESULTS, BUSY)], "/places/tower": [page("The tower", "<p>Open daily.</p>")],
         "/window": [page("Details", WINDOW, OPENS_WINDOW)], "/popup": [page("Popup", "<p>Another window.</p>")], "/form": [page("Your details", FORM, BUSY_ON_HIGHLIGHT)],
-        "/hidden": [HIDDEN],
+        "/hidden": [HIDDEN], "/places/live": [page("The tower", "<p>Open daily.</p>", LIVE)],
+        "/visit": [page("Visiting", "<p><a href=\"/slow\">Opening hours</a></p>")],
+        "/ask": [page("Ask us", "<form action=\"/slow\" method=\"post\"><label>Your question <input name=\"question\"></label><button>Send question</button></form>")],
       }[url.pathname];
       if (!body) {
         response.writeHead(404).end();
@@ -291,9 +310,9 @@ export async function runSharedBrowserStepTimeFixture() {
     // as a just-started browser does. A load still waiting for its first answer
     // keeps Instafy's browser from being reached by the next step, and would
     // land after the step ended, so the step stops it: it opened nothing, and
-    // it fails (its line reads as a step tried) saying the site did not answer,
-    // never the blank page's "Call navigate", which sent Octo to load the same
-    // site again.
+    // it fails (its line reads as a step tried) saying the site did not answer
+    // and where to go next, never the blank page's "Call navigate", which sent
+    // Octo to load the same site again.
     await runPage.goto("about:blank");
     requests.length = 0;
     const loading = await runTool("POST", "/v1/navigate", { url: `${origin}/slow` });
@@ -302,10 +321,11 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.equal(loading.stdout, "", "A failed navigation answers with no page");
     assert.ok(loading.stderr.includes(UNANSWERED_MESSAGE), loading.stderr);
     assert.doesNotMatch(loading.stderr, /The page is blank|Call navigate|still busy|Check what the step did/u);
-    // It answered when its time and its late read were up, and no later: its
-    // failure waits on no check of the browser while the load is pending.
+    // It answered when its time was up, and no later: it stops the load before
+    // anything else, so its failure waits on no read of the page while the
+    // load is pending.
     assert.ok(loading.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(loading.wallMs)} ms)`);
-    assert.ok(loading.wallMs < STEP_TIME_MS + LATE_READ_MS + 4_000, `It answered without waiting on the pending load (${Math.round(loading.wallMs)} ms)`);
+    assert.ok(loading.wallMs < STEP_TIME_MS + UNANSWERED_ANSWER_MS, `It answered without waiting on the pending load (${Math.round(loading.wallMs)} ms)`);
     assert.equal(prompts.length, 1, "Nothing asked during the navigation");
     // The next step reaches the browser at once, while the site still holds
     // its answer, and finds the blank page.
@@ -322,6 +342,99 @@ export async function runSharedBrowserStepTimeFixture() {
     const late = await ok("GET", "/v1/snapshot");
     assert.equal(late.payload.url, "about:blank");
     assert.equal(late.payload.visibleText, "");
+
+    // 1d. The same from a page that had loaded, one that keeps changing its own
+    // address as many do: when the time is up the tab still shows that page,
+    // and the load waits behind it as it did behind the blank page. The step
+    // stops it the same way and fails the same way: it answers with no page,
+    // so neither its answer nor its line names the page the tab still shows
+    // (Octo read "busy" for that page, then could not reach the browser, and the
+    // site's error page landed after the turn). The next step reaches the
+    // browser at once and finds that page, and the site's late answer never
+    // lands.
+    await ok("POST", "/v1/navigate", { url: `${origin}/places/live` });
+    requests.length = 0;
+    const actionsBefore = actions().length;
+    const fromPage = await runTool("POST", "/v1/navigate", { url: `${origin}/slow` });
+    assert.deepEqual(requests, ["GET /slow"], "The site was asked once");
+    assert.equal(fromPage.code, 1, `The step fails: ${fromPage.stdout}`);
+    assert.equal(fromPage.stdout, "", "A failed navigation answers with no page");
+    assert.ok(fromPage.stderr.includes(UNANSWERED_LOADED_MESSAGE), fromPage.stderr);
+    assert.doesNotMatch(fromPage.stderr, /The tower|places\/live|still busy|Check what the step did/u);
+    assert.ok(fromPage.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(fromPage.wallMs)} ms)`);
+    assert.ok(fromPage.wallMs < STEP_TIME_MS + UNANSWERED_ANSWER_MS, `It answered without waiting on the pending load (${Math.round(fromPage.wallMs)} ms)`);
+    // What the view's line follows shows only the navigation the step started,
+    // never the page the tab still shows as its result.
+    assert.deepEqual(actions().slice(actionsBefore).map((action) => action.type), ["navigate"]);
+    assert.equal(prompts.length, 1, "Nothing asked during the navigation");
+    const stayed = await ok("GET", "/v1/snapshot");
+    assert.ok(stayed.wallMs < 5_000, `The next step reached the browser at once (${Math.round(stayed.wallMs)} ms)`);
+    assert.ok(stayed.payload.url.startsWith(`${origin}/places/live`), stayed.payload.url);
+    for (const response of unanswered.splice(0)) {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(page("Opening hours", "<p>Open daily from 09:00 to 19:30.</p>"));
+    }
+    await delay(1_000);
+    assert.ok(runPage.url().startsWith(`${origin}/places/live`), `The late answer never loaded: ${runPage.url()}`);
+
+    // 1e. The same load, started by a link the step clicks on a page that had
+    // loaded. A click waits for the page it opens for less than the step's time;
+    // when that wait gives up with no answer from the site, the load is stopped
+    // there and then, and the step fails as one that opened nothing, as a
+    // navigation does: never "busy" for the page the tab still shows, nor the
+    // click's own timeout. The next step reaches the browser at once, and the
+    // site's late answer never lands.
+    await ok("POST", "/v1/navigate", { url: `${origin}/visit` });
+    const visit = await ok("GET", "/v1/snapshot");
+    const hours = visit.payload.interactiveElements.find((element) => element.label === "Opening hours");
+    assert.ok(hours, "The link is observed");
+    requests.length = 0;
+    const clickedFrom = actions().length;
+    const followed = await runTool("POST", "/v1/click", { index: hours.index, snapshotId: visit.payload.snapshotId });
+    const followedAt = Date.now();
+    assert.deepEqual(requests, ["GET /slow"], "The site was asked once");
+    assert.equal(followed.code, 1, `The step fails: ${followed.stdout}`);
+    assert.equal(followed.stdout, "", "A failed click answers with no page");
+    assert.ok(followed.stderr.includes(UNANSWERED_LOADED_MESSAGE), followed.stderr);
+    assert.doesNotMatch(followed.stderr, /Visiting|\/visit|still busy|Check what the step did|Timeout|Call log/u);
+    const click = actions().slice(clickedFrom);
+    assert.deepEqual(click.map((action) => action.type), ["click"], "Only the click is on the log, never the page the tab still shows");
+    // It answered once the click's own wait gave up (or the step's time ran
+    // out first), without waiting out the step's time on a load already given up.
+    assert.ok(followedAt - click[0].ts < CLICK_WAIT_MS + 2_000, `It answered when the click stopped waiting (${followedAt - click[0].ts} ms after the click)`);
+    assert.ok(followed.wallMs < STEP_TIME_MS + UNANSWERED_ANSWER_MS, `It answered without waiting on the pending load (${Math.round(followed.wallMs)} ms)`);
+    assert.equal(prompts.length, 1, "Nothing asked during the click");
+    const remained = await ok("GET", "/v1/snapshot");
+    assert.ok(remained.wallMs < 5_000, `The next step reached the browser at once (${Math.round(remained.wallMs)} ms)`);
+    assert.equal(remained.payload.url, `${origin}/visit`);
+    for (const response of unanswered.splice(0)) {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(page("Opening hours", "<p>Open daily from 09:00 to 19:30.</p>"));
+    }
+    await delay(1_000);
+    assert.equal(runPage.url(), `${origin}/visit`, "The late answer never loaded");
+
+    // 1f. A form the step sends to a site that does not answer: the form has
+    // reached the site, so its load is left to run, and the step never says
+    // nothing was opened. It answers once its time is up, as a step whose page
+    // is still busy does, and says to check what the step did; the site's late
+    // answer is the form's own, and lands as it did.
+    await ok("POST", "/v1/navigate", { url: `${origin}/ask` });
+    const ask = await ok("GET", "/v1/snapshot");
+    const send = ask.payload.interactiveElements.find((element) => element.label === "Send question");
+    assert.ok(send, "The form's button is observed");
+    requests.length = 0;
+    const promptsBeforeForm = prompts.length;
+    const sent = await runTool("POST", "/v1/click", { index: send.index, snapshotId: ask.payload.snapshotId }, ["allow_once"]);
+    assert.deepEqual(requests, ["POST /slow"], "The form was sent once");
+    assert.equal(sent.code, 0, `The step answers with the page as it is: ${sent.stderr}`);
+    assert.equal(sent.payload.stepTimedOut, true);
+    assert.match(sent.payload.message, /what the step did before you act again\./u);
+    assert.doesNotMatch(`${sent.stdout}${sent.stderr}`, /did not answer|nothing was opened/u);
+    assert.equal(prompts.length, promptsBeforeForm + 1, "The form asked once");
+    for (const response of unanswered.splice(0)) {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(page("Question received", "<p>Thank you.</p>"));
+    }
+    await delay(1_000);
+    assert.equal(new URL(runPage.url()).pathname, "/slow", "The form's late answer landed");
 
     // 2. A click that opens another window and then keeps the page busy: the
     // step's time runs out, and it still ends as a step does. The window is
@@ -364,6 +477,7 @@ export async function runSharedBrowserStepTimeFixture() {
     // the step answers once its time is up, with the page as it is, and says
     // so. It never waits out the busy page.
     requests.length = 0;
+    const promptsBeforeSearch = prompts.length;
     const searched = await ok("POST", "/v1/type", { index: field.index, snapshotId: start.payload.snapshotId, text: "tower", submit: true });
     assert.deepEqual(requests, ["GET /results?q=tower"], "The search was sent once, as the form makes it");
     assert.ok(searched.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(searched.wallMs)} ms)`);
@@ -381,7 +495,7 @@ export async function runSharedBrowserStepTimeFixture() {
     // Nothing was read, so its line does not say a page was read: like status,
     // it names the page it is on.
     assert.deepEqual(searched.payload.activity, { step: "status", url: `${origin}/results?q=tower` });
-    assert.equal(prompts.length, 1, "Nothing asked during the search");
+    assert.equal(prompts.length, promptsBeforeSearch, "Nothing asked during the search");
 
     const result = {
       status: "passed",
@@ -389,12 +503,15 @@ export async function runSharedBrowserStepTimeFixture() {
       checks: [
         "a prompt answered after more than a step's time is waited for, and the step then reads the page as usual",
         "a loaded page that shows no text and no controls reads as still busy, not as an empty page, and its line says no page was read",
-        "a navigation from a blank tab to a site that does not answer in time is stopped once the step's time is up and fails as one that opened nothing, never as a blank page to navigate again; the next step reaches the browser at once, and the site's late answer never loads",
+        "a navigation from a blank tab to a site that does not answer in time is stopped once the step's time is up and fails as one that opened nothing, naming where to go next, never as a blank page to navigate again; the next step reaches the browser at once, and the site's late answer never loads",
+        "a navigation from a page that had loaded, and keeps changing its own address, to a site that does not answer in time is stopped and fails the same way, never naming the page the tab still shows; the next step reaches the browser at once and finds that page, and the site's late answer never lands",
+        "a link clicked on a page that had loaded, to a site that does not answer, is stopped once the click stops waiting for it and fails the same way, never as the page the tab still shows nor as the click's own timeout; the next step reaches the browser at once, and the site's late answer never lands",
+        "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs) },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs) },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);
