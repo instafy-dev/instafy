@@ -1035,7 +1035,7 @@ async fn run_every_chain(harness: &mut Harness) {
     // A and X: the card path. An ordinary turn starts the chat's default thread; the card's
     // Shared Browser turn has no browser thread of its own and resumes the default one. X is
     // another chat on the same page: X1 starts on the page A2 left, X2 on its own; then A3
-    // starts on the page X left.
+    // starts on the page X left. After A4, the chat goes back to the browser (A5).
     let ca = Uuid::new_v4();
     let cx = Uuid::new_v4();
     let a1 = harness.run("A1", Spec::new(ca, Lane::Default, None)).await;
@@ -1051,7 +1051,10 @@ async fn run_every_chain(harness: &mut Harness) {
     let a3 = harness
         .run("A3", Spec::new(ca, Lane::Shared("page-one"), a2))
         .await;
-    harness.run("A4", Spec::new(ca, Lane::Default, a3)).await;
+    let a4 = harness.run("A4", Spec::new(ca, Lane::Default, a3)).await;
+    harness
+        .run("A5", Spec::new(ca, Lane::Shared("page-one"), a4))
+        .await;
 
     // U: an unchanged lane on a resumed thread.
     let cu = Uuid::new_v4();
@@ -1443,6 +1446,7 @@ fn check(harness: &Harness) -> Result<()> {
         ("X2", 1),
         ("A3", 2),
         ("A4", 3),
+        ("A5", 4),
         ("U1", 1),
         ("U2", 1),
         ("C1", 1),
@@ -1592,7 +1596,7 @@ fn check(harness: &Harness) -> Result<()> {
     for turn in &harness.turns {
         let expected = match turn.label {
             "X1" | "A3" => 1,
-            "X2" | "A4" => 2,
+            "X2" | "A4" | "A5" => 2,
             _ => 0,
         };
         for (index, request) in sampling_requests(turn) {
@@ -1610,7 +1614,7 @@ fn check(harness: &Harness) -> Result<()> {
                     "{}#{index}: the turn is not told that another chat left its page",
                     turn.label
                 ),
-                "X2" | "A4" => ensure!(
+                "X2" | "A4" | "A5" => ensure!(
                     last == Some(NOTE_WITHDRAWAL),
                     "{}#{index}: the earlier turn's note is not withdrawn",
                     turn.label

@@ -469,11 +469,12 @@ same on a ChatGPT login and on an API key:
 | Turn | Share |
 | --- | --- |
 | Run instructions and note unchanged | 88-90% |
-| A browser turn that adds or withdraws the note | 90-91% |
+| A browser turn that adds or withdraws the note | 91% |
+| A browser turn back after an ordinary turn, as when a card's chat goes back to the browser (what the ordinary turn added is not cached) | 81% |
 | A turn whose run text changed, on the same tools (an approval start, an MCP turn after an ordinary one) | 86-96% |
-| An ordinary turn after a Summarize or a write turn (what those added is not cached) | 70-77% |
+| An ordinary turn back after a Summarize or a write turn (what those added is not cached) | 70-77% |
 
-The last three were 0% while every developer message went into the instruction message: any change
+The last four were 0% while every developer message went into the instruction message: any change
 of run instructions or note changed the start of every later request. A thread started before run
 instructions followed each turn is given its run's instructions once more at its next turn, after
 its history too. A Chat Completions upstream (a DeepSeek, Z.ai or Gemini key) still gets every
