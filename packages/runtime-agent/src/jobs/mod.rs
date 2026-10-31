@@ -14229,8 +14229,9 @@ fn terminal_shared_browser_summary(code: &str) -> &'static str {
         "approval_denied" => {
             "You said no, so that step didn't happen, and nothing from it was sent."
         }
-        // The page moved to another site after the person's yes. A control
-        // that changed on the same page is asked about again instead.
+        // The page moved to another site after the person's yes, or a
+        // second yes in the run was left unused because the control changed.
+        // The first such change on the same page is asked about again.
         "approval_stale" => {
             "The page changed after you said yes, so I didn't do that step. Send a message and I'll ask again."
         }

@@ -85,8 +85,9 @@ fn page_key(url: &Url) -> String {
 }
 
 /// The approval a terminal consent code stands for: the person said no, did not answer, or said
-/// yes to a step whose page then moved to another site (`approval_stale`, which the controller
-/// raises only after a yes), so Details still list that yes.
+/// yes to a step whose page then moved to another site or, for the second time in the run, whose
+/// control then changed (`approval_stale`, which comes only after a yes), so Details still list
+/// that yes.
 fn approval_of_terminal_code(code: &str) -> Option<&'static str> {
     match code {
         "approval_denied" => Some("denied"),

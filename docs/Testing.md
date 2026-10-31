@@ -1640,19 +1640,23 @@ on the same page (what **Let Octo continue** starts) stars the repository, askin
 once before the form post. The person's values never reach a tool's output or
 the action feed.
 
-Last, `scripts/shared-browser-allowed-step-e2e.mjs` answers prompts on a loopback
-journey planner whose page changes by itself while a prompt waits: a carousel
-shows its next slide (also one that names it in the page's fragment), a clock in
-a link ticks and a live count goes up. The allowed click, typing that sends the
-form and Enter in a field each run once, on the control the person was asked
-about. A control swapped for another, a form sent elsewhere, the same control
-on another address of the site, a form given another field, one of two
-controls alike once the page changed, its twin once it went, and a control a
-look-alike appeared ahead of are not used:
-the step fails without a terminal code, says it asks the person again, and its
-failed command lists their yes; asked again, the new prompt names the form as it
-is now. A take-over while the prompt waits still ends the step, and a page that
-left its site after the yes ends the run with `approval_stale`.
+Last, `scripts/shared-browser-allowed-step-e2e.mjs` answers prompts on loopback
+pages that change by themselves while a prompt waits. On a journey planner, a
+carousel shows its next slide, a clock in a link ticks, a live count goes up and
+the form is drawn again as it was: the allowed click, typing that sends the form
+and Enter in a field each run once, on the control the person was asked about,
+and of two controls alike it is always the one they were asked about. A
+control swapped for another, a form sent elsewhere, the page's address or
+fragment moved (an app that went to another order in its fragment), a shop
+carousel's next "Add to cart" shown in place of the one asked about, another
+product drawn beside the control in place, a countdown inside its form, a form
+given another field, and the twin left once the one asked about went are not
+used: the step fails without a terminal code, says it asks the person again,
+and its failed command lists their yes and says it went unused (runtime-agent
+ends the run at the second, which its unit tests cover); asked again, the new
+prompt names the form as it is now. A take-over while the prompt waits still
+ends the step, and a page that left its site after the yes ends the run with
+`approval_stale`.
 
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across

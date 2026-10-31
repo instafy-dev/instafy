@@ -244,7 +244,8 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   none); `pageKey`, the first 16 hex characters of the SHA-256 of the address without its
   fragment, never the address; and `approval`, `once`, `routine` or `free` from the controller, or
   `denied` / `expired` / `once` from the step's terminal consent code (`once` for
-  `approval_stale`: the person said yes, and the page then left its site). When the step starts, `navigate`
+  `approval_stale`: the person said yes, and the page then left its site or changed the control
+  a second time in the run). When the step starts, `navigate`
   and `open_tab` take the host from the address Octo asked for; any other step, and a step
   whose result names no page, uses the last host the turn's browser steps named. A step the
   person said no to, or left unanswered, never reaches the page, so its kind comes from the tool
@@ -255,7 +256,8 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   (`terminalConsent` plus `activity.step`), from which only the kind is read: "you said no to a
   search", not "a form". A failed step the person allowed at its prompt adds `"approval":"once"`
   there; a failure that does not end the run (such as a control the page changed after the yes,
-  which the step asks about again) keeps both in its own result, so Details list the yes:
+  which the step asks about again, and which also prints `"changedAfterYes":true` beside
+  `activity` for runtime-agent to count) keeps both in its own result, so Details list the yes:
   "You allowed a click on visitlisboa.com" beside "Tried browsing visitlisboa.com".
 - **The labels** (`jobs/activity_labels.rs`):
 

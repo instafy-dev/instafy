@@ -13,15 +13,18 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // production controller script, composed as runtime-agent composes it, drives
 // a real Chromium over CDP against loopback fixture sites. While a prompt
 // waits, the page changes the way live pages do by themselves (a carousel
-// shows its next slide, a clock in a link ticks, a live count goes up), and
-// the allowed step still runs, on the control the person was asked about. A
-// control that changed while the prompt waited (swapped for another, its form
-// sent elsewhere or given another field) is not used, and the step asks again
-// instead of ending the run; so is one that a change leaves looking like
-// another, or that a look-alike appeared ahead of. A take-over while the prompt waits still ends the step, and a page
-// that left its site after the yes ends the run with the yes listed. No model,
-// Studio, controller, account or external site is used, and Chromium resolves
-// no other host.
+// shows its next slide, a clock in a link ticks, a live count goes up, the
+// form is drawn again as it was), and the allowed step still runs, on the
+// control the person was asked about. A control that changed while the prompt
+// waited is not used, and the step asks again instead of ending the run: one
+// swapped for another, its form sent elsewhere or given another field, the
+// page's address or fragment moved, the one it was asked about gone or hidden
+// behind a look-alike (a shop's carousel of identical "Add to cart" forms), or
+// another product drawn beside it in place. A look-alike that appears beside
+// it is never taken for it. A take-over while the prompt waits still ends the
+// step, and a page that left its site after the yes ends the run with the yes
+// listed. No model, Studio, controller, account or external site is used, and
+// Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
 const playwrightRequire = createRequire(frontendRequire.resolve("@playwright/test"));
@@ -82,11 +85,49 @@ window.live = {
   },
   tick() { document.getElementById("departures").textContent = "Departures, updated 10:42:31"; },
   count() { document.getElementById("status").textContent = "Line status: 4 delays"; },
+  // The form drawn again exactly as it was: new elements, the same page.
+  redraw() { const form = document.querySelector("form"); form.outerHTML = form.outerHTML; },
   // A carousel that names its slide in the page's fragment.
   fragment() { this.slide(); history.replaceState(null, "", "#slide-2"); },
   // A page that moves its own address on its site, its controls all the same.
   address() { history.pushState(null, "", "/journey/updated"); },
 };`);
+
+// A shop's carousel of offers, one shown at a time, each with the same "Add to
+// cart" form told apart only by a hidden field: the next offer's look-alike is
+// hidden when the person is asked. "?bare=1" names the offers in plain text,
+// so the page reads the same whichever offer shows.
+const offer = (id, name, on, bare) => `<div class="slide${on ? " on" : ""}"><p>${bare ? name : `<a href="/products/${id}">${name}</a>`}</p>
+<form action="/cart/add" method="post"><input type="hidden" name="id" value="${id}"><button>Add to cart</button></form></div>`;
+const SLIDES = `const slides = [...document.querySelectorAll(".slide")];
+window.live = { slide() {
+  const at = slides.findIndex((slide) => slide.classList.contains("on"));
+  slides[at].classList.remove("on");
+  slides[(at + 1) % slides.length].classList.add("on");
+} };`;
+const shop = (bare) => page("Offers", `<section aria-label="Offers">${offer(1, "Blue mug", true, bare)}${offer(2, "Red mug", false, bare)}</section>`, SLIDES);
+// One offer the page draws again in place, as a script that re-renders it does:
+// the same elements, with another product's name, price and hidden field.
+const deal = page("Deal of the day", `<div class="card"><p><a id="name" href="/products/1">Blue mug</a></p><p id="price">€10</p>
+<form action="/cart/add" method="post"><input type="hidden" name="id" value="1"><button>Add to cart</button></form></div>`,
+`window.live = { swap() {
+  const name = document.getElementById("name");
+  name.textContent = "Red mug";
+  name.setAttribute("href", "/products/2");
+  document.getElementById("price").textContent = "€90";
+  document.querySelector("input[name=id]").value = "2";
+} };`);
+// An app that keeps its page in the fragment ("#/orders/1"): one "Cancel
+// order" button cancels the order the address names.
+const orders = page("Your orders", `<p>Blue mug, ordered today.</p><button id="cancel" type="button">Cancel order</button>`,
+`document.getElementById("cancel").addEventListener("click", () => {
+  location.href = "/cancel?order=" + location.hash.split("/").pop();
+});
+window.live = { route() { location.hash = "#/orders/2"; } };`);
+// A booking form with a countdown inside it.
+const booking = page("Booking", `<form action="/book" method="get"><p>Seats held for <span id="held">300</span> seconds</p>
+<p><label>Name <input name="who" value="Ana"></label></p><p><button>Book seats</button></p></form>`,
+`window.live = { tick() { const held = document.getElementById("held"); held.textContent = String(Number(held.textContent) - 1); } };`);
 
 export async function runSharedBrowserAllowedStepFixture() {
   assert.ok(fs.existsSync(executablePath), "Locked Playwright Chromium is missing; run pnpm --filter @instafy/frontend exec playwright install chromium");
@@ -103,26 +144,35 @@ export async function runSharedBrowserAllowedStepFixture() {
   let server;
   let context;
   try {
-    // What reached the sites: "<host> <method> <path>".
+    // What reached the sites: "<host> <method> <path>", and a form post's body.
     const requests = [];
     server = createServer((request, response) => {
       const url = new URL(request.url, "http://fixture.invalid");
       const host = String(request.headers.host || "").split(":")[0];
-      requests.push(`${host} ${request.method} ${url.pathname}${url.search}`);
-      const body = url.pathname === "/journey"
-        ? planner(url.searchParams.get("twice") === "1")
-        : {
-            "/route": page("Your route", "<p>Central to Airport: 2 stops, 24 minutes.</p>"),
-            "/news/1": page("Line A reopens", "<p>News.</p>"), "/news/2": page("New timetable", "<p>News.</p>"),
-            "/news/3": page("Night service", "<p>News.</p>"), "/departures": page("Departures", "<p>Every 6 minutes.</p>"),
-            "/status": page("Line status", "<p>3 delays.</p>"), "/elsewhere": page("Another site", "<p>Elsewhere.</p>"),
-          }[url.pathname];
-      if (!body) {
-        response.writeHead(404).end();
-        return;
-      }
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-      response.end(body);
+      let sentBody = "";
+      request.on("data", (chunk) => { sentBody += chunk; });
+      request.on("end", () => {
+        requests.push(`${host} ${request.method} ${url.pathname}${url.search}${sentBody ? ` ${sentBody}` : ""}`);
+        const body = url.pathname === "/journey"
+          ? planner(url.searchParams.get("twice") === "1")
+          : url.pathname === "/shop"
+            ? shop(url.searchParams.get("bare") === "1")
+            : {
+                "/deal": deal, "/orders": orders, "/booking": booking,
+                "/route": page("Your route", "<p>Central to Airport: 2 stops, 24 minutes.</p>"),
+                "/cart/add": page("Your cart", "<p>Added.</p>"), "/cancel": page("Cancelled", "<p>Cancelled.</p>"),
+                "/book": page("Booked", "<p>Booked.</p>"),
+                "/news/1": page("Line A reopens", "<p>News.</p>"), "/news/2": page("New timetable", "<p>News.</p>"),
+                "/news/3": page("Night service", "<p>News.</p>"), "/departures": page("Departures", "<p>Every 6 minutes.</p>"),
+                "/status": page("Line status", "<p>3 delays.</p>"), "/elsewhere": page("Another site", "<p>Elsewhere.</p>"),
+              }[url.pathname];
+        if (!body) {
+          response.writeHead(404).end();
+          return;
+        }
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        response.end(body);
+      });
     });
     await new Promise((resolve, reject) => {
       server.once("error", reject);
@@ -131,7 +181,8 @@ export async function runSharedBrowserAllowedStepFixture() {
     const port = server.address().port;
     const origin = `http://journeys.test:${port}`;
     const otherOrigin = `http://other.test:${port}`;
-    const sent = () => requests.filter((request) => /\/route\b/u.test(request));
+    // What the steps sent: a route asked for, a cart, an order cancelled, seats booked.
+    const sent = () => requests.filter((request) => /^\S+ \S+ \/(?:route|cart\/add|cancel|book)\b/u.test(request));
 
     context = await chromium.launchPersistentContext(profileDirectory, {
       executablePath,
@@ -260,169 +311,239 @@ export async function runSharedBrowserAllowedStepFixture() {
       assert.ok(matches[nth], `No control named ${label}: ${snapshot.interactiveElements.map((element) => element.label)}`);
       return { index: matches[nth].index, snapshotId: snapshot.snapshotId };
     };
-    // The planner as Octo observes it: navigate's own answer is the snapshot.
-    const openPlanner = async (query = "", decisions = []) =>
-      (await ok("POST", "/v1/navigate", { url: `${origin}/journey${query}` }, decisions)).payload;
+    // A page as Octo observes it: navigate's own answer is the snapshot.
+    const open = async (where, decisions = []) =>
+      (await ok("POST", "/v1/navigate", { url: `${origin}${where}` }, decisions)).payload;
+    const openPlanner = (query = "", decisions = []) => open(`/journey${query}`, decisions);
     const live = (what) => () => runPage.evaluate((change) => window.live[change](), what);
     // A step that was not done because its control changed: the run goes on
     // (no terminal code), nothing was sent, and the failed command lists the
-    // person's yes.
+    // person's yes and says it went unused, which runtime-agent counts.
     const askedAgain = (result, what) => {
       assert.equal(result.code, 1, `${what}: the step ran: ${result.stdout}`);
       assert.match(result.stderr, CHANGED_AFTER_YES, `${what}: ${result.stderr}`);
       assert.match(result.stderr, /it asks the person again/u, what);
       assert.doesNotMatch(result.stderr, /_non_retryable/u, `${what}: the run ended`);
-      assert.deepEqual(JSON.parse(result.stdout), { ok: false, activity: { approval: "once" } }, what);
-      assert.deepEqual(sent(), [], `${what}: the form was sent`);
+      assert.deepEqual(
+        JSON.parse(result.stdout),
+        { ok: false, activity: { approval: "once" }, changedAfterYes: true },
+        what,
+      );
+      assert.deepEqual(sent(), [], `${what}: something was sent`);
+    };
+    // Each case names itself in its failure.
+    const check = async (name, run) => {
+      try {
+        await run();
+      } catch (error) {
+        error.message = `${name}: ${error.message}`;
+        throw error;
+      }
     };
 
     freshRun();
     // The site's prompt, answered with routine browsing: a form's own submit
     // still asks, every time.
-    let planned = await openPlanner("", ["allow_routine"]);
+    await openPlanner("", ["allow_routine"]);
     assert.equal(prompts.length, 1);
 
     // 1. The page changes by itself while the person reads the prompt. The
     // step they allowed runs, on the control they were asked about.
     const runs = {};
-    for (const [name, change] of [["carousel", "slide"], ["clock", "tick"], ["live count", "count"], ["carousel in the fragment", "fragment"]]) {
-      if (name !== "carousel") planned = await openPlanner();
-      requests.length = 0;
-      const asked = prompts.length;
-      const clicked = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], live(change));
-      assert.equal(clicked.code, 0, `${name}: the allowed step did not run: ${clicked.stderr}`);
-      assert.equal(prompts.length, asked + 1, `${name}: one prompt`);
-      assert.match(prompts.at(-1).display.label, /Plan your journey/u);
-      assert.deepEqual(sent(), [`journeys.test GET /route?which=1&from=Central&to=Airport`], name);
-      assert.equal(new URL(runPage.url()).pathname, "/route", name);
-      assert.equal(clicked.payload.activity.approval, "once", name);
-      runs[name] = "ran";
+    for (const [name, change] of [["carousel", "slide"], ["clock", "tick"], ["live count", "count"], ["form drawn again", "redraw"]]) {
+      await check(name, async () => {
+        const planned = await openPlanner();
+        requests.length = 0;
+        const asked = prompts.length;
+        const clicked = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], live(change));
+        assert.equal(clicked.code, 0, `the allowed step did not run: ${clicked.stderr}`);
+        assert.equal(prompts.length, asked + 1, "one prompt");
+        assert.match(prompts.at(-1).display.label, /Plan your journey/u);
+        assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport"]);
+        assert.equal(new URL(runPage.url()).pathname, "/route");
+        assert.equal(clicked.payload.activity.approval, "once");
+        runs[name] = "ran";
+      });
     }
     // Typing that sends the form, and Enter in a field, the same way.
-    planned = await openPlanner();
-    requests.length = 0;
-    const typed = await runTool("POST", "/v1/type", { ...control(planned, "To"), text: "Old Town", submit: true }, ["allow_once"], live("tick"));
-    assert.equal(typed.code, 0, `typing: ${typed.stderr}`);
-    assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Old+Town"]);
-    planned = await openPlanner();
-    requests.length = 0;
-    const pressed = await runTool("POST", "/v1/press", { ...control(planned, "From"), key: "Enter" }, ["allow_once"], live("slide"));
-    assert.equal(pressed.code, 0, `key press: ${pressed.stderr}`);
-    assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport"]);
-
-    // 2. The control itself changed while the prompt waited: nothing is done,
-    // and the step asks again instead of ending the run.
-    planned = await openPlanner();
-    requests.length = 0;
-    const swapped = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], () =>
-      runPage.evaluate(() => {
-        const plan = document.querySelector("form button");
-        const other = document.createElement("button");
-        other.type = "button";
-        other.textContent = "Buy a day ticket";
-        other.addEventListener("click", () => { document.body.dataset.bought = "1"; });
-        plan.replaceWith(other);
-      }));
-    askedAgain(swapped, "a control swapped for another");
-    assert.equal(await runPage.evaluate(() => document.body.dataset.bought ?? null), null, "the new control was used");
-
-    planned = await openPlanner();
-    requests.length = 0;
-    const elsewhere = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], () =>
-      runPage.evaluate((to) => { document.querySelector("form").action = to; }, `${otherOrigin}/route`));
-    askedAgain(elsewhere, "a form sent elsewhere");
-
-    // The same control on another page of the site is asked about again too.
-    planned = await openPlanner();
-    requests.length = 0;
-    const moving = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], live("address"));
-    askedAgain(moving, "a page whose address moved on its site");
-
-    planned = await openPlanner();
-    requests.length = 0;
-    const addField = () => runPage.evaluate(() => {
-      const field = document.createElement("p");
-      field.innerHTML = '<label>Phone <input name="phone" value="555-0100"></label>';
-      document.querySelector("form button").parentElement.before(field);
+    await check("typing that sends the form", async () => {
+      const planned = await openPlanner();
+      requests.length = 0;
+      const typed = await runTool("POST", "/v1/type", { ...control(planned, "To"), text: "Old Town", submit: true }, ["allow_once"], live("tick"));
+      assert.equal(typed.code, 0, typed.stderr);
+      assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Old+Town"]);
     });
-    const widened = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], addField);
-    askedAgain(widened, "a form given another field");
-    // Octo looks at the page again and does the step again: the person is
-    // asked again, about the form as it is now, and their yes sends it.
-    const askedBefore = prompts.length;
-    const looked = await ok("GET", "/v1/snapshot");
-    const again = await runTool("POST", "/v1/click", control(looked.payload, "Plan your journey"), ["allow_once"]);
-    assert.equal(again.code, 0, `asked again: ${again.stderr}`);
-    assert.equal(prompts.length, askedBefore + 1, "the step asked again");
-    assert.match(prompts.at(-1).display.label, /Phone/u, "the new prompt names the form's new field");
-    assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport&phone=555-0100"]);
+    await check("Enter in a field", async () => {
+      const planned = await openPlanner();
+      requests.length = 0;
+      const pressed = await runTool("POST", "/v1/press", { ...control(planned, "From"), key: "Enter" }, ["allow_once"], live("slide"));
+      assert.equal(pressed.code, 0, pressed.stderr);
+      assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport"]);
+    });
 
-    // 3. Two controls alike: once the page changed, neither is taken for the
-    // one the person was asked about.
-    planned = await openPlanner("?twice=1");
-    requests.length = 0;
-    const twins = await runTool("POST", "/v1/click", control(planned, "Plan your journey", 1), ["allow_once"], live("slide"));
-    askedAgain(twins, "one of two controls alike, after a change");
-    // Nor is the twin left once the one the person was asked about went.
-    planned = await openPlanner("?twice=1");
-    requests.length = 0;
-    const orphan = await runTool("POST", "/v1/click", control(planned, "Plan your journey", 0), ["allow_once"], () =>
-      runPage.evaluate(() => document.querySelector("form").remove()));
-    askedAgain(orphan, "one of two controls alike, after it went");
-    // Nor one that a look-alike, appearing ahead of it, could be taken for.
-    planned = await openPlanner();
-    requests.length = 0;
-    const lookAlike = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], () =>
-      runPage.evaluate(() => {
-        const form = document.querySelector("form");
-        const copy = form.cloneNode(true);
-        copy.querySelector("[name=which]").value = "2";
-        form.before(copy);
-      }));
-    askedAgain(lookAlike, "a control a look-alike appeared ahead of");
-    // With the page as it was, the control at its index is the one: the
-    // second form, not the first that looks like it.
-    planned = await openPlanner("?twice=1");
-    requests.length = 0;
-    const second = await runTool("POST", "/v1/click", control(planned, "Plan your journey", 1), ["allow_once"]);
-    assert.equal(second.code, 0, `the second form: ${second.stderr}`);
-    assert.deepEqual(sent(), ["journeys.test GET /route?which=2&from=Central&to=Airport"], "the control at its index was used");
+    // 2. The control itself, or what it acts on, changed while the prompt
+    // waited: nothing is done, and the step asks again instead of ending the
+    // run.
+    await check("a control swapped for another", async () => {
+      const planned = await openPlanner();
+      requests.length = 0;
+      const swapped = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], () =>
+        runPage.evaluate(() => {
+          const plan = document.querySelector("form button");
+          const other = document.createElement("button");
+          other.type = "button";
+          other.textContent = "Buy a day ticket";
+          other.addEventListener("click", () => { document.body.dataset.bought = "1"; });
+          plan.replaceWith(other);
+        }));
+      askedAgain(swapped, "a control swapped for another");
+      assert.equal(await runPage.evaluate(() => document.body.dataset.bought ?? null), null, "the new control was used");
+    });
+    await check("a form sent elsewhere", async () => {
+      const planned = await openPlanner();
+      requests.length = 0;
+      askedAgain(await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], () =>
+        runPage.evaluate((to) => { document.querySelector("form").action = to; }, `${otherOrigin}/route`)), "a form sent elsewhere");
+    });
+    // The same control on another address of the site, or of the page's
+    // fragment (which some sites keep their page in), is asked about again.
+    await check("a page whose address moved on its site", async () => {
+      const planned = await openPlanner();
+      requests.length = 0;
+      askedAgain(await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], live("address")), "the address moved");
+    });
+    await check("a carousel that names its slide in the fragment", async () => {
+      const planned = await openPlanner();
+      requests.length = 0;
+      askedAgain(await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], live("fragment")), "the fragment moved");
+    });
+    await check("an app that moved to another order in its fragment", async () => {
+      const shown = await open("/orders#/orders/1");
+      requests.length = 0;
+      const cancelled = await runTool("POST", "/v1/click", control(shown, "Cancel order"), ["allow_once"], live("route"));
+      askedAgain(cancelled, "another order");
+      assert.match(prompts.at(-1).display.label, /Cancel order/u);
+    });
+    // A shop's carousel shows the next offer, whose identical form was hidden
+    // when the person was asked: its look-alike is never used, whether the
+    // offers are named by links or in plain text.
+    for (const query of ["", "?bare=1"]) {
+      await check(`a hidden look-alike in a shop's carousel${query}`, async () => {
+        const shown = await open(`/shop${query}`);
+        requests.length = 0;
+        const added = await runTool("POST", "/v1/click", control(shown, "Add to cart"), ["allow_once"], live("slide"));
+        askedAgain(added, "the next offer");
+        assert.match(prompts.at(-1).display.label, /Add to cart/u);
+      });
+    }
+    // The same control, with another product drawn beside it in place.
+    await check("another product drawn beside the control", async () => {
+      const shown = await open("/deal");
+      requests.length = 0;
+      askedAgain(await runTool("POST", "/v1/click", control(shown, "Add to cart"), ["allow_once"], live("swap")), "another product");
+    });
+    // A countdown inside the control's form changes its text: asked again,
+    // and runtime-agent ends the run at the second (unit-tested).
+    await check("a countdown inside the form", async () => {
+      const shown = await open("/booking");
+      requests.length = 0;
+      askedAgain(await runTool("POST", "/v1/click", control(shown, "Book seats"), ["allow_once"], live("tick")), "a countdown");
+    });
+    await check("a form given another field", async () => {
+      const planned = await openPlanner();
+      requests.length = 0;
+      const addField = () => runPage.evaluate(() => {
+        const field = document.createElement("p");
+        field.innerHTML = '<label>Phone <input name="phone" value="555-0100"></label>';
+        document.querySelector("form button").parentElement.before(field);
+      });
+      askedAgain(await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], addField), "another field");
+      // Octo looks at the page again and does the step again: the person is
+      // asked again, about the form as it is now, and their yes sends it.
+      const askedBefore = prompts.length;
+      const looked = await ok("GET", "/v1/snapshot");
+      const again = await runTool("POST", "/v1/click", control(looked.payload, "Plan your journey"), ["allow_once"]);
+      assert.equal(again.code, 0, `asked again: ${again.stderr}`);
+      assert.equal(prompts.length, askedBefore + 1, "the step asked again");
+      assert.match(prompts.at(-1).display.label, /Phone/u, "the new prompt names the form's new field");
+      assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport&phone=555-0100"]);
+    });
+
+    // 3. Two controls alike: the one the person was asked about is used, and
+    // never its twin.
+    await check("one of two controls alike, after a change", async () => {
+      const planned = await openPlanner("?twice=1");
+      requests.length = 0;
+      const second = await runTool("POST", "/v1/click", control(planned, "Plan your journey", 1), ["allow_once"], live("slide"));
+      assert.equal(second.code, 0, second.stderr);
+      assert.deepEqual(sent(), ["journeys.test GET /route?which=2&from=Central&to=Airport"], "the twin was used");
+    });
+    await check("a look-alike that appeared ahead of it", async () => {
+      const planned = await openPlanner();
+      requests.length = 0;
+      const first = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], () =>
+        runPage.evaluate(() => {
+          const form = document.querySelector("form");
+          const copy = form.cloneNode(true);
+          copy.querySelector("[name=which]").value = "2";
+          form.before(copy);
+        }));
+      assert.equal(first.code, 0, first.stderr);
+      assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport"], "the look-alike was used");
+    });
+    await check("the twin left after the one asked about went", async () => {
+      const planned = await openPlanner("?twice=1");
+      requests.length = 0;
+      askedAgain(await runTool("POST", "/v1/click", control(planned, "Plan your journey", 0), ["allow_once"], () =>
+        runPage.evaluate(() => document.querySelector("form").remove())), "the twin left");
+    });
+    await check("the second of two alike on an unchanged page", async () => {
+      const planned = await openPlanner("?twice=1");
+      requests.length = 0;
+      const second = await runTool("POST", "/v1/click", control(planned, "Plan your journey", 1), ["allow_once"]);
+      assert.equal(second.code, 0, second.stderr);
+      assert.deepEqual(sent(), ["journeys.test GET /route?which=2&from=Central&to=Airport"]);
+    });
 
     // 4. A take-over while the prompt waits: the person's run ends and another
     // holds the browser. A yes that comes then does nothing.
-    planned = await openPlanner();
-    requests.length = 0;
-    const takenOver = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], async () => {
-      writeProtectedJson(markerPath, { ...authority, ownerId: randomUUID(), runId: randomUUID() });
-      await delay(150);
+    await check("a take-over while the prompt waits", async () => {
+      const planned = await openPlanner();
+      requests.length = 0;
+      const takenOver = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], async () => {
+        writeProtectedJson(markerPath, { ...authority, ownerId: randomUUID(), runId: randomUUID() });
+        await delay(150);
+      });
+      assert.equal(takenOver.code, 1, `the step ran after a take-over: ${takenOver.stdout}`);
+      assert.match(takenOver.stderr, /\[approval_authority_revoked_non_retryable\]/u, takenOver.stderr);
+      assert.deepEqual(sent(), [], "the form was sent after a take-over");
+      assert.equal(new URL(runPage.url()).pathname, "/journey");
     });
-    assert.equal(takenOver.code, 1, `the step ran after a take-over: ${takenOver.stdout}`);
-    assert.match(takenOver.stderr, /\[approval_authority_revoked_non_retryable\]/u, takenOver.stderr);
-    assert.deepEqual(sent(), [], "the form was sent after a take-over");
-    assert.equal(new URL(runPage.url()).pathname, "/journey");
 
     // 5. The page left its site after the person's yes: the run ends there, as
     // their yes was for a step on that site, and the failed command lists it.
-    freshRun();
-    planned = await openPlanner("", ["allow_routine"]);
-    requests.length = 0;
-    const moved = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], async () => {
-      await runPage.goto(`${otherOrigin}/elsewhere`);
+    await check("a page that left its site after the yes", async () => {
+      freshRun();
+      const planned = await openPlanner("", ["allow_routine"]);
+      requests.length = 0;
+      const moved = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], async () => {
+        await runPage.goto(`${otherOrigin}/elsewhere`);
+      });
+      assert.equal(moved.code, 1, `the step ran on another site: ${moved.stdout}`);
+      assert.match(moved.stderr, /The page moved to another site after the person said yes, so the step was not done \[approval_stale_non_retryable\]/u, moved.stderr);
+      assert.deepEqual(JSON.parse(moved.stdout), { ok: false, activity: { approval: "once" } });
+      assert.deepEqual(sent(), []);
     });
-    assert.equal(moved.code, 1, `the step ran on another site: ${moved.stdout}`);
-    assert.match(moved.stderr, /The page moved to another site after the person said yes, so the step was not done \[approval_stale_non_retryable\]/u, moved.stderr);
-    assert.deepEqual(JSON.parse(moved.stdout), { ok: false, activity: { approval: "once" } });
-    assert.deepEqual(sent(), []);
 
     const result = {
       status: "passed",
       fixtureVersion: 1,
       checks: [
-        "a carousel that moves to its next slide (also one that names it in the page's fragment), a clock in a link that ticks and a live count that goes up while the prompt waits leave the allowed click to run, once, on the control the person was asked about",
+        "a carousel that moves to its next slide, a clock in a link that ticks, a live count that goes up and the form drawn again as it was while the prompt waits leave the allowed click to run, once, on the control the person was asked about",
         "typing that sends the form and Enter in a field run the same way while the page changes",
-        "a control swapped for another, a form sent elsewhere, the same control on another address of the site and a form given another field while the prompt waits are not used: the step fails without ending the run, says it asks again, and lists the person's yes",
+        "a control swapped for another, a form sent elsewhere, the page's address or fragment moved (an app that went to another order in its fragment), a shop carousel's hidden look-alike, another product drawn beside the control in place, a countdown inside its form and a form given another field while the prompt waits are not used: the step fails without ending the run, says it asks again, lists the person's yes and says it went unused",
         "asked again, the step's new prompt names the form as it is now, and the yes sends it",
-        "one of two controls alike is not used once the page changed, nor its twin once it went, nor a control a look-alike appeared ahead of; with the page unchanged the control at its index is",
+        "of two controls alike, the one asked about is used once the page changed or a look-alike appeared ahead of it, and on an unchanged page; never its twin once it went",
         "a take-over while the prompt waits ends the step, and a yes then does nothing",
         "a page that left its site after the yes ends the run with the stale code, and the failed command lists the yes",
       ],
