@@ -2658,9 +2658,7 @@ impl ServerHandler for SharedBrowserMcpServer {
                 let step = self.terminal_step.lock().await.take();
                 Ok(terminal_consent_call_result_with_step(code, step))
             }
-            Err(SharedBrowserMcpExecutionFailure::Other(error)) => {
-                Ok(failed_tool_result(&format!("{error:#}")))
-            }
+            Err(SharedBrowserMcpExecutionFailure::Other(error)) => Ok(failed_call_result(&error)),
         }
     }
 }
@@ -2738,6 +2736,24 @@ fn network_failure(message: &str) -> Option<NetworkFailure> {
         reason,
         code: format!("net::{code}"),
     })
+}
+
+/// The result of a call that failed with `error`. A call that could not reach
+/// the browser at all says so in its structured content
+/// (`browserUnavailable`): the browser never answered its step, so that step
+/// does not stand in for the browser work of the turn (runtime-agent's retry
+/// of a turn with none still runs).
+fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
+    let mut result = failed_tool_result(&format!("{error:#}"));
+    if error.downcast_ref::<BrowserUnavailable>().is_some() {
+        match result.structured_content.as_mut() {
+            Some(JsonValue::Object(content)) => {
+                content.insert("browserUnavailable".to_string(), JsonValue::Bool(true));
+            }
+            _ => result.structured_content = Some(json!({ "browserUnavailable": true })),
+        }
+    }
+    result
 }
 
 /// A failed call's result. A page the network did not deliver says so in

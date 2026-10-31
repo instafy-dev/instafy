@@ -14147,16 +14147,17 @@ fn has_successful_shared_browser_mcp_message(messages: &[JobMessage]) -> bool {
     )
 }
 
-/// A step the browser answered, also with an error: a `navigate`, `click`, `type` or `press`
-/// call that ended (a site that did not answer, a page that changed, a step the policy
-/// refused). The turn has seen why it failed and said so; the browser retry would only send it
-/// back to the same address (a local test, Oct 31: a second 30-second wait on a site that was
-/// down, before the same answer).
+/// A step the browser answered, also with an error: a `navigate`, `open_tab`, `click`, `type`
+/// or `press` call that ended (a site that did not answer, a page that changed, a step the
+/// policy refused). The turn has seen why it failed and said so; the browser retry would only
+/// send it back to the same address (a local test, Oct 31: a second 30-second wait on a site
+/// that was down, before the same answer). A call that could not reach the browser at all was
+/// answered by nothing, so its turn is still retried.
 fn has_answered_shared_browser_step(messages: &[JobMessage]) -> bool {
     has_ended_bound_mcp_message(
         messages,
         "instafy_shared_browser",
-        &["navigate", "click", "type", "press"],
+        &["navigate", "open_tab", "click", "type", "press"],
         &["completed", "failed"],
     )
 }
@@ -14376,7 +14377,9 @@ fn has_successful_bound_mcp_message(
     has_ended_bound_mcp_message(messages, expected_server, accepted_tools, &["completed"])
 }
 
-/// Whether one of `accepted_tools` from `expected_server` ended with one of `statuses`.
+/// Whether one of `accepted_tools` from `expected_server` ended with one of `statuses`. A call
+/// that could not reach its browser (`browserUnavailable`) ended without the browser's answer,
+/// so it counts for no status.
 fn has_ended_bound_mcp_message(
     messages: &[JobMessage],
     expected_server: &str,
@@ -14414,7 +14417,11 @@ fn has_ended_bound_mcp_message(
                     .iter()
                     .any(|accepted| tool.eq_ignore_ascii_case(accepted))
             });
-        server_matches && tool_matches && ended
+        let unreachable = metadata
+            .get("browserUnavailable")
+            .and_then(JsonValue::as_bool)
+            == Some(true);
+        server_matches && tool_matches && ended && !unreachable
     })
 }
 
@@ -19026,6 +19033,12 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             "terminalConsent": terminal_consent,
                             "event": event.clone(),
                         });
+                        // A call that could not reach Instafy's browser at all (the event
+                        // adapter keeps the browser's own mark): the browser answered no step.
+                        if item.get("browserUnavailable").and_then(JsonValue::as_bool) == Some(true)
+                        {
+                            metadata["browserUnavailable"] = JsonValue::Bool(true);
+                        }
                         // A Shared or Personal Browser step names its site from the browser's
                         // own result (`browserStep`, kept by the event adapter); any other tool
                         // call, or a browser step without those facts, is "Using the browser" /
@@ -25909,7 +25922,8 @@ mod tests {
     /// seen why it failed and said so (a local test, Oct 31: a navigation whose
     /// site did not answer was retried, and the retry loaded the same site for
     /// another 30 seconds before the same answer). A read that failed, a call
-    /// that never ended and another server's step still get the retry.
+    /// that never ended, a call that could not reach the browser at all and
+    /// another server's step still get the retry.
     #[test]
     fn a_step_the_browser_answered_with_an_error_is_not_retried() {
         let ended = |server: &str, tool: &str, status: &str| {
@@ -25924,7 +25938,7 @@ mod tests {
                 }
             })])
         };
-        for tool in ["navigate", "click", "type", "press"] {
+        for tool in ["navigate", "open_tab", "click", "type", "press"] {
             let messages = ended("instafy_shared_browser", tool, "failed");
             assert!(
                 !has_successful_shared_browser_mcp_message(&messages),
@@ -25960,6 +25974,32 @@ mod tests {
                     9,
                 ),
                 "{server}/{tool} {status}"
+            );
+        }
+        // A step that could not reach the browser at all (one slow connect, a
+        // browser starting again) was answered by nothing: the turn still gets
+        // its retry, as before. A second one in a row ends the run instead.
+        for tool in ["navigate", "open_tab", "click", "type", "press"] {
+            let unreachable = extract_codex_messages(&[json!({
+                "type": "item.completed",
+                "item": {
+                    "id": format!("call-unreachable-{tool}"),
+                    "type": "mcp_tool_call",
+                    "server": "instafy_shared_browser",
+                    "tool": tool,
+                    "status": "failed",
+                    "browserUnavailable": true,
+                }
+            })]);
+            assert!(
+                shared_browser_execution_missing_after_attempt(
+                    true,
+                    &unreachable,
+                    None,
+                    Some(7),
+                    7,
+                ),
+                "{tool} that never reached the browser was not retried"
             );
         }
     }

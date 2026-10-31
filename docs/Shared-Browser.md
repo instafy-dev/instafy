@@ -1095,20 +1095,25 @@ page was read), and the Shared Browser policy says to take a snapshot
 and go on from there: only an approval's own outcome is final. On the turn's
 line it reads as a page read when the page was read, and like `status`
 ("Browsed <site>") when only its address was, so it adds no new wording and
-never says a page was read when none was. A `navigate` or `open_tab` whose
-site had not answered when its time ran out (one that is down) stops that load,
-whatever page the tab showed before, the blank page or a page that had loaded:
-while it waited, Instafy's browser could not be reached by the next step, and
-it would have landed after the step ended. So the step opened nothing, and it
-fails with "The site did not answer within 20 seconds, so nothing was opened
-and the page is still blank." (or "…and the tab still shows the page it showed
-before."), followed by "Open the place's own site now (the venue's or the
-operator's), or another official source if this was it.": never the blank
+never says a page was read when none was. A load a step started (a
+`navigate`, an `open_tab`, or a link, form or key that opens a page) whose site
+(one that is down) had not answered when the step stopped waiting for it, its
+time up or, sooner, a click's or a key's own 15-second wait for the page it
+opens, stops that load, whatever page the tab showed before, the blank page or
+a page that had loaded: while it waited, Instafy's browser could not be reached
+by the next step, and it would have landed after the step ended. So the step
+opened nothing, and it fails with "The site did not answer in time, so nothing
+was opened and the page is still blank." (or "…and the tab still shows the page
+it showed before."), followed by "Open the place's own site now (the venue's or
+the operator's), or another official source if this was it.": never the blank
 page's "Call navigate", which sent Octo to load the same site again, nor the
-page the tab still shows, which was read as that step's page. Its line reads
-"Tried opening <site>". A site that answered as the time ran out has its page,
-which is read as it is, and a load the browser does not confirm stopped fails as
-a busy page instead. The step's guards still hold while
+page the tab still shows, which was read as that step's page, nor the click's
+own timeout. Its line reads as the step it tried ("Tried opening <site>" for a
+navigation). Whether the site answered is judged by the load's own request,
+never by the tab's address, which a page's script may change while the load
+waits. A site that answered as the step stopped waiting has its page, which is
+read as it is, and a load the browser does not confirm stopped fails as a busy
+page instead. The step's guards still hold while
 the page is read, then end as a step's guards end: a window the step opened
 is closed by its target (a busy page's window may not be a page Playwright can
 show yet) and fails the step as it would have in its time, as does a
@@ -1119,10 +1124,11 @@ whose results page keeps the page busy for a minute answers after about 29
 seconds, a loaded page whose content is still hidden reads as busy, a prompt
 answered after 23 seconds is waited for, a click that opens
 a window and keeps the page busy fails with the window closed for good, a
-hand-off on a page too busy to highlight in time leaves no prompt, and a
-navigation to a site that does not answer, from a blank tab or from a page that
-had loaded, is stopped after about 20 seconds: the next step reaches the browser
-at once, and the site's late answer never loads.
+hand-off on a page too busy to highlight in time leaves no prompt, and a load
+of a site that does not answer is stopped (a navigation, from a blank tab or
+from a page that had loaded, after about 20 seconds; a link clicked on a page
+once the click stops waiting, after about 15): the next step reaches the
+browser at once, and the site's late answer never loads.
 
 In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
 step yields to the model only after the browser server's tool timeout (180
@@ -1316,8 +1322,8 @@ evidence of browser work. The agent's policy, the blank observation itself and
 the retry all tell it to call `navigate` first: with the address the task names,
 or, when the task names none (a research or comparison card carries no address),
 with the official site of what the task is about. A turn that stops on a blank
-page is retried once with that instruction, and `navigate` asks for the site's
-approval as usual. Every other page without an http(s) origin (`data:`,
+page with no step the browser answered (below) is retried once with that
+instruction, and `navigate` asks for the site's approval as usual. Every other page without an http(s) origin (`data:`,
 `about:srcdoc`, a blank page with a fragment, other browser-internal pages)
 still fails closed with `[origin_not_approvable]`. That error is not a consent
 decision and does not end the run; it tells the agent to navigate first. Neither
@@ -1328,10 +1334,13 @@ Every high-level snapshot/action appends the cursor/action-ticker telemetry
 owned by the Shared Browser shell. The runtime records the action-log position
 before the turn and accepts completion only when it sees both a completed call
 from the exact `instafy_shared_browser` server and new action evidence, or a
-`navigate`, `click`, `type` or `press` from that server that ended, also with an
-error (a site that did not answer, a page that changed, a step the policy
-refused): the turn has seen why the step failed and says so, and a retry would
-only send it back to the same address. A tool
+`navigate`, `open_tab`, `click`, `type` or `press` from that server that the
+browser answered, also with an error (a site that did not answer, a page that
+changed, a step the policy refused): the turn has seen why the step failed and
+says so, and a retry would only send it back to the same address. A call that
+could not reach the browser at all is no such answer (its result is marked
+`browserUnavailable`), so that turn is still retried; a second one in a row
+ends the run instead. A tool
 event from another MCP server, a status-only narration, or prose success is not
 accepted. Missing evidence gets one browser-specific retry that again requires
 the bounded server and a fresh snapshot. If the retry still has no instrumented

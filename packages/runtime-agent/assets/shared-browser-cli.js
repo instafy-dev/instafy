@@ -3090,12 +3090,12 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
         assertStepOnTime();
         emitAction({ type: "navigate", label: `Open a tab: ${url}`, url });
         loading = true;
-        await openAddress(opened, url);
+        await opened.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
         await settleAfterAction(opened);
         documents.assertNoneBlocked();
       } catch (error) {
         documents.assertNoneBlocked(error);
-        throw error;
+        throw await unansweredLoadFailure(error, documents);
       } finally {
         await documents.release();
       }
@@ -3166,53 +3166,42 @@ async function within(ms, promise, fallback = null) {
   }
 }
 
-// The load a step of Octo's started (navigate, open_tab) while its site has
-// not answered: the tab it loads in, and whether the site answered in the end
-// (the tab's new page committed) or the load failed or was stopped.
-let unansweredLoad = null;
-
-// Opens `url` in `page`, as the address bar does, and waits for the page's
-// content. Until the site answers, the load is the step's unanswered load
-// (pageAsItIs).
-async function openAddress(page, url) {
-  const deadline = Date.now() + 30_000;
-  const committed = page.goto(url, { waitUntil: "commit", timeout: 30_000 });
-  const load = { page, answered: committed.then(() => true, () => false) };
-  unansweredLoad = load;
-  try {
-    await committed;
-  } finally {
-    if (unansweredLoad === load) unansweredLoad = null;
-  }
-  await page.waitForLoadState("domcontentloaded", { timeout: Math.max(deadline - Date.now(), 1) });
+// Stops the load a step started in its tab (guardStepDocuments) whose site has
+// not answered, whatever started it: navigate, open_tab, a link, a form or a
+// key. Null when no such load waits; otherwise whether the browser said it
+// stopped, and whether the site's answer came as it stopped (that page is
+// then the step's).
+async function stopUnansweredLoad(guards) {
+  const load = guards.map((guard) => guard.unansweredLoad()).find(Boolean) ?? null;
+  if (!load) return null;
+  const stopped = await within(GUARD_RELEASE_MS, stopLoading(load.page).catch(() => false), false);
+  return { page: load.page, stopped, answered: load.answered };
 }
 
 // The answer of a step whose time ran out: the page as it is now, read like a
 // snapshot within LATE_READ_MS, or its address alone when the page is too busy
 // to be read. It says that the step's time ran out, so Octo checks what the step
 // did before it acts again. Its activity says what it is: a read of the page,
-// or, for the address alone, the page it is on, as status names it. A load whose
-// site has not answered, whatever page the tab showed before (unansweredLoad),
-// is stopped first: while it waits, Instafy's browser cannot be reached by the
-// next step, and it would land after the step ended. So the step opened nothing,
-// and it fails (its line reads as opening the site it tried) saying the site did
-// not answer and where to go next, never the page the tab still shows, nor the
-// blank page's "Call navigate", which sent Octo to load the same site again. A
-// site that answered as the time ran out has its page, which is read as it is,
-// and a load the browser did not confirm stopped is still busy. A tab that is
-// still blank is stopped and answered the same way. The step's guards still hold
-// while the page is read, then end as a step's guards end: a window it opened is
-// closed, and what they stopped fails the step as it would have in its time.
+// or, for the address alone, the page it is on, as status names it. A load the
+// step started whose site has not answered, whatever page the tab showed before
+// and whatever started it, is stopped first (stopUnansweredLoad): while it
+// waits, Instafy's browser cannot be reached by the next step, and it would land
+// after the step ended. So the step opened nothing, and it fails (its line
+// reads as the step it tried) saying the site did not answer and where to go
+// next, never the page the tab still shows, nor the blank page's "Call
+// navigate", which sent Octo to load the same site again. A site that answered
+// as the time ran out has its page, which is read as it is, and a load the
+// browser did not confirm stopped is still busy. A tab that is still blank is
+// stopped and answered the same way. The step's guards still hold while the
+// page is read, then end as a step's guards end: a window it opened is closed,
+// and what they stopped fails the step as it would have in its time.
 async function pageAsItIs(browser) {
-  const load = unansweredLoad;
-  const stoppedLoad = load
-    ? await within(GUARD_RELEASE_MS, stopLoading(load.page).catch(() => false), false)
-    : false;
-  const unanswered = load !== null && !(stoppedLoad && (await within(GUARD_RELEASE_MS, load.answered, false)));
+  const guards = [...openStepGuards];
+  const load = await stopUnansweredLoad(guards);
+  const unanswered = load !== null && !load.answered;
   const read = unanswered
     ? null
     : await within(LATE_READ_MS, (async () => snapshotForResult(await resolveExpectedPage(browser)))());
-  const guards = [...openStepGuards];
   let stopped = null;
   try {
     await within(GUARD_RELEASE_MS, Promise.all(guards.map((guard) => guard.closeUnseenWindows())));
@@ -3236,7 +3225,7 @@ async function pageAsItIs(browser) {
     readSomething ? "This is the page as it is now: check" : "Check"
   } what the step did before you act again.`;
   if (unanswered) {
-    throw new Error(stoppedLoad ? unansweredLoadMessage(load.page) : `${BUSY_PAGE_MESSAGE} ${note}`);
+    throw new Error(load.stopped ? unansweredLoadMessage(load.page) : `${BUSY_PAGE_MESSAGE} ${note}`);
   }
   if (view.blank === true) {
     const stoppedBlankLoad = await within(GUARD_RELEASE_MS, stopLoading(resolvedPage).catch(() => false), false);
@@ -3250,15 +3239,27 @@ async function pageAsItIs(browser) {
 }
 
 const BUSY_PAGE_MESSAGE = "The page is still busy, so it could not be read yet. Take a snapshot in a moment.";
-// What a load answers whose site sent nothing back within the step's time: the
-// tab still shows what it showed before, and Octo goes to the next source in
-// the same turn (the browser skill's "Finding a page").
+// What a load answers whose site sent nothing back before the step stopped
+// waiting for it (its time ran out, or a click's own wait for the page did):
+// the tab still shows what it showed before, and Octo goes to the next source
+// in the same turn (the browser skill's "Finding a page").
 const UNANSWERED_NEXT_SOURCE = "Open the place's own site now (the venue's or the operator's), or another official source if this was it.";
-const UNANSWERED_PAGE_MESSAGE = `The site did not answer within ${STEP_TIME_MS / 1000} seconds, so nothing was opened and the page is still blank. ${UNANSWERED_NEXT_SOURCE}`;
-const UNANSWERED_LOADED_PAGE_MESSAGE = `The site did not answer within ${STEP_TIME_MS / 1000} seconds, so nothing was opened and the tab still shows the page it showed before. ${UNANSWERED_NEXT_SOURCE}`;
+const UNANSWERED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${UNANSWERED_NEXT_SOURCE}`;
+const UNANSWERED_LOADED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${UNANSWERED_NEXT_SOURCE}`;
 
 function unansweredLoadMessage(page) {
   return isBlankPage(page) ? UNANSWERED_PAGE_MESSAGE : UNANSWERED_LOADED_PAGE_MESSAGE;
+}
+
+// A step that failed on its own wait for the page a load would bring (a click
+// or a key waits 15 seconds for the page it opens, so it may give up before the
+// step's time does) while that load's site had not answered: the load is
+// stopped, as it is once the step's time is up, and the step says the site did
+// not answer. Any other failure is the step's own.
+async function unansweredLoadFailure(error, guard) {
+  if (error?.name !== "TimeoutError") return error;
+  const load = await stopUnansweredLoad([guard]);
+  return load?.stopped && !load.answered ? new Error(unansweredLoadMessage(load.page)) : error;
 }
 
 // Stops what the page is still loading, as the browser's stop button does; true
@@ -3334,9 +3335,10 @@ async function execute(browser, browserSession, method, requestPath, body) {
     documents.assertNoneBlocked();
     return result;
   } catch (error) {
-    // A blocked load fails the step itself; say why.
+    // A blocked load fails the step itself; say why. So does a load whose site
+    // did not answer.
     documents.assertNoneBlocked(error);
-    throw error;
+    throw await unansweredLoadFailure(error, documents);
   } finally {
     await documents.release();
   }
@@ -3383,6 +3385,36 @@ async function guardStepDocuments(page) {
   // Windows closed by their target alone (closeUnseenWindows).
   let unseenWindows = 0;
   let targetsAtStart = null;
+  // The tab's own load that the step started and its site has not answered
+  // yet (stopUnansweredLoad): the tab's newest document request, from when it
+  // leaves the browser until the site's answer comes (`answered`) or the
+  // request ends unanswered.
+  let waitingLoad = null;
+  const tabDocument = (request) => {
+    try {
+      return request.isNavigationRequest() && request.frame() === page.mainFrame();
+    } catch (_) {
+      return false;
+    }
+  };
+  const loadStarted = (request) => {
+    if (tabDocument(request)) waitingLoad = { page, request, answered: false };
+  };
+  const loadAnswered = (response) => {
+    if (waitingLoad && waitingLoad.request === response.request()) {
+      waitingLoad.answered = true;
+      waitingLoad = null;
+    }
+  };
+  const loadEnded = (request) => {
+    if (waitingLoad && waitingLoad.request === request) waitingLoad = null;
+  };
+  const followLoads = (on) => {
+    for (const [event, listener] of [["request", loadStarted], ["response", loadAnswered], ["requestfailed", loadEnded]]) {
+      if (on) page.on(event, listener);
+      else page.off(event, listener);
+    }
+  };
   const stopWindowRequests = async (route) => {
     const request = route.request();
     let owner = null;
@@ -3408,6 +3440,7 @@ async function guardStepDocuments(page) {
     // there long before Playwright can show it as a page.
     targetsAtStart = new Set(await pageTargetIds());
     context.on("page", noteWindow);
+    followLoads(true);
     await context.route("**/*", stopWindowRequests);
     session = await page.context().newCDPSession(page);
     // The tab's own document is what is guarded. A page may frame a
@@ -3462,6 +3495,7 @@ async function guardStepDocuments(page) {
   } catch (_) {
     if (session) await session.detach().catch(() => {});
     context.off("page", noteWindow);
+    followLoads(false);
     await context.unroute("**/*", stopWindowRequests).catch(() => {});
     throw new Error("Shared Browser could not guard the tab against link-only sites, so the step was not performed");
   }
@@ -3471,6 +3505,8 @@ async function guardStepDocuments(page) {
     limitFormPosts: (origins) => {
       postOrigins = origins === null ? null : new Set(origins.filter(Boolean));
     },
+    // The load the step started that its site has not answered yet, if any.
+    unansweredLoad: () => waitingLoad,
     // Ends the guard once, whoever asks first: the step, or pageAsItIs once
     // the step's time is up (a busy page can hold the step's own release).
     release: () => (released ??= (async () => {
@@ -3479,6 +3515,7 @@ async function guardStepDocuments(page) {
       // A window that appeared after the step's last check is closed too.
       for (const opened of context.pages()) noteWindow(opened);
       context.off("page", noteWindow);
+      followLoads(false);
       await context.unroute("**/*", stopWindowRequests).catch(() => {});
       for (const opened of windows) {
         await opened.close({ runBeforeUnload: false }).catch(() => {});
@@ -3704,7 +3741,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }
     assertStepOnTime();
     emitAction({ type: "navigate", label: `Go to ${url}`, url });
-    await openAddress(page, revalidatedUrl);
+    await page.goto(revalidatedUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
     await emitNavigationResult(page);
