@@ -1,5 +1,12 @@
 # @instafy/cli
 
+## 0.5.2
+
+### Patch Changes
+
+- 761ea7f: `instafy preview check` can keep the picture for an open preview's card in a file instead of sending it, for Instafy's runtime to send with its own credential after a turn's reply (`--picture-to <file>`, hidden from help). A check that sends its picture records when it took it before sending it, so an older picture still on its way to the card is not sent after it.
+- 4d534eb: `instafy bind check` reads a site's GeoJSON data files too, so a map's places (its layers in `data/<layer>.geojson`) count as shown. A map that showed every place the request named was reported as missing all of them, because the check read only HTML and `.json` files. What a map lists as not found yet (its config's `"missing"`) still does not count.
+
 ## 0.5.1
 
 ### Patch Changes
