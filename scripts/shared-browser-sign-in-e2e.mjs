@@ -64,6 +64,15 @@ const page = (title, body) => `<!doctype html><html lang="en"><head><meta charse
 header a{color:#fff}main{padding:16px}label{display:block;margin:12px 0}input{display:block;padding:6px;margin-top:4px}</style></head>
 <body><header><a href="/">Example code host</a>${body.header ?? ""}</header><main><h1>${title}</h1>${body.main}</main></body></html>`;
 
+// What a code host's signed-out pages carry besides the task: a product card
+// whose heading names a secret, and a live feed of project names that look
+// random. Neither shows a key, so the page reads as a page and names its Sign
+// in link; read as a secret screen, it named none and the task stopped there.
+const SIGNED_OUT_EXTRAS = '<section><h3>Secret scanning</h3><p>Catch leaked secrets before they ship.</p>' +
+  '<a href="/features/secret-scanning">Explore Secret scanning</a></section>' +
+  "<h2>Live activity</h2><ul><li>push to kestrel7/orbit-notes-2026</li>" +
+  "<li>pull request on mapleworks9/route-planner-v2</li><li>star on dune88/shoreline-survey-kit</li></ul>";
+
 // A code host: a repository page whose Star needs a sign-in, and its sign-in
 // page. The person's session is a cookie the sign-in sets.
 function fixtureSite(requests) {
@@ -87,7 +96,10 @@ function fixtureSite(requests) {
           main: `<p>An inert repository.</p><form method="post" action="/fixture/repository/star"><button type="submit">${starred ? "Unstar" : "Star"}</button></form>`
             + `<p id="stars">${starred ? "Starred" : "Not starred"}</p>`,
         }
-        : { header: '<a href="/login">Sign in</a>', main: "<p>An inert repository.</p><p>Sign in to star this repository.</p>" }));
+        : {
+          header: '<a href="/login">Sign in</a>',
+          main: `<p>An inert repository.</p><p>Sign in to star this repository.</p>${SIGNED_OUT_EXTRAS}`,
+        }));
       return;
     }
     if (request.method === "GET" && url.pathname === "/login") {
@@ -276,6 +288,8 @@ export async function runSharedBrowserSignInFixture() {
     freshTurn();
     let observed = await ok("POST", "/v1/navigate", { url: `${origin}/fixture/repository` }, ["allow_routine"]);
     assert.equal(prompts.length, 1, "The site asked once");
+    assert.equal(observed.secretScreen, false, "A product card that names a secret is not a secret screen");
+    assert.match(observed.visibleText, /Sign in to star this repository\./u);
     assert.ok(observed.signIn, `The repository page names what opens the sign-in page: ${JSON.stringify(observed)}`);
     assert.equal(observed.signIn.fields, undefined, "A page with no sign-in fields names none");
     assert.deepEqual(observed.signIn.open, control(observed, "Sign in").index);
@@ -342,9 +356,10 @@ export async function runSharedBrowserSignInFixture() {
 
     const result = {
       status: "passed",
-      fixtureVersion: 2,
+      fixtureVersion: 3,
       checks: [
         "a signed-out page with no sign-in fields names its Sign in link, which opens the sign-in page without a prompt",
+        "a product card whose heading names a secret, beside project names that look random, does not make that page a secret screen",
         "the sign-in page's result names its username and password fields and says to pause there with request_human_input",
         "typing into those fields is refused before any prompt",
         "the pause highlights exactly those fields, asks the run's person and ends the turn, with nothing sent",
@@ -369,7 +384,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 2 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 3 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });

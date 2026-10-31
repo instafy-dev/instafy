@@ -107,8 +107,9 @@ Pending requests show a badge for the current driver. A compact page-count picke
 beside the address switches browser tabs. **Browser options** contains history
 navigation, reload, **Expand browser** and where the browser runs, so the toolbar
 stays on one row. AI
-takeover and **Let Octo continue** are in the same participant controls;
-clicking the shared page can still open the takeover confirmation.
+takeover is in the same participant controls; clicking the shared page can still
+open the takeover confirmation. **Let Octo continue** sits in a row of its own
+under the toolbar, which nothing folds away (see Manual input handoff).
 
 ### The agent's tabs
 
@@ -1359,7 +1360,7 @@ The cue is presentation only; it does not grant input or block local viewer pan
 and zoom. Human control still uses the existing request/grant/release actions.
 For AI control, clicking the page or toolbar control icon opens a **Take over** dialog.
 Canceling leaves control unchanged; confirming starts the existing handoff.
-**Let Octo continue** then appears in the existing toolbar. Reduced-motion
+**Let Octo continue** then appears in a row under the toolbar. Reduced-motion
 preferences use a static edge glow. Agent-requested handoff
 uses `request_human_input` with one to eight indices from a fresh snapshot. When
 it comes in while the chat is open, Studio switches the person whose turn it is
@@ -1369,7 +1370,14 @@ nothing). While it waits on the person's fields, a row of its own under the
 toolbar, at every width (a narrow toolbar folds its controls into a menu), says:
 "This space's browser keeps you signed in for its chats until you clear it.",
 or "…for its chats and members…" when other people can open the space (see
-Sign-ins on a browser host). The
+Sign-ins on a browser host), beside **Let Octo continue**. The same row holds
+**Let Octo continue** after a take-over. When nobody holds the browser's
+control (after **Release control**, say), the press takes control first, as
+**Take control** does, and continues once the browser confirms it; without an
+answer within five seconds it says "The browser didn't answer. Try again." While
+someone else holds the browser, the row shows the note alone (the toolbar says
+who holds it), and a press whose control went to someone else first ends
+without a notice. The
 trusted helper highlights those exact editable elements with fixed amber outlines
 and emits bounded, page/initiator-bound guidance through the existing action feed.
 The guidance contains generic labels, not field values or page text. Highlights

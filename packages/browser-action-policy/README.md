@@ -68,6 +68,17 @@ load `redaction.js` first.
   the one table of form steps both browsers' tests run.
 - `pageCapture.js`: `pageSecretSignalsInPage(sources)` runs inside a page and
   answers the four yes/no secret checks that `redactPageObservation` takes.
+  A credential word in the page's title or a dialog's label makes the whole
+  page a credential context. In a heading, legend, table header, term or label
+  it counts only when that heading's own section (up to the next heading of
+  its level, inside its section, form, table or dialog) shows what
+  `redactText` counts as a key in a credential context: a known key format, a
+  random-looking value, or a digit code just after a code word. All of the
+  section is read for it: text right inside the heading's containers, open
+  shadow roots and slotted nodes, the names its controls carry and its
+  read-only fields. So a product page's "Secret scanning" card is not a secret
+  screen, and a page that lists recovery codes or tokens under their heading
+  still is.
   `captureSentPage(redaction, options)` reads a page a person chose to send
   with **Send page to Octo**: it runs in an isolated world next to
   `redaction.js`, masks the address, title and text with the snapshot rules,

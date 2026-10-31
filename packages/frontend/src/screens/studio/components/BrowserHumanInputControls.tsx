@@ -12,7 +12,14 @@ type BrowserHumanInputPresentation = {
   // A compact toolbar can place actions in a popover without unmounting the
   // takeover dialog that also opens from a click on the browser surface.
   renderControls?: (controls: ReactNode) => ReactNode;
+  /**
+   * The view shows Let Octo continue in a row of its own
+   * (`BrowserHumanInputContinue`), so these controls leave it out.
+   */
+  continueInRow?: boolean;
 };
+
+type BrowserHumanInputState = ReturnType<typeof useBrowserHumanInput>;
 
 /**
  * What a pause on the person's fields in the space's browser says stays
@@ -31,21 +38,34 @@ export function BrowserHumanInputControls(props: BrowserHumanInputOptions & Brow
   return <BrowserHumanInputStatus {...props} state={state} />;
 }
 
-export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & BrowserHumanInputPresentation & { state: ReturnType<typeof useBrowserHumanInput> }) {
+type HumanInputControlsProps = Pick<BrowserHumanInputOptions, "humanControlConfirmed" | "canContinue" | "takeControl"> & {
+  state: BrowserHumanInputState;
+};
+
+/**
+ * Whether this person can press Let Octo continue while a pause or take-over
+ * waits: they hold the browser, or nobody does and they may take it
+ * (`takeControl`), and the press then takes control first.
+ */
+export function canLetOctoContinue(props: HumanInputControlsProps): boolean {
+  return props.state.active && (props.humanControlConfirmed || Boolean(props.takeControl));
+}
+
+// Let Octo continue while a pause or take-over waits, else Take over (also
+// after a take-over that failed). In the toolbar, where Octo still holds the
+// browser, it says Octo is stopping until the person may press.
+function HumanInputControls(props: HumanInputControlsProps & { takeOver?: ReactNode }) {
   const { state } = props;
-  const registerOverlay = useContext(BrowserToolsOverlayContext);
-  const dialogOpen = state.takeoverRequested && props.canTakeOver;
-  useLayoutEffect(() => dialogOpen ? registerOverlay?.() : undefined, [dialogOpen, registerOverlay]);
-  if (!state.active && !props.canTakeOver) return props.renderControls?.(null) ?? null;
+  const canPress = canLetOctoContinue(props);
   const manualGuidance = state.request
     ? `Fill the ${state.request.fields.length === 1 ? "highlighted field" : `${state.request.fields.length} highlighted fields`} on the page, then let Octo continue. Keep passwords and codes out of chat.`
     : "You control the browser. Finish your changes on the page, then let Octo continue.";
   const waitingGuidance = state.busy === "continue"
     ? "Continuing Octo's task. Input remains locked."
     : "Waiting for agent control to stop. Input remains locked.";
-  const controls = (
+  return (
     <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2" data-testid="browser-human-input-controls" data-browser-session-safe-zone="true">
-      {state.active && props.humanControlConfirmed ? (
+      {canPress ? (
         <Button type="button" preset="inline" variant="primary" className="shrink-0"
           isDisabled={state.busy !== null || props.canContinue === false} title={manualGuidance}
           onPress={() => void state.continueTask()} data-testid="browser-human-input-continue">
@@ -54,16 +74,37 @@ export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & Browse
         </Button>
       ) : state.active && !state.error ? (
         <Text as="span" variant="caption" tone="muted" role="status">{state.busy === "continue" ? "Continuing…" : "Stopping Octo…"}</Text>
-      ) : props.canTakeOver ? (
-        <IconButton type="button" size="sm" variant="ghost"
-          aria-label="Take over browser" title="Take over browser" onPress={state.requestTakeOver} data-testid="browser-human-input-request">
-          <CursorPointer className="h-4 w-4" aria-hidden="true" />
-        </IconButton>
-      ) : null}
-      {state.active ? <span className="sr-only" role="status">{props.humanControlConfirmed ? manualGuidance : waitingGuidance}</span> : null}
+      ) : props.takeOver ?? null}
+      {state.active ? <span className="sr-only" role="status">{canPress ? manualGuidance : waitingGuidance}</span> : null}
       {state.error ? <InlineNotice tone="danger" appearance="inline" role="alert" className="basis-full">{state.error}</InlineNotice> : null}
     </div>
   );
+}
+
+/**
+ * Let Octo continue in a row of the view's own, outside its toolbar, which a
+ * narrow view folds into a menu: the person finds it at every width. The row
+ * shows once Octo has let go, so when the person cannot press, someone else
+ * holds the browser (the toolbar says who) and it shows nothing.
+ */
+export function BrowserHumanInputContinue(props: HumanInputControlsProps) {
+  return canLetOctoContinue(props) ? <HumanInputControls {...props} /> : null;
+}
+
+export function BrowserHumanInputStatus(props: BrowserHumanInputOptions & BrowserHumanInputPresentation & { state: BrowserHumanInputState }) {
+  const { state } = props;
+  const registerOverlay = useContext(BrowserToolsOverlayContext);
+  const dialogOpen = state.takeoverRequested && props.canTakeOver;
+  useLayoutEffect(() => dialogOpen ? registerOverlay?.() : undefined, [dialogOpen, registerOverlay]);
+  const controls = (state.active ? !props.continueInRow : props.canTakeOver) ? (
+    <HumanInputControls {...props} takeOver={props.canTakeOver ? (
+      <IconButton type="button" size="sm" variant="ghost"
+        aria-label="Take over browser" title="Take over browser" onPress={state.requestTakeOver} data-testid="browser-human-input-request">
+        <CursorPointer className="h-4 w-4" aria-hidden="true" />
+      </IconButton>
+    ) : null} />
+  ) : null;
+  if (!controls && !dialogOpen) return props.renderControls?.(null) ?? null;
   return (
     <>
       {props.renderControls ? props.renderControls(controls) : controls}

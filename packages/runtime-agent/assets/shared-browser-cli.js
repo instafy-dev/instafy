@@ -93,15 +93,9 @@ const ALLOWED_PRESS_KEYS = new Set([
   " ",
   "Space",
 ]);
-// Regular-expression sources the page-side checks need. Values are tested in
-// the page and only yes/no answers come back.
-const PAGE_POLICY_SOURCES = Object.freeze({
-  kind: "page-policy",
-  secretPatterns: [...redaction.KNOWN_SECRET_PATTERN_SOURCES],
-  credentialContext: redaction.CREDENTIAL_CONTEXT_SOURCE,
-  placeholder: redaction.PLACEHOLDER_SOURCE,
-  maskedText: redaction.MASKED_TEXT_SOURCE,
-});
+// Regular-expression sources the page-side checks need, the same ones Send
+// page uses. Values are tested in the page and only yes/no answers come back.
+const PAGE_POLICY_SOURCES = Object.freeze(pageCapture.pagePolicySources(redaction));
 // A document keeps this mark until a new page loads. It makes a page that was
 // a secret screen, or on which a credential step ran, stay withheld across the
 // separate controller processes of one run.

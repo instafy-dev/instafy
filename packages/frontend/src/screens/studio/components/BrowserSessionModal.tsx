@@ -42,7 +42,12 @@ import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { observeBrowserRfbFrames } from "./browserSessionRfbFrame";
 import { BrowserExpandButton } from "./BrowserExpandButton";
-import { BrowserHumanInputStatus, sharedBrowserSignInNote } from "./BrowserHumanInputControls";
+import {
+  BrowserHumanInputContinue,
+  BrowserHumanInputStatus,
+  canLetOctoContinue,
+  sharedBrowserSignInNote,
+} from "./BrowserHumanInputControls";
 import { RemoteControlSurface } from "./RemoteControlSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { BrowserReadingRow } from "./BrowserReadingRow";
@@ -56,7 +61,7 @@ import { SharedBrowserProfileStatus } from "./SharedBrowserProfileStatus";
 import { buildSharedBrowserResumeUrl } from "./sharedBrowserResume";
 import { resolvePublicAppUrl } from "../../../utils/publicAppUrl";
 import { SharedBrowserParticipantPointers } from "./SharedBrowserParticipantPointers";
-import { collaborationSelfOwnsControl } from "./sharedBrowserCollaboration";
+import { collaborationSelfOwnsControl, collaborationSelfParticipant } from "./sharedBrowserCollaboration";
 import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
 import { useSustainedFlag } from "./useSustainedFlag";
 import { BrowserIdentityBadge } from "./BrowserIdentityBadge";
@@ -1221,6 +1226,13 @@ export function BrowserSessionModal({
     canTakeOver: transportActive && canControlBrowser && Boolean(effectiveAgentControlOwner && onTakeOverAgent),
     humanControlConfirmed: humanInputEnabled,
     canContinue: transportActive && Boolean(onContinueAfterHumanInput),
+    // Nobody holds the browser (after Release, say): Let Octo continue takes
+    // control first, with Take control's call.
+    takeControl: transportActive && canControlBrowser && effectiveAgentControlOwner === null &&
+      collaboration.client.state !== null && collaboration.client.state.controlOwner === null &&
+      collaborationSelfParticipant(collaboration.client)?.canControl === true
+      ? () => collaboration.takeControl()
+      : null,
     onTakeOver: async () => onTakeOverAgent
       ? onTakeOverAgent({ agentHoldsBrowser: effectiveAgentControlOwner !== null })
       : false,
@@ -3459,8 +3471,13 @@ export function BrowserSessionModal({
     </SharedBrowserCollaborationControls>
   );
 
+  // While a pause or take-over waits and Octo has let go, Let Octo continue
+  // sits in a row under the toolbar, which a narrow view folds into a menu.
+  const humanInputRowShown = !shouldCollapseDocked && Boolean(humanInputIdentityKey) &&
+    browserHumanInputState.active && effectiveAgentControlOwner === null;
+  const humanInputCanContinue = canLetOctoContinue({ ...browserHumanInputOptions, state: browserHumanInputState });
   const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
-    ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} /> : null;
+    ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} continueInRow={humanInputRowShown} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (
     <div aria-hidden="true" className="pointer-events-none h-px w-px overflow-hidden opacity-0">
       <div ref={setContainerElement} className="h-full w-full overflow-hidden" />
@@ -3538,6 +3555,7 @@ export function BrowserSessionModal({
             <>
               {humanInputIdentityKey ? (
                 <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState}
+                  continueInRow={humanInputRowShown}
                   renderControls={collaborationControlsShown ? renderCollaborationControls : undefined} />
               ) : collaborationControlsShown ? renderCollaborationControls(null) : null}
               {renderSessionControls(sharedBrowserChrome.compact ? <>
@@ -3571,14 +3589,20 @@ export function BrowserSessionModal({
           onTakeOver={() => void browserHumanInputState.takeOver()}
         />
       ) : null}
-      {!shouldCollapseDocked && humanInputIdentityKey && browserHumanInputState.request ? (
+      {humanInputRowShown && (browserHumanInputState.request || humanInputCanContinue) ? (
         // Outside the toolbar, which a narrow view folds into a menu: the
-        // person reads it before they sign in.
-        <Text as="p" variant="caption" tone="muted" role="status"
-          className="shrink-0 border-b border-slate-200 px-3 py-1 dark:border-slate-800"
-          data-browser-session-safe-zone="true" data-testid="browser-human-input-sign-in-note">
-          {signInNote}
-        </Text>
+        // person reads the note before they sign in, and lets Octo continue
+        // from here at every width.
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-1 dark:border-slate-800"
+          data-browser-session-safe-zone="true" data-testid="browser-human-input-row">
+          {browserHumanInputState.request ? (
+            <Text as="p" variant="caption" tone="muted" role="status" className="min-w-0 flex-1"
+              data-testid="browser-human-input-sign-in-note">
+              {signInNote}
+            </Text>
+          ) : null}
+          <BrowserHumanInputContinue {...browserHumanInputOptions} state={browserHumanInputState} />
+        </div>
       ) : null}
       <div
         key="shared-browser-viewport"

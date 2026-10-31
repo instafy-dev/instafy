@@ -50,6 +50,9 @@
       credentialContext: redaction.CREDENTIAL_CONTEXT_SOURCE,
       placeholder: redaction.PLACEHOLDER_SOURCE,
       maskedText: redaction.MASKED_TEXT_SOURCE,
+      digitCode: redaction.DIGIT_CODE_SOURCE,
+      codeWord: redaction.CODE_WORD_SOURCE,
+      codeNearby: redaction.CODE_NEARBY_CHARACTERS,
     };
   }
 
@@ -111,17 +114,145 @@
         elementTag(element) === "DIALOG" ||
         ["dialog", "alertdialog"].includes(elementAttribute(element, "role")) ||
         elementAttribute(element, "aria-modal") === "true";
+      // The value a read-only field shows, or null for any other field.
+      const readOnlyValue = (element) => {
+        const tag = elementTag(element);
+        if (tag !== "INPUT" && tag !== "TEXTAREA") return null;
+        const type = String(element.type || elementAttribute(element, "type") || "").toLowerCase();
+        const readOnly =
+          element.readOnly === true || elementAttribute(element, "readonly") !== null ||
+          element.disabled === true || elementAttribute(element, "disabled") !== null;
+        return readOnly && type !== "password" && type !== "hidden" ? element.value : null;
+      };
+      // A credential word in the page's title or a dialog's label names the
+      // whole page. In a heading (or a legend, table header, term or label)
+      // it names that heading's own section only, so it counts when the
+      // section shows what the text's mask counts as a key there: a product
+      // page's "Secret scanning" card does not turn every random-looking name
+      // elsewhere on the page into a key.
       const labelTags = new Set(["H1", "H2", "H3", "H4", "H5", "H6", "LEGEND", "TH", "LABEL", "DT", "CAPTION"]);
+      // A heading's section is what follows it up to the next heading of the
+      // same or a higher level, inside the nearest of these. A legend, table
+      // header, term or label is a heading of the lowest level.
+      const sectionTags = new Set(["ARTICLE", "ASIDE", "NAV", "SECTION", "DIALOG", "FIELDSET", "FORM", "TABLE", "DL"]);
+      const unreadTags = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
+      // The attributes a control's name or tooltip is read from: an agent
+      // snapshot names a control by them.
+      const nameAttributes = [
+        "aria-label", "title", "alt", "placeholder",
+        "data-tooltip", "data-tippy-content", "data-original-title", "data-bs-original-title",
+      ];
+      const headingLevel = (element) => {
+        if (elementAttribute(element, "role") === "heading") {
+          const level = Number(elementAttribute(element, "aria-level"));
+          return Number.isInteger(level) && level > 0 ? level : 2;
+        }
+        const tag = elementTag(element);
+        return /^H[1-6]$/.test(tag) ? Number(tag.slice(1)) : 0;
+      };
+      const knownKeyPatterns = sources.secretPatterns.map((source) => new RegExp(source, "g"));
+      const digitCodePattern = new RegExp(sources.digitCode, "g");
+      const codeWordPattern = new RegExp(sources.codeWord, "iu");
+      const runPattern = /[A-Za-z0-9][A-Za-z0-9_\-+/=~]{18,}[A-Za-z0-9=]/g;
+      // A key in a run of text, as redaction.js's redactText counts one in a
+      // credential context: a known key format, a digit code just after a
+      // code word, or a random-looking run (a UUID or long hex value among
+      // them), and never a placeholder.
+      const textShowsKey = (text) =>
+        knownKeyPatterns.some((pattern) =>
+          Array.from(text.matchAll(pattern), (match) => match[0]).some((match) => !placeholderPattern.test(match))) ||
+        Array.from(text.matchAll(digitCodePattern)).some((match) =>
+          codeWordPattern.test(text.slice(Math.max(0, match.index - sources.codeNearby), match.index))) ||
+        (text.match(runPattern) || []).some((run) => !placeholderPattern.test(run) &&
+          (uuidValuePattern.test(run) || hexValuePattern.test(run) ||
+            (run.length <= 4_096 && /[A-Za-z]/.test(run) && /[0-9]/.test(run) && valueEntropy(run) >= 3.5)));
+      // A node's parent, from a shadow root's top to its host.
+      const parentOf = (node) => (node.parentNode && node.parentNode.nodeType === 11 ? node.parentNode.host : node.parentNode) || null;
+      // Sections share one reading budget. A section too long to read whole
+      // counts, as any heading did before.
+      let sectionBudget = 20_000;
+      const sectionShowsKey = (label) => {
+        const level = headingLevel(label) || 7;
+        let boundary = parentOf(label);
+        while (boundary && boundary.nodeType === 1 && !sectionTags.has(elementTag(boundary)) && !isDialog(boundary)) {
+          boundary = parentOf(boundary);
+        }
+        // Everything the section shows, in document order: its text, open
+        // shadow roots and slotted nodes included, the names its controls
+        // carry and its read-only fields. `flow` reads the text as the page
+        // shows it, a line apart around each block and a tab before a table
+        // cell; `pieces` keeps every text and name apart as well, so neither
+        // a key run into its neighbours nor one split over inline elements
+        // goes unread.
+        let flow = "";
+        const pieces = [];
+        let size = 0;
+        let state = "reading";
+        const visit = (node, depth) => {
+          if (state !== "reading") return;
+          if (node.nodeType === 3) {
+            const value = node.nodeValue || "";
+            flow += value;
+            pieces.push(value);
+            size += value.length;
+            if (size > 200_000) state = "long";
+            return;
+          }
+          if (node.nodeType !== 1) return;
+          if (node !== label) {
+            const nodeLevel = headingLevel(node);
+            if (nodeLevel > 0 && nodeLevel <= level) {
+              state = "ended";
+              return;
+            }
+          }
+          sectionBudget -= 1;
+          if (sectionBudget < 0 || depth > 512) {
+            state = "long";
+            return;
+          }
+          const tag = elementTag(node);
+          if (unreadTags.has(tag)) return;
+          if (looksLikeSecretValue(readOnlyValue(node), true)) {
+            state = "key";
+            return;
+          }
+          for (const name of nameAttributes) {
+            const value = elementAttribute(node, name);
+            if (value) pieces.push(value);
+          }
+          let display = "block";
+          try {
+            display = String(getComputedStyle(node).display || "");
+          } catch (_) {
+            display = "block";
+          }
+          const block = tag === "BR" ||
+            (display !== "table-cell" && /^(?:block|flex|grid|list-item|table|flow-root|-webkit-box)/.test(display));
+          flow += block ? "\n" : display === "table-cell" ? "\t" : "";
+          const children = [
+            ...Array.from(node.shadowRoot ? node.shadowRoot.childNodes : []),
+            ...(tag === "SLOT" && typeof node.assignedNodes === "function" ? node.assignedNodes({ flatten: true }) : []),
+            ...Array.from(node.childNodes || []),
+          ];
+          for (const child of children) visit(child, depth + 1);
+          if (block) flow += "\n";
+        };
+        visit(label, 0);
+        // Then what follows it, up to the boundary.
+        for (let node = label; node && node !== boundary && state === "reading"; node = parentOf(node)) {
+          for (let next = node.nextSibling; next && state === "reading"; next = next.nextSibling) visit(next, 1);
+        }
+        if (state === "key" || state === "long") return true;
+        return textShowsKey(flow) || textShowsKey(pieces.join("\n"));
+      };
       const credentialContext =
         credentialContextPattern.test(clean(document.title, 1_000)) ||
         scanElements((element) => {
-          const label =
-            labelTags.has(elementTag(element)) || elementAttribute(element, "role") === "heading"
-              ? elementText(element)
-              : isDialog(element)
-                ? clean(elementAttribute(element, "aria-label"))
-                : "";
-          return Boolean(label) && credentialContextPattern.test(label);
+          if (labelTags.has(elementTag(element)) || elementAttribute(element, "role") === "heading") {
+            return credentialContextPattern.test(elementText(element)) && sectionShowsKey(element);
+          }
+          return isDialog(element) && credentialContextPattern.test(clean(elementAttribute(element, "aria-label")));
         });
       const codeTags = new Set(["CODE", "PRE", "KBD", "SAMP", "OUTPUT"]);
       let secretField = false;
@@ -129,14 +260,8 @@
       let maskedNearReveal = false;
       scanElements((element) => {
         const tag = elementTag(element);
-        if (!secretField && (tag === "INPUT" || tag === "TEXTAREA")) {
-          const type = String(element.type || elementAttribute(element, "type") || "").toLowerCase();
-          const readOnly =
-            element.readOnly === true || elementAttribute(element, "readonly") !== null ||
-            element.disabled === true || elementAttribute(element, "disabled") !== null;
-          if (readOnly && type !== "password" && type !== "hidden" && looksLikeSecretValue(element.value, credentialContext)) {
-            secretField = true;
-          }
+        if (!secretField && looksLikeSecretValue(readOnlyValue(element), credentialContext)) {
+          secretField = true;
         }
         if (!secretCode && codeTags.has(tag) && looksLikeSecretValue(elementText(element), credentialContext)) {
           secretCode = true;

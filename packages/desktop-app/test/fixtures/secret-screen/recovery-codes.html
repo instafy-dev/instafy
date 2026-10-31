@@ -1,0 +1,34 @@
+<!doctype html>
+<!--
+  A hand-written account-security page that shows a fresh set of recovery
+  codes once. Nothing here was captured from a live site. The page's title
+  names no credential: only the section's heading does, and the codes follow
+  it in a list, one per line. The test puts the codes in the list at run time.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Two-factor authentication · Forgeline</title>
+  </head>
+  <body>
+    <header>
+      <nav aria-label="Main">
+        <a href="/">Forgeline</a>
+        <a href="/settings/profile">Settings</a>
+      </nav>
+    </header>
+    <main>
+      <h1>Two-factor authentication</h1>
+      <p>Two-factor authentication is on for this account.</p>
+      <h2>Your recovery codes</h2>
+      <ul class="codes">
+        {{CODES}}
+      </ul>
+      <p>Each one works once. Keep them somewhere safe, apart from your phone.</p>
+      <button type="button">Download</button>
+      <button type="button">Print</button>
+      <h2>Devices</h2>
+      <p>One phone.</p>
+    </main>
+  </body>
+</html>
