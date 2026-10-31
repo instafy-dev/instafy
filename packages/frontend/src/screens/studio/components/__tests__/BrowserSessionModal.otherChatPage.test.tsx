@@ -37,7 +37,13 @@ class FakeWebSocket {
   }
 }
 
-const mocks = vi.hoisted(() => ({ fetchStatus: vi.fn(), requestAccessToken: vi.fn(), webRtcConnected: null as null | (() => void) }));
+const mocks = vi.hoisted(() => ({
+  fetchStatus: vi.fn(), requestAccessToken: vi.fn(), webRtcConnected: null as null | (() => void),
+  /** Who holds the browser's control: this person, or someone else. */
+  owner: "self" as "self" | "other",
+  /** The others in the browser, and the tab each one's view shows. */
+  participants: [] as Array<{ id: string; displayName: string; color: string; pageId: string | null; cursor: null; canControl: boolean }>,
+}));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   core: { enabled: true, baseUrl: "" },
   runtimes: { fetchStatus: mocks.fetchStatus, ensure: vi.fn(), stop: vi.fn(), stopIfIdle: vi.fn() },
@@ -52,14 +58,21 @@ vi.mock("../useSharedBrowserApproval", () => ({ useSharedBrowserApproval: () => 
 vi.mock("../useBrowserSessionActions", () => ({ useBrowserSessionActions: () => ({ actions: [], latestClick: null }) }));
 vi.mock("../useSharedBrowserCollaboration", () => ({ useSharedBrowserCollaboration: ({ active }: { active: boolean }) => ({
   client: { connectionStatus: active ? "connected" : "idle", participantId: active ? "self" : null,
-    state: active ? { revision: 1, participants: [], requests: [], controlOwner: { kind: "human", participantId: "self" } } : null, error: null },
+    state: active ? { revision: 1, participants: mocks.participants, requests: [],
+      controlOwner: { kind: "human", participantId: mocks.owner } } : null, error: null },
   publishCursor: () => {}, requestControl: () => {}, takeControl: () => {}, releaseControl: () => {}, grantControl: () => {},
 }) }));
 // WebRTC sends the browser's whole screen, whatever tab is in front: while it
 // is mounted, its stream is open.
-vi.mock("../WebRtcBrowserViewer", () => ({ WebRtcBrowserViewer: (props: { onConnected: () => void }) => {
+vi.mock("../WebRtcBrowserViewer", () => ({ WebRtcBrowserViewer: (props: { onConnected: () => void; active: boolean }) => {
   mocks.webRtcConnected = props.onConnected;
-  return <video data-testid="shared-browser-webrtc" />;
+  // A video that has drawn a picture, which a still can be taken from.
+  const sized = (video: HTMLVideoElement | null) => {
+    if (!video) return;
+    Object.defineProperty(video, "videoWidth", { configurable: true, value: 1280 });
+    Object.defineProperty(video, "videoHeight", { configurable: true, value: 720 });
+  };
+  return <video data-testid="shared-browser-webrtc" data-active={props.active ? "true" : "false"} ref={sized} />;
 } }));
 import { BrowserSessionModal } from "../BrowserSessionModal";
 
@@ -90,11 +103,14 @@ describe("a chat's Browser view and another chat's page", () => {
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
     FakeWebSocket.instances = [];
     mocks.webRtcConnected = null;
+    mocks.owner = "self";
+    mocks.participants = [];
     mocks.fetchStatus.mockReset().mockResolvedValue({ runtimes: [session] });
     mocks.requestAccessToken.mockReset().mockResolvedValue({ token: "origin-token", endpoint: "https://origin.test", expiresIn: 300 });
     vi.stubGlobal("WebSocket", FakeWebSocket);
     vi.stubGlobal("createImageBitmap", vi.fn().mockResolvedValue({ width: 1280, height: 720, close: vi.fn() }));
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/jpeg;base64,c3RpbGw=");
     vi.stubGlobal("CSS", { escape: (value: string) => value });
     vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
     vi.spyOn(console, "log").mockImplementation(() => {});
@@ -151,6 +167,12 @@ describe("a chat's Browser view and another chat's page", () => {
   };
   const note = () => document.querySelector('[data-testid="browser-session-agent-arrival"]')?.textContent ?? null;
   const text = () => document.body.textContent ?? "";
+  const webRtc = () => document.querySelector('[data-testid="shared-browser-webrtc"]');
+  const still = () => document.querySelector('[data-testid="browser-session-frozen-frame"]');
+  const reconnecting = () => document.querySelector('[data-testid="browser-session-reconnecting"]');
+  /** The input socket this view has open, for the page it drives. */
+  const inputSocket = () => FakeWebSocket.instances.filter((socket) =>
+    socket.readyState === FakeWebSocket.OPEN && new URL(socket.url).pathname.endsWith("/browser/input")).at(-1) ?? null;
 
   it("asks for no picture of another chat's page during its turn, and draws the chat's own page again after", async () => {
     await render({ pages: [own(), other()] });
@@ -250,5 +272,90 @@ describe("a chat's Browser view and another chat's page", () => {
     const options = Array.from(document.querySelectorAll<HTMLOptionElement>('[data-testid="shared-browser-page-select"] option'));
     expect(options.map((option) => option.value)).toEqual([CHAT_TAB, octoTab.id]);
     expect(text()).not.toContain("frame.work");
+  });
+
+  // WebRTC sends the browser's whole screen, as RFB does: while someone else
+  // in control shows another tab, its picture is that tab, whatever tab the
+  // tab list names in front.
+  it("connects no WebRTC picture while someone else in control shows another tab", async () => {
+    mocks.owner = "other";
+    mocks.participants = [{ id: "other", displayName: "Anna", color: "#2563eb", pageId: OTHER_TAB, cursor: null, canControl: true }];
+    await render({ pages: [own(), other()], viewer: "webrtc" });
+    expect(webRtc()).toBeNull();
+    // Back on the chat's tab: its picture connects.
+    mocks.participants = [{ ...mocks.participants[0]!, pageId: CHAT_TAB }];
+    await render({ pages: [own(), other()], viewer: "webrtc" });
+    expect(webRtc()).not.toBeNull();
+  });
+
+  // Behind Chat nobody can see whose tab is in front, so a whole-screen
+  // picture is not kept there: a still of the chat's page stands in until
+  // it is back.
+  it("keeps no WebRTC picture behind Chat, and shows a still of the chat's page until it is back", async () => {
+    await render({ pages: [own(), other()], viewer: "webrtc" });
+    await act(async () => mocks.webRtcConnected!());
+    await render({ pages: [own(), other()], viewer: "webrtc", shown: false });
+    expect(webRtc()).toBeNull();
+    await render({ pages: [own(), other()], viewer: "webrtc" });
+    expect(webRtc()).not.toBeNull();
+    expect(still()).not.toBeNull();
+    await act(async () => mocks.webRtcConnected!());
+    expect(still()).toBeNull();
+  });
+
+  // While a picture of the chat's page is on its way (here, of another of
+  // its tabs) its surface is hidden: nothing typed or pressed reaches that
+  // page until it shows.
+  it("takes no input on a picture that is not on screen yet", async () => {
+    const octoTab = (isActive: boolean) => ({ ...tab("PAGE-OCTO", "https://en.metrodoporto.pt/", isActive), openedBy: "agent" as const, agentTabNumber: 2 });
+    const chatPageIds = [CHAT_TAB, "PAGE-OCTO"];
+    await render({ pages: [own(), other(), octoTab(false)], chatPageIds });
+    await drawFrame(pictures()[0]!.socket);
+    expect(canvas()?.dataset.active).toBe("true");
+    // The chat's turn reads in Octo's tab: its picture is on its way.
+    await render({ pages: [own(false), other(), octoTab(true)], chatPageIds });
+    expect(pictures().map((picture) => picture.pageId)).toEqual(["PAGE-OCTO"]);
+    await act(async () => { inputSocket()!.emit({ type: "ready", width: 1280, height: 720, dpr: 1, deviceWidth: 1280, deviceHeight: 720 }); });
+    expect(pictureShown()).toBe(false);
+    expect(canvas()?.dataset.active).toBe("false");
+    expect(document.querySelector('[data-active="true"][data-input-enabled="true"]')).toBeNull();
+    const pressA = () => canvas()!.dispatchEvent(new KeyboardEvent("keydown", { key: "a", code: "KeyA", bubbles: true, cancelable: true }));
+    await act(async () => { pressA(); });
+    expect(inputSocket()!.sent.filter((message) => JSON.parse(message).type === "key")).toEqual([]);
+    // Its first frame: it shows, and takes input.
+    await drawFrame(pictures()[0]!.socket);
+    expect(pictureShown()).toBe(true);
+    expect(canvas()?.dataset.active).toBe("true");
+    await act(async () => { pressA(); });
+    expect(inputSocket()!.sent.filter((message) => JSON.parse(message).type === "key")).not.toEqual([]);
+  });
+
+  // The same for WebRTC: until the view has the chat's picture again, the
+  // video takes no input.
+  it("takes no input on a WebRTC picture that is not on screen yet", async () => {
+    const octoTab = (isActive: boolean) => ({ ...tab("PAGE-OCTO", "https://en.metrodoporto.pt/", isActive), openedBy: "agent" as const, agentTabNumber: 2 });
+    const chatPageIds = [CHAT_TAB, "PAGE-OCTO"];
+    await render({ pages: [own(), other(), octoTab(false)], chatPageIds, viewer: "webrtc" });
+    await act(async () => mocks.webRtcConnected!());
+    expect(webRtc()?.getAttribute("data-active")).toBe("true");
+    await render({ pages: [own(false), other(), octoTab(true)], chatPageIds, viewer: "webrtc" });
+    expect(webRtc()?.getAttribute("data-active")).toBe("false");
+    await act(async () => mocks.webRtcConnected!());
+    expect(webRtc()?.getAttribute("data-active")).toBe("true");
+  });
+
+  // A view opened during another chat's turn has drawn nothing yet: when
+  // the chat's page comes, it is opening, not reconnecting.
+  it("says it is opening, never reconnecting, while the chat's first picture loads after another chat's turn", async () => {
+    const reloaded = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    await render({ pages: [own(false), other(true)], anotherChatTurn: true, project: reloaded });
+    expect(note()).toBe("Octo is working in another chat");
+    await render({ pages: [own(), other()], project: reloaded });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(reconnecting()).toBeNull();
+    expect(text()).toContain("Opening Instafy's browser");
+    await drawFrame(pictures()[0]!.socket);
+    expect(pictureShown()).toBe(true);
+    expect(text()).not.toContain("Opening Instafy's browser");
   });
 });

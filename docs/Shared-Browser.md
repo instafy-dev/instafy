@@ -646,9 +646,10 @@ read, so that page would go into this chat's reply and Details):
   (during the turn, and after it until the tab list names the one Octo read in
   last as the chat's page, which the view then does not move away from). A tab
   of Octo's the list named before the chat's turn started is an earlier turn's,
-  never this one's. With RFB, which draws whatever tab is in front, the stage
-  draws no picture while someone else in control (another person, or the
-  person's other window) shows a tab that is none of the chat's. Any
+  never this one's. With RFB or WebRTC, which send the browser's whole
+  screen, whatever tab is in front, the stage draws no picture while someone
+  else in control (another person, or the person's other window) shows a tab
+  that is none of the chat's. Any
   other tab in front, or none the browser names in front (never its first tab
   in its place), leaves the stage blank, with no address, and the person's
   input does not reach the page. While a browser turn of another chat holds
@@ -657,13 +658,17 @@ read, so that page would go into this chat's reply and Details):
   the stage is blank, for either reason, the view asks for no picture at all:
   its viewer (screencast, WebRTC or RFB) is not connected, so no frame of
   another chat's page reaches the person's device, not even under the blank
-  stage. The view counts as open meanwhile, also when it opens during such a
-  turn, and its picture connects again once a tab of the chat is in front.
-  Behind the Chat tab, a screencast or WebRTC view whose chat's tab is in
-  front keeps its picture, so it shows the page at once when it comes on
-  screen (RFB connects only while the view is shown). The address bar's tab
-  list names only the chat's tabs, never another chat's page by its title,
-  and with one tab there is no list. Once
+  stage, and no still is kept from it. The view counts as open meanwhile,
+  also when it opens during such a turn, and its picture connects again once
+  a tab of the chat is in front (a view that has drawn no picture yet says
+  "Opening Instafy's browser…" while it loads, never "Reconnecting…").
+  Behind the Chat tab, a screencast view whose chat's tab is in front keeps
+  its picture (it asks for that one page), so it shows the page at once when
+  it comes on screen. RFB and WebRTC connect only while the view is shown:
+  behind Chat nobody sees which tab is in front, so a still of the chat's
+  page stands in until their picture is back. The address bar's tab list
+  names only the chat's tabs, never another chat's page by its title, and
+  with one tab there is no list. Once
   that turn or another person is done and no browser turn is under way, the
   chat's tab comes forward again; the chat's own turn leaves the browser where
   it ends (its page, or a tab the person took over, which is the chat's tab

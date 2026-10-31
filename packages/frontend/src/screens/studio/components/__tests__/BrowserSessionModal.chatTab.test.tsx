@@ -294,4 +294,25 @@ describe("a chat's Browser view", () => {
     await paint();
     expect(pictureShown()).toBe(true);
   });
+
+  // RFB draws the whole screen, so a picture of the tab someone else in
+  // control brought forward can arrive before their view says so. The
+  // viewer then closes, and its last picture is never kept as the chat's
+  // still: until the next read of the tab list it would stand on the stage.
+  it("keeps no still of the tab someone else in control brought forward when its picture closes", async () => {
+    mocks.owner = "other";
+    mocks.participants = [{ id: "other", displayName: "Anna", color: "#2563eb", pageId: CHAT_TAB, cursor: null, canControl: true }];
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)], viewOnlyLane: true });
+    await paint();
+    expect(pictureShown()).toBe(true);
+    // Anna brings her tab forward: its picture arrives first, then her view's
+    // page.
+    await act(async () => { viewer()!._framebufferUpdate(); });
+    mocks.participants = [{ ...mocks.participants[0], pageId: OTHER_TAB }];
+    await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)], viewOnlyLane: true });
+    expect(viewer()).toBeNull();
+    expect(still()).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); await vi.dynamicImportSettled(); });
+    expect(still()).toBeNull();
+  });
 });

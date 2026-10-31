@@ -1054,11 +1054,12 @@ export function BrowserSessionModal({
     activeSharedBrowserViewerKind === "rfb" && rfbViewOnlyAvailable && !humanInputEnabled;
   const rfbViewOnlyLaneRef = useRef(rfbViewOnlyLane);
   rfbViewOnlyLaneRef.current = rfbViewOnlyLane;
-  // RFB draws whatever tab is in front, with no page of its own, so someone
-  // else in control (another person, or this person's other window) can
-  // bring another tab forward before the tab list is read again. Their view
-  // says which tab it shows: while that is none of the chat's tabs, or it
-  // names none, the stage draws no picture, and none is kept as the chat's.
+  // RFB and WebRTC send the browser's whole screen, whatever tab is in front,
+  // with no page of their own, so someone else in control (another person,
+  // or this person's other window) can bring another tab forward before the
+  // tab list is read again. Their view says which tab it shows: while that
+  // is none of the chat's tabs, or it names none, the stage draws no
+  // picture, and none is kept as the chat's.
   const collaborationOwner = collaboration.client.connectionStatus === "connected"
     ? collaboration.client.state?.controlOwner ?? null
     : null;
@@ -1066,17 +1067,21 @@ export function BrowserSessionModal({
     collaborationOwner.participantId !== collaboration.client.participantId
     ? collaboration.client.state?.participants.find((participant) => participant.id === collaborationOwner.participantId)?.pageId ?? null
     : undefined;
-  const rfbShowsAnotherTab = activeSharedBrowserViewerKind === "rfb" && sharedBrowserViewportOnly &&
+  const screenShowsAnotherTab = (activeSharedBrowserViewerKind === "rfb" || activeSharedBrowserViewerKind === "webrtc") &&
+    sharedBrowserViewportOnly &&
     chatPageIds !== null && remoteHumanPageId !== undefined &&
     (remoteHumanPageId === null || !chatPageIds.includes(remoteHumanPageId));
-  const rfbShowsAnotherTabRef = useRef(rfbShowsAnotherTab);
-  rfbShowsAnotherTabRef.current = rfbShowsAnotherTab;
+  const screenShowsAnotherTabRef = useRef(screenShowsAnotherTab);
+  screenShowsAnotherTabRef.current = screenShowsAnotherTab;
   // The view asks for a picture only while its stage draws the chat's page.
   // Otherwise (another chat's turn, a tab that is none of the chat's in
-  // front, or with RFB someone else in control showing another tab) no
-  // viewer is connected, so no frame of another chat's page reaches this
-  // view, not even under a hidden surface.
-  const stageDrawsChatPage = stageShowsPage && !rfbShowsAnotherTab;
+  // front, or with RFB or WebRTC someone else in control showing another
+  // tab) no viewer is connected, so no frame of another chat's page reaches
+  // this view, not even under a hidden surface. No still is taken then
+  // either: a whole-screen picture may already show that other tab.
+  const stageDrawsChatPage = stageShowsPage && !screenShowsAnotherTab;
+  const stageDrawsChatPageRef = useRef(stageDrawsChatPage);
+  stageDrawsChatPageRef.current = stageDrawsChatPage;
   const sharedBrowserConnectionPageId =
     activeSharedBrowserViewerKind === "rfb" ? null : sharedBrowserPageId;
   // URL resolution follows renderer selection in an effect. Never mount the
@@ -1329,7 +1334,10 @@ export function BrowserSessionModal({
   }, [forceViewportFullscreenDocked]);
   const freezeCurrentBrowserFrame = useCallback(() => {
     const frameScope = frameScopeRef.current;
-    if (!retainFrameRef.current ||
+    // Never while the stage draws none of the chat's page: when a viewer
+    // closes because someone else in control brought another tab forward,
+    // its last whole-screen picture may already be that tab.
+    if (!retainFrameRef.current || !stageDrawsChatPageRef.current ||
         paintedFrameScopeRef.current !== frameScope || browserDataClearInFlightRef.current) return;
     // A fallback can mount a new blank surface for the same page. Only the
     // exact renderer that supplied pixels may replace the retained picture.
@@ -2281,6 +2289,11 @@ export function BrowserSessionModal({
 
   useEffect(() => {
     const connection = browserOriginConnection;
+    // WebRTC sends the browser's whole screen, as RFB does, so like RFB it is
+    // connected only while the view is shown: behind Chat nobody sees which
+    // tab is in front. A still of the chat's page stands in until it is back.
+    // A screencast asks for the chat's page alone, so it keeps its picture.
+    const wholeScreenBehindChat = activeSharedBrowserViewerKind === "webrtc" && !transportActive;
     if (
       !isOpen ||
       browserDataClearInFlight ||
@@ -2288,8 +2301,10 @@ export function BrowserSessionModal({
       !activeSharedBrowserViewerKind ||
       // No picture while the stage draws no page of the chat: the viewer
       // closes, and connects again once the chat's page is in front.
-      !stageDrawsChatPage
+      !stageDrawsChatPage ||
+      wholeScreenBehindChat
     ) {
+      if (wholeScreenBehindChat) freezeCurrentBrowserFrame();
       setResolvedViewerUrl(null);
       setBrowserInputWsUrl(null);
       setWebRtcConnection(null);
@@ -2386,20 +2401,23 @@ export function BrowserSessionModal({
     browserOriginConnection,
     browserDataClearInFlight,
     canControlBrowser,
+    freezeCurrentBrowserFrame,
     isOpen,
     rfbViewOnlyLane,
     sharedBrowserConnectionPageId,
     stageDrawsChatPage,
+    transportActive,
   ]);
   // Without a page of the chat to draw, the view asks for no picture: once it
   // has its connection it is open, with a blank stage or "Octo is working in
   // another chat", never "Opening Instafy's browser…" for a picture it does
-  // not want. The chat's page then comes back as a reconnect.
+  // not want. That never counts as a picture drawn: a view that has drawn
+  // none says "Opening Instafy's browser…" while the chat's first one loads,
+  // never "Reconnecting…".
   const pictureWithheld = isOpen && !browserDataClearInFlight && browserOriginConnection !== null &&
     activeSharedBrowserViewerKind !== null && !stageDrawsChatPage;
   useEffect(() => {
     if (!pictureWithheld || status !== "connecting") return;
-    setHasConnectedOnce(true);
     setStatus("connected");
   }, [pictureWithheld, status]);
 
@@ -2878,8 +2896,8 @@ export function BrowserSessionModal({
           if (cancelled || !retainFrameRef.current || browserDataClearInFlightRef.current) return;
           painted = true;
           // A picture of a tab someone else brought forward is never kept as
-          // the chat's page (rfbShowsAnotherTab).
-          paintedFrameScopeRef.current = rfbShowsAnotherTabRef.current ? null : frameScopeRef.current;
+          // the chat's page (screenShowsAnotherTab).
+          paintedFrameScopeRef.current = screenShowsAnotherTabRef.current ? null : frameScopeRef.current;
           paintedFrameSurfaceRef.current = rfb?._canvas ?? null;
           markFrameConnected();
         }, () => `${framePaintEpochRef.current}:${frameScopeRef.current}`);
