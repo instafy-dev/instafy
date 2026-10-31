@@ -114,6 +114,19 @@ test("sign-in fixture rejects filters and skips rather than producing a partial 
   }
 });
 
+test("allowed-step fixture rejects filters and skips rather than producing a partial pass", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-allowed-step-args-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const argument of ["--skip", "--grep=allow", "--pass-with-no-tests"]) {
+    const result = spawnSync(process.execPath, [path.join(import.meta.dirname, "shared-browser-allowed-step-e2e.mjs"), argument], {
+      env: fixtureEnvironment(process.env, directory), encoding: "utf8", timeout: 10_000,
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /no filters or skips/);
+    assert.equal(result.stdout, "");
+  }
+});
+
 test("every fixture embeds the link-only list the runtime agent embeds, ahead of the controller", () => {
   const rust = fs.readFileSync(
     path.join(import.meta.dirname, "../packages/runtime-agent/src/shared_browser.rs"),
@@ -123,7 +136,7 @@ test("every fixture embeds the link-only list the runtime agent embeds, ahead of
   assert.ok(file, "runtime-agent embeds the link-only list");
   assert.match(rust, /globalThis\.__instafyLinkOnlySites = \{LINK_ONLY_SITES_DATA\};/u);
   // The controller refuses every step, in any tab, without the list.
-  for (const name of ["shared-browser-agent-tabs-e2e.mjs", "shared-browser-cobrowsing-e2e.mjs", "shared-browser-form-submission-e2e.mjs", "shared-browser-sign-in-e2e.mjs", "shared-browser-step-time-e2e.mjs"]) {
+  for (const name of ["shared-browser-agent-tabs-e2e.mjs", "shared-browser-allowed-step-e2e.mjs", "shared-browser-cobrowsing-e2e.mjs", "shared-browser-form-submission-e2e.mjs", "shared-browser-sign-in-e2e.mjs", "shared-browser-step-time-e2e.mjs"]) {
     const fixture = fs.readFileSync(path.join(import.meta.dirname, name), "utf8");
     assert.ok(fixture.includes(`"packages/runtime-agent/assets/${file[1]}"`), `${name}: ${file[1]}`);
     assert.match(fixture, /`globalThis\.__instafyLinkOnlySites = \$\{linkOnlySites\};`/u, name);
@@ -132,7 +145,7 @@ test("every fixture embeds the link-only list the runtime agent embeds, ahead of
   assert.ok(order.indexOf("embedded_link_only_sites()") > order.indexOf("BROWSER_PAGE_CAPTURE_SCRIPT"));
 });
 
-test("the co-browsing fixture's CI step also runs the agent-tabs, form-submission, step-time and sign-in fixtures", () => {
+test("the co-browsing fixture's CI step also runs the agent-tabs, form-submission, step-time, sign-in and allowed-step fixtures", () => {
   const runner = fs.readFileSync(path.join(import.meta.dirname, "shared-browser-cobrowsing-e2e.mjs"), "utf8");
   assert.match(runner, /await import\("\.\/shared-browser-agent-tabs-e2e\.mjs"\)/u);
   assert.match(runner, /await runSharedBrowserAgentTabsFixture\(\)/u);
@@ -142,4 +155,6 @@ test("the co-browsing fixture's CI step also runs the agent-tabs, form-submissio
   assert.match(runner, /await runSharedBrowserStepTimeFixture\(\)/u);
   assert.match(runner, /await import\("\.\/shared-browser-sign-in-e2e\.mjs"\)/u);
   assert.match(runner, /await runSharedBrowserSignInFixture\(\)/u);
+  assert.match(runner, /await import\("\.\/shared-browser-allowed-step-e2e\.mjs"\)/u);
+  assert.match(runner, /await runSharedBrowserAllowedStepFixture\(\)/u);
 });

@@ -14323,6 +14323,12 @@ fn terminal_shared_browser_summary(code: &str) -> &'static str {
         "approval_denied" => {
             "You said no, so that step didn't happen, and nothing from it was sent."
         }
+        // The page moved to another site after the person's yes, or a
+        // second yes in the run was left unused because the control changed.
+        // The first such change on the same page is asked about again.
+        "approval_stale" => {
+            "The page changed after you said yes, so I didn't do that step. Send a message and I'll ask again."
+        }
         "browser_unavailable" => {
             "Instafy's browser closed or stopped responding, so I stopped there. Open the browser again and send a message to continue."
         }
@@ -26264,7 +26270,7 @@ mod tests {
 
     #[test]
     fn terminal_shared_browser_consent_suppresses_retry_and_reprompt() {
-        for code in ["approval_denied", "approval_timeout"] {
+        for code in ["approval_denied", "approval_timeout", "approval_stale"] {
             let events = vec![json!({
                 "type": "item.completed",
                 "item": {
@@ -26310,6 +26316,10 @@ mod tests {
                 "approval_denied" => {
                     "You said no, so that step didn't happen, and nothing from it was sent."
                 }
+                // Not a safety stop: the person said yes, and the page moved on.
+                "approval_stale" => {
+                    "The page changed after you said yes, so I didn't do that step. Send a message and I'll ask again."
+                }
                 _ => {
                     "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
                 }
@@ -26334,7 +26344,6 @@ mod tests {
         // Every other terminal code reads the same plain message, without
         // the code, which stays in the terminal-consent artifact.
         for code in [
-            "approval_stale",
             "approval_stale_or_replayed",
             "approval_authority_revoked",
             "approval_storage_invalid",
