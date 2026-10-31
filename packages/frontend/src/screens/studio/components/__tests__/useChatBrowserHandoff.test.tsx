@@ -11,6 +11,7 @@ const { cancelAgentJob, cancelConversationJobs, cancelPlanGroup } = vi.hoisted((
 vi.mock("../../../../services/runtimeController/jobs", () => ({ cancelAgentJob, cancelConversationJobs, cancelPlanGroup }));
 
 import { TAKE_OVER_KEEP_TAB_WAIT_MS, useChatBrowserHandoff } from "../useChatBrowserHandoff";
+import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
 type Options = Parameters<typeof useChatBrowserHandoff>[0];
 type Result = ReturnType<typeof useChatBrowserHandoff>;
@@ -182,6 +183,86 @@ describe("useChatBrowserHandoff", () => {
     await render({ ...value, runs: [teammates] });
     await resultRef.current!.continueSharedRun("Continue the previous browser task.");
     expect(vi.mocked(value.onSubmit).mock.calls[2]![2]!.metadata).not.toHaveProperty("browserContinuesRunId");
+  });
+
+  // Let Octo continue posted its whole prompt to the chat as the person's own
+  // message ("Continue the previous browser task on this same page. I may
+  // have used the browser…"). They pressed a button and wrote nothing: the
+  // chat shows the button's words, and the turn still gets the prompt.
+  it("shows Let Octo continue in the chat as the button's own words and sends the turn the whole prompt", async () => {
+    const value = options();
+    await render(value);
+    await expect(resultRef.current!.continueSharedRun(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT)).resolves.toBe(true);
+    expect(value.onSubmit).toHaveBeenCalledExactlyOnceWith("conversation-1", "Let Octo continue", expect.objectContaining({
+      dispatchInput: BROWSER_HUMAN_INPUT_CONTINUE_PROMPT,
+      metadata: expect.objectContaining({ browserPageId: "page-1", browserRuntimeId: "shared-runtime-1" }),
+    }));
+  });
+
+  // Try again on a Let Octo continue whose turn failed is the same press
+  // again: the whole prompt, shown as the button's words, on the chat's page
+  // and runtime, naming the run it continues, with the retry's link to the
+  // failure. Never the button's words sent as an ordinary message.
+  it("sends a Let Octo continue again as the same press, with the retry's metadata", async () => {
+    const value = options();
+    const base = value.runs[0];
+    const paused: RunRecord = {
+      ...base, status: "success", updatedAt: "2026-10-27T10:58:45Z",
+      metadata: { ...base.metadata, initiatingUserId: "user-1" },
+    };
+    await render({ ...value, runs: [paused] });
+    await expect(resultRef.current!.retryContinue(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, { retryOfMessageId: "failure-1" }))
+      .resolves.toBe(true);
+    expect(value.onSubmit).toHaveBeenCalledExactlyOnceWith("conversation-1", "Let Octo continue", expect.objectContaining({
+      dispatchInput: BROWSER_HUMAN_INPUT_CONTINUE_PROMPT,
+      runtimeOverride: { runtimeId: "shared-runtime-1", runtimeDisplayName: null, preferRuntime: true },
+      metadata: expect.objectContaining({
+        retryOfMessageId: "failure-1",
+        browserContinuesRunId: RUN_ID,
+        browserPageId: "page-1",
+        browserRuntimeId: "shared-runtime-1",
+      }),
+    }));
+    // With the chat's browser closed (after a reload, say), nothing is sent:
+    // the chat says to open the browser first.
+    vi.mocked(value.onSubmit).mockClear();
+    await render({ ...value, runs: [paused], open: false });
+    await expect(resultRef.current!.retryContinue(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, { retryOfMessageId: "failure-1" }))
+      .resolves.toBe(false);
+    expect(value.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("sends a Let Octo continue again in the browser on this device with the person's own approval choice", async () => {
+    const setAgentControlEnabled = vi.fn().mockResolvedValue({ agentControlEnabled: true, runtimeId: "personal-runtime-2" });
+    const status = {
+      ownerId: "personal-owner-1", state: "ready", agentControlEnabled: true, url: "https://example.test/form",
+    } as Options["personal"]["status"];
+    const value = options({
+      transport: "personal",
+      personal: personal({ setAgentControlEnabled, approvalModeChoice: "ask", status }),
+    });
+    await render(value);
+    let pending!: Promise<boolean>;
+    await act(async () => {
+      pending = resultRef.current!.retryContinue(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, { retryOfMessageId: "failure-1" });
+    });
+    expect(setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(true, "ask");
+    await render({
+      ...value,
+      personal: personal({
+        setAgentControlEnabled,
+        approvalModeChoice: "ask",
+        agentPhase: "ready",
+        runtimeOverride: { runtimeId: "personal-runtime-2", runtimeDisplayName: null, preferRuntime: true },
+        status,
+      }),
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    await expect(pending).resolves.toBe(true);
+    expect(value.onSubmit).toHaveBeenCalledExactlyOnceWith("conversation-1", "Let Octo continue", expect.objectContaining({
+      dispatchInput: BROWSER_HUMAN_INPUT_CONTINUE_PROMPT,
+      metadata: expect.objectContaining({ retryOfMessageId: "failure-1", browserTransport: "desktop-personal" }),
+    }));
   });
 
   it("dispatches Shared continuation directly with exact page/runtime and no draft attachments", async () => {

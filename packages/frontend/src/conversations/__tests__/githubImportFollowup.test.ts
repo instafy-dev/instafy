@@ -40,7 +40,7 @@ describe("githubImportFollowup", () => {
     expect(consumeGithubImportFollowups("project-b")).toHaveLength(0);
   });
 
-  it("builds an assistant followup with suggested replies", () => {
+  it("builds an assistant followup that names what to ask next in its own words", () => {
     const entry: GithubImportFollowupRecord = {
       id: "followup-id",
       projectId: "project-a",
@@ -58,11 +58,9 @@ describe("githubImportFollowup", () => {
     expect(message.content).toContain("quantleaf/probly-search");
     expect(message.content).toContain("24 files");
     expect(message.content).toContain("repos/quantleaf-probly-search");
-    expect(message.metadata?.["ui"]).toMatchObject({
-      suggestedReplies: expect.arrayContaining([
-        "Please investigate the GitHub issues of this project we just imported.",
-      ]),
-    });
+    expect(message.content).toContain("You can ask me to investigate issues");
+    // Studio shows no offered replies, so the message carries none.
+    expect(message.metadata?.["ui"]).toBeUndefined();
     expect(message.metadata?.["agent"]).toMatchObject({ handle: "octo" });
     expect(message.metadata?.["githubImport"]).toMatchObject({
       sourceMessageId: "integration-request-1",

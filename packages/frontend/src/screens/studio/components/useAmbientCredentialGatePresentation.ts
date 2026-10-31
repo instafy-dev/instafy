@@ -4,13 +4,11 @@ import type { AiCredentialsGateState } from "./AiCredentialsStatusBubble";
 function buildAmbientAiGateDraftKey(
   conversationId: string | null,
   inputValue: string,
-  fallbackSuggestion: string | null | undefined,
   canRunAmbientParticipationPreflight: boolean,
 ) {
-  const effectiveInput = inputValue.trim() || (fallbackSuggestion ?? "").trim();
   return JSON.stringify([
     conversationId,
-    effectiveInput,
+    inputValue.trim(),
     canRunAmbientParticipationPreflight,
   ]);
 }
@@ -19,7 +17,6 @@ export function useAmbientCredentialGatePresentation({
   activeConversationId,
   credentialGateState,
   credentialGateStateForBubble,
-  fallbackSuggestion,
   inputCanRunAmbientParticipationPreflight,
   inputValue,
   pinCredentialGateToBottom,
@@ -27,7 +24,6 @@ export function useAmbientCredentialGatePresentation({
   activeConversationId: string | null;
   credentialGateState: AiCredentialsGateState | null;
   credentialGateStateForBubble: AiCredentialsGateState | null;
-  fallbackSuggestion: string | null | undefined;
   inputCanRunAmbientParticipationPreflight: boolean;
   inputValue: string;
   pinCredentialGateToBottom: () => void;
@@ -35,7 +31,6 @@ export function useAmbientCredentialGatePresentation({
   const currentDraftKey = buildAmbientAiGateDraftKey(
     activeConversationId,
     inputValue,
-    fallbackSuggestion,
     inputCanRunAmbientParticipationPreflight,
   );
   const currentDraftKeyRef = useRef(currentDraftKey);

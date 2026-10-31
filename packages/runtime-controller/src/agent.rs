@@ -3701,6 +3701,21 @@ pub(crate) async fn agent_complete(
         );
         let should_swallow_evaluation_decline = explicit_successful_decline
             && !run_has_visible_assistant_message(&transaction, &project_id, run_id).await?;
+        // A message the runtime sent straight to Instafy's browser ends with
+        // its card alone: the card is the turn's answer, and Studio opens it
+        // by itself. Such a turn posts no reply of its own, not even a blank
+        // one (runtime-agent `routed_browser_execution`).
+        let card_is_the_reply = outcome_lower == "succeeded"
+            && error_message.is_none()
+            && summary
+                .as_deref()
+                .is_none_or(|summary| summary.trim().is_empty())
+            && crate::browser_hand_back::job_posted_routed_browser_card(
+                &transaction,
+                &conversation_uuid,
+                &job_uuid,
+            )
+            .await?;
         // Both messages below land in this conversation: whether it is an
         // internal review anchor is read once for the two.
         let internal_conversation = if should_swallow_evaluation_decline {
@@ -3771,6 +3786,8 @@ pub(crate) async fn agent_complete(
         // answer streamed earlier) records the decline and posts nothing.
         if should_swallow_evaluation_decline {
             record_agent_evaluation_decline(&transaction, &project_id, &job_uuid, run_id).await?;
+        } else if card_is_the_reply {
+            // Its card is already in the conversation.
         } else {
             let authenticated_evaluation =
                 crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)
@@ -5168,6 +5185,42 @@ pub(crate) async fn lease_next_agent_job(
             payload = JsonValue::Object(map);
         }
 
+        // What the conversation's browser turns found since the building
+        // thread's last turn: a building turn on a restored thread reads them
+        // as quoted page data (runtime-agent `browser_hand_back.rs`). Every
+        // lease sets it, so no copy a client sent can survive.
+        let job_id: Uuid = row.get("id");
+        // A terminal command runs no model, and a granted turn reads no
+        // thread of the chat's.
+        let runs_a_model_turn = row
+            .get::<_, Option<String>>("intent")
+            .is_none_or(|intent| !intent.trim().eq_ignore_ascii_case("terminal_command"));
+        let turns_since = if grant_ids.is_empty() && runs_a_model_turn {
+            crate::browser_hand_back::browser_turns_since(
+                transaction,
+                &conversation_uuid,
+                &job_id,
+                &payload,
+                credential_id.as_ref(),
+                agent_scope_id.as_ref(),
+                agent_scope_handle.as_deref(),
+            )
+            .await?
+        } else {
+            crate::browser_hand_back::BrowserTurnsSince::default()
+        };
+        if let JsonValue::Object(ref mut map) = payload {
+            map.insert(
+                crate::browser_hand_back::TURNS_SINCE_KEY.to_string(),
+                JsonValue::Array(turns_since.turns),
+            );
+            // Whether older browser turns were left out to keep the newest.
+            map.insert(
+                crate::browser_hand_back::TURNS_SINCE_LEFT_OUT_KEY.to_string(),
+                JsonValue::Bool(turns_since.earlier_left_out),
+            );
+        }
+
         // Anyone's `/skills` message opens a setup, so a granted turn reads
         // none.
         let skill_setup_openers = if granted_person.is_some() {
@@ -5292,7 +5345,24 @@ pub(crate) async fn load_conversation_history_for_agent(
     let rows = transaction
         .query(
             &format!(
-                "select id, role, content, metadata, created_at
+                "select id, role, content, metadata, created_at, run_id,
+                    -- A browser turn's request and replies: its run is a
+                    -- Shared or Personal Browser job's, or, for a request
+                    -- without a run, its own prompt metadata says so.
+                    (run_id is not null and exists (
+                        select 1 from agent_jobs browser_job
+                         where browser_job.run_id = conversation_messages.run_id
+                           and browser_job.conversation_id = $1
+                           and lower(replace(coalesce(
+                                   browser_job.payload #>> '{{metadata,browserTransport}}',
+                                   browser_job.payload #>> '{{metadata,browser_transport}}', ''),
+                                 '_', '-')) in ('shared', 'desktop-personal')))
+                    or (lower(role) = 'user'
+                        and lower(replace(coalesce(
+                                metadata #>> '{{prompt_metadata,browserTransport}}',
+                                metadata ->> 'browserTransport', ''),
+                              '_', '-')) in ('shared', 'desktop-personal'))
+                      as browser_lane
              from conversation_messages
              where conversation_id = $1
                and not (
@@ -5326,6 +5396,8 @@ pub(crate) async fn load_conversation_history_for_agent(
             let mut content: String = row.get("content");
             let mut metadata: JsonValue = row.get("metadata");
             let created_at: DateTime<Utc> = row.get("created_at");
+            let run_id: Option<Uuid> = row.get("run_id");
+            let browser_lane: bool = row.get("browser_lane");
 
             let message_type = metadata
                 .as_object()
@@ -5373,6 +5445,16 @@ pub(crate) async fn load_conversation_history_for_agent(
                 "createdAt".to_string(),
                 JsonValue::String(created_at.to_rfc3339()),
             );
+            // Which turn the row belongs to, and whether that turn ran in a
+            // browser: a building turn's replay quotes a browser turn only as
+            // page data, and a browser thread's replay reads only those turns
+            // (runtime-agent `conversation_context.rs`).
+            if let Some(run_id) = run_id {
+                map.insert("runId".to_string(), JsonValue::String(run_id.to_string()));
+            }
+            if browser_lane {
+                map.insert("lane".to_string(), JsonValue::String("browser".to_string()));
+            }
             if !metadata.is_null() {
                 map.insert("metadata".to_string(), metadata);
             }

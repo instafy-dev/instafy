@@ -15,7 +15,10 @@
 //!   `request_browser` card with the card's own task, marked
 //!   `browserRequestOf: "job:<card job>"`. Studio opens it by itself or the
 //!   person presses the card; billing cannot tell the two apart, and both ask
-//!   only what Octo asked.
+//!   only what Octo asked. A card the routing step posted for the person's
+//!   own message (`browserRequest.routed`) is not one: its task is their own
+//!   words, so its browser turn is their own turn, stamped `routed` and charged
+//!   as any turn they send.
 //!
 //! Each reserves its credit at dispatch like any other turn. A hand-back or an
 //! automatic retry costs what any turn costs when it ends with Octo's reply (a
@@ -128,10 +131,14 @@ pub(crate) fn system_turn_of(job_payload: &JsonValue) -> Option<SystemTurn> {
     {
         return Some(SystemTurn::AutomaticRetry);
     }
-    if metadata
+    if let Some(card_turn) = metadata
         .get(BROWSER_CARD_TURN_KEY)
-        .is_some_and(JsonValue::is_object)
+        .filter(|stamp| stamp.is_object())
     {
+        // A routed card's task is the person's own words: their own turn.
+        if card_turn.get("routed") == Some(&JsonValue::Bool(true)) {
+            return None;
+        }
         return Some(SystemTurn::BrowserCard);
     }
     None
@@ -387,8 +394,9 @@ fn asks_only_the_card_task(prompt_text: &str, task: &str) -> bool {
 /// A card's checks, for conversation `$1` and the card's job `$2` (and as
 /// text, `$3`): who sent the card's turn and its stamps, the task of the card
 /// that turn's runtime posted (its own `action_request` message, never a
-/// client's), and whether a browser turn already carried that card on. Each
-/// reads only the conversation's rows, through its index.
+/// client's) and whether the routing step posted it for the person's own
+/// message (`routed`), and whether a browser turn already carried that card
+/// on. Each reads only the conversation's rows, through its index.
 const BROWSER_CARD_CHECKS_SQL: &str = "select
      job.payload as card_payload,
      prompt.user_id as card_sender,
@@ -405,6 +413,20 @@ const BROWSER_CARD_CHECKS_SQL: &str = "select
                       card.metadata #> '{details,details,browserRequest}') is not null
        order by card.created_at desc
        limit 1) as card_task,
+     coalesce((select coalesce(card.metadata #> '{details,browserRequest,routed}',
+                               card.metadata #> '{details,details,browserRequest,routed}')
+                      = 'true'::jsonb
+        from conversation_messages card
+       where card.conversation_id = $1
+         and card.role = 'assistant'
+         and card.created_by is null
+         and card.metadata #>> '{jobId}' = $3
+         and lower(coalesce(card.metadata #>> '{messageType}', card.metadata #>> '{message_type}', ''))
+             = 'action_request'
+         and coalesce(card.metadata #> '{details,browserRequest}',
+                      card.metadata #> '{details,details,browserRequest}') is not null
+       order by card.created_at desc
+       limit 1), false) as card_routed,
      exists (
          select 1 from agent_jobs earlier
           where earlier.conversation_id = $1
@@ -466,10 +488,18 @@ pub(crate) async fn verify_browser_card_turn(
     if !ordinary_card_turn || !asks_the_card || card.get::<_, bool>("already_carried_on") {
         return Ok(None);
     }
-    Ok(Some(json!({
+    let mut stamp = json!({
         "version": BROWSER_CARD_TURN_VERSION,
         "cardJobId": card_job_id,
-    })))
+    });
+    // The routing step posted this card for the person's own message, so its
+    // task is their words: the browser turn is their own turn, charged as any
+    // turn they send ([`system_turn_of`]), and still the card's turn for the
+    // checks that read which turns Instafy started (one hop, the hand-back).
+    if card.get::<_, bool>("card_routed") {
+        stamp["routed"] = json!(true);
+    }
+    Ok(Some(stamp))
 }
 
 /// Statuses a step ends with when it did not work (Studio's `FAILED_STATES`).
@@ -941,6 +971,30 @@ mod tests {
             assert_eq!(system_turn_of(&json!({ "metadata": metadata })), None);
         }
         assert_eq!(system_turn_of(&json!({})), None);
+    }
+
+    /// The routing step posted the card for the person's own message, so its task is their
+    /// words: the browser turn that carries it on is their own turn, charged as any turn they
+    /// send. Its stamp stays for the checks that read which turns Instafy started.
+    #[test]
+    fn a_routed_cards_browser_turn_is_the_persons_own() {
+        let routed = json!({"metadata": {"browserCardTurn": {
+            "version": 1,
+            "cardJobId": Uuid::new_v4(),
+            "routed": true,
+        }}});
+        assert_eq!(system_turn_of(&routed), None);
+        assert!(started_by_instafy(&routed));
+        for routed in [json!("true"), json!(false), json!(1)] {
+            assert_eq!(
+                system_turn_of(&json!({"metadata": {"browserCardTurn": {
+                    "version": 1,
+                    "routed": routed,
+                }}})),
+                Some(SystemTurn::BrowserCard),
+                "{routed}"
+            );
+        }
     }
 
     #[test]

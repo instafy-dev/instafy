@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::codex::{
-    CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema, CodexRunOptions, CodexRunOutput,
-    ScopedWorkerExecution, classify_internal_codex_fallback_summary,
+    BUILDING_THREAD_KEYS, CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema,
+    CodexRunOptions, CodexRunOutput, RETIRED_BROWSER_THREAD_KEYS, ScopedWorkerExecution,
+    ThreadLane, classify_internal_codex_fallback_summary, lane_history_replay_required,
     provider_thread_restorable_on_this_runtime,
 };
 use crate::config::Config;
@@ -112,8 +113,6 @@ const PROMPT_REFERENCED_FILE_MAX_BYTES: usize = 24_000;
 const PROMPT_REFERENCED_FILE_MAX_TOTAL_BYTES: usize = 48_000;
 const WORKSPACE_PROJECT_ROOT_MAX_DIRS: usize = 8;
 const WORKSPACE_PROJECT_ROOT_MAX_ENTRIES: usize = 8;
-const MAX_UI_SUGGESTED_REPLIES: usize = 3;
-const MAX_UI_SUGGESTED_REPLY_CHARS: usize = 160;
 const TERMINAL_OUTPUT_MAX_CHARS: usize = 120_000;
 const TERMINAL_SESSION_OUTPUT_MAX_CHARS: usize = 400_000;
 const TERMINAL_STREAM_POLL_MILLIS: u64 = 120;
@@ -138,6 +137,11 @@ const AGENT_CONTEXT_CARD_LIMIT: usize = 4;
 const AGENT_CONTEXT_CARD_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PLANNING_MAX_CHARS: usize = 3_200;
 const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
+/// How much of the browser skill's "Routing preflight" section the routing step reads.
+const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 1_200;
+/// The longest message a routed card carries as its task, as a card's own task is bounded
+/// (`BrowserRequest::parse`).
+const ROUTED_BROWSER_TASK_MAX_UTF16_UNITS: usize = 8_000;
 const COLLABORATION_SKILL_DELEGATION_MAX_CHARS: usize = 1_600;
 const COLLABORATION_RESULT_POLICY_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PATH: &str = ".agents/skills/instafy-agent-collaboration/SKILL.md";
@@ -188,6 +192,12 @@ enum AgentRoutingPreflightRoute {
     MultiAgentCandidate,
     CrossChatLookup,
     WriteCoordinationRequired,
+    /// The message runs in Instafy's browser from its first step (`browser`); with
+    /// `continue_building`, Octo then builds from what it found (`browser_then_build`). Offered
+    /// only where the browser skill says when (`browser_routing_snapshot_for_job`).
+    Browser {
+        continue_building: bool,
+    },
 }
 
 /// Recorded on a turn whose request was read as needing file changes and whose
@@ -463,51 +473,103 @@ fn should_persist_codex_conversation_thread_with_structured_persistence(
 
 fn restored_provider_thread_available(
     provider_state: Option<&JsonValue>,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> bool {
-    let history_replay_required =
-        provider_state_bool(provider_state, "historyReplayRequired").unwrap_or(false);
-    if history_replay_required {
+    if lane_history_replay_required(provider_state, lane) {
         return false;
     }
+    lane.thread_id_keys()
+        .iter()
+        .any(|key| provider_state_string(provider_state, key).is_some())
+}
 
-    let thread_key = if browser_mode {
-        "browserThreadId"
+/// The lane a job's turn runs in: a Shared Browser turn's own thread, or the chat's building
+/// thread (`ThreadLane`).
+fn thread_lane_for_job(job: &LeaseJob) -> ThreadLane {
+    if crate::shared_browser::payload_requests_shared_browser(&job.payload) {
+        ThreadLane::SharedBrowser
     } else {
-        "defaultThreadId"
-    };
+        ThreadLane::Building
+    }
+}
 
-    provider_state_string(provider_state, thread_key)
-        .or_else(|| provider_state_string(provider_state, "threadId"))
-        .is_some()
+/// A chat's turns used to share one provider thread: a Shared Browser turn found no browser
+/// thread of its own, resumed the default thread through the legacy keys and saved that
+/// thread's id and rollout as `browserThreadId` and `browserRolloutPath`. Such a thread holds
+/// the pages its browser turns read, so neither lane resumes it: when the old browser keys name
+/// the building thread, its keys go too, and each lane starts a thread of its own once, with its
+/// lane's history replayed. The old browser keys go in any case; nothing reads them any more.
+/// The run saves its state as a merge of this one, so neither lane finds the old thread again.
+/// The second value says whether a thread both lanes wrote was retired.
+fn split_shared_thread_state(state: Option<JsonValue>) -> (Option<JsonValue>, bool) {
+    let Some(JsonValue::Object(mut map)) = state else {
+        return (state, false);
+    };
+    let mut retired = false;
+    if let Some(JsonValue::Object(nested)) = map.remove("codex") {
+        let (nested, nested_retired) = split_shared_thread_state(Some(JsonValue::Object(nested)));
+        if let Some(nested) = nested {
+            map.insert("codex".to_string(), nested);
+        }
+        retired |= nested_retired;
+    }
+    let value = |map: &JsonMap<String, JsonValue>, key: &str| {
+        map.get(key)
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    };
+    let old_browser: Vec<String> = ["browserThreadId", "browserRolloutPath"]
+        .iter()
+        .filter_map(|key| value(&map, key))
+        .collect();
+    let shared = [
+        "defaultThreadId",
+        "threadId",
+        "defaultRolloutPath",
+        "rolloutPath",
+    ]
+    .iter()
+    .filter_map(|key| value(&map, key))
+    .any(|building| old_browser.contains(&building));
+    for key in RETIRED_BROWSER_THREAD_KEYS {
+        map.remove(key);
+    }
+    if shared {
+        for key in BUILDING_THREAD_KEYS {
+            map.remove(key);
+        }
+        map.remove("historyReplayRequired");
+        retired = true;
+    }
+    (Some(JsonValue::Object(map)), retired)
 }
 
 /// The controller attaches the previous run's provider state when it enqueues a job, whichever
 /// runtime later leases it. After a restart, or on a fresh runtime, the thread that state names
-/// is often not restorable here, and Codex then quietly starts an empty thread. The prompt lane
-/// and the contextual-instruction suppression are both chosen from this state before Codex
-/// tries, so a state that still claims a restored thread would send the compact reminder to a
-/// model with no history, no workspace memory snapshot and no skills catalog. Such a state is
-/// marked for history replay so the turn gets the full lane. The second value says whether the
-/// state was marked.
+/// for the turn's lane is often not restorable here, and Codex then quietly starts an empty
+/// thread. The prompt lane and the contextual-instruction suppression are both chosen from this
+/// state before Codex tries, so a state that still claims a restored thread would send the
+/// compact reminder to a model with no history, no workspace memory snapshot and no skills
+/// catalog. Such a state is marked for the lane's history replay so the turn gets the full lane.
+/// The second value says whether the state was marked.
 fn provider_conversation_state_for_this_runtime(
     state: Option<JsonValue>,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> (Option<JsonValue>, bool) {
     let Some(mut state) = state else {
         return (None, false);
     };
-    let claims_restored_thread = provider_state_claims_restored_thread(Some(&state))
-        || restored_provider_thread_available(Some(&state), browser_mode);
-    if !claims_restored_thread
-        || provider_thread_restorable_on_this_runtime(Some(&state), browser_mode)
-    {
+    let claims_restored_thread = provider_state_claims_restored_thread(Some(&state), lane)
+        || restored_provider_thread_available(Some(&state), lane);
+    if !claims_restored_thread || provider_thread_restorable_on_this_runtime(Some(&state), lane) {
         return (Some(state), false);
     }
     let Some(map) = state.as_object_mut() else {
         return (Some(state), false);
     };
-    map.insert("historyReplayRequired".to_string(), JsonValue::Bool(true));
+    map.insert(lane.history_replay_key().to_string(), JsonValue::Bool(true));
     (Some(state), true)
 }
 
@@ -522,42 +584,46 @@ fn prompt_context_replayed_history(prompt_context: &JsonValue) -> bool {
             .is_some_and(|turns| turns > 0)
 }
 
-/// Codex keeps `historyReplayRequired` set after a run that could not restore its thread,
+/// Codex keeps the lane's replay flag set after a run that could not restore its thread,
 /// because that run's prompt was normally built before the loss was known and carried no
-/// history. When this run's prompt did replay the history, as it does once
+/// history. When this run's prompt did replay the lane's history, as it does once
 /// `provider_conversation_state_for_this_runtime` has spotted a lost thread, the fresh thread
-/// already holds it. Keeping the flag would make the next turn, whose new rollout resumes,
-/// send the history, workspace snapshot and skills catalog into that thread a second time.
-/// The flag is shared by the default and browser threads, so it stays set while the other
-/// thread still lacks the history.
+/// already holds it. Keeping the flag would make the next turn in this lane, whose new rollout
+/// resumes, send the history, workspace snapshot and skills catalog into that thread a second
+/// time. Only this lane's restore and replay flags are cleared; the other lane's stay as they
+/// are, and the flag both lanes shared before follows the other lane's.
 ///
-/// Codex recomputes the flag from both modes' `*ThreadRestoreFailed` fields on every run it
-/// saves, so this mode's field is cleared too. Left set, the next run in the other mode would
-/// raise the flag again for a thread that already holds the history. The
-/// `*ThreadRestoreSource` and `lastThreadRestoreSource` fields still record the failed restore.
+/// The lane's `*ThreadRestoreSource` and `lastThreadRestoreSource` fields still record the
+/// failed restore.
 fn provider_conversation_state_after_history_replay(
     state: Option<JsonValue>,
     prompt_replayed_history: bool,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> Option<JsonValue> {
     let mut state = state?;
-    let (restore_failed_key, other_restore_failed_key) = if browser_mode {
-        ("browserThreadRestoreFailed", "defaultThreadRestoreFailed")
-    } else {
-        ("defaultThreadRestoreFailed", "browserThreadRestoreFailed")
-    };
     let started_fresh_thread =
-        provider_state_bool(Some(&state), restore_failed_key).unwrap_or(false);
+        provider_state_bool(Some(&state), lane.restore_failed_key()).unwrap_or(false);
     if !prompt_replayed_history || !started_fresh_thread {
         return Some(state);
     }
-    let other_thread_lacks_history =
-        provider_state_bool(Some(&state), other_restore_failed_key).unwrap_or(false);
+    let other = match lane {
+        ThreadLane::Building => ThreadLane::SharedBrowser,
+        ThreadLane::SharedBrowser => ThreadLane::Building,
+    };
+    let other_lacks_history =
+        provider_state_bool(Some(&state), other.history_replay_key()).unwrap_or(false);
     if let Some(map) = state.as_object_mut() {
-        map.insert(restore_failed_key.to_string(), JsonValue::Bool(false));
+        map.insert(
+            lane.restore_failed_key().to_string(),
+            JsonValue::Bool(false),
+        );
+        map.insert(
+            lane.history_replay_key().to_string(),
+            JsonValue::Bool(false),
+        );
         map.insert(
             "historyReplayRequired".to_string(),
-            JsonValue::Bool(other_thread_lacks_history),
+            JsonValue::Bool(other_lacks_history),
         );
     }
     Some(state)
@@ -576,12 +642,12 @@ fn provider_conversation_state_to_save(
     run_prompt: &str,
     prompt: &str,
     prompt_context: &JsonValue,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> Option<JsonValue> {
     provider_conversation_state_after_history_replay(
         output.provider_conversation_state.clone(),
         run_prompt.starts_with(prompt) && prompt_context_replayed_history(prompt_context),
-        browser_mode,
+        lane,
     )
 }
 
@@ -590,7 +656,7 @@ fn broad_contextual_instruction_suppression_reason(
     _prompt_text: &str,
     scoped_worker_has_precollected_observations: bool,
     provider_conversation_state_for_run: Option<&JsonValue>,
-    runtime_is_browser_session: bool,
+    thread_lane: ThreadLane,
     expects_direct_workspace_file_changes: bool,
 ) -> Option<&'static str> {
     if scoped_worker_has_precollected_observations {
@@ -611,10 +677,7 @@ fn broad_contextual_instruction_suppression_reason(
     {
         return Some("focused_cross_chat_context_lookup");
     }
-    if restored_provider_thread_available(
-        provider_conversation_state_for_run,
-        runtime_is_browser_session,
-    ) {
+    if restored_provider_thread_available(provider_conversation_state_for_run, thread_lane) {
         return Some("stateful_provider_thread_restored");
     }
     if expects_direct_workspace_file_changes {
@@ -3322,10 +3385,14 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// prompt asked for it, once that turn is finished, for an address the person
 /// could have seen and where nothing else is stopped or taken over; anywhere
 /// else the card is a button. Opening it changes no approval in the browser.
-/// The card itself says where the browser goes. The reply never says that a
-/// page was opened before a browser tool saw it, so it stays true when the
-/// card is only a button, nor what the browser will submit, send or buy: that
-/// step asks the person first, and they may say no.
+/// The card itself says where the browser goes. A turn whose only action is
+/// the card posts the card alone ([`post_only_the_card`]), so the contract
+/// says that such a turn's `summary` may not show: what the person needs goes
+/// in `task`, or in a reply without the card. A reply that does show beside a
+/// card (with another card or a file, in a skill setup, on an evaluated turn)
+/// never says that a page was opened before a browser tool saw it, so it stays
+/// true when the card is only a button, nor what the browser will submit, send
+/// or buy: that step asks the person first, and they may say no.
 ///
 /// A sign-in the person asked for, or one a step they asked for needs, is
 /// opened and paused on (`request_human_input`), so the task can go on after
@@ -3350,7 +3417,7 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
 - `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
-- In `summary`, never say a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy: that step asks the person first.\n\
+- A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n\
 - Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
 - The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
@@ -3529,6 +3596,7 @@ fn granted_turn_prompt(
     let mut conversation = build_prompt_conversation_context(
         job.payload.get("conversation_history"),
         provider_conversation_state,
+        ThreadLane::Building,
     );
     let mut sections = JsonMap::new();
     let mut prompt = String::new();
@@ -3802,7 +3870,7 @@ fn ensure_ambient_participation_context(
     if context.metrics["totalTurns"].as_u64().unwrap_or(0) > 0 {
         // Compare rendered sections, not raw content substrings: a short prior
         // turn such as NO_RESPONSE can also occur in the policy/latest request.
-        let ordinary = build_prompt_conversation_context(history, None);
+        let ordinary = build_prompt_conversation_context(history, None, thread_lane_for_job(job));
         let ordinary_section = format!("\n{}:\n{}", ordinary.section_label, ordinary.section_text);
         let section = format!(
             "\nConversation evidence for the ambient participation decision:\n{}\n",
@@ -4005,6 +4073,12 @@ fn parse_agent_routing_preflight_route(raw: &str) -> Option<AgentRoutingPrefligh
         "write_coordination_required" | "coordination_required" => {
             AgentRoutingPreflightRoute::WriteCoordinationRequired
         }
+        "browser" => AgentRoutingPreflightRoute::Browser {
+            continue_building: false,
+        },
+        "browser_then_build" => AgentRoutingPreflightRoute::Browser {
+            continue_building: true,
+        },
         _ => return None,
     }
     .into()
@@ -4122,6 +4196,12 @@ fn agent_routing_preflight_artifact(preflight: &AgentRoutingPreflight) -> JsonVa
             AgentRoutingPreflightRoute::MultiAgentCandidate => "multi_agent_candidate",
             AgentRoutingPreflightRoute::CrossChatLookup => "cross_chat_lookup",
             AgentRoutingPreflightRoute::WriteCoordinationRequired => "write_coordination_required",
+            AgentRoutingPreflightRoute::Browser {
+                continue_building: false,
+            } => "browser",
+            AgentRoutingPreflightRoute::Browser {
+                continue_building: true,
+            } => "browser_then_build",
         },
         "reason": preflight.reason,
         "selectedSkills": preflight.selected_skills,
@@ -4280,7 +4360,9 @@ fn agent_routing_preflight_metadata(preflight: &AgentRoutingPreflight) -> JsonVa
                 }),
             );
         }
-        AgentRoutingPreflightRoute::Direct => {}
+        // A browser route ends its job before the main turn, or is read as `direct` where it
+        // was not offered.
+        AgentRoutingPreflightRoute::Direct | AgentRoutingPreflightRoute::Browser { .. } => {}
     }
 
     JsonValue::Object(metadata)
@@ -6831,6 +6913,9 @@ impl JobProcessor {
         };
 
         let mut worker_question_reply = None;
+        // Where the routing step may send this message straight to Instafy's browser: the browser
+        // skill's routing section, which says when.
+        let mut browser_routes: Option<String> = None;
         anyhow::ensure!(
             pending_worker_input.is_none()
                 || (skills_kickoff.is_none()
@@ -6841,11 +6926,16 @@ impl JobProcessor {
             && should_run_agent_routing_preflight_for_execution(job, prompt_text)
         {
             let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
-            let preflight_prompt = build_agent_routing_preflight_prompt(
+            browser_routes = pending_worker_input
+                .is_none()
+                .then(|| browser_routing_snapshot_for_job(job, &workspace_dir, prompt_text))
+                .flatten();
+            let preflight_prompt = build_agent_routing_preflight_prompt_with_browser_routes(
                 &workspace_dir,
                 prompt_text,
                 active_plan_group_id.as_deref(),
                 pending_worker_input.as_ref(),
+                browser_routes.as_deref(),
             );
             let (preflight_prompt, primary_context) =
                 agent_routing_primary_prompt(&preflight_prompt, &job.payload);
@@ -6885,6 +6975,33 @@ impl JobProcessor {
             }
         } else {
             None
+        };
+        // A message the routing step sent straight to Instafy's browser ends here with its card.
+        // A browser route that was not offered, or does not apply, is read as `direct`.
+        let routing_preflight = match routing_preflight {
+            Some(mut preflight) => {
+                if let AgentRoutingPreflightRoute::Browser { continue_building } = preflight.route {
+                    if browser_routes.is_some()
+                        && worker_question_reply.is_none()
+                        && pending_worker_input.is_none()
+                        && let Some(execution) = routed_browser_execution(
+                            prompt_text,
+                            continue_building,
+                            agent_routing_preflight_artifact(&preflight),
+                        )
+                    {
+                        tracing::info!(
+                            job_id = %job.id,
+                            continue_building,
+                            "routing step sent the message straight to Instafy's browser"
+                        );
+                        return Ok(execution);
+                    }
+                    preflight.route = AgentRoutingPreflightRoute::Direct;
+                }
+                Some(preflight)
+            }
+            None => None,
         };
         let remaining_request;
         let mut worker_reply_receipt = None;
@@ -6953,17 +7070,30 @@ impl JobProcessor {
                 expects_generic_mcp_tool_execution,
                 explicit_personal_browser_execution,
             ) && !job_requests_cross_chat_context_lookup(job);
+        // A Shared Browser turn resumes the chat's browser thread, every other turn the
+        // building thread (`ThreadLane`).
+        let thread_lane = thread_lane_for_job(job);
+        let (stored_provider_conversation_state, retired_shared_thread) = split_shared_thread_state(
+            persist_codex_conversation_thread
+                .then(|| job.payload.get("provider_conversation_state").cloned())
+                .flatten(),
+        );
+        if retired_shared_thread {
+            tracing::info!(
+                job_id = %job.id,
+                lane = thread_lane.name(),
+                "retired a thread both lanes wrote; each lane starts a thread of its own"
+            );
+        }
         let (provider_conversation_state_for_run, provider_thread_not_restorable) =
             provider_conversation_state_for_this_runtime(
-                persist_codex_conversation_thread
-                    .then(|| job.payload.get("provider_conversation_state").cloned())
-                    .flatten(),
-                browser_mode,
+                stored_provider_conversation_state,
+                thread_lane,
             );
         if provider_thread_not_restorable {
             tracing::info!(
                 job_id = %job.id,
-                browser_mode,
+                lane = thread_lane.name(),
                 "stored provider thread cannot be resumed on this runtime; replaying conversation history"
             );
         }
@@ -6972,7 +7102,7 @@ impl JobProcessor {
             prompt_text,
             scoped_worker_has_precollected_observations,
             provider_conversation_state_for_run.as_ref(),
-            browser_mode,
+            thread_lane,
             direct_write_broad_context_suppression_eligible(runtime_expectations, browser_mode),
         );
         // A skill kickoff's carried SKILL.md text names terms the person never
@@ -7019,6 +7149,7 @@ impl JobProcessor {
             // Browser-mode is a runtime capability (VNC + headed Chromium via CDP), not inferred
             // from prompt heuristics. This keeps behavior deterministic and model-driven.
             expect_browser_session: browser_mode,
+            thread_lane,
             personal_browser: explicit_personal_browser_execution,
             shared_browser: explicit_shared_browser_execution,
             shared_browser_page_id,
@@ -7381,7 +7512,7 @@ impl JobProcessor {
             &prompt,
             &prompt,
             &prompt_context,
-            browser_mode,
+            thread_lane,
         );
 
         let mut raw_interim_messages = with_runtime_metadata_vec(
@@ -7472,9 +7603,9 @@ impl JobProcessor {
             &mut outcome.summary,
             &mut codex_fallback_summary_kind,
             first_shared_browser_terminal_consent_failure,
+            last_reply_was_a_pause(job),
         );
         augment_summary_for_onboarding_actions(&mut outcome.summary, &outcome.actions);
-        ensure_onboarding_suggestions(&mut outcome.suggested_replies, &outcome.actions);
         let expects_workspace_file_changes_after_actions =
             workspace_file_changes_still_required(expects_workspace_file_changes, &outcome);
         let final_messages = with_runtime_metadata_vec(
@@ -7603,7 +7734,7 @@ impl JobProcessor {
         artifacts.push(build_codex_thread_state_artifact(
             output.provider_conversation_state.as_ref(),
             output_provider_conversation_state.as_ref(),
-            browser_mode,
+            thread_lane,
         ));
         if let Some(message) = safety_check_downgrade_warning.as_deref() {
             artifacts.push(json!({
@@ -8094,7 +8225,7 @@ impl JobProcessor {
                 &retry_prompt,
                 &prompt,
                 &retry_prompt_context,
-                browser_mode,
+                thread_lane,
             );
 
             let retry_raw_messages = with_runtime_metadata_vec(
@@ -8113,10 +8244,6 @@ impl JobProcessor {
                 classify_internal_codex_fallback_summary(&retry_outcome.summary);
             augment_summary_for_onboarding_actions(
                 &mut retry_outcome.summary,
-                &retry_outcome.actions,
-            );
-            ensure_onboarding_suggestions(
-                &mut retry_outcome.suggested_replies,
                 &retry_outcome.actions,
             );
             let mut retry_expects_workspace_file_changes_after_actions =
@@ -8224,6 +8351,7 @@ impl JobProcessor {
                 &mut retry_outcome.summary,
                 &mut retry_codex_fallback_summary_kind,
                 retry_shared_browser_terminal_consent_failure,
+                last_reply_was_a_pause(job),
             );
             // A retry that returned actions or wrote files did work of its
             // own that the first answer does not describe, so it keeps its own.
@@ -8247,7 +8375,6 @@ impl JobProcessor {
                 // turn's history ends with the retry's empty reply while the
                 // person saw this answer.
                 retry_outcome.summary = outcome.summary.clone();
-                retry_outcome.suggested_replies = outcome.suggested_replies.clone();
                 retry_outcome.snippet = outcome.snippet.clone();
                 retry_outcome.actions = outcome.actions.clone();
                 retry_outcome.read_files = outcome.read_files.clone();
@@ -8324,7 +8451,7 @@ impl JobProcessor {
             retry_artifacts.push(build_codex_thread_state_artifact(
                 retry_output.provider_conversation_state.as_ref(),
                 retry_provider_conversation_state.as_ref(),
-                browser_mode,
+                thread_lane,
             ));
             if let Some(message) = retry_safety_check_downgrade_warning.as_deref() {
                 retry_artifacts.push(json!({
@@ -8460,10 +8587,6 @@ impl JobProcessor {
                 if finalization_fallback_kind.is_none() {
                     augment_summary_for_onboarding_actions(
                         &mut finalization_outcome.summary,
-                        &finalization_outcome.actions,
-                    );
-                    ensure_onboarding_suggestions(
-                        &mut finalization_outcome.suggested_replies,
                         &finalization_outcome.actions,
                     );
                     // The tool-free pass only recovers prose; keep the file
@@ -8816,11 +8939,12 @@ impl JobProcessor {
                 streaming_active,
                 retry_messages,
             );
+            post_only_the_card(job, &mut retry_outcome);
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
             user_input_request::append_outcome_artifact(&mut retry_artifacts, &retry_outcome);
             return Ok(JobExecution {
                 summary: retry_outcome.summary,
-                suggested_replies: retry_outcome.suggested_replies,
+                suggested_replies: Vec::new(),
                 provider: "codex-embedded".to_string(),
                 artifacts: retry_artifacts,
                 credit_snapshot: None,
@@ -9025,11 +9149,12 @@ impl JobProcessor {
             streaming_active,
             interim_messages,
         );
+        post_only_the_card(job, &mut outcome);
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
             summary: outcome.summary,
-            suggested_replies: outcome.suggested_replies,
+            suggested_replies: Vec::new(),
             provider: "codex-embedded".to_string(),
             artifacts,
             credit_snapshot: None,
@@ -9064,7 +9189,7 @@ impl JobProcessor {
 
         let mut prompt = String::from(
             "You are the Instafy MCP assistant. This run is MCP-tool focused.\n\
-            Return a single JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }.\n\
+            Return a single JSON object: { \"summary\": string, \"files\": [], optional \"actions\": [] }.\n\
             Do not use Markdown or code fences.\n\
             Do not use the final assistant message for progress or status updates. Complete the requested MCP work first, then return the final JSON object.\n\
             \n\
@@ -9245,8 +9370,11 @@ impl JobProcessor {
         } else {
             job.payload.get("conversation_history")
         };
-        let mut conversation_context =
-            build_prompt_conversation_context(conversation_history, provider_conversation_state);
+        let mut conversation_context = build_prompt_conversation_context(
+            conversation_history,
+            provider_conversation_state,
+            thread_lane_for_job(job),
+        );
         let stateful_thread_restored =
             prompt_metric_bool(&conversation_context.metrics, "statefulThreadRestored");
         let mut prompt_section_metrics = JsonMap::new();
@@ -9706,7 +9834,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt_section_metrics,
                 "responseContract",
                 "\nLead checkpoint response contract:\n\
-                - Return one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. No Markdown fences.\n\
+                - Return one JSON object: { \"summary\": string, \"files\": [], optional \"actions\": [] }. No Markdown fences.\n\
                 - Put the final user-facing answer in `summary`, following the supplied collaboration skill and any explicit user-requested format.\n\
                 - Use sibling outcomes in the latest request as primary evidence.\n\
                 - If tools are needed, run bounded commands at declared handoff or exact sibling paths; do not add an extra `bash -lc` wrapper or rediscover the workspace.\n\
@@ -9759,7 +9887,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "responseContract",
                 &[
                     "\nResponse contract reminder:\n\
-                - Return one JSON object only: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }.\n\
+                - Return one JSON object only: { \"summary\": string, \"files\": [], optional \"actions\": [] }.\n\
                 - Put the natural-language answer in `summary`; do not wrap the JSON in Markdown.\n\
                 - Populate `files` only for real workspace changes.\n",
                     // A turn that may not ask for the browser is not offered its card: a browser
@@ -9800,7 +9928,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "responseContract",
                 &[
                     "\nCross-chat context recovery response contract:\n\
-                - Return exactly one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown.\n\
+                - Return exactly one JSON object: { \"summary\": string, \"files\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown.\n\
                 - Put the user-facing answer in `summary`; keep it concise and cite the recovered conversation/thread, focused agent/lane, or context card when available.\n\
                 - If relevant context cards are already included, answer from them only when they are sufficient. Otherwise run the bounded Instafy CLI lookup described above before the final response.\n\
                 - Do not create a `multi_agent_plan` for a narrow recovery question. Do not edit files.\n\
@@ -9827,7 +9955,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 metadata_requests_write_scoped_workspace(job.payload.get("metadata"));
             let mut worker_response_contract = String::from(
                 "\nScoped worker response contract:\n\
-                - Return exactly one JSON object: { \"summary\": string, \"files\": [], optional \"suggestions\": [] }.\n\
+                - Return exactly one JSON object: { \"summary\": string, \"files\": [] }.\n\
                 - Put the worker report in `summary`; do not wrap JSON in Markdown.\n\
                 - Keep `files` empty unless the worker is explicitly write-scoped. For read-only workers, do not create, edit, move, delete, or return workspace file changes.\n",
             );
@@ -9899,7 +10027,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             let response_contract_start = prompt.len();
             prompt.push_str(
             "\nPlease follow these constraints:\n\
-            - Respond with a single JSON object shaped as { \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. Do not wrap the JSON in Markdown or code fences.\n\
+            - Respond with a single JSON object shaped as { \"summary\": string, \"files\": [], optional \"actions\": [] }. Do not wrap the JSON in Markdown or code fences.\n\
             - Do not use the final assistant message for progress or status updates. If you need to inspect or execute something, do the tool work first, then return the final JSON object only after the task is complete.\n\
             - When runtime metadata marks command execution or concrete workspace/runtime observation as required, call the available runtime command tool (`exec_command` or `shell`) before returning the final JSON. Do not only reason about commands. If no command tool is callable, return a JSON `summary` that states that concrete blocker. This does not block file-only create/edit/delete requests that can be satisfied with inline `files[]` content.\n\
             - If the user requests a different output format, still return the JSON object; satisfy the request inside `summary` as closely as possible.\n\
@@ -9909,7 +10037,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - Avoid exploratory commands (especially `--help` output dumps). Only run commands that are needed to complete the task or to resolve a concrete error. When an Instafy capability you need seems missing, `instafy <group> --help` counts as needed.\n\
             - When the user asks about metadata the prompt doesn’t include (e.g. token usage), do not guess; retrieve it via the Instafy CLI (`instafy history ...` first, `instafy api get` as advanced fallback), not raw HTTP (curl/wget).\n\
             - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n\
-            - If you propose next steps, include up to three concise strings in `suggestions` (e.g. module ideas, integrations, deployment follow-ups), never in `summary`: Studio shows them as buttons. Each suggestion should be a short user message that can be sent as-is when clicked. Omit the field if you have nothing meaningful to suggest.\n\
             - For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n\
             - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n",
         );
@@ -9954,7 +10081,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - If you emit `request_location`, keep `summary` focused on why location is needed and whether approximate or precise location is enough. Do not mention action cards, UI steps, or retry phrases for location; the app handles that.\n\
             - Use `request_location` when the user wants nearby/current-location recommendations or routes and they have not already provided a place/city. Prefer `approximate` unless exact turn-by-turn or meter-level precision is clearly necessary.\n\
               - When a retry phrase applies (`request_integration`), provide exactly one. Do not include any other retry/confirmation phrase anywhere in `summary` (avoid extra lines like \"Then reply …\").\n\
-              - If you include `suggestions` alongside onboarding actions, it must contain exactly one string and it must equal the retry phrase; otherwise omit `suggestions`. Omit `suggestions` entirely for `request_secret`.\n\
             - For integration onboarding, state what you will do immediately after the retry phrase (for example: verify connection status, then continue the requested task).\n\
             - When requesting secrets, always include concrete env var names. Prefer names grounded in tool output, a skill, upstream docs, or an explicit error.\n\
             - Keep action-card copy terse. Treat action `description` fields as one-line labels/hints, not documentation.\n\
@@ -10146,17 +10272,21 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
-        let mut conversation_section = String::new();
-        conversation_section.push('\n');
-        conversation_section.push_str(conversation_context.section_label);
-        conversation_section.push_str(":\n");
-        conversation_section.push_str(&conversation_context.section_text);
-        append_prompt_section(
-            &mut prompt,
-            &mut prompt_section_metrics,
-            "conversationContext",
-            &conversation_section,
-        );
+        // A browser thread's first turn in a chat has no earlier browser turn to read: no
+        // section (`build_prompt_conversation_context`).
+        if !conversation_context.section_text.is_empty() {
+            let mut conversation_section = String::new();
+            conversation_section.push('\n');
+            conversation_section.push_str(conversation_context.section_label);
+            conversation_section.push_str(":\n");
+            conversation_section.push_str(&conversation_context.section_text);
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "conversationContext",
+                &conversation_section,
+            );
+        }
 
         if let Some(section) =
             format_undo_target_context_section(job.payload.get("metadata"), conversation_history)
@@ -10176,6 +10306,24 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "siteIntentContext",
+                &section,
+            );
+        }
+
+        // What the chat's browser turns found since this building thread's last turn: the one
+        // way a page's text reaches building work besides the hand-back below.
+        if !lead_continuation_checkpoint
+            && !multi_agent_planning_turn
+            && !multi_agent_worker
+            && let Some(section) = browser_hand_back::format_browser_turns_since_section(
+                &job.payload,
+                stateful_thread_restored,
+            )
+        {
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "browserTurnsSince",
                 &section,
             );
         }
@@ -10397,7 +10545,6 @@ enum LocationPrecision {
 #[derive(Debug, Clone)]
 struct CodexOutcome {
     summary: String,
-    suggested_replies: Vec<String>,
     files: Vec<CodexFileDescriptor>,
     // Display references never enter materialization, write evidence or origin sync.
     read_files: Vec<CodexFileDescriptor>,
@@ -10688,22 +10835,8 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
         }
     }
 
-    let mut suggested_replies = parse_codex_suggestions(value);
-    // Replies offered on the reply's last line (a plain-text reply has no `suggestions`) become
-    // buttons, and the line leaves the reply.
-    if let Some((reply, offered)) = trailing_suggested_replies(&summary) {
+    if let Some(reply) = without_offered_replies_line(&summary) {
         summary = reply;
-        for offer in offered {
-            if suggested_replies.len() >= MAX_UI_SUGGESTED_REPLIES {
-                break;
-            }
-            if !suggested_replies
-                .iter()
-                .any(|known| known.to_lowercase() == offer.to_lowercase())
-            {
-                suggested_replies.push(offer);
-            }
-        }
     }
     let mut actions = parse_codex_actions(value);
     if let Some(request) = user_input_request::parse_action(value)? {
@@ -10715,12 +10848,53 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
 
     Ok(CodexOutcome {
         summary,
-        suggested_replies,
         files,
         read_files,
         snippet,
         actions,
     })
+}
+
+/// The most replies one line of offered replies held, and the longest of them.
+const OFFERED_REPLIES_LINE_MAX: usize = 3;
+const OFFERED_REPLY_MAX_CHARS: usize = 160;
+
+/// A reply without the line of replies it offers last, each in quotes and joined by ` · `
+/// (`“Add another option” · “Make it shorter”`). Octo is no longer asked for them, but a thread
+/// started before that still holds the plain-text lanes' instruction to end a reply with them
+/// ("Studio shows them as buttons"), and a later turn there keeps doing it. Studio never shows
+/// them, so the line leaves the reply and is kept nowhere. None when the last line is anything
+/// else, or is all the reply says. The runtime's [`NO_FILE_CHANGES_MARKER`] line after it stays
+/// last, for the caller that reads it.
+fn without_offered_replies_line(summary: &str) -> Option<String> {
+    if let Some(unmarked) = take_no_file_changes_marker(summary) {
+        let reply = without_offered_replies_line(&unmarked)?;
+        return Some(format!("{reply}\n{NO_FILE_CHANGES_MARKER}"));
+    }
+    let (reply, last_line) = summary.trim_end().rsplit_once('\n')?;
+    let reply = reply.trim_end();
+    let parts: Vec<&str> = last_line.split('·').map(str::trim).collect();
+    if reply.is_empty() || parts.len() < 2 || parts.len() > OFFERED_REPLIES_LINE_MAX {
+        return None;
+    }
+    let offered = |part: &str| {
+        part.strip_prefix('“')
+            .and_then(|rest| rest.strip_suffix('”'))
+            .or_else(|| {
+                part.strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+            })
+            .map(str::trim)
+            .is_some_and(|quoted| {
+                !quoted.is_empty()
+                    && quoted.chars().count() <= OFFERED_REPLY_MAX_CHARS
+                    && !quoted.contains(['“', '”', '"', '\n'])
+            })
+    };
+    parts
+        .iter()
+        .all(|part| offered(part))
+        .then(|| reply.to_string())
 }
 
 fn normalize_codex_outcome_summary_text(summary: &str) -> String {
@@ -10754,94 +10928,6 @@ fn normalize_codex_outcome_summary_text(summary: &str) -> String {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| summary.to_string())
-}
-
-/// The replies a reply offers on its own last line, each in quotes and joined by ` · `
-/// (`“Add another option” · “Make it shorter”`), as the runtime's plain-text
-/// instructions ask: the reply without that line, and the replies. None when the last line is
-/// anything else, or is all the reply says. The runtime's [`NO_FILE_CHANGES_MARKER`] line after
-/// them stays last, for the caller that reads it.
-fn trailing_suggested_replies(summary: &str) -> Option<(String, Vec<String>)> {
-    if let Some(unmarked) = take_no_file_changes_marker(summary) {
-        let (reply, offered) = trailing_suggested_replies(&unmarked)?;
-        return Some((format!("{reply}\n{NO_FILE_CHANGES_MARKER}"), offered));
-    }
-    let trimmed = summary.trim_end();
-    let (reply, last_line) = trimmed.rsplit_once('\n')?;
-    let reply = reply.trim_end();
-    let parts: Vec<&str> = last_line.split('·').map(str::trim).collect();
-    if reply.is_empty() || parts.len() < 2 || parts.len() > MAX_UI_SUGGESTED_REPLIES {
-        return None;
-    }
-    let mut offered = Vec::with_capacity(parts.len());
-    for part in parts {
-        let quoted = part
-            .strip_prefix('“')
-            .and_then(|rest| rest.strip_suffix('”'))
-            .or_else(|| {
-                part.strip_prefix('"')
-                    .and_then(|rest| rest.strip_suffix('"'))
-            })?
-            .trim();
-        if quoted.is_empty()
-            || quoted.chars().count() > MAX_UI_SUGGESTED_REPLY_CHARS
-            || quoted.contains(['“', '”', '"', '\n'])
-        {
-            return None;
-        }
-        offered.push(quoted.to_string());
-    }
-    Some((reply.to_string(), offered))
-}
-
-fn parse_codex_suggestions(value: &JsonValue) -> Vec<String> {
-    let mut suggestions = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let Some(entries) = value.get("suggestions").and_then(JsonValue::as_array) else {
-        return suggestions;
-    };
-
-    for entry in entries {
-        let Some(raw_text) = parse_codex_suggestion_entry(entry) else {
-            continue;
-        };
-        let trimmed = raw_text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let candidate = if trimmed.chars().count() > MAX_UI_SUGGESTED_REPLY_CHARS {
-            trimmed
-                .chars()
-                .take(MAX_UI_SUGGESTED_REPLY_CHARS)
-                .collect::<String>()
-        } else {
-            trimmed.to_string()
-        };
-        let dedupe_key = candidate.to_lowercase();
-        if !seen.insert(dedupe_key) {
-            continue;
-        }
-        suggestions.push(candidate);
-        if suggestions.len() >= MAX_UI_SUGGESTED_REPLIES {
-            break;
-        }
-    }
-
-    suggestions
-}
-
-fn parse_codex_suggestion_entry(value: &JsonValue) -> Option<String> {
-    if let Some(text) = value.as_str() {
-        return Some(text.to_string());
-    }
-
-    let map = value.as_object()?;
-    for key in ["text", "prompt", "reply", "label"] {
-        if let Some(text) = map.get(key).and_then(JsonValue::as_str) {
-            return Some(text.to_string());
-        }
-    }
-    None
 }
 
 fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
@@ -12002,70 +12088,6 @@ fn provider_display_name(provider: &str) -> String {
     }
 }
 
-fn push_onboarding_suggestion(
-    suggestions: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    suggestion: String,
-) {
-    if suggestions.len() >= MAX_UI_SUGGESTED_REPLIES {
-        return;
-    }
-    let trimmed = suggestion.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let candidate = if trimmed.chars().count() > MAX_UI_SUGGESTED_REPLY_CHARS {
-        trimmed
-            .chars()
-            .take(MAX_UI_SUGGESTED_REPLY_CHARS)
-            .collect::<String>()
-    } else {
-        trimmed.to_string()
-    };
-    let dedupe_key = candidate.to_ascii_lowercase();
-    if !seen.insert(dedupe_key) {
-        return;
-    }
-    suggestions.push(candidate);
-}
-
-fn ensure_onboarding_suggestions(suggested_replies: &mut Vec<String>, actions: &[CodexAction]) {
-    if actions.is_empty() {
-        return;
-    }
-    let mut seen: HashSet<String> = suggested_replies
-        .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .collect();
-
-    for action in actions {
-        if suggested_replies.len() >= MAX_UI_SUGGESTED_REPLIES {
-            break;
-        }
-        match action {
-            CodexAction::MultiAgentPlan { .. } => {}
-            CodexAction::GoalUpdate { .. } => {}
-            CodexAction::CoordinationRequired { .. } => {}
-            CodexAction::RequestIntegration { provider, .. } => {
-                let label = provider_display_name(provider);
-                push_onboarding_suggestion(
-                    suggested_replies,
-                    &mut seen,
-                    format!("I connected {label}. Retry now."),
-                );
-            }
-            // No suggestion for a secret: the card in the message saves the
-            // value and continues the run from its own button. A chip here
-            // would be a second path, worded differently from the card's,
-            // which is what made the card read as two competing routes.
-            CodexAction::RequestSecret { .. } => {}
-            CodexAction::RequestLocation { .. } => {}
-            CodexAction::RequestBrowser(_) => {}
-            CodexAction::RequestUserInput(_) => {}
-        }
-    }
-}
-
 fn augment_summary_for_onboarding_actions(summary: &mut String, actions: &[CodexAction]) {
     if actions.is_empty() {
         return;
@@ -12345,6 +12367,42 @@ fn stream_settled_cards(
         }
     }
     remaining.collect()
+}
+
+/// A turn whose only action is a `request_browser` card, and that reports no
+/// file, posts the card and no reply of its own: the card says where the
+/// browser goes, and the browser turn says what it found. The words a model
+/// wrote beside the card promised what the browser had not done, a submit
+/// the person then refused among them ("The browser will handle the form and
+/// submission."), however the contract put it. So the runtime decides what
+/// the person reads here, as it does with a hand-back's "Finished in the
+/// browser." and a pause's fixed reply. An empty reply is no reply: the
+/// controller and Studio show none, and nothing notifies. The browser rule
+/// ([`BROWSER_CHOICE_CONTRACT`]) tells the model so, and that what the person
+/// needs goes in the card's `task` or in a reply without the card.
+///
+/// A skill setup keeps its words: its replies carry the setup's walk and its
+/// next question beside the card ([`SKILL_SETUP_CONTINUATION`]). So does a
+/// turn the controller dispatched for Octo to decide whether to answer at all
+/// (`groupParticipation.decision: "agent_evaluation"`): there the controller
+/// reads an empty reply as no answer, not as none to show.
+fn post_only_the_card(job: &LeaseJob, outcome: &mut CodexOutcome) {
+    let only_a_card = !outcome.actions.is_empty()
+        && outcome
+            .actions
+            .iter()
+            .all(|action| matches!(action, CodexAction::RequestBrowser(_)));
+    let participation = &job.payload["metadata"]["groupParticipation"];
+    let evaluated = participation["decision"].as_str() == Some("agent_evaluation")
+        && participation["enforcedBy"].as_str() == Some("runtime-controller");
+    if only_a_card
+        && outcome.files.is_empty()
+        && outcome.read_files.is_empty()
+        && !evaluated
+        && !conversation_began_with_skill_setup(job)
+    {
+        outcome.summary.clear();
+    }
 }
 
 /// The chat messages an assistant turn's actions become.
@@ -13438,7 +13496,7 @@ fn codex_missing_final_recovery_prompt(
         - If the user forbids repo inspection, do not read repo files; use only allowed runtime or Instafy CLI observations.\n\
         - If the snapshot and allowed observations are insufficient, say exactly what is missing in `summary`.\n\
         - Do not mention internal retry, recovery, or protocol mechanics in the user-facing `summary`.\n\
-        - Return exactly one final assistant message as a JSON object shaped as {{ \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }}. Do not end with reasoning only.\n\
+        - Return exactly one final assistant message as a JSON object shaped as {{ \"summary\": string, \"files\": [], optional \"actions\": [] }}. Do not end with reasoning only.\n\
         - Supported action for goals: {{ \"type\": \"goal_update\", \"status\": \"active\" | \"completed\" | \"blocked\" | \"paused\" | \"canceled\", optional \"objective\": string, optional \"progressSummary\": string, optional \"doneWhen\": string, optional \"stopWhen\": string }}.\n\
         - If the latest request asks to create, set, start, or update a goal, include exactly one `goal_update`: use `completed` when this retry fully satisfies it, `blocked` only when required evidence, permissions, runtime access, or user input cannot be obtained with the available safe tools, and `active` only when meaningful work remains.\n\
         - If the latest request explicitly requires separate assistant turns, do the next useful step in `summary` and use `goal_update` status `active` while more steps remain; do not block just because this response is one final JSON object.\n\
@@ -13476,7 +13534,7 @@ fn codex_missing_final_json_finalization_prompt(prompt_text: &str, retry_summary
          Retry observation:\n{}\n\
          \n\
          Return exactly one JSON object with this shape:\n\
-         {{ \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }}\n\
+         {{ \"summary\": string, \"files\": [], optional \"actions\": [] }}\n\
          \n\
          Rules:\n\
          - Do not wrap the JSON in Markdown or code fences.\n\
@@ -14218,15 +14276,50 @@ fn should_retry_codex_once(
     shared_browser_terminal_consent_failure.is_none() && recovery_retry_required
 }
 
+/// What the person reads when a Shared Browser turn paused on the page for
+/// their input (`human_input_required`).
+const HUMAN_INPUT_PAUSE_REPLY: &str = "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue. I don't ask for those details in chat.";
+
+/// What it reads when Octo's last reply in the chat was such a pause already:
+/// the browser is still waiting for the person. The same words again read as
+/// if Let Octo continue had done nothing (pressed without signing in, a local
+/// test on Oct 31). The runtime knows only that the last reply was a pause,
+/// not which page this one is on: a one-time code, a consent screen or a card
+/// form pauses too, right after a sign-in the person did finish. So the words
+/// hold on any page, as the first pause's do, and keep saying that those
+/// details stay out of chat.
+const HUMAN_INPUT_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting for you. Sign in or fill in the highlighted fields on the page, then choose Let Octo continue. I don't ask for those details in chat.";
+
+/// Whether Octo's last reply in the chat before this turn was a pause for the
+/// person's input, in the history the controller leased the turn with.
+fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
+    parse_conversation_history(job.payload.get("conversation_history"))
+        .iter()
+        .rev()
+        .find(|turn| turn.role.eq_ignore_ascii_case("assistant"))
+        .is_some_and(|turn| {
+            let reply = turn.content.trim();
+            reply == HUMAN_INPUT_PAUSE_REPLY || reply == HUMAN_INPUT_PAUSE_AGAIN_REPLY
+        })
+}
+
+/// `paused_already`: Octo's last reply in the chat was a pause for the
+/// person's input ([`last_reply_was_a_pause`]).
 fn apply_terminal_shared_browser_summary(
     summary: &mut String,
     fallback_kind: &mut Option<CodexFallbackSummaryKind>,
     terminal_consent_failure: Option<&str>,
+    paused_already: bool,
 ) {
     let Some(code) = terminal_consent_failure else {
         return;
     };
-    *summary = terminal_shared_browser_summary(code).to_string();
+    *summary = if code == "human_input_required" && paused_already {
+        HUMAN_INPUT_PAUSE_AGAIN_REPLY
+    } else {
+        terminal_shared_browser_summary(code)
+    }
+    .to_string();
     *fallback_kind = None;
 }
 
@@ -14238,9 +14331,7 @@ fn apply_terminal_shared_browser_summary(
 /// about that step and never about the whole turn.
 fn terminal_shared_browser_summary(code: &str) -> &'static str {
     match code {
-        "human_input_required" => {
-            "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue. I don't ask for those details in chat."
-        }
+        "human_input_required" => HUMAN_INPUT_PAUSE_REPLY,
         "approval_timeout" => {
             "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
         }
@@ -14271,6 +14362,7 @@ fn manual_browser_handoff_is_not_retried_or_reported_as_a_generic_failure() {
         &mut summary,
         &mut fallback,
         Some("human_input_required"),
+        false,
     );
     // The button the person presses, as Studio names it.
     assert_eq!(
@@ -15387,13 +15479,104 @@ fn format_collaboration_routing_preflight_snapshot(
 ) -> Option<String> {
     let path = ".agents/skills/instafy-agent-collaboration/SKILL.md";
     let content = read_workspace_file_utf8(workspace_dir, path)?;
-    let mut excerpt = extract_markdown_h2_section(&content, "Routing preflight")
+    let excerpt = extract_markdown_h2_section(&content, "Routing preflight")
         .or_else(|| extract_markdown_h2_section(&content, "Skill-authored workstreams"))
         .unwrap_or(content);
-    excerpt = strip_markdown_fenced_blocks(&excerpt);
+    Some(format_routing_skill_snapshot(
+        "collaboration",
+        path,
+        &excerpt,
+        max_chars,
+    ))
+}
+
+/// The browser skill's "Routing preflight" section from the space's own copy, which says when a
+/// message goes straight to Instafy's browser: None when the copy has no such section, so a
+/// space whose copy predates it keeps today's routes.
+fn format_browser_routing_preflight_snapshot(workspace_dir: &Path) -> Option<String> {
+    let path = ".agents/skills/instafy-browser-automation/SKILL.md";
+    let content = read_workspace_file_utf8(workspace_dir, path)?;
+    let excerpt = extract_markdown_h2_section(&content, "Routing preflight")?;
+    Some(format_routing_skill_snapshot(
+        "browser",
+        path,
+        &excerpt,
+        BROWSER_SKILL_ROUTING_MAX_CHARS,
+    ))
+}
+
+/// Whether the person's message carries files or images of its own.
+fn message_carries_attachments(job: &LeaseJob) -> bool {
+    job.payload
+        .get("metadata")
+        .and_then(|metadata| metadata.get("attachments"))
+        .and_then(JsonValue::as_array)
+        .is_some_and(|attachments| !attachments.is_empty())
+}
+
+/// The browser skill's routing section, when the routing step may send this message straight to
+/// Instafy's browser: the person's own words (never a prompt the runtime wrote for a command,
+/// such as `/learn`), on an interactive turn that could ask for the browser itself
+/// (`browser_choice_applies`: not a hand-back, a worker, a plan, an unattended run or a browser
+/// turn) and that Octo answers (not a group chat's turn where Octo first decides whether to
+/// answer at all), with no attachments, short enough to be a card's task, in a space whose copy
+/// of the skill says when.
+fn browser_routing_snapshot_for_job(
+    job: &LeaseJob,
+    workspace_dir: &Path,
+    prompt_text: &str,
+) -> Option<String> {
+    let own_words = job
+        .payload
+        .get("prompt_text")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|words| words.trim() == prompt_text.trim());
+    (own_words
+        && browser_choice_applies(job, false, false, false, false)
+        && !main_owns_ambient_participation(job)
+        && !message_carries_attachments(job)
+        && !prompt_text.trim().is_empty()
+        && prompt_text.trim().encode_utf16().count() <= ROUTED_BROWSER_TASK_MAX_UTF16_UNITS)
+        .then(|| format_browser_routing_preflight_snapshot(workspace_dir))
+        .flatten()
+}
+
+/// A message the routing step sent straight to Instafy's browser: its job runs no main model
+/// turn. Its only message is the card, marked `routed`, whose task is the person's own words;
+/// Studio opens it by itself where it can, and where it cannot, it stays a button with its
+/// reason. The card's browser turn and its hand-back follow the card's own checks. No reply, no
+/// run log and no provider state: the building thread never sees this turn (its browser turn
+/// reaches it through `browser_turns_since`).
+fn routed_browser_execution(
+    task: &str,
+    continue_building: bool,
+    preflight_artifact: JsonValue,
+) -> Option<JobExecution> {
+    let card = browser_request::BrowserRequest::routed(task, continue_building)?;
+    Some(JobExecution {
+        summary: String::new(),
+        suggested_replies: Vec::new(),
+        provider: "codex-embedded".to_string(),
+        artifacts: vec![preflight_artifact],
+        credit_snapshot: None,
+        provider_conversation_state: None,
+        messages: Vec::new(),
+        messages_streamed: false,
+        final_messages: vec![card.message()],
+    })
+}
+
+/// One skill's routing judgement as the routing step reads it.
+fn format_routing_skill_snapshot(
+    label: &str,
+    path: &str,
+    excerpt: &str,
+    max_chars: usize,
+) -> String {
+    let excerpt = strip_markdown_fenced_blocks(excerpt);
     let truncated = excerpt.chars().count() > max_chars;
     let snippet = excerpt.chars().take(max_chars).collect::<String>();
-    let mut out = String::from("\nFocused collaboration routing skill snapshot:\n");
+    let mut out = format!("\nFocused {label} routing skill snapshot:\n");
     let _ = writeln!(
         out,
         "- Source: `{path}` (routing excerpt{})",
@@ -15405,7 +15588,7 @@ fn format_collaboration_routing_preflight_snapshot(
         out.push_str("\n...");
     }
     out.push_str("\n```\n");
-    Some(out)
+    out
 }
 
 /// Most recent multi-agent plan group id visible to this job: the job's own
@@ -15457,12 +15640,48 @@ fn latest_plan_group_id_from_payload(payload: &JsonValue) -> Option<String> {
         })
 }
 
+/// The routing prompt where no browser route is offered.
+#[cfg(test)]
 fn build_agent_routing_preflight_prompt(
     workspace_dir: &Path,
     prompt_text: &str,
     active_plan_group_id: Option<&str>,
     pending: Option<&worker_input_routing::PendingContext>,
 ) -> String {
+    build_agent_routing_preflight_prompt_with_browser_routes(
+        workspace_dir,
+        prompt_text,
+        active_plan_group_id,
+        pending,
+        None,
+    )
+}
+
+/// The routing prompt; with `browser_routes` (the browser skill's routing section,
+/// `browser_routing_snapshot_for_job`), it also offers `browser` and `browser_then_build`.
+fn build_agent_routing_preflight_prompt_with_browser_routes(
+    workspace_dir: &Path,
+    prompt_text: &str,
+    active_plan_group_id: Option<&str>,
+    pending: Option<&worker_input_routing::PendingContext>,
+    browser_routes: Option<&str>,
+) -> String {
+    // A pending worker reply is answered here; it never goes to the browser.
+    let browser_routes = browser_routes.filter(|_| pending.is_none());
+    let browser_route_lines = if browser_routes.is_some() {
+        "- `browser`: runs in Instafy's browser from its first step; its reply answers.\n\
+        - `browser_then_build`: the same, then a build from what it found.\n"
+    } else {
+        ""
+    };
+    // A `direct` request that needs the browser first still ends with its card: routed as a
+    // change that must write files, it would run in the lane that cannot ask for the browser.
+    let browser_change_line = if browser_routes.is_some() {
+        "A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`: with `browser` or `browser_then_build` the browser changes no file and a build after it is its own turn, and with `direct` its card hands back to a build.\n"
+    } else {
+        "A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`: its card hands back to a build.\n"
+    };
+    let browser_snapshot = browser_routes.unwrap_or_default();
     let skill_snapshot = format_collaboration_routing_preflight_snapshot(workspace_dir, if pending.is_some() { 3200 } else { COLLABORATION_SKILL_ROUTING_MAX_CHARS })
         .unwrap_or_else(|| {
             "\nFocused collaboration routing skill snapshot unavailable. Prefer `direct`; use `multi_agent_candidate` only for durable Instafy workstreams, not merely generic parallel work.\n".to_string()
@@ -15482,14 +15701,15 @@ fn build_agent_routing_preflight_prompt(
         - `multi_agent_candidate`: enter durable top-level Instafy team planning under the collaboration skill; this is not the route for native helpers.\n\
         - `cross_chat_lookup`: retrieve required prior conversation or context evidence missing from supplied history and refs, without creating a new team.\n\
         - `write_coordination_required`: the request asks for concurrent writes to the same target and needs a safer split first.\n\
+        {browser_route_lines}\
         Prefer current-conversation evidence for follow-ups. Apply the collaboration skill to choose the execution lane; mentioning another chat alone does not require retrieving evidence already supplied.\n\
         Set `requiresContextLookup = true` only when required prior conversation/context evidence is absent from the latest request and supplied current-conversation evidence and must be retrieved. Referring to prior work or supplying links alone neither requires nor satisfies retrieval; use the actual supplied evidence. This flag independently requires a read-only Instafy context/conversation lookup, regardless of `requiresCommandExecution`.\n\
         Set `requiresCommandExecution = true` when a correct final answer needs a separate fresh observation of current filesystem, Git, process, repo, runtime, server, or tool state. Prior-conversation retrieval belongs only in `requiresContextLookup`; the fact that its transport uses a CLI does not set this flag. Leave it false when supplied current evidence is enough. Both flags may be true when both kinds of evidence are needed.\n\
         Set `workspaceFileChangeRequirement` from the success condition, independently of write permission: `required` when success necessarily requires creating, editing, moving, deleting, committing, or syncing workspace files; `conditional` when inspection or validation decides whether changes are warranted, and a justified unchanged result can satisfy the request; `none` when no workspace mutation is requested. Conditional work still permits warranted edits under the existing write scope. Do not turn permission to improve or repair into a requirement to produce a patch. Preserve the requested observations and tests even when no change is warranted.\n\
-        A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`: its card hands back to a build.\n\
+        {browser_change_line}\
         Always include `observationCommands`; use an empty array when no current-state observation is needed. When `requiresCommandExecution` is true, propose up to 3 concrete safe commands for that observation. These are proposals, not permission grants: the host executes only its existing allowlist, and the main agent must obtain any remaining observation under its normal tool permissions. Do not place conversation/context retrieval commands here. Do not set `requiresCommandExecution = true` merely because the main task includes workspace writes, patches, commits, pushes, or syncs. Do not put file-writing, patching, commit, push, or sync commands in `observationCommands`; classify `workspaceFileChangeRequirement` instead and let the main run make the requested changes under its existing permissions. Explicit non-file Instafy CLI actions such as `instafy automations create` or `instafy automations update` are allowed only when the user asked for that exact action. Propose independent read-only commands, not shell pipelines or command lists whose final status can hide a failed read. If no supported proposal fits, leave `observationCommands` empty and keep the observation requirement for the main agent.\n\
         {plan_group_guidance}\
-        {skill_snapshot}\n\
+        {skill_snapshot}{browser_snapshot}\n\
         Latest user request:\n```text\n{prompt_text}\n```\n\
         Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, `observationCommands`, and nullable `workerQuestionReply`."
     );
@@ -17175,43 +17395,30 @@ fn infer_codex_files_from_git_status_delta(
 fn build_codex_thread_state_artifact(
     provider_state: Option<&JsonValue>,
     saved_state: Option<&JsonValue>,
-    browser_mode: bool,
+    lane: ThreadLane,
 ) -> JsonValue {
-    let thread_key = if browser_mode {
-        "browserThreadId"
-    } else {
-        "defaultThreadId"
+    let first = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| provider_state_string(provider_state, key))
     };
-    let rollout_key = if browser_mode {
-        "browserRolloutPath"
-    } else {
-        "defaultRolloutPath"
-    };
-    let restore_failed_key = if browser_mode {
-        "browserThreadRestoreFailed"
-    } else {
-        "defaultThreadRestoreFailed"
-    };
-    let restore_source_key = if browser_mode {
-        "browserThreadRestoreSource"
-    } else {
-        "defaultThreadRestoreSource"
-    };
-
-    let thread_id = provider_state_string(provider_state, thread_key)
-        .or_else(|| provider_state_string(provider_state, "threadId"));
-    let rollout_path = provider_state_string(provider_state, rollout_key)
-        .or_else(|| provider_state_string(provider_state, "rolloutPath"));
-    let restore_failed = provider_state_bool(provider_state, restore_failed_key).unwrap_or(false);
-    let restore_source = provider_state_string(provider_state, restore_source_key)
-        .or_else(|| provider_state_string(provider_state, "lastThreadRestoreSource"));
-    let history_replay_required =
-        provider_state_bool(saved_state, "historyReplayRequired").unwrap_or(false);
+    let thread_id = first(lane.thread_id_keys());
+    let rollout_path = first(lane.rollout_path_keys());
+    let restore_failed =
+        provider_state_bool(provider_state, lane.restore_failed_key()).unwrap_or(false);
+    let restore_source = provider_state_string(
+        provider_state,
+        match lane {
+            ThreadLane::Building => "defaultThreadRestoreSource",
+            ThreadLane::SharedBrowser => "sharedBrowserThreadRestoreSource",
+        },
+    )
+    .or_else(|| provider_state_string(provider_state, "lastThreadRestoreSource"));
+    let history_replay_required = lane_history_replay_required(saved_state, lane);
 
     json!({
         "kind": "codex/thread-state",
         "metadata": {
-            "mode": if browser_mode { "browser" } else { "default" },
+            "mode": lane.name(),
             "threadId": thread_id,
             "rolloutPath": rollout_path,
             "restoreFailed": restore_failed,
@@ -18831,9 +19038,9 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                                 continue;
                             }
                             // The note repeats the reply as the person reads it: without the
-                            // replies offered on its last line (buttons) and without the
+                            // line of replies an older thread still offers and without the
                             // runtime's marker, in the order the reply loses them.
-                            let offered = trailing_suggested_replies(text).map(|(reply, _)| reply);
+                            let offered = without_offered_replies_line(text);
                             let text = offered.as_deref().unwrap_or(text);
                             let unmarked = take_no_file_changes_marker(text);
                             let text = unmarked.as_deref().unwrap_or(text);
@@ -21539,8 +21746,8 @@ mod tests {
                 "Use multiple AI agents to review https://github.com/dao-xyz/borsh-ts.",
                 false,
                 None,
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             Some("focused_team_planning_skill_snapshot")
         );
@@ -21556,8 +21763,8 @@ mod tests {
                 "Continue from the previous answer.",
                 false,
                 Some(&provider_state),
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             Some("stateful_provider_thread_restored")
         );
@@ -21572,8 +21779,8 @@ mod tests {
                 "Continue from the previous answer.",
                 false,
                 Some(&replay_required),
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             None
         );
@@ -21586,8 +21793,8 @@ mod tests {
                 "Create hello.txt with the exact contents below.",
                 false,
                 None,
-                false,
-                true,
+                ThreadLane::Building,
+                true
             ),
             Some("focused_direct_workspace_write")
         );
@@ -22430,7 +22637,8 @@ mod tests {
                 "defaultRolloutPath": rollout_path.display().to_string(),
                 "historyReplayRequired": false,
             });
-            let (state, marked) = provider_conversation_state_for_this_runtime(Some(stored), false);
+            let (state, marked) =
+                provider_conversation_state_for_this_runtime(Some(stored), ThreadLane::Building);
             let (prompt, _, metrics) = processor
                 .build_prompt_with_text(
                     &project_id,
@@ -22449,7 +22657,7 @@ mod tests {
                 request,
                 false,
                 state.as_ref(),
-                false,
+                ThreadLane::Building,
                 false,
             );
             if restorable {
@@ -22500,7 +22708,7 @@ mod tests {
         let thread_id = Uuid::new_v4().to_string();
 
         assert_eq!(
-            provider_conversation_state_for_this_runtime(None, false),
+            provider_conversation_state_for_this_runtime(None, ThreadLane::Building),
             (None, false)
         );
         for untouched in [
@@ -22509,40 +22717,56 @@ mod tests {
             json!({"defaultThreadId": thread_id, "defaultRolloutPath": rollout.display().to_string()}),
         ] {
             assert_eq!(
-                provider_conversation_state_for_this_runtime(Some(untouched.clone()), false),
+                provider_conversation_state_for_this_runtime(
+                    Some(untouched.clone()),
+                    ThreadLane::Building
+                ),
                 (Some(untouched.clone()), false),
                 "{untouched}"
             );
         }
-        for (lost, browser_mode) in [
+        for (lost, lane) in [
             // A thread id with no rollout to resume from.
-            (json!({"defaultThreadId": thread_id}), false),
+            (json!({"defaultThreadId": thread_id}), ThreadLane::Building),
             // An id Codex cannot parse starts a new thread even with a rollout.
             (
                 json!({"threadId": "restored-thread", "rolloutPath": rollout.display().to_string()}),
-                false,
+                ThreadLane::Building,
             ),
             // A browser run resumes the browser thread, whose rollout is gone.
             (
                 json!({
                     "defaultThreadId": thread_id,
                     "defaultRolloutPath": rollout.display().to_string(),
-                    "browserThreadId": Uuid::new_v4().to_string(),
-                    "browserRolloutPath": tmp.path().join("gone.jsonl").display().to_string(),
+                    "sharedBrowserThreadId": Uuid::new_v4().to_string(),
+                    "sharedBrowserRolloutPath": tmp.path().join("gone.jsonl").display().to_string(),
                 }),
-                true,
+                ThreadLane::SharedBrowser,
             ),
         ] {
             let (state, marked) =
-                provider_conversation_state_for_this_runtime(Some(lost.clone()), browser_mode);
+                provider_conversation_state_for_this_runtime(Some(lost.clone()), lane);
             let state = state.expect("state is kept");
             assert!(marked, "{lost}");
-            assert_eq!(state["historyReplayRequired"], true, "{lost}");
+            assert_eq!(state[lane.history_replay_key()], true, "{lost}");
             // Codex still receives the ids it would have tried, unchanged.
-            for key in ["defaultThreadId", "threadId", "browserThreadId"] {
+            for key in ["defaultThreadId", "threadId", "sharedBrowserThreadId"] {
                 assert_eq!(state.get(key), lost.get(key), "{lost} {key}");
             }
         }
+        // A chat's first browser turn finds only the building thread: its own lane names no
+        // thread, so there is nothing to mark, and the building thread is not its to resume.
+        let building_only = json!({
+            "defaultThreadId": thread_id,
+            "defaultRolloutPath": tmp.path().join("gone.jsonl").display().to_string(),
+        });
+        assert_eq!(
+            provider_conversation_state_for_this_runtime(
+                Some(building_only.clone()),
+                ThreadLane::SharedBrowser
+            ),
+            (Some(building_only), false)
+        );
     }
 
     /// A Codex run that saved `state`, so tests can hand it to
@@ -22595,7 +22819,7 @@ mod tests {
             "historyReplayRequired": false,
         });
         let (first_state, marked) =
-            provider_conversation_state_for_this_runtime(Some(stored), false);
+            provider_conversation_state_for_this_runtime(Some(stored), ThreadLane::Building);
         assert!(marked);
         let (first_prompt, _, first_metrics) = build(
             &skill_setup_test_job(SKILL_SETUP_TEST_OPENER),
@@ -22615,7 +22839,7 @@ mod tests {
         fs::write(&fresh_rollout, "").expect("write fresh rollout");
         let codex_state = crate::codex::provider_state_after_fresh_thread(
             first_state.as_ref(),
-            false,
+            ThreadLane::Building,
             &fresh_rollout,
         );
         assert_eq!(codex_state["historyReplayRequired"], true);
@@ -22625,7 +22849,7 @@ mod tests {
             &first_prompt,
             &first_prompt,
             &first_metrics,
-            false,
+            ThreadLane::Building,
         )
         .expect("saved state");
         assert_eq!(saved["historyReplayRequired"], false);
@@ -22639,14 +22863,25 @@ mod tests {
             codex_fields.len()
         );
         for (key, value) in codex_fields {
-            if key != "historyReplayRequired" && key != "defaultThreadRestoreFailed" {
+            if ![
+                "historyReplayRequired",
+                "defaultHistoryReplayRequired",
+                "defaultThreadRestoreFailed",
+            ]
+            .contains(&key.as_str())
+            {
                 assert_eq!(&saved[key], value, "{key}");
             }
         }
+        assert_eq!(saved["defaultHistoryReplayRequired"], false);
         assert_eq!(saved["defaultThreadRestoreSource"], "failed_new");
         assert_eq!(saved["lastThreadRestoreSource"], "failed_new");
         // This turn's thread-state artifact still reports the failed restore.
-        let artifact = build_codex_thread_state_artifact(Some(&codex_state), Some(&saved), false);
+        let artifact = build_codex_thread_state_artifact(
+            Some(&codex_state),
+            Some(&saved),
+            ThreadLane::Building,
+        );
         assert_eq!(artifact["metadata"]["restoreFailed"], true);
         assert_eq!(artifact["metadata"]["restoreSource"], "failed_new");
         assert_eq!(artifact["metadata"]["historyReplayRequired"], false);
@@ -22668,7 +22903,7 @@ mod tests {
             }
         ]));
         let (second_state, marked) =
-            provider_conversation_state_for_this_runtime(Some(saved), false);
+            provider_conversation_state_for_this_runtime(Some(saved), ThreadLane::Building);
         assert!(!marked);
         let (second_prompt, _, second_metrics) =
             build(&second_job, second_request, second_state.as_ref());
@@ -22684,29 +22919,54 @@ mod tests {
                 second_request,
                 false,
                 second_state.as_ref(),
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             Some("stateful_provider_thread_restored")
         );
     }
 
-    /// Codex derives `historyReplayRequired` from both modes' restore flags on every run it
-    /// saves. If a replay that seeded a fresh thread left that mode's flag set, the next run
-    /// in the other mode would raise the request again, and the turn after it would replay
-    /// the history into a thread that already holds it.
+    /// Each lane keeps its own thread and its own replay flag. When one lane's thread is lost,
+    /// that lane replays its history into a fresh thread, while the other lane, whose thread is
+    /// still on this disk, resumes it without a replay. Once replayed, neither lane asks for the
+    /// history again.
     #[test]
-    fn a_thread_seeded_by_a_replay_stays_seeded_across_a_turn_in_the_other_mode() {
+    fn a_lost_thread_replays_only_into_its_own_lane() {
         let tmp = tempdir().expect("temp dir");
         let processor = test_job_processor(tmp.path());
         let project_id = Uuid::new_v4();
-        let job = skill_setup_test_job(SKILL_SETUP_TEST_OPENER);
+        let history = json!([
+            {"role": "user", "content": SKILL_SETUP_TEST_OPENER},
+            {
+                "role": "assistant",
+                "content": SKILL_SETUP_TEST_QUESTION,
+                "metadata": {"source": "agent", "provider": "codex-embedded"}
+            },
+            {"role": "user", "content": "Look up the setup guide's sign-in page.", "lane": "browser"},
+            {"role": "assistant", "content": "The guide's sign-in page asks for a workspace name.", "lane": "browser"},
+        ]);
+        let building_job = skill_setup_history_job(history.clone());
+        let browser_job = test_lease_job(
+            Some("feature"),
+            json!({
+                "conversation_history": history,
+                "metadata": {
+                    "browserTransport": "shared",
+                    "browserPageId": "page-one",
+                    "browserConsentVersion": 1,
+                },
+            }),
+        );
         let request = "What's next in the setup?";
-        let build = |state: Option<&JsonValue>| {
+        let build = |lane: ThreadLane, state: Option<&JsonValue>| {
+            let job = match lane {
+                ThreadLane::Building => &building_job,
+                ThreadLane::SharedBrowser => &browser_job,
+            };
             processor
                 .build_prompt_with_text(
                     &project_id,
-                    &job,
+                    job,
                     tmp.path(),
                     request,
                     true,
@@ -22722,89 +22982,272 @@ mod tests {
             .join("from-the-old-runtime.jsonl")
             .display()
             .to_string();
-        let kept_rollout = tmp.path().join("default-thread.jsonl");
-        fs::write(&kept_rollout, "").expect("write default rollout");
+        let kept_rollout = tmp.path().join("kept-thread.jsonl");
+        fs::write(&kept_rollout, "").expect("write kept rollout");
         let kept_rollout = kept_rollout.display().to_string();
-        let default_thread = Uuid::new_v4().to_string();
+        let building_thread = Uuid::new_v4().to_string();
+        let browser_thread = Uuid::new_v4().to_string();
 
-        for (label, lost_browser, stored) in [
-            // The default thread is lost, and the browser turn resumes the fresh one through
-            // the legacy thread keys.
+        for (lost, other, building_rollout, browser_rollout) in [
             (
-                "default_lost",
-                false,
-                json!({
-                    "provider": "codex-embedded",
-                    "defaultThreadId": default_thread,
-                    "defaultRolloutPath": lost_rollout,
-                    "threadId": default_thread,
-                    "rolloutPath": lost_rollout,
-                    "historyReplayRequired": false,
-                }),
+                ThreadLane::Building,
+                ThreadLane::SharedBrowser,
+                &lost_rollout,
+                &kept_rollout,
             ),
-            // The browser thread is lost while the default thread is still on this disk.
             (
-                "browser_lost",
-                true,
-                json!({
-                    "provider": "codex-embedded",
-                    "defaultThreadId": default_thread,
-                    "defaultRolloutPath": kept_rollout,
-                    "threadId": default_thread,
-                    "rolloutPath": kept_rollout,
-                    "browserThreadId": Uuid::new_v4().to_string(),
-                    "browserRolloutPath": lost_rollout,
-                    "historyReplayRequired": false,
-                }),
+                ThreadLane::SharedBrowser,
+                ThreadLane::Building,
+                &kept_rollout,
+                &lost_rollout,
             ),
         ] {
-            // Turn N replays the history into a fresh thread in the mode that lost it.
+            let label = lost.name();
+            let stored = json!({
+                "provider": "codex-embedded",
+                "defaultThreadId": building_thread,
+                "defaultRolloutPath": building_rollout,
+                "threadId": building_thread,
+                "rolloutPath": building_rollout,
+                "sharedBrowserThreadId": browser_thread,
+                "sharedBrowserRolloutPath": browser_rollout,
+                "defaultHistoryReplayRequired": false,
+                "sharedBrowserHistoryReplayRequired": false,
+                "historyReplayRequired": false,
+            });
+            // The other lane's thread is on this disk: it resumes without a replay.
             let (state, marked) =
-                provider_conversation_state_for_this_runtime(Some(stored), lost_browser);
+                provider_conversation_state_for_this_runtime(Some(stored.clone()), other);
+            assert!(!marked, "{label}");
+            let (_, _, metrics) = build(other, state.as_ref());
+            assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
+
+            // Turn N replays the lane's history into a fresh thread in the lane that lost it.
+            let (state, marked) = provider_conversation_state_for_this_runtime(Some(stored), lost);
             assert!(marked, "{label}");
-            let (prompt, _, metrics) = build(state.as_ref());
+            let (prompt, _, metrics) = build(lost, state.as_ref());
             assert_eq!(metrics["promptMode"], "full", "{label}");
+            assert!(prompt_context_replayed_history(&metrics), "{label}");
             let fresh_rollout = tmp.path().join(format!("{label}-fresh.jsonl"));
             fs::write(&fresh_rollout, "").expect("write fresh rollout");
             let saved = provider_conversation_state_to_save(
                 &codex_run_output(crate::codex::provider_state_after_fresh_thread(
                     state.as_ref(),
-                    lost_browser,
+                    lost,
                     &fresh_rollout,
                 )),
                 &prompt,
                 &prompt,
                 &metrics,
-                lost_browser,
-            );
+                lost,
+            )
+            .expect("saved state");
+            for key in [
+                "defaultHistoryReplayRequired",
+                "sharedBrowserHistoryReplayRequired",
+                "historyReplayRequired",
+            ] {
+                assert_eq!(saved[key], false, "{label} {key}");
+            }
 
-            // Turn N+1 runs in the other mode and resumes a thread that holds the history.
-            let (state, marked) =
-                provider_conversation_state_for_this_runtime(saved, !lost_browser);
+            // Turn N+1 runs in the other lane and resumes its own thread.
+            let (state, marked) = provider_conversation_state_for_this_runtime(Some(saved), other);
             assert!(!marked, "{label}");
-            let (prompt, _, metrics) = build(state.as_ref());
+            let (prompt, _, metrics) = build(other, state.as_ref());
             assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
             let saved = provider_conversation_state_to_save(
                 &codex_run_output(crate::codex::provider_state_after_thread_resumed(
                     state.as_ref().expect("state"),
-                    !lost_browser,
+                    other,
                 )),
                 &prompt,
                 &prompt,
                 &metrics,
-                !lost_browser,
+                other,
             )
             .expect("saved state");
             assert_eq!(saved["historyReplayRequired"], false, "{label}");
 
-            // Turn N+2 is back in the first mode, whose thread already holds the history.
-            let (state, marked) =
-                provider_conversation_state_for_this_runtime(Some(saved), lost_browser);
+            // Turn N+2 is back in the first lane, whose fresh thread already holds its history.
+            let (state, marked) = provider_conversation_state_for_this_runtime(Some(saved), lost);
             assert!(!marked, "{label}");
-            let (_, _, metrics) = build(state.as_ref());
+            let (_, _, metrics) = build(lost, state.as_ref());
             assert_eq!(metrics["promptMode"], "stateful_compact", "{label}");
             assert_eq!(metrics["includedTurns"], 0, "{label}");
         }
+    }
+
+    /// A chat's turns used to share one thread: a browser turn resumed the building thread and
+    /// saved its id as `browserThreadId`. That thread holds the pages its browser turns read, so
+    /// it is retired for both lanes: each starts a thread of its own once, and the state the
+    /// turn saves names neither the old thread nor the old browser keys. Old browser keys that
+    /// name another thread are dropped too; no lane reads them.
+    #[test]
+    fn a_thread_both_lanes_wrote_is_retired_for_both() {
+        let tmp = tempdir().expect("temp dir");
+        let shared_rollout = tmp.path().join("shared.jsonl");
+        fs::write(&shared_rollout, "").expect("write shared rollout");
+        let shared_rollout = shared_rollout.display().to_string();
+        let shared = Uuid::new_v4().to_string();
+        let both_lanes_wrote = json!({
+            "provider": "codex-embedded",
+            "defaultThreadId": shared,
+            "threadId": shared,
+            "defaultRolloutPath": shared_rollout,
+            "rolloutPath": shared_rollout,
+            "defaultThreadRestoreFailed": false,
+            "browserThreadId": shared,
+            "browserRolloutPath": shared_rollout,
+            "browserThreadRestoreFailed": false,
+            "historyReplayRequired": false,
+        });
+        let (state, retired) = split_shared_thread_state(Some(both_lanes_wrote));
+        assert!(retired);
+        let state = state.expect("state");
+        assert_eq!(state["provider"], "codex-embedded");
+        for key in [
+            "defaultThreadId",
+            "threadId",
+            "defaultRolloutPath",
+            "rolloutPath",
+            "browserThreadId",
+            "browserRolloutPath",
+            "browserThreadRestoreFailed",
+            "historyReplayRequired",
+        ] {
+            assert!(state.get(key).is_none(), "{key}: {state}");
+        }
+        for lane in [ThreadLane::Building, ThreadLane::SharedBrowser] {
+            // Nothing claims a thread, so the turn's prompt replays its lane's history into a
+            // new thread, and the state that turn saves holds that thread alone.
+            let (for_run, marked) =
+                provider_conversation_state_for_this_runtime(Some(state.clone()), lane);
+            assert!(!marked);
+            assert!(!provider_state_claims_restored_thread(
+                for_run.as_ref(),
+                lane
+            ));
+            assert!(!crate::codex::provider_thread_restorable_on_this_runtime(
+                for_run.as_ref(),
+                lane
+            ));
+            let fresh = tmp.path().join(format!("{}.jsonl", lane.name()));
+            fs::write(&fresh, "").expect("write fresh rollout");
+            let saved =
+                crate::codex::provider_state_after_fresh_thread(for_run.as_ref(), lane, &fresh);
+            assert!(!saved.to_string().contains(&shared), "{saved}");
+            assert!(saved.get("browserThreadId").is_none());
+        }
+
+        // An old browser thread of its own: dropped, and the building thread is kept.
+        let building = Uuid::new_v4().to_string();
+        let (state, retired) = split_shared_thread_state(Some(json!({
+            "defaultThreadId": building,
+            "threadId": building,
+            "defaultRolloutPath": shared_rollout,
+            "rolloutPath": shared_rollout,
+            "browserThreadId": Uuid::new_v4().to_string(),
+            "browserRolloutPath": tmp.path().join("older-browser.jsonl").display().to_string(),
+        })));
+        assert!(!retired);
+        let state = state.expect("state");
+        assert_eq!(state["defaultThreadId"], building);
+        assert_eq!(state["rolloutPath"], shared_rollout);
+        assert!(state.get("browserThreadId").is_none());
+        assert!(state.get("browserRolloutPath").is_none());
+
+        // A state written since keeps both lanes' threads.
+        let browser = Uuid::new_v4().to_string();
+        let current = json!({
+            "defaultThreadId": building,
+            "threadId": building,
+            "sharedBrowserThreadId": browser,
+        });
+        assert_eq!(
+            split_shared_thread_state(Some(current.clone())),
+            (Some(current), false)
+        );
+        assert_eq!(split_shared_thread_state(None), (None, false));
+    }
+
+    /// A Shared Browser turn runs on its chat's browser thread; every other turn that keeps a
+    /// thread runs on the building thread, also an ordinary turn on a runtime whose browser
+    /// starts with it (`INSTAFY_ENABLE_BROWSER_SESSION`), which has shell tools, and a Personal
+    /// Browser turn, whose thread is its own and never saved.
+    #[test]
+    fn a_boot_time_browser_ordinary_turn_uses_the_building_lane() {
+        for (metadata, lane) in [
+            (json!({}), ThreadLane::Building),
+            (
+                json!({"browserTransport": "desktop-personal"}),
+                ThreadLane::Building,
+            ),
+            (
+                json!({"browserTransport": "shared", "browserPageId": "page-one"}),
+                ThreadLane::SharedBrowser,
+            ),
+        ] {
+            let job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+            assert_eq!(thread_lane_for_job(&job), lane, "{metadata}");
+        }
+    }
+
+    /// A building turn on a restored thread reads what the chat's browser turns found since its
+    /// last turn; on a new or lost thread its replay quotes them instead, and a browser turn
+    /// never reads them.
+    #[test]
+    fn a_restored_building_prompt_carries_the_browser_turns_since() {
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let since = json!([{
+            "request": "Find the opening hours.",
+            "reply": "Open daily, 09:00 to 19:30.",
+            "readAt": "2026-01-05T10:00:00Z",
+            "viewer": "Instafy's browser in the workspace",
+            "outcome": "succeeded",
+        }]);
+        let rollout = tmp.path().join("building.jsonl");
+        fs::write(&rollout, "").expect("write rollout");
+        let restored = json!({
+            "defaultThreadId": Uuid::new_v4().to_string(),
+            "defaultRolloutPath": rollout.display().to_string(),
+            "sharedBrowserThreadId": Uuid::new_v4().to_string(),
+            "historyReplayRequired": false,
+        });
+        let sections = |metadata: JsonValue, state: Option<&JsonValue>| {
+            let job = test_lease_job(
+                Some("feature"),
+                json!({ "metadata": metadata, "browser_turns_since": since.clone() }),
+            );
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Add the hours to the page.",
+                    true,
+                    state,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+            (prompt, metrics["promptSections"].clone())
+        };
+        let (prompt, sections_of) = sections(json!({}), Some(&restored));
+        assert!(
+            sections_of.get("browserTurnsSince").is_some(),
+            "{sections_of}"
+        );
+        assert!(prompt.contains("Open daily, 09:00 to 19:30."));
+        let (_, fresh) = sections(json!({}), None);
+        assert!(fresh.get("browserTurnsSince").is_none(), "{fresh}");
+        let (_, browser) = sections(
+            json!({"browserTransport": "shared", "browserPageId": "page-one", "browserConsentVersion": 1}),
+            Some(&restored),
+        );
+        assert!(browser.get("browserTurnsSince").is_none(), "{browser}");
     }
 
     /// A retry reuses the first prompt's metrics, but the missing-final recoveries rebuild
@@ -22840,7 +23283,7 @@ mod tests {
                 "defaultRolloutPath": tmp.path().join("from-the-old-runtime.jsonl").display().to_string(),
                 "historyReplayRequired": false,
             })),
-            false,
+            ThreadLane::Building,
         );
         assert!(marked);
         let (prompt, _, metrics) = build(state.as_ref());
@@ -22850,8 +23293,11 @@ mod tests {
         // prompt.
         let retry_rollout = tmp.path().join("retry-thread.jsonl");
         fs::write(&retry_rollout, "").expect("write retry rollout");
-        let codex_state =
-            crate::codex::provider_state_after_fresh_thread(state.as_ref(), false, &retry_rollout);
+        let codex_state = crate::codex::provider_state_after_fresh_thread(
+            state.as_ref(),
+            ThreadLane::Building,
+            &retry_rollout,
+        );
         let retry_output = codex_run_output(codex_state.clone());
 
         for (label, retry_prompt) in [
@@ -22885,7 +23331,7 @@ mod tests {
                     &retry_prompt,
                     &prompt,
                     &metrics,
-                    false
+                    ThreadLane::Building
                 )
                 .as_ref(),
                 Some(&codex_state),
@@ -22920,7 +23366,7 @@ mod tests {
                 &retry_prompt,
                 &prompt,
                 &metrics,
-                false,
+                ThreadLane::Building,
             )
             .expect("saved state");
             assert_eq!(saved["historyReplayRequired"], false, "{label}");
@@ -22933,9 +23379,9 @@ mod tests {
             &codex_missing_final_recovery_prompt(request, tmp.path(), &[], false),
             &prompt,
             &metrics,
-            false,
+            ThreadLane::Building,
         );
-        let (state, _) = provider_conversation_state_for_this_runtime(saved, false);
+        let (state, _) = provider_conversation_state_for_this_runtime(saved, ThreadLane::Building);
         let (next_prompt, _, next_metrics) = build(state.as_ref());
         assert_eq!(next_metrics["promptMode"], "full");
         assert_eq!(next_metrics["includedTurns"], 2);
@@ -22972,7 +23418,9 @@ mod tests {
             let rollout = tmp.path().join(format!("{name}.jsonl"));
             fs::write(&rollout, "").expect("write fresh rollout");
             let output = codex_run_output(crate::codex::provider_state_after_fresh_thread(
-                state, false, &rollout,
+                state,
+                ThreadLane::Building,
+                &rollout,
             ));
             assert_eq!(
                 output.provider_conversation_state.as_ref().expect("state")["historyReplayRequired"],
@@ -22990,15 +23438,20 @@ mod tests {
                 "defaultRolloutPath": tmp.path().join("from-the-old-runtime.jsonl").display().to_string(),
                 "historyReplayRequired": false,
             })),
-            false,
+            ThreadLane::Building,
         );
         assert!(marked);
         let (prompt, _, metrics) = build(lost.as_ref());
         assert_eq!(metrics["includedTurns"], 2);
         let output = fresh_thread_output(lost.as_ref(), "first-attempt");
-        let first_attempt =
-            provider_conversation_state_to_save(&output, &prompt, &prompt, &metrics, false)
-                .expect("saved state");
+        let first_attempt = provider_conversation_state_to_save(
+            &output,
+            &prompt,
+            &prompt,
+            &metrics,
+            ThreadLane::Building,
+        )
+        .expect("saved state");
         assert_eq!(first_attempt["historyReplayRequired"], false);
         assert_eq!(first_attempt["defaultThreadRestoreFailed"], false);
 
@@ -23008,16 +23461,27 @@ mod tests {
             &prompt,
             CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson,
         );
-        let resent_retry =
-            provider_conversation_state_to_save(&retry_output, &resent, &prompt, &metrics, false)
-                .expect("saved state");
+        let resent_retry = provider_conversation_state_to_save(
+            &retry_output,
+            &resent,
+            &prompt,
+            &metrics,
+            ThreadLane::Building,
+        )
+        .expect("saved state");
         assert_eq!(resent_retry["historyReplayRequired"], false);
 
         // A missing-final recovery rebuilt the retry prompt from the latest request alone, so
         // its fresh thread lacks the history although the reused metrics say it was replayed.
         let recovery = codex_missing_final_recovery_prompt(request, tmp.path(), &[], false);
         assert_eq!(
-            provider_conversation_state_to_save(&retry_output, &recovery, &prompt, &metrics, false),
+            provider_conversation_state_to_save(
+                &retry_output,
+                &recovery,
+                &prompt,
+                &metrics,
+                ThreadLane::Building
+            ),
             retry_output.provider_conversation_state
         );
 
@@ -23032,14 +23496,20 @@ mod tests {
                 "defaultRolloutPath": rollout.display().to_string(),
                 "historyReplayRequired": false,
             })),
-            false,
+            ThreadLane::Building,
         );
         assert!(!marked);
         let (prompt, _, metrics) = build(restorable.as_ref());
         assert_eq!(metrics["includedTurns"], 0);
         let output = fresh_thread_output(restorable.as_ref(), "unloadable-rollout");
         assert_eq!(
-            provider_conversation_state_to_save(&output, &prompt, &prompt, &metrics, false),
+            provider_conversation_state_to_save(
+                &output,
+                &prompt,
+                &prompt,
+                &metrics,
+                ThreadLane::Building
+            ),
             output.provider_conversation_state
         );
     }
@@ -23067,7 +23537,7 @@ mod tests {
         }
 
         assert_eq!(
-            provider_conversation_state_after_history_replay(None, true, false),
+            provider_conversation_state_after_history_replay(None, true, ThreadLane::Building),
             None
         );
         for (label, prompt_replayed_history, state) in [
@@ -23086,7 +23556,8 @@ mod tests {
                 true,
                 json!({
                     "defaultThreadRestoreFailed": false,
-                    "browserThreadRestoreFailed": true,
+                    "sharedBrowserThreadRestoreFailed": true,
+                    "sharedBrowserHistoryReplayRequired": true,
                     "historyReplayRequired": true,
                 }),
             ),
@@ -23095,7 +23566,7 @@ mod tests {
                 provider_conversation_state_after_history_replay(
                     Some(state.clone()),
                     prompt_replayed_history,
-                    false
+                    ThreadLane::Building
                 ),
                 Some(state),
                 "{label}"
@@ -23103,36 +23574,43 @@ mod tests {
         }
 
         // The browser thread lost its history on an earlier turn and has not had a replay
-        // since, so the next browser turn still needs one. The default thread is seeded.
+        // since, so the next browser turn still needs one. The building thread is seeded.
         let default_seeded = provider_conversation_state_after_history_replay(
             Some(json!({
                 "defaultThreadRestoreFailed": true,
-                "browserThreadRestoreFailed": true,
+                "sharedBrowserThreadRestoreFailed": true,
+                "defaultHistoryReplayRequired": true,
+                "sharedBrowserHistoryReplayRequired": true,
                 "historyReplayRequired": true,
             })),
             true,
-            false,
+            ThreadLane::Building,
         )
         .expect("state");
+        assert_eq!(default_seeded["defaultHistoryReplayRequired"], false);
+        assert_eq!(default_seeded["sharedBrowserHistoryReplayRequired"], true);
         assert_eq!(default_seeded["historyReplayRequired"], true);
         assert_eq!(default_seeded["defaultThreadRestoreFailed"], false);
-        assert_eq!(default_seeded["browserThreadRestoreFailed"], true);
+        assert_eq!(default_seeded["sharedBrowserThreadRestoreFailed"], true);
 
-        // A browser turn replayed into its fresh thread while the default thread is fine.
+        // A browser turn replayed into its fresh thread while the building thread is fine.
         let browser = provider_conversation_state_after_history_replay(
             Some(json!({
                 "defaultThreadRestoreFailed": false,
-                "browserThreadRestoreFailed": true,
-                "browserThreadRestoreSource": "failed_new",
+                "sharedBrowserThreadRestoreFailed": true,
+                "sharedBrowserThreadRestoreSource": "failed_new",
+                "defaultHistoryReplayRequired": false,
+                "sharedBrowserHistoryReplayRequired": true,
                 "historyReplayRequired": true,
             })),
             true,
-            true,
+            ThreadLane::SharedBrowser,
         )
         .expect("state");
         assert_eq!(browser["historyReplayRequired"], false);
-        assert_eq!(browser["browserThreadRestoreFailed"], false);
-        assert_eq!(browser["browserThreadRestoreSource"], "failed_new");
+        assert_eq!(browser["sharedBrowserHistoryReplayRequired"], false);
+        assert_eq!(browser["sharedBrowserThreadRestoreFailed"], false);
+        assert_eq!(browser["sharedBrowserThreadRestoreSource"], "failed_new");
     }
 
     #[test]
@@ -23762,12 +24240,13 @@ mod tests {
         // opens public addresses only and a site in the space is a preview card.
         // Since Oct 28 it says which card continues building (`continueBuilding`).
         // Since Oct 29 it says never to ask the person to enable the browser.
-        // Since Oct 31 it says a reply never says what the browser will submit,
-        // send or buy, which asks the person first, and that a card which
-        // continues building asks only what to find or check.
+        // Since Oct 31 it says that a card which continues building asks only
+        // what to find or check, and that a turn with only the card may not
+        // show its reply, while a reply beside a card still never promises a
+        // page or a submit.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 540,
+            browser_choice <= 560,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
@@ -24324,6 +24803,195 @@ mod tests {
         assert!(!without.contains("instafy agents status"));
     }
 
+    /// The routing step may send a message straight to Instafy's browser only where the browser
+    /// skill says when: the space's copy has its "Routing preflight" section, and the turn is an
+    /// interactive one that could ask for the browser itself, with no attachments and words a
+    /// card could carry. Anywhere else the routes are not offered, and the routing prompt keeps
+    /// today's line about a card that hands back.
+    #[test]
+    fn the_routing_prompt_offers_browser_routes_only_with_the_skill_section() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let request = "Open forms.example/order in your browser and fill in a test order.";
+        // The person's own words: the job's prompt as dispatch stored it.
+        let job_saying = |metadata: JsonValue, words: &str| {
+            test_lease_job(
+                Some("feature"),
+                json!({ "prompt_text": words, "metadata": metadata }),
+            )
+        };
+        let job = |metadata: JsonValue| job_saying(metadata, request);
+        let routes = browser_routing_snapshot_for_job(&job(json!({})), tmp.path(), request)
+            .expect("an ordinary message is offered the browser routes");
+        assert!(routes.contains("## Routing preflight"), "{routes}");
+        let prompt = build_agent_routing_preflight_prompt_with_browser_routes(
+            tmp.path(),
+            request,
+            None,
+            None,
+            Some(&routes),
+        );
+        assert!(prompt.contains(
+            "- `browser`: runs in Instafy's browser from its first step; its reply answers."
+        ));
+        assert!(
+            prompt.contains("- `browser_then_build`: the same, then a build from what it found.")
+        );
+        // Whatever the route, a request that needs the browser before a change writes no file in
+        // its own turn. A direct one runs where it can post its card, which hands back to a
+        // build: routed as a change that must write files, it would run in the lane that cannot
+        // ask for the browser.
+        assert!(prompt.contains(
+            "A request that needs Instafy's browser to find something before a change has `workspaceFileChangeRequirement: none`"
+        ));
+        assert!(prompt.contains(
+            "with `browser` or `browser_then_build` the browser changes no file and a build after it is its own turn"
+        ));
+        assert!(
+            prompt.contains("with `direct` its card hands back to a build"),
+            "{prompt}"
+        );
+        assert!(prompt.contains(&routes));
+
+        let without = build_agent_routing_preflight_prompt(tmp.path(), request, None, None);
+        assert!(!without.contains("`browser`:"), "{without}");
+        assert!(!without.contains("browser_then_build"), "{without}");
+        assert!(without.contains("its card hands back to a build"));
+
+        for (label, metadata, text) in [
+            (
+                "unattended",
+                json!({"automation": {"id": "nightly"}}),
+                request.to_string(),
+            ),
+            (
+                "space review",
+                json!({"spaceReview": {"id": "review"}}),
+                request.to_string(),
+            ),
+            (
+                "hand-back",
+                json!({"browserHandBack": {"verified": true, "reply": "Read 1 page."}}),
+                request.to_string(),
+            ),
+            (
+                "shared browser turn",
+                json!({"browserTransport": "shared", "browserPageId": "page-one"}),
+                request.to_string(),
+            ),
+            (
+                "personal browser turn",
+                json!({"browserTransport": "desktop-personal"}),
+                request.to_string(),
+            ),
+            (
+                "attachments",
+                json!({"attachments": [{"name": "photo.png", "storagePath": "a/photo.png"}]}),
+                request.to_string(),
+            ),
+            ("too long for a card", json!({}), "x".repeat(8_001)),
+            // A group chat's turn where Octo first decides whether to answer at all: words
+            // between two people never go to the browser on their own.
+            (
+                "ambient group turn",
+                json!({"groupParticipation": {
+                    "decision": "agent_evaluation",
+                    "reason": "skill_mode_ambient",
+                    "enforcedBy": "runtime-controller",
+                }}),
+                request.to_string(),
+            ),
+        ] {
+            assert_eq!(
+                browser_routing_snapshot_for_job(&job_saying(metadata, &text), tmp.path(), &text),
+                None,
+                "{label}"
+            );
+        }
+        // A prompt the runtime wrote for a command (`/learn apply`) is not the person's words,
+        // so no card carries it.
+        assert_eq!(
+            browser_routing_snapshot_for_job(
+                &job_saying(json!({}), "/learn apply"),
+                tmp.path(),
+                request
+            ),
+            None
+        );
+
+        // A space whose copy of the skill predates the section keeps today's routes.
+        let older = tempdir().expect("temp dir");
+        let skill = older
+            .path()
+            .join(".agents/skills/instafy-browser-automation/SKILL.md");
+        fs::create_dir_all(skill.parent().expect("dir")).expect("skill dir");
+        fs::write(
+            &skill,
+            "# Browser automation\n\n## Finding a page\nRead the place's own site.\n",
+        )
+        .expect("write skill");
+        assert_eq!(
+            browser_routing_snapshot_for_job(&job(json!({})), older.path(), request),
+            None
+        );
+
+        for (raw, continue_building) in [
+            ("browser", false),
+            ("browser_then_build", true),
+            ("Browser-Then-Build", true),
+        ] {
+            assert_eq!(
+                parse_agent_routing_preflight_route(raw),
+                Some(AgentRoutingPreflightRoute::Browser { continue_building }),
+                "{raw}"
+            );
+        }
+    }
+
+    /// A message sent straight to Instafy's browser ends its job with the routed card alone: its
+    /// task is the person's own words, it says whether Octo builds after it, and the job has no
+    /// reply, no run log and no provider state. A message no card could carry gets none.
+    #[test]
+    fn a_browser_route_ends_the_job_with_a_routed_card() {
+        let preflight = json!({"kind": "agent/routing-preflight", "route": "browser_then_build"});
+        let execution = routed_browser_execution(
+            "  In your browser, find each laptop's weight and add it to the page.  ",
+            true,
+            preflight.clone(),
+        )
+        .expect("routed card");
+        assert_eq!(execution.summary, "");
+        assert!(execution.messages.is_empty());
+        assert_eq!(execution.provider_conversation_state, None);
+        assert_eq!(execution.artifacts, vec![preflight.clone()]);
+        assert_eq!(execution.final_messages.len(), 1);
+        let card = &execution.final_messages[0];
+        assert_eq!(card.message_type.as_deref(), Some("action_request"));
+        let metadata = card.metadata.as_ref().expect("card metadata");
+        assert_eq!(
+            metadata["details"]["browserRequest"],
+            json!({
+                "task": "In your browser, find each laptop's weight and add it to the page.",
+                "location": "auto",
+                "continueBuilding": true,
+                "routed": true,
+            })
+        );
+        let question = routed_browser_execution(
+            "Open example.com in your browser.",
+            false,
+            preflight.clone(),
+        )
+        .expect("routed card");
+        assert_eq!(
+            question.final_messages[0].metadata.as_ref().unwrap()["details"]["browserRequest"],
+            json!({"task": "Open example.com in your browser.", "location": "auto", "routed": true})
+        );
+        for task in ["   ".to_string(), "🌍".repeat(4_001)] {
+            assert!(routed_browser_execution(&task, false, preflight.clone()).is_none());
+        }
+    }
+
     #[test]
     fn packaged_routing_policy_fits_both_preflight_budgets() {
         let tmp = tempdir().unwrap();
@@ -24638,15 +25306,97 @@ mod tests {
         assert!(!BROWSER_CHOICE_CONTRACT.contains('\u{2014}'));
     }
 
-    /// A reply with only a card says what the card does, and never what the
-    /// browser will submit, send or buy (a card's reply once said it would "use
-    /// made-up details and submit the form as requested"): that step asks the
-    /// person first, and they may say no.
+    /// A turn whose only action is a browser card posts the card alone. What a
+    /// model wrote beside it promised what the browser had not done, the
+    /// submit the person then said no to among them, although the contract
+    /// told it not to. A turn that also asks for something else, or reports a
+    /// file, keeps its reply, and so does a turn with no card.
     #[test]
-    fn a_card_reply_never_says_what_the_browser_will_submit_send_or_buy() {
+    fn a_turn_with_only_a_card_posts_the_card_and_no_reply_of_its_own() {
+        let card = json!({
+            "type": "request_browser",
+            "task": "Open httpbin.org/forms/post, fill in a test pizza order using made-up details, and submit it."
+        });
+        let said = "I've sent the test pizza order task to Instafy's browser. The browser will handle the form and submission.";
+        let ordinary = test_lease_job(Some("feature"), json!({}));
+        let posted_in = |job: &LeaseJob, raw: JsonValue| {
+            let mut outcome = extract_codex_outcome(&raw).expect("extract outcome");
+            post_only_the_card(job, &mut outcome);
+            let messages = build_final_messages_from_outcome(&outcome, None);
+            (outcome.summary, messages)
+        };
+        let posted = |raw: JsonValue| posted_in(&ordinary, raw);
+
+        let (reply, messages) = posted(json!({ "summary": said, "files": [], "actions": [card] }));
+        assert_eq!(reply, "");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_type.as_deref(), Some("action_request"));
+        // Two cards in one turn are still one card, and its reply still none.
+        let (reply, messages) = posted(json!({ "summary": said, "actions": [card, card] }));
+        assert_eq!(reply, "");
+        assert_eq!(messages.len(), 1);
+
+        let secret = json!({ "type": "request_secret", "name": "EXAMPLE_TOKEN" });
+        let file = json!({ "path": "sites/order/index.html", "content": "<p>Order</p>" });
+        for raw in [
+            json!({ "summary": said, "files": [], "actions": [secret, card] }),
+            json!({ "summary": said, "files": [file], "actions": [card] }),
+            json!({ "summary": said, "files": [], "actions": [] }),
+        ] {
+            assert_eq!(posted(raw.clone()).0, said, "{raw}");
+        }
+        // A turn the controller asks to decide whether to answer at all keeps
+        // its words: an empty reply there reads as no answer.
+        let evaluated = test_lease_job(
+            Some("feature"),
+            json!({ "metadata": { "groupParticipation": {
+                "decision": "agent_evaluation",
+                "reason": "skill_mode_ambient",
+                "enforcedBy": "runtime-controller"
+            } } }),
+        );
+        assert_eq!(
+            posted_in(&evaluated, json!({ "summary": said, "actions": [card] })).0,
+            said
+        );
+        // A skill setup's reply carries its walk and its next question.
+        let setup = skill_setup_test_job(SKILL_SETUP_TEST_OPENER);
+        let walk = "Instafy's browser opens the provider's sign-in page. Which workspace should the token belong to?";
+        let (reply, messages) = posted_in(
+            &setup,
+            json!({ "summary": walk, "files": [], "actions": [card] }),
+        );
+        assert_eq!(reply, walk);
+        assert_eq!(messages.len(), 1);
+    }
+
+    /// The turns that still post a reply beside a card (a card with another
+    /// action or a reported file, a skill setup, an evaluated turn) carry the
+    /// browser rule, and the rule still says what such a reply never says: the
+    /// submit the person later refused ("The browser will handle the form and
+    /// submission.") came from a turn like these. It also tells the model that
+    /// a turn with only the card may show no reply, so nothing the person
+    /// needs is written where it is dropped.
+    #[test]
+    fn a_reply_beside_a_card_never_promises_and_a_lone_card_may_show_none() {
         assert!(BROWSER_CHOICE_CONTRACT.contains(
-            "or what the browser will submit, send or buy: that step asks the person first."
+            "- A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n"
         ));
+        let evaluated = test_lease_job(
+            Some("feature"),
+            json!({ "metadata": { "groupParticipation": {
+                "decision": "agent_evaluation",
+                "reason": "skill_mode_ambient",
+                "enforcedBy": "runtime-controller"
+            } } }),
+        );
+        for job in [
+            test_lease_job(Some("feature"), json!({})),
+            evaluated,
+            skill_setup_test_job(SKILL_SETUP_TEST_OPENER),
+        ] {
+            assert!(browser_choice_applies(&job, false, false, false, false));
+        }
     }
 
     /// A card that continues building asks the browser only what to find or
@@ -24786,8 +25536,11 @@ mod tests {
         let tmp = tempdir().expect("temp dir");
         let processor = test_job_processor(tmp.path());
         let project_id = Uuid::new_v4();
-        let provider_state =
-            json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
+        let provider_state = json!({
+            "defaultThreadId": "existing-thread",
+            "sharedBrowserThreadId": "existing-browser-thread",
+            "historyReplayRequired": false,
+        });
         let reminder = |metadata: JsonValue| {
             let job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
             let (prompt, _, _) = processor
@@ -24844,7 +25597,6 @@ mod tests {
         };
         let outcome_with_card = || CodexOutcome {
             summary: "Instafy's browser will open the pricing page.".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -25251,7 +26003,6 @@ mod tests {
     fn conditional_write_no_change_is_valid_but_required_edits_remain_required() {
         let outcome = CodexOutcome {
             summary: "Reviewed the implementation and ran the tests; no warranted changes.".into(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -25388,7 +26139,6 @@ mod tests {
         );
         let outcome = CodexOutcome {
             summary: "Refined the implementation.".into(),
-            suggested_replies: Vec::new(),
             files,
             read_files: Vec::new(),
             snippet: None,
@@ -26128,14 +26878,19 @@ mod tests {
             };
             let mut summary = "internal no-final fallback".to_string();
             let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
-            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal, false);
             assert_eq!(summary, expected);
             assert!(!summary.contains(code), "the person never reads {code}");
             assert_eq!(fallback, None);
 
             let mut false_success = "Done — the requested browser action succeeded.".to_string();
             let mut no_fallback = None;
-            apply_terminal_shared_browser_summary(&mut false_success, &mut no_fallback, terminal);
+            apply_terminal_shared_browser_summary(
+                &mut false_success,
+                &mut no_fallback,
+                terminal,
+                false,
+            );
             assert_eq!(
                 false_success, expected,
                 "terminal consent must never preserve a false success summary"
@@ -26155,7 +26910,7 @@ mod tests {
         ] {
             let mut summary = "Done.".to_string();
             let mut fallback = None;
-            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, Some(code));
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, Some(code), true);
             assert_eq!(
                 summary,
                 "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again."
@@ -26201,12 +26956,84 @@ mod tests {
         ));
         let mut summary = "Still working on it.".to_string();
         let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
-        apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
+        apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal, false);
         assert_eq!(
             summary,
             "Instafy's browser closed or stopped responding, so I stopped there. Open the browser again and send a message to continue."
         );
         assert_eq!(fallback, None);
+    }
+
+    /// A turn that pauses for the person's input right after Octo's last reply
+    /// was such a pause says that the browser is still waiting. Let Octo
+    /// continue pressed without signing in got the first pause's reply word for
+    /// word, so the press looked as if it did nothing. The words hold on any
+    /// page that pauses: a pause for a one-time code, a consent screen or a
+    /// card form follows a sign-in the person did complete, with the same
+    /// history, so they never claim the page is a sign-in page, and they keep
+    /// saying that those details stay out of chat. A pause after any other
+    /// reply, or in a chat with no history, reads as the first one does.
+    #[test]
+    fn a_pause_right_after_a_pause_says_the_browser_is_still_waiting() {
+        let continue_prompt = "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
+        let job = |history: JsonValue| {
+            test_lease_job(Some("feature"), json!({ "conversation_history": history }))
+        };
+        let row = |role: &str, content: &str| json!({ "role": role, "content": content });
+        let after_a_pause = job(json!([
+            row(
+                "user",
+                "Open github.com, sign me in, then star the repository."
+            ),
+            row(
+                "assistant",
+                "Tool call completed: instafy_shared_browser/request_human_input"
+            ),
+            row("assistant", HUMAN_INPUT_PAUSE_REPLY),
+            row("user", continue_prompt),
+        ]));
+        assert!(last_reply_was_a_pause(&after_a_pause));
+        let mut summary = "The fresh snapshot still shows the sign-in page.".to_string();
+        let mut fallback = None;
+        apply_terminal_shared_browser_summary(
+            &mut summary,
+            &mut fallback,
+            Some("human_input_required"),
+            last_reply_was_a_pause(&after_a_pause),
+        );
+        assert_eq!(
+            summary,
+            "Instafy's browser is still waiting for you. Sign in or fill in the highlighted fields on the page, then choose Let Octo continue. I don't ask for those details in chat."
+        );
+        assert_ne!(summary, HUMAN_INPUT_PAUSE_REPLY);
+        for claim in ["sign-in page", "Sign in there"] {
+            assert!(!summary.contains(claim), "{claim}");
+        }
+        // A third press reads the same: the last reply was a pause too.
+        let after_two = job(json!([
+            row("assistant", HUMAN_INPUT_PAUSE_AGAIN_REPLY),
+            row("user", continue_prompt),
+        ]));
+        assert!(last_reply_was_a_pause(&after_two));
+
+        for first in [
+            job(json!([row("user", "Open github.com and sign me in.")])),
+            job(json!([
+                row("assistant", "The shop is open daily from 09:00 to 19:30."),
+                row("user", "Now sign me in to the shop."),
+            ])),
+            test_lease_job(Some("feature"), json!({})),
+        ] {
+            assert!(!last_reply_was_a_pause(&first));
+            let mut summary = String::new();
+            apply_terminal_shared_browser_summary(
+                &mut summary,
+                &mut None,
+                Some("human_input_required"),
+                last_reply_was_a_pause(&first),
+            );
+            assert_eq!(summary, HUMAN_INPUT_PAUSE_REPLY);
+        }
     }
 
     /// Under routine browsing a turn opens pages and clicks before the step
@@ -26259,7 +27086,7 @@ mod tests {
 
             let mut summary = "Opened the invoice and saved it.".to_string();
             let mut fallback = None;
-            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal);
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal, false);
             let lowered = summary.to_lowercase();
             for whole_turn in ["nothing was", "nothing has", "no changes"] {
                 assert!(
@@ -26869,7 +27696,6 @@ mod tests {
         );
         let mut outcome = CodexOutcome {
             summary: "worker tried to spawn a nested plan".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -26900,86 +27726,56 @@ mod tests {
         );
     }
 
-    // A local test: a build turn's plain-text reply ended with three quoted replies joined by
-    // " · ", which showed as text instead of buttons.
+    // Studio showed no reply a turn offered (a local test, Oct 31: three replies carried four, and
+    // none was on screen), and Enter in an empty composer sent the first of them, so Octo is no
+    // longer asked for any. A thread started before that still holds the plain-text lanes' old
+    // instruction to end a reply with them on its own line (`"A" · "B"`, said to show as buttons),
+    // and a later turn there keeps doing it: that line leaves the reply and goes nowhere, as it did
+    // when it became buttons, and the note that repeats the reply among the turn's steps reads the
+    // same. Any other last line is the reply's own words, and nothing is kept as an offer.
     #[test]
-    fn replies_offered_on_the_last_line_become_buttons() {
+    fn a_reply_leaves_out_the_line_of_replies_an_older_thread_still_offers() {
         let reply = "Built and opened a comparison page.\n\nAssumed: boards means the newest ones.";
-        let outcome = extract_codex_outcome(&json!({
-            "summary": format!(
-                "{reply}\n\n“Include the keyboard model too” · “Find independent reviews” · \"Show prices in euros\"\n"
-            ),
-            "files": []
-        }))
-        .expect("extract outcome");
-        assert_eq!(outcome.summary, reply);
-        assert_eq!(
-            outcome.suggested_replies,
-            vec![
-                "Include the keyboard model too",
-                "Find independent reviews",
-                "Show prices in euros"
-            ]
-        );
-        // With the `suggestions` field too, each reply once and at most three.
-        let outcome = extract_codex_outcome(&json!({
-            "summary": format!("{reply}\n“Find independent reviews” · “Show prices in euros”"),
-            "suggestions": ["Find independent reviews", "Add a fourth board", "Make it shorter"]
-        }))
-        .expect("extract outcome");
-        assert_eq!(outcome.summary, reply);
-        assert_eq!(
-            outcome.suggested_replies,
-            vec![
-                "Find independent reviews",
-                "Add a fourth board",
-                "Make it shorter"
-            ]
-        );
+        for offered in [
+            "\u{201c}Include the keyboard model too\u{201d} \u{b7} \u{201c}Find independent reviews\u{201d}",
+            "\"Check current prices and weights\" \u{b7} \"Find two independent reviews per model\"",
+        ] {
+            let text = format!("{reply}\n\n{offered}\n");
+            let outcome = extract_codex_outcome(&json!({
+                "summary": text,
+                "files": [],
+                "suggestions": ["Find independent reviews", "Add a fourth board"]
+            }))
+            .expect("extract outcome");
+            assert_eq!(outcome.summary, reply, "{offered}");
+
+            let marked = format!("{reply}\n{offered}\nNO_FILE_CHANGES");
+            let messages = extract_codex_messages(&[json!({
+                "type": "item.completed",
+                "item": { "type": "agent_message", "text": marked },
+            })]);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].content, reply, "{offered}");
+            let outcome = extract_codex_outcome(&json!({ "summary": marked, "files": [] }))
+                .expect("extract outcome");
+            assert_eq!(
+                take_no_file_changes_marker(&outcome.summary).as_deref(),
+                Some(reply),
+                "{offered}"
+            );
+        }
         // Any other last line stays the reply's own words.
         for summary in [
-            "Done.\n“Find independent reviews”",
-            "Done.\nTry “Find independent reviews” · “Show prices in euros”",
-            "Done.\n“A” · “B” · “C” · “D”",
-            "Done.\n“” · “B”",
-            "“Find independent reviews” · “Show prices in euros”",
-            "Done. “Find independent reviews” · “Show prices in euros”",
+            "Done.\n\u{201c}Find independent reviews\u{201d}",
+            "Done.\nTry \u{201c}Find independent reviews\u{201d} \u{b7} \u{201c}Show prices in euros\u{201d}",
+            "Done.\n\u{201c}A\u{201d} \u{b7} \u{201c}B\u{201d} \u{b7} \u{201c}C\u{201d} \u{b7} \u{201c}D\u{201d}",
+            "Done.\n\u{201c}\u{201d} \u{b7} \u{201c}B\u{201d}",
+            "\u{201c}Find independent reviews\u{201d} \u{b7} \u{201c}Show prices in euros\u{201d}",
+            "Done. \u{201c}Find independent reviews\u{201d} \u{b7} \u{201c}Show prices in euros\u{201d}",
         ] {
             let outcome = extract_codex_outcome(&json!({ "summary": summary, "files": [] }))
                 .expect("extract outcome");
             assert_eq!(outcome.summary, summary, "{summary}");
-            assert!(outcome.suggested_replies.is_empty(), "{summary}");
-        }
-    }
-
-    // The note that repeats a plain-text reply among the turn's steps reads as the reply does:
-    // Studio leaves it out of Details only when the two match, so replies moved to buttons
-    // leave the note too, also when the runtime's no-change line follows them.
-    #[test]
-    fn the_note_that_repeats_the_reply_loses_its_offered_replies_too() {
-        let reply = "Built the page.";
-        for text in [
-            format!("{reply}\n\n“Find independent reviews” · “Show prices in euros”"),
-            format!(
-                "{reply}\n“Find independent reviews” · “Show prices in euros”\nNO_FILE_CHANGES"
-            ),
-        ] {
-            let messages = extract_codex_messages(&[json!({
-                "type": "item.completed",
-                "item": { "type": "agent_message", "text": text },
-            })]);
-            assert_eq!(messages.len(), 1, "{text}");
-            let outcome = extract_codex_outcome(&json!({ "summary": text, "files": [] }))
-                .expect("extract outcome");
-            let summary = take_no_file_changes_marker(&outcome.summary)
-                .unwrap_or_else(|| outcome.summary.clone());
-            assert_eq!(summary, reply, "{text}");
-            assert_eq!(messages[0].content, summary, "{text}");
-            assert_eq!(
-                outcome.suggested_replies,
-                vec!["Find independent reviews", "Show prices in euros"],
-                "{text}"
-            );
         }
     }
 
@@ -27082,9 +27878,9 @@ mod tests {
                 "Review the prepared source path.",
                 false,
                 None,
-                false,
+                ThreadLane::Building,
                 // Write-scoped worker lanes still report the worker-lane reason.
-                true,
+                true
             ),
             Some("focused_multi_agent_worker_lane")
         );
@@ -27108,8 +27904,8 @@ mod tests {
                 "Review sibling outcomes.",
                 false,
                 None,
-                false,
-                false,
+                ThreadLane::Building,
+                false
             ),
             Some("focused_multi_agent_lead_continuation")
         );
@@ -29518,7 +30314,7 @@ mod tests {
         assert!(prompt.contains("Do not substitute shell searches over raw runtime/session"));
         assert!(prompt.contains("Do not answer from raw runtime/session logs"));
         assert!(prompt.contains(
-            "{ \"summary\": string, \"files\": [], optional \"suggestions\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown."
+            "{ \"summary\": string, \"files\": [], optional \"actions\": [] }. Do not wrap JSON in Markdown."
         ));
         assert_prompt_carries_secret_rejection_contract(&prompt);
         let sections = metrics
@@ -30236,7 +31032,6 @@ mod tests {
         };
         let outcome = CodexOutcome {
             summary: "ok".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -32691,7 +33486,6 @@ mod tests {
     fn coordination_required_action_defers_workspace_file_expectation_without_team_card() {
         let outcome = CodexOutcome {
             summary: "This needs a single owner before editing.".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -32709,7 +33503,6 @@ mod tests {
     fn coordination_required_summary_alone_does_not_defer_workspace_file_expectation() {
         let outcome = CodexOutcome {
             summary: "This has overlapping write-scope ownership, so coordination is required before editing.".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -32846,7 +33639,6 @@ mod tests {
     fn multi_agent_plan_action_defers_workspace_file_expectation() {
         let outcome = CodexOutcome {
             summary: "planned".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -32863,7 +33655,6 @@ mod tests {
 
         let plain_outcome = CodexOutcome {
             summary: "no action".to_string(),
-            suggested_replies: Vec::new(),
             files: Vec::new(),
             read_files: Vec::new(),
             snippet: None,
@@ -33051,50 +33842,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_onboarding_suggestions_adds_retry_prompts() {
-        let mut suggestions = vec!["Existing hint".to_string()];
-        let actions = vec![
-            CodexAction::RequestIntegration {
-                provider: "example".to_string(),
-                description: None,
-                required_scopes: Vec::new(),
-                capabilities: Vec::new(),
-                auth_methods: Vec::new(),
-                suggested_secret_names: Vec::new(),
-                suggested_secrets: Vec::new(),
-                agent_handles: vec!["octo".to_string()],
-            },
-            CodexAction::RequestSecret {
-                name: "EXAMPLE_TOKEN".to_string(),
-                description: None,
-                value_label: None,
-                where_to_get: None,
-                skill: None,
-                sensitive: Some(true),
-                agent_handles: vec!["octo".to_string()],
-                refused_class: None,
-            },
-        ];
-
-        ensure_onboarding_suggestions(&mut suggestions, &actions);
-
-        assert!(
-            suggestions
-                .iter()
-                .any(|item| item == "I connected Example. Retry now.")
-        );
-        // A secret gets no chip: its card saves the value and continues the
-        // run itself, and a second phrasing of the same step is what made the
-        // card read as two competing paths.
-        assert!(
-            !suggestions
-                .iter()
-                .any(|item| item.contains("EXAMPLE_TOKEN"))
-        );
-        assert!(suggestions.len() <= MAX_UI_SUGGESTED_REPLIES);
-    }
-
-    #[test]
     fn augment_summary_for_onboarding_actions_says_nothing_extra_about_a_secret() {
         // The card is a few pixels below this sentence and its caption already
         // says where the value is kept. A line here made one ask arrive three
@@ -33209,7 +33956,6 @@ mod tests {
         );
         let mut outcome = CodexOutcome {
             summary: String::new(),
-            suggested_replies: vec![],
             files: vec![],
             read_files: vec![],
             snippet: None,

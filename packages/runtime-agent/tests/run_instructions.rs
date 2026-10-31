@@ -1,7 +1,9 @@
 //! Every turn reads its own run's instructions: on a fresh provider thread, and on a thread a
-//! later turn resumes from its rollout. A chat's turns share one thread, and a card's Shared
-//! Browser turn resumes the chat's default thread, so a run's lane text, browser policy and turn
-//! note must reach a resumed thread too, once, and only when they change.
+//! later turn resumes from its rollout. A chat keeps two threads: its Shared Browser turns run on
+//! its browser thread, every other turn that keeps a thread on its building thread. Neither
+//! thread ever holds the other lane's turns: a building turn reads what the browser found only as
+//! quoted page data, and a browser turn reads only its request. A run's lane text, browser policy
+//! and turn note must reach a resumed thread too, once, and only when they change.
 //!
 //! Real job processor and real proxy (the ChatGPT transport, and the API-key one for chain T), an
 //! inert localhost provider, the real `provider-mcp` broker for a granted turn and the real
@@ -251,11 +253,17 @@ fn remove_env(key: &str) {
     unsafe { std::env::remove_var(key) };
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Step {
-    Final { total_tokens: u64 },
+    Final {
+        total_tokens: u64,
+    },
     Fail502,
-    ExecCommand { total_tokens: u64 },
+    ExecCommand {
+        total_tokens: u64,
+    },
+    /// The routing step's answer: one JSON object, as the routing schema asks.
+    Routing(Value),
 }
 
 struct Provider {
@@ -368,7 +376,33 @@ async fn provider_request(
             total_tokens,
             false,
         ),
+        Step::Routing(answer) => fixture_response(
+            streams,
+            json!({
+                "id":format!("msg_{}",Uuid::new_v4()),"type":"message","role":"assistant",
+                "status":"completed","phase":"final_answer",
+                "content":[{"type":"output_text","text":answer.to_string()}]
+            }),
+            80,
+            false,
+        ),
     }
+}
+
+/// The routing step's answer that sends the message straight to Instafy's browser.
+fn browser_route(continue_building: bool) -> Value {
+    json!({
+        "summary": "The person names Instafy's browser.",
+        "route": if continue_building { "browser_then_build" } else { "browser" },
+        "reason": "The message names Instafy's browser.",
+        "selectedSkills": ["instafy-browser-automation"],
+        "confidence": 90,
+        "requiresContextLookup": false,
+        "requiresCommandExecution": false,
+        "workspaceFileChangeRequirement": "none",
+        "observationCommands": [],
+        "workerQuestionReply": null
+    })
 }
 
 /// The Personal Browser's desktop broker, as the proxy_integration Personal Browser probe
@@ -539,6 +573,9 @@ struct Spec {
     /// Metadata the job carries next to its lane's own, as Studio and the controller would
     /// have set it (a card's continuation, a checked hand-back).
     metadata: Value,
+    /// The routing step runs first and sends the message straight to Instafy's browser, with
+    /// `continueBuilding` when set: the job ends with its routed card.
+    routed: Option<bool>,
 }
 
 impl Spec {
@@ -554,7 +591,15 @@ impl Spec {
             script: Vec::new(),
             prompt: None,
             metadata: json!({}),
+            routed: None,
         }
+    }
+
+    /// A message the routing step sends straight to Instafy's browser.
+    fn routed(mut self, continue_building: bool) -> Self {
+        self.routed = Some(continue_building);
+        self.script = vec![Step::Routing(browser_route(continue_building))];
+        self
     }
 
     fn asking(mut self, prompt: &'static str) -> Self {
@@ -590,12 +635,18 @@ impl Spec {
 struct Turn {
     label: &'static str,
     lane: Lane,
+    conversation: Uuid,
     job_id: Uuid,
     run_id: Uuid,
     expected: Vec<&'static str>,
     requests: Vec<Value>,
     /// Whether the stub answered each request (`Provider::requests`).
     answered: Vec<bool>,
+    /// The routing step sent the message straight to Instafy's browser: the job's only request
+    /// was the routing call, and it ended with its card (`routed_messages`).
+    routed: bool,
+    /// The messages the job ended with, as the runtime posts them.
+    final_messages: Vec<Value>,
     /// The provider state the job saved, or why it failed.
     outcome: std::result::Result<Option<Value>, String>,
 }
@@ -613,6 +664,9 @@ struct Harness {
     /// Whether each older thread's rollout could be made (`make_older_thread`), by its first
     /// turn: checked after every turn's own instructions, so a failure there comes first.
     older_threads: Vec<(&'static str, std::result::Result<(), String>)>,
+    /// Each chat's browser turns since its building thread's last turn, as the controller lists
+    /// them on a building job's lease (`browser_turns_since`).
+    browser_turns_since: HashMap<Uuid, Vec<(Uuid, Value)>>,
 }
 
 fn rollout_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -664,9 +718,32 @@ impl Harness {
         for (key, value) in spec.metadata.as_object().into_iter().flatten() {
             metadata[key] = value.clone();
         }
+        // A message whose route is not decided yet goes through the routing step.
+        if spec.routed.is_some() {
+            if let Some(map) = metadata.as_object_mut() {
+                map.remove("agentRoutingPreflight");
+                map.remove("runtimeExpectations");
+            }
+        }
         let prompt = spec
             .prompt
             .unwrap_or("Find the opening hours of the city museum and report them.");
+        // A building job's lease lists the chat's browser turns since its building thread's
+        // last turn, all but the one a checked hand-back carries in its record.
+        let handed_back = metadata["browserHandBack"]["browserJobId"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok());
+        let turns_since: Vec<Value> = if matches!(spec.lane, Lane::Shared(_) | Lane::Personal) {
+            Vec::new()
+        } else {
+            self.browser_turns_since
+                .get(&spec.conversation)
+                .into_iter()
+                .flatten()
+                .filter(|(browser_job, _)| Some(*browser_job) != handed_back)
+                .map(|(_, turn)| turn.clone())
+                .collect()
+        };
         let mut job = json!({
             "id": job_id,
             "intent": "feature",
@@ -678,6 +755,7 @@ impl Harness {
                 "provider_conversation_state": spec.previous,
                 "user_id": INITIATOR,
                 "metadata": metadata,
+                "browser_turns_since": turns_since,
             },
             "lease_attempts": 1,
         });
@@ -715,7 +793,7 @@ impl Harness {
             .scripts
             .lock()
             .unwrap()
-            .insert(label.to_string(), spec.script.iter().copied().collect());
+            .insert(label.to_string(), spec.script.iter().cloned().collect());
         if spec.browser_session_runtime {
             set_env("INSTAFY_ENABLE_BROWSER_SESSION", "true");
         } else {
@@ -791,8 +869,24 @@ impl Harness {
         let started_thread = created
             .into_iter()
             .find(|path| fs::read_to_string(path).is_ok_and(|text| text.contains(&tag)));
+        let mut final_messages = Vec::new();
         let outcome = match result {
-            Ok(Ok(execution)) => Ok(execution.provider_conversation_state),
+            Ok(Ok(execution)) => {
+                final_messages = execution
+                    .final_messages
+                    .iter()
+                    .map(|message| {
+                        json!({
+                            "content": message.content,
+                            "messageType": message.message_type,
+                            "metadata": message.metadata,
+                            "summary": execution.summary,
+                            "artifacts": execution.artifacts,
+                        })
+                    })
+                    .collect();
+                Ok(execution.provider_conversation_state)
+            }
             Ok(Err(error)) => Err(format!("{error:#}").chars().take(400).collect()),
             Err(_) => Err("the job timed out".to_string()),
         };
@@ -811,14 +905,46 @@ impl Harness {
                 Err(error) => format!("failed: {error}"),
             }
         );
+        match spec.lane {
+            // A routed message saves no thread: the building thread's last turn stays where it was.
+            _ if spec.routed.is_some() => {}
+            Lane::Shared(_) => {
+                let prompt = spec
+                    .prompt
+                    .unwrap_or("Find the opening hours of the city museum and report them.");
+                self.browser_turns_since
+                    .entry(spec.conversation)
+                    .or_default()
+                    .push((
+                        job_id,
+                        json!({
+                            "browserJobId": job_id.to_string(),
+                            "request": format!("[[{label}]] {prompt}"),
+                            "reply": format!("Turn {label} completed."),
+                            "replyTruncated": false,
+                            "findings": [],
+                            "readAt": "2026-01-05T10:00:00Z",
+                            "viewer": "Instafy's browser in the workspace",
+                            "outcome": "succeeded",
+                        }),
+                    ));
+            }
+            Lane::Personal | Lane::Granted => {}
+            _ => {
+                self.browser_turns_since.remove(&spec.conversation);
+            }
+        }
         self.turns.push(Turn {
             label,
             lane: spec.lane,
+            conversation: spec.conversation,
             job_id,
             run_id,
             expected: spec.expected_markers(),
             requests,
             answered,
+            routed: spec.routed.is_some(),
+            final_messages,
             outcome,
         });
         next_state
@@ -845,20 +971,21 @@ fn emulated_state(spec: &Spec, started_thread: Option<&Path>) -> Value {
     };
     let thread = rollout_thread_id(rollout).unwrap_or_default();
     let rollout = rollout.display().to_string();
-    let browser =
-        spec.browser_session_runtime || matches!(spec.lane, Lane::Shared(_) | Lane::Personal);
     map.insert("provider".into(), json!("codex-embedded"));
     map.insert("version".into(), json!(2));
-    if browser {
-        map.insert("browserThreadId".into(), json!(thread));
-        map.insert("browserRolloutPath".into(), json!(rollout));
-        map.insert("browserThreadRestoreFailed".into(), json!(false));
+    // A Shared Browser turn saves its chat's browser thread; every other turn the building one.
+    if matches!(spec.lane, Lane::Shared(_)) {
+        map.insert("sharedBrowserThreadId".into(), json!(thread));
+        map.insert("sharedBrowserRolloutPath".into(), json!(rollout));
+        map.insert("sharedBrowserThreadRestoreFailed".into(), json!(false));
+        map.insert("sharedBrowserHistoryReplayRequired".into(), json!(false));
     } else {
         map.insert("defaultThreadId".into(), json!(thread));
         map.insert("threadId".into(), json!(thread));
         map.insert("defaultRolloutPath".into(), json!(rollout));
         map.insert("rolloutPath".into(), json!(rollout));
         map.insert("defaultThreadRestoreFailed".into(), json!(false));
+        map.insert("defaultHistoryReplayRequired".into(), json!(false));
     }
     map.insert("historyReplayRequired".into(), json!(false));
     Value::Object(map)
@@ -1068,6 +1195,7 @@ async fn run_chains() -> Result<()> {
         api_key_proxy,
         turns: Vec::new(),
         older_threads: Vec::new(),
+        browser_turns_since: HashMap::new(),
     };
     run_every_chain(&mut harness).await;
     run_browser_flows(&mut harness).await;
@@ -1082,10 +1210,10 @@ async fn run_chains() -> Result<()> {
 }
 
 async fn run_every_chain(harness: &mut Harness) {
-    // A and X: the card path. An ordinary turn starts the chat's default thread; the card's
-    // Shared Browser turn has no browser thread of its own and resumes the default one. X is
-    // another chat on the same page: X1 starts on the page A2 left, X2 on its own; then A3
-    // starts on the page X left. After A4, the chat goes back to the browser (A5).
+    // A and X: the card path. An ordinary turn starts the chat's building thread; the card's
+    // Shared Browser turn starts the chat's browser thread. X is another chat on the same page:
+    // X1 starts on the page A2 left, X2 on its own; then A3 starts on the page X left. A4 is
+    // back on the building thread, and the chat goes back to the browser (A5).
     let ca = Uuid::new_v4();
     let cx = Uuid::new_v4();
     let a1 = harness.run("A1", Spec::new(ca, Lane::Default, None)).await;
@@ -1111,8 +1239,9 @@ async fn run_every_chain(harness: &mut Harness) {
     let u1 = harness.run("U1", Spec::new(cu, Lane::Default, None)).await;
     harness.run("U2", Spec::new(cu, Lane::Default, u1)).await;
 
-    // C: a runtime with a boot-time browser, where an ordinary turn is a browser-mode turn and
-    // shares the browser thread a Shared Browser turn started.
+    // C: a runtime with a boot-time browser, where an ordinary turn is a browser-mode turn with
+    // shell tools: it runs on the building thread, never on the browser thread a Shared Browser
+    // turn started.
     let cc = Uuid::new_v4();
     let c1 = harness
         .run("C1", Spec::new(cc, Lane::Shared("page-two"), None))
@@ -1162,7 +1291,9 @@ async fn run_every_chain(harness: &mut Harness) {
         .await;
 
     // K: native compaction. K2 (Summarize) compacts mid-turn; K3 (ordinary) follows and ends
-    // above the compaction limit; K4 (a card's Shared Browser turn) compacts before it starts.
+    // above the compaction limit. K4 (a card's Shared Browser turn) starts the browser thread and
+    // ends above the limit too; K5 (ordinary) compacts the building thread before it starts, and
+    // K6 (the browser again) its browser thread.
     let ck = Uuid::new_v4();
     let k1 = harness.run("K1", Spec::new(ck, Lane::Default, None)).await;
     let mut k2 = Spec::new(ck, Lane::PlainFinal, k1);
@@ -1175,10 +1306,15 @@ async fn run_every_chain(harness: &mut Harness) {
         total_tokens: 200_000,
     }];
     let k3 = harness.run("K3", k3).await;
-    let k4 = harness
-        .run("K4", Spec::new(ck, Lane::Shared("page-four"), k3))
+    let mut k4 = Spec::new(ck, Lane::Shared("page-four"), k3);
+    k4.script = vec![Step::Final {
+        total_tokens: 200_000,
+    }];
+    let k4 = harness.run("K4", k4).await;
+    let k5 = harness.run("K5", Spec::new(ck, Lane::Default, k4)).await;
+    harness
+        .run("K6", Spec::new(ck, Lane::Shared("page-four"), k5))
         .await;
-    harness.run("K5", Spec::new(ck, Lane::Default, k4)).await;
 
     // R: a turn on a resumed thread fails before the model answers; the person's retry follows.
     let cr = Uuid::new_v4();
@@ -1249,7 +1385,12 @@ fn card_continuation(card: Uuid, continue_building: bool) -> Value {
 
 /// The hand-back the controller checks and stamps on the building turn after the browser turn
 /// `browser` (its card from `card`) read `pages`: its reply with one finding per page.
-fn checked_hand_back(browser: Uuid, card: Uuid, pages: &[(&str, &str, &str)]) -> Value {
+fn checked_hand_back(
+    browser: Uuid,
+    card: Uuid,
+    request: &str,
+    pages: &[(&str, &str, &str)],
+) -> Value {
     let read_at = "2026-01-05T10:00:00Z";
     let viewer = "Instafy's browser in the workspace";
     let mut reply = format!("Read {} pages.", pages.len());
@@ -1267,6 +1408,7 @@ fn checked_hand_back(browser: Uuid, card: Uuid, pages: &[(&str, &str, &str)]) ->
             "cardJobId": card.to_string(),
             "viewer": viewer,
             "readAt": read_at,
+            "request": request,
             "findings": findings,
             "reply": reply,
             "replyTruncated": false,
@@ -1274,13 +1416,15 @@ fn checked_hand_back(browser: Uuid, card: Uuid, pages: &[(&str, &str, &str)]) ->
     })
 }
 
-/// B, H, G and F: four browser flows as a person meets them. A message that asks for the
-/// browser is an ordinary turn whose answer is a `request_browser` card, and Studio then opens
-/// the card by itself: a Shared Browser turn that asks the card's task. B builds a comparison
-/// page: its card continues building, so its browser turn hands back to a write turn; then the
-/// person asks for more in the browser, and it hands back again. H looks something up and keeps
-/// going in the browser over three follow-ups. G pauses on a sign-in page, and the person lets
-/// Octo continue. F fills in a form. Each chain uses a page of its own.
+/// B, H, G and F: four browser flows as a person meets them. A message that names Instafy's
+/// browser goes straight to it: the routing step ends its job with a routed card, and Studio
+/// opens the card by itself, a Shared Browser turn that asks the person's own words. A message
+/// that is research is an ordinary turn whose answer is a `request_browser` card, which Studio
+/// opens the same way with the card's task. B builds a comparison page: its first card
+/// continues building, so its browser turn hands back to a write turn; then the person asks for
+/// more in the browser, which goes straight to it and hands back again. H looks something up in
+/// the browser and keeps going there over three follow-ups. G pauses on a sign-in page, and the
+/// person lets Octo continue. F fills in a form. Each chain uses a page of its own.
 async fn run_browser_flows(harness: &mut Harness) {
     let cb = Uuid::new_v4();
     let b1 = harness
@@ -1292,11 +1436,12 @@ async fn run_browser_flows(harness: &mut Harness) {
         )
         .await;
     let card = harness.turn("B1").job_id;
+    const B2_TASK: &str = "Find the maker's three newest laptops on laptops.example and read each one's own page for its CPU, battery, weight and price.";
     let b2 = harness
         .run(
             "B2",
             Spec::new(cb, Lane::Shared("page-b"), b1)
-                .asking("Find the maker's three newest laptops on laptops.example and read each one's own page for its CPU, battery, weight and price.")
+                .asking(B2_TASK)
                 .with_metadata(card_continuation(card, true)),
         )
         .await;
@@ -1309,6 +1454,7 @@ async fn run_browser_flows(harness: &mut Harness) {
                 .with_metadata(checked_hand_back(
                     browser,
                     card,
+                    &format!("[[B2]] {B2_TASK}"),
                     &[(
                         "https://laptops.example/",
                         "Laptops",
@@ -1317,59 +1463,70 @@ async fn run_browser_flows(harness: &mut Harness) {
                 )),
         )
         .await;
+    const B4_WORDS: &str = "In your browser, find each laptop's weight and price on the maker's own pages and two independent reviews for each on the reviewers' own sites, add them to the page, and show me the page.";
+    // A routed message saves no thread, so the chat's state stays B3's.
     let b4 = harness
         .run(
             "B4",
-            Spec::new(cb, Lane::Default, b3).asking(
-                "In your browser, find each laptop's weight and price on the maker's own pages and two independent reviews for each on the reviewers' own sites, add them to the page, and show me the page.",
-            ),
+            Spec::new(cb, Lane::Default, b3)
+                .asking(B4_WORDS)
+                .routed(true),
         )
         .await;
     let card = harness.turn("B4").job_id;
+    const B5_TASK: &str = B4_WORDS;
     let b5 = harness
         .run(
             "B5",
             Spec::new(cb, Lane::Shared("page-b"), b4)
-                .asking("Find each laptop's weight and price on the maker's own pages and two independent reviews for each on the reviewers' own sites.")
+                .asking(B5_TASK)
                 .with_metadata(card_continuation(card, true)),
         )
         .await;
     let browser = harness.turn("B5").job_id;
+    let mut b6 = checked_hand_back(
+        browser,
+        card,
+        &format!("[[B5]] {B5_TASK}"),
+        &[
+            (
+                "https://laptops.example/twelve",
+                "Twelve",
+                "1.3 kg, from 789 EUR",
+            ),
+            (
+                "https://laptops.example/thirteen",
+                "Thirteen",
+                "1.4 kg, from 1,799 EUR",
+            ),
+            (
+                "https://reviews.example/thirteen",
+                "Thirteen review",
+                "Battery lasts a working day",
+            ),
+        ],
+    );
+    // The card the routing step posted: the controller's record gives the build the message's
+    // own words as the person's request, since the building thread never saw B4.
+    b6["browserHandBack"]["personRequest"] = json!(format!("[[B4]] {B4_WORDS}"));
     harness
         .run(
             "B6",
             Spec::new(cb, Lane::PlainWrite, b5)
                 .asking(HAND_BACK)
-                .with_metadata(checked_hand_back(
-                    browser,
-                    card,
-                    &[
-                        (
-                            "https://laptops.example/twelve",
-                            "Twelve",
-                            "1.3 kg, from 789 EUR",
-                        ),
-                        (
-                            "https://laptops.example/thirteen",
-                            "Thirteen",
-                            "1.4 kg, from 1,799 EUR",
-                        ),
-                        (
-                            "https://reviews.example/thirteen",
-                            "Thirteen review",
-                            "Battery lasts a working day",
-                        ),
-                    ],
-                )),
+                .with_metadata(b6),
         )
         .await;
 
     let ch = Uuid::new_v4();
+    const H1_WORDS: &str =
+        "Open the city's tourism site in your browser and find the old bookshop's opening hours.";
     let h1 = harness
         .run(
             "H1",
             Spec::new(ch, Lane::Default, None)
-                .asking("Find the opening hours of the old bookshop on the city's tourism site."),
+                .asking(H1_WORDS)
+                .routed(false),
         )
         .await;
     let card = harness.turn("H1").job_id;
@@ -1377,7 +1534,7 @@ async fn run_browser_flows(harness: &mut Harness) {
         .run(
             "H2",
             Spec::new(ch, Lane::Shared("page-h"), h1)
-                .asking("Look up the old bookshop's opening hours on the city's tourism site.")
+                .asking(H1_WORDS)
                 .with_metadata(card_continuation(card, false)),
         )
         .await;
@@ -1404,12 +1561,14 @@ async fn run_browser_flows(harness: &mut Harness) {
         .await;
 
     let cg = Uuid::new_v4();
+    const G1_WORDS: &str =
+        "Open the code host in your browser, sign me in, then star its example project.";
     let g1 = harness
         .run(
             "G1",
-            Spec::new(cg, Lane::Default, None).asking(
-                "Open the code host in your browser, sign me in, then star its example project.",
-            ),
+            Spec::new(cg, Lane::Default, None)
+                .asking(G1_WORDS)
+                .routed(false),
         )
         .await;
     let card = harness.turn("G1").job_id;
@@ -1417,7 +1576,7 @@ async fn run_browser_flows(harness: &mut Harness) {
         .run(
             "G2",
             Spec::new(cg, Lane::Shared("page-g"), g1)
-                .asking("Open the code host's sign-in page so the person can sign in there, then star its example project.")
+                .asking(G1_WORDS)
                 .with_metadata(card_continuation(card, false)),
         )
         .await;
@@ -1432,12 +1591,13 @@ async fn run_browser_flows(harness: &mut Harness) {
         .await;
 
     let cf = Uuid::new_v4();
+    const F1_WORDS: &str = "Open the test form site in your browser and fill in a test order with made-up details, then submit it.";
     let f1 = harness
         .run(
             "F1",
-            Spec::new(cf, Lane::Default, None).asking(
-                "Open the test form site in your browser and fill in a test order with made-up details, then submit it.",
-            ),
+            Spec::new(cf, Lane::Default, None)
+                .asking(F1_WORDS)
+                .routed(false),
         )
         .await;
     let card = harness.turn("F1").job_id;
@@ -1445,7 +1605,7 @@ async fn run_browser_flows(harness: &mut Harness) {
         .run(
             "F2",
             Spec::new(cf, Lane::Shared("page-f"), f1)
-                .asking("Open forms.example/order and fill in a test order with made-up details.")
+                .asking(F1_WORDS)
                 .with_metadata(card_continuation(card, false)),
         )
         .await;
@@ -1619,6 +1779,82 @@ fn first_sampling_request(turn: &Turn) -> &Value {
         .unwrap_or_else(|| panic!("{} made no sampling request", turn.label))
 }
 
+/// The turns that ran on a thread: all but the messages the routing step sent straight to the
+/// browser, whose only request was the routing call (`check_routed_messages`).
+fn thread_turns(harness: &Harness) -> impl Iterator<Item = &Turn> {
+    harness.turns.iter().filter(|turn| !turn.routed)
+}
+
+/// A message the routing step sent straight to Instafy's browser ends its job with the routed
+/// card alone: the routing call was its one request, it saved no thread, and it has no reply and
+/// no run log. The card's task is the person's own words, and it says whether Octo builds after.
+fn check_routed_messages(harness: &Harness) -> Result<()> {
+    let routed: Vec<&Turn> = harness.turns.iter().filter(|turn| turn.routed).collect();
+    ensure!(
+        !routed.is_empty(),
+        "no message went straight to the browser"
+    );
+    for turn in routed {
+        let label = turn.label;
+        ensure!(
+            turn.requests.len() == 1,
+            "{label} made {} requests, not only the routing call",
+            turn.requests.len()
+        );
+        ensure!(
+            matches!(turn.outcome, Ok(None)),
+            "{label} did not end without a thread: {:?}",
+            turn.outcome
+        );
+        ensure!(
+            turn.final_messages.len() == 1,
+            "{label} posted {} messages",
+            turn.final_messages.len()
+        );
+        let card = &turn.final_messages[0];
+        ensure!(card["messageType"] == "action_request", "{label}: {card}");
+        ensure!(card["summary"] == "", "{label} has a reply: {card}");
+        let kinds: Vec<&str> = card["artifacts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|artifact| artifact["kind"].as_str())
+            .collect();
+        // The routing decision, and the content-free usage receipt every job leaves; no run log.
+        ensure!(
+            kinds.contains(&"agent/routing-preflight")
+                && kinds
+                    .iter()
+                    .all(|kind| ["agent/routing-preflight", "ai/task-usage"].contains(kind)),
+            "{label} left {kinds:?}"
+        );
+        let request = &card["metadata"]["details"]["browserRequest"];
+        let words = first_sampling_request(turn)
+            .to_string()
+            .contains(&format!("[[{label}]]"));
+        ensure!(words, "{label}'s routing call did not read its message");
+        ensure!(
+            request["routed"] == true
+                && request["location"] == "auto"
+                && request["task"]
+                    .as_str()
+                    .is_some_and(|task| task.starts_with(&format!("[[{label}]] "))),
+            "{label}'s card: {request}"
+        );
+    }
+    let building = &harness.turn("B4").final_messages[0]["metadata"]["details"]["browserRequest"];
+    ensure!(
+        building["continueBuilding"] == true,
+        "B4's card: {building}"
+    );
+    let question = &harness.turn("F1").final_messages[0]["metadata"]["details"]["browserRequest"];
+    ensure!(
+        question.get("continueBuilding").is_none(),
+        "F1's card: {question}"
+    );
+    Ok(())
+}
+
 fn check(harness: &Harness) -> Result<()> {
     for turn in &harness.turns {
         ensure!(
@@ -1643,7 +1879,7 @@ fn check(harness: &Harness) -> Result<()> {
     );
 
     // Phase 1: every request reads its own run's text.
-    for turn in &harness.turns {
+    for turn in thread_turns(harness) {
         for (index, request) in sampling_requests(turn) {
             let text = instructions_text(request);
             let missing: Vec<String> = turn
@@ -1663,7 +1899,7 @@ fn check(harness: &Harness) -> Result<()> {
     }
 
     // Phase 2: how the text is delivered.
-    for turn in &harness.turns {
+    for turn in thread_turns(harness) {
         for (index, request) in turn.requests.iter().enumerate() {
             // (i) Only inside input[0] or as a developer message: Codex sent them as developer
             // messages, and the proxy keeps nothing else in either.
@@ -1715,16 +1951,16 @@ fn check(harness: &Harness) -> Result<()> {
     // text, and none added when it stays the same.
     for (label, expected) in [
         ("A1", 1),
-        ("A2", 2),
+        ("A2", 1),
         ("X1", 1),
         ("X2", 1),
-        ("A3", 2),
-        ("A4", 3),
-        ("A5", 4),
+        ("A3", 1),
+        ("A4", 1),
+        ("A5", 1),
         ("U1", 1),
         ("U2", 1),
         ("C1", 1),
-        ("C2", 2),
+        ("C2", 1),
         ("S1", 1),
         ("S2", 2),
         ("D1", 1),
@@ -1740,7 +1976,9 @@ fn check(harness: &Harness) -> Result<()> {
         ("K1", 1),
         ("K2", 2),
         ("K3", 2),
-        ("K5", 2),
+        ("K4", 1),
+        ("K5", 1),
+        ("K6", 1),
         ("R1", 1),
         ("R5", 2),
         ("R6", 2),
@@ -1791,9 +2029,18 @@ fn check(harness: &Harness) -> Result<()> {
             "P3 reads the Personal Browser policy"
         );
     }
-    // Native compaction: K2 compacts mid-turn and goes on with its own text alone; K4 compacts
-    // before it starts and then reads its own text alone.
-    for (label, compaction_index) in [("K2", 1), ("K4", 0)] {
+    // Native compaction: K2 compacts mid-turn and goes on with its own text alone; K5 and K6
+    // compact their own lane's thread before they start and then read their own text alone. K4
+    // starts the browser thread and has nothing to compact.
+    ensure!(
+        !harness
+            .turn("K4")
+            .requests
+            .iter()
+            .any(is_compaction_request),
+        "K4 compacted a thread it does not share"
+    );
+    for (label, compaction_index) in [("K2", 1), ("K5", 0), ("K6", 0)] {
         let turn = harness.turn(label);
         ensure!(
             turn.requests
@@ -1866,11 +2113,12 @@ fn check(harness: &Harness) -> Result<()> {
         );
     }
 
-    // (v) A note holds for its turn only.
-    for turn in &harness.turns {
+    // (v) A note holds for its turn only. A4's building thread never read A3's, so it has
+    // nothing to withdraw.
+    for turn in thread_turns(harness) {
         let expected = match turn.label {
             "X1" | "A3" => 1,
-            "X2" | "A4" | "A5" => 2,
+            "X2" | "A5" => 2,
             _ => 0,
         };
         for (index, request) in sampling_requests(turn) {
@@ -1888,7 +2136,7 @@ fn check(harness: &Harness) -> Result<()> {
                     "{}#{index}: the turn is not told that another chat left its page",
                     turn.label
                 ),
-                "X2" | "A4" | "A5" => ensure!(
+                "X2" | "A5" => ensure!(
                     last == Some(NOTE_WITHDRAWAL),
                     "{}#{index}: the earlier turn's note is not withdrawn",
                     turn.label
@@ -1898,8 +2146,12 @@ fn check(harness: &Harness) -> Result<()> {
         }
     }
     // (vi) The cache.
-    print_costs(harness);
+    let costs = print_costs(harness);
     check_cached_starts(harness)?;
+    // (vii) Each lane's thread.
+    check_lanes(harness, &costs)?;
+    // (viii) A message sent straight to the browser.
+    check_routed_messages(harness)?;
     println!("every turn read its own run instructions");
     Ok(())
 }
@@ -1982,7 +2234,7 @@ impl Usage {
 /// run: its first sampling request and the requests that go on with that run. Its recovery run
 /// (a lane whose tool evidence this host cannot give ends in one) is not billed, nor is a request
 /// the stub answered with a 502. Printed per turn, then per chain.
-fn print_costs(harness: &Harness) {
+fn print_costs(harness: &Harness) -> Vec<(String, f64)> {
     let requests: Vec<(&Turn, usize, &Value)> = harness
         .turns
         .iter()
@@ -2022,6 +2274,28 @@ fn print_costs(harness: &Harness) {
     for turn in &harness.turns {
         let first = position;
         position += turn.requests.len();
+        let chain: String = turn
+            .label
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect();
+        if turn.routed {
+            // No model turn of its own, and the routing call is not billed: it costs the reserve
+            // a person's turn takes at dispatch.
+            println!(
+                "cost {} ({:?}, sent straight to the browser): no model turn of its own; its reserve, 1 credit",
+                turn.label, turn.lane
+            );
+            match chains.iter_mut().find(|(name, ..)| *name == chain) {
+                Some((_, _, exact, charged, turns)) => {
+                    *exact += 1.0;
+                    *charged += 1;
+                    *turns += 1;
+                }
+                None => chains.push((chain, Usage::default(), 1.0, 1, 1)),
+            }
+            continue;
+        }
         let mut usage = Usage::default();
         let mut first_share = None;
         for (index, request) in turn.requests.iter().enumerate() {
@@ -2064,11 +2338,6 @@ fn print_costs(harness: &Harness) {
             usage.exact_credits(),
             usage.charge(),
         );
-        let chain: String = turn
-            .label
-            .chars()
-            .take_while(char::is_ascii_alphabetic)
-            .collect();
         match chains.iter_mut().find(|(name, ..)| *name == chain) {
             Some((_, total, exact, charged, turns)) => {
                 total.input += usage.input;
@@ -2080,12 +2349,16 @@ fn print_costs(harness: &Harness) {
             None => chains.push((chain, usage, usage.exact_credits(), usage.charge(), 1)),
         }
     }
-    for (chain, total, exact, charged, turns) in chains {
-        println!(
-            "cost chain {chain}: {turns} turn(s), {} tokens in, {} cached: {exact:.3} credits, charged {charged}",
-            total.input, total.cached,
-        );
-    }
+    chains
+        .into_iter()
+        .map(|(chain, total, exact, charged, turns)| {
+            println!(
+                "cost chain {chain}: {turns} turn(s), {} tokens in, {} cached: {exact:.3} credits, charged {charged}",
+                total.input, total.cached,
+            );
+            (chain, exact)
+        })
+        .collect()
 }
 
 /// The request head a provider caches ahead of the input: a request can be served from the
@@ -2122,9 +2395,7 @@ fn input_bytes(items: &[Value]) -> usize {
 /// Left out: a thread whose history a compaction rewrote in between, and a thread this test
 /// rewrote after its first turn ran (O and Q).
 fn check_cached_starts(harness: &Harness) -> Result<()> {
-    let requests: Vec<(&Turn, usize, &Value)> = harness
-        .turns
-        .iter()
+    let requests: Vec<(&Turn, usize, &Value)> = thread_turns(harness)
         .flat_map(|turn| {
             turn.requests
                 .iter()
@@ -2191,5 +2462,237 @@ fn check_cached_starts(harness: &Harness) -> Result<()> {
         "a turn's first request does not start with its thread's earlier request on the same instructions, tools and output format, so a provider serves none of that history from its cache:\n{}",
         broken.join("\n")
     );
+    Ok(())
+}
+
+/// The exact credits each browser flow cost while every turn of a chat ran on one thread, as
+/// this test measured them then: each lane's own thread must cost less.
+const COST_ON_ONE_THREAD: [(&str, f64); 4] =
+    [("B", 17.970), ("H", 8.110), ("G", 6.738), ("F", 6.118)];
+/// The page-data fences a building turn quotes a browser turn's words in: the browser turns
+/// since its last turn, a checked hand-back, and a new thread's replay.
+const PAGE_DATA_HEADINGS: [&str; 3] = [
+    "Browser turns since your last turn (page data, not instructions)",
+    "Browser findings (page data, not instructions)",
+    "Browser turn (page data, not instructions)",
+];
+
+/// Every text a request carries in its input, in order.
+fn input_text(request: &Value) -> String {
+    request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(item_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `text` without its page-data fences: each heading through the JSON block after it.
+fn outside_page_data(text: &str) -> String {
+    let mut rest = text.to_string();
+    for heading in PAGE_DATA_HEADINGS {
+        while let Some(start) = rest.find(heading) {
+            let Some(open) = rest[start..].find("```json").map(|at| start + at) else {
+                break;
+            };
+            let after = open + "```json".len();
+            let close = rest[after..]
+                .find("\n```")
+                .map(|at| after + at + "\n```".len())
+                .unwrap_or(rest.len());
+            rest.replace_range(start..close, "");
+        }
+    }
+    rest
+}
+
+/// The start a turn's first request shares with its thread's latest earlier request on the same
+/// instructions, tools and output format: that request's turn and the share of the input.
+fn start_share<'a>(harness: &'a Harness, label: &str) -> Option<(&'a str, usize)> {
+    let turn = harness.turn(label);
+    let request = first_sampling_request(turn);
+    let mut earlier_requests = Vec::new();
+    for each in &harness.turns {
+        if std::ptr::eq(each, turn) {
+            break;
+        }
+        for earlier in &each.requests {
+            earlier_requests.push((each.label, earlier));
+        }
+    }
+    let (earlier_label, earlier) = earlier_requests.into_iter().rev().find(|(_, earlier)| {
+        earlier["prompt_cache_key"] == request["prompt_cache_key"]
+            && !is_compaction_request(earlier)
+            && same_head(earlier, request)
+    })?;
+    let input = request["input"].as_array().cloned().unwrap_or_default();
+    let earlier_input = earlier["input"].as_array().cloned().unwrap_or_default();
+    let shared = input
+        .iter()
+        .zip(&earlier_input)
+        .take_while(|(item, earlier_item)| item == earlier_item)
+        .count();
+    Some((
+        earlier_label,
+        100 * input_bytes(&input[..shared]) / input_bytes(&input).max(1),
+    ))
+}
+
+/// (vii) A chat keeps a thread per lane. A browser turn resumes its chat's browser thread and a
+/// building turn the building thread, each starting with its lane's previous request, so moving
+/// between building and browsing no longer reads the other lane's turns again. Neither thread
+/// holds the other lane's turns: a browser request never carries a building turn's words, and a
+/// building request carries a browser turn's words only inside a page-data fence.
+fn check_lanes(harness: &Harness, costs: &[(String, f64)]) -> Result<()> {
+    let is_browser = |turn: &Turn| matches!(turn.lane, Lane::Shared(_));
+    // Chain A: the card's browser turn starts the browser thread; each later turn starts with
+    // its own lane's previous request.
+    let a2 = first_sampling_request(harness.turn("A2"));
+    ensure!(
+        !harness
+            .turns
+            .iter()
+            .take_while(|turn| turn.label != "A2")
+            .any(|turn| turn
+                .requests
+                .iter()
+                .any(|request| request["prompt_cache_key"] == a2["prompt_cache_key"])),
+        "A2 did not start a thread of its own"
+    );
+    for (later, earlier) in [("A3", "A2"), ("A4", "A1"), ("A5", "A3")] {
+        let found = start_share(harness, later);
+        ensure!(
+            found.is_some_and(|(label, share)| label == earlier && share >= 85),
+            "{later} does not start with {earlier}'s request: {found:?}"
+        );
+    }
+    // C2, an ordinary turn on a runtime with a boot-time browser, starts the building thread.
+    let c2 = first_sampling_request(harness.turn("C2"));
+    ensure!(
+        !harness
+            .turn("C1")
+            .requests
+            .iter()
+            .any(|request| request["prompt_cache_key"] == c2["prompt_cache_key"]),
+        "C2 resumed the browser thread"
+    );
+
+    // The browser flows: every turn whose lane's previous turn in its chat had the same
+    // instructions, tools and output format starts with that turn's request. A build after a
+    // question changes its start inside the building lane, which is not a lane switch.
+    for turn in thread_turns(harness) {
+        if !["B", "H", "G", "F", "A"]
+            .iter()
+            .any(|chain| turn.label.starts_with(chain))
+        {
+            continue;
+        }
+        let Some(previous) = harness
+            .turns
+            .iter()
+            .take_while(|earlier| !std::ptr::eq(*earlier, turn))
+            .filter(|earlier| {
+                !earlier.routed
+                    && earlier.conversation == turn.conversation
+                    && is_browser(earlier) == is_browser(turn)
+            })
+            .last()
+        else {
+            continue;
+        };
+        let first = first_sampling_request(turn);
+        if !previous
+            .requests
+            .iter()
+            .any(|request| same_head(request, first))
+        {
+            continue;
+        }
+        let found = start_share(harness, turn.label);
+        ensure!(
+            found.is_some_and(|(label, share)| label == previous.label && share >= 85),
+            "{} does not start with its lane's previous request ({}): {found:?}",
+            turn.label,
+            previous.label
+        );
+    }
+
+    // Neither thread holds the other lane's turns.
+    for turn in thread_turns(harness) {
+        let earlier_in_chat: Vec<&Turn> = harness
+            .turns
+            .iter()
+            .take_while(|earlier| !std::ptr::eq(*earlier, turn))
+            .filter(|earlier| !earlier.routed && earlier.conversation == turn.conversation)
+            .collect();
+        for (index, request) in turn.requests.iter().enumerate() {
+            let text = input_text(request);
+            let instructions = instructions_text(request);
+            if is_browser(turn) {
+                for marker in ["STRUCTURED", "PLAIN_WRITE", "PLAIN_FINAL", "MCP_MODE"] {
+                    ensure!(
+                        count(&instructions, marker) == 0,
+                        "{}#{index}: a browser thread reads the building lane's {marker}",
+                        turn.label
+                    );
+                }
+                for building in earlier_in_chat
+                    .iter()
+                    .filter(|earlier| !is_browser(earlier))
+                {
+                    for words in [
+                        format!("[[{}]]", building.label),
+                        format!("Turn {} completed.", building.label),
+                    ] {
+                        ensure!(
+                            !text.contains(&words),
+                            "{}#{index}: a browser thread holds {words}",
+                            turn.label
+                        );
+                    }
+                }
+            } else if !matches!(turn.lane, Lane::Personal) {
+                for marker in ["SHARED_POLICY", "PERSONAL_POLICY"] {
+                    ensure!(
+                        count(&instructions, marker) == 0,
+                        "{}#{index}: a building thread reads {marker}",
+                        turn.label
+                    );
+                }
+                let outside = outside_page_data(&text);
+                for browser in earlier_in_chat.iter().filter(|earlier| is_browser(earlier)) {
+                    for words in [
+                        format!("[[{}]]", browser.label),
+                        format!("Turn {} completed.", browser.label),
+                    ] {
+                        ensure!(
+                            !outside.contains(&words),
+                            "{}#{index}: a building thread holds {words} outside page data",
+                            turn.label
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // A4 read A2's and A3's requests and replies, as page data.
+    let a4 = input_text(first_sampling_request(harness.turn("A4")));
+    for words in ["[[A2]]", "[[A3]]", "Turn A3 completed."] {
+        ensure!(a4.contains(words), "A4 never read {words}");
+    }
+
+    // Each browser flow costs less than it did on one thread.
+    for (chain, before) in COST_ON_ONE_THREAD {
+        let after = costs
+            .iter()
+            .find(|(name, _)| name == chain)
+            .map(|(_, exact)| *exact)
+            .with_context(|| format!("no cost for chain {chain}"))?;
+        ensure!(
+            after < before,
+            "chain {chain} costs {after:.3} credits, not less than the {before:.3} it cost on one thread"
+        );
+    }
     Ok(())
 }
