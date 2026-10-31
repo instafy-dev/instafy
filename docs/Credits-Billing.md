@@ -74,7 +74,10 @@ Managed Instafy AI can run without a user-provided provider key and burn the sha
 - Set `MANAGED_AI_ENABLED=true`
 - Set `MANAGED_AI_LABEL` to the user-facing product name
 - Set `MANAGED_AI_CREDIT_BURN_AMOUNT` to the reserve debit taken before a prompt runs
-- Set `MANAGED_AI_DAILY_PROMPT_LIMIT` if you want a daily starter cap
+- Set `MANAGED_AI_DAILY_PROMPT_LIMIT` to cap the managed-AI prompts a person sends in any 24 hours
+  (default 20). The window rolls: a prompt counts for 24 hours after it is sent, so once the cap is
+  reached the next prompt is free 24 hours after the oldest one counted
+  (`count_recent_managed_ai_prompts`), not at the start of a day
 - Set `MANAGED_AI_MODEL_ID` to the upstream model id used for managed turns (default `gpt-6-luna`)
 - Set `MANAGED_AI_MODEL_LABEL` to the managed model name shown in the UI (default `GPT-6 Luna`)
 - Set `MANAGED_AI_CHAT_REASONING_EFFORT` to the reasoning effort of a managed chat turn (default `medium`; empty or `off` keeps the runtime's `high`)
@@ -312,7 +315,7 @@ existing rules. See [group participation](Group-Conversation-Participation.md).
 
 Starter guidance with the current defaults:
 - 200 units/day is the whole shared free budget
-- managed AI has a soft cap of 20 prompts/day by default
+- managed AI has a soft cap of 20 prompts in any 24 hours by default
 - tunnels and hosted runtimes burn from the same pool, so heavy infra usage reduces how much managed AI remains that day
 - once per UTC day the balance tops back up to the daily limit, so what is left of one day's
   credits never adds to the next day's: the first status read or charge of the day that finds
@@ -383,6 +386,11 @@ gets its reserve and its daily prompt slot back (refund reason `system_turn_with
 a runtime already ran it; the runtime's later receipt for a refused plan bills nothing either. The
 turn it continues or retries follows the rules for a turn the person sent ("Failed turns" above).
 
+Each of these turns also takes a prompt slot of the person whose turn it continues when it is
+dispatched, as a message they send does, and gives it back when it is not charged. So one card flow
+uses up to three of the default 20 prompts in any 24 hours: the turn that posts the card, the card's
+browser turn, and the hand-back when the card continues building.
+
 Billing reads only the controller's own marks on the job (`system_turns.rs`):
 
 - the `browserHandBack` record that dispatch stamps on a hand-back it checked;
@@ -418,6 +426,12 @@ inside the same turn (a recovery retry, which Studio shows as "Trying again…",
 pass after a missing answer), that attempt is not billed, and neither is the routing check the
 runtime makes with the model before a building turn. An automatic retry that Studio sends is a turn
 of its own (above).
+
+A turn's charge is its exact cost rounded up. Each kind of token (uncached input, cached input,
+output) is priced in whole micro-dollars, rounded up, and the turn's sum is rounded up to a whole
+credit, so a turn that used any tokens costs at least one credit (`calculate_managed_ai_usage_charge`
+in `credits.rs`). Over many short turns the rounding adds up: 16 turns whose exact costs add up to
+112.87 credits are charged 123.
 
 ### Why a short follow-up can cost as much as a long turn
 
@@ -481,6 +495,13 @@ its history too. A Chat Completions upstream (a DeepSeek, Z.ai or Gemini key) st
 developer message in its first message, because those providers differ on instructions later in a
 request; there a turn that changes its run instructions or note still pays its history uncached
 once.
+
+The same test prices every turn as billing would (its `cost` lines): a request's tokens are its
+bytes / 4, the cached ones are the start it shares with its thread's latest earlier request on the
+same instructions, tools and output format, and a turn is billed for its first run's requests at the
+default prices, rounded up as above. Four browser flows run there as a person meets them: a
+comparison page whose browser turns hand back twice, research that keeps going in the browser, a
+sign-in pause the person lets Octo continue, and a form.
 
 ### Measuring root-call usage
 
