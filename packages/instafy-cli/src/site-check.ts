@@ -1193,6 +1193,8 @@ export type CheckThumbnailUploader = (input: {
   path: string;
   image: Buffer;
   description: string | null;
+  /** when the check began loading the page the picture is of (ms since the epoch) */
+  takenAt?: number;
 }) => Promise<{ status: "uploaded" | "skipped" | "failed"; reason?: string } | null>;
 
 export type PreviewCheckIo = {
@@ -1220,6 +1222,8 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
     const port = parsePreviewPort(opts.port, env);
     const sitePath = parseCheckPath(opts.path);
     const wantsThumbnail = Boolean(io.uploadThumbnail && io.hasOpenPreview?.(port, sitePath));
+    // The picture shows the site as it was when the check began loading it.
+    const takenAt = Date.now();
     const result = await runSiteCheck({
       port,
       path: opts.path,
@@ -1245,7 +1249,7 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
         "skipped" in shot
           ? { status: "skipped" as const, reason: shot.skipped }
           : await io
-              .uploadThumbnail({ port, path: sitePath, image: shot.image, description: shot.description })
+              .uploadThumbnail({ port, path: sitePath, image: shot.image, description: shot.description, takenAt })
               .catch((error: unknown) => ({ status: "failed" as const, reason: firstLine(error) }));
       if (outcome) {
         result.report.thumbnail = outcome.status;

@@ -68,6 +68,7 @@ mod learn;
 /// Where a space keeps its copy of the web-research skill's link-only list.
 pub(crate) use learn::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH;
 mod mcp;
+mod preview_pictures;
 #[cfg(test)]
 mod preview_routing_tests;
 mod project_preferences;
@@ -8699,6 +8700,12 @@ impl JobProcessor {
                 .as_ref()
                 .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
                 .unwrap_or_default();
+            // What the turn changed, for the pictures of the previews it changed.
+            let mut retry_picture_paths = if read_only_workspace {
+                Vec::new()
+            } else {
+                preview_pictures::changed_paths(&retry_outcome.files)
+            };
             if commit_to_workspace {
                 let retry_commit_files = if read_only_workspace {
                     retry_outcome.files.clone()
@@ -8710,6 +8717,9 @@ impl JobProcessor {
                     ))
                     .await
                 };
+                if !read_only_workspace {
+                    retry_picture_paths = preview_pictures::changed_paths(&retry_commit_files);
+                }
                 if let Some(token) = workspace_token.as_deref() {
                     if !retry_commit_files.is_empty() {
                         if let Some(sender) = progress_sender
@@ -8776,6 +8786,12 @@ impl JobProcessor {
                     }));
                 }
             }
+            preview_pictures::retake_stale_pictures(
+                &workspace_dir,
+                &project_id,
+                &retry_picture_paths,
+            )
+            .await;
 
             if read_only_workspace
                 && (retry_reported_files_len > 0 || !retry_read_only_changed_paths.is_empty())
@@ -8888,6 +8904,12 @@ impl JobProcessor {
             .as_ref()
             .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
             .unwrap_or_default();
+        // What the turn changed, for the pictures of the previews it changed.
+        let mut picture_paths = if read_only_workspace {
+            Vec::new()
+        } else {
+            preview_pictures::changed_paths(&outcome.files)
+        };
         if commit_to_workspace {
             let commit_files = if read_only_workspace {
                 outcome.files.clone()
@@ -8899,6 +8921,9 @@ impl JobProcessor {
                 ))
                 .await
             };
+            if !read_only_workspace {
+                picture_paths = preview_pictures::changed_paths(&commit_files);
+            }
             if let Some(token) = workspace_token.as_deref() {
                 if !commit_files.is_empty() {
                     if let Some(sender) = progress_sender
@@ -8965,6 +8990,7 @@ impl JobProcessor {
                 }));
             }
         }
+        preview_pictures::retake_stale_pictures(&workspace_dir, &project_id, &picture_paths).await;
 
         if read_only_workspace && (reported_files_len > 0 || !read_only_changed_paths.is_empty()) {
             artifacts.push(build_read_only_write_blocked_artifact(

@@ -897,14 +897,25 @@ fn start_tunnel_client(
     });
     if let Some(record) = entry.as_object_mut() {
         // What `instafy preview open` recorded for this same preview stays: how
-        // `--start` starts the site, and the domain and Studio origin its viewers
-        // come from (a site served in preview mode answers only those).
+        // `--start` starts the site, the domain and Studio origin its viewers
+        // come from (a site served in preview mode answers only those), and the
+        // site's folder and when the card's picture was taken (a turn that
+        // changes the site after that checks it again, for a new picture).
         let earlier = |key: &str| current.and_then(|entry| entry.get(key)).cloned();
-        for key in ["start", "hostSuffix", "studioOrigin"] {
+        for key in [
+            "start",
+            "hostSuffix",
+            "studioOrigin",
+            "siteDir",
+            "pictureAt",
+        ] {
             if let Some(value) = earlier(key) {
                 record.insert(key.to_string(), value);
             }
         }
+        record
+            .entry("siteDir")
+            .or_insert_with(|| json!(restart.serve.cwd));
         match site {
             Some(site) => {
                 record.insert("startedPid".to_string(), json!(site.pid));
@@ -1149,6 +1160,9 @@ mod tests {
         assert_eq!(entry["previewId"], json!(restart.preview_id));
         assert_eq!(entry["localPort"], json!(port));
         assert!(entry.get("hostSuffix").is_none());
+        // The folder the site runs from, for a turn that changes it later.
+        assert_eq!(entry["siteDir"], json!("./site"));
+        assert!(entry.get("pictureAt").is_none());
         // The site it started is recorded with the preview, as `open --start`
         // records its own, so `instafy preview close` stops it.
         assert!(
@@ -1211,6 +1225,8 @@ mod tests {
             "startedCommand": "node site.mjs 4173",
             "hostSuffix": "preview.test",
             "studioOrigin": "https://studio.test",
+            "siteDir": "sites/lisbon",
+            "pictureAt": 1_761_800_000_000_i64,
         });
         let mut recorded = earlier.clone();
         recorded["previewId"] = json!("already");
@@ -1228,7 +1244,8 @@ mod tests {
         outcome?;
         assert!(!marker.exists(), "the start command must not run");
         // The record of the site that answered is kept, and so is what the
-        // preview's viewers come from.
+        // preview's viewers come from, the site's folder and when the card's
+        // picture was taken.
         let entry = &state["previews"][0];
         for key in [
             "start",
@@ -1236,6 +1253,8 @@ mod tests {
             "startedCommand",
             "hostSuffix",
             "studioOrigin",
+            "siteDir",
+            "pictureAt",
         ] {
             assert_eq!(entry[key], earlier[key], "{key}");
         }

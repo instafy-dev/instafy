@@ -305,7 +305,10 @@ function writeState(home: string, previews: unknown[]) {
 }
 
 function readState(home: string): {
-  previews: Array<{ previewId: string; pid: number; localPort: number; workdir: string; hostSuffix?: string; studioOrigin?: string }>;
+  previews: Array<{
+    previewId: string; pid: number; localPort: number; workdir: string; hostSuffix?: string; studioOrigin?: string;
+    siteDir?: string; pictureAt?: number;
+  }>;
 } {
   return JSON.parse(fs.readFileSync(path.join(home, ".instafy", "cli-preview-state.json"), "utf8"));
 }
@@ -1121,6 +1124,40 @@ describe("instafy preview: the card's summary and picture", () => {
     expect(thumbnailPuts(controller.captures)).toHaveLength(1);
   }, 60000);
 
+  // The runtime reads both when a turn ends: a turn that changed a file in the site's folder after the picture was
+  // taken checks the site again, for a new picture.
+  it("records the site's folder and when the card's picture was taken, only once it is up", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const home = makeHome();
+    const sitePort = await startSite();
+    // The CLI runs from the package folder; make the folder of packages the space's workspace.
+    const workspace = { WORKSPACE_PROJECT_DIR: new URL("../../", import.meta.url).pathname };
+    const file = path.join(home, "snapshot.png");
+    fs.writeFileSync(file, pngOf(640, 400));
+    const args = (controllerUrl: string) => [
+      ...openArgs({ projectId, controllerUrl, port: sitePort, rathole: rathole.file, thumbnail: true }),
+      "--thumbnail", file, "--serve-cmd", "python3 -m http.server 8000",
+    ];
+
+    const failing = await startMockController({ projectId, thumbnailStatus: 500 });
+    const notUp = await execCli(args(failing.url), home, workspace);
+    expect(notUp.code, notUp.stderr).toBe(0);
+    expect(JSON.parse(notUp.stdout)).toMatchObject({ thumbnail: "failed" });
+    expect(readState(home).previews[0]).toMatchObject({ siteDir: "instafy-cli" });
+    expect(readState(home).previews[0]).not.toHaveProperty("pictureAt");
+
+    const controller = await startMockController({ projectId });
+    const before = Date.now();
+    const up = await execCli(args(controller.url), home, workspace);
+    expect(up.code, up.stderr).toBe(0);
+    expect(JSON.parse(up.stdout)).toMatchObject({ thumbnail: "uploaded" });
+    const entry = readState(home).previews[0]!;
+    expect(entry).toMatchObject({ siteDir: "instafy-cli" });
+    expect(entry.pictureAt).toBeGreaterThanOrEqual(before);
+    expect(entry.pictureAt).toBeLessThanOrEqual(Date.now());
+  }, 60000);
+
   it("a picture that cannot be uploaded leaves the exit code alone", async () => {
     const projectId = randomUUID();
     const rathole = makeStubRathole();
@@ -1205,9 +1242,12 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
     }]);
     const env = { ...browserEnv, INSTAFY_ACCESS_TOKEN: "test-token" };
 
+    const before = Date.now();
     const checked = await execCli(["preview", "check", "--port", String(sitePort), "--json"], home, env);
     expect(checked.code, checked.stderr).toBe(0);
     expect(JSON.parse(checked.stdout)).toMatchObject({ ok: true, thumbnail: "uploaded" });
+    // When the picture was taken, for a turn that changes the site after it.
+    expect(readState(home).previews[0]!.pictureAt).toBeGreaterThanOrEqual(before);
     const puts = thumbnailPuts(controller.captures);
     expect(puts.map((capture) => capture.path)).toEqual([`/projects/${projectId}/previews/preview-1/thumbnail`]);
     const body = JSON.parse(puts[0]!.body) as Record<string, unknown>;

@@ -661,7 +661,8 @@ Exit codes:
 for agents that build sites, and works for any site or framework. It calls no Instafy server and needs no login,
 except to refresh a card: when this machine has a preview open on that port and path (`open` recorded it), it
 uploads a 640×400 picture of the desktop page for the card, and the report says `thumbnail` (`uploaded`,
-`skipped` or `failed`). That never changes the exit code.
+`skipped` or `failed`). That never changes the exit code. When a turn ends having changed the site's folder after
+the card's picture was taken, the runtime runs this check itself.
 
 ```bash
 instafy preview check --port 4173
