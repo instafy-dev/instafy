@@ -231,6 +231,62 @@ describe("SitePreviewPane", () => {
     expect(progress()).toBeNull();
   });
 
+  // A page can draw before its frame's load event fires (its first view is
+  // up while a picture or a font on it still loads): the `ready` it said then
+  // is its own, so the pane never goes back to saying it is opening it.
+  it("keeps a ready the page said before its frame finished loading", async () => {
+    const progress = () => container.querySelector("[data-testid=site-preview-progress]")?.textContent ?? null;
+    const origin = new URL(FIRST).origin;
+    const site = (data: Record<string, unknown>) => post({ source: "site-kit", v: 1, ...data }, origin, frame()!.contentWindow);
+    await render();
+    await site({ type: "layout-ack", payload: { supports: ["ready"] } });
+    await site({ type: "ready" });
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    // The page acknowledges the layout Studio sends at the load.
+    await site({ type: "layout-ack", payload: { supports: ["ready"] } });
+    expect(progress()).toBeNull();
+    await advance(10_000);
+    expect(progress()).toBeNull();
+  });
+
+  it("goes on saying it is opening the site through the frame's load for a page that said before it that it draws later", async () => {
+    const progress = () => container.querySelector("[data-testid=site-preview-progress]")?.textContent ?? null;
+    const origin = new URL(FIRST).origin;
+    const site = (data: Record<string, unknown>) => post({ source: "site-kit", v: 1, ...data }, origin, frame()!.contentWindow);
+    await render();
+    await site({ type: "layout-ack", payload: { supports: ["ready"] } });
+    expect(progress()).toContain("Opening Docs site…");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    // Before the page acknowledges the layout sent at the load: no blink.
+    expect(progress()).toContain("Opening Docs site…");
+    await site({ type: "layout-ack", payload: { supports: ["ready"] } });
+    expect(progress()).toContain("Opening Docs site…");
+    await site({ type: "ready" });
+    expect(progress()).toBeNull();
+  });
+
+  // The pane waits for a site's first draw once each time it loads it fresh
+  // (the press, Reload). A site that then moves on inside the frame (it
+  // reloads itself in place, or opens its next page) shows as it loads, as
+  // before, never under "Loading…" once it has drawn.
+  it("never says Loading… over a site that moved on inside the frame after it had drawn", async () => {
+    const progress = () => container.querySelector("[data-testid=site-preview-progress]")?.textContent ?? null;
+    const origin = new URL(FIRST).origin;
+    const site = (data: Record<string, unknown>) => post({ source: "site-kit", v: 1, ...data }, origin, frame()!.contentWindow);
+    await render();
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await site({ type: "layout-ack", payload: { supports: ["ready"] } });
+    await site({ type: "ready" });
+    expect(progress()).toBeNull();
+    // The site reloads itself in place, and its new page draws before its load event fires.
+    await site({ type: "ready" });
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await site({ type: "layout-ack", payload: { supports: ["ready"] } });
+    expect(progress()).toBeNull();
+    await advance(10_000);
+    expect(progress()).toBeNull();
+  });
+
   // The frame of a site that stopped answering goes, and a new one loads when
   // it answers again: at the same address, so the page that loaded in the
   // frame before is no sign this one has.

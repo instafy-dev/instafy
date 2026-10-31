@@ -454,7 +454,7 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
     setPageLoadedOnce(true);
     host.onFrameLoad();
   };
-  // A page that draws itself after it loads (a map) is empty until it says it
+  // A page that says it draws itself after it loads is empty until it says it
   // has drawn (useSiteHost's `drawing`): the pane goes on saying it is opening
   // the site meanwhile. Any other page shows once it has loaded.
   const drawing = frameShown && !frameLoading && host.drawing;

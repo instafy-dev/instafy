@@ -22,6 +22,7 @@ import type { ChatMessage } from "../../types";
 import { browserAutoStartPlan, forgetBrowserAutoStartsForTests, type BrowserAutoStartPlan } from "../browserAutoStart";
 import type { BrowserSessionPage, BrowserSessionPageTarget } from "../browserSessionPages";
 import {
+  chatBrowserCardReady,
   chatBrowserTab,
   chatBrowserTarget,
   chatViewPageIds,
@@ -60,7 +61,7 @@ type Sent = { tab: BrowserSessionPageTarget | null; extras: { metadata: Record<s
 /**
  * The card, the chat's own tab and the chat's turn target, joined as
  * ChatPanel joins them (chatPanelChatBrowserView.test.ts reads that it
- * does): the card's turn is ready once a tab is there for it, and it is sent
+ * does): the card's turn is ready by `chatBrowserCardReady`, and it is sent
  * to the tab `resolveForTurn` gives the chat.
  */
 type HarnessProps = {
@@ -83,7 +84,7 @@ function Harness(props: HarnessProps) {
   useChatBrowserRequest({
     identity: IDENTITY, messages: props.messages, canWrite: true, ready: true, transport: "shared", open: props.open,
     busy: false, personalAvailable: false, personalReady: false,
-    sharedReady: Boolean(HOST && target?.tabAvailable),
+    sharedReady: chatBrowserCardReady({ runtimeId: HOST, target }),
     sharedRuntimeId: HOST, sharedUnavailable: false,
     activate: props.activate,
     continueTask: async (_transport, _message, extras) => {

@@ -201,10 +201,11 @@ import {
 import { shouldSuppressOuterAvatarForConversationThread } from "./conversationThreadPreviewLayout";
 import { resolveComposerGhostSuggestion } from "./composerGhostSuggestion";
 import { useChatBrowserSessionState } from "./useChatBrowserSessionState";
-import { useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeting";
+import { sharedBrowserPagesFast, useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeting";
 import {
   CHAT_BROWSER_VIEW_START,
   browserTurnUnderWay,
+  chatBrowserCardReady,
   chatBrowserHandoffPage,
   chatBrowserTarget,
   chatPageOnScreen,
@@ -424,6 +425,7 @@ import {
 } from "./useChatBrowserRequest";
 import {
   BrowserRequestHostContext,
+  anyBrowserCardOpening,
   browserRequestContinuedKeys,
   newestBrowserRequestKey,
   pressedBrowserCardSites,
@@ -1870,11 +1872,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     resolvedBrowserRuntimeId,
     showStatus,
     sharedBrowserPagesActive,
-    sharedBrowserPagesPollFast:
-      spaceRunActive ||
-      browserCardOpening ||
-      sharedBrowserPresence?.remoteController === true ||
-      sharedBrowserPresence?.othersPresent === true,
+    sharedBrowserPagesPollFast: sharedBrowserPagesFast({
+      runActive: spaceRunActive,
+      cardOpening: browserCardOpening,
+      presence: sharedBrowserPresence,
+    }),
     sharedBrowserSurfaceVisible: browserVisible,
   });
   // This chat's own tab in Instafy's browser (chatBrowserTab.ts): its browser
@@ -4916,7 +4918,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     // A card's turn finds a tab: the chat's own, or a blank one it gets as it
     // is sent (resolveForTurn), with the person in Chat too. A chat with no tab
     // yet has no page on screen (browserHandoffPage) until its view shows.
-    sharedReady: Boolean(resolvedBrowserRuntimeId && chatBrowserMessageTarget?.tabAvailable),
+    sharedReady: chatBrowserCardReady({ runtimeId: resolvedBrowserRuntimeId, target: chatBrowserMessageTarget }),
     sharedRuntimeId: resolvedBrowserRuntimeId,
     sharedUnavailable: sharedBrowserCapabilitiesUnsupported,
     sharedHost: {
@@ -5012,7 +5014,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setBrowserAutoWaiting(browserRequestAutoWaiting);
   }, [browserRequestAutoWaiting]);
   const browserCardOpeningNow = useMemo(
-    () => [...browserRequestState.cardStates.values()].some((state) => state.kind === "opening"),
+    () => anyBrowserCardOpening(browserRequestState.cardStates),
     [browserRequestState.cardStates],
   );
   useEffect(() => {

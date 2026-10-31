@@ -1,7 +1,26 @@
 import { useCallback, useEffect, useState } from "react";
 import type { StatusIntent } from "../../../status/useStatus";
+import type { SharedBrowserPresence } from "./browserAutoStart";
 import { useBrowserSessionPages } from "./useBrowserSessionPages";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
+
+/**
+ * Whether the browser's tabs are read at the fast pace (every 2.5 s, also
+ * with its view off screen, `sharedBrowserPagesPollFast`): while work runs in
+ * the space, while a card opens the browser (its turn goes out as soon as the
+ * browser lists a tab, with the person in Chat too), and while someone else
+ * controls the browser or is in it.
+ */
+export function sharedBrowserPagesFast(input: {
+  runActive: boolean;
+  cardOpening: boolean;
+  presence: SharedBrowserPresence | null;
+}): boolean {
+  return input.runActive ||
+    input.cardOpening ||
+    input.presence?.remoteController === true ||
+    input.presence?.othersPresent === true;
+}
 
 type UseChatComposerBrowserTargetingOptions = {
   activeConversationId: string | null;

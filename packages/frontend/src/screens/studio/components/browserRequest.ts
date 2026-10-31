@@ -25,6 +25,12 @@ export type BrowserRequestCardState =
   | { kind: "opened" }
   | { kind: "button"; reason: string | null };
 
+/** A card is opening Instafy's browser, by itself or after a press. */
+export function anyBrowserCardOpening(cardStates: ReadonlyMap<string, BrowserRequestCardState>): boolean {
+  for (const state of cardStates.values()) if (state.kind === "opening") return true;
+  return false;
+}
+
 /**
  * What this Studio can open for a request_browser card. The card itself says
  * nothing about browsers. Instafy's Workspace browser starts on demand: on the

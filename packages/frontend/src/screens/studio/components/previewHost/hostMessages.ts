@@ -13,10 +13,10 @@
  * its own pair in `locationBroker.ts`; follow mode reads `layout-ack` (what the
  * site supports), `view`, `tap` and `interact`; Ask Octo reads `ask`
  * (siteAsks.ts) and answers `ask-status`. A page that draws itself after it
- * loads (a map, a chart) lists "ready" in its `layout-ack` and sends `ready`
- * once its first view is drawn: until then the pane says it is opening the
- * site (SitePreviewPane). Messages are data, never commands, and the pane
- * reads them only from its own frame at the viewer's origin.
+ * loads can list "ready" in its `layout-ack` and send `ready` once its first
+ * view is drawn: until then the pane says it is opening the site
+ * (SitePreviewPane). Messages are data, never commands, and the pane reads
+ * them only from its own frame at the viewer's origin.
  */
 import { parseSiteAsk, type SiteAsk } from "./siteAsks";
 

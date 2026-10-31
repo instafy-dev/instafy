@@ -31,6 +31,15 @@ export type CdpScreencastViewerProps = {
 
 const CDP_FIRST_FRAME_TIMEOUT_MS = 10_000;
 const CDP_INPUT_READY_TIMEOUT_MS = 10_000;
+/**
+ * The browser allows each viewer two picture streams at a time, and counts
+ * one this view closed until it has finished setting it up. A picture asked
+ * for within this long of the view closing its last one (it moved to another
+ * tab, or its address was renewed) may be refused only for that.
+ */
+const CDP_PICTURE_REPLACED_WINDOW_MS = 2_000;
+/** How long such a refused picture waits before it is asked for once more. */
+export const CDP_PICTURE_RETRY_DELAY_MS = 1_000;
 
 function websocketOpen(socket: WebSocket | null): socket is WebSocket {
   return Boolean(socket && socket.readyState === WebSocket.OPEN);
@@ -127,6 +136,8 @@ export function CdpScreencastViewer({
   const inputSocketStartedWithAuthorityRef = useRef(false);
   const lastObservedInputAuthorityKeyRef = useRef<string | null>(null);
   const callbacksRef = useRef({ onConnected, onDisconnected, onTransportError });
+  /** When the view last closed a picture socket of its own (CDP_PICTURE_REPLACED_WINDOW_MS). */
+  const pictureClosedAtRef = useRef<number | null>(null);
   const inputConnectionKey = inputAvailable && inputWsUrl
     ? `${connectionGeneration}\n${inputWsUrl}`
     : null;
@@ -146,6 +157,7 @@ export function CdpScreencastViewer({
     let connected = false;
     let readyReceived = false;
     let firstFrameTimer: number | null = null;
+    let retryTimer: number | null = null;
     const currentViewport = initialViewport(canvas);
     setRemoteBrowserSurfaceContentSize(
       canvas,
@@ -155,30 +167,42 @@ export function CdpScreencastViewer({
     let latestFrameId = 0;
     let paintedFrameId = 0;
     let socket: WebSocket | null = null;
+    // This picture replaces one the view closed just now: the browser may
+    // refuse it while it still counts that one, so a refusal is asked again
+    // once before it counts as failed (and the view moves to another viewer).
+    const replacedAtMs = pictureClosedAtRef.current;
+    let retriesLeft = replacedAtMs !== null && Date.now() - replacedAtMs < CDP_PICTURE_REPLACED_WINDOW_MS ? 1 : 0;
 
-    // React StrictMode intentionally mounts, disposes, and remounts effects in
-    // development. Defer the network side effect by one microtask so the
-    // disposed probe cannot overlap the replacement CDP screencast session.
-    // This also collapses same-commit URL/generation replacements without
-    // delaying ordinary renderer startup by a visible frame.
-    queueMicrotask(() => {
+    const open = () => {
       if (disposed) {
         return;
       }
 
       const nextSocket = new WebSocket(withInitialViewport(wsUrl, currentViewport));
       socket = nextSocket;
-
-      firstFrameTimer = window.setTimeout(() => {
-        firstFrameTimer = null;
-        if (!disposed && !connected) {
-          callbacksRef.current.onTransportError(
-            "Shared Browser renderer did not produce its first frame.",
-            true,
-          );
-          nextSocket.close(1011, "first frame timeout");
+      // Whether the browser said anything on this socket; and whether it was
+      // given up for a new ask, so nothing it does later counts.
+      let heard = false;
+      let superseded = false;
+      // Ended before the browser said anything: asked for again once, a
+      // moment later, while a retry is left. True when it was (or already had
+      // been), so the end is not reported.
+      const askAgain = (): boolean => {
+        if (superseded) {
+          return true;
         }
-      }, CDP_FIRST_FRAME_TIMEOUT_MS);
+        if (heard || connected || retriesLeft <= 0) {
+          return false;
+        }
+        retriesLeft -= 1;
+        superseded = true;
+        nextSocket.close();
+        retryTimer = window.setTimeout(() => {
+          retryTimer = null;
+          open();
+        }, CDP_PICTURE_RETRY_DELAY_MS);
+        return true;
+      };
 
       const send = (message: Record<string, unknown>) => {
         if (websocketOpen(nextSocket)) {
@@ -188,9 +212,10 @@ export function CdpScreencastViewer({
 
       nextSocket.addEventListener("message", (event) => {
         const message = parseCdpScreencastServerMessage(event.data);
-        if (!message || disposed) {
+        if (!message || disposed || superseded) {
           return;
         }
+        heard = true;
         if (message.type === "ready" || message.type === "viewport") {
           if (message.type === "ready") {
             readyReceived = true;
@@ -252,7 +277,7 @@ export function CdpScreencastViewer({
           });
       });
       nextSocket.addEventListener("error", () => {
-        if (!disposed) {
+        if (!disposed && !askAgain()) {
           callbacksRef.current.onTransportError(
             "Shared Browser renderer connection failed.",
             true,
@@ -260,7 +285,7 @@ export function CdpScreencastViewer({
         }
       });
       nextSocket.addEventListener("close", (event) => {
-        if (!disposed) {
+        if (!disposed && !askAgain()) {
           if (firstFrameTimer !== null) {
             window.clearTimeout(firstFrameTimer);
             firstFrameTimer = null;
@@ -271,12 +296,48 @@ export function CdpScreencastViewer({
           });
         }
       });
+    };
+
+    // React StrictMode intentionally mounts, disposes, and remounts effects in
+    // development. Defer the network side effect by one microtask so the
+    // disposed probe cannot overlap the replacement CDP screencast session.
+    // This also collapses same-commit URL/generation replacements without
+    // delaying ordinary renderer startup by a visible frame.
+    queueMicrotask(() => {
+      if (disposed) {
+        return;
+      }
+      // One deadline for the first frame, whichever ask brings it.
+      firstFrameTimer = window.setTimeout(() => {
+        firstFrameTimer = null;
+        if (!disposed && !connected) {
+          retriesLeft = 0;
+          if (retryTimer !== null) {
+            window.clearTimeout(retryTimer);
+            retryTimer = null;
+          }
+          callbacksRef.current.onTransportError(
+            "Shared Browser renderer did not produce its first frame.",
+            true,
+          );
+          socket?.close(1011, "first frame timeout");
+        }
+      }, CDP_FIRST_FRAME_TIMEOUT_MS);
+      open();
     });
 
     return () => {
       disposed = true;
       if (firstFrameTimer !== null) {
         window.clearTimeout(firstFrameTimer);
+      }
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
+      // The browser counts this picture until it has set it up: the next one
+      // may be refused for that alone.
+      if (socket) {
+        pictureClosedAtRef.current = Date.now();
       }
       socket?.close(1000, "viewer disposed");
     };

@@ -43,7 +43,11 @@ export type SiteMessageEvent = Pick<MessageEvent, "data" | "origin" | "source">;
  * First draw: a page that draws itself after it loads lists "ready" in its
  * `layout-ack` and says `ready` once drawn. `drawing` is true from that
  * `layout-ack` until then (at most SITE_FIRST_DRAW_WAIT_MS), so the pane keeps
- * saying it is opening the site instead of showing an empty page.
+ * saying it is opening the site instead of showing an empty page. It waits
+ * once each time the frame is loaded fresh (the press, Reload, a new
+ * address), through the frame's load event: a `ready` said before that event
+ * counts, and a page that moves on inside the frame after the first draw
+ * shows as it loads.
  */
 export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, frameOnScreen, record, title = "", spaceName = null, asks = null, onError = NO_ERROR }: {
   frame: RefObject<HTMLIFrameElement | null>;
@@ -90,7 +94,20 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   const loadsSinceFresh = useRef(0);
   /** What the site's `layout-ack` listed ("view", "tap"); cleared with each new document. */
   const [supports, setSupports] = useState<readonly string[]>([]);
-  /** The document said its first view is drawn, or the pane stopped waiting for it. */
+  /**
+   * The page listed "ready" in a `layout-ack` since the frame was loaded
+   * fresh: it draws itself after it loads. Kept through the frame's load
+   * event, so the pane's line does not go off between the load and the
+   * page's answer to the layout sent then.
+   */
+  const [drawsLater, setDrawsLater] = useState(false);
+  /**
+   * The page said its first view is drawn since the frame was loaded fresh,
+   * or the pane stopped waiting for it. Kept through the frame's load events:
+   * a page can draw before its own load event fires (a picture or a font on
+   * it still loading), and one that moves on inside the frame after it drew
+   * shows as it loads.
+   */
   const [drawn, setDrawn] = useState(false);
   /** A document in this pane has drawn once: a later one draws again under "Loading…". */
   const [drawnOnce, setDrawnOnce] = useState(false);
@@ -101,7 +118,6 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     heardFromSite.current = false;
     loadsSinceFresh.current += 1;
     setSupports([]);
-    setDrawn(false);
     setFrameLoads(count => count + 1);
     // The site moved to another page inside the frame: that page did not ask, so this
     // frame's watches and pending answers end. The first load is left alone, since the
@@ -173,7 +189,7 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   // A new document in the frame (Reload, a new capability) did not ask: its watches end, and what it held is gone.
   useEffect(() => {
     loadsSinceFresh.current = 0;
-    return () => { broker.current?.stopAll(); broker.current?.forgetPositions(); setSupports([]); setDrawn(false); };
+    return () => { broker.current?.stopAll(); broker.current?.forgetPositions(); setSupports([]); setDrawsLater(false); setDrawn(false); };
   }, [frameKey, viewerUrl]);
   const locationStatus = useLocationSiteStatus(siteKey);
 
@@ -208,6 +224,7 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
       // Within one document what a site supports only grows.
       if (parsed.type === "layout-ack") {
         setSupports(current => parsed.supports.every(name => current.includes(name)) ? current : [...new Set([...current, ...parsed.supports])]);
+        if (parsed.supports.includes("ready")) setDrawsLater(true);
       }
       if (parsed.type === "ready") { setDrawn(true); return true; }
       if (parsed.type === "ask") { askEvent.current.handleAsk(parsed.ask); return true; }
@@ -218,7 +235,7 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   }, [sendLayout]);
 
   // A page that said it draws itself after it loads, and has not said it has.
-  const drawing = supports.includes("ready") && !drawn;
+  const drawing = drawsLater && !drawn;
   useEffect(() => {
     if (!drawing) return;
     const timer = window.setTimeout(() => setDrawn(true), SITE_FIRST_DRAW_WAIT_MS);

@@ -57,19 +57,21 @@ describe("ChatPanel's chat Browser view", () => {
 
 // Seen Oct 30: no browser card opened by itself while the person
 // stayed in Chat. The card waited for the page Take over acts on, which a
-// chat with no tab yet has only while its Browser view is on screen
-// (chatBrowserCardStart.test.tsx covers the card with these values).
+// chat with no tab yet has only while its Browser view is on screen.
+// chatBrowserCardStart.test.tsx covers the card with chatBrowserCardReady, and
+// useBrowserSessionPages.test.tsx the reads with sharedBrowserPagesFast; these
+// read that ChatPanel uses both.
 describe("ChatPanel's browser cards", () => {
   it("send a card's turn once a tab is there for it, with the chat's Browser view off screen too", () => {
-    expect(chatPanel).toContain("sharedReady: Boolean(resolvedBrowserRuntimeId && chatBrowserMessageTarget?.tabAvailable),");
+    expect(chatPanel).toContain("sharedReady: chatBrowserCardReady({ runtimeId: resolvedBrowserRuntimeId, target: chatBrowserMessageTarget }),");
     expect(chatPanel).not.toMatch(/sharedReady:[^\n]*browserHandoffPage/);
     // The page on screen stays what Take over and Let Octo continue act on.
     expect(chatPanel).toContain("page: browserHandoffPage,");
   });
 
   it("read the browser's tabs at the fast pace while a card opens it", () => {
-    expect(chatPanel).toMatch(/sharedBrowserPagesPollFast:\n\s*spaceRunActive \|\|\n\s*browserCardOpening \|\|/);
-    expect(chatPanel).toContain('[...browserRequestState.cardStates.values()].some((state) => state.kind === "opening")');
+    expect(chatPanel).toMatch(/sharedBrowserPagesPollFast: sharedBrowserPagesFast\(\{\n\s*runActive: spaceRunActive,\n\s*cardOpening: browserCardOpening,\n\s*presence: sharedBrowserPresence,\n\s*\}\),/);
+    expect(chatPanel).toContain("() => anyBrowserCardOpening(browserRequestState.cardStates),");
     expect(chatPanel).toContain("setBrowserCardOpening(browserCardOpeningNow);");
   });
 });
