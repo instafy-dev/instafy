@@ -1647,7 +1647,8 @@ a link ticks and a live count goes up. The allowed click, typing that sends the
 form and Enter in a field each run once, on the control the person was asked
 about. A control swapped for another, a form sent elsewhere, the same control
 on another address of the site, a form given another field, one of two
-controls alike once the page changed, and its twin once it went are not used:
+controls alike once the page changed, its twin once it went, and a control a
+look-alike appeared ahead of are not used:
 the step fails without a terminal code, says it asks the person again, and its
 failed command lists their yes; asked again, the new prompt names the form as it
 is now. A take-over while the prompt waits still ends the step, and a page that

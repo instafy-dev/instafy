@@ -18,7 +18,7 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // control that changed while the prompt waited (swapped for another, its form
 // sent elsewhere or given another field) is not used, and the step asks again
 // instead of ending the run; so is one that a change leaves looking like
-// another. A take-over while the prompt waits still ends the step, and a page
+// another, or that a look-alike appeared ahead of. A take-over while the prompt waits still ends the step, and a page
 // that left its site after the yes ends the run with the yes listed. No model,
 // Studio, controller, account or external site is used, and Chromium resolves
 // no other host.
@@ -358,8 +358,7 @@ export async function runSharedBrowserAllowedStepFixture() {
     assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport&phone=555-0100"]);
 
     // 3. Two controls alike: once the page changed, neither is taken for the
-    // one the person was asked about. With the page as it was, the control at
-    // its index is the one.
+    // one the person was asked about.
     planned = await openPlanner("?twice=1");
     requests.length = 0;
     const twins = await runTool("POST", "/v1/click", control(planned, "Plan your journey", 1), ["allow_once"], live("slide"));
@@ -370,6 +369,19 @@ export async function runSharedBrowserAllowedStepFixture() {
     const orphan = await runTool("POST", "/v1/click", control(planned, "Plan your journey", 0), ["allow_once"], () =>
       runPage.evaluate(() => document.querySelector("form").remove()));
     askedAgain(orphan, "one of two controls alike, after it went");
+    // Nor one that a look-alike, appearing ahead of it, could be taken for.
+    planned = await openPlanner();
+    requests.length = 0;
+    const lookAlike = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"], () =>
+      runPage.evaluate(() => {
+        const form = document.querySelector("form");
+        const copy = form.cloneNode(true);
+        copy.querySelector("[name=which]").value = "2";
+        form.before(copy);
+      }));
+    askedAgain(lookAlike, "a control a look-alike appeared ahead of");
+    // With the page as it was, the control at its index is the one: the
+    // second form, not the first that looks like it.
     planned = await openPlanner("?twice=1");
     requests.length = 0;
     const second = await runTool("POST", "/v1/click", control(planned, "Plan your journey", 1), ["allow_once"]);
@@ -410,7 +422,7 @@ export async function runSharedBrowserAllowedStepFixture() {
         "typing that sends the form and Enter in a field run the same way while the page changes",
         "a control swapped for another, a form sent elsewhere, the same control on another address of the site and a form given another field while the prompt waits are not used: the step fails without ending the run, says it asks again, and lists the person's yes",
         "asked again, the step's new prompt names the form as it is now, and the yes sends it",
-        "one of two controls alike is not used once the page changed, nor its twin once it went; with the page unchanged the control at its index is",
+        "one of two controls alike is not used once the page changed, nor its twin once it went, nor a control a look-alike appeared ahead of; with the page unchanged the control at its index is",
         "a take-over while the prompt waits ends the step, and a yes then does nothing",
         "a page that left its site after the yes ends the run with the stale code, and the failed command lists the yes",
       ],
