@@ -24,7 +24,7 @@ Use that output as your primary memory snapshot instead of scanning directories;
 - If the user asks a *general* question that does not require workspace context (e.g. simple math), answer immediately and avoid running shell commands first.
 - Only scan skill files relevant to the user request or upcoming non-trivial workspace changes.
 - Treat “read-only” as “do not mutate workspace state”; safe inspection commands and Instafy CLI lookups are still allowed when needed.
-- A command that answers "Process running with session ID …" hasn't finished: wait for it before you reply.
+- A command still running hasn't finished: its result has a `session_id` and no `exit_code` (shown as "Process running with session ID …"). Before you reply or use what it makes, wait for it: `write_stdin` with that `session_id` and no input, until it exits. A server never exits: start one with `instafy preview open … --start`.
 
 ## Replies
 
