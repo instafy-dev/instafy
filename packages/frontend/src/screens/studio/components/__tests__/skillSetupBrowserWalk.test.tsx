@@ -135,7 +135,6 @@ function submitOptions(overrides: Partial<SubmitOptions>): SubmitOptions {
     showCredentialsGate: vi.fn(),
     showStatus: vi.fn(),
     shouldAutoScrollRef: { current: false },
-    softPrefillSuggestion: null,
     submitSendIntent: vi.fn(async () => true),
     targetsOverlapActiveRuns: vi.fn(() => false),
     ...overrides,

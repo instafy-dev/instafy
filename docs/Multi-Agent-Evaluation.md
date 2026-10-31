@@ -352,7 +352,7 @@ Write-scope modes:
 
 Runtime jobs should use the narrowest final-output contract that still gives Studio the machine-readable data it needs:
 
-- `strict_structured`: default for executable automation. The Responses API receives the JSON schema because Studio needs `summary`, `files`, `actions`, and `suggestions` to apply file changes or render product actions.
+- `strict_structured`: default for executable automation. The Responses API receives the JSON schema because Studio needs `summary`, `files` and `actions` to apply file changes or render product actions.
 - `schema_free_structured`: planning/checkpoint turns still prompt for a parseable JSON object, but the API-level schema is disabled because lead synthesis and action planning proved more reliable without strict final-output enforcement. Studio validates/parses after the model returns.
 - `plain_text_report`: pre-observed read-only worker lanes produce evidence prose. They should not be forced through the JSON final schema because no file/app action is expected.
 - `plain_text_write`: ordinary required or conditional workspace-change jobs use tools and finish with a short summary; actual file changes are collected from disk. Conditional review can finish with an evidenced no-change result. Required prior-context retrieval does not change this format. Read-only and coordination-required scopes retain their restrictions.

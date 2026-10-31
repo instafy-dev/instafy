@@ -93,7 +93,6 @@ Avoid product bloat:
 
 After onboarding completes, suggest one concrete retry prompt so the user can continue immediately.
 - Provide exactly one retry phrase. Don’t add an alternate “then reply …” phrase.
-- If you include suggestion chips, include exactly one and it must equal the retry phrase (otherwise omit).
 
 ## Showing the way in Instafy's browser
 

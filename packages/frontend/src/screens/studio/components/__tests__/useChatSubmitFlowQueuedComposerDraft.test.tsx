@@ -130,7 +130,6 @@ function createOptions(overrides: Partial<HookOptions> = {}): HookOptions {
     showCredentialsGate: vi.fn(),
     showStatus: vi.fn(),
     shouldAutoScrollRef: { current: false },
-    softPrefillSuggestion: null,
     submitSendIntent: vi.fn(async () => true),
     targetsOverlapActiveRuns: vi.fn(() => true),
     ...overrides,
@@ -508,5 +507,41 @@ describe("useChatSubmitFlow sends made for the person", () => {
     expect(options.performSubmit).not.toHaveBeenCalled();
     expect(options.enqueueServerSendQueueItem).not.toHaveBeenCalled();
     expect(options.onRecordMessage).not.toHaveBeenCalled();
+  });
+
+  // Enter in an empty composer sent the last reply's first suggestion, which
+  // Studio never showed: the metro reply's "Try the route again in a fresh
+  // browser session." would have gone out in the person's name. An empty
+  // composer sends nothing, whatever the last reply carries.
+  it("Enter in an empty composer after a reply sends nothing", async () => {
+    const options = createOptions({
+      inputValue: "",
+      isAssistantTyping: false,
+      targetsOverlapActiveRuns: vi.fn(() => false),
+      activeConversationMessages: [
+        { id: "ask", role: "user", content: "Please keep going and find the metro route.", timestamp: 1 },
+        {
+          id: "reply",
+          role: "assistant",
+          content: "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again.",
+          timestamp: 2,
+          metadata: {
+            source: "agent",
+            ui: { suggestedReplies: ["Try the route again in a fresh browser session."], suggestedRepliesMode: "send" },
+          },
+        },
+      ],
+    });
+    const resultRef = await mount(options);
+    let sent: boolean | undefined;
+    await act(async () => {
+      sent = await resultRef.current?.submitMessage(undefined, { intent: "send" });
+    });
+    expect(sent).toBe(false);
+    expect(options.performSubmit).not.toHaveBeenCalled();
+    expect(options.enqueueServerSendQueueItem).not.toHaveBeenCalled();
+    expect(options.submitSendIntent).not.toHaveBeenCalled();
+    expect(options.onRecordMessage).not.toHaveBeenCalled();
+    expect(options.focusInput).toHaveBeenCalled();
   });
 });

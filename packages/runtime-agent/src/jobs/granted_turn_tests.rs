@@ -211,7 +211,6 @@ fn a_granted_turn_never_asks_to_open_a_browser() {
     };
     let outcome_with_card = || CodexOutcome {
         summary: "Instafy's browser will open the pricing page.".to_string(),
-        suggested_replies: Vec::new(),
         files: Vec::new(),
         read_files: Vec::new(),
         snippet: None,

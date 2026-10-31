@@ -69,7 +69,6 @@ describe("useAmbientCredentialGatePresentation", () => {
       activeConversationId: "conversation-1",
       credentialGateState: "missing",
       credentialGateStateForBubble: "missing",
-      fallbackSuggestion: null,
       inputCanRunAmbientParticipationPreflight: true,
       inputValue: "Taylor, what do you think?",
       pinCredentialGateToBottom,
@@ -103,7 +102,6 @@ describe("useAmbientCredentialGatePresentation", () => {
       activeConversationId: "conversation-1",
       credentialGateState: "missing",
       credentialGateStateForBubble: "missing",
-      fallbackSuggestion: null,
       inputCanRunAmbientParticipationPreflight: true,
       inputValue: "How does this API work?",
       pinCredentialGateToBottom: vi.fn(),
@@ -131,7 +129,6 @@ describe("useAmbientCredentialGatePresentation", () => {
       activeConversationId: "conversation-1",
       credentialGateState: null,
       credentialGateStateForBubble: null,
-      fallbackSuggestion: null,
       inputCanRunAmbientParticipationPreflight: true,
       inputValue: "How does this API work?",
       pinCredentialGateToBottom,
@@ -168,38 +165,33 @@ describe("useAmbientCredentialGatePresentation", () => {
     expect(resolveOutOfCreditsSendDisabled(resultRef.current)).toBe(false);
   });
 
-  it("does not inherit a reveal across ghost suggestions or conversations", async () => {
+  it("does not inherit a reveal across conversations", async () => {
     const pinCredentialGateToBottom = vi.fn();
     const resultRef: MutableRefObject<HookResult | null> = { current: null };
     const options: HookOptions = {
       activeConversationId: "conversation-1",
       credentialGateState: "missing",
       credentialGateStateForBubble: "missing",
-      fallbackSuggestion: "Ask Taylor for a decision",
       inputCanRunAmbientParticipationPreflight: true,
-      inputValue: "",
+      inputValue: "Ask Taylor for a decision",
       pinCredentialGateToBottom,
     };
 
     await act(async () => {
       root.render(<Harness options={options} resultRef={resultRef} />);
     });
-    const oldSuggestionShowCredentialsGate = resultRef.current?.showCredentialsGate;
+    const oldConversationShowCredentialsGate = resultRef.current?.showCredentialsGate;
 
     await act(async () => {
       root.render(
         <Harness
-          options={{
-            ...options,
-            activeConversationId: "conversation-2",
-            fallbackSuggestion: "Explain the failing build",
-          }}
+          options={{ ...options, activeConversationId: "conversation-2" }}
           resultRef={resultRef}
         />,
       );
     });
     await act(async () => {
-      oldSuggestionShowCredentialsGate?.();
+      oldConversationShowCredentialsGate?.();
     });
 
     expect(pinCredentialGateToBottom).not.toHaveBeenCalled();

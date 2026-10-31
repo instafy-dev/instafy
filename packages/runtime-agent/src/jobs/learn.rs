@@ -200,6 +200,8 @@ const LEGACY_INTEGRATION_ONBOARDING_TEMPLATES: &[&str] = &[
     include_str!("legacy/integration-onboarding-v4.md"),
     // From before the button that continues after a sign-in was "Let Octo continue".
     include_str!("legacy/integration-onboarding-v5.md"),
+    // From before replies stopped carrying suggestion chips.
+    include_str!("legacy/integration-onboarding-v6.md"),
 ];
 const BYOC_AI_CREDENTIALS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2522,13 +2524,17 @@ mod tests {
         );
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("`request_browser`"));
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("open Instafy's browser without asking"));
-        // Every earlier copy predates the browser offer, except the last two:
-        // the one before predates the repo-import and auth-failure routing
-        // keywords, and the last names the button that goes on after a
-        // sign-in "Let AI continue", where Studio now says "Let Octo continue".
-        let (last, earlier) = LEGACY_INTEGRATION_ONBOARDING_TEMPLATES
+        // Every earlier copy predates the browser offer, except the last three:
+        // the first of them predates the repo-import and auth-failure routing
+        // keywords, the next names the button that goes on after a sign-in
+        // "Let AI continue", where Studio now says "Let Octo continue", and the
+        // last still offers suggestion chips, which no reply carries now.
+        let (chips, earlier) = LEGACY_INTEGRATION_ONBOARDING_TEMPLATES
             .split_last()
             .expect("legacy copies");
+        assert!(chips.contains("suggestion chips"));
+        assert!(!INTEGRATION_ONBOARDING_TEMPLATE.contains("suggestion chips"));
+        let (last, earlier) = earlier.split_last().expect("legacy copies");
         let (keywords, earlier) = earlier.split_last().expect("legacy copies");
         for previous in earlier {
             assert!(!previous.contains("open Instafy's browser without asking"));

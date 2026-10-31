@@ -1210,8 +1210,8 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
 /// The skill's list of pages that end a read no longer covers it, the turn that writes the card's task knows the
 /// browser turn pauses there, and the browser skill's sign-in rules stay inside the part a browser turn carries, up to
 /// the last word of the last one (a cut inside that rule left its start in place, so a check of its start passed). The
-/// reply no longer says where the browser goes (the card says it), and still never says a page opened before a tool
-/// saw it. An unedited earlier copy of the skill is upgraded.
+/// card says where the browser goes, and a reply beside it never says a page opened before a browser tool saw it. An
+/// unedited earlier copy of the skill is upgraded.
 #[test]
 fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1228,7 +1228,7 @@ fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
         "- The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential."
     ));
     assert!(BROWSER_CHOICE_CONTRACT.contains(
-        "- In `summary`, never say a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy: that step asks the person first.\n"
+        "`summary` never says a page opened, or what it shows, before a browser tool saw it"
     ));
     assert!(!BROWSER_CHOICE_CONTRACT.contains("where the browser goes"));
 

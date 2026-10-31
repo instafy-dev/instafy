@@ -47,7 +47,6 @@ type BuildChatSubmitPlanOptions = {
       updateSticky?: boolean;
     },
   ) => ResolvedPromptAgentSelection;
-  softPrefillSuggestion: string | null | undefined;
 };
 
 export type ChatSubmitPlan = {
@@ -77,12 +76,10 @@ export function buildChatSubmitPlan({
   pendingBrowserLaunchMode,
   preferredBrowserPage,
   resolvePromptAgentTargets,
-  softPrefillSuggestion,
 }: BuildChatSubmitPlanOptions): ChatSubmitPlan {
   const trimmed = override ? override.message.trim() : inputValue.trim();
-  const fallback = override ? "" : (softPrefillSuggestion ?? "").trim();
-  const messageToSend =
-    trimmed || (!trimmed && !override && imageAttachmentCount === 0 ? fallback : "");
+  // What the person wrote, and only that: an empty composer sends nothing.
+  const messageToSend = trimmed;
   const browserLaunchMode = browserTargetingEnabled
     ? (override?.browserLaunchMode ?? pendingBrowserLaunchMode)
     : null;

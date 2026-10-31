@@ -207,7 +207,7 @@ describe("Personal handoff with the real React browser bridge", () => {
     expect(setEnabled).not.toHaveBeenCalled();
 
     let pending!: Promise<boolean>;
-    await act(async () => { pending = resultRef.current!.handoff.continuePersonal("Continue", "ask"); });
+    await act(async () => { pending = resultRef.current!.handoff.continuePersonalRun("Continue", "ask"); });
     expect(setEnabled).toHaveBeenCalledExactlyOnceWith({
       enabled: true, ownerId: nativeStatus.ownerId, approvalMode: "ask", handoffId: "handoff-1",
     });
@@ -215,6 +215,10 @@ describe("Personal handoff with the real React browser bridge", () => {
     await act(async () => startup.resolve({ pid: 42, runtimeId: "personal-fresh" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });
     expect(await pending).toBe(true);
+    // The chat shows the button's own words; the turn gets the whole prompt.
+    expect(value.onSubmit).toHaveBeenCalledExactlyOnceWith("conversation-1", "Let Octo continue", expect.objectContaining({
+      dispatchInput: "Continue",
+    }));
   });
 
   it("keeps refusing a card press after Let Octo continue failed before Desktop took the handoff", async () => {

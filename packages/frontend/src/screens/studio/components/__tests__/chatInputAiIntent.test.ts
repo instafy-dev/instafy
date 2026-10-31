@@ -17,7 +17,6 @@ describe("resolveChatInputRequiresAi", () => {
         activeConversationMessages: [],
         inputValue: "",
         hasImageAttachments: false,
-        fallbackSuggestion: null,
         resolvePromptAgentTargets,
       }),
     ).toBe(false);
@@ -30,7 +29,6 @@ describe("resolveChatInputRequiresAi", () => {
         activeConversationMessages: [],
         inputValue: "",
         hasImageAttachments: true,
-        fallbackSuggestion: null,
         resolvePromptAgentTargets: vi.fn(() => ({
           targetHandles: ["octo"],
           explicitMentionedHandles: [],
@@ -45,7 +43,6 @@ describe("resolveChatInputRequiresAi", () => {
         activeConversationMessages: [],
         inputValue: "",
         hasImageAttachments: true,
-        fallbackSuggestion: null,
         resolvePromptAgentTargets: vi.fn(() => ({
           targetHandles: [],
           explicitMentionedHandles: [],
@@ -54,28 +51,12 @@ describe("resolveChatInputRequiresAi", () => {
     ).toBe(false);
   });
 
-  it("uses an empty-send fallback suggestion when deciding whether AI is required", () => {
-    expect(
-      resolveChatInputRequiresAi({
-        activeConversationMessages: [],
-        inputValue: "",
-        hasImageAttachments: false,
-        fallbackSuggestion: "Summarize the next steps",
-        resolvePromptAgentTargets: vi.fn(() => ({
-          targetHandles: ["octo"],
-          explicitMentionedHandles: [],
-        })),
-      }),
-    ).toBe(true);
-  });
-
   it("uses the selected or explicitly mentioned agent for text", () => {
     expect(
       resolveChatInputRequiresAi({
         activeConversationMessages: [],
         inputValue: "Please review this",
         hasImageAttachments: false,
-        fallbackSuggestion: null,
         resolvePromptAgentTargets: () => ({
           targetHandles: ["octo"],
           explicitMentionedHandles: [],
@@ -90,7 +71,6 @@ describe("resolveChatInputRequiresAi", () => {
         activeConversationMessages: [],
         inputValue: "@octo can you check this?",
         hasImageAttachments: false,
-        fallbackSuggestion: null,
         resolvePromptAgentTargets: () => ({
           targetHandles: [],
           explicitMentionedHandles: [],
@@ -110,7 +90,6 @@ describe("resolveChatInputRequiresAi", () => {
         activeConversationMessages: [],
         inputValue: "Continue with https://github.com/octocat/Hello-World.",
         hasImageAttachments: false,
-        fallbackSuggestion: null,
         resolvePromptAgentTargets,
       }),
     ).toBe(false);
@@ -128,7 +107,6 @@ describe("resolveChatInputRequiresAi", () => {
         activeConversationMessages: [],
         inputValue: "/invite teammate@example.com",
         hasImageAttachments: false,
-        fallbackSuggestion: null,
         resolvePromptAgentTargets,
       }),
     ).toBe(false);
@@ -141,7 +119,6 @@ describe("resolveChatInputRequiresAi", () => {
         activeConversationMessages: [],
         inputValue: "Import https://github.com/octocat/Hello-World",
         hasImageAttachments: true,
-        fallbackSuggestion: null,
         resolvePromptAgentTargets: vi.fn(() => ({
           targetHandles: ["octo"],
           explicitMentionedHandles: [],
@@ -167,7 +144,6 @@ describe("resolveChatInputCanRunAmbientParticipationPreflight", () => {
     return resolveChatInputCanRunAmbientParticipationPreflight({
       inputValue: "Taylor, should we choose option A?",
       hasImageAttachments: false,
-      fallbackSuggestion: null,
       activeConversationControllerId: "controller-1",
       conversationHasHumanPeer: true,
       assistantEnabled: true,
@@ -192,8 +168,6 @@ describe("resolveChatInputCanRunAmbientParticipationPreflight", () => {
   it("allows a human greeting after Shared Browser was opened but the chat tab is active", () => {
     const hasBrowserTask = resolveChatInputHasBrowserTask({
       inputValue: "Hi Taylor, what do you think?",
-      hasImageAttachments: false,
-      fallbackSuggestion: null,
       personalBrowserActive: false,
       sharedBrowserModeActive: false,
       pendingNewBrowser: false,
@@ -212,8 +186,6 @@ describe("resolveChatInputCanRunAmbientParticipationPreflight", () => {
   it("keeps an auto-targeted interaction with an open Shared Browser behind AI gates", () => {
     const hasBrowserTask = resolveChatInputHasBrowserTask({
       inputValue: "Click the blue button there",
-      hasImageAttachments: false,
-      fallbackSuggestion: null,
       personalBrowserActive: false,
       sharedBrowserModeActive: false,
       pendingNewBrowser: false,
