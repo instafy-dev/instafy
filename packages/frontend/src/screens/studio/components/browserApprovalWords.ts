@@ -69,26 +69,6 @@ export function activityHostOf(origin: string | null | undefined): string | null
   return isActivityHost(host) ? host : null;
 }
 
-/**
- * Where a step on the page goes, as a host with no scheme ("httpbin.org"),
- * for the browser view's sheet to say "Goes to httpbin.org": a link's or a
- * form's address. Null when the sentence already names it: a site prompt or
- * a navigation names its page, and a form sent to another site says "It
- * goes to …". On the page's own site only a step that sends fields goes
- * somewhere: the runtime binds Enter, Space and a click on a box in a form
- * to the page's address even when the step sends nothing.
- */
-export function browserApprovalGoesTo(
-  request: Pick<BrowserApprovalWordsRequest, "kind" | "operation" | "sourceOrigin" | "destinationOrigin" | "display">,
-): string | null {
-  if (request.kind !== "action" || request.operation === "navigate") return null;
-  const destination = shownHost(request.display.destinationOrigin) ?? shownHost(request.destinationOrigin);
-  if (!destination) return null;
-  const site = shownHost(request.sourceOrigin) ?? destination;
-  if (destination !== site) return request.operation === "form-submit" ? null : destination;
-  return controlWords(splitBrowserApprovalLabel(request.display.label).label).sends ? destination : null;
-}
-
 function shownHost(origin: string | null | undefined): string | null {
   const host = hostOf(origin);
   return host ? displayActivityHost(host) : null;
@@ -139,7 +119,10 @@ function controlWords(name: string): ControlWords {
  * name of the control, the only place the page's own words appear, because
  * the person needs them to decide. Each of its names is cut on its own, so
  * the text the control shows is never lost to a longer one, and a form step
- * says which fields it sends: "Sends: Customer name, Telephone."
+ * says which fields it sends: "Sends: Customer name, Telephone." A step that
+ * leaves the site says where it goes ("It goes to pay.example."); one that
+ * stays on it does not, since the sentence already names the site. The chat's
+ * row and the browser view's sheet both ask in this one sentence.
  */
 export function browserApprovalSentence(agent: string, request: BrowserApprovalWordsRequest): string {
   // The step's category leads the runtime's label ("Delete, cancel or sign
@@ -160,29 +143,30 @@ function stepSentence(agent: string, request: BrowserApprovalWordsRequest, name:
   const quoted = label ? ` “${label}”${other ? ` (also called “${other}”)` : ""}` : "";
   // The exact page a site prompt or a navigation will load, when the runtime names it.
   const page = sharedBrowserApprovalTargetAddress(request);
+  // Where a step on the page goes (a link's or a form's address), named only
+  // when it is another site: on the page's own site the sentence has said it.
+  const elsewhere = destination && destination !== site ? ` It goes to ${destination}.` : "";
   switch (request.operation) {
     case "approve-origin":
       return page ? `${agent} wants to open ${page}.` : `${agent} wants to use ${destination ?? site}.`;
     case "navigate":
       return `${agent} wants to open ${page ?? destination ?? "a page"}.`;
     case "click":
-      return `${agent} wants to click${quoted} on ${site}.`;
+      return `${agent} wants to click${quoted} on ${site}.${elsewhere}`;
     case "type":
-      return `${agent} wants to type into${quoted || " a field"} on ${site}.`;
-    case "form-submit": {
-      const elsewhere = destination && destination !== site ? ` It goes to ${destination}.` : "";
+      return `${agent} wants to type into${quoted || " a field"} on ${site}.${elsewhere}`;
+    case "form-submit":
       return `${agent} wants to send ${label ? `the form${quoted}` : "a form"} on ${site}.${elsewhere}`;
-    }
     case "press-enter":
-      return `${agent} wants to press Enter on${quoted || " a control"} on ${site}.`;
+      return `${agent} wants to press Enter on${quoted || " a control"} on ${site}.${elsewhere}`;
     case "press-space":
-      return `${agent} wants to press Space on${quoted || " a control"} on ${site}.`;
+      return `${agent} wants to press Space on${quoted || " a control"} on ${site}.${elsewhere}`;
     case "press-key": {
       // The runtime names the key itself: "Press Tab on Search".
       const key = cut(name.replace(/^Press /u, ""));
-      return `${agent} wants to press ${key || "a key"} on ${site}.`;
+      return `${agent} wants to press ${key || "a key"} on ${site}.${elsewhere}`;
     }
     default:
-      return `${agent} wants to take a step${quoted} on ${site}.`;
+      return `${agent} wants to take a step${quoted} on ${site}.${elsewhere}`;
   }
 }

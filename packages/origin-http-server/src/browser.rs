@@ -1094,28 +1094,35 @@ struct ListedTitle {
 /// What `/browser/pages` last listed, by page id (see [`pages_still_loading`]).
 static LISTED_TITLES: Lazy<Mutex<HashMap<String, ListedTitle>>> = Lazy::new(Default::default);
 
-/// The pages whose listed title is the page they are leaving. While a tab
-/// loads another address, DevTools lists that address with the title of the
-/// page the tab last showed (Chromium keeps a tab's title until the new page
-/// arrives): "metrodoporto.pt" next to the bookshop's title, for as long as
-/// the slow page takes. A page is still loading while its listed address is
-/// not the one it shows (`shown_address`, its history's current entry).
+/// The pages whose listed title may be the page they are leaving, so they are
+/// named by their site alone. While a tab loads another address, DevTools
+/// lists that address with the title of the page the tab last showed
+/// (Chromium keeps a tab's title until the new page arrives): "metrodoporto.pt"
+/// next to the bookshop's title, for as long as the slow page takes. A page is
+/// still loading while its listed address is not the one it shows
+/// (`shown_address`, its history's current entry).
 ///
 /// A page's history is read only when its address or title changed since the
-/// last list, or while it is still loading, so a steady list opens no socket.
-/// A page whose history cannot be read keeps its title.
+/// last list confirmed its title, so a steady list opens no socket. The pages
+/// are read together, each for at most `read_timeout`, so one busy tab does not
+/// use up the time of the others. A page whose history could not be read in
+/// that time keeps no title until a later list confirms it: a busy tab is often
+/// the one still loading, and a title that is not confirmed may be the page it
+/// is leaving. A page with no DevTools socket, or no title of its own to show,
+/// keeps the title it has.
 async fn pages_still_loading<F, Fut>(
     targets: &[BrowserCdpTargetDescriptor],
     listed: &Mutex<HashMap<String, ListedTitle>>,
     shown_address: F,
+    read_timeout: Duration,
 ) -> HashSet<String>
 where
     F: Fn(String) -> Fut,
     Fut: Future<Output = Option<String>>,
 {
     let known = listed.lock().map(|known| known.clone()).unwrap_or_default();
+    let mut reads = Vec::new();
     let mut seen = HashMap::new();
-    let mut loading = HashSet::new();
     for target in targets {
         let url = target.url.trim().to_string();
         let title = target.title.clone();
@@ -1127,20 +1134,37 @@ where
             .as_deref()
             .map(str::trim)
             .filter(|websocket_url| !websocket_url.is_empty());
-        // A page with no title of its own to show has nothing to hide.
-        let own = if unchanged || normalize_browser_page_title(&title).is_none() {
-            true
-        } else if let Some(websocket_url) = websocket_url {
-            shown_address(websocket_url.to_string())
-                .await
-                .is_none_or(|shown| shown == url)
-        } else {
-            true
-        };
-        if !own {
-            loading.insert(target.id.clone());
+        match websocket_url {
+            // A page with no title of its own to show has nothing to hide.
+            Some(websocket_url) if !unchanged && normalize_browser_page_title(&title).is_some() => {
+                let shown = shown_address(websocket_url.to_string());
+                reads.push(async move {
+                    let own = timeout(read_timeout, shown)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|shown| shown == url);
+                    (target.id.clone(), ListedTitle { url, title, own })
+                });
+            }
+            _ => {
+                seen.insert(
+                    target.id.clone(),
+                    ListedTitle {
+                        url,
+                        title,
+                        own: true,
+                    },
+                );
+            }
         }
-        seen.insert(target.id.clone(), ListedTitle { url, title, own });
+    }
+    let mut loading = HashSet::new();
+    for (id, read) in futures_util::future::join_all(reads).await {
+        if !read.own {
+            loading.insert(id.clone());
+        }
+        seen.insert(id, read);
     }
     if let Ok(mut known) = listed.lock() {
         *known = seen;
@@ -1254,13 +1278,15 @@ async fn handle_browser_pages(
         .agent_tabs()
         .await;
     // A page still loading another address is named by the site it opens:
-    // its listed title is the page it is leaving. Bounded like the focus scan.
-    let still_loading = timeout(
+    // its listed title is the page it is leaving. Each page's read is bounded
+    // like the focus scan, and a page not read in time keeps no title.
+    let still_loading = pages_still_loading(
+        &targets,
+        &LISTED_TITLES,
+        fetch_browser_shown_address,
         BROWSER_CDP_COMMAND_TIMEOUT,
-        pages_still_loading(&targets, &LISTED_TITLES, fetch_browser_shown_address),
     )
-    .await
-    .unwrap_or_default();
+    .await;
     let pages = targets
         .into_iter()
         .map(|target| {
@@ -2814,7 +2840,7 @@ mod tests {
             let listed = &listed;
             let shown = &shown;
             async move {
-                pages_still_loading(&targets, listed, shown)
+                pages_still_loading(&targets, listed, shown, BROWSER_CDP_COMMAND_TIMEOUT)
                     .await
                     .contains("page")
             }
@@ -2839,14 +2865,80 @@ mod tests {
         *shown_now.lock().unwrap() = Some(METRO_LINES.to_string());
         assert!(!loading(page(METRO_LINES, "Metro do Porto")).await);
 
-        // A page whose history cannot be read keeps its title; one with no
-        // title of its own is not read at all.
+        // A page whose history cannot be read keeps no title, and is read
+        // again on the next list until a read confirms it: the title may be
+        // the page it is leaving.
         *shown_now.lock().unwrap() = None;
+        assert!(loading(page(LELLO, "Livraria Lello & Co")).await);
+        let before = reads.load(Ordering::SeqCst);
+        assert!(loading(page(LELLO, "Livraria Lello & Co")).await);
+        assert_eq!(reads.load(Ordering::SeqCst), before + 1);
+        *shown_now.lock().unwrap() = Some(LELLO.to_string());
         assert!(!loading(page(LELLO, "Livraria Lello & Co")).await);
+
+        // One with no title of its own is not read at all.
         let before = reads.load(Ordering::SeqCst);
         assert!(!loading(page(METRO, "about:blank")).await);
         assert!(!loading(page(METRO, "")).await);
         assert_eq!(reads.load(Ordering::SeqCst), before);
+    }
+
+    // A local test: while a comparison read reviews in several tabs, the
+    // reading row showed PCWorld's title next to tomshardware.com for 2.6 s.
+    // The tab list was read in one 2 s budget for every tab in turn, and when
+    // it ran out, every listed title was shown, the one the tab was leaving
+    // included.
+    #[tokio::test]
+    async fn a_tab_whose_history_does_not_answer_in_time_has_no_title_and_holds_up_no_other() {
+        const TOMS: &str = "https://www.tomshardware.com/laptops/framework-laptop-13-pro-review";
+        const FRAME: &str = "https://frame.work/at/en/laptop13pro";
+        let listed = Mutex::new(HashMap::new());
+        let target = |id: &str, url: &str, title: &str| BrowserCdpTargetDescriptor {
+            id: id.to_string(),
+            target_type: "page".to_string(),
+            title: title.to_string(),
+            url: url.to_string(),
+            websocket_debugger_url: Some(format!("ws://127.0.0.1:9/devtools/page/{id}")),
+        };
+        // The review tab is busy loading Tom's Hardware: its history never
+        // answers. The other tab shows its own page.
+        let shown = |websocket_url: String| async move {
+            if websocket_url.ends_with("/reviews") {
+                std::future::pending::<()>().await;
+            }
+            Some(FRAME.to_string())
+        };
+        let started = std::time::Instant::now();
+        let loading = pages_still_loading(
+            &[
+                target("reviews", TOMS, "Framework Laptop 13 Pro review | PCWorld"),
+                target("frame", FRAME, "Framework Laptop 13 Pro"),
+            ],
+            &listed,
+            shown,
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(loading, HashSet::from(["reviews".to_string()]));
+        // The tab that answered is remembered as showing its own title; the
+        // one that did not is read again next time.
+        let known = listed.lock().unwrap().clone();
+        assert!(known["frame"].own);
+        assert!(!known["reviews"].own);
+
+        // A page that was steady before keeps its title when nothing changed.
+        let steady = pages_still_loading(
+            &[target("frame", FRAME, "Framework Laptop 13 Pro")],
+            &listed,
+            |_websocket_url: String| async move {
+                std::future::pending::<()>().await;
+                None
+            },
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(steady.is_empty());
     }
 
     // The tabs a list no longer has are forgotten, and each page is judged on
@@ -2876,6 +2968,7 @@ mod tests {
             ],
             &listed,
             shown,
+            BROWSER_CDP_COMMAND_TIMEOUT,
         )
         .await;
         assert_eq!(loading, HashSet::from(["b".to_string()]));
@@ -2883,6 +2976,7 @@ mod tests {
             &[target("a", "https://visitporto.travel/a")],
             &listed,
             shown,
+            BROWSER_CDP_COMMAND_TIMEOUT,
         )
         .await;
         assert_eq!(

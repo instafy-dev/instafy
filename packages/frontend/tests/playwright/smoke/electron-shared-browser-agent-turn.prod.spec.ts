@@ -342,7 +342,7 @@ async function approveExpectedSharedBrowserRequest(
     { timeout: 60_000 },
   );
   // The origin the request is bound to, and the words the person reads name
-  // its host: the sentence for a site, "Goes to …" for a step that leaves it.
+  // its host: the sentence for a site, "It goes to …" for a step that leaves it.
   await expect(prompt).toHaveAttribute("data-approval-origin", expected.destination, { timeout: 60_000 });
   const approvedDestination = (await prompt.getAttribute("data-approval-origin"))?.trim() ?? "";
   expect(approvedDestination).not.toBe("");

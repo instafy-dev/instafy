@@ -169,10 +169,17 @@ describe("BrowserApprovalRow", () => {
       "Octo wants to press Enter on “Places” on visitlisboa.com.", "Allow"],
     [{ operation: "press-key", display: { label: "Press Tab on Places", destinationOrigin: null } },
       "Octo wants to press Tab on Places on visitlisboa.com.", "Allow"],
+    // Where a step goes is named only when it leaves the site, in the same
+    // sentence the browser view's sheet shows.
+    [{ operation: "click", destinationOrigin: "https://www.carris.pt", display: { label: "Timetables", destinationOrigin: "https://www.carris.pt" } },
+      "Octo wants to click “Timetables” on visitlisboa.com. It goes to carris.pt.", "Allow"],
+    [{ operation: "press-enter", display: { label: "Change something: Submit order \u00b7 Sends: Customer name", destinationOrigin: "https://www.visitlisboa.com" } },
+      "Octo wants to press Enter on “Submit order” on visitlisboa.com. Sends: Customer name.", "Allow"],
   ] as const)("says what it waits for in one sentence (%#)", async (overrides, sentence, allow) => {
     const value = request(overrides as Partial<RuntimeSharedBrowserApprovalRequest>);
     expect(browserApprovalSentence("Octo", value)).toBe(sentence);
     await render(withPending(value));
+    expect(byTestId("browser-approval-sentence")?.textContent).toBe(sentence);
     expect(byTestId("browser-approval-allow")?.textContent).toBe(allow);
   });
 
@@ -217,11 +224,12 @@ describe("BrowserApprovalRow", () => {
     expect(originState.decide).toHaveBeenCalledWith("allow_origin", "77777777-7777-4777-8777-777777777777");
   });
 
-  // A local test: Deny read "Saving…" while it sent the no.
+  // A local test: Deny read "Saving…" while it sent the no. Then its word was
+  // faded out under the spinner, so it showed a spinner and no word.
   it.each([
     ["deny", "Deny", "Allow"],
     ["allow", "Allow", "Deny"],
-  ] as const)("keeps the pressed button's word under a spinner while the answer is sent (%s)", async (button, word, otherWord) => {
+  ] as const)("keeps the pressed button's word in view beside a spinner while the answer is sent (%s)", async (button, word, otherWord) => {
     const value = request();
     const state = withPending(value);
     await render(state);
@@ -229,13 +237,15 @@ describe("BrowserApprovalRow", () => {
     await render({ ...state, submitting: true });
     const pressed = byTestId(`browser-approval-${button}`)!;
     const other = byTestId(`browser-approval-${button === "deny" ? "allow" : "deny"}`)!;
-    // On screen, the shared look of a pressed button with no icon: the spinner
-    // over its own word, which keeps its place (and the button's name) faded
-    // out, so nothing moves and nothing reads "Saving…".
+    // On screen, the spinner beside the button's own word, which stays in
+    // view, and nothing reads "Saving…".
     expect(pressed.textContent).toBe(word);
     expect(pressed.hasAttribute("data-pending")).toBe(true);
-    expect(pressed.querySelector('[role="progressbar"]')).not.toBeNull();
-    expect(pressed.querySelector(".opacity-0")?.textContent).toBe(word);
+    const progress = pressed.querySelector('[role="progressbar"]');
+    expect(progress).not.toBeNull();
+    expect(progress?.className).not.toContain("absolute");
+    expect(progress?.parentElement?.textContent).toBe(word);
+    expect(pressed.querySelector(".opacity-0")).toBeNull();
     expect(text()).not.toContain("Saving");
     // The other button keeps its word in view and waits.
     expect(other.textContent).toBe(otherWord);

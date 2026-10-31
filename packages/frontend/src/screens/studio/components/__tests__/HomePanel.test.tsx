@@ -541,7 +541,9 @@ describe("HomePanel activity states", () => {
     expect(query("home-create")).toBeNull();
   });
 
-  it("never calls a chat's updates new: one already read is no longer unread", async () => {
+  // A local test: Home's Recent activity read "8 updates", "10 updates" and
+  // "21 updates" under three chats, a count nobody acts on.
+  it("never calls a chat's updates new or counts them: one already read is no longer unread", async () => {
     // A chat read in the chat itself since the last visit to Home: its three
     // updates are past the visit's cut, and the chat is not under Unread.
     const chat = { id: "conversation-hi", title: "Say hi in three words", visibility: "public", threadKind: null };
@@ -555,7 +557,10 @@ describe("HomePanel activity states", () => {
     await render();
     expect(query("home-attention-section")).toBeNull();
     const row = query("home-recent-item-23")!;
-    expect(row.textContent).toContain("3 updates");
+    // One row for the chat, its newest state, and no count of what is behind it.
+    expect(container.querySelectorAll('[data-testid^="home-recent-item-"]')).toHaveLength(1);
+    expect(row.textContent).toContain(chat.title);
+    expect(row.textContent).not.toContain("updates");
     expect(row.textContent).not.toMatch(/new/i);
     expect(container.textContent).not.toMatch(/\bnew of\b/);
   });

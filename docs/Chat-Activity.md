@@ -25,7 +25,7 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives. A step still running from before the turn's save never names the line again; after a retry, it does |
 | The model is working with no step running, after the turn's first step | `Thinking…` (never its reasoning titles or notes), once there has been no step for 3 seconds; until then the line keeps the step before it |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
-| Done | what it made leads (the latest outcome), then the step that answered (the last "what it did" group) and the biggest other one (the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. The steps are read in the order they last changed (a step that started before another and ended after it is the later one), as the chat's thread holds them and as the controller stores them with the reply, so the line reads the same when the reply lands. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that opened or stopped a preview names the later of the two, and a site stopped and opened again reads `Opened a preview`. The preview card already says a preview opened, so `Opened a preview` shows only when no other step of the turn finished; no card says a site stopped, so a turn that made nothing else leads with it: `Stopped the preview, edited a file`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
+| Done | what it made leads (the latest outcome), then the two "what it did" groups that did most (pages, places, files; the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. A research turn that read six pages on frame.work and reviews on three other sites names the sites it read most, `Opened 6 pages on frame.work, opened 2 pages on phoronix.com`, not the last site it happened to open. When the step that answered (the last group) is one of the two, it leads; otherwise the bigger leads. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. The steps are read in the order they last changed (a step that started before another and ended after it is the later one), as the chat's thread holds them and as the controller stores them with the reply, so the line reads the same when the reply lands. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that opened or stopped a preview names the later of the two, and a site stopped and opened again reads `Opened a preview`. The preview card already says a preview opened, so `Opened a preview` shows only when no other step of the turn finished; no card says a site stopped, so a turn that made nothing else leads with it: `Stopped the preview, edited a file`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files`; a look around the workspace (`pwd`, `ls`, `cat`, `rg --files`) is not counted, so a turn that only looked and answered, or only posted a card, has no line |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
 | Done, nothing of its own after a retry | `Took two tries` (`Took three tries`, …), so Details opens on the first try |
@@ -215,7 +215,7 @@ Exit status reaches Studio through the step's own `status` and `exitCode`; a lab
   "count": 1, "also": [] }
 ```
 
-- `role` is `content` (what the turn did; the last and the biggest other are named), `outcome` (what it made;
+- `role` is `content` (what the turn did; the two that did most are named), `outcome` (what it made;
   the latest leads the line) or `quiet` (shown only while it runs and in Details; a quiet label's
   `done` is its row's past tense in Details).
 - `done` is one form for any count, or `one`, `other` (with `{n}`) and `some` (count unknown).
@@ -306,8 +306,10 @@ activity line, to the person who started the run only, and the line says `Waitin
 - **The row** (`BrowserApprovalRow.tsx`) names the step in one sentence: `Octo wants to use
   {host}.` (or `to open {page}.` when the site prompt names the page it loads), `to open {page}.`,
   `to click “{label}” on {host}.`, `to type into “{label}” on {host}.`, `to send the form
-  “{label}” on {host}.` (plus `It goes to {site}.` when the form posts to another site), `to press
-  Enter on “{label}” on {host}.` and `to press {key} on {host}.` `{label}` is the runtime's
+  “{label}” on {host}.`, `to press Enter on “{label}” on {host}.` and `to press {key} on {host}.`,
+  plus `It goes to {site}.` when the step leaves the site (a link or a form to another site); a
+  step that stays on the site says nothing of where it goes. The browser view's sheet asks in this
+  same sentence. `{label}` is the runtime's
   already-masked name of the control, cut at 40 characters: the page's own words appear only
   here, where the person needs them to decide, never in the line. The runtime leads its label
   with the step's category (`Delete, cancel or sign out: Delete account`); the row quotes only
@@ -315,7 +317,9 @@ activity line, to the person who started the run only, and the line says `Waitin
   “Delete account” on example.com. It may delete, cancel or sign out of something.`). An
   ordinary step's category (`Change something`) adds nothing (`browserApprovalLabel.ts`, from the
   runtime's fixed list of titles). `Allow site` answers a site
-  prompt and `Allow` one step; neither button takes focus. In the prompt's last minute the row
+  prompt and `Allow` one step; neither button takes focus. While the answer is sent, the pressed
+  button keeps its word in view with a spinner beside it, in the room the button already had
+  (`pendingLabel="beside"`). In the prompt's last minute the row
   says `Expires in under a minute`; an error shows after the buttons. The row is a labelled
   group, says `Octo needs your answer: …` once to screen readers, and its buttons are 44 px tall
   on coarse pointers.

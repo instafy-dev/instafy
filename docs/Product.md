@@ -659,7 +659,8 @@ not repeat it, and comes first there when Continue working gave way to it; **Rec
 out both; and **Recent activity** leaves out every chat listed above it, stepping aside rather than
 reading "Quiet so far" when that leaves it empty. A chat listed above that is running says so on its
 own row ("Run in progress"), in place of its In progress row. Rows that follow each other for the
-same chat read as one row that counts their updates. Past rows that follow each other for different
+same chat read as one row, the chat's newest state, with no count of the updates behind it: opening
+the chat shows them. Past rows that follow each other for different
 chats that would read exactly the same (the same name, space and last update) show as one row that
 counts the chats and opens the newest; the others stay in Chats. A row never calls an update new:
 only **Unread** lists what is unread.

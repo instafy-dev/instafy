@@ -123,14 +123,22 @@ const RADIUS_CLASSES: Record<ButtonRadius, string> = {
 
 // The pending glyph takes the leading icon's place at the icon's size. A button
 // without an icon keeps its label in place (and in its accessible name) but
-// fades it out under a centred spinner. Either way nothing moves or resizes
-// when a press starts waiting.
+// fades it out under a centred spinner, unless it asks to keep its label in
+// view beside the spinner (`pendingLabel="beside"`). Either way the button
+// never resizes when a press starts waiting.
 const PENDING_SPINNER_SIZE: Record<ButtonSize, SpinnerSize> = {
   xs: "xs",
   sm: "md",
   md: "md",
   lg: "md",
   icon: "md"
+};
+// The room a spinner and its gap (gap-2) take beside a label, split around
+// the idle label: an xs spinner is 0.75rem, md 1rem, and the gap 0.5rem.
+const PENDING_ROOM_CLASSES: Record<SpinnerSize, string> = {
+  xs: "px-2.5",
+  sm: "px-[0.6875rem]",
+  md: "px-3",
 };
 
 /**
@@ -146,6 +154,15 @@ const PENDING_SPINNER_SIZE: Record<ButtonSize, SpinnerSize> = {
 export type ButtonProps = Omit<AriaButtonProps, "className"> & {
   /** Leading glyph, replaced by the pending spinner while `isPending`. */
   icon?: ReactNode;
+  /**
+   * Where a label without an icon goes while `isPending`: faded under a
+   * centred spinner (`under`, the default), or kept in view with the spinner
+   * beside it (`beside`), for a button whose word the person still reads
+   * while it waits, such as Deny and Allow on a prompt. A `beside` button
+   * keeps the spinner's room around its idle label, so it is as wide while it
+   * waits as before, and nothing next to it moves.
+   */
+  pendingLabel?: "under" | "beside";
   variant?: ButtonVariant;
   /** Palette for ghost, outline and text actions; filled variants own their tone. */
   tone?: ButtonTone;
@@ -199,6 +216,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     className,
     title,
     icon,
+    pendingLabel = "under",
     children,
     ...props
   },
@@ -255,6 +273,18 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         );
         if (size === "icon") {
           return isPending ? pendingGlyph() : content;
+        }
+        if (pendingLabel === "beside" && !icon) {
+          // Idle, the spinner's room sits around the label; waiting, the
+          // spinner takes it, beside the word.
+          return isPending ? (
+            <span className="inline-flex items-center gap-2">
+              {pendingGlyph()}
+              {content}
+            </span>
+          ) : (
+            <span className={`inline-flex items-center gap-2 ${PENDING_ROOM_CLASSES[PENDING_SPINNER_SIZE[size]]}`}>{content}</span>
+          );
         }
         if (isPending && !icon) {
           return (
