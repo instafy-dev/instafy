@@ -18,21 +18,53 @@ pub(super) struct BrowserRequest {
     routed: bool,
 }
 
+/// Why each `request_browser` card of a reply is dropped as the reply is read
+/// ([`BrowserRequest::parse`]), one reason per card. Nothing of such a card reaches the person,
+/// while the reply beside it may still send them to the browser, so the runtime logs each one
+/// with the turn's job.
+pub(super) fn dropped_requests(reply: &Value) -> Vec<&'static str> {
+    reply
+        .get("actions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter(|action| {
+            action
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    kind.trim().to_ascii_lowercase().replace('-', "_") == "request_browser"
+                })
+        })
+        .filter_map(|action| BrowserRequest::parse(action).err())
+        .collect()
+}
+
 impl BrowserRequest {
-    pub(super) fn parse(value: &serde_json::Map<String, Value>) -> Option<Self> {
-        let task = value.get("task")?.as_str()?.trim();
-        if task.is_empty() || task.encode_utf16().count() > 8_000 {
-            return None;
+    /// The card a reply's `request_browser` action asks for, or why none is posted: no task, a
+    /// task over 8,000 characters or an unknown browser location.
+    pub(super) fn parse(value: &serde_json::Map<String, Value>) -> Result<Self, &'static str> {
+        let task = value
+            .get("task")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if task.is_empty() {
+            return Err("no task");
+        }
+        if task.encode_utf16().count() > 8_000 {
+            return Err("task over 8,000 characters");
         }
         let location = match value.get("browserLocation") {
             None | Some(Value::Null) => "auto",
             Some(Value::String(location)) if location == "auto" => "auto",
             Some(Value::String(location)) if location == "device" => "device",
             Some(Value::String(location)) if location == "workspace" => "workspace",
-            _ => return None,
+            _ => return Err("unknown browserLocation"),
         };
         let continue_building = value.get("continueBuilding") == Some(&Value::Bool(true));
-        Some(Self {
+        Ok(Self {
             task: task.to_owned(),
             location,
             continue_building,
@@ -184,7 +216,43 @@ mod tests {
             json!({"task":"Open a page", "browserLocation":42}),
             json!({"task":"Open a page", "browserLocation":"another-users-device"}),
         ] {
-            assert!(BrowserRequest::parse(value.as_object().unwrap()).is_none());
+            assert!(BrowserRequest::parse(value.as_object().unwrap()).is_err());
+        }
+    }
+
+    /// A card no one can act on posts nothing, while the reply beside it may still send the
+    /// person to the browser: a reply ended "Open Instafy's browser to check…" over a card with
+    /// no task, and nothing said that no card came with it. Each such card has a reason, which
+    /// the runtime logs with the turn's job; a card that is posted, or another action, has none.
+    #[test]
+    fn a_card_dropped_for_having_no_task_says_why() {
+        let reply = json!({"actions": [
+            {"type": "request_browser"},
+            {"type": "request_browser", "task": null, "browserLocation": null},
+            {"type": " Request-Browser ", "task": " "},
+            {"type": "request_browser", "task": 42},
+            {"type": "request_browser", "task": "x".repeat(8001)},
+            {"type": "request_browser", "task": "Open a page", "browserLocation": "another-users-device"},
+            {"type": "request_browser", "task": "Find the opening hours"},
+            {"type": "request_location", "precision": "approximate"},
+        ]});
+        assert_eq!(
+            dropped_requests(&reply),
+            [
+                "no task",
+                "no task",
+                "no task",
+                "no task",
+                "task over 8,000 characters",
+                "unknown browserLocation",
+            ]
+        );
+        for reply in [
+            json!({"summary": "Done."}),
+            json!({"summary": "Done.", "actions": null}),
+            json!({"actions": [{"type": "request_browser", "task": "Find the opening hours"}]}),
+        ] {
+            assert!(dropped_requests(&reply).is_empty(), "{reply}");
         }
     }
 }

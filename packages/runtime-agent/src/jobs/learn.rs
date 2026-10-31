@@ -108,6 +108,8 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before a command still running (a `session_id` and no `exit_code`) was waited for
     // before the reply.
     include_str!("legacy/agents-doc-v5.md"),
+    // From before a reply said what was made, not what a page check found or passed.
+    include_str!("legacy/agents-doc-v6.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2200,6 +2202,32 @@ mod tests {
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
         let previous = include_str!("legacy/agents-doc-v5.md");
         assert!(!previous.contains("Process running with session ID"));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+    }
+
+    /// A reply says what Octo made, not what a page check found or passed: replies ended "The page
+    /// check found all four models, and the open view was reloaded." and "The page is up in Studio
+    /// and passed the desktop and phone checks." `AGENTS.md` gives both as don'ts beside what to
+    /// say. The copy from before is upgraded.
+    #[test]
+    fn agents_doc_says_what_was_made_not_what_a_page_check_found() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        let replies = doc
+            .split("## Replies")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Replies section");
+        assert!(replies.contains(
+            "\"I put all four models on the page\", not \"The page check found all four models, and the open view was reloaded\" or \"passed the desktop and phone checks\""
+        ), "{replies}");
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        let previous = include_str!("legacy/agents-doc-v6.md");
+        assert!(!previous.contains("passed the desktop and phone checks"));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
         fs::write(&path, previous).unwrap();

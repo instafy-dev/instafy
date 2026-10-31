@@ -535,6 +535,26 @@ fn default_final_output_json_schema() -> JsonValue {
     .expect("default final output schema must be valid JSON")
 }
 
+/// The default grammar without its notes on filling in a browser card (`browserLocation`,
+/// `continueBuilding`), for a Shared Browser turn. Such a turn may not ask for the browser: the
+/// runtime drops its card, and browse-then-build turns ended on one filled in as those notes
+/// say, where they could have read the pages themselves. The fields stay, so a reply keeps its
+/// shape.
+fn shared_browser_final_output_json_schema() -> JsonValue {
+    let mut schema = default_final_output_json_schema();
+    if let Some(fields) = schema
+        .pointer_mut("/properties/actions/items/properties")
+        .and_then(JsonValue::as_object_mut)
+    {
+        for field in ["browserLocation", "continueBuilding"] {
+            if let Some(field) = fields.get_mut(field).and_then(JsonValue::as_object_mut) {
+                field.remove("description");
+            }
+        }
+    }
+    schema
+}
+
 fn multi_agent_plan_final_output_json_schema() -> JsonValue {
     serde_json::from_str(
         r#"{
@@ -818,6 +838,8 @@ fn routing_preflight_final_output_json_schema() -> JsonValue {
 pub enum CodexFinalOutputSchema {
     #[default]
     Default,
+    /// A Shared Browser turn's ([`shared_browser_final_output_json_schema`]).
+    SharedBrowser,
     MultiAgentPlan,
     RoutingPreflight,
 }
@@ -838,6 +860,7 @@ fn final_output_json_schema_for_run(
 
     Some(match schema {
         CodexFinalOutputSchema::Default => default_final_output_json_schema(),
+        CodexFinalOutputSchema::SharedBrowser => shared_browser_final_output_json_schema(),
         CodexFinalOutputSchema::MultiAgentPlan => multi_agent_plan_final_output_json_schema(),
         CodexFinalOutputSchema::RoutingPreflight => routing_preflight_final_output_json_schema(),
     })
@@ -8489,6 +8512,52 @@ mod tests {
             },
             None => unsafe { std::env::remove_var("CODEX_DISABLE_FINAL_OUTPUT_JSON_SCHEMA") },
         }
+    }
+
+    /// A Shared Browser turn's reply grammar says nothing of the browser card: the runtime drops
+    /// a card from such a turn, and two browse-then-build turns ended on one filled in as the
+    /// default grammar's notes say (`browserLocation` auto, `continueBuilding` true). Its fields
+    /// and their types stay, so a reply keeps its shape; every other turn keeps the notes.
+    #[test]
+    fn a_shared_browser_turns_reply_grammar_says_nothing_of_the_browser_card() {
+        let _env_lock = env_lock();
+        let previous = std::env::var_os("CODEX_DISABLE_FINAL_OUTPUT_JSON_SCHEMA");
+        unsafe { std::env::remove_var("CODEX_DISABLE_FINAL_OUTPUT_JSON_SCHEMA") };
+        let schema = |kind: CodexFinalOutputSchema| {
+            final_output_json_schema_for_run(WireApi::Responses, false, false, kind)
+                .expect("a reply grammar")
+        };
+        let browser = schema(CodexFinalOutputSchema::SharedBrowser);
+        let building = schema(CodexFinalOutputSchema::Default);
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("CODEX_DISABLE_FINAL_OUTPUT_JSON_SCHEMA", value)
+            },
+            None => unsafe { std::env::remove_var("CODEX_DISABLE_FINAL_OUTPUT_JSON_SCHEMA") },
+        }
+
+        assert!(
+            !browser.to_string().contains("request_browser"),
+            "{browser}"
+        );
+        let action = |schema: &JsonValue| schema["properties"]["actions"]["items"].clone();
+        for field in ["browserLocation", "continueBuilding"] {
+            let note = action(&building)["properties"][field]["description"].clone();
+            assert!(
+                note.as_str()
+                    .is_some_and(|note| note.starts_with("For request_browser")),
+                "{field}: {note}"
+            );
+            let mut without_note = action(&building)["properties"][field].clone();
+            without_note.as_object_mut().unwrap().remove("description");
+            assert_eq!(
+                action(&browser)["properties"][field],
+                without_note,
+                "{field}"
+            );
+        }
+        assert_eq!(action(&browser)["required"], action(&building)["required"]);
+        assert_eq!(browser["required"], building["required"]);
     }
 
     #[test]
