@@ -133,13 +133,6 @@ export function buildGithubImportFollowupMessageFromPayload(
         fileCount: entry.fileCount ?? null,
         sourceMessageId: entry.sourceMessageId?.trim() || null,
       },
-      ui: {
-        suggestedReplies: [
-          "Please investigate the GitHub issues of this project we just imported.",
-          "Give me a quick architecture summary of this codebase.",
-          "Recommend the top 3 next actions and start with the first one.",
-        ],
-      },
     },
   };
 }

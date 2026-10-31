@@ -342,7 +342,6 @@ import {
   formatPromptContextModeLabel,
   isCurrentUserChatMessage,
   resolveBrowserSessionAutoOpenCandidate,
-  resolveComposerUiSuggestedReplies,
   resolveTokenUsageForMessage,
 } from "./chatMessageDetailHelpers";
 import {
@@ -1638,31 +1637,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     () => buildComposerInlineSuggestion(inputValue, composerInlineCompletion),
     [composerInlineCompletion, inputValue],
   );
-  const suggestedReplies = useMemo(() => {
-    const lastVisible = (() => {
-      for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const candidate = messages[index];
-        if (shouldDisplayChatMessage(candidate)) {
-          return candidate;
-        }
-      }
-      return null;
-    })();
-
-    if (!lastVisible || lastVisible.role !== "assistant") {
-      return [];
-    }
-    return resolveComposerUiSuggestedReplies(lastVisible);
-  }, [messages]);
+  // The composer's own completion only: a reply's offered replies are never
+  // shown, so none of them is ghost text or what Enter sends from an empty
+  // composer.
   const composerGhostSuggestion = useMemo(
     () =>
       resolveComposerGhostSuggestion(
         inputValue,
-        composerInlineSuggestion ? [composerInlineSuggestion, ...suggestedReplies] : suggestedReplies,
+        composerInlineSuggestion ? [composerInlineSuggestion] : [],
       ),
-    [composerInlineSuggestion, inputValue, suggestedReplies],
+    [composerInlineSuggestion, inputValue],
   );
-  const softPrefillSuggestion = composerGhostSuggestion?.suggestion ?? suggestedReplies[0] ?? null;
   const chatInputPlaceholder = useMemo(() => {
     if (anyAgentsEnabled) {
       return DEFAULT_CHAT_INPUT_PLACEHOLDER;
@@ -3191,14 +3176,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return handles;
   }, [steerableActiveConversationRuns]);
   const composerTargetAgentHandles = useMemo(() => {
-    const prompt = inputValue.trim().length > 0
-      ? inputValue
-      : (softPrefillSuggestion ?? "");
-    return resolvePromptAgentTargets(prompt, {
+    return resolvePromptAgentTargets(inputValue, {
       useSticky: true,
       updateSticky: false,
     }).targetHandles;
-  }, [inputValue, resolvePromptAgentTargets, softPrefillSuggestion]);
+  }, [inputValue, resolvePromptAgentTargets]);
   const candidateComposerPrimaryActionMode = resolveComposerPrimaryActionMode({
     // Queue-dispatched and cross-device runs can become active without going
     // through this tab's optimistic typing state. The reconciled controller
@@ -3957,7 +3939,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       activeConversationMessages: messages,
       inputValue,
       hasImageAttachments: imageAttachments.length > 0,
-      fallbackSuggestion: softPrefillSuggestion,
       resolvePromptAgentTargets,
     });
   }, [
@@ -3965,7 +3946,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     inputValue,
     messages,
     resolvePromptAgentTargets,
-    softPrefillSuggestion,
   ]);
 
   const inputReplyToOcto = useMemo(() => {
@@ -3987,7 +3967,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       resolveChatInputCanRunAmbientParticipationPreflight({
         inputValue,
         hasImageAttachments: imageAttachments.length > 0,
-        fallbackSuggestion: softPrefillSuggestion,
         activeConversationControllerId,
         conversationHasHumanPeer:
           conversationHumanPeerContext.resolved &&
@@ -3997,8 +3976,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         ownerAgentHandle: activeConversationEntry?.ownerAgent?.handle ?? null,
         hasBrowserTask: resolveChatInputHasBrowserTask({
           inputValue,
-          hasImageAttachments: imageAttachments.length > 0,
-          fallbackSuggestion: softPrefillSuggestion,
           personalBrowserActive:
             browserTransport === "personal" && browserComposerActive,
           sharedBrowserModeActive:
@@ -4032,7 +4009,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       preferredBrowserPage,
       resolvePromptAgentTargets,
       skillSetupConversation,
-      softPrefillSuggestion,
     ],
   );
 
@@ -4093,7 +4069,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     activeConversationId,
     credentialGateState,
     credentialGateStateForBubble,
-    fallbackSuggestion: softPrefillSuggestion,
     inputCanRunAmbientParticipationPreflight,
     inputValue,
     pinCredentialGateToBottom: pinAiOnboardingToBottom,
@@ -4706,7 +4681,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
     shouldAutoScrollRef,
     skillSetupConversation,
-    softPrefillSuggestion,
     submitSendIntent,
     targetsOverlapActiveRuns,
   });
@@ -6667,7 +6641,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   />
                 ) : null}
                 humanInputIdentityKey={browserHandoff.identityKey}
-                onContinueAfterHumanInput={browserHandoff.continuePersonal}
+                onContinueAfterHumanInput={browserHandoff.continuePersonalRun}
                 onPauseAgentControl={declineBrowserAutoStart}
                 onSendPage={canSendPages ? sendPersonalPage : undefined}
                 sendPagePending={sendPagePendingViewer === "personal"}

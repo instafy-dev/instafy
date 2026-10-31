@@ -40,7 +40,6 @@ function buildPlan(browserTargetingEnabled: boolean, overrideBrowserTargeting = 
     pendingBrowserLaunchMode: "new_page",
     preferredBrowserPage: sharedPage,
     resolvePromptAgentTargets: () => assistantSelection,
-    softPrefillSuggestion: null,
   });
 }
 
@@ -78,7 +77,6 @@ describe("buildChatSubmitPlan page targeting by words", () => {
     pendingBrowserLaunchMode: null,
     preferredBrowserPage: sharedPage,
     resolvePromptAgentTargets: () => assistantSelection,
-    softPrefillSuggestion: null,
   });
 
   it("aims a message that reads like a browser instruction at the open page, in the person's own words", () => {

@@ -224,7 +224,6 @@ export function useChatSubmitFlow({
   showStatus,
   shouldAutoScrollRef,
   skillSetupConversation = false,
-  softPrefillSuggestion,
   submitSendIntent,
   targetsOverlapActiveRuns,
 }: {
@@ -366,7 +365,6 @@ export function useChatSubmitFlow({
    * controls (the card's button, Let Octo continue) carry a walk on there.
    */
   skillSetupConversation?: boolean;
-  softPrefillSuggestion: string | null | undefined;
   submitSendIntent: (input: {
     mode: "queue" | "steer";
     request: Record<string, unknown>;
@@ -426,7 +424,6 @@ export function useChatSubmitFlow({
       pendingBrowserLaunchMode,
       preferredBrowserPage: sharedBrowserFollowUp?.page ?? preferredBrowserPage,
       resolvePromptAgentTargets,
-      softPrefillSuggestion,
     });
     if (!messageToSend) {
       if (imageFiles.length > 0) {
@@ -983,7 +980,6 @@ export function useChatSubmitFlow({
     showStatus,
     shouldAutoScrollRef,
     skillSetupConversation,
-    softPrefillSuggestion,
     submitSendIntent,
     targetsOverlapActiveRuns,
   ]);

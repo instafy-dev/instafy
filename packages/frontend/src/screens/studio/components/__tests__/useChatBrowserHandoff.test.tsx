@@ -11,6 +11,7 @@ const { cancelAgentJob, cancelConversationJobs, cancelPlanGroup } = vi.hoisted((
 vi.mock("../../../../services/runtimeController/jobs", () => ({ cancelAgentJob, cancelConversationJobs, cancelPlanGroup }));
 
 import { TAKE_OVER_KEEP_TAB_WAIT_MS, useChatBrowserHandoff } from "../useChatBrowserHandoff";
+import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
 type Options = Parameters<typeof useChatBrowserHandoff>[0];
 type Result = ReturnType<typeof useChatBrowserHandoff>;
@@ -182,6 +183,20 @@ describe("useChatBrowserHandoff", () => {
     await render({ ...value, runs: [teammates] });
     await resultRef.current!.continueSharedRun("Continue the previous browser task.");
     expect(vi.mocked(value.onSubmit).mock.calls[2]![2]!.metadata).not.toHaveProperty("browserContinuesRunId");
+  });
+
+  // Let Octo continue posted its whole prompt to the chat as the person's own
+  // message ("Continue the previous browser task on this same page. I may
+  // have used the browser…"). They pressed a button and wrote nothing: the
+  // chat shows the button's words, and the turn still gets the prompt.
+  it("shows Let Octo continue in the chat as the button's own words and sends the turn the whole prompt", async () => {
+    const value = options();
+    await render(value);
+    await expect(resultRef.current!.continueSharedRun(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT)).resolves.toBe(true);
+    expect(value.onSubmit).toHaveBeenCalledExactlyOnceWith("conversation-1", "Let Octo continue", expect.objectContaining({
+      dispatchInput: BROWSER_HUMAN_INPUT_CONTINUE_PROMPT,
+      metadata: expect.objectContaining({ browserPageId: "page-1", browserRuntimeId: "shared-runtime-1" }),
+    }));
   });
 
   it("dispatches Shared continuation directly with exact page/runtime and no draft attachments", async () => {

@@ -1357,7 +1357,11 @@ thread is given its own policy as well (once, when it differs from the one the
 thread last read), and the hint says the rule again where it applies. The
 turn's reply after a pause says "Sign in or fill in the highlighted
 fields on the page in Instafy's browser, then choose Let Octo continue. I don't
-ask for those details in chat."
+ask for those details in chat." When Octo's last reply in the chat was such a
+pause already (Let Octo continue pressed, or a message sent, before signing
+in), it says "The sign-in page is still waiting. Sign in there, then choose
+Let Octo continue." instead. The chat shows a press of **Let Octo continue** as
+those words in the person's name; the turn gets the whole continuation prompt.
 
 A browser that has just started, such as the on-demand browser on a space's own
 machine, shows exactly `about:blank`, and a tab opened in the viewer shows the
@@ -2012,7 +2016,9 @@ unless the policy is `"covered"`.
   check and every check before sending still apply.
 - **Cards after a press.** A card says what it is for ("Continue in
   Instafy's browser", and the site it is headed for), never what pressing it
-  does: older cards carry a line about that, which is not shown. It reads
+  does: older cards carry a line about that, which is not shown. A turn whose
+  only action is the card posts the card and no reply of its own, except in a
+  skill setup, whose reply carries its walk. It reads
   **Opening Instafy's browser…** while it opens and a plain **Opened** once it
   was continued, also after a reload. A card a newer card followed offers no
   button and reads **Not opened**: the newer card carries the task on, so two

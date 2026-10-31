@@ -6,7 +6,7 @@ import { InlineNotice } from "../../../components/InlineNotice";
 import { StudioDialogBody } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { BrowserToolsOverlayContext } from "./BrowserToolsPopover";
-import { useBrowserHumanInput, type BrowserHumanInputOptions } from "./useBrowserHumanInput";
+import { LET_OCTO_CONTINUE, useBrowserHumanInput, type BrowserHumanInputOptions } from "./useBrowserHumanInput";
 
 type BrowserHumanInputPresentation = {
   // A compact toolbar can place actions in a popover without unmounting the
@@ -70,7 +70,7 @@ function HumanInputControls(props: HumanInputControlsProps & { takeOver?: ReactN
           isDisabled={state.busy !== null || props.canContinue === false} title={manualGuidance}
           onPress={() => void state.continueTask()} data-testid="browser-human-input-continue">
           <Play className="h-3.5 w-3.5" aria-hidden="true" />
-          {state.busy === "continue" ? "Continuing…" : "Let Octo continue"}
+          {state.busy === "continue" ? "Continuing…" : LET_OCTO_CONTINUE}
         </Button>
       ) : state.active && !state.error ? (
         <Text as="span" variant="caption" tone="muted" role="status">{state.busy === "continue" ? "Continuing…" : "Stopping Octo…"}</Text>

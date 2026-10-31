@@ -19,6 +19,13 @@ export type BrowserHumanInputRequest = {
 export const BROWSER_HUMAN_INPUT_CONTINUE_PROMPT =
   "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
 
+/**
+ * The button's own words. The chat shows them for the turn the button starts,
+ * in the person's name: they pressed it and wrote nothing, so the prompt above
+ * goes to Octo only.
+ */
+export const LET_OCTO_CONTINUE = "Let Octo continue";
+
 export type BrowserHumanInputOptions = {
   /** Include user, project, conversation, transport, runtime/page (or native owner). */
   identityKey: string;

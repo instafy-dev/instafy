@@ -272,7 +272,7 @@ impl JobProcessor {
             );
             let mut execution = JobExecution {
                 summary: outcome.summary,
-                suggested_replies: outcome.suggested_replies,
+                suggested_replies: Vec::new(),
                 provider: "codex-embedded".into(),
                 artifacts: execution_artifacts,
                 credit_snapshot: None,
