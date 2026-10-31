@@ -23,7 +23,8 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // stops waiting for it and fails as one that opened nothing and names where to
 // go next, never as a blank page to navigate again nor as the page the tab
 // still shows; the next step reaches the browser at once, and the site's late
-// answer never loads. No model, Studio,
+// answer never loads. A form sent to such a site has reached it, so its load
+// runs on and the step never says nothing was opened. No model, Studio,
 // controller, account or external site is used, and Chromium resolves no other
 // host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -152,6 +153,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "/window": [page("Details", WINDOW, OPENS_WINDOW)], "/popup": [page("Popup", "<p>Another window.</p>")], "/form": [page("Your details", FORM, BUSY_ON_HIGHLIGHT)],
         "/hidden": [HIDDEN], "/places/live": [page("The tower", "<p>Open daily.</p>", LIVE)],
         "/visit": [page("Visiting", "<p><a href=\"/slow\">Opening hours</a></p>")],
+        "/ask": [page("Ask us", "<form action=\"/slow\" method=\"post\"><label>Your question <input name=\"question\"></label><button>Send question</button></form>")],
       }[url.pathname];
       if (!body) {
         response.writeHead(404).end();
@@ -410,6 +412,30 @@ export async function runSharedBrowserStepTimeFixture() {
     await delay(1_000);
     assert.equal(runPage.url(), `${origin}/visit`, "The late answer never loaded");
 
+    // 1f. A form the step sends to a site that does not answer: the form has
+    // reached the site, so its load is left to run, and the step never says
+    // nothing was opened. It answers once its time is up, as a step whose page
+    // is still busy does, and says to check what the step did; the site's late
+    // answer is the form's own, and lands as it did.
+    await ok("POST", "/v1/navigate", { url: `${origin}/ask` });
+    const ask = await ok("GET", "/v1/snapshot");
+    const send = ask.payload.interactiveElements.find((element) => element.label === "Send question");
+    assert.ok(send, "The form's button is observed");
+    requests.length = 0;
+    const promptsBeforeForm = prompts.length;
+    const sent = await runTool("POST", "/v1/click", { index: send.index, snapshotId: ask.payload.snapshotId }, ["allow_once"]);
+    assert.deepEqual(requests, ["POST /slow"], "The form was sent once");
+    assert.equal(sent.code, 0, `The step answers with the page as it is: ${sent.stderr}`);
+    assert.equal(sent.payload.stepTimedOut, true);
+    assert.match(sent.payload.message, /what the step did before you act again\./u);
+    assert.doesNotMatch(`${sent.stdout}${sent.stderr}`, /did not answer|nothing was opened/u);
+    assert.equal(prompts.length, promptsBeforeForm + 1, "The form asked once");
+    for (const response of unanswered.splice(0)) {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(page("Question received", "<p>Thank you.</p>"));
+    }
+    await delay(1_000);
+    assert.equal(new URL(runPage.url()).pathname, "/slow", "The form's late answer landed");
+
     // 2. A click that opens another window and then keeps the page busy: the
     // step's time runs out, and it still ends as a step does. The window is
     // closed before it loads anything and the step says so, and once the page
@@ -451,6 +477,7 @@ export async function runSharedBrowserStepTimeFixture() {
     // the step answers once its time is up, with the page as it is, and says
     // so. It never waits out the busy page.
     requests.length = 0;
+    const promptsBeforeSearch = prompts.length;
     const searched = await ok("POST", "/v1/type", { index: field.index, snapshotId: start.payload.snapshotId, text: "tower", submit: true });
     assert.deepEqual(requests, ["GET /results?q=tower"], "The search was sent once, as the form makes it");
     assert.ok(searched.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(searched.wallMs)} ms)`);
@@ -468,7 +495,7 @@ export async function runSharedBrowserStepTimeFixture() {
     // Nothing was read, so its line does not say a page was read: like status,
     // it names the page it is on.
     assert.deepEqual(searched.payload.activity, { step: "status", url: `${origin}/results?q=tower` });
-    assert.equal(prompts.length, 1, "Nothing asked during the search");
+    assert.equal(prompts.length, promptsBeforeSearch, "Nothing asked during the search");
 
     const result = {
       status: "passed",
@@ -479,11 +506,12 @@ export async function runSharedBrowserStepTimeFixture() {
         "a navigation from a blank tab to a site that does not answer in time is stopped once the step's time is up and fails as one that opened nothing, naming where to go next, never as a blank page to navigate again; the next step reaches the browser at once, and the site's late answer never loads",
         "a navigation from a page that had loaded, and keeps changing its own address, to a site that does not answer in time is stopped and fails the same way, never naming the page the tab still shows; the next step reaches the browser at once and finds that page, and the site's late answer never lands",
         "a link clicked on a page that had loaded, to a site that does not answer, is stopped once the click stops waiting for it and fails the same way, never as the page the tab still shows nor as the click's own timeout; the next step reaches the browser at once, and the site's late answer never lands",
+        "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs) },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs) },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);

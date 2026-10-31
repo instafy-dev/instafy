@@ -1129,7 +1129,10 @@ navigation). Whether the site answered is judged by the load's own request,
 never by the tab's address, which a page's script may change while the load
 waits. A site that answered as the step stopped waiting has its page, which is
 read as it is, and a load the browser does not confirm stopped fails as a busy
-page instead. The step's guards still hold while
+page instead. Only a load that sends nothing (a GET, through every redirect) is
+stopped: a form the tab posted has reached its site even when no answer came,
+so its load runs on, and the step answers as a busy page does and says to check
+what it did, never that nothing was opened. The step's guards still hold while
 the page is read, then end as a step's guards end: a window the step opened
 is closed by its target (a busy page's window may not be a page Playwright can
 show yet) and fails the step as it would have in its time, as does a

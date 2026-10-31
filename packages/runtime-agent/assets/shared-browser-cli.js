@@ -3388,7 +3388,10 @@ async function guardStepDocuments(page) {
   // The tab's own load that the step started and its site has not answered
   // yet (stopUnansweredLoad): the tab's newest document request, from when it
   // leaves the browser until the site's answer comes (`answered`) or the
-  // request ends unanswered.
+  // request ends unanswered. Only a load that sends nothing (GET, through
+  // every redirect) is one: a form the tab posted has reached its site even
+  // when no answer came, so that load is left to run and the step answers as
+  // it did, never that nothing was opened.
   let waitingLoad = null;
   const tabDocument = (request) => {
     try {
@@ -3397,8 +3400,14 @@ async function guardStepDocuments(page) {
       return false;
     }
   };
+  const sendsNothing = (request) => {
+    for (let hop = request; hop; hop = hop.redirectedFrom()) {
+      if (hop.method() !== "GET") return false;
+    }
+    return true;
+  };
   const loadStarted = (request) => {
-    if (tabDocument(request)) waitingLoad = { page, request, answered: false };
+    if (tabDocument(request)) waitingLoad = sendsNothing(request) ? { page, request, answered: false } : null;
   };
   const loadAnswered = (response) => {
     if (waitingLoad && waitingLoad.request === response.request()) {
