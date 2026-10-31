@@ -239,7 +239,7 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   answer.
 - **runtime-agent keeps four facts** (`shared_browser_activity.rs`), when the tool call ends:
   `step` (one of `navigate`, `open_tab`, `snapshot`, `search`, `submit`, `click`, `type`,
-  `press`, `scroll`, `tabs`, `status`); `host`, the address's domain in lower case without a
+  `choose`, `press`, `scroll`, `tabs`, `status`); `host`, the address's domain in lower case without a
   leading `www.` (an address literal, a name without a dot or one the contract rejects gives
   none); `pageKey`, the first 16 hex characters of the SHA-256 of the address without its
   fragment, never the address; and `approval`, `once`, `routine` or `free` from the controller, or
@@ -266,7 +266,7 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   | `navigate`, `open_tab` | Opening {host} | opened {host} / opened {n} pages on {host} / opened pages on {host} | content |
   | `snapshot` | Reading {host} | read a page on {host} / read {n} pages on {host} / read pages on {host} | content |
   | `search` (typing with submit, or Enter, in a search field) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
-  | `submit`, `click`, `type`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
+  | `submit`, `click`, `type`, `choose`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
   | no host known yet | Using the browser | used the browser | content |
 
   Opening, reading and searching carry `when: "success"`: a step the person said no to, left
@@ -335,7 +335,8 @@ activity line, to the person who started the run only, and the line says `Waitin
   | no answer | `skipped a search on visitlisboa.com: no answer in time` |
 
   The noun comes from the step's own `activity` (`step` and `approval`), so it reads the same
-  after a reload: `a search`, `a form`, `a click`, `typing`, `a key press`, `opening {host}`, or
+  after a reload: `a search`, `a form`, `a click`, `typing`, `choosing an option`, `a key press`,
+  `opening {host}`, or
   the site itself (`the site` when the line already names it). The host is left out when the line
   already names it first: `Searched visitlisboa.com, read 2 pages · you allowed a search`.
   Several answers read as the latest one counted: `you allowed 2 steps`. When no step carries an

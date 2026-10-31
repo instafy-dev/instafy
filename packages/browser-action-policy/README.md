@@ -19,7 +19,11 @@ load `redaction.js` first.
   control names, and decides when a page is a secret screen.
 - `actionPolicy.js`: `classifyStep(op, target, ctx)` returns
   `{ verdict, category, reason, code?, commit? }` for a navigation, click,
-  typing step, submission or key press. Free verdicts come only from structure;
+  typing step, choice of an option in a list (`choose`, with `ctx.option`),
+  submission or key press. A choice is judged like a click on a radio button
+  named by the list's own label and that option, so signing in with another
+  account ("Sign in with GitHub") is refused; the list's other options never
+  count. Free verdicts come only from structure;
   label words and the icons of icon-only controls only add risk. The
   exceptions are short whole-name lists that also need the right structure:
   cookie dismissals, page numbers and menu or section toggles ("Menü
@@ -27,9 +31,12 @@ load `redaction.js` first.
   button). `commit: true` marks an ordinary control whose label or icon commits
   a change (Save, Speichern, Umbuchen, Beleg erfassen, Stornobuchung, a floppy
   disk), which the Shared Browser still asks for under routine browsing. Menu
-  items, tabs, tree items, disclosure and menu openers and navigation-area items
-  never carry it, and a menu item named for a list ("Buchungen",
-  "Stornobuchung") stays navigation.
+  items, tabs, tree items, disclosure and menu openers, navigation-area items,
+  lists (a select, combobox or listbox) and their options never carry it, and a
+  menu item named for a list ("Buchungen", "Stornobuchung") stays navigation.
+  `stepLabels` names a list by its own label, or by the option it shows when it
+  has none, never by its options; the in-page rules read what a select or a
+  listbox shows as its chosen option.
   In a cookie or consent banner (the describer's `consentContext`), a
   refusal's button ("Reject all") is free with `consentRejection: true`, and a
   control or link whose words accept, agree or consent, or only allow

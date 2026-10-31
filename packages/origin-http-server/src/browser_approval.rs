@@ -90,6 +90,9 @@ enum ApprovalOperation {
     Navigate,
     Click,
     Type,
+    /// Choosing an option of a list: it sets a value on the page and sends
+    /// nothing, like typing.
+    Choose,
     FormSubmit,
     PressKey,
     PressEnter,
@@ -1276,12 +1279,14 @@ fn validate_operation_shape(request: &PendingApprovalRequest) -> Result<(), Stri
         {
             Ok(())
         }
-        (ApprovalKind::Action, ApprovalOperation::Type | ApprovalOperation::PressKey)
-            if request.source_origin.is_some()
-                && request.destination_origin.is_none()
-                && snapshot
-                && target
-                && payload =>
+        (
+            ApprovalKind::Action,
+            ApprovalOperation::Type | ApprovalOperation::Choose | ApprovalOperation::PressKey,
+        ) if request.source_origin.is_some()
+            && request.destination_origin.is_none()
+            && snapshot
+            && target
+            && payload =>
         {
             Ok(())
         }
@@ -1776,6 +1781,7 @@ impl std::fmt::Display for ApprovalOperation {
             Self::Navigate => "navigate",
             Self::Click => "click",
             Self::Type => "type",
+            Self::Choose => "choose",
             Self::FormSubmit => "form-submit",
             Self::PressKey => "press-key",
             Self::PressEnter => "press-enter",
