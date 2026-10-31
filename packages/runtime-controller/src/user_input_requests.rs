@@ -117,6 +117,23 @@ fn bounded(value: &str, maximum: usize) -> bool {
     !value.trim().is_empty() && value.chars().count() <= maximum && !value.contains('\0')
 }
 
+/// The asking worker as its question message names it: its handle, and the
+/// saved agent, name and face its job carries, so the question wears its lane's
+/// face in the chat and on Home, and a saved agent's face as its profile has it.
+fn question_agent(payload: &Value, handle: &str) -> Value {
+    let mut agent = json!({ "handle": handle });
+    for key in ["id", "displayName", "avatarSeed"] {
+        if let Some(value) = payload
+            .pointer(&format!("/metadata/agent/{key}"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            agent[key] = json!(value);
+        }
+    }
+    agent
+}
+
 pub(crate) fn validate_questions(questions: &[Question], note: &str) -> ApiResult<()> {
     if !(1..=3).contains(&questions.len()) || !bounded(note, 4_000) {
         return Err(bad_request(
@@ -317,7 +334,7 @@ async fn create_request(
         run_id,
         text,
         json!({"jobId":job_id,"messageType":"action_request",
-            "agent":{"handle":handle},"details":{"userInputRequestId":request_id,"userInputRequestStatus":"pending"}}),
+            "agent":question_agent(&payload, handle),"details":{"userInputRequestId":request_id,"userInputRequestStatus":"pending"}}),
     )
     .await?;
     tx.execute(

@@ -3,6 +3,7 @@ pub mod proto {
 }
 
 pub use proto::*;
+pub mod agent_face;
 pub mod chat_activity;
 pub mod multi_agent;
 pub mod own_ai_model;
