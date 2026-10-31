@@ -338,6 +338,8 @@ activity line, to the person who started the run only, and the line says `Waitin
   is not in this view), the chat shows the same row at the end of the transcript, with Octo's
   avatar only when the message above it is not the same run's (`fallbackRowContinuesTail`):
   one avatar per turn. The browser view's sheet shares the same approval state, so answering one settles both.
+  Another chat's prompt never shows in this chat's browser view, and only the asking chat's Browser tab says
+  `Approve` ([Shared Browser](Shared-Browser.md)).
 - **Once answered**, or left to expire, the row goes and the turn's done line gains one clause
   after ` · `, and Details an entry with a lock:
 

@@ -60,7 +60,12 @@ export function useSharedBrowserApproval({
   browserPageId: string | null;
   originEndpoint: string | null;
   originAccessToken: string | null;
-  /** Which polled prompts a caller may answer here; every prompt when absent. */
+  /**
+   * Which polled prompts a caller shows and may answer here; every prompt
+   * when absent. The lane never holds, returns or answers any other: such a
+   * prompt reads as none, also when what the caller accepts changes after
+   * the read.
+   */
   acceptsRequest?: (request: RuntimeSharedBrowserApprovalRequest) => boolean;
   /** A run that may raise a prompt is active: poll every 1.5 s. Defaults to true. */
   runActive?: boolean;
@@ -179,8 +184,10 @@ export function useSharedBrowserApproval({
         const live = next && next.request.expiresAtMs > Date.now() ? next : null;
         if (!live || live.request.approvalId !== settledApprovalIdRef.current) {
           settledApprovalIdRef.current = null;
-          pendingRef.current = live;
-          setPending(live);
+          const accepts = acceptsRequestRef.current;
+          const held = live && (!accepts || accepts(live.request)) ? live : null;
+          pendingRef.current = held;
+          setPending(held);
         } else {
           pendingRef.current = null;
           setPending(null);
@@ -324,7 +331,7 @@ export function useSharedBrowserApproval({
   );
 
   return {
-    pending,
+    pending: pending && (!acceptsRequest || acceptsRequest(pending.request)) ? pending : null,
     submitting,
     error,
     routineApprovedRunId,

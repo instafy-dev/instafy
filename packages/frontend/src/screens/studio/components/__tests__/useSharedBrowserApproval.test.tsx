@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RuntimeSharedBrowserApprovalRequest } from "../../../../sdk/instafy";
 
 const { fetchPendingApprovalMock, decideApprovalMock } = vi.hoisted(() => ({
   fetchPendingApprovalMock: vi.fn(),
@@ -57,12 +58,14 @@ function Harness({
   runtimeId = pending.runtimeId,
   browserPageId = pending.request.browserPageId,
   originAccessToken = "origin-token",
+  accepts,
 }: {
   active?: boolean;
   browserSessionId?: string;
   runtimeId?: string;
   browserPageId?: string;
   originAccessToken?: string;
+  accepts?: (request: RuntimeSharedBrowserApprovalRequest) => boolean;
 }) {
   const approval = useSharedBrowserApproval({
     active,
@@ -72,6 +75,7 @@ function Harness({
     browserPageId,
     originEndpoint: "https://origin.example.test",
     originAccessToken,
+    acceptsRequest: accepts,
   });
   latestApproval = approval;
   const shownApprovalId = approval.pending?.request.approvalId ?? "";
@@ -173,6 +177,36 @@ describe("useSharedBrowserApproval", () => {
       await Promise.resolve();
     });
     expect(lastDecision()).toBe("none");
+  });
+
+  // Local test, Oct 31: another chat's prompt, with Deny and Allow, showed in
+  // a chat's Browser view. A lane whose caller keeps only its own prompts
+  // never holds another: it is not shown, not answered, and the lane reads at
+  // the pace of no prompt.
+  it("holds, shows and answers only the prompts its caller accepts", async () => {
+    const otherTabs = { ...pending, request: { ...pending.request, approvalId: "other-approval", browserPageId: "page-2" } };
+    fetchPendingApprovalMock.mockResolvedValue(otherTabs);
+    decideApprovalMock.mockResolvedValue(true);
+    const shown = () => container.querySelector('[data-testid="pending"]')?.textContent;
+    await act(async () => { root.render(<Harness accepts={(request) => request.browserPageId === "page-1"} />); });
+    expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(1);
+    expect(shown()).toBe("none");
+    await act(async () => { await latestApproval!.decide("allow_once", "other-approval"); });
+    expect(decideApprovalMock).not.toHaveBeenCalled();
+    // The next read comes at the run's 1.5 s, not the 400 ms of a shown prompt.
+    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+    expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(1);
+    fetchPendingApprovalMock.mockResolvedValue(pending);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_100); });
+    expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
+    expect(shown()).toBe(pending.request.approvalId);
+    // What the caller accepts changes: the prompt goes at once, before the
+    // next read, and a press can no longer answer it.
+    await act(async () => { root.render(<Harness accepts={() => false} />); });
+    expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
+    expect(shown()).toBe("none");
+    await act(async () => { await latestApproval!.decide("allow_once", pending.request.approvalId); });
+    expect(decideApprovalMock).not.toHaveBeenCalled();
   });
 
   it("does not poll when the approval surface is inactive", async () => {
