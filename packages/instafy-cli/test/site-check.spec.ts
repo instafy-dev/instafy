@@ -286,7 +286,7 @@ describe("preview check: pure parts", () => {
     const check = registerPreviewCheckCommand(preview);
     expect(check.name()).toBe("check");
     const flags = check.options.map((o) => o.long);
-    expect(flags).toEqual(["--port", "--path", "--phone", "--framed", "--workspace-playwright", "--out", "--timeout", "--wait", "--json"]);
+    expect(flags).toEqual(["--port", "--path", "--phone", "--desktop", "--framed", "--workspace-playwright", "--out", "--timeout", "--wait", "--json"]);
   });
 });
 
@@ -560,6 +560,65 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
     expect(r.title).toBe("Docs #s=2 390");
     expect(fs.existsSync(path.join(outDir, "phone.png"))).toBe(true);
     expect(fs.existsSync(path.join(outDir, "desktop.png"))).toBe(false);
+  });
+
+  // The end of a turn checks a site only for its card's picture, which comes from the desktop size.
+  it("--desktop takes only the desktop screenshot, and the card's picture from it", { timeout: 90_000 }, async () => {
+    const port = await serve({ "/": { body: GOOD } });
+    const outDir = path.join(tmp, "desktop-only");
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.writeFileSync(path.join(outDir, "phone.png"), "stale");
+    const out: string[] = [];
+    const uploads: number[] = [];
+    const code = await runPreviewCheckCli(
+      { port: String(port), desktop: true, out: outDir, json: true },
+      {
+        out: (s: string) => out.push(s),
+        err: () => {},
+        env: browserEnv,
+        hasOpenPreview: () => true,
+        uploadThumbnail: async ({ image }) => {
+          uploads.push(image.length);
+          return { status: "uploaded" };
+        },
+      },
+    );
+    expect(code).toBe(CHECK_EXIT_OK);
+    const r = JSON.parse(out[0]!);
+    expect(r.viewports.map((v: { name: string; width: number }) => [v.name, v.width])).toEqual([["desktop", 1280]]);
+    expect(r.thumbnail).toBe("uploaded");
+    expect(uploads).toHaveLength(1);
+    expect(fs.existsSync(path.join(outDir, "desktop.png"))).toBe(true);
+    expect(fs.existsSync(path.join(outDir, "phone.png"))).toBe(false);
+  });
+
+  // A turn that ends after its own check tried, and failed, to picture the site is not checked again for nothing.
+  it("a picture the check could not take is recorded as tried, and nothing is uploaded", { timeout: 90_000 }, async () => {
+    const port = await serve({ "/": { body: `<!doctype html><title>Nothing yet</title><body style="margin:0;background:#fff"></body>` } });
+    const tried: Array<{ port: number; path: string; takenAt: number }> = [];
+    const uploads: number[] = [];
+    const before = Date.now();
+    const out: string[] = [];
+    await runPreviewCheckCli(
+      { port: String(port), desktop: true, out: path.join(tmp, "tried"), json: true },
+      {
+        out: (s: string) => out.push(s),
+        err: () => {},
+        env: browserEnv,
+        hasOpenPreview: () => true,
+        uploadThumbnail: async ({ image }) => {
+          uploads.push(image.length);
+          return { status: "uploaded" };
+        },
+        pictureTried: async (input) => {
+          tried.push(input);
+        },
+      },
+    );
+    expect(JSON.parse(out[0]!)).toMatchObject({ thumbnail: "skipped", thumbnailReason: "the page looked blank" });
+    expect(uploads).toEqual([]);
+    expect(tried).toEqual([{ port, path: "/", takenAt: expect.any(Number) }]);
+    expect(tried[0]!.takenAt).toBeGreaterThanOrEqual(before);
   });
 });
 

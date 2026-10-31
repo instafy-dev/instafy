@@ -898,9 +898,10 @@ fn start_tunnel_client(
     if let Some(record) = entry.as_object_mut() {
         // What `instafy preview open` recorded for this same preview stays: how
         // `--start` starts the site, the domain and Studio origin its viewers
-        // come from (a site served in preview mode answers only those), and the
-        // site's folder and when the card's picture was taken (a turn that
-        // changes the site after that checks it again, for a new picture).
+        // come from (a site served in preview mode answers only those), the
+        // site's folder and when it was last pictured for the card (a turn
+        // that changes the site after that checks it again, for a new
+        // picture), and whether its card takes a picture at all.
         let earlier = |key: &str| current.and_then(|entry| entry.get(key)).cloned();
         for key in [
             "start",
@@ -908,6 +909,7 @@ fn start_tunnel_client(
             "studioOrigin",
             "siteDir",
             "pictureAt",
+            "noThumbnail",
         ] {
             if let Some(value) = earlier(key) {
                 record.insert(key.to_string(), value);
@@ -1227,6 +1229,7 @@ mod tests {
             "studioOrigin": "https://studio.test",
             "siteDir": "sites/lisbon",
             "pictureAt": 1_761_800_000_000_i64,
+            "noThumbnail": true,
         });
         let mut recorded = earlier.clone();
         recorded["previewId"] = json!("already");
@@ -1244,8 +1247,8 @@ mod tests {
         outcome?;
         assert!(!marker.exists(), "the start command must not run");
         // The record of the site that answered is kept, and so is what the
-        // preview's viewers come from, the site's folder and when the card's
-        // picture was taken.
+        // preview's viewers come from, the site's folder, when it was last
+        // pictured for the card, and whether the card takes a picture.
         let entry = &state["previews"][0];
         for key in [
             "start",
@@ -1255,6 +1258,7 @@ mod tests {
             "studioOrigin",
             "siteDir",
             "pictureAt",
+            "noThumbnail",
         ] {
             assert_eq!(entry[key], earlier[key], "{key}");
         }

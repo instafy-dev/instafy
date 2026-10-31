@@ -38,6 +38,7 @@ import {
   previewOpen,
   printPreviewList,
   printPreviewOpen,
+  recordCheckPictureTried,
   uploadCheckThumbnail,
 } from "./preview.js";
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
@@ -2245,7 +2246,11 @@ const previewCommand = program
 
 failWithGroupHelp(previewCommand);
 // A check of a site with an open preview refreshes the picture on its card.
-registerPreviewCheckCommand(previewCommand, { hasOpenPreview: hasOpenPreviewFor, uploadThumbnail: uploadCheckThumbnail });
+registerPreviewCheckCommand(previewCommand, {
+  hasOpenPreview: hasOpenPreviewFor,
+  uploadThumbnail: uploadCheckThumbnail,
+  pictureTried: recordCheckPictureTried,
+});
 
 const webCommand = registerWebSearchCommand(registerWebLinkCommand(registerWebCommand(program)));
 failWithGroupHelp(webCommand);

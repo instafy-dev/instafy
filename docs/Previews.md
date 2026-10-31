@@ -95,16 +95,21 @@ A member can **Present** a site whose page says it can share its view, and the o
   after it loads marks it: `data-instafy-ready="false"` on its `<html>` element, then `"true"` once drawn (the map
   engine sets it once its tiles and description are in). The picture then waits for `"true"` instead of a quiet
   network, up to 30 s in all, and a page still drawing by then gets no picture, never a half-drawn one. The JSON gains `thumbnail`
-  (`uploaded`, `skipped` or `failed`) and `thumbnailReason`; the exit code never changes. `--no-thumbnail` takes none;
-  `--thumbnail <file>` sends a picture a skill made itself (JPEG, PNG or WebP, at most 512 KiB and 2000×2000).
-  `instafy preview check` takes a new one from the desktop page it already loaded, when this machine has a preview open
-  on that port and path, so a check after a change also refreshes the card.
+  (`uploaded`, `skipped` or `failed`) and `thumbnailReason`; the exit code never changes. `--no-thumbnail` takes none,
+  and no later check takes one for that preview's card either; `--thumbnail <file>` sends a picture a skill made itself
+  (JPEG, PNG or WebP, at most 512 KiB and 2000×2000). `instafy preview check` takes a new one from the desktop page it
+  already loaded, when this machine has a preview open on that port and path, so a check after a change also refreshes
+  the card.
 - **After a turn.** `open` records, with each preview it opens on the machine, the folder the site's server runs from
-  in the workspace (`siteDir`), and `open` and `check` record when the card's picture was taken (`pictureAt`). When a
-  turn ends having changed a file in that folder after the picture was taken, the runtime runs `instafy preview check`
-  for that port and path itself, from the workspace with the turn's own credentials (at most three previews, 60 s in
-  all), so a turn that stopped before its own check still leaves the card showing the site as it left it. A preview
-  with no recorded folder counts every change in the workspace; a check that fails leaves the old picture.
+  in the workspace (`siteDir`), and `open` and `check` record when they last pictured the site for the card
+  (`pictureAt`), also when no picture came of it (a blank page, one that never loaded). While a turn's changes are
+  saved, each preview whose folder holds a file the turn changed after that is checked once more, at the size its
+  picture comes from (`instafy preview check --desktop`), from the workspace with the turn's own credentials: at most
+  three previews and 30 s in all, a check starting only with 15 s of that left, none once the turn is stopped. So a
+  turn that stopped before its own check still leaves the card showing the site as it left it, and a turn whose own
+  check came after its last change adds nothing. The check's screenshots go to a folder removed after it, and a
+  check that fails, runs out of time or is stopped ends with every helper it started and leaves the old picture. A
+  preview with no recorded folder, or opened with `--no-thumbnail`, is left alone.
 - **What the capture may load.** Only the site's own loopback origin directly. Every other request goes through the
   image's `browser-egress-proxy`, an instance of its own on a free loopback port: public addresses on ports 80 and
   443 only, connected to the address it checked. Another loopback port, `localhost` names, private, link-local,

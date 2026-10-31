@@ -307,7 +307,7 @@ function writeState(home: string, previews: unknown[]) {
 function readState(home: string): {
   previews: Array<{
     previewId: string; pid: number; localPort: number; workdir: string; hostSuffix?: string; studioOrigin?: string;
-    siteDir?: string; pictureAt?: number;
+    siteDir?: string; pictureAt?: number; noThumbnail?: boolean;
   }>;
 } {
   return JSON.parse(fs.readFileSync(path.join(home, ".instafy", "cli-preview-state.json"), "utf8"));
@@ -1096,6 +1096,9 @@ describe("instafy preview: the card's summary and picture", () => {
     expect(none.code, none.stderr).toBe(0);
     expect(JSON.parse(none.stdout)).toMatchObject({ thumbnail: "skipped", thumbnailReason: "--no-thumbnail" });
     expect(thumbnailPuts(controller.captures)).toHaveLength(0);
+    // Recorded with the preview: a check, or the end of a turn, puts no picture on its card either.
+    expect(readState(home).previews[0]).toMatchObject({ noThumbnail: true });
+    expect(readState(home).previews[0]).not.toHaveProperty("pictureAt");
 
     const file = path.join(home, "snapshot.png");
     fs.writeFileSync(file, pngOf(640, 400));
@@ -1105,6 +1108,8 @@ describe("instafy preview: the card's summary and picture", () => {
     );
     expect(withFile.code, withFile.stderr).toBe(0);
     expect(JSON.parse(withFile.stdout)).toMatchObject({ status: "live", thumbnail: "uploaded" });
+    // Opened again with a picture, the card takes pictures again.
+    expect(readState(home).previews[0]).not.toHaveProperty("noThumbnail");
     const puts = thumbnailPuts(controller.captures);
     expect(puts.map((capture) => capture.path)).toEqual([`/projects/${projectId}/previews/preview-1/thumbnail`]);
     const body = JSON.parse(puts[0]!.body) as Record<string, unknown>;
@@ -1259,5 +1264,40 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
     expect(other.code, other.stderr).toBe(0);
     expect(JSON.parse(other.stdout)).not.toHaveProperty("thumbnail");
     expect(thumbnailPuts(controller.captures)).toHaveLength(1);
+  }, 240000);
+
+  // `--no-thumbnail` promises a card with no picture of the site, so a check of that preview (Octo's own, or the one
+  // the runtime runs when a turn ends) takes none. A check that could not take a picture records when it tried: the
+  // end of a turn does not try the unchanged site again.
+  it("check takes no picture for a preview opened with --no-thumbnail, and records a picture it could not take", async () => {
+    const projectId = randomUUID();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startPage();
+    const blankPort = await listen(
+      http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(`<!doctype html><title>Nothing yet</title><body style="margin:0;background:#fff"></body>`);
+      }),
+    );
+    const home = makeHome();
+    const entry = (previewId: string, localPort: number, extra: Record<string, unknown> = {}) => ({
+      previewId, projectId, title: "Lisbon weekend", localPort, path: "/", controllerUrl: controller.url,
+      pid: 999999, logFile: path.join(home, "log"), workdir: path.join(home, "wd"), startedAt: new Date().toISOString(), ...extra,
+    });
+    writeState(home, [entry("preview-1", sitePort, { noThumbnail: true }), entry("preview-2", blankPort)]);
+    const env = { ...browserEnv, INSTAFY_ACCESS_TOKEN: "test-token" };
+
+    const none = await execCli(["preview", "check", "--port", String(sitePort), "--json"], home, env);
+    expect(none.code, none.stderr).toBe(0);
+    expect(JSON.parse(none.stdout)).not.toHaveProperty("thumbnail");
+    expect(thumbnailPuts(controller.captures)).toHaveLength(0);
+    expect(readState(home).previews[0]).not.toHaveProperty("pictureAt");
+
+    const before = Date.now();
+    const blank = await execCli(["preview", "check", "--port", String(blankPort), "--desktop", "--json"], home, env);
+    expect(JSON.parse(blank.stdout)).toMatchObject({ thumbnail: "skipped", thumbnailReason: "the page looked blank" });
+    expect(thumbnailPuts(controller.captures)).toHaveLength(0);
+    expect(readState(home).previews[1]!.pictureAt).toBeGreaterThanOrEqual(before);
+    expect(readState(home).previews[1]!.pictureAt).toBeLessThanOrEqual(Date.now());
   }, 240000);
 });
