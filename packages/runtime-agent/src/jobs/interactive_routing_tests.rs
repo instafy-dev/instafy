@@ -171,18 +171,22 @@ fn research_execution_policy_upgrades_unedited_skills_but_keeps_local_edits() {
     assert!(current.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
 }
 
-/// A page written by hand follows the person's light or dark mode, as the starters do (a visit page written by hand
-/// set `color-scheme: light` and stayed light in a dark Studio, and so did its card's picture). An unedited earlier
-/// copy of the hub is upgraded; an edited one is kept.
+/// A page written by hand follows light and dark as the starters' `theme.css` does (a visit page written by hand set
+/// `color-scheme: light` and stayed light in a dark Studio, and so did its card's picture): the device's mode, and
+/// Studio's theme, which the bind client puts on `<html data-theme>` and which wins over the device's (a framed
+/// page's `prefers-color-scheme` follows the device, not Studio). An unedited earlier copy of the hub is upgraded; an
+/// edited one is kept.
 #[test]
 fn a_page_written_by_hand_follows_light_and_dark() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     let previous = include_str!("legacy/interactive-artifacts-v4.md");
-    let rule = "a page you write sets `color-scheme: light dark` and its colours again under \
-                `@media (prefers-color-scheme: dark)`, never `color-scheme: light` alone.";
-    assert!(flat(hub).contains(&flat(rule)));
+    let rule = r#"a page you write sets its dark colours, with `color-scheme: dark`, under
+        `:root:not([data-theme="light"])` inside `@media (prefers-color-scheme: dark)` and under
+        `:root[data-theme="dark"]` (Studio's theme, which `instafy bind serve` puts on `<html>`). Never
+        `color-scheme: light` alone;"#;
+    assert!(flat(hub).contains(&flat(rule)), "{hub}");
     assert!(!previous.contains("prefers-color-scheme"));
     assert!(
         hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
