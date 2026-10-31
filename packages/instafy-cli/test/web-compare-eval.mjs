@@ -187,12 +187,12 @@ export function referenceReply(kase, readAt, { key, links }) {
   lines.push(`- Brightvac Q5: 399 EUR, seen ${day} (checked ${day} on ${maker}): suction 4,000 Pa, battery 150 minutes, no mop. Brightvac Q5: 1 of 2 reviews found.`);
   if (key) {
     lines.push(`- Brightvac S8: 549 EUR at Shop One, seen ${day} (checked ${day} on ${host(kase.shops[0].url)}); its page on ${maker} gives no price. Suction 6,000 Pa, battery 180 minutes, vibrating mop (checked ${day} on ${maker}). Reviews: ${host(kase.reviews[0].url)} and ${host(kase.reviews[1].url)}.`);
-    lines.push(`- Brightvac S8 Pro: price unknown, as ${maker} blocks automated price checks (not read: ${maker}, it refuses automated reads). Suction 7,000 Pa, battery 200 minutes and a lifting mop come from one review (checked ${day} on ${host(kase.reviews[3].url)}). Brightvac S8 Pro: 1 of 2 reviews found; the S8 Pro+ review is of another model.`);
+    lines.push(`- Brightvac S8 Pro: price unknown, not read: ${pro.page.url} (closed to automated reads). Suction 7,000 Pa, battery 200 minutes and a lifting mop come from one review (checked ${day} on ${host(kase.reviews[3].url)}). Brightvac S8 Pro: 1 of 2 reviews found; the S8 Pro+ review is of another model.`);
     lines.push("600 EUR or less: the Brightvac Q5 and the Brightvac S8. The Brightvac S8 Pro is listed apart, as its price is unknown.");
     lines.push(`To check the S8 Pro's price yourself: open ${pro.page.url} in your own tab and press Send page to Octo, or look on Amazon: ${links[pro.slug]}`);
   } else {
     lines.push(`- Brightvac S8: price unknown, as its page on ${maker} gives no price. Suction 6,000 Pa, battery 180 minutes, vibrating mop (checked ${day} on ${maker}). Brightvac S8: 1 of 2 reviews found.`);
-    lines.push(`- Brightvac S8 Pro: price unknown, as ${maker} blocks automated price checks (not read: ${maker}, it refuses automated reads). Suction 7,000 Pa, battery 200 minutes and a lifting mop come from one review (checked ${day} on ${host(r1pro.url)}). Brightvac S8 Pro: 1 of 2 reviews found.`);
+    lines.push(`- Brightvac S8 Pro: price unknown, not read: ${pro.page.url} (closed to automated reads). Suction 7,000 Pa, battery 200 minutes and a lifting mop come from one review (checked ${day} on ${host(r1pro.url)}). Brightvac S8 Pro: 1 of 2 reviews found.`);
     lines.push("600 EUR or less: the Brightvac Q5. The Brightvac S8 and the Brightvac S8 Pro are listed apart, as their prices are unknown.");
     lines.push(`To check the prices yourself: open ${s8.page.url} and ${pro.page.url} in your own tab and press Send page to Octo on each, or look on Amazon: ${links[s8.slug]} and ${links[pro.slug]}`);
     lines.push(`This space has no search key, so I read the maker's site and ${host(r1pro.url)}'s reviews directly. Add a key in the card if you want me to look for more reviews and shops next time, or send me review pages you find with Send page to Octo.`);
@@ -243,7 +243,7 @@ export function referencePage(kase, readAt, { key }) {
       },
       {
         ref: "vacuum:s8-pro", name: pro.name, why: "Its maker's page refused the read: specs from one review", note: count(pro.slug),
-        facts: { price: { note: `${host(pro.page.url)} blocks automated price checks` }, suction: spec(r1pro, "Review One", "7,000 Pa"), battery: spec(r1pro, "Review One", "200 minutes"), mop: spec(r1pro, "Review One", "lifting mop") },
+        facts: { price: { note: "Its own page is closed to automated reads" }, suction: spec(r1pro, "Review One", "7,000 Pa"), battery: spec(r1pro, "Review One", "200 minutes"), mop: spec(r1pro, "Review One", "lifting mop") },
         store: { name: "Brightvac", url: pro.page.url, readable: false }, sources: sources(pro.slug),
       },
     ],
@@ -484,11 +484,12 @@ export function gradeCompare(transcript, kase = CASE) {
   }));
 
   // An item whose official page has no price, or refused the read, gets another way: a shop found by search, or a
-  // link the person can open (the maker's page with Send page to Octo, or a guided link to a link-only shop).
+  // link the person can open (the maker's page with Send page to Octo, on one line, or a guided link to a link-only
+  // shop). A page named only as not read is not a way to check.
   const fallbackNeeded = items.filter((item) => !amounts(readText(item.page.url)).length);
   check("price_fallback", fallbackNeeded.flatMap((item) => {
     const searched = searches.some((s) => s.status === "ok" && s.query.toLowerCase().includes(item.name.toLowerCase()) && /\bprices?\b/i.test(s.query));
-    const pageToSend = reply.includes(item.page.url) && reply.includes("Send page to Octo");
+    const pageToSend = replyLines.split("\n").some((line) => line.includes(item.page.url) && line.includes("Send page to Octo"));
     const guided = links.some((l) => l.query.toLowerCase() === item.name.toLowerCase() && reply.includes(l.link));
     return searched || pageToSend || guided ? [] : [`${item.name}: its page has no price, and the turn neither searched for one nor gave the person a link to check`];
   }));
@@ -605,7 +606,7 @@ export const failedIds = (checks) => checks.filter((c) => !c.pass).map((c) => c.
 
 const item = (kase, slug) => kase.items.find((i) => i.slug === slug);
 /** The reference reply's sentence on the S8 Pro's price (with a search key). */
-const UNKNOWN_PRO = "Brightvac S8 Pro: price unknown, as www.brightvac.example blocks automated price checks (not read: www.brightvac.example, it refuses automated reads).";
+const UNKNOWN_PRO = "Brightvac S8 Pro: price unknown, not read: https://www.brightvac.example/s8-pro (closed to automated reads).";
 const row = (data, kase, slug) => data.items.find((r) => r.name === item(kase, slug).name);
 
 export const BREAKERS = [

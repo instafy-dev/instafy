@@ -34,7 +34,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import type { Command } from "commander";
 import * as redaction from "@instafy/browser-action-policy/redaction";
-import { AI_AGENTS, USER_AGENT, challengeReason, parseRobots, robotsAllows, type RobotsGroup } from "@instafy/bind/web";
+import { AI_AGENTS, USER_AGENT, challengeReason, parseRobots, robotsAllows, robotsRefusesAll, type RobotsGroup } from "@instafy/bind/web";
 import {
   findPassages,
   findTerms,
@@ -566,7 +566,10 @@ function visibleChars(lines: string[]): number {
 const TELL: Record<StopCode | SkipCode | FailCode | "robots_site" | "needs_browser" | "no_reuse", string> = {
   link_only: `${STOP_TELL} A skill lists this site as link-only: none of its pages is read. ${OTHER_SOURCES_TELL}`,
   robots: PAGE_STOP_TELL,
-  /** robots.txt itself refused the read (an error answer, a loop, a refused or link-only address): every page of the site */
+  /**
+   * every page of the site: robots.txt itself refused the read (an error answer, a loop, a refused or link-only
+   * address), or its rules refuse every path to one of the agents checked ("Disallow: /")
+   */
   robots_site: `${STOP_TELL} The site's robots.txt refuses all of its pages for now. ${OTHER_SOURCES_TELL}`,
   blocked_address: `${STOP_TELL} ${OTHER_SOURCES_TELL}`,
   redirects: PAGE_STOP_TELL,
@@ -649,7 +652,10 @@ function stripHash(url: URL): string {
   return copy.href;
 }
 
-/** `wholeSite`: robots.txt itself refused the read, so every page of the site is refused, not just this path. */
+/**
+ * `wholeSite`: every page of the site is refused, not just this path: robots.txt itself refused the read, or its rules
+ * keep one of the agents checked out of every path.
+ */
 async function robotsVerdict(
   url: URL,
   ctx: ReadContext,
@@ -668,7 +674,8 @@ async function robotsVerdict(
   for (const agent of ROBOTS_AGENTS) {
     if (!robotsAllows(groups, agent, target)) {
       const shown = redaction.redactUrl(url.href).text;
-      return { refused: `robots.txt disallows ${shown} for ${agent === "*" ? "all bots" : agent}` };
+      const refused = `robots.txt disallows ${shown} for ${agent === "*" ? "all bots" : agent}`;
+      return ROBOTS_AGENTS.some((any) => robotsRefusesAll(groups, any)) ? { refused, wholeSite: true } : { refused };
     }
   }
   return { refused: null };

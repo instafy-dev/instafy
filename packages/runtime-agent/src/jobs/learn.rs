@@ -326,6 +326,8 @@ const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
     // From before a lane read with the research skill and compared a product by its "Comparing items".
     include_str!("legacy/research-team-researcher-v1.md"),
     include_str!("legacy/research-team-researcher-v2.md"),
+    // From before a page robots.txt refuses left the site's other pages open, as its `tell` says.
+    include_str!("legacy/research-team-researcher-v3.md"),
 ];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -424,6 +426,9 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v9.md"),
     // From before reviews came from a reviewer's home page and its links, never a guessed address.
     include_str!("legacy/web-research-v10.md"),
+    // From before a stop was listed by the page that stopped, not its site, and the turn went on
+    // as its `tell` says instead of to "a different source".
+    include_str!("legacy/web-research-v11.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

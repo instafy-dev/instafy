@@ -88,7 +88,7 @@ When the task needs a `no-agents` site (hotel prices on Booking.com):
 Say per item what you found:
 
 - Name: the exact model and generation its official page gives, else the page naming it.
-- Price: the maker's or a shop's own page. None there, or a stop: say so ("no price on <host>'s page", "<host> blocks automated price checks"), then try a shop robots.txt allows: `instafy web search "<name> price" --json`, or `--chain reference-search` for shops' official sites; a link-only shop gets `instafy web link <site> query=<name>` (Guided mode). Still none: "price unknown", and the page for the person to open and send to Octo; never a remembered or guessed price.
+- Price: the maker's or a shop's own page. None there, or a stop: say so ("no price on <page>", "<page> is closed to automated reads"), then try a shop robots.txt allows: `instafy web search "<name> price" --json`, or `--chain reference-search` for shops' official sites; a link-only shop gets `instafy web link <site> query=<name>` (Guided mode). Still none: "price unknown", and the page for the person to open and send to Octo; never a remembered or guessed price.
 - Sources asked for ("two independent reviews"): that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count). Short: "<item>: 1 of 2 reviews found", in the reply and on the page.
 - A limit ("under €600"): an item with no price read this turn is listed as "price unknown", never as within it.
 - A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.
@@ -99,7 +99,7 @@ A login, sign-in or paywall, a CAPTCHA or bot check, HTTP 401, 403 or 429, a rob
 
 - never retry it another way (another reader, browser, user agent, cache, mirror or archive);
 - never ask for a password or code; the person may sign in in their own browser and paste what they choose to share;
-- list it in the reply as "not read: <host> (<why, in plain words>)" with its link, and try a different source.
+- list it in the reply as "not read: <page> (<why, in plain words>)" with its link, and follow its `tell`.
 
 `instafy web read` reports these as `stopped` with a `code`: `login` (401 or a sign-in form), `forbidden` (403), `rate_limited` (429), `captcha`, `paywall`, `robots`, `link_only`. After a 429 or bot check, read nothing more from that site this turn. `needs_browser` is not a stop: read that page in a browser tab or use another source.
 

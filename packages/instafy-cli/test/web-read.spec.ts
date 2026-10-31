@@ -1019,6 +1019,98 @@ describe("what a stop leaves open", () => {
     expect(await one("http://news.example.org/a", {}, { env: nextTurn })).toMatchObject({ code: "robots", previouslyStopped: true, tell: robotsSite });
     expect(hits.filter((hit) => !hit.endsWith("/robots.txt"))).toEqual([]);
   });
+
+  const ROBOTS_SITE =
+    "This address only (and where it redirected): don't read it another way. Give the person the plain link. " +
+    "The site's robots.txt refuses all of its pages for now. Other sources can still be read.";
+  // The usual way a site keeps AI crawlers out is a group that refuses every path ("Disallow: /"), for all bots or for
+  // one of the agents the reader checks: every other page of the site is refused with it.
+  for (const robots of [
+    "User-agent: *\nDisallow: /\n",
+    "User-agent: GPTBot\nDisallow: /\n",
+    "User-agent: ClaudeBot\nDisallow: /*\n",
+    "User-agent: *\nDisallow: /private/\n\nUser-agent: Claude-User\nDisallow: /\n",
+    // an Allow shorter than the Disallow that matches every path never wins (the longest rule does)
+    "User-agent: *\nDisallow: /*\nAllow: /\n",
+  ]) {
+    it(`leaves only other sources open when robots.txt refuses every page to an agent it checks: ${JSON.stringify(robots)}`, async () => {
+      routes["news.example.org/robots.txt"] = { type: "text/plain", body: robots };
+      for (const at of ["/", "/a", "/private/b"]) routes[`news.example.org${at}`] = { body: ARTICLE };
+      const report = await read(["http://news.example.org/private/b", "http://news.example.org/a", "http://news.example.org/"]);
+      expect(report.pages.map((p) => [p.status, p.code])).toEqual(Array(3).fill(["stopped", "robots"]));
+      expect(report.pages.map((p) => p.tell)).toEqual(Array(3).fill(ROBOTS_SITE));
+      // Remembered, it says the same: in this turn, and in the next one through the workspace cache.
+      const nextTurn = { INSTAFY_TURN_STARTED_AT: "2026-10-26T11:00:00Z", INSTAFY_PROJECT_ID: "project-1" };
+      expect(await one("http://news.example.org/a")).toMatchObject({ code: "robots", previouslyStopped: true, tell: ROBOTS_SITE });
+      expect(await one("http://news.example.org/a", {}, { env: nextTurn })).toMatchObject({ code: "robots", previouslyStopped: true, tell: ROBOTS_SITE });
+      expect(hits.filter((hit) => !hit.endsWith("/robots.txt"))).toEqual([]);
+    });
+  }
+
+  it("keeps the site's other pages open when robots.txt refuses its root but opens some pages again", async () => {
+    routes["shop.example.net/robots.txt"] = { type: "text/plain", body: "User-agent: *\nDisallow: /\nAllow: /products/\n" };
+    routes["shop.example.net/marketplace/laptops"] = { body: ARTICLE };
+    routes["shop.example.net/products/laptop-13"] = { body: page("<h1>Laptop 13</h1><p>Battery: 61 Wh.</p>", "Laptop 13") };
+    const report = await read(["http://shop.example.net/marketplace/laptops", "http://shop.example.net/products/laptop-13"]);
+    expect(report.pages.map((p) => [p.status, p.code ?? null])).toEqual([["stopped", "robots"], ["read", null]]);
+    expect(report.pages[0]!.tell).toBe(PAGE_OPEN);
+  });
+
+  // Each stop's note against what the reader then does in the same turn: it offers the site's other pages exactly when
+  // the reader reads another page of that site, and other sources always.
+  const OPEN_AFTER: Array<{ stop: string; url: string; other: string; setup: () => void }> = [
+    { stop: "robots.txt disallowing that path", url: "http://news.example.org/x", other: "http://news.example.org/other", setup: () => {
+      routes["news.example.org/robots.txt"] = { type: "text/plain", body: "User-agent: *\nDisallow: /x\n" };
+    } },
+    { stop: "robots.txt refusing every path to all bots", url: "http://news.example.org/x", other: "http://news.example.org/other", setup: () => {
+      routes["news.example.org/robots.txt"] = { type: "text/plain", body: "User-agent: *\nDisallow: /\n" };
+    } },
+    { stop: "robots.txt refusing every path to an AI agent", url: "http://news.example.org/x", other: "http://news.example.org/other", setup: () => {
+      routes["news.example.org/robots.txt"] = { type: "text/plain", body: "User-agent: GPTBot\nDisallow: /\n" };
+    } },
+    { stop: "robots.txt answering 503", url: "http://news.example.org/x", other: "http://news.example.org/other", setup: () => {
+      routes["news.example.org/robots.txt"] = { status: 503, type: "text/plain", body: "down" };
+    } },
+    { stop: "robots.txt redirecting to a link-only site", url: "http://news.example.org/x", other: "http://news.example.org/other", setup: () => {
+      routes["news.example.org/robots.txt"] = { status: 302, headers: { location: "https://www.booking.com/robots.txt" } };
+    } },
+    { stop: "too many redirects", url: "http://news.example.org/r0", other: "http://news.example.org/other", setup: () => {
+      for (let i = 0; i < 6; i += 1) routes[`news.example.org/r${i}`] = { status: 302, headers: { location: `/r${i + 1}` } };
+    } },
+    { stop: "a secret screen", url: "http://news.example.org/x", other: "http://news.example.org/other", setup: () => {
+      routes["news.example.org/x"] = { body: page(`<h1>API keys</h1><input readonly value="${FAKE_STRIPE_KEY}">`, "API keys") };
+    } },
+    ...(
+      [
+        ["HTTP 401", { status: 401 }],
+        ["HTTP 403", { status: 403 }],
+        ["HTTP 429", { status: 429 }],
+        ["a CAPTCHA page", { body: page('<div class="g-recaptcha" data-sitekey="x"></div>', "Just a moment...") }],
+        ["a sign-in form", { body: page('<form><input name="email"><input type="password" name="pw"><button>Sign in</button></form>', "Sign in") }],
+        ["a paywall", { body: page('<div class="article paywall"><p>Subscribe to read.</p></div>') }],
+        ["a file download", { type: "application/pdf", body: "%PDF-1.7" }],
+      ] as Array<[string, Route]>
+    ).map(([stop, route]) => ({ stop, url: "http://news.example.org/x", other: "http://news.example.org/other", setup: () => {
+      routes["news.example.org/x"] = route;
+    } })),
+    { stop: "a link-only site", url: "https://www.booking.com/hotel/x.html", other: "https://www.booking.com/hotel/other.html", setup: () => {
+      dns["www.booking.com"] = [PUBLIC_A];
+      routes["www.booking.com/hotel/other.html"] = { body: ARTICLE };
+    } },
+    { stop: "a private address", url: "http://10.1.2.3/x", other: "http://10.1.2.3/other", setup: () => {} },
+  ];
+  for (const { stop, url, other, setup } of OPEN_AFTER) {
+    it(`offers the site's other pages only when the same turn reads them, and other sources always: ${stop}`, async () => {
+      setup();
+      routes[`${new URL(other).host}${new URL(other).pathname}`] ??= { body: ARTICLE };
+      routes["other.example.com/review"] = { body: ARTICLE };
+      const [stopped, sameSite, elsewhere] = (await read([url, other, "http://other.example.com/review"])).pages;
+      expect(stopped!.status).toBe("stopped");
+      expect(stopped!.tell).toMatch(/[Oo]ther sources can still be read\./);
+      expect(sameSite!.status).toBe(stopped!.tell!.includes("The site's other pages") ? "read" : "stopped");
+      expect(elsewhere!.status).toBe("read");
+    });
+  }
 });
 
 describe("one site, however its host is written", () => {

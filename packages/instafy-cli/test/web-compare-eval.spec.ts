@@ -405,7 +405,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     const research = flat(fs.readFileSync(path.join(skills, "instafy-web-research/SKILL.md"), "utf8"));
     for (const rule of [
       "## Comparing items",
-      "None there, or a stop: say so (\"no price on <host>'s page\", \"<host> blocks automated price checks\")",
+      "None there, or a stop: say so (\"no price on <page>\", \"<page> is closed to automated reads\")",
       "`instafy web search \"<name> price\" --json`, or `--chain reference-search` for shops' official sites",
       "a link-only shop gets `instafy web link <site> query=<name>` (Guided mode)",
       "never a remembered or guessed price",
