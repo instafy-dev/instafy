@@ -120,8 +120,7 @@ export function useChatSharedBrowserApproval(params: {
   });
   // The origin already answers only the person who started the run; this
   // also keeps another run's prompt out of this conversation. The lane
-  // applies it to its latest poll when a press is answered, as well as to
-  // what is shown here.
+  // holds, shows and answers only the prompts it accepts.
   const forThisRun = useCallback(
     (request: RuntimeSharedBrowserApprovalRequest) =>
       target !== null && request.runId === target.runId && request.initiatorUserId === userId,
@@ -137,7 +136,7 @@ export function useChatSharedBrowserApproval(params: {
     originAccessToken: grant?.accessToken ?? null,
     acceptsRequest: forThisRun,
   });
-  const pending = lane.pending && forThisRun(lane.pending.request) ? lane.pending : null;
+  const pending = lane.pending;
   const decide = lane.decide;
   const approval = useMemo<SharedBrowserApprovalState>(() => ({
     pending,
@@ -148,4 +147,24 @@ export function useChatSharedBrowserApproval(params: {
     decide,
   }), [decide, lane.error, lane.lastDecision, lane.routineApprovedRunId, lane.submitting, pending]);
   return { target, approval };
+}
+
+/**
+ * Whether the chat's browser view shows a prompt, as the view says through
+ * `onApprovalPendingChange`, kept with the chat (`scope`) it said so for. One
+ * view serves every chat and says so only after it draws, so a chat the
+ * person just went to would otherwise read, for that draw, the prompt of the
+ * chat they left, and its Browser tab would say Approve.
+ */
+export function useChatViewApprovalPending(scope: string | null): {
+  pending: boolean;
+  onApprovalPendingChange: (pending: boolean) => void;
+} {
+  const [said, setSaid] = useState<{ scope: string | null; pending: boolean }>({ scope: null, pending: false });
+  const onApprovalPendingChange = useCallback(
+    (pending: boolean) =>
+      setSaid((current) => (current.scope === scope && current.pending === pending ? current : { scope, pending })),
+    [scope],
+  );
+  return { pending: said.pending && said.scope === scope, onApprovalPendingChange };
 }

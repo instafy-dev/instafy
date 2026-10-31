@@ -371,7 +371,7 @@ import {
 } from "./messageStashLifecycle";
 import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
 import { BrowserApprovalRow } from "./BrowserApprovalRow";
-import { useChatSharedBrowserApproval } from "./useChatSharedBrowserApproval";
+import { useChatSharedBrowserApproval, useChatViewApprovalPending } from "./useChatSharedBrowserApproval";
 import {
   fallbackRowContinuesTail,
   TurnBrowserApprovalContext,
@@ -821,7 +821,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
   ) : null, [activeProjectId, fileOpenRequest, selectedFile]);
   useEffect(() => { if (messageTargetActive) selectSurface("chat"); }, [messageTargetActive, location.key, selectSurface]);
-  const [sharedBrowserApprovalPending, setSharedBrowserApprovalPending] = useState(false);
+  // Whether this chat's Browser view shows a prompt, kept with the chat the
+  // view said it for: a chat the person goes to never reads the prompt of
+  // the one they left (useChatViewApprovalPending).
+  const chatViewApproval = useChatViewApprovalPending(surfaceScope);
+  const sharedBrowserApprovalPending = chatViewApproval.pending;
   const [browserTransport, setBrowserTransport] = useState<BrowserTransport>("shared");
   const browserTransportScopeKey = currentUserId && activeProjectId && activeConversationId
     ? JSON.stringify([currentUserId, activeProjectId, activeConversationId]) : null;
@@ -6686,7 +6690,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     presentation="docked"
                     fillContainer
                     onBackToChat={handleBackToChat}
-                    onApprovalPendingChange={setSharedBrowserApprovalPending}
+                    onApprovalPendingChange={chatViewApproval.onApprovalPendingChange}
                     locationOptions={browserTransport === "shared" ? browserLocationOptions : null}
                     transportActive={
                       browserTransport === "shared" && browserVisible
