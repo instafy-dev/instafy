@@ -3170,10 +3170,15 @@ async function within(ms, promise, fallback = null) {
 // snapshot within LATE_READ_MS, or its address alone when the page is too busy
 // to be read. It says that the step's time ran out, so Octo checks what the step
 // did before it acts again. Its activity says what it is: a read of the page,
-// or, for the address alone, the page it is on, as status names it. The step's
-// guards still hold while the page is read, then end as a step's guards end: a
-// window it opened is closed, and what they stopped fails the step as it would
-// have in its time.
+// or, for the address alone, the page it is on, as status names it. A tab still
+// on the blank page has a load whose site has not answered: while it waits,
+// Instafy's browser cannot be reached by the next step, and it would land after
+// the step ended. The step stops it, so it opened nothing, and fails (its line
+// reads as a step tried) saying the site did not answer, never the blank page's
+// "Call navigate", which sent Octo to load the same site again; a load the
+// browser did not confirm stopped is still busy. The step's guards still hold
+// while the page is read, then end as a step's guards end: a window it opened is
+// closed, and what they stopped fails the step as it would have in its time.
 async function pageAsItIs(browser) {
   const read = await within(LATE_READ_MS, (async () => snapshotForResult(await resolveExpectedPage(browser)))());
   const guards = [...openStepGuards];
@@ -3193,13 +3198,17 @@ async function pageAsItIs(browser) {
   await within(GUARD_RELEASE_MS, Promise.all(guards.map((guard) => guard.release())));
   if (stopped) throw stopped;
   const view = read ?? addressOnly(resolvedPage);
-  const readSomething = read && !isBusyPageResult(read);
-  emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
+  const readSomething = read && view.blank !== true && !isBusyPageResult(read);
   // Only a page that was read is "the page as it is now"; a busy one says so
   // in its own message.
   const note = `This step was still running after ${STEP_TIME_MS / 1000} seconds, so it stopped where it was. ${
     readSomething ? "This is the page as it is now: check" : "Check"
   } what the step did before you act again.`;
+  if (view.blank === true) {
+    const stoppedLoad = await within(GUARD_RELEASE_MS, stopLoading(resolvedPage).catch(() => false), false);
+    throw new Error(stoppedLoad ? UNANSWERED_PAGE_MESSAGE : `${BUSY_PAGE_MESSAGE} ${note}`);
+  }
+  emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
   return withActivity(
     { ...view, stepTimedOut: true, message: [view.message, note].filter(Boolean).join(" ") },
     stepActivity(resolvedPage, readSomething ? "snapshot" : "status", null),
@@ -3207,6 +3216,19 @@ async function pageAsItIs(browser) {
 }
 
 const BUSY_PAGE_MESSAGE = "The page is still busy, so it could not be read yet. Take a snapshot in a moment.";
+const UNANSWERED_PAGE_MESSAGE = `The site did not answer within ${STEP_TIME_MS / 1000} seconds, so nothing was opened and the page is still blank.`;
+
+// Stops what the page is still loading, as the browser's stop button does; true
+// once the browser says it did.
+async function stopLoading(page) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("Page.stopLoading");
+    return true;
+  } finally {
+    await session.detach().catch(() => {});
+  }
+}
 
 // Whether a read answered that the page is still busy (addressOnly).
 function isBusyPageResult(result) {

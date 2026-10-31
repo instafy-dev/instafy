@@ -91,12 +91,9 @@ For every reader, browser or not:
   search engine or a guessed path.
 - A page that says it is missing ("not found", "are you lost?"): use that
   site's own search box or menu.
-- A page that reads as busy: take one more snapshot in a moment; still nothing,
-  go to the place's own site.
-- Two failed pages on one site: find another source with `instafy web search`
-  (no key: `--chain reference-search`), then read its best result; with only
-  browser tools, open the home page of another official source (the operator,
-  authority or maker).
+- A page that fails (busy, blank, or an error page such as 504): open the
+  place's own site now, in this turn. After that, another official
+  source.
 - A sight, stop, opening hours or price comes from its own page (the venue's,
   operator's or shop's), not a listing or a kiosk page: those only lead to it.
 - Anything not read on a page this turn (from memory or a search result) says
