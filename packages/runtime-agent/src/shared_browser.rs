@@ -2658,11 +2658,28 @@ impl ServerHandler for SharedBrowserMcpServer {
                 let step = self.terminal_step.lock().await.take();
                 Ok(terminal_consent_call_result_with_step(code, step))
             }
-            Err(SharedBrowserMcpExecutionFailure::Other(error)) => {
-                Ok(failed_tool_result(&format!("{error:#}")))
-            }
+            Err(SharedBrowserMcpExecutionFailure::Other(error)) => Ok(failed_call_result(&error)),
         }
     }
+}
+
+/// A failed call's result, with what the controller said of its step
+/// (`activity`): a step the person allowed that then did not happen, such as a
+/// control the page changed after their yes, lists their yes in Details.
+fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
+    let mut result = failed_tool_result(&format!("{error:#}"));
+    let activity = error
+        .downcast_ref::<ControllerFailure>()
+        .and_then(ControllerFailure::activity);
+    if let Some(activity) = activity {
+        match result.structured_content.as_mut() {
+            Some(JsonValue::Object(structured)) => {
+                structured.insert("activity".to_string(), activity);
+            }
+            _ => result.structured_content = Some(json!({ "activity": activity })),
+        }
+    }
+    result
 }
 
 /// A page that did not load because of the network: one of Chromium's
@@ -3353,20 +3370,40 @@ fn controller_failure(
     if status.code() == Some(BROWSER_UNAVAILABLE_EXIT_CODE) {
         BrowserUnavailable(message).into()
     } else {
+        let FailedStep { step, approval } = failed_step(stdout).unwrap_or_default();
         ControllerFailure {
             message,
-            step: failed_step_kind(stdout),
+            step,
+            approval,
         }
         .into()
     }
 }
 
 /// A controller command that failed, with the step's kind when the command
-/// said it (a search, or a form sent) before it asked the person.
+/// said it (a search, or a form sent) before it asked the person, and `once`
+/// when the person allowed the step at its prompt.
 #[derive(Debug)]
 struct ControllerFailure {
     message: String,
     step: Option<&'static str>,
+    approval: Option<&'static str>,
+}
+
+impl ControllerFailure {
+    /// What the failed call's result says of its step (`activity`), for the
+    /// turn's line and Details: a step the person allowed that then did not
+    /// happen still lists their yes.
+    fn activity(&self) -> Option<JsonValue> {
+        let mut activity = serde_json::Map::new();
+        if let Some(step) = self.step {
+            activity.insert("step".to_string(), JsonValue::from(step));
+        }
+        if let Some(approval) = self.approval {
+            activity.insert("approval".to_string(), JsonValue::from(approval));
+        }
+        (!activity.is_empty()).then_some(JsonValue::Object(activity))
+    }
 }
 
 impl std::fmt::Display for ControllerFailure {
@@ -3377,12 +3414,21 @@ impl std::fmt::Display for ControllerFailure {
 
 impl std::error::Error for ControllerFailure {}
 
-/// The step kind a failed command printed: exactly `{"ok":false,"activity":
-/// {"step":<kind>}}` on stdout, the kind one of the few the controller names
-/// there. Anything else names none. The controller writes nothing else to
-/// stdout before it fails, and never page text there.
-fn failed_step_kind(stdout: &[u8]) -> Option<&'static str> {
+/// What a failed command said of its step.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FailedStep {
+    step: Option<&'static str>,
+    approval: Option<&'static str>,
+}
+
+/// What a failed command printed of its step: exactly `{"ok":false,"activity":
+/// {...}}` on stdout, with `step` (one of the few kinds the controller names
+/// there), `approval` (`once`), or both. Anything else names nothing. The
+/// controller writes nothing else to stdout before it fails, and never page
+/// text there.
+fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
     const KINDS: &[&str] = &["search", "submit"];
+    const APPROVALS: &[&str] = &["once"];
     if stdout.len() > 256 {
         return None;
     }
@@ -3392,11 +3438,26 @@ fn failed_step_kind(stdout: &[u8]) -> Option<&'static str> {
         return None;
     }
     let activity = object.get("activity")?.as_object()?;
-    if activity.len() != 1 {
+    if activity.is_empty()
+        || activity
+            .keys()
+            .any(|key| key != "step" && key != "approval")
+    {
         return None;
     }
-    let step = activity.get("step")?.as_str()?;
-    KINDS.iter().copied().find(|known| *known == step)
+    // A field that is there names one of its known words, or nothing is read.
+    let known = |field: &str, words: &[&'static str]| match activity.get(field) {
+        None => Some(None),
+        Some(value) => words
+            .iter()
+            .copied()
+            .find(|word| value.as_str() == Some(*word))
+            .map(Some),
+    };
+    Some(FailedStep {
+        step: known("step", KINDS)?,
+        approval: known("approval", APPROVALS)?,
+    })
 }
 
 fn embedded_shared_browser_script() -> String {

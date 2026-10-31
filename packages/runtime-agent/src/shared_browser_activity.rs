@@ -84,11 +84,14 @@ fn page_key(url: &Url) -> String {
         .collect()
 }
 
-/// The approval a terminal consent code stands for: the person said no, or did not answer.
+/// The approval a terminal consent code stands for: the person said no, did not answer, or said
+/// yes to a step whose page then moved to another site (`approval_stale`, which the controller
+/// raises only after a yes), so Details still list that yes.
 fn approval_of_terminal_code(code: &str) -> Option<&'static str> {
     match code {
         "approval_denied" => Some("denied"),
         "approval_timeout" => Some("expired"),
+        "approval_stale" => Some("once"),
         _ => None,
     }
 }
@@ -276,7 +279,9 @@ mod tests {
         for (code, approval) in [
             ("approval_denied", Some("denied")),
             ("approval_timeout", Some("expired")),
-            ("approval_stale", None),
+            // The page moved to another site after the person's yes: the yes is listed.
+            ("approval_stale", Some("once")),
+            ("approval_authority_revoked", None),
         ] {
             let facts = browser_step_facts(
                 "type",
@@ -290,6 +295,24 @@ mod tests {
             assert_eq!(facts["host"], "visitlisboa.com");
             assert_eq!(facts.get("approval").and_then(JsonValue::as_str), approval);
         }
+    }
+
+    /// A step the person allowed that then failed without ending the run (the page changed the
+    /// control after their yes) keeps their yes from the failed call's own result.
+    #[test]
+    fn a_failed_step_the_person_allowed_keeps_their_yes() {
+        let facts = browser_step_facts(
+            "click",
+            Some(&json!({"index": 4, "snapshotId": "0".repeat(64)})),
+            Some(&json!({"activity": {"approval": "once"}})),
+            None,
+            &mut Some("visitlisboa.com".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            facts,
+            json!({"step": "click", "host": "visitlisboa.com", "approval": "once"})
+        );
     }
 
     #[test]

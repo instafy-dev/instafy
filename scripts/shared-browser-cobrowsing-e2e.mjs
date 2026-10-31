@@ -959,6 +959,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     // next run goes on after it (scripts/shared-browser-sign-in-e2e.mjs).
     const { runSharedBrowserSignInFixture } = await import("./shared-browser-sign-in-e2e.mjs");
     console.log(JSON.stringify(await runSharedBrowserSignInFixture(), null, 2));
+    // And that a step the person allowed runs while the page changes around
+    // its control, and asks again when the control itself changed
+    // (scripts/shared-browser-allowed-step-e2e.mjs).
+    const { runSharedBrowserAllowedStepFixture } = await import("./shared-browser-allowed-step-e2e.mjs");
+    console.log(JSON.stringify(await runSharedBrowserAllowedStepFixture(), null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
     fs.writeFileSync(path.join(resultDirectory, "result.json"), `${JSON.stringify({ status: "failed", fixtureVersion: 1 })}\n`);

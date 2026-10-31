@@ -2204,15 +2204,15 @@ async function emitNavigationResult(page) {
   });
 }
 
-async function targetLocator(page, body, revalidationAfterApproval = false) {
+// The control a step is for, by its index in the snapshot Octo observed: the
+// page must still read as that snapshot did (the run, the tab, the address and
+// every control), so the index names the control Octo saw. `asked` keeps what
+// finds that control again once the person has answered (approvedTarget): its
+// own fingerprint, how many controls on the page share it, and the page's
+// address.
+async function targetLocator(page, body) {
   const interactive = await collectInteractiveElements(page);
-  const currentSnapshotId = snapshotFingerprint(page.url(), interactive);
-  if (body.snapshotId !== currentSnapshotId) {
-    if (revalidationAfterApproval) {
-      throw new Error(
-        "Shared Browser snapshot changed while approval was pending; the action was not performed [approval_stale_non_retryable]",
-      );
-    }
+  if (body.snapshotId !== snapshotFingerprint(page.url(), interactive)) {
     throw new Error(
       "Shared Browser snapshot is stale; take a fresh snapshot before acting",
     );
@@ -2223,7 +2223,58 @@ async function targetLocator(page, body, revalidationAfterApproval = false) {
       `Shared Browser element index ${body.index} is unavailable; take a fresh snapshot`,
     );
   }
-  return target;
+  const fingerprint = targetFingerprint(target.description);
+  const alike = interactive.filter(({ description }) => targetFingerprint(description) === fingerprint).length;
+  return { ...target, asked: { fingerprint, alike, address: pageAddress(page.url()) } };
+}
+
+// After the person's answer, the step acts on the control they were asked
+// about, whatever else on the page changed while they read the prompt: a
+// carousel's slide, a clock, a live count. The run's authority is read again
+// first, so a take-over or a new run still ends the step there. A page that
+// still reads as the snapshot did gives the control at its index. Otherwise the
+// control is found by its own fingerprint (its names, where it leads, its form
+// and that form's text), and only on the same page (its address, the fragment
+// aside), only when it was the one control like it when the person was asked,
+// and only when exactly one control matches now. A control that changed, went
+// or can no longer be told apart is asked about again (controlChanged).
+async function approvedTarget(page, body, asked) {
+  approvalProtocol.authority();
+  const interactive = await collectInteractiveElements(page);
+  if (body.snapshotId === snapshotFingerprint(page.url(), interactive)) {
+    return { ...interactive[body.index], asked };
+  }
+  const matches = asked.alike === 1 && pageAddress(page.url()) === asked.address
+    ? interactive.filter(({ description }) => targetFingerprint(description) === asked.fingerprint)
+    : [];
+  if (matches.length !== 1) {
+    throw controlChanged();
+  }
+  return { ...matches[0], asked };
+}
+
+// A page's address without its fragment: a carousel that moves the fragment
+// is still the same page.
+function pageAddress(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    url.hash = "";
+    return url.toString();
+  } catch (_) {
+    return String(rawUrl || "");
+  }
+}
+
+// The control a step is for is not on the page as it was when the step was
+// judged, so nothing was done. This does not end the run: Octo looks at the
+// page again and, if the step still fits, does it again, which asks the person
+// again when it asked them before.
+function controlChanged() {
+  return new Error(
+    stepAllowedAtPrompt
+      ? "The page changed after the person said yes, and the control this step was for is not there as it was, so nothing was done. Take a fresh snapshot and do the step again if it still fits the request: it asks the person again."
+      : "The page changed before this step ran, and the control it was for is not there as it was, so nothing was done. Take a fresh snapshot and do the step again if it still fits the request.",
+  );
 }
 
 function descriptionContent(description) {
@@ -2613,12 +2664,21 @@ function resolvedTargetDestination(description, currentUrl) {
   }
 }
 
+// The step stays on the site it was judged on. A page that moved to another
+// site after the person said yes in this step ends the browser run
+// (approval_stale): their yes was for a step on that site, and the reply says
+// the page changed after it. One that moved while nobody was asked only fails
+// the step, and a fresh snapshot judges the site it is on now.
 function assertSameOrigin(actualUrl, expectedOrigin) {
-  if (approvalProtocol.normalizedOrigin(actualUrl) !== expectedOrigin) {
+  if (approvalProtocol.normalizedOrigin(actualUrl) === expectedOrigin) {
+    return;
+  }
+  if (stepAllowedAtPrompt) {
     throw new Error(
-      "Shared Browser page changed while approval was pending; take a fresh snapshot and retry [approval_stale_non_retryable]",
+      "The page moved to another site after the person said yes, so the step was not done [approval_stale_non_retryable]",
     );
   }
+  throw new Error("The page moved to another site, so nothing was done. Take a fresh snapshot.");
 }
 
 function assertSameTarget(
@@ -2629,9 +2689,7 @@ function assertSameTarget(
   destinationMode = "target",
 ) {
   if (targetFingerprint(actual.description) !== expectedFingerprint) {
-    throw new Error(
-      "Shared Browser target changed while approval was pending; take a fresh snapshot and retry [approval_stale_non_retryable]",
-    );
+    throw controlChanged();
   }
   const targetDestination = resolvedTargetDestination(
     actual.description,
@@ -2648,9 +2706,7 @@ function assertSameTarget(
       expectedDestination.destinationFingerprint ||
     actualBinding.destinationOrigin !== expectedDestination.destinationOrigin
   ) {
-    throw new Error(
-      "Shared Browser destination changed while approval was pending; take a fresh snapshot and retry [approval_stale_non_retryable]",
-    );
+    throw controlChanged();
   }
 }
 
@@ -3723,7 +3779,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
-    target = await targetLocator(page, body, true);
+    target = await approvedTarget(page, body, target.asked);
     assertSameTarget(
       target,
       page.url(),
@@ -3832,7 +3888,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
-    target = await targetLocator(page, body, true);
+    target = await approvedTarget(page, body, target.asked);
     assertSameTarget(
       target,
       page.url(),
@@ -3850,7 +3906,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     await target.locator.focus();
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
-    target = await targetLocator(page, body, true);
+    target = await approvedTarget(page, body, target.asked);
     assertSafeTypeTarget(target.description);
     assertSameTarget(
       target,
@@ -3960,7 +4016,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
-    target = await targetLocator(page, body, true);
+    target = await approvedTarget(page, body, target.asked);
     assertSameTarget(
       target,
       page.url(),
@@ -4063,10 +4119,17 @@ async function main() {
 main().then(
   () => process.exit(0),
   async (error) => {
-    // The step's kind, for the turn's line, on stdout: runtime-agent reads it
-    // only from a failed command's stdout, as one of a few fixed words.
-    if (FAILED_STEP_KINDS.has(stepKind)) {
-      await writeStdout(`${JSON.stringify({ ok: false, activity: { step: stepKind } })}\n`).catch(() => {});
+    // What the step was, for the turn's line and Details, on stdout:
+    // runtime-agent reads it only from a failed command's stdout, as a few
+    // fixed words. Its kind when the browser judged it before it asked, and
+    // "once" when the person said yes at its prompt: a step they allowed that
+    // then did not happen still lists their yes.
+    const activity = {
+      ...(FAILED_STEP_KINDS.has(stepKind) ? { step: stepKind } : {}),
+      ...(stepAllowedAtPrompt ? { approval: "once" } : {}),
+    };
+    if (Object.keys(activity).length) {
+      await writeStdout(`${JSON.stringify({ ok: false, activity })}\n`).catch(() => {});
     }
     const message = error && error.message ? error.message : String(error);
     // Errors reach the model and logs; browser errors can quote page markup.

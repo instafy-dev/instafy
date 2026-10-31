@@ -1628,7 +1628,7 @@ POST goes out without the prompts for that site. The Personal Browser lane runs
 the same table through the built page bridge in Electron, and a keydown handler
 that moves the form there too.
 
-Last, `scripts/shared-browser-sign-in-e2e.mjs` plays a task that goes on past a
+Then `scripts/shared-browser-sign-in-e2e.mjs` plays a task that goes on past a
 sign-in ("sign in, then star the repository") on a loopback code host. The
 signed-out repository page has no sign-in fields, so its result names its "Sign
 in" link, which opens the sign-in page without a prompt; the sign-in page's
@@ -1639,6 +1639,19 @@ the turn with nothing sent. The person then signs in on the page, and a fresh ru
 on the same page (what **Let Octo continue** starts) stars the repository, asking
 once before the form post. The person's values never reach a tool's output or
 the action feed.
+
+Last, `scripts/shared-browser-allowed-step-e2e.mjs` answers prompts on a loopback
+journey planner whose page changes by itself while a prompt waits: a carousel
+shows its next slide (also one that names it in the page's fragment), a clock in
+a link ticks and a live count goes up. The allowed click, typing that sends the
+form and Enter in a field each run once, on the control the person was asked
+about. A control swapped for another, a form sent elsewhere, the same control
+on another address of the site, a form given another field, one of two
+controls alike once the page changed, and its twin once it went are not used:
+the step fails without a terminal code, says it asks the person again, and its
+failed command lists their yes; asked again, the new prompt names the form as it
+is now. A take-over while the prompt waits still ends the step, and a page that
+left its site after the yes ends the run with `approval_stale`.
 
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across
