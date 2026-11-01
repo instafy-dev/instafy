@@ -525,6 +525,33 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
     expect(result.report!.viewports[0]!.errors.join("\n")).toMatch(/blank page/);
   });
 
+  // A site server that answers a folder with no index.html with 404 (a map's card that served the space's folder,
+  // not the map's) fails the check, so that card is never called ready, and its picture is never the error page.
+  it("a page that answers 404 is a problem, and the card gets no picture of it", { timeout: 90_000 }, async () => {
+    const port = await serve({ "/": { status: 404, type: "text/plain; charset=utf-8", body: "There is no page here." } });
+    const out: string[] = [];
+    const uploads: number[] = [];
+    const code = await runPreviewCheckCli(
+      { port: String(port), desktop: true, out: path.join(tmp, "folder-404"), json: true },
+      {
+        out: (s: string) => out.push(s),
+        err: () => {},
+        env: browserEnv,
+        hasOpenPreview: () => true,
+        uploadThumbnail: async ({ image }) => {
+          uploads.push(image.length);
+          return { status: "uploaded" };
+        },
+      },
+    );
+    expect(code).toBe(CHECK_EXIT_PROBLEMS);
+    const r = JSON.parse(out[0]!);
+    expect(r.viewports[0].status).toBe(404);
+    expect(r.viewports[0].errors.join("\n")).toMatch(/HTTP 404: \//);
+    expect(r.thumbnail).toBe("skipped");
+    expect(uploads).toEqual([]);
+  });
+
   it("a site that refuses to be framed passes by default (it is shown as a link) and is reported only with --framed", { timeout: 90_000 }, async () => {
     const port = await serve({ "/": { body: GOOD, headers: { "x-frame-options": "DENY" } } });
     const plain = await check({ port, outDir: path.join(tmp, "deny"), phone: true });

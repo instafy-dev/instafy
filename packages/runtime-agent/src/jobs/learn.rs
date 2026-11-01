@@ -324,6 +324,8 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before a value cited only a page that gives it, a lede said only what a page read
     // says, and no sort was by a value no row has.
     include_str!("legacy/interactive-artifacts-v5.md"),
+    // From before a request for a small page, or for something as a page or on a page, matched this skill.
+    include_str!("legacy/interactive-artifacts-v6.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
