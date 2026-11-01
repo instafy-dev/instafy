@@ -190,6 +190,13 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
       initialized.body.result.instructions,
       /never a link-only site: link_only_site, link_only_list_unavailable and private_address_blocked are final for that step/,
     );
+    // A link-only site ends that address, not the task: the agent goes on with the source's own site, and gives the
+    // person the link only for a site they asked for.
+    assert.match(
+      initialized.body.result.instructions,
+      /A link-only site ends that address, not the task: go on with the maker's, venue's or reviewer's own site, and give the person the plain link only if they asked for that site\./,
+    );
+    assert.doesNotMatch(initialized.body.result.instructions, /Give the person the plain link/);
     // A page load stopped after the previous step is reported as that step's, not as a refusal of this one.
     assert.match(initialized.body.result.instructions, /this step was not run because Desktop stopped a page load after your previous step, it is the previous step's/);
     // A form that would open another window is refused for good.
