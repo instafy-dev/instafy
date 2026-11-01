@@ -321,6 +321,8 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     include_str!("legacy/interactive-artifacts-v3.md"),
     // From before a page written by hand followed light and dark mode.
     include_str!("legacy/interactive-artifacts-v4.md"),
+    // From before a request for a small page, or for something as a page or on a page, matched this skill.
+    include_str!("legacy/interactive-artifacts-v5.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),

@@ -528,7 +528,7 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
   // A site server that answers a folder with no index.html with 404 (a map's card that served the space's folder,
   // not the map's) fails the check, so that card is never called ready, and its picture is never the error page.
   it("a page that answers 404 is a problem, and the card gets no picture of it", { timeout: 90_000 }, async () => {
-    const port = await serve({ "/": { status: 404, type: "text/plain; charset=utf-8", body: "not found: / (no index.html)" } });
+    const port = await serve({ "/": { status: 404, type: "text/plain; charset=utf-8", body: "There is no page here." } });
     const out: string[] = [];
     const uploads: number[] = [];
     const code = await runPreviewCheckCli(

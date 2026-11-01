@@ -71,6 +71,60 @@ fn pages_to_tap_through_route_to_the_hub() {
     }
 }
 
+/// A page asked for in plain words ("a small page I can share", "as a page", "on a page") is a page to build. The turn
+/// that builds it runs without the workspace memory snapshot, so it learns which skills apply from the hints alone:
+/// they named the browser skill (whose `page` is a page in the browser) and no page builder, and the turn built the
+/// page inside a map site, served without Studio's theme. The hub is hinted now, and picks a starter. A page in the
+/// browser, or a request with no page in it, is not the hub's. An unedited copy of the hub from before is upgraded;
+/// an edited one is kept.
+#[test]
+fn a_page_asked_for_in_plain_words_points_the_building_turn_at_the_hub() {
+    let tmp = tempdir().expect("tmp");
+    learn::ensure_project_memory_scaffold(tmp.path());
+    let hinted = |prompt: &str| {
+        format_skill_hints(tmp.path(), prompt, DIRECT_WRITE_SKILL_HINTS_LEAD)
+            .map(|hints| hints.skills)
+            .unwrap_or_default()
+    };
+    for prompt in [
+        "Put the hours and the metro route on a small page I can share.",
+        "Show the opening hours and how to get there as a page.",
+        "put the packing list for the weekend on a page",
+        "a simple page with the menu and the opening times",
+        "turn these notes into a page",
+        "a one page summary of the three offers",
+        "make a shareable page with the meeting times",
+    ] {
+        let hints = hinted(prompt);
+        assert!(hints.iter().any(|id| id == HUB), "{prompt}: {hints:?}");
+    }
+    let contexts = build_top_level_context_nodes(tmp.path());
+    for prompt in [
+        "Open the pricing page on stripe.com in your browser",
+        "Open github.com in your browser and sign me in",
+        "rename userId to accountId",
+    ] {
+        assert!(
+            !routed(&contexts, prompt).iter().any(|id| id == HUB),
+            "{prompt}: {:?}",
+            routed(&contexts, prompt)
+        );
+    }
+
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let previous = include_str!("legacy/interactive-artifacts-v5.md");
+    assert!(!previous.contains("small page"));
+    let path = tmp.path().join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
+    let edited = format!("{previous}\nLocal page preference.\n");
+    fs::write(&path, &edited).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+}
+
 #[test]
 fn location_sharing_is_for_the_users_own_position_only() {
     let tmp = tempdir().expect("tmp");

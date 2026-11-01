@@ -3,7 +3,7 @@ name: instafy-interactive-artifacts
 description: Use when the answer should be a page the user taps through, not a long chat reply (map, ranking, comparison or shopping table, dashboard, quiz, timeline, planner, tracker, checklist). Picks the builder from the installed skills and shows the site in Studio with `instafy preview open`.
 context_kind: workflow
 context_parent: instafy-skill-router
-routing_keywords: interactive, map, maps, tap through, dashboard, quiz, timeline, planner, tracker, calculator, comparison table, side by side, checklist, ranking, ranked, top 10, shortlist, compare, versus, shopping, cheapest, best price, where to buy, which to buy, should i buy, visualize, interaktiv, tidslinje, planerare, kalkylator, checklista, jämförelse, tablero, ダッシュボード
+routing_keywords: interactive, map, maps, tap through, as a page, on a page, into a page, small page, simple page, one page, shareable page, dashboard, quiz, timeline, planner, tracker, calculator, comparison table, side by side, checklist, ranking, ranked, top 10, shortlist, compare, versus, shopping, cheapest, best price, where to buy, which to buy, should i buy, visualize, interaktiv, tidslinje, planerare, kalkylator, checklista, jämförelse, tablero, ダッシュボード
 ---
 
 # Interactive artifacts
