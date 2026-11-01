@@ -242,8 +242,9 @@ const compareData = () => ({
 
 // A comparison's card said "Opening …" for 15 s each time it opened in a Studio whose pane was out of sight: the page
 // said it had drawn only on its next animation frame, and a page out of sight gets none. Its first view is on the page
-// all the same, so it tells Studio within about 100 ms of drawing it, frames or not, and once.
-test("a starter page out of sight, with no animation frames, tells its host it has drawn within about 100 ms", async () => {
+// all the same, so it tells Studio on a 100 ms timer when no frame comes first, and once. (A browser may hold an unseen
+// frame's timers for up to about a second; here timers run on time.)
+test("a starter page out of sight, with no animation frames, tells its host it has drawn on a 100 ms timer", async () => {
   for (const frames of [false, true]) {
     const page = await draw("compare", compareData(), { host: true, frames, search: "?show=all" });
     assert.ok(await until(() => page.sent.some((m) => m.type === "ready"), 1000), `frames: ${frames}: no ready in 1 s`);
@@ -348,14 +349,14 @@ test("compare: no cell is blank or a dash, and every value cites its page and da
 });
 
 // A comparison sorted by a value no row had (every weight unknown): a phone showed "Weight unknown" on the right of
-// every row, and the page's main criterion was a column of unknowns. A sort whose column no row has a value for orders
-// nothing and is left out; one some rows have stays, with the rows without it listed last.
+// every row, and the page's main criterion was a column of unknowns. A sort whose column no row has a value for is
+// left out; one some rows have stays, with the rows without it listed last, and so does one in words.
 test("compare: a sort by a column no row has a value for is left out", async () => {
   const laptop = (ref, battery, price) => item(ref, `Laptop ${ref.toUpperCase()}`, {
     cpu: { v: "8 cores", src: "Maker", url: `https://maker.example/${ref}`, date: DAY },
     weight: { note: "not on the maker's page" },
     ...(battery ? { battery: { v: battery, src: "Review", url: `https://review.example/${ref}`, date: DAY } } : {}),
-    price: { v: price, src: "Shop", url: `https://shop.example/${ref}`, date: DAY },
+    price: price ? { v: price, src: "Shop", url: `https://shop.example/${ref}`, date: DAY } : { note: "no price on the shop's page" },
   });
   const laptops = (items, sort) => ({
     title: "Laptops", lede: "", sort, items,
@@ -383,6 +384,28 @@ test("compare: a sort by a column no row has a value for is left out", async () 
   assert.deepEqual(document.getElementById("f-sort").querySelectorAll("option").map((o) => o.getAttribute("value")), ["battery", "price"]);
   assert.deepEqual(rows(document).within, ["option:b", "option:c", "option:a", "option:e", "option:d"], "longest battery first");
   assert.match(document.getElementById("list").textContent, /1 without a battery is listed last\./);
+  // five laptops whose data asks for a sort, with one sort left: it still orders the rows, with no "Sort by" of one
+  const byPrice = laptops([laptop("b", "14 h", "€1,100"), laptop("a", "10 h", "€900"), laptop("c", "12 h", null),
+    laptop("d", null, "€800"), laptop("e", "9 h", "€700")], [price, weight]);
+  ({ document } = await draw("compare", byPrice));
+  assert.equal(document.getElementById("f-sort"), null, "no Sort by");
+  assert.deepEqual(rows(document).within, ["option:e", "option:d", "option:a", "option:b", "option:c"], "cheapest first");
+  assert.match(document.getElementById("list").textContent, /1 without a price is listed last\./);
+
+  // a main criterion in words that the rows have stays on the right of each row
+  const verdicts = {
+    ...three,
+    sort: [{ key: "verdict", label: "Verdict" }],
+    columns: [...three.columns, { key: "verdict", label: "Verdict", type: "text" }],
+    items: three.items.map((i, n) => ({ ...i, facts: { ...i.facts, verdict: { v: ["Best overall", "Best value", "Lightest"][n], src: "Review", url: `https://review.example/${n}`, date: DAY } } })),
+  };
+  ({ document } = await draw("compare", verdicts, { width: 390 }));
+  assert.deepEqual(shownOnTheRight(document), ["Best overall", "Best value", "Lightest"]);
+
+  // a sort written as one entry instead of a list orders nothing, and the page still draws
+  ({ document } = await draw("compare", { ...three, sort: price }, { width: 390 }));
+  assert.deepEqual(rows(document).within, ["option:a", "option:b", "option:c"]);
+  assert.deepEqual(shownOnTheRight(document), []);
 
   // a price nobody has read but a store can check stays: the check's price lands where it is shown now
   const unread = laptops(["a", "b"].map((ref) => item(ref, `Laptop ${ref}`, { price: { note: "not read yet" } },

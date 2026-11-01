@@ -175,8 +175,10 @@ test("check fails for a value that only says nothing and for a value without its
     assert.equal(problems.length, 4, problems.join("\n"));
     assert.match(problems[0], /^Option A · Weight: "—" says nothing\. Leave out "v" and say why in "note"/);
     assert.match(problems[1], /^Option B · Rating: "n\/a" says nothing/);
-    assert.match(problems[2], /^Option C · Rating: "4\.4 of 5" has no "src", "url" \(the page\) or "date" \(the day\): add where you read it and when \("checked 27 Oct on maker\.com"\), or leave the value out\. Without a source the page shows it as not checked\.$/);
-    assert.match(problems[3], /^Option C · Warranty: "2 years" has no "url" \(the page\): add where you read it and when/);
+    // the page to add is one that gives the value: a count of what was found, with none found ("0 of 2 reviews
+    // found"), cites no page and is a note instead, never the one page that was read
+    assert.match(problems[2], /^Option C · Rating: "4\.4 of 5" has no "src", "url" \(the page\) or "date" \(the day\): add the page that gives this value and the day you read it \("checked 27 Oct on maker\.com"\)\. When no page gives it \(such as a count of what you found, with none found\), leave out "v" and say why in "note"\. Without a source the page shows it as not checked\.$/);
+    assert.match(problems[3], /^Option C · Warranty: "2 years" has no "url" \(the page\): add the page that gives this value and the day you read it/);
     const out = run("check", dir, "--expect", "Option A, Option B, Option C");
     assert.equal(out.status, 1, "every item is shown, and the values still fail the check");
     assert.match(out.stdout, /^VALUES: 4 value\(s\) to fix in data\.json:$/m);

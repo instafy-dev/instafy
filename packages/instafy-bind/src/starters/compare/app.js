@@ -8,11 +8,11 @@
  *                          latest, only when it says so.
  *   sort: [{key, label, dir: "asc"|"desc"}]   the first entry is the person's main criterion: phones show its value
  *                          on the right of each row. An entry whose column no row has a value for (nor, for a price, a
- *                          store that can be checked) orders nothing and is left out. A "Sort by" select appears only
- *                          with 5 or more options and more than one entry left, and only then are rows sorted (fresh
- *                          values first, then ones that may have changed, then missing ones). Otherwise rows keep the
- *                          order of "items", before and after a price check: put them in the order the lede talks
- *                          about them.
+ *                          store that can be checked) is left out. With 5 or more options and more than one entry,
+ *                          rows are sorted by the first entry left (fresh values first, then ones that may have
+ *                          changed, then missing ones), and a "Sort by" select offers the entries left when there are
+ *                          two or more. Otherwise rows keep the order of "items", before and after a price check: put
+ *                          them in the order the lede talks about them.
  *   columns: [{key, label, type: "price"|"number"|"text"}]   at most 5; a "price" column can be checked live
  *   filter (only for a constraint the person stated): {key, max, label: "Under $160", rest: "over $160",
  *                          unknown?: "Price unknown"}. Only a value the page shows counts: a row whose value is
@@ -138,25 +138,29 @@
   /** The site of the search result that alone names this row ("found"), or "". */
   function found(item) { return typeof item.found === "string" ? item.found.trim().slice(0, 100) : ""; }
 
-  /** The page's sorts that order something: one whose column no row has a value for (nor, for a price, a store that
-   * can be checked) is left out. Sorted by it, the rows would keep their order under a label saying otherwise, and a
-   * phone would show "Unknown" on the right of every row. */
+  /** The sort entries data.json gives (none unless it is a list). */
+  function sortList(data) { return Array.isArray(data.sort) ? data.sort : []; }
+  /** The entries left: one whose column no row shows a value for (nor, for a price, a store that can be checked) is
+   * left out. Sorted by it, the rows would keep their order under a label saying otherwise, and a phone would show
+   * "Unknown" on the right of every row. */
   function sorts(data) {
     var items = data.items || [];
-    return (data.sort || []).filter(function (s) {
+    return sortList(data).filter(function (s) {
       var col = s && s.key ? colOf(data, s.key) || { key: s.key } : null;
       return !!col && items.some(function (i) {
-        return site.known(valueOf(i, col)) != null || (isPrice(col) && !!(i.store && i.store.readable));
+        return site.shown(valueOf(i, col)) || (isPrice(col) && !!(i.store && i.store.readable));
       });
     });
   }
-  /** The sort in use: the chosen one when it orders something, else the first that does; null when none does. */
+  /** The sort in use: the chosen one when it is left, else the first one left; null when none is. */
   function sortDef(data, st) {
     var list = sorts(data);
     return list.filter(function (s) { return s.key === st.sort; })[0] || list[0] || null;
   }
-  /** The "Sort by" select shows (and rows are sorted) only with 5 or more options and more than one way to sort. */
-  function sortShown(data) { return sorts(data).length > 1 && (data.items || []).length >= 5; }
+  /** Rows are sorted only with 5 or more options and more than one entry in data.json, by an entry left. */
+  function sorted(data) { return sortList(data).length > 1 && (data.items || []).length >= 5 && !!sorts(data).length; }
+  /** The "Sort by" select shows only when rows are sorted and more than one entry is left to choose from. */
+  function sortShown(data) { return sorted(data) && sorts(data).length > 1; }
   /** Sorted by the chosen key: fresh values first, then values that may have changed (an old price never leads), then
    * rows without one. */
   function sortItems(data, items, st) {
@@ -189,8 +193,9 @@
   function render(data, st) {
     site.head(data);
     var all = data.items || [];
-    // without a "Sort by" select the rows keep their authored order: nothing moves when a check comes back
-    var items = sortShown(data) ? sortItems(data, all, st) : all.slice();
+    // unless data.json asks for a sort (5+ options), the rows keep their authored order: nothing moves when a check
+    // comes back
+    var items = sorted(data) ? sortItems(data, all, st) : all.slice();
     // while a check runs, keep the order the person was looking at; sort once when every check has finished
     if (site.anyPending(all) && lastOrder.length === all.length) {
       items = lastOrder.map(function (ref) { return all.filter(function (i) { return i.ref === ref; })[0]; }).filter(Boolean);
@@ -241,7 +246,7 @@
         lines.push(h("p", { "class": "cap hidden-line" }, hidden + " more " + (data.filter.rest || "hidden") + " · ",
           h("button", { "class": "link-btn", text: "Show", attrs: { type: "button", "data-key": "show-all" }, on: { click: function () { site.setState({ show: "all" }); } } })));
       }
-      var missing = sortShown(data) ? missingLine(data, shown, st) : null;
+      var missing = sorted(data) ? missingLine(data, shown, st) : null;
       if (missing) lines.push(missing);
       var from = sharedLine(data, shared, all);
       if (from) lines.push(from);

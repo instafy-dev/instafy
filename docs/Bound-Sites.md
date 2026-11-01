@@ -242,8 +242,9 @@ frame at an origin the binder lists (§4 Frames) that sent a `layout`. Studio's 
   draw, is on the page. Its acknowledgement of the layout then lists `ready`, and `ready` goes to the host once, so
   Studio's pane goes on saying it is opening the site until then, with the page out of sight under that line, instead
   of showing what the page shows meanwhile (the starters' placeholder rows and "Loading…"). The starters'
-  `site.start()` calls both, the second on the next frame after that view is on the page, or 100 ms after it when no
-  frame comes: a page out of sight (a hidden tab or pane) gets no frames until it is shown.
+  `site.start()` calls both, the second on the next frame after that view is on the page, or on a 100 ms timer when no
+  frame comes first: a page out of sight (a hidden tab or pane) gets no frames until it is shown, and the browser may
+  hold its timers for up to about a second.
 
 ## 3. `bound.json`
 
